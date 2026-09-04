@@ -2492,6 +2492,7 @@ static kiln_shape kiln_c99_root_shape = {
     NULL, /* ikey */
     0,    /* slot_index */
     0,    /* property_count */
+    0,    /* num_transitions */
     {NULL}, /* keys */
     NULL  /* transitions */
 };
@@ -2529,6 +2530,9 @@ static int kiln_c99_shape_transition(kiln_shape *current, const char *ikey, kiln
             return 1;
         }
     }
+    if (current->num_transitions >= 32) {
+        return 0;
+    }
     next_shape = (kiln_shape *)calloc(1, sizeof(kiln_shape));
     new_tr = (kiln_shape_transition *)calloc(1, sizeof(kiln_shape_transition));
     if (next_shape == NULL || new_tr == NULL) {
@@ -2540,6 +2544,7 @@ static int kiln_c99_shape_transition(kiln_shape *current, const char *ikey, kiln
     next_shape->ikey = ikey;
     next_shape->slot_index = current->property_count;
     next_shape->property_count = current->property_count + 1;
+    next_shape->num_transitions = 0;
     memcpy((void *)next_shape->keys, (const void *)current->keys,
            current->property_count * sizeof(const char *));
     next_shape->keys[current->property_count] = ikey;
@@ -2548,6 +2553,7 @@ static int kiln_c99_shape_transition(kiln_shape *current, const char *ikey, kiln
     new_tr->next = next_shape;
     new_tr->next_transition = current->transitions;
     current->transitions = new_tr;
+    current->num_transitions++;
 
     *out_shape = next_shape;
     return 1;
@@ -2625,6 +2631,12 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
         pos++;
     }
     object->count = pos;
+    if (object->slots != NULL && object->slots != object->inline_slots) {
+        free(object->slots);
+    }
+    object->slots = NULL;
+    object->slot_capacity = 0;
+    object->shape = NULL;
     return KILN_C99_OK;
 }
 
@@ -3873,6 +3885,23 @@ static size_t kiln_c99_own_index(const kiln_object *object, const char *ikey, co
     return found;
 }
 
+static int kiln_c99_has_inherited_setter_or_readonly(kiln_value proto) {
+    kiln_value current = proto;
+    size_t steps;
+    for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
+        kiln_object *walked;
+        if (current.tag != KILN_VALUE_OBJECT) {
+            break;
+        }
+        walked = kiln_c99_object_of(current);
+        if (walked->accessor_count != 0 || walked->read_only_seen) {
+            return 1;
+        }
+        current = walked->prototype;
+    }
+    return 0;
+}
+
 /* A write to an existing key replaces it in place, so insertion order is the order of first
  * appearance -- which is the order `Object.keys` reports and the order a console prints. */
 static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key, size_t key_len,
@@ -4054,7 +4083,7 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
      * own property is found -- so a hit here ends the search without a single prototype touched.
      * That is most writes on a request or response past its first: the key is already there. */
     /* Fast path for shape-based objects (ADR 0050) */
-    if (object->shape != NULL && object->prototype.tag == KILN_VALUE_UNDEFINED) {
+    if (object->shape != NULL) {
         if (object->elements != NULL) {
             double index_num = kiln_c99_key_index(key, key_len);
             if (index_num >= 0.0 && index_num < 100000.0) {
@@ -4071,7 +4100,9 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
                 object->slots[slot] = value;
                 return KILN_C99_OK;
             }
-        } else if (!object->not_extensible) {
+        } else if (!object->not_extensible &&
+                   (object->prototype.tag == KILN_VALUE_UNDEFINED ||
+                    !kiln_c99_has_inherited_setter_or_readonly(object->prototype))) {
             double index_num = kiln_c99_key_index(key, key_len);
             if (index_num < 0.0) {
                 kiln_shape *next_shape = NULL;
