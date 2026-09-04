@@ -27,6 +27,58 @@ pub enum WellKnown {
 }
 
 impl WellKnown {
+    /// Every well-known symbol, including the host one `Symbol` does not publish.
+    ///
+    /// Kept exhaustive by [`WellKnown::ordinal`] rather than by review: that function matches on
+    /// `self`, so adding a variant stops the crate compiling until the variant is given an
+    /// ordinal, and the `const` block at the end of this file refuses to build unless this list
+    /// holds every ordinal exactly once and in order. There used to be a list of fifteen beside
+    /// an enum of sixteen, and a `chain` at the one call site that noticed -- which is how a
+    /// symbol goes missing from `getOwnPropertySymbols` while every other path still works.
+    pub(crate) const ALL: [Self; 16] = [
+        Self::Iterator,
+        Self::AsyncIterator,
+        Self::HasInstance,
+        Self::ToStringTag,
+        Self::ToPrimitive,
+        Self::Match,
+        Self::MatchAll,
+        Self::Replace,
+        Self::Search,
+        Self::Split,
+        Self::Species,
+        Self::Unscopables,
+        Self::IsConcatSpreadable,
+        Self::Dispose,
+        Self::AsyncDispose,
+        Self::NodeInspectCustom,
+    ];
+
+    /// This symbol's position in [`WellKnown::ALL`].
+    ///
+    /// Exists only so that the compiler has something exhaustive to check. Adding a variant
+    /// without adding it to `ALL` fails here.
+    const fn ordinal(self) -> usize {
+        match self {
+            Self::Iterator => 0,
+            Self::AsyncIterator => 1,
+            Self::HasInstance => 2,
+            Self::ToStringTag => 3,
+            Self::ToPrimitive => 4,
+            Self::Match => 5,
+            Self::MatchAll => 6,
+            Self::Replace => 7,
+            Self::Search => 8,
+            Self::Split => 9,
+            Self::Species => 10,
+            Self::Unscopables => 11,
+            Self::IsConcatSpreadable => 12,
+            Self::Dispose => 13,
+            Self::AsyncDispose => 14,
+            Self::NodeInspectCustom => 15,
+        }
+    }
+
     pub fn property_key(self) -> &'static str {
         match self {
             Self::Iterator => "@@iterator",
@@ -66,34 +118,23 @@ impl WellKnown {
     /// symbol-keyed property apart from the machine's own bookkeeping, which is the whole
     /// difficulty of storing symbols as strings.
     ///
-    /// `@@nodeInspectCustom` is included even though `ALL` excludes it: `Symbol` does not
-    /// publish it, but an object that carries it carries a symbol-keyed property and
-    /// `Object.getOwnPropertySymbols` has to say so.
+    /// `@@nodeInspectCustom` included: `Symbol` does not publish it, but an object that carries
+    /// it carries a symbol-keyed property and `Object.getOwnPropertySymbols` has to say so.
     pub(crate) fn from_property_key(key: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
-            .chain(std::iter::once(Self::NodeInspectCustom))
             .find(|symbol| symbol.property_key() == key)
     }
 
-    /// Every well-known symbol, so `Symbol` can publish them all from one list.
-    pub(crate) const ALL: [Self; 15] = [
-        Self::Iterator,
-        Self::AsyncIterator,
-        Self::HasInstance,
-        Self::ToStringTag,
-        Self::ToPrimitive,
-        Self::Match,
-        Self::MatchAll,
-        Self::Replace,
-        Self::Search,
-        Self::Split,
-        Self::Species,
-        Self::Unscopables,
-        Self::IsConcatSpreadable,
-        Self::Dispose,
-        Self::AsyncDispose,
-    ];
+    /// Whether `Symbol` publishes this one as a static member.
+    ///
+    /// All but one: `@@nodeInspectCustom` is a host symbol, so `Symbol.nodeInspectCustom` must
+    /// not exist -- but an object carrying it still carries a symbol-keyed property, and
+    /// `Object.getOwnPropertySymbols` has to say so. That single difference used to be spelled
+    /// as two lists of different lengths.
+    pub(crate) const fn published_by_symbol(self) -> bool {
+        !matches!(self, Self::NodeInspectCustom)
+    }
 
     /// What `String(symbol)` shows, which spells the well-known ones out.
     pub(crate) fn description(self) -> &'static str {
@@ -253,3 +294,16 @@ pub(crate) fn is_reserved(key: &str) -> bool {
             .any(|prefix| key.starts_with(prefix))
         || INTERNAL_SLOTS.contains(&key)
 }
+
+/// `WellKnown::ALL` holds every variant, once, in ordinal order -- checked while the compiler
+/// builds it, because a list that is merely believed to be complete is not one.
+const _: () = {
+    let mut index = 0;
+    while index < WellKnown::ALL.len() {
+        assert!(
+            WellKnown::ALL[index].ordinal() == index,
+            "WellKnown::ALL must hold every well-known symbol exactly once, in ordinal order"
+        );
+        index += 1;
+    }
+};

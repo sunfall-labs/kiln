@@ -44601,6 +44601,28 @@ fn own_property_keys_including_symbols(intrinsics: &Intrinsics, target: &Value) 
         _ => Vec::new(),
     };
     keys.extend(stored);
+    // A built-in's symbol-keyed members. They are answered by the value tables and listed by
+    // nothing, so `Object.getOwnPropertySymbols(Date.prototype)` was `[]` where every other
+    // engine reports `Symbol.toPrimitive` -- the property read correctly, described correctly,
+    // and did not exist as far as reflection was concerned.
+    //
+    // Derived by asking the table for each well-known symbol rather than from a list of which
+    // ones each built-in has: such a list is a second place to describe a member, and the whole
+    // point here is that there is one. `WellKnown::ALL` is itself compiler-checked, so a new
+    // symbol cannot be missed. This is deliberately *not* in `own_property_keys`, which
+    // `Object.getOwnPropertyNames` reads unfiltered -- putting a reserved spelling there is
+    // exactly the leak that cost 838 rows.
+    if matches!(target, Value::Native(_, _)) {
+        let Value::Native(native, _) = target else {
+            unreachable!("checked by the guard");
+        };
+        for symbol in WellKnown::ALL {
+            let key = symbol.property_key();
+            if !matches!(native.property(key), None | Some(Value::Undefined)) {
+                keys.push(key.to_owned());
+            }
+        }
+    }
     // A derived key such as an array's `length` may also be present in its store. The target's
     // own-key operation cannot return duplicates, so preserve the first occurrence from the
     // specification order and discard later copies.
