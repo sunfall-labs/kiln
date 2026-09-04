@@ -1,6 +1,10 @@
 # Private names are per class *definition*, not per class *evaluation*
 
-**Status:** open. **52 test262 rows** -- 46 in `language/expressions/class`, 6 in
+**Status:** FIXED 2026-09-03, by the operand route described below. +53 rows measured
+(`language/expressions` 20318 -> 20360, `language/statements/class` 8490 -> 8501). One gap is
+left and is recorded at the end: `#x in o`.
+
+**Status was:** open. **52 test262 rows** -- 46 in `language/expressions/class`, 6 in
 `language/statements/class`, all named `*-brand-check-multiple-evaluations-of-class-*`.
 
 ## What is wrong
@@ -76,3 +80,28 @@ Option 1 is the better trade for a path this hot; option 2 is the one to reach f
 cross-engine cost of changing three instruction shapes turns out to be the obstacle. Either way
 the brand is minted once per class evaluation and installed on the instance beside the private
 members, which is where `install_private_and_fields` already runs.
+
+
+## How it was done
+
+The operand route, as recommended. Each class *evaluation* mints a brand -- an empty array, the
+cheapest thing with an identity -- into a hidden binding declared where the class opens its
+private scope, so every method compiled inside captures it. The brand is installed on each
+instance beside its private members, and on the constructor, under `@@private:{scope}:%brand`:
+one per class, not one per member, because the question is which evaluation an object came from.
+
+`GetPrivate` and `SetPrivate` take the brand as an operand pushed directly beneath them, so each
+of the nine access sites needed only a local edit and no reordering. Both engines compare the
+instance's stored brand against it and raise the same TypeError the own-only rule already raised.
+The C backend derives the brand key from the private name at emission time, so the instruction
+keeps the shape the interpreter gives it.
+
+An absent brand -- a private access compiled outside any class, which is a syntax error reported
+elsewhere -- is let through, so the error that matters is the one already raised.
+
+## What is still missing
+
+`#x in o` compiles to the ordinary `in` against the private key, so it still answers `true` for an
+instance of a *different* evaluation where it should answer `false`. It needs the brand comparison
+too, and unlike the accesses it must answer `false` rather than throw. The emitted form would be
+`(key in o) && o[brandKey] === brand`, which existing instructions can express.
