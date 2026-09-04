@@ -23817,24 +23817,10 @@ static int kiln_c99_op_new(kiln_host *host, kiln_value *stack, size_t *sp, size_
                            int depth, kiln_value *thrown) {
     kiln_value built;
     kiln_value callee = stack[*sp - argc - 1];
-    kiln_value call_argbuf[KILN_C99_COERCED_INLINE + 1];
-    kiln_value *call_args = NULL;
+    const kiln_value *call_args = argc > 0 ? &stack[*sp - argc] : NULL;
     int status;
 
-    if (argc > 0) {
-        if (argc <= KILN_C99_COERCED_INLINE) {
-            call_args = call_argbuf;
-        } else {
-            call_args = (kiln_value *)malloc(argc * sizeof *call_args);
-            if (call_args == NULL) return KILN_C99_OUT_OF_MEMORY;
-        }
-        for (size_t i = 0; i < argc; i++) {
-            call_args[i] = stack[*sp - argc + i];
-        }
-    }
-
     status = kiln_c99_construct(host, &built, callee, call_args, argc, depth, thrown);
-    if (call_args != NULL && call_args != call_argbuf) free(call_args);
 
     if (status == KILN_C99_CONTROL_ERROR) {
         if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = callee.tag;
