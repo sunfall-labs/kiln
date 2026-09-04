@@ -3885,11 +3885,22 @@ static size_t kiln_c99_own_index(const kiln_object *object, const char *ikey, co
     size_t found;
     if (object->shape != NULL) {
         kiln_c99_ensure_dictionary((kiln_object *)object);
+        if (ikey == NULL) {
+            ikey = kiln_c99_interned_in(kiln_c99_gc_heap(), key, key_len);
+        }
     }
     found = object->count;
     if (ikey != NULL) {
         for (index = 0; index < object->count; ++index) {
             if (object->properties[index].key == ikey) {
+                found = index;
+                break;
+            }
+        }
+    } else {
+        for (index = 0; index < object->count; ++index) {
+            if (object->properties[index].key_len == key_len &&
+                memcmp(object->properties[index].key, key, key_len) == 0) {
                 found = index;
                 break;
             }
