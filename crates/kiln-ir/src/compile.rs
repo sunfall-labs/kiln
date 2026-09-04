@@ -3483,6 +3483,29 @@ impl Compiler {
         self.patch_jump(yielded_this);
     }
 
+    /// A static class element may not be named `prototype`, which is a TypeError rather than a
+    /// quiet overwrite: the constructor's `prototype` is what its instances inherit from, and a
+    /// field that replaced it would leave every instance of the class descending from something
+    /// the class never made.
+    ///
+    /// The name is converted first, so a key object whose `toString` answers "prototype" is
+    /// refused for the same reason a literal one is. The constructor is already beneath the key
+    /// on the stack, which is the shape `ToPropertyKey` reads.
+    fn guard_static_prototype_key(&mut self) {
+        self.code.push(Instruction::ToPropertyKey);
+        self.code.push(Instruction::Dup);
+        self.push_constant(Constant::String("prototype".to_owned()));
+        self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
+        let usable = self.emit_jump(Instruction::JumpIfFalse(0));
+        self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
+        self.push_constant(Constant::String(
+            "a static class element may not be named `prototype`".to_owned(),
+        ));
+        self.code.push(Instruction::New { argc: 1 });
+        self.code.push(Instruction::Throw);
+        self.patch_jump(usable);
+    }
+
     /// `throw new TypeError("...")`, spelled in the instructions that already exist.
     fn emit_iterator_result_type_error(&mut self) {
         self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
@@ -5057,6 +5080,7 @@ impl Compiler {
                 }
                 ObjectKey::Computed(key) => {
                     self.expression(key);
+                    self.guard_static_prototype_key();
                     self.emit_field_value(field);
                     self.code.push(self.set_computed_instruction());
                 }
