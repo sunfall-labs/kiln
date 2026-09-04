@@ -14520,6 +14520,25 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             return self.dispatch_native(native, receiver, &reduced, instruction);
         }
+        // `CanBeHeldWeakly`: an object or an *unregistered* symbol, and nothing else. A weak
+        // collection that took a number held something it could never observe being collected,
+        // so `new WeakSet([1])` built a set whose member no reference could ever match. The
+        // predicate reads the symbol registry, which the machine-free table has no access to,
+        // so the refusal is made here.
+        if matches!(native, Native::WeakSetAdd | Native::WeakMapSet)
+            && !self.can_be_held_weakly(arguments.first().unwrap_or(&Value::Undefined))
+        {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: format!(
+                    "{} cannot be held weakly: a weak collection takes an object or an \
+                     unregistered symbol",
+                    arguments
+                        .first()
+                        .unwrap_or(&Value::Undefined)
+                        .to_display_string()
+                ),
+            });
+        }
         // Each of these begins with `ToObject` of its first argument, and that step throws for
         // `null` and `undefined`. The rest of the coercion is invisible here: a primitive has
         // exactly the own properties its wrapper would, and the pure implementations already
@@ -15556,23 +15575,32 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::ObjectFromEntries => {
                 let source = arguments.first().cloned().unwrap_or(Value::Undefined);
                 let mut data = ObjectData::default();
-                for entry in self.drain_iterable(&source, instruction)? {
-                    // An entry that is not an object is a `TypeError`, not a row to skip:
-                    // `Object.fromEntries([1])` answered `{}`, so a caller that had built its
-                    // pairs wrongly got an empty object back and no indication of where.
-                    if !is_an_object(&entry) && !is_callable(&entry) {
-                        return Err(ExecutionError::TypeErrorMessage {
-                            message: format!(
-                                "iterator entry {} is not an object",
-                                entry.to_display_string()
-                            ),
-                        });
+                // Stepped and consumed one entry at a time, not drained first: a source that
+                // never reports `done` was walked for ever, and the entry read that would have
+                // ended it -- an accessor at `0` that throws -- was never reached. The same
+                // hang `new Map(source)` had, in the same shape.
+                let method =
+                    self.read_property(&source, WellKnown::Iterator.property_key(), instruction)?;
+                if !is_callable(&method) {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: format!("{} is not iterable", source.to_display_string()),
+                    });
+                }
+                let iterator = self.call_value(&method, source.clone(), Vec::new(), instruction)?;
+                let next = self.iterator_direct(&iterator, instruction)?;
+                loop {
+                    let Some(entry) = self.iterator_step(&iterator, &next, instruction)? else {
+                        break;
+                    };
+                    match self.from_entries_pair(&entry, instruction) {
+                        Ok((key, value)) => {
+                            data.set(&key.property_key(), value);
+                        }
+                        Err(error) => {
+                            self.close_discarding(&iterator, instruction);
+                            return Err(error);
+                        }
                     }
-                    // Both halves of an entry are ordinary `Get`s on whatever the iterator
-                    // handed back, so an accessor at `0` or `1` runs and may throw.
-                    let key = self.read_computed(&entry, &Value::Number(0.0), instruction)?;
-                    let value = self.read_computed(&entry, &Value::Number(1.0), instruction)?;
-                    data.set(&key.property_key(), value);
                 }
                 Ok(Value::Object(Rc::new(RefCell::new(data))))
             }
@@ -17137,6 +17165,30 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
         }
         Ok(Value::Undefined)
+    }
+
+    /// One entry of `Object.fromEntries`, read the way the specification reads it.
+    ///
+    /// An entry that is not an object is a `TypeError`, not a row to skip:
+    /// `Object.fromEntries([1])` answered `{}`, so a caller that had built its pairs wrongly got
+    /// an empty object back and no indication of where. Both halves are ordinary `Get`s on
+    /// whatever the iterator handed back, so an accessor at `0` or `1` runs and may throw.
+    fn from_entries_pair(
+        &mut self,
+        entry: &Value,
+        instruction: usize,
+    ) -> Result<(Value, Value), ExecutionError> {
+        if !is_an_object(entry) && !is_callable(entry) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: format!(
+                    "iterator entry {} is not an object",
+                    entry.to_display_string()
+                ),
+            });
+        }
+        let key = self.read_computed(entry, &Value::Number(0.0), instruction)?;
+        let value = self.read_computed(entry, &Value::Number(1.0), instruction)?;
+        Ok((key, value))
     }
 
     /// `ToPropertyKey` of a key that arrived from the program, as a value.
@@ -24923,6 +24975,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         } else {
             (item, Value::Undefined)
         };
+        // A weak collection seeded from an iterable holds its entries to the same rule a later
+        // `add` or `set` does: `new WeakSet([1])` is a TypeError, not a set holding a number no
+        // reference could ever match. The insert below goes straight to the machine-free table,
+        // so the check the dispatcher makes for the method forms is repeated here.
+        if weak && !self.can_be_held_weakly(&key) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: format!(
+                    "{} cannot be held weakly: a weak collection takes an object or an \
+                     unregistered symbol",
+                    key.to_display_string()
+                ),
+            });
+        }
         // The collection's *own* insert, weak or strong: it is the one whose brand check this
         // receiver passes, and the two do the same work behind it.
         call_native(
