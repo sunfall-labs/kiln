@@ -1828,12 +1828,12 @@ impl IteratorKind {
     /// The `next` this kind publishes, which is the one its instances already answered.
     fn next_method(self) -> Value {
         match self {
-            Self::Array | Self::String => {
-                Value::Native(Native::ArrayIteratorNext, RealmId::PRIMARY)
-            }
-            Self::Map | Self::Set | Self::RegExpString => {
+            Self::Array => Value::Native(Native::ArrayIteratorNext, RealmId::PRIMARY),
+            Self::String => Value::Native(Native::StringIteratorNext, RealmId::PRIMARY),
+            Self::Map | Self::Set => {
                 Value::Native(Native::CollectionIteratorNext, RealmId::PRIMARY)
             }
+            Self::RegExpString => Value::Native(Native::RegExpStringIteratorNext, RealmId::PRIMARY),
         }
     }
 }
@@ -1843,7 +1843,12 @@ fn iterator_prototype_method(kind: IteratorKind, name: &str) -> Value {
     match name {
         "next" => kind.next_method(),
         key if key == WellKnown::ToStringTag.property_key() => Value::String(kind.tag().to_owned()),
-        _ => Value::Undefined,
+        // Everything else is `%IteratorPrototype%`'s, one link up: the helpers, and `@@iterator`
+        // itself. The chain walk follows one marker and stops, so the step is taken here -- the
+        // same shape `inherit_from_object` gives every other table for `Object.prototype`.
+        // Without it `[..."a".matchAll(re)]` stopped working: `next` resolved and the object was
+        // still not iterable, which is a spread refusing an iterator.
+        other => iterator_method(other),
     }
 }
 
@@ -27111,14 +27116,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Boolean(flags.contains('u') || flags.contains('v')),
         );
         iterator.set_non_enumerable(HELPER_DONE, Value::Boolean(false));
-        iterator.set_non_enumerable(
-            "next",
-            Value::Native(Native::RegExpStringIteratorNext, RealmId::PRIMARY),
-        );
-        iterator.set_non_enumerable(
-            WellKnown::Iterator.property_key(),
-            Value::Native(Native::IteratorSelf, RealmId::PRIMARY),
-        );
+        iterator.set_prototype(Value::Native(
+            Native::PrototypeOf(PrototypeTable::IteratorFor(IteratorKind::RegExpString)),
+            RealmId::PRIMARY,
+        ));
         Ok(Value::Object(Rc::new(RefCell::new(iterator))))
     }
 
@@ -29751,7 +29752,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 key if key == WellKnown::AsyncIterator.property_key() => {
                     Value::Native(Native::IteratorSelf, RealmId::PRIMARY)
                 }
-                _ => Value::Undefined,
+                // The tag, which `%AsyncGeneratorPrototype%` owns and a generator reaches
+                // through its chain: `Object.prototype.toString` reads it, and without it every
+                // async generator reported `[object Object]`.
+                other => generator_prototype_method(true, other),
             },
             // A generator object is its own iterator, which is what lets one be used directly in
             // `for-of` and in a spread.
@@ -29764,7 +29768,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // Everything else comes from `%IteratorPrototype%`, which a generator object
                 // reaches through two links of its chain -- and which is the only reason
                 // `g().map(f)` is a thing a program can write.
-                other => iterator_method(other),
+                // The tag first, from `%GeneratorPrototype%`; everything after it comes from
+                // `%IteratorPrototype%`, which a generator reaches through two links of its
+                // chain -- and which is the only reason `g().map(f)` is a thing a program can
+                // write.
+                other => match generator_prototype_method(false, other) {
+                    Value::Undefined => iterator_method(other),
+                    found => found,
+                },
             },
             _ => Value::Undefined,
         }
@@ -37018,16 +37029,12 @@ fn call_native(
                 .map(|character| Value::String(character.to_string()))
                 .collect::<Vec<_>>();
             let mut iterator = ObjectData::default();
-            iterator.set(
-                "@@iterated",
-                Value::Array(ArrayData::new(characters)),
-            );
+            iterator.set_prototype(Value::Native(
+                Native::PrototypeOf(PrototypeTable::IteratorFor(IteratorKind::String)),
+                RealmId::PRIMARY,
+            ));
+            iterator.set("@@iterated", Value::Array(ArrayData::new(characters)));
             iterator.set("@@index", Value::Number(0.0));
-            iterator.set("next", Value::Native(Native::StringIteratorNext, RealmId::PRIMARY));
-            iterator.set(
-                WellKnown::Iterator.property_key(),
-                Value::Native(Native::IteratorSelf, RealmId::PRIMARY),
-            );
             Value::Object(Rc::new(RefCell::new(iterator)))
         }
         // The state shape is the array iterator's, so the same stepper serves both.
@@ -38927,10 +38934,7 @@ fn array_iterator_over(native: Native, iterated: &Value) -> Value {
     // `[...].values().map(f)` still finds them. The iterator object now owns nothing, which is
     // what `Object.getOwnPropertyNames` on one reports.
     iterator.set_prototype(Value::Native(
-        Native::PrototypeOf(PrototypeTable::IteratorFor(match iterated {
-            Value::String(_) => IteratorKind::String,
-            _ => IteratorKind::Array,
-        })),
+        Native::PrototypeOf(PrototypeTable::IteratorFor(IteratorKind::Array)),
         RealmId::PRIMARY,
     ));
     iterator.set("@@iterated", iterated.clone());
@@ -41955,6 +41959,12 @@ fn array_buffer_method(shared: bool, name: &str) -> Value {
 /// table anyway: they are statics on the constructor rather than methods on the prototype.
 fn iterator_method(name: &str) -> Value {
     match name {
+        // An iterator is its own iterable, and that is `%IteratorPrototype%`'s to say -- every
+        // built-in iterator used to carry an own copy, which is one more own property than any
+        // of them has.
+        key if key == WellKnown::Iterator.property_key() => {
+            Value::Native(Native::IteratorSelf, RealmId::PRIMARY)
+        }
         "map" => Value::Native(Native::IteratorLazy(HelperKind::Map), RealmId::PRIMARY),
         "filter" => Value::Native(Native::IteratorLazy(HelperKind::Filter), RealmId::PRIMARY),
         "take" => Value::Native(Native::IteratorLazy(HelperKind::Take), RealmId::PRIMARY),
@@ -42142,6 +42152,18 @@ fn intrinsic_owns(native: Native, key: &str) -> Option<Value> {
     let inherited = tabulated_object_property(key);
     if !matches!(inherited, Value::Undefined) && strict_equal(&found, &inherited) {
         return None;
+    }
+    // The five iterator tables and the two generator ones take their step up to
+    // `%IteratorPrototype%` inside their own answer, so what it supplies reaches them the same
+    // way `Object.prototype`'s does -- and is inherited for the same reason.
+    if matches!(
+        table,
+        PrototypeTable::IteratorFor(_) | PrototypeTable::Generator | PrototypeTable::AsyncGenerator
+    ) {
+        let from_iterator = iterator_method(key);
+        if !matches!(from_iterator, Value::Undefined) && strict_equal(&found, &from_iterator) {
+            return None;
+        }
     }
     Some(found)
 }
