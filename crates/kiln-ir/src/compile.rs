@@ -1925,6 +1925,27 @@ impl Compiler {
             self.error(Some(span), "destructuring bindings are not supported yet");
             return;
         }
+        // `var x = e` inside a `with` initialises through the object environment, because the
+        // declaration and the initialisation are two different things: the *declaration* hoists to
+        // the function or script scope, and the *initialisation* is an ordinary assignment, so it
+        // resolves `x` against the with object first and writes there when that object has the
+        // name. The hoisted binding is then left undefined -- `with (o) { var value = "v" }` makes
+        // `o.value` "v" and leaves `value` undefined. Storing into the slot got both backwards.
+        //
+        // Only a plain `var`: a `let` or `const` inside a `with` block declares in the block's own
+        // scope, which the object environment does not shadow.
+        if kind == VariableKind::Var
+            && !bound_from_stack
+            && let Some(initializer) = initializer
+        {
+            let scopes = self.with_scopes_for(name);
+            if !scopes.is_empty() {
+                self.with_assignment(&scopes, AssignmentOperator::Assign, name, initializer, span);
+                // An assignment leaves its value; a declaration is a statement and wants none.
+                self.code.push(Instruction::Pop);
+                return;
+            }
+        }
         let scope_index = if kind == VariableKind::Var {
             0
         } else {

@@ -39000,9 +39000,44 @@ fn number_property(name: &str) -> Value {
     }
 }
 
+/// `Array.prototype[Symbol.unscopables]`.
+///
+/// The object `with` consults to take a name *out* of the scope an array provides: it is what
+/// lets `Array.prototype.flat` be added years after `with (array) { flat }` was written without
+/// changing what that code means. The `with` machinery has always read it correctly; the property
+/// simply was not there, so every one of these sixteen names shadowed an outer binding of the
+/// same name.
+///
+/// Built once and handed out by clone, because its identity is observable:
+/// `Array.prototype[Symbol.unscopables] === Array.prototype[Symbol.unscopables]` is true, and a
+/// fresh object per read would make it false. That is why it cannot be spelled as an ordinary
+/// table entry -- the tables answer with values that have no identity to keep.
+fn array_unscopables() -> Value {
+    thread_local! {
+        static UNSCOPABLES: Value = {
+            let mut data = ObjectData::default();
+            // No prototype, so a name the list does not mention cannot be answered by
+            // `Object.prototype` and blocked by accident.
+            data.set_prototype(Value::Null);
+            for name in [
+                "at", "copyWithin", "entries", "fill", "find", "findIndex", "findLast",
+                "findLastIndex", "flat", "flatMap", "includes", "keys", "toReversed", "toSorted",
+                "toSpliced", "values",
+            ] {
+                data.set(name, Value::Boolean(true));
+            }
+            Value::Object(Rc::new(RefCell::new(data)))
+        };
+    }
+    UNSCOPABLES.with(Value::clone)
+}
+
 fn array_property(name: &str) -> Value {
     if let Some(method) = array_callback_method(name) {
         return Value::Callback(method, RealmId::PRIMARY);
+    }
+    if name == WellKnown::Unscopables.property_key() {
+        return array_unscopables();
     }
     match name {
         "join" => Value::Native(Native::ArrayJoin, RealmId::PRIMARY),
@@ -45027,6 +45062,15 @@ fn published_attributes(target: &Value, native: Native, key: &str, found: &Value
     }
     if found.type_of() == "function" {
         return Attributes::BUILT_IN;
+    }
+    // `Array.prototype[@@unscopables]` is a data property the specification locks against
+    // assignment and leaves configurable, exactly as it does the tag below.
+    if key == WellKnown::Unscopables.property_key() {
+        return Attributes {
+            writable: false,
+            enumerable: false,
+            configurable: true,
+        };
     }
     // `@@toStringTag` is the one built-in *value* the specification leaves configurable, and it
     // has to be: the tag is what `Object.prototype.toString` reads, and a program that wants the
