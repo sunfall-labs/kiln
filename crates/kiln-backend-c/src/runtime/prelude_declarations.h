@@ -202,5 +202,13 @@ extern int kiln_c99_op_load_cell(kiln_value cell, kiln_value *stack, size_t *sp,
 extern int kiln_c99_check_tdz(kiln_value val, kiln_value *thrown);
 extern int kiln_c99_op_set_property(kiln_host *host, kiln_value *stack, size_t *sp, const char *key, size_t key_len, int strict, int depth, kiln_value *thrown, kiln_c99_site *site);
 extern int kiln_c99_op_set_computed(kiln_host *host, kiln_value *stack, size_t *sp, int strict, int depth, kiln_value *thrown);
+extern int kiln_c99_read_property(kiln_host *host, kiln_value target, const char *key, size_t key_len, int depth, kiln_value *thrown, kiln_c99_site *site, kiln_value *out);
+extern int kiln_c99_write_property(kiln_host *host, kiln_value target, const char *key, size_t key_len, kiln_value value, int strict, int depth, kiln_value *thrown, kiln_c99_site *site);
+extern void kiln_c99_note_get_property_refusal(kiln_value target);
+extern void kiln_c99_note_get_computed_refusal(kiln_value target, kiln_value key);
+extern int kiln_c99_read_element(kiln_host *host, kiln_value target, kiln_value key, int depth, kiln_value *thrown, kiln_value *out);
+extern int kiln_c99_write_element(kiln_host *host, kiln_value target, kiln_value key, kiln_value value, int strict, int depth, kiln_value *thrown);
+extern kiln_val kiln_val_from_boundary(kiln_value v);
+extern kiln_value kiln_val_to_boundary(kiln_val v);
 
 #endif /* KILN_PRELUDE_DECLARATIONS_H */

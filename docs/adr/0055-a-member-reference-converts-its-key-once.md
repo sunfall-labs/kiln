@@ -1,4 +1,4 @@
-# ADR 0053: A member reference converts its key once, and plain assignment converts it last
+# ADR 0055: A member reference converts its key once, and plain assignment converts it last
 
 ## Status
 

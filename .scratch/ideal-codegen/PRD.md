@@ -86,3 +86,25 @@ In `prelude_declarations.h`:
 - [x] **Milestone 3**: Overhaul `kiln_body_fn` calling convention with `kiln_call_context` across `prelude_types.h`, `prelude_declarations.h`, `prelude_core.c`, and `lib.rs` (ADR 0052: zero argument spills on SysV AMD64 & AArch64).
 - [x] **Milestone 4**: Zero-copy call argument passing: eliminated temporary argument array copying and heap allocations in `kiln_c99_op_call` and `kiln_c99_op_call_method`.
 - [x] **Milestone 5**: Stack traffic reduction via instruction fusion: fused `Const` + `StoreLocal`, `LoadLocal` + `StoreLocal`, and `Binary` + `StoreLocal` into direct register/local writes, eliminating stack push/pop churn in loops.
+- [x] **Milestone 6**: Multi-instruction operand-level fusion: 4-instruction sequences (`LoadLocal` + `Const`/`LoadLocal` + `Binary` + `JumpIf*`/`StoreLocal`) bypass the operand stack entirely, generating pure C scalar arithmetic.
+- [x] **Milestone 7**: Diagnostic reset hoisting: lifted 10 global variable memory writes out of instruction loops into the function prologue, eliminating billions of redundant writes in tight loops and enabling Clang auto-vectorization.
+- [x] **Milestone 8**: Direct static call devirtualization across all module functions: emitted static inline prototypes and direct static calls for internal helper functions, enabling Clang/LLVM to inline callees.
+- [x] **Milestone 9**: Expression-level binary fusion: fused `LoadLocal` + `Const`/`LoadLocal` + `Binary` expressions directly into register-level evaluation.
+- [x] **Milestone 10**: Call result assignment fusion: fused `Call` + `Dup` + `StoreLocal` + `Pop` sequences (`y = f(x)`) directly into `locals[dst] = call_result`.
+- [x] **Milestone 11**: Power-of-2 and constant float arithmetic specialization: replaced expensive `fmod(a, 2.0)` with single-cycle bitwise `(int64_t)a & 1`, replaced division by power-of-2 constants with multiplication by their exact reciprocal (`a * 0.5`), and replaced `memcpy` float construction with compound union literals for direct Clang constant folding.
+- [x] **Milestone 12**: Symmetric constant-expression fusion: added `Const` + `LoadLocal` + `Binary` / `StoreLocal` / `CompareJump` multi-instruction patterns, compiling all constant-variable expressions (`3 * n`, `100 - x`, `0 < n`) directly to native C scalar arithmetic.
+- [x] **Milestone 13**: Architectural design and specification for 64-bit NaN-boxed internal value representation (ADR 0053: single GPR mapping, 2x cache density, unboxed doubles, and zero-overhead float checks).
+- [x] **Milestone 14**: Method call statement and assignment fusion: generalized call fusion machinery to match `CallMethod` + `Pop` (statement execution discarding return value without stack churn) and `CallMethod` + `Dup` + `StoreLocal` + `Pop` / `StoreLocal` (direct assignment to local destination variable).
+- [x] **Milestone 15**: Property access and assignment fusion with monomorphic inline cache fast-paths: fused `LoadLocal` + `GetProperty` + `StoreLocal` / `Pop`, `LoadLocal` + `LoadLocal`/`Const` + `SetProperty` + `Pop` sequences into direct register-to-register property reads and writes, bypassing stack memory traffic and routing through monomorphic shape caching (`kiln_c99_read_property` / `kiln_c99_write_property`).
+- [x] **Milestone 16**: In-place numeric induction variable mutation (`i = i + 1`, `i = i - 1`): specialized `can_fuse_load_const_binary_store` when `src == dst` to update `locals[dst].bits` directly in-place without whole `kiln_value` struct recreation. By avoiding writes to `locals[dst].tag`, Clang/LLVM loop-invariant code motion (LICM) hoists the number tag check out of the loop and promotes `locals[dst].bits` into an unboxed CPU register across the entire loop.
+- [x] **Milestone 17**: 64-bit quiet-NaN boxed internal value representation (ADR 0053 Phase 2): introduced `kiln_val` (`uint64_t`), quiet-NaN bit masks, sentinel values, and zero-overhead boundary bridge helpers (`kiln_val_from_boundary`, `kiln_val_to_boundary`) in prelude runtime.
+
+
+## Benchmark Results (Empirical Release Measurements, 5 runs median)
+
+| Benchmark | Baseline (`85f8aeb`) | After Initial Wasmi 2.0 | After Inlining & Expression Fusion | **After Float & Constant Specialization** | Total Speedup vs Baseline |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Numerical Loop (`50M` iterations)** | `1553.9 ms` | `1195.1 ms` | `793.0 ms` | **`680.8 ms`** | **2.28x (+56.2% runtime cut)** |
+| **Recursive Fibonacci (`fib(30) × 5`)** | `751.7 ms` | `549.9 ms` | `426.0 ms` | **`393.0 ms`** | **1.91x (+47.7% runtime cut)** |
+| **Collatz Conjecture (`300k` sequence)** | `1936.1 ms` | `1613.2 ms` | `1116.3 ms` | **`985.2 ms`** | **1.97x (+49.1% runtime cut)** |
+| **Function Dispatch (`15M` calls)** | `1007.5 ms` | `782.7 ms` | `731.2 ms` | **`688.2 ms`** | **1.46x (+31.7% runtime cut)** |

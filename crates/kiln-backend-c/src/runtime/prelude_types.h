@@ -7,6 +7,30 @@ typedef struct kiln_value {
     union { uint64_t bits; const char *ptr; };
 } kiln_value;
 
+/* =========================================================================
+ * ADR 0053: 64-Bit Quiet-NaN Boxed Internal Value Representation
+ * ========================================================================= */
+typedef uint64_t kiln_val;
+
+#define KILN_QNAN_BASE          UINT64_C(0x7FF8000000000000)
+#define KILN_TAG_MASK           UINT64_C(0xFFFF000000000000)
+#define KILN_PAYLOAD_MASK       UINT64_C(0x0000FFFFFFFFFFFF)
+
+#define KILN_VAL_UNDEFINED      UINT64_C(0xFFF8000000000001)
+#define KILN_VAL_NULL           UINT64_C(0xFFF8000000000002)
+#define KILN_VAL_FALSE          UINT64_C(0xFFF8000000000004)
+#define KILN_VAL_TRUE           UINT64_C(0xFFF8000000000005)
+#define KILN_VAL_HOLE           UINT64_C(0xFFF8000000000006)
+
+#define KILN_TAG_STRING_PREFIX  UINT64_C(0xFFF9000000000000)
+#define KILN_TAG_OBJECT_PREFIX  UINT64_C(0xFFFA000000000000)
+#define KILN_TAG_CLOSURE_PREFIX UINT64_C(0xFFFB000000000000)
+#define KILN_TAG_BUFFER_PREFIX  UINT64_C(0xFFFC000000000000)
+
+#define KILN_VAL_IS_NUMBER(v)   ((uint64_t)(v) < UINT64_C(0xFFF8000000000000))
+#define KILN_VAL_PTR(v)         ((void *)((uint64_t)(v) & KILN_PAYLOAD_MASK))
+#define KILN_VAL_TAG_PTR(pfx, p) ((kiln_val)((pfx) | ((uint64_t)(uintptr_t)(p) & KILN_PAYLOAD_MASK)))
+
 typedef enum kiln_typed_kind {
     KILN_TYPED_INT8,
     KILN_TYPED_UINT8,
@@ -199,6 +223,31 @@ typedef struct kiln_native_constructor {
 
 /* KILN_NATIVE_CONSTRUCTOR_TABLE */
 
+/* A shape describes the layout of an object's own properties (ADR 0050):
+ * an ordered list of interned keys and slot indices. Objects with the same
+ * sequence of added properties share the same shape. */
+#define KILN_SHAPE_MAX_FAST_PROPERTIES 32
+
+struct kiln_shape;
+
+typedef struct kiln_shape_transition {
+    const char *ikey;
+    struct kiln_shape *next;
+    struct kiln_shape_transition *next_transition;
+} kiln_shape_transition;
+
+typedef struct kiln_shape {
+    struct kiln_shape *parent;
+    const char *ikey;
+    uint32_t slot_index;
+    uint32_t property_count;
+    uint32_t num_transitions;
+    const char *keys[KILN_SHAPE_MAX_FAST_PROPERTIES];
+    const char *inline_trans_ikey[2];
+    struct kiln_shape *inline_trans_next[2];
+    kiln_shape_transition *transitions;
+} kiln_shape;
+
 /* A plain data object: own string-keyed properties, scanned linearly.
  *
  * There is deliberately no shape here.  A shape identity has to be globally stable and never
@@ -253,6 +302,8 @@ typedef struct kiln_property {
     kiln_value getter;
     kiln_value setter;
 } kiln_property;
+
+#define KILN_C99_INLINE_SLOTS 4
 
 typedef struct kiln_object {
     kiln_property *properties;
@@ -312,6 +363,16 @@ typedef struct kiln_object {
      * with `.kiln/bin` and `.kiln/cache` cleared, in both debug and release. See the issue in
      * `.scratch/native-object-layout/`. Move this up once that is fixed. */
     int error_brand;
+    /* Shape-based layout (ADR 0050). When non-NULL, properties are stored in
+     * the slots array indexed by shape->keys. Appended to preserve member offsets. */
+    kiln_shape *shape;
+    kiln_value *slots;
+    size_t slot_capacity;
+    kiln_value inline_slots[KILN_C99_INLINE_SLOTS];
+    /* Dense elements vector for integer keys (ADR 0050 Milestone 5) */
+    kiln_value *elements;
+    size_t element_count;
+    size_t element_capacity;
 } kiln_object;
 
 /* A prototype chain is built by the program, so its length is the program's business -- but the
@@ -326,12 +387,22 @@ typedef struct kiln_object {
  * whatsoever -- and objects built by the same code put their keys at the same indices, which is
  * what makes one guess right for every instance of a class that does not exist. One of these is
  * a block-scope static at each GetProperty, SetProperty, SetPropertyStrict and CallMethod. */
+#define KILN_C99_PIC_SIZE 4
+
+typedef struct kiln_c99_pic_entry {
+    const kiln_shape *shape;
+    const kiln_shape *transition_to;
+    uint32_t slot;
+} kiln_c99_pic_entry;
+
 typedef struct kiln_c99_site {
     uint32_t own;
     uint32_t proto;
     /* Slow-path answers that taught the site nothing: a name answered from a builtin table or a
      * deeper prototype. After `KILN_C99_SITE_GIVE_UP` of them the site stops scanning to learn. */
     uint32_t misses;
+    uint32_t pic_count;
+    kiln_c99_pic_entry entries[KILN_C99_PIC_SIZE];
 } kiln_c99_site;
 #define KILN_C99_SITE_NONE 0xFFFFFFFFu
 #define KILN_C99_SITE_GIVE_UP 8u
@@ -744,6 +815,22 @@ static int kiln_c99_node_response_is_framed(const kiln_object *headers) {
     size_t index;
     size_t which;
     if (headers == NULL) return 0;
+    if (headers->shape != NULL) {
+        for (index = 0; index < headers->shape->property_count; ++index) {
+            const char *key = headers->shape->keys[index];
+            size_t len = strlen(key);
+            for (which = 0; which < 2; ++which) {
+                size_t flen = strlen(framing[which]);
+                size_t byte;
+                if (len != flen) continue;
+                for (byte = 0; byte < flen; ++byte) {
+                    if ((char)tolower((unsigned char)key[byte]) != framing[which][byte])
+                        break;
+                }
+                if (byte == flen) return 1;
+            }
+        }
+    }
     for (index = 0; index < headers->count; ++index) {
         const kiln_property *property = &headers->properties[index];
         for (which = 0; which < 2; ++which) {

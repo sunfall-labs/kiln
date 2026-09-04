@@ -2009,6 +2009,7 @@ const fn assert_refusals_name_themselves(source: &str, internal_sites: usize, ab
     );
 }
 
+#[allow(long_running_const_eval)]
 const _: () = assert_refusals_name_themselves(
     concat!(
         include_str!("runtime/prelude_core.c"),
@@ -3902,6 +3903,7 @@ pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_method_index_ready", C99StateOwner::Constant),
     ("kiln_c99_introspect_pending", C99StateOwner::Process),
     ("kiln_c99_introspect_armed", C99StateOwner::Process),
+    ("kiln_c99_root_shape", C99StateOwner::Constant),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

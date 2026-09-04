@@ -12,80 +12,55 @@ int kiln_module_cdf58079a736c0362f04ade879223b63(kiln_host *host, kiln_value *re
     kiln_value stack[2];
     kiln_value locals[2];
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
+    kiln_c99_reset_diagnostics();
     locals[0] = kiln_c99_undefined();
     locals[1] = kiln_c99_undefined();
 kiln_label_0:;
-    kiln_c99_reset_diagnostics();
     stack[sp++] = kiln_c99_number_bits(UINT64_C(4611686018427387904));
 kiln_label_1:;
-    kiln_c99_reset_diagnostics();
     stack[sp++] = kiln_c99_number_bits(UINT64_C(4615063718147915776));
 kiln_label_2:;
-    kiln_c99_reset_diagnostics();
     { kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER && right.tag == KILN_VALUE_NUMBER)) { double a; double b; memcpy(&a, &left.bits, sizeof(a)); memcpy(&b, &right.bits, sizeof(b)); answer = kiln_c99_number(a + b); } else { answer = kiln_c99_binary(1, left, right); } stack[sp++] = answer; }
 kiln_label_3:;
-    kiln_c99_reset_diagnostics();
     stack[sp++] = kiln_c99_number_bits(UINT64_C(4921056587992461136));
 kiln_label_4:;
-    kiln_c99_reset_diagnostics();
     { kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER && right.tag == KILN_VALUE_NUMBER)) { double a; double b; memcpy(&a, &left.bits, sizeof(a)); memcpy(&b, &right.bits, sizeof(b)); answer = kiln_c99_number(a * b); } else { answer = kiln_c99_binary(3, left, right); } locals[0] = answer; }
 kiln_label_5:;
 kiln_label_6:;
-    kiln_c99_reset_diagnostics();
     stack[sp++] = locals[0];
 kiln_label_7:;
-    kiln_c99_reset_diagnostics();
     stack[sp - 1] = kiln_c99_unary(2, stack[sp - 1]);
 kiln_label_8:;
-    kiln_c99_reset_diagnostics();
     stack[sp++] = kiln_c99_number_bits(UINT64_C(9223372036854775808));
 kiln_label_9:;
-    kiln_c99_reset_diagnostics();
     { kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER && right.tag == KILN_VALUE_NUMBER)) { double a; double b; memcpy(&a, &left.bits, sizeof(a)); memcpy(&b, &right.bits, sizeof(b)); answer = kiln_c99_number(a - b); } else { answer = kiln_c99_binary(2, left, right); } stack[sp++] = answer; }
 kiln_label_10:;
-    kiln_c99_reset_diagnostics();
     stack[sp++] = kiln_c99_number_bits(UINT64_C(9221120237041090560));
 kiln_label_11:;
-    kiln_c99_reset_diagnostics();
     { kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER && right.tag == KILN_VALUE_NUMBER)) { double a; double b; memcpy(&a, &left.bits, sizeof(a)); memcpy(&b, &right.bits, sizeof(b)); answer = kiln_c99_boolean(a == b); } else { answer = kiln_c99_binary(7, left, right); } stack[sp++] = answer; }
 kiln_label_12:;
-    kiln_c99_reset_diagnostics();
     stack[sp - 1] = kiln_c99_unary(3, stack[sp - 1]);
 kiln_label_13:;
-    kiln_c99_reset_diagnostics();
     locals[1] = stack[--sp];
 kiln_label_14:;
-    kiln_c99_reset_diagnostics();
-    stack[sp++] = locals[0];
+    { kiln_value left = locals[0]; kiln_value answer; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER)) { double a; memcpy(&a, &left.bits, sizeof(a)); double b = ((union { uint64_t u; double d; }){ .u = UINT64_C(4611686018427387904) }).d; if (KILN_LIKELY(a > 0.0 && a <= 9007199254740992.0 && a == (double)(int64_t)a)) { answer = kiln_c99_number((double)((int64_t)a & 1)); } else { answer = kiln_c99_number(fmod(a, b)); } } else { kiln_value right = kiln_c99_number_bits(UINT64_C(4611686018427387904)); answer = kiln_c99_binary(5, left, right); } stack[sp++] = answer; }
 kiln_label_15:;
-    kiln_c99_reset_diagnostics();
-    stack[sp++] = kiln_c99_number_bits(UINT64_C(4611686018427387904));
 kiln_label_16:;
-    kiln_c99_reset_diagnostics();
-    { kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER && right.tag == KILN_VALUE_NUMBER)) { double a; double b; memcpy(&a, &left.bits, sizeof(a)); memcpy(&b, &right.bits, sizeof(b)); if (a != 0.0 && b != 0.0 && a >= -9007199254740992.0 && a <= 9007199254740992.0 &&              b >= -9007199254740992.0 && b <= 9007199254740992.0 && a == (double)(int64_t)a &&              b == (double)(int64_t)b) { answer = kiln_c99_number((double)((int64_t)a % (int64_t)b)); }              else { answer = kiln_c99_number(fmod(a, b)); } } else { answer = kiln_c99_binary(5, left, right); } stack[sp++] = answer; }
 kiln_label_17:;
-    kiln_c99_reset_diagnostics();
     stack[sp++] = kiln_c99_number_bits(UINT64_C(4611686018427387904));
 kiln_label_18:;
-    kiln_c99_reset_diagnostics();
     { kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; stack[sp++] = kiln_c99_binary(6, left, right); }
 kiln_label_19:;
-    kiln_c99_reset_diagnostics();
     stack[sp++] = kiln_c99_number_bits(UINT64_C(4611686018427387904));
 kiln_label_20:;
-    kiln_c99_reset_diagnostics();
     { kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; stack[sp++] = kiln_c99_binary(19, left, right); }
 kiln_label_21:;
-    kiln_c99_reset_diagnostics();
     stack[sp++] = kiln_c99_number_bits(UINT64_C(4611686018427387904));
 kiln_label_22:;
-    kiln_c99_reset_diagnostics();
     { kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; stack[sp++] = kiln_c99_binary(22, left, right); }
 kiln_label_23:;
-    kiln_c99_reset_diagnostics();
     stack[sp - 1] = kiln_c99_unary(4, stack[sp - 1]);
 kiln_label_24:;
-    kiln_c99_reset_diagnostics();
     *result = sp == 0 ? kiln_c99_undefined() : stack[--sp]; return KILN_C99_OK;
     goto kiln_refusal;
 kiln_refusal:;
