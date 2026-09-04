@@ -48,6 +48,7 @@ use std::sync::Arc;
 /// Kept minimal on purpose. design.md §5 wants built-ins written in JavaScript, and everything
 /// here is a placeholder for one -- but nothing can bootstrap a JS built-in until there are
 /// prototypes and a loader, so the handful the conformance corpus needs first live here.
+mod intrinsic_members;
 mod symbol;
 pub use symbol::*;
 
@@ -22910,7 +22911,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // An accessor on a table is not this refusal's business: it is answered by
                 // whether it has a setter, which the table reports separately.
                 let is_accessor = matches!(native, Native::PrototypeOf(table)
-                    if prototype_accessor_names(*table).contains(&name));
+                    if intrinsic_members::is_accessor(*table, name));
                 if !is_accessor && let Some(attributes) = intrinsic_own_attributes(&current, name) {
                     if !attributes.writable {
                         return false;
@@ -42334,55 +42335,17 @@ impl BuiltinAccessor {
 }
 
 /// The accessors one intrinsic prototype publishes, in the order the specification lists them.
-fn prototype_accessor_names(table: PrototypeTable) -> &'static [&'static str] {
-    match table {
-        PrototypeTable::ArrayBuffer => &[
-            "byteLength",
-            "maxByteLength",
-            "resizable",
-            "detached",
-            "immutable",
-        ],
-        PrototypeTable::SharedArrayBuffer => &["byteLength", "maxByteLength", "growable"],
-        PrototypeTable::DataView => &["buffer", "byteLength", "byteOffset"],
-        PrototypeTable::TypedArray => &["buffer", "byteLength", "byteOffset", "length"],
-        PrototypeTable::Map | PrototypeTable::Set => &["size"],
-        PrototypeTable::Symbol => &["description"],
-        PrototypeTable::DisposableStack | PrototypeTable::AsyncDisposableStack => &["disposed"],
-        _ => &[],
-    }
-}
 
 /// Which accessor an intrinsic prototype publishes under `key`, or `None` for a name that is
 /// not one of them.
+/// The getter a built-in prototype publishes under `key`, or `None` if that name is not an
+/// accessor.
+///
+/// One row in `intrinsic_members` carries both the name and the getter, because they used to be
+/// two tables and a name present in one but absent from the other is not a compile error -- it is
+/// a property that lists and describes as a data property holding `undefined`.
 fn prototype_accessor(table: PrototypeTable, key: &str) -> Option<BuiltinAccessor> {
-    Some(match (table, key) {
-        (PrototypeTable::ArrayBuffer, "byteLength") => BuiltinAccessor::BufferByteLength,
-        (PrototypeTable::ArrayBuffer, "maxByteLength") => BuiltinAccessor::BufferMaxByteLength,
-        (PrototypeTable::ArrayBuffer, "resizable") => BuiltinAccessor::BufferResizable,
-        (PrototypeTable::ArrayBuffer, "detached") => BuiltinAccessor::BufferDetached,
-        (PrototypeTable::ArrayBuffer, "immutable") => BuiltinAccessor::BufferImmutable,
-        (PrototypeTable::SharedArrayBuffer, "byteLength") => BuiltinAccessor::SharedByteLength,
-        (PrototypeTable::SharedArrayBuffer, "maxByteLength") => {
-            BuiltinAccessor::SharedMaxByteLength
-        }
-        (PrototypeTable::SharedArrayBuffer, "growable") => BuiltinAccessor::SharedGrowable,
-        (PrototypeTable::DataView, "buffer") => BuiltinAccessor::DataViewBuffer,
-        (PrototypeTable::DataView, "byteLength") => BuiltinAccessor::DataViewByteLength,
-        (PrototypeTable::DataView, "byteOffset") => BuiltinAccessor::DataViewByteOffset,
-        (PrototypeTable::TypedArray, "buffer") => BuiltinAccessor::TypedArrayBuffer,
-        (PrototypeTable::TypedArray, "byteLength") => BuiltinAccessor::TypedArrayByteLength,
-        (PrototypeTable::TypedArray, "byteOffset") => BuiltinAccessor::TypedArrayByteOffset,
-        (PrototypeTable::TypedArray, "length") => BuiltinAccessor::TypedArrayLength,
-        (PrototypeTable::Symbol, "description") => BuiltinAccessor::SymbolDescription,
-        (PrototypeTable::Map, "size") => BuiltinAccessor::CollectionSize(true),
-        (PrototypeTable::Set, "size") => BuiltinAccessor::CollectionSize(false),
-        (PrototypeTable::DisposableStack, "disposed") => BuiltinAccessor::DisposableStackDisposed,
-        (PrototypeTable::AsyncDisposableStack, "disposed") => {
-            BuiltinAccessor::AsyncDisposableStackDisposed
-        }
-        _ => return None,
-    })
+    intrinsic_members::accessor(table, key)
 }
 
 /// The accessor the *machine* has to run for a read of `key` on `target`, or `None`.
@@ -43837,295 +43800,360 @@ fn table_step(
 /// Reads can fall through to `Object.prototype`, but reflection must not report inherited names
 /// as own properties. Keeping this inventory beside the table machinery gives the virtual
 /// prototypes the same observable shape as ordinary objects.
+const UINT8_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
+    "BYTES_PER_ELEMENT",
+    "toBase64",
+    "toHex",
+    "setFromBase64",
+    "setFromHex",
+]);
+/// Every concrete view but `Uint8Array` publishes only its element width; the byte view adds the
+/// four text conversions, which is why it has a list of its own.
+const TYPED_ARRAY_VIEW_MEMBERS: intrinsic_members::NamedMembers =
+    intrinsic_members::NamedMembers::new(&["BYTES_PER_ELEMENT"]);
+const OBJECT_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
+    "hasOwnProperty",
+    "isPrototypeOf",
+    "propertyIsEnumerable",
+    "toString",
+    "toLocaleString",
+    "valueOf",
+    "__defineGetter__",
+    "__defineSetter__",
+    "__lookupGetter__",
+    "__lookupSetter__",
+    "__proto__",
+]);
+const ARRAY_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
+    "map",
+    "forEach",
+    "filter",
+    "reduce",
+    "sort",
+    "findIndex",
+    "find",
+    "some",
+    "every",
+    "flatMap",
+    "findLast",
+    "findLastIndex",
+    "reduceRight",
+    "join",
+    "push",
+    "pop",
+    "indexOf",
+    "includes",
+    "slice",
+    "at",
+    "flat",
+    "entries",
+    "keys",
+    "concat",
+    "reverse",
+    "shift",
+    "unshift",
+    "lastIndexOf",
+    "fill",
+    "splice",
+    "copyWithin",
+    "toString",
+    "values",
+    "set",
+    "subarray",
+    "with",
+    "toReversed",
+    "toSorted",
+    "toSpliced",
+]);
+const STRING_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
+    "values",
+    "toUpperCase",
+    "toLowerCase",
+    "includes",
+    "indexOf",
+    "slice",
+    "substring",
+    "substr",
+    "split",
+    "trim",
+    "startsWith",
+    "endsWith",
+    "repeat",
+    "at",
+    "codePointAt",
+    "localeCompare",
+    "toLocaleUpperCase",
+    "toLocaleLowerCase",
+    "normalize",
+    "charAt",
+    "charCodeAt",
+    "padStart",
+    "padEnd",
+    "replace",
+    "replaceAll",
+    "lastIndexOf",
+    "trimStart",
+    "trimEnd",
+    "concat",
+    "toString",
+    "toLocaleString",
+    "valueOf",
+    "match",
+    "matchAll",
+    "search",
+    "trimLeft",
+    "trimRight",
+    "anchor",
+    "big",
+    "blink",
+    "bold",
+    "fixed",
+    "fontcolor",
+    "fontsize",
+    "italics",
+    "link",
+    "small",
+    "strike",
+    "sub",
+    "sup",
+]);
+const NUMBER_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
+    "toString",
+    "toFixed",
+    "toExponential",
+    "toPrecision",
+    "valueOf",
+]);
+const FUNCTION_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
+    "toString",
+    "call",
+    "apply",
+    "bind",
+    "caller",
+    "arguments",
+]);
+const REG_EXP_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
+    "exec",
+    "dotAll",
+    "flags",
+    "global",
+    "hasIndices",
+    "ignoreCase",
+    "multiline",
+    "source",
+    "sticky",
+    "unicode",
+    "unicodeSets",
+    "toString",
+    "test",
+]);
+const DATE_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
+    "toString",
+    "toDateString",
+    "toTimeString",
+    "toISOString",
+    "toUTCString",
+    "toGMTString",
+    "getDate",
+    "setDate",
+    "getDay",
+    "getFullYear",
+    "setFullYear",
+    "getHours",
+    "setHours",
+    "getMilliseconds",
+    "setMilliseconds",
+    "getMinutes",
+    "setMinutes",
+    "getMonth",
+    "setMonth",
+    "getSeconds",
+    "setSeconds",
+    "getTime",
+    "setTime",
+    "getTimezoneOffset",
+    "getUTCDate",
+    "setUTCDate",
+    "getUTCDay",
+    "getUTCFullYear",
+    "setUTCFullYear",
+    "getUTCHours",
+    "setUTCHours",
+    "getUTCMilliseconds",
+    "setUTCMilliseconds",
+    "getUTCMinutes",
+    "setUTCMinutes",
+    "getUTCMonth",
+    "setUTCMonth",
+    "getUTCSeconds",
+    "setUTCSeconds",
+    "valueOf",
+    "getYear",
+    "setYear",
+    "toJSON",
+    "toLocaleString",
+    "toLocaleDateString",
+    "toLocaleTimeString",
+]);
+const ARRAY_BUFFER_MEMBERS: intrinsic_members::NamedMembers =
+    intrinsic_members::NamedMembers::new(&[
+        "resize",
+        "slice",
+        "sliceToImmutable",
+        "transfer",
+        "transferToFixedLength",
+        "transferToImmutable",
+    ]);
+const SHARED_ARRAY_BUFFER_MEMBERS: intrinsic_members::NamedMembers =
+    intrinsic_members::NamedMembers::new(&["grow", "slice"]);
+const DATA_VIEW_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
+    "getInt8",
+    "getUint8",
+    "getInt16",
+    "getUint16",
+    "getInt32",
+    "getUint32",
+    "getFloat32",
+    "getFloat64",
+    "setInt8",
+    "setUint8",
+    "setInt16",
+    "setUint16",
+    "setInt32",
+    "setUint32",
+    "setFloat32",
+    "setFloat64",
+    "getBigInt64",
+    "getBigUint64",
+    "setBigInt64",
+    "setBigUint64",
+]);
+const ITERATOR_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
+    "map", "filter", "take", "drop", "flatMap", "reduce", "toArray", "forEach", "some", "every",
+    "find",
+]);
+/// The three wrapper tables answer to the same three names and nothing else.
+const WRAPPER_MEMBERS: intrinsic_members::NamedMembers =
+    intrinsic_members::NamedMembers::new(&["toString", "toLocaleString", "valueOf"]);
+const PROMISE_MEMBERS: intrinsic_members::NamedMembers =
+    intrinsic_members::NamedMembers::new(&["then", "catch", "finally"]);
+const MAP_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
+    "get",
+    "getOrInsert",
+    "getOrInsertComputed",
+    "set",
+    "has",
+    "delete",
+    "clear",
+    "forEach",
+    "values",
+    "keys",
+    "entries",
+]);
+const SET_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
+    "add",
+    "has",
+    "delete",
+    "clear",
+    "forEach",
+    "values",
+    "keys",
+    "entries",
+    "union",
+    "intersection",
+    "difference",
+    "symmetricDifference",
+    "isSubsetOf",
+    "isSupersetOf",
+    "isDisjointFrom",
+]);
+const WEAK_MAP_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
+    "get",
+    "getOrInsert",
+    "getOrInsertComputed",
+    "set",
+    "has",
+    "delete",
+]);
+const WEAK_SET_MEMBERS: intrinsic_members::NamedMembers =
+    intrinsic_members::NamedMembers::new(&["add", "has", "delete"]);
+const WEAK_REF_MEMBERS: intrinsic_members::NamedMembers =
+    intrinsic_members::NamedMembers::new(&["deref"]);
+const SHADOW_REALM_MEMBERS: intrinsic_members::NamedMembers =
+    intrinsic_members::NamedMembers::new(&["evaluate", "importValue"]);
+const DISPOSABLE_STACK_MEMBERS: intrinsic_members::NamedMembers =
+    intrinsic_members::NamedMembers::new(&["use", "adopt", "defer", "move", "dispose"]);
+const ASYNC_DISPOSABLE_STACK_MEMBERS: intrinsic_members::NamedMembers =
+    intrinsic_members::NamedMembers::new(&["use", "adopt", "defer", "move", "disposeAsync"]);
+const FINALIZATION_REGISTRY_MEMBERS: intrinsic_members::NamedMembers =
+    intrinsic_members::NamedMembers::new(&["register", "unregister"]);
+const EVENT_EMITTER_MEMBERS: intrinsic_members::NamedMembers =
+    intrinsic_members::NamedMembers::new(&[
+        "on",
+        "addListener",
+        "once",
+        "emit",
+        "listeners",
+        "eventNames",
+        "removeAllListeners",
+        "setMaxListeners",
+    ]);
+const READABLE_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
+    "push",
+    "read",
+    "destroy",
+    "pause",
+    "resume",
+    "setEncoding",
+]);
+const WRITABLE_MEMBERS: intrinsic_members::NamedMembers =
+    intrinsic_members::NamedMembers::new(&["write", "end", "destroy"]);
+
+/// The string-keyed members each built-in prototype lists.
+///
+/// Each list is a `const` built through [`intrinsic_members::NamedMembers`], which refuses a
+/// symbol's internal `@@` spelling *while the compiler is building it*. That is not decoration:
+/// putting `"@@hasInstance"` in one of these lists once leaked the internal spelling of
+/// `Symbol.hasInstance` into every property listing in the realm, and nothing about the change
+/// looked wrong. Now it does not build.
 fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'static [&'static str] {
     match table {
         // A concrete view's prototype carries only what differs between the views: its element
         // width, and -- for the byte view alone -- the four conversions to and from text.
         PrototypeTable::TypedArrayFor(kind) => match kind {
-            TypedKind::Uint8 => &[
-                "BYTES_PER_ELEMENT",
-                "toBase64",
-                "toHex",
-                "setFromBase64",
-                "setFromHex",
-            ],
-            _ => &["BYTES_PER_ELEMENT"],
+            TypedKind::Uint8 => UINT8_MEMBERS.names(),
+            _ => TYPED_ARRAY_VIEW_MEMBERS.names(),
         },
-        PrototypeTable::Object => &[
-            "hasOwnProperty",
-            "isPrototypeOf",
-            "propertyIsEnumerable",
-            "toString",
-            "toLocaleString",
-            "valueOf",
-            "__defineGetter__",
-            "__defineSetter__",
-            "__lookupGetter__",
-            "__lookupSetter__",
-            "__proto__",
-        ],
-        PrototypeTable::Array | PrototypeTable::TypedArray => &[
-            "map",
-            "forEach",
-            "filter",
-            "reduce",
-            "sort",
-            "findIndex",
-            "find",
-            "some",
-            "every",
-            "flatMap",
-            "findLast",
-            "findLastIndex",
-            "reduceRight",
-            "join",
-            "push",
-            "pop",
-            "indexOf",
-            "includes",
-            "slice",
-            "at",
-            "flat",
-            "entries",
-            "keys",
-            "concat",
-            "reverse",
-            "shift",
-            "unshift",
-            "lastIndexOf",
-            "fill",
-            "splice",
-            "copyWithin",
-            "toString",
-            "values",
-            "set",
-            "subarray",
-            "with",
-            "toReversed",
-            "toSorted",
-            "toSpliced",
-        ],
-        PrototypeTable::String => &[
-            "values",
-            "toUpperCase",
-            "toLowerCase",
-            "includes",
-            "indexOf",
-            "slice",
-            "substring",
-            "substr",
-            "split",
-            "trim",
-            "startsWith",
-            "endsWith",
-            "repeat",
-            "at",
-            "codePointAt",
-            "localeCompare",
-            "toLocaleUpperCase",
-            "toLocaleLowerCase",
-            "normalize",
-            "charAt",
-            "charCodeAt",
-            "padStart",
-            "padEnd",
-            "replace",
-            "replaceAll",
-            "lastIndexOf",
-            "trimStart",
-            "trimEnd",
-            "concat",
-            "toString",
-            "toLocaleString",
-            "valueOf",
-            "match",
-            "matchAll",
-            "search",
-            "trimLeft",
-            "trimRight",
-            "anchor",
-            "big",
-            "blink",
-            "bold",
-            "fixed",
-            "fontcolor",
-            "fontsize",
-            "italics",
-            "link",
-            "small",
-            "strike",
-            "sub",
-            "sup",
-        ],
-        PrototypeTable::Number => &[
-            "toString",
-            "toFixed",
-            "toExponential",
-            "toPrecision",
-            "valueOf",
-        ],
+        PrototypeTable::Object => OBJECT_MEMBERS.names(),
+        PrototypeTable::Array | PrototypeTable::TypedArray => ARRAY_MEMBERS.names(),
+        PrototypeTable::String => STRING_MEMBERS.names(),
+        PrototypeTable::Number => NUMBER_MEMBERS.names(),
         // `caller` and `arguments` are the restricted accessor pair
         // `AddRestrictedFunctionProperties` installs here, and they are own properties of this
         // object -- which is what makes every function that inherits from it throw on a read.
-        PrototypeTable::Function => &["toString", "call", "apply", "bind", "caller", "arguments"],
-        PrototypeTable::RegExp => &[
-            "exec",
-            "dotAll",
-            "flags",
-            "global",
-            "hasIndices",
-            "ignoreCase",
-            "multiline",
-            "source",
-            "sticky",
-            "unicode",
-            "unicodeSets",
-            "toString",
-            "test",
-        ],
-        PrototypeTable::Date => &[
-            "toString",
-            "toDateString",
-            "toTimeString",
-            "toISOString",
-            "toUTCString",
-            "toGMTString",
-            "getDate",
-            "setDate",
-            "getDay",
-            "getFullYear",
-            "setFullYear",
-            "getHours",
-            "setHours",
-            "getMilliseconds",
-            "setMilliseconds",
-            "getMinutes",
-            "setMinutes",
-            "getMonth",
-            "setMonth",
-            "getSeconds",
-            "setSeconds",
-            "getTime",
-            "setTime",
-            "getTimezoneOffset",
-            "getUTCDate",
-            "setUTCDate",
-            "getUTCDay",
-            "getUTCFullYear",
-            "setUTCFullYear",
-            "getUTCHours",
-            "setUTCHours",
-            "getUTCMilliseconds",
-            "setUTCMilliseconds",
-            "getUTCMinutes",
-            "setUTCMinutes",
-            "getUTCMonth",
-            "setUTCMonth",
-            "getUTCSeconds",
-            "setUTCSeconds",
-            "valueOf",
-            "getYear",
-            "setYear",
-            "toJSON",
-            "toLocaleString",
-            "toLocaleDateString",
-            "toLocaleTimeString",
-        ],
-        PrototypeTable::ArrayBuffer => &[
-            "resize",
-            "slice",
-            "sliceToImmutable",
-            "transfer",
-            "transferToFixedLength",
-            "transferToImmutable",
-        ],
-        PrototypeTable::SharedArrayBuffer => &["grow", "slice"],
-        PrototypeTable::DataView => &[
-            "getInt8",
-            "getUint8",
-            "getInt16",
-            "getUint16",
-            "getInt32",
-            "getUint32",
-            "getFloat32",
-            "getFloat64",
-            "setInt8",
-            "setUint8",
-            "setInt16",
-            "setUint16",
-            "setInt32",
-            "setUint32",
-            "setFloat32",
-            "setFloat64",
-            "getBigInt64",
-            "getBigUint64",
-            "setBigInt64",
-            "setBigUint64",
-        ],
-        PrototypeTable::Iterator => &[
-            "map", "filter", "take", "drop", "flatMap", "reduce", "toArray", "forEach", "some",
-            "every", "find",
-        ],
+        PrototypeTable::Function => FUNCTION_MEMBERS.names(),
+        PrototypeTable::RegExp => REG_EXP_MEMBERS.names(),
+        PrototypeTable::Date => DATE_MEMBERS.names(),
+        PrototypeTable::ArrayBuffer => ARRAY_BUFFER_MEMBERS.names(),
+        PrototypeTable::SharedArrayBuffer => SHARED_ARRAY_BUFFER_MEMBERS.names(),
+        PrototypeTable::DataView => DATA_VIEW_MEMBERS.names(),
+        PrototypeTable::Iterator => ITERATOR_MEMBERS.names(),
         PrototypeTable::Boolean | PrototypeTable::Symbol | PrototypeTable::BigInt => {
-            &["toString", "toLocaleString", "valueOf"]
+            WRAPPER_MEMBERS.names()
         }
-        PrototypeTable::Promise => &["then", "catch", "finally"],
-        PrototypeTable::Map => &[
-            "get",
-            "getOrInsert",
-            "getOrInsertComputed",
-            "set",
-            "has",
-            "delete",
-            "clear",
-            "forEach",
-            "values",
-            "keys",
-            "entries",
-        ],
-        PrototypeTable::Set => &[
-            "add",
-            "has",
-            "delete",
-            "clear",
-            "forEach",
-            "values",
-            "keys",
-            "entries",
-            "union",
-            "intersection",
-            "difference",
-            "symmetricDifference",
-            "isSubsetOf",
-            "isSupersetOf",
-            "isDisjointFrom",
-        ],
-        PrototypeTable::WeakMap => &[
-            "get",
-            "getOrInsert",
-            "getOrInsertComputed",
-            "set",
-            "has",
-            "delete",
-        ],
-        PrototypeTable::WeakSet => &["add", "has", "delete"],
-        PrototypeTable::WeakRef => &["deref"],
-        PrototypeTable::ShadowRealm => &["evaluate", "importValue"],
-        PrototypeTable::DisposableStack => &["use", "adopt", "defer", "move", "dispose"],
-        PrototypeTable::AsyncDisposableStack => &["use", "adopt", "defer", "move", "disposeAsync"],
-        PrototypeTable::FinalizationRegistry => &["register", "unregister"],
-        PrototypeTable::EventEmitter => &[
-            "on",
-            "addListener",
-            "once",
-            "emit",
-            "listeners",
-            "eventNames",
-            "removeAllListeners",
-            "setMaxListeners",
-        ],
-        PrototypeTable::Readable => &["push", "read", "destroy", "pause", "resume", "setEncoding"],
-        PrototypeTable::Writable => &["write", "end", "destroy"],
+        PrototypeTable::Promise => PROMISE_MEMBERS.names(),
+        PrototypeTable::Map => MAP_MEMBERS.names(),
+        PrototypeTable::Set => SET_MEMBERS.names(),
+        PrototypeTable::WeakMap => WEAK_MAP_MEMBERS.names(),
+        PrototypeTable::WeakSet => WEAK_SET_MEMBERS.names(),
+        PrototypeTable::WeakRef => WEAK_REF_MEMBERS.names(),
+        PrototypeTable::ShadowRealm => SHADOW_REALM_MEMBERS.names(),
+        PrototypeTable::DisposableStack => DISPOSABLE_STACK_MEMBERS.names(),
+        PrototypeTable::AsyncDisposableStack => ASYNC_DISPOSABLE_STACK_MEMBERS.names(),
+        PrototypeTable::FinalizationRegistry => FINALIZATION_REGISTRY_MEMBERS.names(),
+        PrototypeTable::EventEmitter => EVENT_EMITTER_MEMBERS.names(),
+        PrototypeTable::Readable => READABLE_MEMBERS.names(),
+        PrototypeTable::Writable => WRITABLE_MEMBERS.names(),
     }
 }
 
@@ -44133,7 +44161,7 @@ fn intrinsic_prototype_entries(table: PrototypeTable) -> Vec<(String, Property)>
     let target = Value::Native(Native::PrototypeOf(table), RealmId::PRIMARY);
     std::iter::once("constructor")
         .chain(intrinsic_prototype_method_names(table).iter().copied())
-        .chain(prototype_accessor_names(table).iter().copied())
+        .chain(intrinsic_members::accessor_keys(table))
         .filter_map(|name| {
             if let Some(accessor) = intrinsic_accessor(&target, name) {
                 return Some((name.to_owned(), accessor));
