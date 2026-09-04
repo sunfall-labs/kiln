@@ -187,6 +187,23 @@ pub trait ActiveHttpRuntime {
     fn take_client_events(&mut self, resource: ResourceId) -> Vec<RuntimeHttpClientEvent>;
 }
 
+/// One clock reading, in the milliseconds a program reads.
+///
+/// Every clock JavaScript can see ends in this conversion -- `Date.now`, `performance.now`,
+/// `process.hrtime`, `Intl`'s default instant, and the native backend's `kiln_realm_now` -- and
+/// until this function existed each of them spelled it itself. Two spellings were in the tree:
+/// `as_secs_f64() * 1_000.0` in the interpreter and `as_millis() as f64` in the native FFI. The
+/// second truncates, so `performance.now()` answered whole milliseconds under the native backend
+/// and sub-milliseconds under the interpreter -- one call, two precisions, decided by which
+/// backend you happened to run. That is the divergence ADR 0043 exists to prevent, and the cost
+/// was concrete: the native clock could not measure anything shorter than a millisecond, which
+/// is most of what a benchmark measures.
+///
+/// Duplicated arithmetic is how it drifted, so there is one copy and both engines call it.
+pub fn epoch_milliseconds(reading: Duration) -> f64 {
+    reading.as_secs_f64() * 1_000.0
+}
+
 /// Default deterministic entropy seed from ADR 0026.
 pub const DEFAULT_ENTROPY_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 
@@ -2793,6 +2810,11 @@ impl<M, T> Realm<M, T> {
         self.now
     }
 
+    /// The same reading in ECMAScript milliseconds.
+    pub fn now_milliseconds(&self) -> f64 {
+        epoch_milliseconds(self.now())
+    }
+
     /// Moves the clock forward to `now` when that is later than it reads. A wall-clock realm
     /// (ADR 0044) does this at every turn boundary so timers armed by the callbacks that follow
     /// measure from the present; the virtual clock never calls it, and advances only when a
@@ -3131,6 +3153,28 @@ pub fn duration_from_milliseconds(milliseconds: f64) -> Duration {
 
 #[cfg(test)]
 mod tests {
+    /// A clock reading keeps the part of it that is shorter than a millisecond.
+    ///
+    /// The native FFI once spelled this conversion `as_millis() as f64`, which truncates, while
+    /// the interpreter spelled it `as_secs_f64() * 1_000.0`. So `performance.now()` answered
+    /// whole milliseconds under one backend and sub-milliseconds under the other -- one call,
+    /// two precisions, chosen by which engine ran it. It made the native clock unable to measure
+    /// anything shorter than a millisecond, which is most of what a benchmark measures, and it
+    /// is the kind of two-engine divergence ADR 0043 exists to forbid.
+    #[test]
+    fn a_clock_reading_keeps_its_sub_millisecond_part() {
+        let reading = super::Duration::from_nanos(1_500_250);
+        let milliseconds = super::epoch_milliseconds(reading);
+        assert!(
+            (milliseconds - 1.500_25).abs() < 1e-9,
+            "expected 1.50025 ms, got {milliseconds}"
+        );
+        assert!(
+            milliseconds.fract() != 0.0,
+            "resolution collapsed to whole milliseconds"
+        );
+    }
+
     use super::*;
 
     fn next_host_completion<H: RealmHostProvider>(
