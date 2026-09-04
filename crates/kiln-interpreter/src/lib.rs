@@ -15969,6 +15969,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // Describing and defining a property are trapped operations of their own. A library
             // that copies a proxy into a plain object -- which is what a copy-on-write layer
             // does when it finalises -- goes through exactly this pair.
+            // `Function.prototype[Symbol.hasInstance]` called directly, and -- since it is a
+            // real property now -- also what `instanceof` reaches for every ordinary function.
+            // It performs `OrdinaryHasInstance`, deliberately not the operator, which would read
+            // this same property back off the receiver and recur without end.
+            Native::FunctionHasInstance => {
+                let value = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let receiver = receiver.clone();
+                let answered = self.ordinary_has_instance(&value, &receiver, None, instruction)?;
+                Ok(Value::Boolean(answered))
+            }
             // The detached `Object.prototype.__proto__` getter, called on a proxy: it is
             // `[[GetPrototypeOf]]` like the property read is, and the trap can throw.
             Native::ProtoGetter if matches!(receiver, Value::Proxy(_)) => {
@@ -21019,16 +21029,37 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             )?;
             return Ok(answered.is_truthy());
         }
+        // `InstanceofOperator` step 5 refuses a non-callable right-hand side. `OrdinaryHasInstance`
+        // does *not* -- it answers false -- and the difference is observable now that the method
+        // is reachable: `x instanceof 3` throws, while calling the method with a non-callable
+        // receiver returns false.
         if !is_callable(constructor) {
             return Err(ExecutionError::TypeErrorMessage {
                 message: "Right-hand side of 'instanceof' is not callable".to_owned(),
             });
         }
-        // `Iterator` is the one built-in whose instances are told apart by a marker rather than
-        // by a prototype the realm has as an object: a generator, an array iterator and a helper
-        // all answer to it, and none of their chains reaches an object this walk could compare.
-        // A value carrying no marker still falls through to the ordinary walk below, which is
-        // what answers for an iterator a program wrote by extending `Iterator` itself.
+        self.ordinary_has_instance(value, constructor, error_prototype, instruction)
+    }
+
+    /// `OrdinaryHasInstance(C, O)`: the prototype walk, with no `@@hasInstance` read of its own.
+    ///
+    /// Split out from [`Vm::instance_of_value`] because `Function.prototype[@@hasInstance]` is now
+    /// a real property, so the operator's first step *finds* it for any ordinary function. If that
+    /// method re-entered the operator it would read the same property and call itself for ever;
+    /// what the specification says it performs is this walk, which is therefore what it calls.
+    fn ordinary_has_instance(
+        &mut self,
+        value: &Value,
+        constructor: &Value,
+        error_prototype: Option<&Value>,
+        instruction: usize,
+    ) -> Result<bool, ExecutionError> {
+        // Step 1 of `OrdinaryHasInstance`, and an answer rather than a refusal: the operator
+        // has already refused a non-callable right-hand side by the time it gets here, but the
+        // method a program calls directly has not, and the specification says it answers false.
+        if !is_callable(constructor) {
+            return Ok(false);
+        }
         // `Iterator` is the one built-in whose instances are told apart by a marker rather than
         // by a prototype the realm has as an object: a generator, an array iterator and a helper
         // all answer to it, and none of their chains reaches an object this walk could compare.
@@ -21057,12 +21088,27 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Some(prototype) => prototype,
                 None => return Ok(false),
             },
-            Value::Native(Native::Error(_), _) => match error_prototype {
-                Some(prototype) => prototype.clone(),
-                None => return Ok(false),
-            },
+            // Derived from the constructor rather than handed in. It used to be a parameter, and
+            // the caller that could not supply one -- `Function.prototype[@@hasInstance]`, which
+            // is reached with no operator context at all -- answered false for every error in the
+            // realm. That is `e instanceof TypeError` being false, which test262's own
+            // `assert.throws` depends on, so it failed hundreds of tests that had nothing to do
+            // with `instanceof`. The realm can always answer this question; the caller cannot.
+            Value::Native(Native::Error(kind), _) => {
+                let kind = *kind;
+                let _ = error_prototype;
+                self.error_prototype(kind)
+            }
             Value::Bound(bound) => {
-                return self.instance_of_value(value, &bound.target, error_prototype, instruction);
+                // `OrdinaryHasInstance` unwraps a bound function and asks about its target, and
+                // it asks *this* operation rather than the operator: the specification does not
+                // re-read `@@hasInstance` off the target.
+                return self.ordinary_has_instance(
+                    value,
+                    &bound.target,
+                    error_prototype,
+                    instruction,
+                );
             }
             Value::Native(native, _) => match native.property("prototype") {
                 Some(prototype) => prototype,
@@ -22840,16 +22886,40 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Some((Property::Accessor { set, .. }, _)) => return set.is_some(),
             None => {}
         }
-        // Only the chain of objects the *program* built. A built-in prototype table answers for
-        // names it does not really carry as own properties -- a well-known symbol, the arity of
-        // a callable -- and reading a refusal out of one turned `obj[Symbol.species] = x` on a
-        // plain object into a TypeError. What is left is exactly the case the language means
-        // here: a prototype the program itself froze or defined a property on.
+        // The chain, built-in prototypes included. An earlier version stopped at the objects the
+        // program itself built, because a table answers for names it does not really carry -- a
+        // well-known symbol, the arity of a callable -- and reading a refusal out of one turned
+        // `obj[Symbol.species] = x` on a plain object into a TypeError.
+        //
+        // `intrinsic_own_attributes` is the question that was missing: it answers `None` for a
+        // name the table does not actually hold, so the derived answers no longer look like
+        // properties. What it does hold is nearly all writable (`Attributes::BUILT_IN`), so a
+        // method can still be shadowed; the handful that are not are the ones the specification
+        // locks -- `Function.prototype[@@hasInstance]`, `Date.prototype[@@toPrimitive]`, every
+        // `@@toStringTag` -- and assigning over one of those was silently accepted.
         let mut current = prototype_of(target);
         while matches!(
             current,
-            Value::Object(_) | Value::Array(_) | Value::Function(_) | Value::Bound(_)
+            Value::Object(_)
+                | Value::Array(_)
+                | Value::Function(_)
+                | Value::Bound(_)
+                | Value::Native(_, _)
         ) {
+            if let Value::Native(native, _) = &current {
+                // An accessor on a table is not this refusal's business: it is answered by
+                // whether it has a setter, which the table reports separately.
+                let is_accessor = matches!(native, Native::PrototypeOf(table)
+                    if prototype_accessor_names(*table).contains(&name));
+                if !is_accessor && let Some(attributes) = intrinsic_own_attributes(&current, name) {
+                    if !attributes.writable {
+                        return false;
+                    }
+                    break;
+                }
+                current = prototype_of(&current);
+                continue;
+            }
             match own_property_state(&self.intrinsics, &current, name) {
                 // A non-writable data property on a prototype cannot be shadowed by an
                 // assignment: `Object.create(Object.freeze({x: 1})).x = 2` is refused.
@@ -35749,6 +35819,9 @@ fn call_native(
         | Native::PromiseConstructor
         | Native::PromiseResolve
         | Native::PromiseReject
+        // `OrdinaryHasInstance` walks a prototype chain, and a link in that chain can be a proxy
+        // whose `getPrototypeOf` trap is ordinary code -- so it is dispatched on the machine.
+        | Native::FunctionHasInstance
         | Native::PromiseAll
         | Native::PromiseAllSettled
         | Native::PromiseAllKeyed
@@ -42658,6 +42731,14 @@ fn tabulated_function_property(name: &str) -> Value {
         "call" => Value::Native(Native::FunctionCall, RealmId::PRIMARY),
         "apply" => Value::Native(Native::FunctionApply, RealmId::PRIMARY),
         "bind" => Value::Native(Native::FunctionBind, RealmId::PRIMARY),
+        // Published here rather than in `intrinsic_prototype_method_names`, which is what an
+        // earlier attempt did: that list is the *enumeration*, and a reserved key put in it leaks
+        // the internal spelling of the symbol into every property listing in the realm. This one
+        // is the existence-and-value path, which is where a symbol-keyed member belongs --
+        // `Date.prototype[@@toPrimitive]` is published the same way.
+        key if key == WellKnown::HasInstance.property_key() => {
+            Value::Native(Native::FunctionHasInstance, RealmId::PRIMARY)
+        }
         _ => Value::Undefined,
     }
 }
@@ -43186,6 +43267,9 @@ const fn native_length(native: Native) -> Option<f64> {
         // callable, and it is the anonymous function of no arguments that returns undefined.
         N::Hole | N::Uninitialized | N::ReturnSignal | N::Tombstone => return None,
         N::PrototypeOf(PrototypeTable::Function) => 0.0,
+        // `OrdinaryHasInstance(C, O)` takes the one value being tested; the constructor is the
+        // receiver.
+        N::FunctionHasInstance => 1.0,
         N::PrototypeOf(_) => return None,
         N::Math | N::Json | N::Reflect | N::Performance => return None,
         N::HostCreateRealm => 0.0,
@@ -44668,6 +44752,18 @@ fn intrinsic_own_attributes(target: &Value, key: &str) -> Option<Attributes> {
             configurable: true,
         });
     }
+    // `Function.prototype[Symbol.hasInstance]` is the one built-in the specification locks on
+    // *both* axes. It decides `instanceof` for every ordinary function in the realm, so a program
+    // that could assign over it or delete it could change what every one of them answers.
+    if matches!(native, Native::PrototypeOf(PrototypeTable::Function))
+        && key == WellKnown::HasInstance.property_key()
+    {
+        return Some(Attributes {
+            writable: false,
+            enumerable: false,
+            configurable: false,
+        });
+    }
     // `Date.prototype[Symbol.toPrimitive]` is the one built-in *method* the specification makes
     // read-only. It is what `ToPrimitive` finds before anything else, so a program that could
     // assign over it could change what every date in the realm coerces to.
@@ -44850,6 +44946,11 @@ fn native_code_source(name: &str) -> String {
 
 fn native_js_name(native: &Native) -> String {
     match native {
+        // A symbol-keyed method is named for the symbol in brackets, which is what the
+        // specification's `SetFunctionName` does with a symbol key. Derivation would spell it
+        // `functionHasInstance`, the name of a Rust variant rather than of anything a program
+        // can see.
+        Native::FunctionHasInstance => "[Symbol.hasInstance]".to_owned(),
         // Derivation cannot reach these: the payload is the whole of the name.
         Native::Intl(op) => intl::js_name(*op),
         Native::Temporal(op) => temporal::js_name(*op),
