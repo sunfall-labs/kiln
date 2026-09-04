@@ -2494,6 +2494,8 @@ static kiln_shape kiln_c99_root_shape = {
     0,    /* property_count */
     0,    /* num_transitions */
     {NULL}, /* keys */
+    {NULL, NULL}, /* inline_trans_ikey */
+    {NULL, NULL}, /* inline_trans_next */
     NULL  /* transitions */
 };
 
@@ -2505,6 +2507,12 @@ static int kiln_c99_shape_find_slot(const kiln_shape *shape, const char *ikey, u
     uint32_t i;
     if (shape == NULL || ikey == NULL) {
         return 0;
+    }
+    if (shape->ikey == ikey) {
+        if (out_slot) {
+            *out_slot = shape->slot_index;
+        }
+        return 1;
     }
     for (i = 0; i < shape->property_count; ++i) {
         if (shape->keys[i] == ikey) {
@@ -2520,9 +2528,15 @@ static int kiln_c99_shape_find_slot(const kiln_shape *shape, const char *ikey, u
 static int kiln_c99_shape_transition(kiln_shape *current, const char *ikey, kiln_shape **out_shape) {
     kiln_shape_transition *tr;
     kiln_shape *next_shape;
-    kiln_shape_transition *new_tr;
+    size_t i;
     if (current == NULL || ikey == NULL || current->property_count >= KILN_SHAPE_MAX_FAST_PROPERTIES) {
         return 0;
+    }
+    for (i = 0; i < 2 && i < current->num_transitions; ++i) {
+        if (current->inline_trans_ikey[i] == ikey) {
+            *out_shape = current->inline_trans_next[i];
+            return 1;
+        }
     }
     for (tr = current->transitions; tr != NULL; tr = tr->next_transition) {
         if (tr->ikey == ikey) {
@@ -2534,10 +2548,7 @@ static int kiln_c99_shape_transition(kiln_shape *current, const char *ikey, kiln
         return 0;
     }
     next_shape = (kiln_shape *)calloc(1, sizeof(kiln_shape));
-    new_tr = (kiln_shape_transition *)calloc(1, sizeof(kiln_shape_transition));
-    if (next_shape == NULL || new_tr == NULL) {
-        free(next_shape);
-        free(new_tr);
+    if (next_shape == NULL) {
         return 0;
     }
     next_shape->parent = current;
@@ -2549,10 +2560,20 @@ static int kiln_c99_shape_transition(kiln_shape *current, const char *ikey, kiln
            current->property_count * sizeof(const char *));
     next_shape->keys[current->property_count] = ikey;
 
-    new_tr->ikey = ikey;
-    new_tr->next = next_shape;
-    new_tr->next_transition = current->transitions;
-    current->transitions = new_tr;
+    if (current->num_transitions < 2) {
+        current->inline_trans_ikey[current->num_transitions] = ikey;
+        current->inline_trans_next[current->num_transitions] = next_shape;
+    } else {
+        kiln_shape_transition *new_tr = (kiln_shape_transition *)calloc(1, sizeof(kiln_shape_transition));
+        if (new_tr == NULL) {
+            free(next_shape);
+            return 0;
+        }
+        new_tr->ikey = ikey;
+        new_tr->next = next_shape;
+        new_tr->next_transition = current->transitions;
+        current->transitions = new_tr;
+    }
     current->num_transitions++;
 
     *out_shape = next_shape;

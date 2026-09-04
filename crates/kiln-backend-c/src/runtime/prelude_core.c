@@ -23621,10 +23621,13 @@ static int kiln_c99_read_property(kiln_host *host, kiln_value target,
                                   kiln_c99_site *site, kiln_value *out) {
     if (KILN_LIKELY(site->pic_count > 0 && target.tag == KILN_VALUE_OBJECT)) {
         const kiln_object *object = kiln_c99_object_of(target);
-        if (KILN_LIKELY(object->shape == site->entries[0].shape &&
-                        site->entries[0].slot < object->slot_capacity)) {
-            *out = object->slots[site->entries[0].slot];
-            return KILN_C99_OK;
+        size_t p;
+        for (p = 0; p < site->pic_count; ++p) {
+            if (object->shape == site->entries[p].shape &&
+                site->entries[p].slot < object->slot_capacity) {
+                *out = object->slots[site->entries[p].slot];
+                return KILN_C99_OK;
+            }
         }
     }
     return kiln_c99_get_site(host, target, key, key_len, out, depth, thrown, site);
@@ -23637,12 +23640,24 @@ static int kiln_c99_write_property(kiln_host *host, kiln_value target,
                                    kiln_c99_site *site) {
     if (KILN_LIKELY(site->pic_count > 0 && target.tag == KILN_VALUE_OBJECT)) {
         kiln_object *object = kiln_c99_object_of(target);
-        if (KILN_LIKELY(object->shape == site->entries[0].shape &&
-                        site->entries[0].transition_to == NULL &&
-                        site->entries[0].slot < object->slot_capacity &&
-                        !object->frozen)) {
-            object->slots[site->entries[0].slot] = value;
-            return KILN_C99_OK;
+        size_t p;
+        for (p = 0; p < site->pic_count; ++p) {
+            if (object->shape == site->entries[p].shape) {
+                if (site->entries[p].transition_to == NULL) {
+                    if (KILN_LIKELY(site->entries[p].slot < object->slot_capacity && !object->frozen)) {
+                        object->slots[site->entries[p].slot] = value;
+                        return KILN_C99_OK;
+                    }
+                } else if (!object->not_extensible &&
+                           site->entries[p].slot < object->slot_capacity &&
+                           (object->prototype.tag == KILN_VALUE_UNDEFINED ||
+                            !kiln_c99_has_inherited_setter_or_readonly(object->prototype))) {
+                    object->slots[site->entries[p].slot] = value;
+                    object->shape = (kiln_shape *)site->entries[p].transition_to;
+                    return KILN_C99_OK;
+                }
+                break;
+            }
         }
     }
     return kiln_c99_put_site(host, target, key, key_len, value, strict, depth, thrown, site);
