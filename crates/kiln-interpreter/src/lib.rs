@@ -20616,6 +20616,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Proxy(proxy) => {
                 let proxy = Rc::clone(proxy);
                 let inner = proxy.target.clone();
+                // A proxy has a `[[Call]]` method only when its target has one. Running the
+                // trap regardless made `new Proxy({}, {apply(){}})()` a call where the language
+                // says the proxy is not a function -- and a handler could therefore make an
+                // ordinary object callable, which no other value can do.
+                if !is_callable(&inner) {
+                    return Err(ExecutionError::NotCallable {
+                        instruction,
+                        value: callee.type_name(),
+                    });
+                }
                 match self.proxy_trap(&proxy, "apply", instruction)? {
                     Some(trap) => {
                         let handler = proxy.handler.clone();
@@ -40752,21 +40762,27 @@ fn string_coerced_argument(native: Native, index: usize) -> bool {
 }
 
 fn is_callable(value: &Value) -> bool {
-    matches!(
-        value,
-        Value::Function(_)
-            | Value::Native(_, _)
-            | Value::Callback(_, _)
-            | Value::Settler(..)
-            | Value::Capability(..)
-            | Value::Element(_)
-            | Value::Element(_)
-            | Value::Bound(_)
-            | Value::Wrapped(_)
-            | Value::CommonJsRequire(_)
-            | Value::CommonJsResolve(_)
-            | Value::Proxy(_)
-    )
+    match value {
+        // A proxy has a `[[Call]]` method exactly when its target has one, decided when the
+        // proxy is made and never after. Treating every proxy as callable meant
+        // `new Proxy({}, {apply(){}})()` ran the trap where the language says the proxy is not
+        // a function at all -- and `typeof` said so too. The target survives revocation, which
+        // is what keeps a revoked function proxy a function.
+        Value::Proxy(proxy) => is_callable(&proxy.target),
+        other => matches!(
+            other,
+            Value::Function(_)
+                | Value::Native(_, _)
+                | Value::Callback(_, _)
+                | Value::Settler(..)
+                | Value::Capability(..)
+                | Value::Element(_)
+                | Value::Bound(_)
+                | Value::Wrapped(_)
+                | Value::CommonJsRequire(_)
+                | Value::CommonJsResolve(_)
+        ),
+    }
 }
 
 /// One match: where it landed, and where each capture group did.
