@@ -1754,6 +1754,10 @@ pub enum PrototypeTable {
     /// along. Both sit above `%IteratorPrototype%`.
     Generator,
     AsyncGenerator,
+    /// `%ArrayIteratorPrototype%` and its four siblings. Each owns `next` and a tag naming the
+    /// kind, and each sits above `%IteratorPrototype%` -- so the iterator objects themselves own
+    /// nothing, which is what `Object.getOwnPropertyNames` on one reports.
+    IteratorFor(IteratorKind),
     /// The three wrapper tables. Each answers to almost nothing of its own -- `toString` and
     /// `valueOf` -- but a program that names one is nearly always about to `call` that method
     /// onto a receiver it supplies, which is precisely what a marker supports.
@@ -1796,6 +1800,53 @@ pub enum PrototypeTable {
 /// Each of these builds an iterator rather than walking one: the source is pulled from a single
 /// element at a time, which is what lets `map` over an endless sequence followed by `take(3)`
 /// terminate. An eager implementation of any of them would make that program hang.
+/// Which built-in iterator a `%...IteratorPrototype%` belongs to.
+///
+/// They differ only in their tag and in which `next` they publish, which is exactly why one
+/// parameterised table serves all five rather than five tables that would drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IteratorKind {
+    Array,
+    String,
+    Map,
+    Set,
+    RegExpString,
+}
+
+impl IteratorKind {
+    /// The tag `Object.prototype.toString` reports through `@@toStringTag`.
+    const fn tag(self) -> &'static str {
+        match self {
+            Self::Array => "Array Iterator",
+            Self::String => "String Iterator",
+            Self::Map => "Map Iterator",
+            Self::Set => "Set Iterator",
+            Self::RegExpString => "RegExp String Iterator",
+        }
+    }
+
+    /// The `next` this kind publishes, which is the one its instances already answered.
+    fn next_method(self) -> Value {
+        match self {
+            Self::Array | Self::String => {
+                Value::Native(Native::ArrayIteratorNext, RealmId::PRIMARY)
+            }
+            Self::Map | Self::Set | Self::RegExpString => {
+                Value::Native(Native::CollectionIteratorNext, RealmId::PRIMARY)
+            }
+        }
+    }
+}
+
+/// What one of the five iterator prototypes answers.
+fn iterator_prototype_method(kind: IteratorKind, name: &str) -> Value {
+    match name {
+        "next" => kind.next_method(),
+        key if key == WellKnown::ToStringTag.property_key() => Value::String(kind.tag().to_owned()),
+        _ => Value::Undefined,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HelperKind {
     Map,
@@ -29142,7 +29193,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     || object.borrow().get_own(HELPER_SOURCE).is_some() =>
             {
                 let object = object.borrow();
-                object.get(name).unwrap_or_else(|| {
+                let from_prototype = || match object.prototype() {
+                    // The instance's prototype is `%ArrayIteratorPrototype%` or one of its kin,
+                    // which are markers rather than objects -- so the store's own chain walk
+                    // stops at them and the tag they publish never arrives.
+                    Some(Value::Native(native, _)) => match native.property(name) {
+                        Some(Value::Undefined) | None => None,
+                        found => found,
+                    },
+                    _ => None,
+                };
+                object.get(name).or_else(from_prototype).unwrap_or_else(|| {
                     // `%IteratorPrototype%` sits *above* `Object.prototype` rather than
                     // replacing it, so a name it does not answer still reaches the ordinary
                     // object methods -- which is what stops adding the helpers from taking
@@ -37064,7 +37125,14 @@ fn call_native(
         Native::CollectionValues(_) | Native::CollectionKeys(_) | Native::CollectionEntries(_) => {
             let (entries, is_map) = require_collection(receiver, native)?;
             let mut iterator = ObjectData::default();
-            iterator.set_prototype(Value::Native(Native::PrototypeOf(PrototypeTable::Iterator), RealmId::PRIMARY));
+            iterator.set_prototype(Value::Native(
+                Native::PrototypeOf(PrototypeTable::IteratorFor(if is_map {
+                    IteratorKind::Map
+                } else {
+                    IteratorKind::Set
+                })),
+                RealmId::PRIMARY,
+            ));
             iterator.set("@@iterated", Value::Array(entries));
             iterator.set("@@index", Value::Number(0.0));
             // What to hand back for each stored entry. Decided here, where the collection's kind
@@ -37081,7 +37149,7 @@ fn call_native(
                     .to_owned(),
                 ),
             );
-            iterator.set("next", Value::Native(Native::CollectionIteratorNext, RealmId::PRIMARY));
+
             iterator.set(
                 WellKnown::Iterator.property_key(),
                 Value::Native(Native::IteratorSelf, RealmId::PRIMARY),
@@ -37737,6 +37805,18 @@ fn prototype_of(value: &Value) -> Value {
         Value::Native(Native::PrototypeOf(PrototypeTable::TypedArrayFor(_)), _) => {
             Value::Native(Native::PrototypeOf(PrototypeTable::TypedArray), realm)
         }
+        // The five built-in iterator prototypes and the two generator ones all sit on
+        // `%IteratorPrototype%`, which is where the helpers live and what `instanceof Iterator`
+        // walks to. Falling to `Object.prototype` with the arm below broke exactly that:
+        // `Iterator.from(x)` must hand back `x` when it is already an iterator, and stopped.
+        Value::Native(
+            Native::PrototypeOf(
+                PrototypeTable::IteratorFor(_)
+                | PrototypeTable::Generator
+                | PrototypeTable::AsyncGenerator,
+            ),
+            _,
+        ) => Value::Native(Native::PrototypeOf(PrototypeTable::Iterator), realm),
         Value::Native(Native::PrototypeOf(_), _) => {
             Value::Native(Native::PrototypeOf(PrototypeTable::Object), realm)
         }
@@ -38842,11 +38922,15 @@ fn require_collection(
 /// iterator itself, so `next` reads the receiver as it is each step.
 fn array_iterator_over(native: Native, iterated: &Value) -> Value {
     let mut iterator = ObjectData::default();
-    // On `Iterator.prototype`, which is where the helper methods live: an array iterator is one
-    // of the iterators `map` and `take` are for, and without the link `[...].values().map(f)`
-    // finds nothing.
+    // On `%ArrayIteratorPrototype%`, which owns `next` and the tag and itself sits on
+    // `%IteratorPrototype%` -- so `map` and `take` are one link further up and
+    // `[...].values().map(f)` still finds them. The iterator object now owns nothing, which is
+    // what `Object.getOwnPropertyNames` on one reports.
     iterator.set_prototype(Value::Native(
-        Native::PrototypeOf(PrototypeTable::Iterator),
+        Native::PrototypeOf(PrototypeTable::IteratorFor(match iterated {
+            Value::String(_) => IteratorKind::String,
+            _ => IteratorKind::Array,
+        })),
         RealmId::PRIMARY,
     ));
     iterator.set("@@iterated", iterated.clone());
@@ -38862,10 +38946,7 @@ fn array_iterator_over(native: Native, iterated: &Value) -> Value {
             .to_owned(),
         ),
     );
-    iterator.set(
-        "next",
-        Value::Native(Native::ArrayIteratorNext, RealmId::PRIMARY),
-    );
+
     // An iterator is itself iterable, which is what lets one be passed straight to another
     // `for-of` or to `Array.from`.
     iterator.set(
@@ -44260,6 +44341,11 @@ const DATA_VIEW_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::Na
 /// `%GeneratorPrototype%` and `%AsyncGeneratorPrototype%` publish the same three names. The
 /// `constructor` the specification gives them is an intrinsic this engine has no object for, so
 /// it is absent rather than wrong -- see `Native::property`.
+/// Each of the five iterator prototypes owns exactly `next`; the tag is symbol-keyed and listed
+/// through the symbol path.
+const BUILT_IN_ITERATOR_MEMBERS: intrinsic_members::NamedMembers =
+    intrinsic_members::NamedMembers::new(&["next"]);
+
 const GENERATOR_MEMBERS: intrinsic_members::NamedMembers =
     intrinsic_members::NamedMembers::new(&["next", "return", "throw"]);
 
@@ -44404,6 +44490,7 @@ fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'static [&'static
         PrototypeTable::DataView => DATA_VIEW_MEMBERS.names(),
         PrototypeTable::Iterator => ITERATOR_MEMBERS.names(),
         PrototypeTable::Generator | PrototypeTable::AsyncGenerator => GENERATOR_MEMBERS.names(),
+        PrototypeTable::IteratorFor(_) => BUILT_IN_ITERATOR_MEMBERS.names(),
         PrototypeTable::Boolean | PrototypeTable::Symbol => WRAPPER_MEMBERS.names(),
         PrototypeTable::BigInt => BIG_INT_MEMBERS.names(),
         PrototypeTable::Promise => PROMISE_MEMBERS.names(),
