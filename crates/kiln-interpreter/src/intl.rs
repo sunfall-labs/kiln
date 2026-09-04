@@ -20,7 +20,8 @@ use kiln_host_abi::HostOps;
 use kiln_intl as engine;
 
 use crate::{
-    ArrayData, ErrorKind, ExecutionError, Native, ObjectData, RealmId, Value, Vm, WellKnown,
+    ArrayData, ErrorKind, ExecutionError, Native, ObjectData, PrimitiveHint, RealmId, Value, Vm,
+    WellKnown,
 };
 
 /// Which `Intl` service a constructor, prototype or instance belongs to.
@@ -668,7 +669,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     },
                     Some(Value::String(text)) => text.clone(),
                     Some(value @ Value::Object(_)) => {
-                        let primitive = self.as_primitive(value, true, instruction)?;
+                        let primitive =
+                            self.as_primitive(value, PrimitiveHint::String, instruction)?;
                         primitive.to_display_string()
                     }
                     _ => return Err(type_error("Intl.Locale expects a locale or a string")),
@@ -1225,7 +1227,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 },
                 Value::String(text) => text.clone(),
                 Value::Object(_) | Value::Array(_) => {
-                    let primitive = self.as_primitive(&element, true, instruction)?;
+                    let primitive =
+                        self.as_primitive(&element, PrimitiveHint::String, instruction)?;
                     primitive.to_display_string()
                 }
                 _ => {
@@ -1978,7 +1981,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         if matches!(value, Value::Symbol(_)) {
             return Err(ExecutionError::SymbolIsNotAString);
         }
-        let primitive = self.as_primitive(value, true, instruction)?;
+        let primitive = self.as_primitive(value, PrimitiveHint::String, instruction)?;
         if matches!(primitive, Value::Symbol(_)) {
             return Err(ExecutionError::SymbolIsNotAString);
         }

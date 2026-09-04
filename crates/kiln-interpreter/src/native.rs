@@ -1,4 +1,5 @@
 use super::*;
+use crate::PrimitiveHint;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Native {
@@ -879,16 +880,17 @@ impl Native {
 
     /// Whether this built-in reduces its arguments to primitives first, and with which hint.
     ///
-    /// `Some(false)` is the number hint, `Some(true)` the string hint, and `None` means the
-    /// built-in takes its arguments as they arrive. The distinction has to be carried rather than
-    /// collapsed into a flag: for an object defining both methods, `Math.abs` reaches `valueOf`
-    /// and `parseInt` reaches `toString`, so the two disagree on the same value.
+    /// `None` means the built-in takes its arguments as they arrive. The hint has to be carried
+    /// rather than collapsed into a flag: for an object defining both methods, `Math.abs` reaches
+    /// `valueOf` and `parseInt` reaches `toString`, so the two disagree on the same value -- and
+    /// `new Date(x)` asks for neither, which is a third answer rather than a shade of one of
+    /// these two, and is why the count is a parameter here.
     ///
     /// Only the built-ins whose pure implementations cannot do this themselves are listed.
     /// `String`, the global `isNaN` and the global `isFinite` already agree with the
     /// specification by another route, and naming them here would reduce twice -- which a
     /// `valueOf` that counts its calls can see.
-    pub(crate) fn primitive_argument_hint(self) -> Option<bool> {
+    pub(crate) fn primitive_argument_hint(self, argument_count: usize) -> Option<PrimitiveHint> {
         match self {
             // `Math.random` takes no argument, so it is deliberately not in this list.
             Self::MathAbs
@@ -935,14 +937,19 @@ impl Native {
             // The field forms of both take seven numbers, and the *order* the conversions
             // happen in is observable through a `valueOf`: the specification converts year
             // through millisecond left to right, before it decides anything about the date.
-            | Self::DateConstructor
             | Self::DateUtc
             // Both take code *units*, and both read them with the pure `as_number`, which
             // answers NaN for an object: `String.fromCharCode({valueOf: () => 65})` was NUL
             // rather than "A", and `fromCodePoint` refused the same argument outright.
             | Self::StringFromCharCode
-            | Self::StringFromCodePoint => Some(false),
-            Self::ParseInt | Self::ParseFloat => Some(true),
+            | Self::StringFromCodePoint => Some(PrimitiveHint::Number),
+            Self::ParseInt | Self::ParseFloat => Some(PrimitiveHint::String),
+            // `new Date(value)` is `ToPrimitive(value)` with no preferred type at all: it decides
+            // between parsing a date string and reading an instant only once the value has
+            // reduced, so it cannot have asked for a number. Every other arity is the field form,
+            // which takes seven numbers left to right.
+            Self::DateConstructor if argument_count == 1 => Some(PrimitiveHint::Default),
+            Self::DateConstructor => Some(PrimitiveHint::Number),
             _ => None,
         }
     }

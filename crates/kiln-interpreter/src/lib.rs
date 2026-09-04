@@ -3933,6 +3933,37 @@ pub enum Value {
     Function(Rc<Closure>),
 }
 
+/// Which reading of a value `ToPrimitive` is asking for.
+///
+/// The specification has three hints, not two, and the third is not decoration: `Date` is the one
+/// built-in whose `@@toPrimitive` answers differently for "default" than for "number", which is
+/// exactly why `date + date` concatenates two date strings while `date - date` subtracts two
+/// instants. Collapsing "default" into either of the others gets one of those two wrong.
+///
+/// For every other value the three coincide, which is why a two-valued flag went unnoticed here
+/// for so long, and why the spelling is what the C backend emits too -- a program that branches on
+/// the hint it was handed cannot tell the two engines apart.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PrimitiveHint {
+    /// Prefer a string: `toString` before `valueOf`.
+    String,
+    /// Prefer a number: `valueOf` before `toString`.
+    Number,
+    /// State no preference. Ordinary values read this exactly as `Number`; a `Date` does not.
+    Default,
+}
+
+impl PrimitiveHint {
+    /// The hint as `@@toPrimitive` receives it.
+    fn spelling(self) -> &'static str {
+        match self {
+            Self::String => "string",
+            Self::Number => "number",
+            Self::Default => "default",
+        }
+    }
+}
+
 // Rust-side equality for interpreter values is JavaScript strict equality. Keeping this manual
 // rather than deriving it prevents `Rc<T>` payload equality from turning object identity into a
 // structural comparison, and `strict_equal` remains exhaustive so every new representation must
@@ -4428,7 +4459,11 @@ impl Value {
             Self::Generator(_) => "[object Generator]".to_owned(),
             Self::Promise(_) => "[object Promise]".to_owned(),
             // `String(/a/g)` is the literal as written, which is what `toString` returns.
-            Self::RegExp(regexp) => format!("/{}/{}", regexp.source, canonical_regexp_flags(&regexp.flags)),
+            Self::RegExp(regexp) => format!(
+                "/{}/{}",
+                regexp.source,
+                canonical_regexp_flags(&regexp.flags)
+            ),
             Self::Date(date) => date_to_string(date.time.get()),
             Self::Temporal(built) => built
                 .value()
@@ -10989,7 +11024,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         // Through `catchable`, because reducing can fail in a way the program is
                         // allowed to catch: an object with no route to a primitive is a
                         // `TypeError`, not the end of the run.
-                        let reduced = self.as_primitive(&value, false, current);
+                        let reduced = self.as_primitive(&value, PrimitiveHint::Number, current);
                         let Some(reduced) = self.catchable(reduced, current)? else {
                             continue;
                         };
@@ -11077,7 +11112,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // commonest guard in JavaScript, and calling into a wrapper's accessor to
                     // evaluate it is both wrong and, for a wrapper that assumes it is being used
                     // properly, fatal.
-                    let mixed = is_object_like(&left) != is_object_like(&right)
+                    let mixed = reduces_to_primitive(&left) != reduces_to_primitive(&right)
                         && !left.is_nullish()
                         && !right.is_nullish();
                     let reduces =
@@ -11101,10 +11136,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                                 | BinaryOp::UnsignedShiftRight
                         ) || (matches!(operator, BinaryOp::LooseEqual | BinaryOp::LooseNotEqual)
                             && mixed);
+                    // `+` and loose equality ask for no hint at all -- the default -- because
+                    // each chooses between a string reading and a numeric one only after both
+                    // sides have reduced. Every other operator here has already committed to a
+                    // number before it looks at either side. The distinction is invisible for
+                    // every value but a `Date`, and it is the whole of why `date + date`
+                    // concatenates two date strings while `date - date` subtracts two instants.
+                    let hint = if matches!(
+                        operator,
+                        BinaryOp::Add | BinaryOp::LooseEqual | BinaryOp::LooseNotEqual
+                    ) {
+                        PrimitiveHint::Default
+                    } else {
+                        PrimitiveHint::Number
+                    };
                     let (left, right) = if reduces {
                         // Left before right, and each through `catchable`: the reduction runs
                         // user code, so it can both fail catchably and observe the order.
-                        let reduced = self.as_primitive(&left, false, current);
+                        let reduced = self.as_primitive(&left, hint, current);
                         let Some(left) = self.catchable(reduced, current)? else {
                             continue;
                         };
@@ -11122,7 +11171,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             )?;
                             continue;
                         }
-                        let reduced = self.as_primitive(&right, false, current);
+                        let reduced = self.as_primitive(&right, hint, current);
                         let Some(right) = self.catchable(reduced, current)? else {
                             continue;
                         };
@@ -14597,14 +14646,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // and answered NaN: `Math.abs(sym)` was NaN and `parseInt(sym)` was NaN where the
         // language promises a throw. `String(sym)` is the one conversion that is legal, and
         // `StringConstructor` is deliberately not in the list.
-        if native.primitive_argument_hint().is_some()
+        if native.primitive_argument_hint(arguments.len()).is_some()
             && arguments
                 .iter()
                 .any(|argument| matches!(argument, Value::Symbol(_)))
         {
             return Err(ExecutionError::SymbolIsNotANumber);
         }
-        if let Some(prefer_string) = native.primitive_argument_hint()
+        if let Some(hint) = native.primitive_argument_hint(arguments.len())
             && arguments.iter().any(|argument| {
                 matches!(
                     argument,
@@ -14620,7 +14669,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             for argument in arguments {
                 // Left to right, because each reduction can run user code and the order in which
                 // those calls happen is observable.
-                reduced.push(self.as_primitive(argument, prefer_string, instruction)?);
+                reduced.push(self.as_primitive(argument, hint, instruction)?);
             }
             return self.dispatch_native(native, receiver, &reduced, instruction);
         }
@@ -14760,7 +14809,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             if matches!(receiver, Value::String(_)) {
                 receiver
             } else {
-                let primitive = self.as_primitive(receiver, true, instruction)?;
+                let primitive = self.as_primitive(receiver, PrimitiveHint::String, instruction)?;
                 if matches!(primitive, Value::Symbol(_)) {
                     return Err(ExecutionError::SymbolIsNotAString);
                 }
@@ -14783,7 +14832,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     ),
                 });
             }
-            let primitive = self.as_primitive(receiver, true, instruction)?;
+            let primitive = self.as_primitive(receiver, PrimitiveHint::String, instruction)?;
             // A symbol is the one primitive `ToString` refuses: it has a description, not a
             // spelling, and reading one as text is the mistake `String(symbol)` exists for.
             if matches!(primitive, Value::Symbol(_)) {
@@ -15415,7 +15464,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 };
                 // A string hint, because that is what `String(x)` asks for -- so an object with
                 // both `valueOf` and `toString` uses the second.
-                let primitive = self.as_primitive(value, true, instruction)?;
+                let primitive = self.as_primitive(value, PrimitiveHint::String, instruction)?;
                 Ok(Value::String(primitive.to_display_string()))
             }
             // `JSON.parse(text, reviver)`. The reviver is called on every value the text
@@ -15461,9 +15510,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                                     let inner = object.borrow().primitive().cloned();
                                     match inner {
                                         Some(Value::String(text)) => Some(text),
-                                        Some(Value::Number(number)) => {
-                                            Some(number_string(number))
-                                        }
+                                        Some(Value::Number(number)) => Some(number_string(number)),
                                         _ => None,
                                     }
                                 }
@@ -16361,7 +16408,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         Some(Value::Date(existing)) => existing.time.get(),
                         Some(Value::String(text)) => parse_date(text),
                         Some(value) => {
-                            let primitive = self.as_primitive(value, false, instruction)?;
+                            // `ToPrimitive(value)` with no preferred type at all, which is the
+                            // default hint rather than the number one: `new Date(x)` decides
+                            // between parsing a date string and reading an instant only *after*
+                            // the value has reduced, so it cannot have asked for a number.
+                            let primitive =
+                                self.as_primitive(value, PrimitiveHint::Default, instruction)?;
                             match primitive {
                                 Value::String(text) => parse_date(&text),
                                 // Anything that is not a string is `ToNumber`d, and the two
@@ -16586,7 +16638,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         continue;
                     }
                     converted[index] = if index == 0 {
-                        self.as_primitive(&converted[index].clone(), false, instruction)?
+                        self.as_primitive(
+                            &converted[index].clone(),
+                            PrimitiveHint::Number,
+                            instruction,
+                        )?
                     } else {
                         Value::Number(
                             self.as_number_argument(Some(&converted[index].clone()), instruction)?,
@@ -16968,7 +17024,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
     ) -> Result<f64, ExecutionError> {
         let primitive = match value {
-            Some(value) => self.as_primitive(value, false, instruction)?,
+            Some(value) => self.as_primitive(value, PrimitiveHint::Number, instruction)?,
             None => Value::Undefined,
         };
         match primitive {
@@ -17312,7 +17368,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if !is_reflect_target(key) {
             return Ok(key.clone());
         }
-        self.as_primitive(key, true, instruction)
+        self.as_primitive(key, PrimitiveHint::String, instruction)
     }
 
     /// `ToPropertyKey` of an argument, which may run the program's own `toString`.
@@ -17327,7 +17383,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if matches!(key, Value::Symbol(_)) {
             return Ok(key.property_key());
         }
-        let primitive = self.as_primitive(&key, true, instruction)?;
+        let primitive = self.as_primitive(&key, PrimitiveHint::String, instruction)?;
         Ok(primitive.property_key())
     }
 
@@ -17736,7 +17792,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // A date is a value kind here rather than an object, so `ToPrimitive` on one with a
             // number hint is the instant it holds.
             Value::Date(instant) => Value::Number(instant.time.get()),
-            other => self.as_primitive(other, false, instruction)?,
+            other => self.as_primitive(other, PrimitiveHint::Number, instruction)?,
         };
         if matches!(primitive, Value::Number(number) if !number.is_finite()) {
             return Ok(Value::Null);
@@ -17826,7 +17882,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         value: &Value,
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
-        let primitive = self.as_primitive(value, false, instruction)?;
+        let primitive = self.as_primitive(value, PrimitiveHint::Number, instruction)?;
         coerce_element(kind, &primitive)
     }
 
@@ -17841,7 +17897,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
     ) -> Result<num_bigint::BigInt, ExecutionError> {
         let primitive = match value {
-            Some(value) => self.as_primitive(value, false, instruction)?,
+            Some(value) => self.as_primitive(value, PrimitiveHint::Number, instruction)?,
             None => Value::Undefined,
         };
         match primitive {
@@ -19402,7 +19458,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
     /// `ToString`, running the program's own `toString` or `@@toPrimitive` where there is one.
     fn as_text(&mut self, value: &Value, instruction: usize) -> Result<String, ExecutionError> {
-        let primitive = self.as_primitive(value, true, instruction)?;
+        let primitive = self.as_primitive(value, PrimitiveHint::String, instruction)?;
         // A symbol is the one primitive `ToString` refuses: it has a description, not a
         // spelling, and reading one as text is the mistake `String(symbol)` exists for.
         if matches!(primitive, Value::Symbol(_)) {
@@ -27232,7 +27288,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     fn as_primitive(
         &mut self,
         value: &Value,
-        prefer_string: bool,
+        hint: PrimitiveHint,
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
         // A `Temporal` value is an object in the specification's sense, and reducing one is a
@@ -27241,7 +27297,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // through as its own primitive is what made `Number(date)` answer NaN.
         if !matches!(
             value,
-            Value::Object(_) | Value::Function(_) | Value::Array(_) | Value::Temporal(_)
+            Value::Object(_)
+                | Value::Function(_)
+                | Value::Array(_)
+                | Value::Temporal(_)
+                // A `Date` is a value kind here rather than an object, but it reduces by
+                // *calling* for the same reason a `Temporal` does, and it is the one built-in
+                // where the answer depends on which hint was asked for. Passing it through as
+                // its own primitive is what made `date + date` add two instants.
+                | Value::Date(_)
         ) {
             return Ok(value.clone());
         }
@@ -27262,7 +27326,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             });
         }
         if is_callable(&exotic) {
-            let hint = Value::String(if prefer_string { "string" } else { "default" }.to_owned());
+            let hint = Value::String(hint.spelling().to_owned());
             let produced =
                 self.call_value(&exotic, value.clone(), Vec::from([hint]), instruction)?;
             // An `@@toPrimitive` that answers with another object ends the conversion rather
@@ -27277,7 +27341,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(produced)
             };
         }
-        let order = if prefer_string {
+        let order = if hint == PrimitiveHint::String {
             ["toString", "valueOf"]
         } else {
             ["valueOf", "toString"]
@@ -27321,7 +27385,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if matches!(
             thrown,
             Value::Object(_) | Value::Function(_) | Value::Array(_)
-        ) && let Ok(Value::String(text)) = self.as_primitive(thrown, true, instruction)
+        ) && let Ok(Value::String(text)) =
+            self.as_primitive(thrown, PrimitiveHint::String, instruction)
         {
             return text;
         }
@@ -31876,7 +31941,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             stack_height: self.stack.len(),
             native_depth: self.native_depth,
         });
-        let outcome = self.as_primitive(specifier, true, instruction);
+        let outcome = self.as_primitive(specifier, PrimitiveHint::String, instruction);
         self.handlers.truncate(installed);
         match outcome {
             Ok(Value::Symbol(_)) => {
@@ -32143,7 +32208,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if let Value::String(text) = value {
             return Ok(text.clone());
         }
-        let primitive = self.as_primitive(value, true, instruction)?;
+        let primitive = self.as_primitive(value, PrimitiveHint::String, instruction)?;
         // A symbol is the one primitive `ToString` refuses: it has a description, not a
         // spelling, and reading one as text is the mistake `String(symbol)` exists for.
         if matches!(primitive, Value::Symbol(_)) {
@@ -33952,8 +34017,10 @@ fn json_stringify(
                     // An element that is not representable becomes null rather than vanishing,
                     // because dropping it would renumber every element after it.
                     let at = index.to_string();
-                    json_stringify(item, indent, &nested, guard.seen, resolve, allowed, &at, value)
-                        .map(|part| part.unwrap_or_else(|| "null".to_owned()))
+                    json_stringify(
+                        item, indent, &nested, guard.seen, resolve, allowed, &at, value,
+                    )
+                    .map(|part| part.unwrap_or_else(|| "null".to_owned()))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             Some(if parts.is_empty() {
@@ -39778,7 +39845,11 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
             view.byte_length().unwrap_or(0),
             view.offset
         ),
-        Value::RegExp(regexp) => format!("/{}/{}", regexp.source, canonical_regexp_flags(&regexp.flags)),
+        Value::RegExp(regexp) => format!(
+            "/{}/{}",
+            regexp.source,
+            canonical_regexp_flags(&regexp.flags)
+        ),
         Value::Date(date) => {
             iso_string(date.time.get()).unwrap_or_else(|| "Invalid Date".to_owned())
         }
@@ -41880,8 +41951,6 @@ fn private_brand_matches(target: &Value, name: &str, expected: &Value) -> bool {
     }
 }
 
-
-
 /// Whether `new value(...)` is something the language will run.
 ///
 /// A different question from "is it callable", and programs ask it directly: Test262's own
@@ -42191,10 +42260,20 @@ fn needs_text_conversion(value: &Value) -> bool {
 }
 
 /// Whether this value reduces to a primitive by calling one of its own methods.
-fn is_object_like(value: &Value) -> bool {
+/// Whether reducing this value to a primitive is a *call* rather than a no-op.
+///
+/// The question `==` asks before it coerces at all, and deliberately not "is this an object": a
+/// `Date` is a value kind here and still reduces by calling, so `date == String(date)` compares
+/// two strings and is true. Answering it with an object test left that one false. The C backend
+/// asks the same question under the same name, for the same reason.
+fn reduces_to_primitive(value: &Value) -> bool {
     matches!(
         value,
-        Value::Object(_) | Value::Function(_) | Value::Array(_)
+        Value::Object(_)
+            | Value::Function(_)
+            | Value::Array(_)
+            | Value::Date(_)
+            | Value::Temporal(_)
     )
 }
 
