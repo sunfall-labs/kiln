@@ -1744,3 +1744,43 @@ fn nan_boxed_kiln_val_prelude_surface() {
     assert!(prelude.contains("kiln_val_from_boundary"));
     assert!(prelude.contains("kiln_val_to_boundary"));
 }
+
+#[test]
+fn fused_computed_read_and_write_emission() {
+    let p = program(
+        vec![
+            Constant::Number(0f64.to_bits()),
+            Constant::Number(42f64.to_bits()),
+        ],
+        vec![
+            // x = a[i]; (LoadLocal(0), LoadLocal(1), GetComputed, StoreLocal(2))
+            Instruction::LoadLocal(0),
+            Instruction::LoadLocal(1),
+            Instruction::GetComputed,
+            Instruction::StoreLocal(2),
+            // a[i] = x; (LoadLocal(0), LoadLocal(1), LoadLocal(2), SetComputed, Pop)
+            Instruction::LoadLocal(0),
+            Instruction::LoadLocal(1),
+            Instruction::LoadLocal(2),
+            Instruction::SetComputed,
+            Instruction::Pop,
+            // a[i] = 42; (LoadLocal(0), LoadLocal(1), Const(1), SetComputedStrict, Pop)
+            Instruction::LoadLocal(0),
+            Instruction::LoadLocal(1),
+            Instruction::Const(1),
+            Instruction::SetComputedStrict { strict: true },
+            Instruction::Pop,
+            Instruction::Return,
+        ],
+        3,
+    );
+    let unit = emit(&p).expect("fused computed program emits");
+    let b = body(&unit);
+    // Verified: No intermediate stack traffic for fused computed read
+    assert!(b.contains("kiln_c99_read_element(host, locals[0], locals[1]"));
+    assert!(b.contains("locals[2] = read;"));
+    // Verified: No stack pushes for fused local computed write
+    assert!(b.contains("kiln_c99_write_element(host, locals[0], locals[1], locals[2], 0,"));
+    // Verified: No stack pushes for fused const computed write
+    assert!(b.contains("kiln_c99_write_element(host, locals[0], locals[1], kiln_c99_number_bits(UINT64_C(4631107791820423168)), 1,"));
+}

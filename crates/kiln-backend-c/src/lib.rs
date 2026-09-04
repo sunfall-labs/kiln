@@ -1150,6 +1150,173 @@ fn can_fuse_load_const_set_property_pop(
     Some((*obj, *c_idx, name, strict))
 }
 
+fn can_fuse_load_load_get_computed_dup_store_pop(
+    code: &[Instruction],
+    index: usize,
+    jump_targets: &HashSet<u32>,
+) -> Option<(u32, u32, u32)> {
+    let Instruction::LoadLocal(src1) = code.get(index)? else {
+        return None;
+    };
+    for offset in 1..=5 {
+        if jump_targets.contains(&((index + offset) as u32)) {
+            return None;
+        }
+    }
+    let Instruction::LoadLocal(src2) = code.get(index + 1)? else {
+        return None;
+    };
+    if !matches!(code.get(index + 2)?, Instruction::GetComputed) {
+        return None;
+    }
+    if !matches!(code.get(index + 3)?, Instruction::Dup) {
+        return None;
+    }
+    let Instruction::StoreLocal(dst) = code.get(index + 4)? else {
+        return None;
+    };
+    if !matches!(code.get(index + 5)?, Instruction::Pop) {
+        return None;
+    }
+    Some((*src1, *src2, *dst))
+}
+
+fn can_fuse_load_load_get_computed_store(
+    code: &[Instruction],
+    index: usize,
+    jump_targets: &HashSet<u32>,
+) -> Option<(u32, u32, u32)> {
+    let Instruction::LoadLocal(src1) = code.get(index)? else {
+        return None;
+    };
+    for offset in 1..=3 {
+        if jump_targets.contains(&((index + offset) as u32)) {
+            return None;
+        }
+    }
+    let Instruction::LoadLocal(src2) = code.get(index + 1)? else {
+        return None;
+    };
+    if !matches!(code.get(index + 2)?, Instruction::GetComputed) {
+        return None;
+    }
+    let Instruction::StoreLocal(dst) = code.get(index + 3)? else {
+        return None;
+    };
+    Some((*src1, *src2, *dst))
+}
+
+fn can_fuse_load_load_get_computed_pop(
+    code: &[Instruction],
+    index: usize,
+    jump_targets: &HashSet<u32>,
+) -> Option<(u32, u32)> {
+    let Instruction::LoadLocal(src1) = code.get(index)? else {
+        return None;
+    };
+    for offset in 1..=3 {
+        if jump_targets.contains(&((index + offset) as u32)) {
+            return None;
+        }
+    }
+    let Instruction::LoadLocal(src2) = code.get(index + 1)? else {
+        return None;
+    };
+    if !matches!(code.get(index + 2)?, Instruction::GetComputed) {
+        return None;
+    }
+    if !matches!(code.get(index + 3)?, Instruction::Pop) {
+        return None;
+    }
+    Some((*src1, *src2))
+}
+
+fn can_fuse_load_load_get_computed(
+    code: &[Instruction],
+    index: usize,
+    jump_targets: &HashSet<u32>,
+) -> Option<(u32, u32)> {
+    let Instruction::LoadLocal(src1) = code.get(index)? else {
+        return None;
+    };
+    for offset in 1..=2 {
+        if jump_targets.contains(&((index + offset) as u32)) {
+            return None;
+        }
+    }
+    let Instruction::LoadLocal(src2) = code.get(index + 1)? else {
+        return None;
+    };
+    if !matches!(code.get(index + 2)?, Instruction::GetComputed) {
+        return None;
+    }
+    Some((*src1, *src2))
+}
+
+fn can_fuse_load_load_load_set_computed_pop(
+    code: &[Instruction],
+    index: usize,
+    jump_targets: &HashSet<u32>,
+) -> Option<(u32, u32, u32, bool)> {
+    let Instruction::LoadLocal(obj) = code.get(index)? else {
+        return None;
+    };
+    for offset in 1..=4 {
+        if jump_targets.contains(&((index + offset) as u32)) {
+            return None;
+        }
+    }
+    let Instruction::LoadLocal(key) = code.get(index + 1)? else {
+        return None;
+    };
+    let Instruction::LoadLocal(val) = code.get(index + 2)? else {
+        return None;
+    };
+    let strict = match code.get(index + 3)? {
+        Instruction::SetComputedStrict { strict } => *strict,
+        Instruction::SetComputed => false,
+        _ => return None,
+    };
+    if !matches!(code.get(index + 4)?, Instruction::Pop) {
+        return None;
+    }
+    Some((*obj, *key, *val, strict))
+}
+
+fn can_fuse_load_load_const_set_computed_pop(
+    code: &[Instruction],
+    constants: &[Constant],
+    index: usize,
+    jump_targets: &HashSet<u32>,
+) -> Option<(u32, u32, u32, bool)> {
+    let Instruction::LoadLocal(obj) = code.get(index)? else {
+        return None;
+    };
+    for offset in 1..=4 {
+        if jump_targets.contains(&((index + offset) as u32)) {
+            return None;
+        }
+    }
+    let Instruction::LoadLocal(key) = code.get(index + 1)? else {
+        return None;
+    };
+    let Instruction::Const(c_idx) = code.get(index + 2)? else {
+        return None;
+    };
+    if matches!(constants.get(*c_idx as usize), Some(Constant::BigInt(_))) {
+        return None;
+    }
+    let strict = match code.get(index + 3)? {
+        Instruction::SetComputedStrict { strict } => *strict,
+        Instruction::SetComputed => false,
+        _ => return None,
+    };
+    if !matches!(code.get(index + 4)?, Instruction::Pop) {
+        return None;
+    }
+    Some((*obj, *key, *c_idx, strict))
+}
+
 fn render_constant_value(symbol: &str, constant_idx: u32, constant: &Constant) -> Option<String> {
     match constant {
         Constant::Undefined => Some("kiln_c99_undefined()".to_string()),
@@ -1352,6 +1519,7 @@ fn is_fused_with_previous(
                 || can_fuse_const_load_binary(code, constants, start, jump_targets).is_some()
                 || can_fuse_load_get_property_store(code, start, jump_targets).is_some()
                 || can_fuse_load_get_property_pop(code, start, jump_targets).is_some()
+                || can_fuse_load_load_get_computed(code, start, jump_targets).is_some()
             {
                 return true;
             }
@@ -1370,6 +1538,8 @@ fn is_fused_with_previous(
                 || can_fuse_load_load_set_property_pop(code, start, jump_targets).is_some()
                 || can_fuse_load_const_set_property_pop(code, constants, start, jump_targets)
                     .is_some()
+                || can_fuse_load_load_get_computed_store(code, start, jump_targets).is_some()
+                || can_fuse_load_load_get_computed_pop(code, start, jump_targets).is_some()
             {
                 return true;
             }
@@ -1378,7 +1548,19 @@ fn is_fused_with_previous(
     for offset in 1..=4 {
         if index >= offset {
             let start = index - offset;
-            if can_fuse_load_get_property_dup_store_pop(code, start, jump_targets).is_some() {
+            if can_fuse_load_get_property_dup_store_pop(code, start, jump_targets).is_some()
+                || can_fuse_load_load_load_set_computed_pop(code, start, jump_targets).is_some()
+                || can_fuse_load_load_const_set_computed_pop(code, constants, start, jump_targets)
+                    .is_some()
+            {
+                return true;
+            }
+        }
+    }
+    for offset in 1..=5 {
+        if index >= offset {
+            let start = index - offset;
+            if can_fuse_load_load_get_computed_dup_store_pop(code, start, jump_targets).is_some() {
                 return true;
             }
         }
@@ -3337,6 +3519,113 @@ fn emit_instruction(
                     output,
                     "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_value read; int status = kiln_c99_read_property(host, locals[{src}], {symbol}_key_{name}, {}, depth, thrown, &site, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(locals[{src}]); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = read; }}",
                     text.len()
+                )
+                .unwrap();
+            } else if let Some((src1, src2, dst)) =
+                can_fuse_load_load_get_computed_dup_store_pop(emitter.code, index, &emitter.jump_targets)
+            {
+                let unwind = unwind_or_return(handlers, site);
+                if guarded.contains(&src2) {
+                    writeln!(
+                        output,
+                        "    {{ int status = kiln_c99_check_tdz(locals[{src2}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                    )
+                    .unwrap();
+                }
+                writeln!(
+                    output,
+                    "    {{ kiln_value read; int status = kiln_c99_read_element(host, locals[{src1}], locals[{src2}], depth, thrown, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(locals[{src1}], locals[{src2}]); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; locals[{dst}] = read; }}"
+                )
+                .unwrap();
+            } else if let Some((src1, src2, dst)) =
+                can_fuse_load_load_get_computed_store(emitter.code, index, &emitter.jump_targets)
+            {
+                let unwind = unwind_or_return(handlers, site);
+                if guarded.contains(&src2) {
+                    writeln!(
+                        output,
+                        "    {{ int status = kiln_c99_check_tdz(locals[{src2}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                    )
+                    .unwrap();
+                }
+                writeln!(
+                    output,
+                    "    {{ kiln_value read; int status = kiln_c99_read_element(host, locals[{src1}], locals[{src2}], depth, thrown, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(locals[{src1}], locals[{src2}]); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; locals[{dst}] = read; }}"
+                )
+                .unwrap();
+            } else if let Some((src1, src2)) =
+                can_fuse_load_load_get_computed_pop(emitter.code, index, &emitter.jump_targets)
+            {
+                let unwind = unwind_or_return(handlers, site);
+                if guarded.contains(&src2) {
+                    writeln!(
+                        output,
+                        "    {{ int status = kiln_c99_check_tdz(locals[{src2}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                    )
+                    .unwrap();
+                }
+                writeln!(
+                    output,
+                    "    {{ kiln_value read; int status = kiln_c99_read_element(host, locals[{src1}], locals[{src2}], depth, thrown, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(locals[{src1}], locals[{src2}]); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                )
+                .unwrap();
+            } else if let Some((src1, src2)) =
+                can_fuse_load_load_get_computed(emitter.code, index, &emitter.jump_targets)
+            {
+                let unwind = unwind_or_return(handlers, site);
+                if guarded.contains(&src2) {
+                    writeln!(
+                        output,
+                        "    {{ int status = kiln_c99_check_tdz(locals[{src2}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                    )
+                    .unwrap();
+                }
+                writeln!(
+                    output,
+                    "    {{ kiln_value read; int status = kiln_c99_read_element(host, locals[{src1}], locals[{src2}], depth, thrown, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(locals[{src1}], locals[{src2}]); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = read; }}"
+                )
+                .unwrap();
+            } else if let Some((obj, key, val, strict)) =
+                can_fuse_load_load_load_set_computed_pop(emitter.code, index, &emitter.jump_targets)
+            {
+                let unwind = unwind_or_return(handlers, site);
+                if guarded.contains(&key) {
+                    writeln!(
+                        output,
+                        "    {{ int status = kiln_c99_check_tdz(locals[{key}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                    )
+                    .unwrap();
+                }
+                if guarded.contains(&val) {
+                    writeln!(
+                        output,
+                        "    {{ int status = kiln_c99_check_tdz(locals[{val}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                    )
+                    .unwrap();
+                }
+                writeln!(
+                    output,
+                    "    {{ int status = kiln_c99_write_element(host, locals[{obj}], locals[{key}], locals[{val}], {}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
+                    i32::from(strict)
+                )
+                .unwrap();
+            } else if let Some((obj, key, c_idx, strict)) =
+                can_fuse_load_load_const_set_computed_pop(emitter.code, emitter.constants, index, &emitter.jump_targets)
+            {
+                let const_val = render_constant_value(symbol, c_idx, &constants[c_idx as usize])
+                    .expect("BigInt excluded by can_fuse_load_load_const_set_computed_pop");
+                let unwind = unwind_or_return(handlers, site);
+                if guarded.contains(&key) {
+                    writeln!(
+                        output,
+                        "    {{ int status = kiln_c99_check_tdz(locals[{key}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                    )
+                    .unwrap();
+                }
+                writeln!(
+                    output,
+                    "    {{ int status = kiln_c99_write_element(host, locals[{obj}], locals[{key}], {const_val}, {}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
+                    i32::from(strict)
                 )
                 .unwrap();
             } else {
