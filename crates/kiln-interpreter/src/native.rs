@@ -711,6 +711,10 @@ pub enum Native {
     /// method. It is the one built-in the specification makes neither writable nor configurable,
     /// because it is what decides `instanceof` for every ordinary function in the realm.
     FunctionHasInstance,
+    /// `Symbol.prototype[Symbol.toPrimitive]`: `thisSymbolValue`, and the reason a symbol refuses
+    /// to be coerced. It exists as its own variant rather than reusing `PrimitiveValueOf` because
+    /// a program can read it, and what it reads must be named `[Symbol.toPrimitive]`.
+    SymbolToPrimitive,
     PromiseAll,
     PromiseAllSettled,
     /// `Promise.allKeyed` and `Promise.allSettledKeyed`: the same two combinators, walking an
