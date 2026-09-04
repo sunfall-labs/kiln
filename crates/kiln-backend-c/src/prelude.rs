@@ -2009,6 +2009,7 @@ const fn assert_refusals_name_themselves(source: &str, internal_sites: usize, ab
     );
 }
 
+#[allow(long_running_const_eval)]
 const _: () = assert_refusals_name_themselves(
     concat!(
         include_str!("runtime/prelude_core.c"),
