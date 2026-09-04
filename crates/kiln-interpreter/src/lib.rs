@@ -21886,19 +21886,35 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         promise: &Value,
         instruction: usize,
     ) -> Result<Option<Value>, ExecutionError> {
+        // `SpeciesConstructor`, with the two refusals it makes. An absent `constructor` is the
+        // default; anything that is not an object is a TypeError rather than a silent fall back
+        // to `%Promise%`, and a species that is not a constructor is a TypeError rather than a
+        // promise built from something that cannot construct one.
         let constructor = self.read_property(promise, "constructor", instruction)?;
-        if !is_an_object(&constructor) {
+        if matches!(constructor, Value::Undefined) {
             return Ok(None);
+        }
+        if !is_an_object(&constructor) && !is_callable(&constructor) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: format!(
+                    "{} is not an object and cannot be a constructor",
+                    constructor.to_display_string()
+                ),
+            });
         }
         let named = self.read_computed(
             &constructor,
             &Value::Symbol(Symbol::WellKnown(WellKnown::Species)),
             instruction,
         )?;
-        let species = if matches!(named, Value::Null | Value::Undefined) {
-            constructor
-        } else {
-            named
+        let species = match named {
+            Value::Null | Value::Undefined => return Ok(None),
+            species if is_constructor(&species) => species,
+            other => {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: format!("{} is not a constructor", other.to_display_string()),
+                });
+            }
         };
         Ok(self.promise_subclass_prototype(&species))
     }
