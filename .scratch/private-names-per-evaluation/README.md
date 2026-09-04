@@ -49,3 +49,30 @@ An alternative worth weighing first: keep the static key for the *slot* and give
 brand object that instances carry, checked before the slot is read. That leaves accesses named and
 puts the per-evaluation identity in the check rather than in the key -- likely the smaller change,
 and closer to how the specification describes it.
+
+## What the surface actually is (measured, not assumed)
+
+Private access is **not** a generic property read: it has three instructions of its own --
+`GetPrivate(u32)`, `SetPrivate(u32)` and `DefinePrivate { .. }` -- emitted from 11 sites in
+`compile.rs`. `GetPrivate`'s own comment states the current rule plainly: "Own-only, and a miss is
+a TypeError. That own-only rule *is* the brand check." So the check exists and is in one place;
+only its granularity is wrong.
+
+That makes the brand-object design concrete, and there are two ways to carry the brand to the
+access site:
+
+1. **A stack operand.** The three instructions take the brand as an extra operand, pushed by
+   `load_captured_binding` from a hidden binding the class evaluation fills. One instruction
+   shape change, three interpreter arms, three C emissions. The check stays a single comparison
+   in one place per instruction.
+2. **An emitted guard.** No instruction changes at all: before each access, compare the
+   instance's stored brand against the class's, and throw if they differ, using only instructions
+   that already exist. This is the shape the iterator-result, derived-constructor-return and
+   static-`prototype` guards on this branch already use, and it reaches both engines for free --
+   but it puts ~8 instructions in front of every private access, where option 1 puts one
+   comparison inside the instruction that is already running.
+
+Option 1 is the better trade for a path this hot; option 2 is the one to reach for if the
+cross-engine cost of changing three instruction shapes turns out to be the obstacle. Either way
+the brand is minted once per class evaluation and installed on the instance beside the private
+members, which is where `install_private_and_fields` already runs.
