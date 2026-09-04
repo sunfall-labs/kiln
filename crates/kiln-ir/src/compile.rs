@@ -7836,7 +7836,7 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
                         // analysis the important case is a function value: its body is nested
                         // relative to the current owner even when the surrounding expression is
                         // itself already inside another function.
-                        collect_identifiers(&property.value, names, true);
+                        collect_identifiers(&property.value, names, collecting);
                     }
                     ObjectMember::Spread(source) => {
                         collect_identifiers(source, names, collecting);

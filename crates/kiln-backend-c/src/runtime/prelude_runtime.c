@@ -370,8 +370,10 @@ static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,
                                           const kiln_value *args, size_t argc,
                                           kiln_value *thrown);
 static int kiln_c99_form_decode(const char *bytes, size_t len, kiln_value *out);
-static int kiln_c99_node_querystring_parse(kiln_value *out, const kiln_value *args, size_t argc);
 static int kiln_c99_typed_alloc(kiln_value *out, kiln_typed_kind kind, size_t count);
+static int kiln_c99_typed_alloc_uninit(kiln_value *out, kiln_typed_kind kind, size_t count);
+static int kiln_c99_object_reserve(kiln_object *object, size_t needed);
+static int kiln_c99_array_reserve(kiln_array *array, size_t needed);
 static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
                                     kiln_value source, size_t byte_offset, size_t length,
                                     int has_length, kiln_value *thrown);
@@ -960,7 +962,7 @@ typedef struct kiln_gc_block {
  * per block, done once per slab instead. */
 #define KILN_GC_SLAB_SIZE ((size_t)64 * 1024)
 #define KILN_GC_SLAB_CLASS_MIN ((size_t)48) /* smallest total slot (header + 1 byte payload) */
-#define KILN_GC_SLAB_CLASS_MAX ((size_t)256)
+#define KILN_GC_SLAB_CLASS_MAX ((size_t)1024)
 #define KILN_GC_SLAB_CLASS_STEP ((size_t)16)
 #define KILN_GC_SLOT_FREE ((size_t)-1) /* block->size sentinel: this slot is on the free list */
 
@@ -975,6 +977,8 @@ typedef struct kiln_gc_slab {
     uint32_t slot_count;
     uint32_t free_count;
     uint32_t first_slot_offset;     /* bytes from the slab base to slot 0 */
+    uint32_t next_slot;             /* bump allocation for never-yet-allocated slots */
+    void *raw_allocation;
 } kiln_gc_slab;
 
 /* A tiny open-addressed set of pointer values, shared by the large-block table (keys are block
@@ -1460,7 +1464,12 @@ static void *kiln_c99_gc_aligned_alloc(size_t alignment, size_t size) {
 
 static void kiln_c99_gc_aligned_free(void *aligned) {
     if (aligned == NULL) return;
-    free(((void **)aligned)[-1]);
+    kiln_gc_slab *slab = (kiln_gc_slab *)aligned;
+    if (slab->raw_allocation != NULL) {
+        free(slab->raw_allocation);
+    } else {
+        free(((void **)aligned)[-1]);
+    }
 }
 
 /* Which size class (if any) holds a block whose header plus payload totals `total` bytes; -1
@@ -1526,7 +1535,6 @@ static kiln_gc_slab *kiln_c99_gc_slab_new(kiln_gc_heap *heap, int class_index) {
     size_t first_slot_offset = sizeof(kiln_gc_slab);
     size_t usable;
     size_t slot_count;
-    uint32_t index;
     if (first_slot_offset % sizeof(void *) != 0)
         first_slot_offset += sizeof(void *) - (first_slot_offset % sizeof(void *));
     if (first_slot_offset >= KILN_GC_SLAB_SIZE) return NULL;
@@ -1536,28 +1544,35 @@ static kiln_gc_slab *kiln_c99_gc_slab_new(kiln_gc_heap *heap, int class_index) {
     if (heap->spare_slabs_count > 0) {
         slab = heap->spare_slabs[--heap->spare_slabs_count];
     } else {
-        slab = (kiln_gc_slab *)kiln_c99_gc_aligned_alloc(KILN_GC_SLAB_SIZE, KILN_GC_SLAB_SIZE);
-        if (slab == NULL) return NULL;
+        #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L && !defined(_WIN32)
+        void *ptr = aligned_alloc(KILN_GC_SLAB_SIZE, KILN_GC_SLAB_SIZE);
+        if (ptr != NULL) {
+            slab = (kiln_gc_slab *)ptr;
+            slab->raw_allocation = ptr;
+        } else {
+            ptr = kiln_c99_gc_aligned_alloc(KILN_GC_SLAB_SIZE, KILN_GC_SLAB_SIZE);
+            if (ptr == NULL) return NULL;
+            slab = (kiln_gc_slab *)ptr;
+            slab->raw_allocation = ((void **)ptr)[-1];
+        }
+        #else
+        void *ptr = kiln_c99_gc_aligned_alloc(KILN_GC_SLAB_SIZE, KILN_GC_SLAB_SIZE);
+        if (ptr == NULL) return NULL;
+        slab = (kiln_gc_slab *)ptr;
+        slab->raw_allocation = ((void **)ptr)[-1];
+        #endif
     }
     slab->class_index = (uint32_t)class_index;
     slab->slot_size = (uint32_t)slot_size;
     slab->slot_count = (uint32_t)slot_count;
     slab->free_count = (uint32_t)slot_count;
     slab->first_slot_offset = (uint32_t)first_slot_offset;
+    slab->next_slot = 0;
     slab->free_head = NULL;
     slab->free_prev = NULL;
     slab->free_next = NULL;
     slab->all_prev = NULL;
     slab->all_next = NULL;
-    for (index = 0; index < (uint32_t)slot_count; ++index) {
-        kiln_gc_block *slot = kiln_c99_gc_slab_slot(slab, index);
-        slot->size = KILN_GC_SLOT_FREE;
-        slot->kind = KILN_GC_NONE;
-        slot->mark = 0;
-        slot->prev = NULL;
-        slot->next = slab->free_head;
-        slab->free_head = slot;
-    }
     if (kiln_c99_gc_ptrset_insert(&heap->slab_table, slab) != KILN_C99_OK) {
         kiln_c99_gc_aligned_free(slab);
         return NULL;
@@ -1602,7 +1617,7 @@ static kiln_gc_block *kiln_c99_gc_lookup_slab(const kiln_gc_heap *heap, const vo
         relative = offset - slab->first_slot_offset;
         if (relative % slab->slot_size != sizeof(kiln_gc_block)) return NULL;
         slot_index = relative / slab->slot_size;
-        if (slot_index >= slab->slot_count) return NULL;
+        if (slot_index >= slab->next_slot) return NULL;
         block = kiln_c99_gc_slab_slot(slab, (uint32_t)slot_index);
         if (block->size == KILN_GC_SLOT_FREE) return NULL;
         if (out_slab != NULL) *out_slab = (kiln_gc_slab *)slab;
@@ -1677,8 +1692,12 @@ static void *kiln_c99_gc_alloc(uint32_t kind, size_t size) {
             slab = kiln_c99_gc_slab_new(heap, class_index);
             if (slab == NULL) return NULL;
         }
-        block = slab->free_head;
-        slab->free_head = block->next;
+        if (slab->free_head != NULL) {
+            block = slab->free_head;
+            slab->free_head = block->next;
+        } else {
+            block = kiln_c99_gc_slab_slot(slab, slab->next_slot++);
+        }
         block->next = NULL;
         if (--slab->free_count == 0) kiln_c99_gc_slab_unlink_free(heap, slab);
         block->kind = kind;
@@ -2248,15 +2267,23 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
 static void kiln_c99_gc_finalize(kiln_gc_block *block) {
     void *payload = block + 1;
     switch (block->kind & KILN_GC_KIND_MASK) {
-    case KILN_GC_OBJECT:
-        free(((kiln_object *)payload)->properties);
+    case KILN_GC_OBJECT: {
+        kiln_object *obj = (kiln_object *)payload;
+        if (obj->properties != NULL && obj->properties != obj->inline_properties) {
+            free(obj->properties);
+        }
         break;
+    }
     case KILN_GC_CLOSURE:
         free(((kiln_closure *)payload)->upvalues);
         break;
-    case KILN_GC_ARRAY:
-        free(((kiln_array *)payload)->elements);
+    case KILN_GC_ARRAY: {
+        kiln_array *arr = (kiln_array *)payload;
+        if (arr->elements != NULL && arr->elements != arr->inline_elements) {
+            free(arr->elements);
+        }
         break;
+    }
     case KILN_GC_GENERATOR: {
         kiln_generator *frame = (kiln_generator *)payload;
         free(frame->locals);
@@ -2359,7 +2386,7 @@ static void kiln_c99_gc_sweep(kiln_gc_heap *heap, int orphan_marked) {
         kiln_gc_slab *next_slab = slab->all_next;
         uint32_t index;
         int had_survivor = 0;
-        for (index = 0; index < slab->slot_count; ++index) {
+        for (index = 0; index < slab->next_slot; ++index) {
             kiln_gc_block *slot = kiln_c99_gc_slab_slot(slab, index);
             if (slot->size == KILN_GC_SLOT_FREE) continue;
             if (slot->mark != heap->epoch) {
@@ -2518,9 +2545,9 @@ static int kiln_c99_new_object(kiln_value *out) {
     if (object == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
-    object->properties = NULL;
+    object->properties = object->inline_properties;
     object->count = 0;
-    object->capacity = 0;
+    object->capacity = KILN_OBJECT_INLINE_PROPERTIES;
     object->prototype = kiln_c99_undefined();
     object->frozen = 0;
     object->not_extensible = 0;
@@ -2546,11 +2573,13 @@ static int kiln_c99_new_object_with_capacity(kiln_value *out, size_t capacity) {
     if (status != KILN_C99_OK) {
         return status;
     }
+    if (capacity <= KILN_OBJECT_INLINE_PROPERTIES) {
+        return KILN_C99_OK;
+    }
     object = kiln_c99_object_of(*out);
     /* The object is already on the heap, so a failure here leaves it to the collector rather
      * than to a partially built caller. */
-    return kiln_c99_reserve((void **)&object->properties, &object->capacity, capacity,
-                            sizeof *object->properties);
+    return kiln_c99_object_reserve(object, capacity);
 }
 
 /* Cancellation is ordinary object state, not a new value kind. That keeps the hot value layout
@@ -2670,7 +2699,7 @@ static int kiln_c99_buffer_from(kiln_value *out, kiln_value source, kiln_value *
     size_t index;
     int status;
     if (source.tag == KILN_VALUE_STRING) {
-        status = kiln_c99_typed_alloc(&built, KILN_TYPED_UINT8, source.len);
+        status = kiln_c99_typed_alloc_uninit(&built, KILN_TYPED_UINT8, source.len);
         if (status != KILN_C99_OK) return status;
         if (source.len > 0) {
             kiln_typed_array *view = kiln_c99_typed_array_of(built);
@@ -2724,28 +2753,43 @@ static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value rec
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                         "Buffer.concat needs an array");
         items = kiln_c99_array_of(first);
-        for (at = 0; at < items->count; ++at) {
-            if (items->elements[at].tag != KILN_VALUE_TYPED_ARRAY)
+        const kiln_value *elems = items->elements;
+        size_t count = items->count;
+        int all_uint8 = 1;
+        for (at = 0; at < count; ++at) {
+            if (KILN_UNLIKELY(elems[at].tag != KILN_VALUE_TYPED_ARRAY))
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                             "Buffer.concat entries must be typed arrays");
-            total += kiln_c99_typed_array_of(items->elements[at])->length;
+            kiln_typed_array *view = kiln_c99_typed_array_of(elems[at]);
+            total += view->length;
+            if (KILN_UNLIKELY(view->kind != KILN_TYPED_UINT8)) all_uint8 = 0;
         }
-        status = kiln_c99_typed_alloc(out, KILN_TYPED_UINT8, total);
+        status = kiln_c99_typed_alloc_uninit(out, KILN_TYPED_UINT8, total);
         if (status != KILN_C99_OK) return status;
         {
             kiln_typed_array *dest = kiln_c99_typed_array_of(*out);
             uint8_t *dest_bytes = (uint8_t *)dest->buffer->bytes + dest->byte_offset;
-            for (at = 0; at < items->count; ++at) {
-                kiln_typed_array *view = kiln_c99_typed_array_of(items->elements[at]);
-                if (view->kind == KILN_TYPED_UINT8 && view->length > 0) {
-                    const uint8_t *src_bytes = (const uint8_t *)view->buffer->bytes + view->byte_offset;
-                    memcpy(dest_bytes + written, src_bytes, view->length);
-                    written += view->length;
-                } else {
-                    size_t index;
-                    for (index = 0; index < view->length; ++index)
-                        kiln_c99_typed_set(dest, written++,
-                                           kiln_c99_typed_get(view, index));
+            if (KILN_LIKELY(all_uint8)) {
+                for (at = 0; at < count; ++at) {
+                    const kiln_typed_array *view = kiln_c99_typed_array_of(elems[at]);
+                    size_t vlen = view->length;
+                    if (vlen > 0) {
+                        memcpy(dest_bytes + written, (const uint8_t *)view->buffer->bytes + view->byte_offset, vlen);
+                        written += vlen;
+                    }
+                }
+            } else {
+                for (at = 0; at < count; ++at) {
+                    kiln_typed_array *view = kiln_c99_typed_array_of(elems[at]);
+                    if (view->kind == KILN_TYPED_UINT8 && view->length > 0) {
+                        memcpy(dest_bytes + written, (const uint8_t *)view->buffer->bytes + view->byte_offset, view->length);
+                        written += view->length;
+                    } else {
+                        size_t index;
+                        for (index = 0; index < view->length; ++index)
+                            kiln_c99_typed_set(dest, written++,
+                                               kiln_c99_typed_get(view, index));
+                    }
                 }
             }
             dest->is_buffer = 1;
@@ -3001,9 +3045,9 @@ static int kiln_c99_new_array(kiln_value *out) {
     if (array == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
-    array->elements = NULL;
+    array->elements = array->inline_elements;
     array->count = 0;
-    array->capacity = 0;
+    array->capacity = KILN_ARRAY_INLINE_ELEMENTS;
     array->properties = kiln_c99_undefined();
     array->frozen = 0;
     array->not_extensible = 0;
@@ -3112,6 +3156,22 @@ static int kiln_c99_new_typed_buffer(kiln_value *out, size_t byte_length) {
     /* The bytes stay malloc-backed: nothing but this buffer ever points at them, and the
      * KILN_GC_TYPED_BUFFER finaliser is the one place they are released. */
     buffer->bytes = (uint8_t *)calloc(byte_length == 0 ? 1 : byte_length, 1);
+    if (buffer->bytes == NULL) {
+        kiln_c99_gc_release(buffer);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    buffer->byte_length = byte_length;
+    *out = kiln_c99_value(KILN_VALUE_ARRAY_BUFFER, (uint64_t)(uintptr_t)buffer, NULL, 0);
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_new_typed_buffer_uninit(kiln_value *out, size_t byte_length) {
+    kiln_typed_buffer *buffer =
+        (kiln_typed_buffer *)kiln_c99_gc_alloc(KILN_GC_TYPED_BUFFER, sizeof *buffer);
+    if (buffer == NULL) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    buffer->bytes = (uint8_t *)malloc(byte_length == 0 ? 1 : byte_length);
     if (buffer->bytes == NULL) {
         kiln_c99_gc_release(buffer);
         return KILN_C99_OUT_OF_MEMORY;
@@ -3384,6 +3444,31 @@ static int kiln_c99_typed_alloc(kiln_value *out, kiln_typed_kind kind, size_t co
     return KILN_C99_OK;
 }
 
+static int kiln_c99_typed_alloc_uninit(kiln_value *out, kiln_typed_kind kind, size_t count) {
+    size_t width = kiln_c99_typed_width(kind);
+    kiln_value buffer;
+    kiln_typed_array *view;
+    int status;
+    if (count > ((size_t)-1) / width) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    status = kiln_c99_new_typed_buffer_uninit(&buffer, count * width);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    view = (kiln_typed_array *)kiln_c99_gc_alloc(KILN_GC_TYPED_ARRAY, sizeof *view);
+    if (view == NULL) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    view->buffer = kiln_c99_typed_buffer_of(buffer);
+    view->byte_offset = 0;
+    view->length = count;
+    view->kind = kind;
+    view->is_buffer = 0;
+    *out = kiln_c99_value(KILN_VALUE_TYPED_ARRAY, (uint64_t)(uintptr_t)view, NULL, 0);
+    return KILN_C99_OK;
+}
+
 /* `new DataView(buffer[, byteOffset[, byteLength]])`.
  *
  * The two failures are different errors and a program tells them apart: a first argument that is
@@ -3564,6 +3649,68 @@ static int kiln_c99_reserve(void **items, size_t *capacity, size_t needed, size_
     }
     *items = moved;
     *capacity = grown;
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_object_reserve(kiln_object *object, size_t needed) {
+    if (needed <= object->capacity) {
+        return KILN_C99_OK;
+    }
+    size_t grown = object->capacity == 0 ? KILN_OBJECT_INLINE_PROPERTIES : object->capacity;
+    kiln_property *moved;
+    while (grown < needed) {
+        if (grown > ((size_t)-1) / 2 / sizeof(kiln_property)) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        grown *= 2;
+    }
+    if (object->properties == object->inline_properties) {
+        moved = (kiln_property *)malloc(grown * sizeof(kiln_property));
+        if (moved == NULL) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        if (object->count > 0) {
+            memcpy(moved, object->inline_properties, object->count * sizeof(kiln_property));
+        }
+    } else {
+        moved = (kiln_property *)realloc(object->properties, grown * sizeof(kiln_property));
+        if (moved == NULL) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+    }
+    object->properties = moved;
+    object->capacity = grown;
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_array_reserve(kiln_array *array, size_t needed) {
+    if (needed <= array->capacity) {
+        return KILN_C99_OK;
+    }
+    size_t grown = array->capacity == 0 ? KILN_ARRAY_INLINE_ELEMENTS : array->capacity;
+    kiln_value *moved;
+    while (grown < needed) {
+        if (grown > ((size_t)-1) / 2 / sizeof(kiln_value)) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        grown *= 2;
+    }
+    if (array->elements == array->inline_elements) {
+        moved = (kiln_value *)malloc(grown * sizeof(kiln_value));
+        if (moved == NULL) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        if (array->count > 0) {
+            memcpy(moved, array->inline_elements, array->count * sizeof(kiln_value));
+        }
+    } else {
+        moved = (kiln_value *)realloc(array->elements, grown * sizeof(kiln_value));
+        if (moved == NULL) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+    }
+    array->elements = moved;
+    array->capacity = grown;
     return KILN_C99_OK;
 }
 
@@ -3970,8 +4117,7 @@ static int kiln_c99_own_slot_ikey(kiln_value target, const char *key, size_t key
         *out = &object->properties[index];
         return KILN_C99_OK;
     }
-    status = kiln_c99_reserve((void **)&object->properties, &object->capacity, object->count + 1,
-                              sizeof *object->properties);
+    status = kiln_c99_object_reserve(object, object->count + 1);
     if (status != KILN_C99_OK) {
         return status;
     }
@@ -4004,6 +4150,7 @@ static int kiln_c99_own_slot_ikey(kiln_value target, const char *key, size_t key
          * language produces this prefix. */
         object->properties[position].enumerable =
             !(key_len >= 2 && key[0] == '@' && key[1] == '@');
+        object->properties[position].symbol_hidden = 0;
         object->properties[position].writable = 1;
         object->properties[position].configurable = 1;
         object->properties[position].accessor = 0;

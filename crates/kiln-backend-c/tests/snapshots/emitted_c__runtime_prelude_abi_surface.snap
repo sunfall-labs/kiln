@@ -125,7 +125,7 @@ KILN_VALUE_DATA_VIEW = 27
 #define KILN_C99_BUILTIN_TEMPORAL_NOW 62
 #define KILN_C99_BUILTIN_URL 63
 #define KILN_C99_BUILTIN_BUFFER 64
-#define KILN_C99_BUILTIN_SYMBOL_PROTOTYPE 65
+#define KILN_C99_BUILTIN_SYMBOL_PROTOTYPE 96
 #define KILN_C99_METHOD_ARRAY_AT 200
 #define KILN_C99_METHOD_ARRAY_FIND 201
 #define KILN_C99_METHOD_ARRAY_FIND_INDEX 202
@@ -659,12 +659,14 @@ typedef enum kiln_native_prototype_surface {
 typedef struct kiln_native_constructor {
 static kiln_native_constructor kiln_c99_native_constructors[] = {
 typedef struct kiln_property {
+#define KILN_OBJECT_INLINE_PROPERTIES 8
 typedef struct kiln_object {
 #define KILN_C99_MAX_PROTOTYPE_DEPTH 10000
 typedef struct kiln_c99_site {
 #define KILN_C99_SITE_NONE 0xFFFFFFFFu
 #define KILN_C99_SITE_GIVE_UP 8u
 typedef struct kiln_proxy {
+#define KILN_ARRAY_INLINE_ELEMENTS 16
 typedef struct kiln_array {
 typedef struct kiln_generator {
 typedef struct kiln_date_parts {
@@ -964,8 +966,10 @@ static int kiln_c99_valid_utf8(const char *bytes, size_t len);
 static int kiln_c99_url_construct(kiln_value *out, const kiln_value *args, size_t argc,
 static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,
 static int kiln_c99_form_decode(const char *bytes, size_t len, kiln_value *out);
-static int kiln_c99_node_querystring_parse(kiln_value *out, const kiln_value *args, size_t argc);
 static int kiln_c99_typed_alloc(kiln_value *out, kiln_typed_kind kind, size_t count);
+static int kiln_c99_typed_alloc_uninit(kiln_value *out, kiln_typed_kind kind, size_t count);
+static int kiln_c99_object_reserve(kiln_object *object, size_t needed);
+static int kiln_c99_array_reserve(kiln_array *array, size_t needed);
 static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
 static int kiln_c99_buffer_from(kiln_value *out, kiln_value source, kiln_value *thrown);
 static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value receiver,
@@ -1103,7 +1107,7 @@ typedef enum kiln_gc_kind {
 typedef struct kiln_gc_block {
 #define KILN_GC_SLAB_SIZE ((size_t)64 * 1024)
 #define KILN_GC_SLAB_CLASS_MIN ((size_t)48) /* smallest total slot (header + 1 byte payload) */
-#define KILN_GC_SLAB_CLASS_MAX ((size_t)256)
+#define KILN_GC_SLAB_CLASS_MAX ((size_t)1024)
 #define KILN_GC_SLAB_CLASS_STEP ((size_t)16)
 #define KILN_GC_SLOT_FREE ((size_t)-1) /* block->size sentinel: this slot is on the free list */
 typedef struct kiln_gc_slab {
@@ -1224,11 +1228,13 @@ static uint64_t kiln_c99_typed_constructor(kiln_typed_kind kind) {
 static uint64_t kiln_c99_typed_prototype(kiln_typed_kind kind) {
 static int kiln_c99_typed_prototype_kind(uint64_t builtin, kiln_typed_kind *kind) {
 static int kiln_c99_new_typed_buffer(kiln_value *out, size_t byte_length) {
+static int kiln_c99_new_typed_buffer_uninit(kiln_value *out, size_t byte_length) {
 static int kiln_c99_to_index(kiln_value value, size_t *out, kiln_value *thrown) {
 static double kiln_c99_typed_get(kiln_typed_array *view, size_t index) {
 static void kiln_c99_typed_set(kiln_typed_array *view, size_t index, double value) {
 static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
 static int kiln_c99_typed_alloc(kiln_value *out, kiln_typed_kind kind, size_t count) {
+static int kiln_c99_typed_alloc_uninit(kiln_value *out, kiln_typed_kind kind, size_t count) {
 static int kiln_c99_new_data_view(kiln_value *out, kiln_value source, size_t byte_offset,
 static int kiln_c99_data_view_at(kiln_data_view *view, size_t offset, size_t width,
 static uint64_t kiln_c99_data_view_gather(const uint8_t *bytes, size_t width, int little_endian) {
@@ -1237,6 +1243,8 @@ static size_t kiln_c99_uint64_digits(uint64_t value, char *out) {
 static const void *kiln_c99_bigint_uint64_mask(void) {
 static int kiln_c99_typed_order(double left, double right) {
 static int kiln_c99_reserve(void **items, size_t *capacity, size_t needed, size_t item_size) {
+static int kiln_c99_object_reserve(kiln_object *object, size_t needed) {
+static int kiln_c99_array_reserve(kiln_array *array, size_t needed) {
 static double kiln_c99_key_index(const char *key, size_t key_len) {
 static int kiln_c99_same_name(const char *key, size_t key_len, const char *name) {
 static int kiln_c99_same_key(const kiln_property *property, const char *key, size_t key_len) {
@@ -1486,6 +1494,7 @@ static int kiln_c99_is_trimmed(uint16_t unit) {
 static int kiln_c99_same_value_zero(kiln_value left, kiln_value right) {
 static size_t kiln_c99_relative_index(kiln_value value, size_t length, size_t fallback) {
 static size_t kiln_c99_unit_position(kiln_value value, size_t length, size_t fallback,
+static const void *kiln_c99_memmem(const void *haystack, size_t haystack_len,
 static int kiln_c99_invoke_string_method(kiln_value *result, uint64_t code, kiln_value receiver,
 static int kiln_c99_match_result(kiln_host *host, kiln_value *out, const uint16_t *units,
 static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t code,
