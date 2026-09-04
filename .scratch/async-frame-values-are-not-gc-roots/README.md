@@ -46,6 +46,16 @@ next       -> tag 11
 one of its call sites -- so the property was lost after construction. The snapshot array it pointed
 at was collected while the iterator was still in use.
 
+## It is the collector: `KILN_GC=0` makes it pass
+
+That is the one measurement worth having, and it was cheap: with collection off the program prints
+`a,b,c,d,e`. `KILN_GC_STRESS=1` does not make the synchronous spelling fail, so the sync path is
+rooted and only this one is not.
+
+Instrumenting the mark phase shows the collection happens with **no generated frame running** --
+which matches `collect_if_due`'s comment that it is offered only at a turn boundary. So the frame
+is *suspended* at the moment it dies, and what should be holding it then is the promise it awaits.
+
 ## Why it is not rooted
 
 `kiln_c99_gc_unit_roots` marks the realm's statics and nothing else: symbols, native constructor
@@ -59,6 +69,27 @@ Between them, a value reachable only from the operand stack is invisible to the 
 `for await` loop holds its iterator exactly there, across a body that allocates hard.
 
 That is why the synchronous spelling survives and the asynchronous one does not.
+
+## Tried, and did not fix it
+
+Each of these was built and run against the repro, so nobody needs to try them twice:
+
+- **Rooting the running frame.** Added a stack of frames whose bodies are executing, pushed in
+  both `kiln_c99_invoke_closure_body` and the fast path in `kiln_c99_invoke_closure`, marked in
+  `kiln_c99_gc_unit_roots`. It never fires: the count is zero at the one collection, because
+  collection is only offered when no generated frame is on the stack.
+- **The operand-stack marking bound.** `kiln_c99_gc_trace` marks `frame->stack` for
+  `closure->stack_size` entries; widening both the allocation and the marking by 64 changes
+  nothing.
+- **Marking every object slot.** Tracing `slot_capacity` entries, and `inline_slots` when `slots`
+  is NULL, rather than `shape->property_count`: no change.
+
+The chain that *should* hold the frame all traces correctly on inspection: `kiln_reaction` marks
+`on_fulfilled`, `on_rejected` and `derived`; `KILN_GC_BOUND` marks `target`, `receiver`,
+`arguments` and `properties`; the realm marks value slots, callable stores, continuations, queued
+work and timers. `@@resume` is bound to the suspended generator as its receiver, so the generator
+should be reachable through the awaited promise's reaction. Something in that chain is not, and
+finding which link is the remaining work.
 
 ## Eliminated, so nobody repeats them
 
