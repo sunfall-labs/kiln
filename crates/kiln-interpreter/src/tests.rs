@@ -2677,6 +2677,8 @@ fn serialize(value: &Value, indent: &str) -> Result<Option<String>, ExecutionErr
         crate::JsonCall::ToJson(receiver, _) => Ok(receiver.clone()),
         crate::JsonCall::Replace(_, _, property) => Ok(property),
     };
+    // The root's holder is the wrapper `{"": value}` the specification serialises through; no
+    // fixture here has a replacer to read it, so the value itself stands in.
     json_stringify(
         value,
         indent,
@@ -2685,6 +2687,7 @@ fn serialize(value: &Value, indent: &str) -> Result<Option<String>, ExecutionErr
         &mut unreachable_getter,
         None,
         "",
+        value,
     )
 }
 
