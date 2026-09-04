@@ -6,7 +6,8 @@ lever. That grouping is right and this note keeps it. What it adds is the thing 
 cannot say: what the emitted C has to *look like* at the end, measured, and the one structural
 change that produces that C for every program rather than for the benchmarks someone has read.
 
-Everything here was measured in a worktree at `84b2087b` on an 18-core aarch64 macOS machine.
+Everything here was measured in a worktree on an 18-core aarch64 macOS machine, first at
+`84b2087b` and again at `cf93bb61`, the commit that NaN-boxed the emitted bodies.
 `.scratch/fastest-native/measure.sh` reproduces the table.
 
 ## Where today's number comes from
@@ -81,21 +82,31 @@ values (ADR 0053), shape-plus-slots objects (ADR 0050), interned keys and per-si
 0047). It is deliberately *not* clever C: a guarded fast clone and a generic fallback, a typed
 entry beside a boxed one, a two-entry shape cache at a call site.
 
-Both engines are timed the same way, because the first draft of this table did not and the
-comparison was wrong by the cost of starting a process: node's column is `bench/harness.mjs`'s
-in-process warm median, and the hand-emitted C times its own workload the same way (median of
-twenty repetitions, on stderr; the checksum stays on stdout). Today's native column is whole
-process, which flatters it by about two milliseconds. All three answer node's checksum:
+All three columns are on one basis, because the first draft of this table was not and the
+comparison was wrong by the cost of starting a process: `bench/harness.mjs` reports an in-process
+warm median for node and for today's native binary alike, and the hand-emitted C times its own
+workload the same way (median of twenty repetitions, on stderr; the checksum stays on stdout).
+All three answer node's checksum. The "today" column is `cf93bb61`, with bodies NaN-boxed; the
+column before it is the same source at `84b2087b`, whole process, for the size of that step.
 
-| | node, warm | native today | hand-emitted C, warm | ceiling vs node |
-| --- | --- | --- | --- | --- |
-| `cpu/loop` | 25.0 ms | 286.5 ms | 27.5 ms | level |
-| `cpu/fib` | 21.5 ms | 92.2 ms | 3.0 ms | 7x ahead |
-| `non-io/class-poly` | 0.48 ms | 50.6 ms | 0.55 ms | level |
+| | node, warm | native at `84b2087b` | native today, warm | hand-emitted C, warm | ceiling vs node |
+| --- | --- | --- | --- | --- | --- |
+| `cpu/loop` | 25.5 ms | 279 ms | 162 ms | 28.7 ms | level |
+| `cpu/fib` | 21.3 ms | 92 ms | 118 ms | 3.4 ms | 6x ahead |
+| `non-io/class-poly` | 0.48 ms | 50.5 ms | 62.7 ms | 0.3 to 0.9 ms | level |
 
 Node's few percent on the two level rows is real, not noise. V8 runs that loop on int32 values
 with `% 7` strength-reduced to a multiply, and the class-poly figure includes allocating the
 thousand objects each repetition. The hand-written C is a plausible target, not a lower bound.
+
+The NaN-boxing step is instructive on its own. It moved `loop` by 1.7x and moved `fib` and
+`class-poly` the wrong way, by about a quarter each. The bodies hold `kiln_val` now, but
+`kiln_body_fn`, the prelude's entry points and the object slots still take the 16-byte
+`kiln_value`, so every call and every property access converts on the way in and out: the
+emitter gained 84 `kiln_val_to_boundary` and `from_boundary` sites in that one commit. A loop
+that never leaves its body gets the whole benefit; a program that is all calls pays the seam on
+each one. The migration is not done until the calling convention and the prelude's hot paths
+take `kiln_val`, and until then call-heavy code is slightly slower than before it started.
 
 So the runtime is not the ceiling. The prelude, the collector, the object model and the calling
 convention already permit code that is level with V8 on a numeric loop and well ahead of it on a
@@ -270,7 +281,7 @@ conformance corpora exercise and it must not move.
 | step | what | moves | expected |
 | --- | --- | --- | --- |
 | 0 | definite-assignment TDZ elimination; drop diagnostics from paths that cannot refuse | every benchmark, a little | `loop` 286 -> ~200 ms |
-| 1 | NaN-boxing phase 3 | class B everywhere | `loop` -> ~120 ms, `fib` -> ~60 ms |
+| 1 | NaN-boxing phase 3: bodies landed in `cf93bb61`; the calling convention, prelude entry points and object slots remain | class B everywhere | `loop` -> ~120 ms, `fib` back below 92 ms |
 | 2 | value graph; delete the fusers; guard hoisting; versioned numeric regions | `loop`, `mandelbrot`, `nbody`, `collatz` | `loop` -> ~27 ms, level with node |
 | 3 | direct calls to immutable bindings; typed entries; frame globals only when published | `fib`, `frame`, every call | `fib` -> ~3 ms, ahead of node |
 | 4 | inline site guards; prototype epoch; intrinsics; closed-world elision | `class-poly`, `collections`, `array-functional`, `object-spread` | `class-poly` -> ~0.5 ms, level |
