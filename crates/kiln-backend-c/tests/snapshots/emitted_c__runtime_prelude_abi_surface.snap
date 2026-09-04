@@ -662,6 +662,10 @@ typedef struct kiln_method_store {
 typedef enum kiln_native_prototype_surface {
 typedef struct kiln_native_constructor {
 static kiln_native_constructor kiln_c99_native_constructors[] = {
+#define KILN_SHAPE_MAX_FAST_PROPERTIES 32
+struct kiln_shape;
+typedef struct kiln_shape_transition {
+typedef struct kiln_shape {
 typedef struct kiln_property {
 typedef struct kiln_object {
 #define KILN_C99_MAX_PROTOTYPE_DEPTH 10000
@@ -1208,6 +1212,11 @@ static void kiln_c99_gc_hook_mark_block(void *opaque, void *payload) {
 static const kiln_gc_hooks kiln_c99_gc_hooks = {
 static void kiln_c99_gc_result_roots(void *opaque, void *context, int phase) {
 static char *kiln_c99_gc_alloc_text(size_t len) {
+static kiln_shape kiln_c99_root_shape = {
+static struct kiln_shape *kiln_c99_shape_root(void) {
+static int kiln_c99_shape_find_slot(const kiln_shape *shape, const char *ikey, uint32_t *out_slot) {
+static int kiln_c99_shape_transition(kiln_shape *current, const char *ikey, kiln_shape **out_shape) {
+static int kiln_c99_ensure_dictionary(kiln_object *object) {
 static int kiln_c99_new_object(kiln_value *out) {
 static int kiln_c99_new_object_with_capacity(kiln_value *out, size_t capacity) {
 static int kiln_c99_new_abort_signal(kiln_value *out) {

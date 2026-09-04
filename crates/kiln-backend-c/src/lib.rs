@@ -1602,6 +1602,7 @@ int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
         return status;
     }}
     data = kiln_c99_object_of(object);
+    data->shape = NULL;
     data->prototype = kiln_c99_null();
     for (index = 0; index < count; ++index) {{
         size_t source = order[index];

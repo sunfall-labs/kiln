@@ -108,6 +108,7 @@ int kiln_module_659cb65dc1a991aa4093bd7539036ba1_namespace_wrapper(kiln_value *r
         return status;
     }
     data = kiln_c99_object_of(object);
+    data->shape = NULL;
     data->prototype = kiln_c99_null();
     for (index = 0; index < count; ++index) {
         size_t source = order[index];
