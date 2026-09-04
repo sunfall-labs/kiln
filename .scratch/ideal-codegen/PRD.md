@@ -96,6 +96,9 @@ In `prelude_declarations.h`:
 - [x] **Milestone 13**: Architectural design and specification for 64-bit NaN-boxed internal value representation (ADR 0053: single GPR mapping, 2x cache density, unboxed doubles, and zero-overhead float checks).
 - [x] **Milestone 14**: Method call statement and assignment fusion: generalized call fusion machinery to match `CallMethod` + `Pop` (statement execution discarding return value without stack churn) and `CallMethod` + `Dup` + `StoreLocal` + `Pop` / `StoreLocal` (direct assignment to local destination variable).
 - [x] **Milestone 15**: Property access and assignment fusion with monomorphic inline cache fast-paths: fused `LoadLocal` + `GetProperty` + `StoreLocal` / `Pop`, `LoadLocal` + `LoadLocal`/`Const` + `SetProperty` + `Pop` sequences into direct register-to-register property reads and writes, bypassing stack memory traffic and routing through monomorphic shape caching (`kiln_c99_read_property` / `kiln_c99_write_property`).
+- [x] **Milestone 16**: In-place numeric induction variable mutation (`i = i + 1`, `i = i - 1`): specialized `can_fuse_load_const_binary_store` when `src == dst` to update `locals[dst].bits` directly in-place without whole `kiln_value` struct recreation. By avoiding writes to `locals[dst].tag`, Clang/LLVM loop-invariant code motion (LICM) hoists the number tag check out of the loop and promotes `locals[dst].bits` into an unboxed CPU register across the entire loop.
+- [x] **Milestone 17**: 64-bit quiet-NaN boxed internal value representation (ADR 0053 Phase 2): introduced `kiln_val` (`uint64_t`), quiet-NaN bit masks, sentinel values, and zero-overhead boundary bridge helpers (`kiln_val_from_boundary`, `kiln_val_to_boundary`) in prelude runtime.
+
 
 ## Benchmark Results (Empirical Release Measurements, 5 runs median)
 

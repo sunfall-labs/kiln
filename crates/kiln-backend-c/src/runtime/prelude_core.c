@@ -23615,6 +23615,54 @@ static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_val
  * Outlined instruction operation helpers (compact scalar emission)
  * ========================================================================= */
 
+static kiln_val kiln_val_from_boundary(kiln_value v) {
+    if (v.tag == KILN_VALUE_NUMBER) {
+        /* Canonicalize any quiet-NaN to prevent collision with tagged pointer prefixes */
+        if (KILN_UNLIKELY((v.bits & UINT64_C(0x7FF8000000000000)) == UINT64_C(0x7FF8000000000000))) {
+            return KILN_QNAN_BASE;
+        }
+        return (kiln_val)v.bits;
+    }
+    switch (v.tag) {
+        case KILN_VALUE_UNDEFINED: return KILN_VAL_UNDEFINED;
+        case KILN_VALUE_NULL:      return KILN_VAL_NULL;
+        case KILN_VALUE_BOOLEAN:   return v.bits ? KILN_VAL_TRUE : KILN_VAL_FALSE;
+        case KILN_VALUE_STRING:    return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, (const void *)v.ptr);
+        case KILN_VALUE_OBJECT:    return KILN_VAL_TAG_PTR(KILN_TAG_OBJECT_PREFIX, (const void *)(uintptr_t)v.bits);
+        case KILN_VALUE_FUNCTION:  return KILN_VAL_TAG_PTR(KILN_TAG_CLOSURE_PREFIX, (const void *)(uintptr_t)v.bits);
+        default:                   return KILN_VAL_UNDEFINED;
+    }
+}
+
+static kiln_value kiln_val_to_boundary(kiln_val v) {
+    if (KILN_VAL_IS_NUMBER(v)) {
+        kiln_value out;
+        out.tag = KILN_VALUE_NUMBER;
+        out.len = 0;
+        out.bits = (uint64_t)v;
+        return out;
+    }
+    switch (v) {
+        case KILN_VAL_UNDEFINED: return kiln_c99_undefined();
+        case KILN_VAL_NULL:      return kiln_c99_null();
+        case KILN_VAL_FALSE:     return kiln_c99_boolean(0);
+        case KILN_VAL_TRUE:      return kiln_c99_boolean(1);
+        default:
+            if ((v & KILN_TAG_MASK) == KILN_TAG_STRING_PREFIX) {
+                const char *p = (const char *)KILN_VAL_PTR(v);
+                return kiln_c99_copy_text(p, p ? strlen(p) : 0);
+            }
+            if ((v & KILN_TAG_MASK) == KILN_TAG_OBJECT_PREFIX) {
+                kiln_value out;
+                out.tag = KILN_VALUE_OBJECT;
+                out.len = 0;
+                out.bits = (uint64_t)(uintptr_t)KILN_VAL_PTR(v);
+                return out;
+            }
+            return kiln_c99_undefined();
+    }
+}
+
 static int kiln_c99_read_property(kiln_host *host, kiln_value target,
                                   const char *key, size_t key_len,
                                   int depth, kiln_value *thrown,

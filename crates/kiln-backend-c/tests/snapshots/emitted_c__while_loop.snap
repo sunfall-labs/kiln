@@ -23,7 +23,7 @@ kiln_label_3:;
 kiln_label_4:;
 kiln_label_5:;
 kiln_label_6:;
-    { kiln_value left = locals[0]; kiln_value answer; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER)) { double a; memcpy(&a, &left.bits, sizeof(a)); answer = kiln_c99_number(a + 1.0); } else { kiln_value right = kiln_c99_number_bits(UINT64_C(4607182418800017408)); answer = kiln_c99_binary(1, left, right); } locals[0] = answer; }
+    if (KILN_LIKELY(locals[0].tag == KILN_VALUE_NUMBER)) { double a; memcpy(&a, &locals[0].bits, sizeof(a)); locals[0].bits = ((union { double d; uint64_t u; }){ .d = a + 1.0 }).u; } else { kiln_value left = locals[0]; kiln_value right = kiln_c99_number_bits(UINT64_C(4607182418800017408)); locals[0] = kiln_c99_binary(1, left, right); }
 kiln_label_7:;
 kiln_label_8:;
 kiln_label_9:;

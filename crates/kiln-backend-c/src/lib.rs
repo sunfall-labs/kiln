@@ -22,7 +22,7 @@ pub const C_ABI_VERSION: u32 = 1;
 /// This is deliberately independent from [`C_ABI_VERSION`]: diagnostics and private helper code
 /// can change emitted object bytes without changing the public embedding layout. Native artifact
 /// keys include this revision so those objects are never reused across generator changes.
-pub const C_GENERATOR_VERSION: u32 = 26;
+pub const C_GENERATOR_VERSION: u32 = 27;
 
 /// Realm policy that changes observable native execution.
 ///
@@ -3090,34 +3090,48 @@ fn emit_instruction(
                 can_fuse_load_const_binary_store(emitter.code, emitter.constants, index, &emitter.jump_targets)
             {
                 let unwind = unwind_or_return(handlers, site);
-                let op_body = match const_numeric_fast_body(op, bits) {
-                    Some(fast) => {
-                        if !*callables {
-                            format!("{{ {fast} }} else {{ kiln_value right = kiln_c99_number_bits(UINT64_C({bits})); answer = kiln_c99_binary({}, left, right); }}", binary_code(op))
-                        } else {
-                            format!("{{ {fast} }} else {{ kiln_value right = kiln_c99_number_bits(UINT64_C({bits})); int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
-                        }
-                    }
-                    None => {
-                        if !*callables {
-                            format!("{{ kiln_value right = kiln_c99_number_bits(UINT64_C({bits})); answer = kiln_c99_binary({}, left, right); }}", binary_code(op))
-                        } else {
-                            format!("{{ kiln_value right = kiln_c99_number_bits(UINT64_C({bits})); int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
-                        }
-                    }
-                };
-                if const_numeric_fast_body(op, bits).is_some() {
+                if src == dst && const_numeric_fast_body_in_place(op, bits, dst).is_some() {
+                    let in_place = const_numeric_fast_body_in_place(op, bits, dst).unwrap();
+                    let fallback = if !*callables {
+                        format!("{{ kiln_value left = locals[{src}]; kiln_value right = kiln_c99_number_bits(UINT64_C({bits})); locals[{dst}] = kiln_c99_binary({}, left, right); }}", binary_code(op))
+                    } else {
+                        format!("{{ kiln_value left = locals[{src}]; kiln_value right = kiln_c99_number_bits(UINT64_C({bits})); kiln_value answer; int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; locals[{dst}] = answer; }}", binary_code(op))
+                    };
                     writeln!(
                         output,
-                        "    {{ kiln_value left = locals[{src}]; kiln_value answer; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER)) {op_body} locals[{dst}] = answer; }}"
+                        "    if (KILN_LIKELY(locals[{dst}].tag == KILN_VALUE_NUMBER)) {{ {in_place} }} else {fallback}"
                     )
                     .unwrap();
                 } else {
-                    writeln!(
-                        output,
-                        "    {{ kiln_value left = locals[{src}]; kiln_value answer; {op_body} locals[{dst}] = answer; }}"
-                    )
-                    .unwrap();
+                    let op_body = match const_numeric_fast_body(op, bits) {
+                        Some(fast) => {
+                            if !*callables {
+                                format!("{{ {fast} }} else {{ kiln_value right = kiln_c99_number_bits(UINT64_C({bits})); answer = kiln_c99_binary({}, left, right); }}", binary_code(op))
+                            } else {
+                                format!("{{ {fast} }} else {{ kiln_value right = kiln_c99_number_bits(UINT64_C({bits})); int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
+                            }
+                        }
+                        None => {
+                            if !*callables {
+                                format!("{{ kiln_value right = kiln_c99_number_bits(UINT64_C({bits})); answer = kiln_c99_binary({}, left, right); }}", binary_code(op))
+                            } else {
+                                format!("{{ kiln_value right = kiln_c99_number_bits(UINT64_C({bits})); int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
+                            }
+                        }
+                    };
+                    if const_numeric_fast_body(op, bits).is_some() {
+                        writeln!(
+                            output,
+                            "    {{ kiln_value left = locals[{src}]; kiln_value answer; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER)) {op_body} locals[{dst}] = answer; }}"
+                        )
+                        .unwrap();
+                    } else {
+                        writeln!(
+                            output,
+                            "    {{ kiln_value left = locals[{src}]; kiln_value answer; {op_body} locals[{dst}] = answer; }}"
+                        )
+                        .unwrap();
+                    }
                 }
             } else if let Some((src1, src2, op, dst)) =
                 can_fuse_load_load_binary_store(emitter.code, index, &emitter.jump_targets)
@@ -4186,6 +4200,82 @@ fn numeric_fast_body(operator: BinaryOp) -> Option<&'static str> {
         BinaryOp::GreaterThanOrEqual => "answer = kiln_c99_boolean(a >= b);",
         _ => return None,
     })
+}
+
+fn const_numeric_fast_body_in_place(operator: BinaryOp, bits: u64, dst: u32) -> Option<String> {
+    let two_bits = 2.0f64.to_bits();
+    let one_bits = 1.0f64.to_bits();
+    let val = f64::from_bits(bits);
+
+    match operator {
+        BinaryOp::Add => {
+            if bits == one_bits {
+                Some(format!(
+                    "double a; memcpy(&a, &locals[{dst}].bits, sizeof(a)); locals[{dst}].bits = ((union {{ double d; uint64_t u; }}){{ .d = a + 1.0 }}).u;"
+                ))
+            } else if bits == two_bits {
+                Some(format!(
+                    "double a; memcpy(&a, &locals[{dst}].bits, sizeof(a)); locals[{dst}].bits = ((union {{ double d; uint64_t u; }}){{ .d = a + 2.0 }}).u;"
+                ))
+            } else {
+                Some(format!(
+                    "double a; memcpy(&a, &locals[{dst}].bits, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; locals[{dst}].bits = ((union {{ double d; uint64_t u; }}){{ .d = a + b }}).u;"
+                ))
+            }
+        }
+        BinaryOp::Subtract => {
+            if bits == one_bits {
+                Some(format!(
+                    "double a; memcpy(&a, &locals[{dst}].bits, sizeof(a)); locals[{dst}].bits = ((union {{ double d; uint64_t u; }}){{ .d = a - 1.0 }}).u;"
+                ))
+            } else if bits == two_bits {
+                Some(format!(
+                    "double a; memcpy(&a, &locals[{dst}].bits, sizeof(a)); locals[{dst}].bits = ((union {{ double d; uint64_t u; }}){{ .d = a - 2.0 }}).u;"
+                ))
+            } else {
+                Some(format!(
+                    "double a; memcpy(&a, &locals[{dst}].bits, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; locals[{dst}].bits = ((union {{ double d; uint64_t u; }}){{ .d = a - b }}).u;"
+                ))
+            }
+        }
+        BinaryOp::Multiply => {
+            if bits == two_bits {
+                Some(format!(
+                    "double a; memcpy(&a, &locals[{dst}].bits, sizeof(a)); locals[{dst}].bits = ((union {{ double d; uint64_t u; }}){{ .d = a * 2.0 }}).u;"
+                ))
+            } else if bits == one_bits {
+                Some(format!(
+                    "double a; memcpy(&a, &locals[{dst}].bits, sizeof(a)); locals[{dst}].bits = ((union {{ double d; uint64_t u; }}){{ .d = a * 1.0 }}).u;"
+                ))
+            } else {
+                Some(format!(
+                    "double a; memcpy(&a, &locals[{dst}].bits, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; locals[{dst}].bits = ((union {{ double d; uint64_t u; }}){{ .d = a * b }}).u;"
+                ))
+            }
+        }
+        BinaryOp::Divide => {
+            if bits == two_bits {
+                Some(format!(
+                    "double a; memcpy(&a, &locals[{dst}].bits, sizeof(a)); locals[{dst}].bits = ((union {{ double d; uint64_t u; }}){{ .d = a * 0.5 }}).u;"
+                ))
+            } else if val > 0.0
+                && val.is_finite()
+                && val.fract() == 0.0
+                && (val as u64).is_power_of_two()
+            {
+                let inv = 1.0 / val;
+                let inv_bits = inv.to_bits();
+                Some(format!(
+                    "double a; memcpy(&a, &locals[{dst}].bits, sizeof(a)); double inv_b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({inv_bits}) }}).d; locals[{dst}].bits = ((union {{ double d; uint64_t u; }}){{ .d = a * inv_b }}).u;"
+                ))
+            } else {
+                Some(format!(
+                    "double a; memcpy(&a, &locals[{dst}].bits, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; locals[{dst}].bits = ((union {{ double d; uint64_t u; }}){{ .d = a / b }}).u;"
+                ))
+            }
+        }
+        _ => None,
+    }
 }
 
 fn const_numeric_fast_body(operator: BinaryOp, bits: u64) -> Option<String> {

@@ -637,6 +637,22 @@ KILN_VALUE_DATA_VIEW = 27
 static uint32_t kiln_c99_method_groups(uint64_t code) {
 static int kiln_c99_method_in_group(uint64_t code, uint32_t group) {
 typedef struct kiln_value {
+typedef uint64_t kiln_val;
+#define KILN_QNAN_BASE          UINT64_C(0x7FF8000000000000)
+#define KILN_TAG_MASK           UINT64_C(0xFFFF000000000000)
+#define KILN_PAYLOAD_MASK       UINT64_C(0x0000FFFFFFFFFFFF)
+#define KILN_VAL_UNDEFINED      UINT64_C(0xFFF8000000000001)
+#define KILN_VAL_NULL           UINT64_C(0xFFF8000000000002)
+#define KILN_VAL_FALSE          UINT64_C(0xFFF8000000000004)
+#define KILN_VAL_TRUE           UINT64_C(0xFFF8000000000005)
+#define KILN_VAL_HOLE           UINT64_C(0xFFF8000000000006)
+#define KILN_TAG_STRING_PREFIX  UINT64_C(0xFFF9000000000000)
+#define KILN_TAG_OBJECT_PREFIX  UINT64_C(0xFFFA000000000000)
+#define KILN_TAG_CLOSURE_PREFIX UINT64_C(0xFFFB000000000000)
+#define KILN_TAG_BUFFER_PREFIX  UINT64_C(0xFFFC000000000000)
+#define KILN_VAL_IS_NUMBER(v)   ((uint64_t)(v) < UINT64_C(0xFFF8000000000000))
+#define KILN_VAL_PTR(v)         ((void *)((uint64_t)(v) & KILN_PAYLOAD_MASK))
+#define KILN_VAL_TAG_PTR(pfx, p) ((kiln_val)((pfx) | ((uint64_t)(uintptr_t)(p) & KILN_PAYLOAD_MASK)))
 typedef enum kiln_typed_kind {
 typedef struct kiln_typed_buffer {
 typedef struct kiln_typed_array {
@@ -1780,6 +1796,8 @@ static int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int string_h
 static int kiln_c99_to_number_checked(kiln_host *host, kiln_value value, double *out, int depth,
 static int kiln_c99_unary_checked(uint16_t operation, kiln_host *host, kiln_value value,
 static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_value left,
+static kiln_val kiln_val_from_boundary(kiln_value v) {
+static kiln_value kiln_val_to_boundary(kiln_val v) {
 static int kiln_c99_read_property(kiln_host *host, kiln_value target,
 static int kiln_c99_write_property(kiln_host *host, kiln_value target,
 static void kiln_c99_note_get_property_refusal(kiln_value target) {

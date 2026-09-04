@@ -1696,3 +1696,51 @@ fn fused_call_method_statement_and_assignment() {
     // CallMethod + Dup + StoreLocal + Pop fuses out Dup and Pop
     assert!(b.contains("locals[2] = stack[--sp]; }"));
 }
+
+#[test]
+fn in_place_induction_variable_loop_emission() {
+    let p = program(
+        vec![
+            Constant::Number(1.0f64.to_bits()),
+            Constant::Number(2.0f64.to_bits()),
+        ],
+        vec![
+            // i = i + 1
+            Instruction::LoadLocal(0),
+            Instruction::Const(0),
+            Instruction::Binary(BinaryOp::Add),
+            Instruction::StoreLocal(0),
+            // i = i - 2
+            Instruction::LoadLocal(0),
+            Instruction::Const(1),
+            Instruction::Binary(BinaryOp::Subtract),
+            Instruction::StoreLocal(0),
+            Instruction::Return,
+        ],
+        1,
+    );
+    let unit = emit(&p).expect("induction variable program emits");
+    let b = body(&unit);
+    // In-place bit update without locals[0] whole struct re-creation
+    assert!(b.contains("if (KILN_LIKELY(locals[0].tag == KILN_VALUE_NUMBER)) { double a; memcpy(&a, &locals[0].bits, sizeof(a)); locals[0].bits = ((union { double d; uint64_t u; }){ .d = a + 1.0 }).u; }"));
+    assert!(b.contains("if (KILN_LIKELY(locals[0].tag == KILN_VALUE_NUMBER)) { double a; memcpy(&a, &locals[0].bits, sizeof(a)); locals[0].bits = ((union { double d; uint64_t u; }){ .d = a - 2.0 }).u; }"));
+}
+
+#[test]
+fn polymorphic_inline_cache_prelude_surface() {
+    let unit = emit(&minimal_program()).expect("minimal program emits");
+    let (prelude, _) = split(&unit.source);
+    // Asserts 4-shape polymorphic unrolling exists in read_property and write_property
+    assert!(prelude.contains("for (p = 0; p < site->pic_count; ++p)"));
+    assert!(prelude.contains("object->shape == site->entries[p].shape"));
+}
+
+#[test]
+fn nan_boxed_kiln_val_prelude_surface() {
+    let unit = emit(&minimal_program()).expect("minimal program emits");
+    let (prelude, _) = split(&unit.source);
+    assert!(prelude.contains("typedef uint64_t kiln_val;"));
+    assert!(prelude.contains("KILN_VAL_IS_NUMBER"));
+    assert!(prelude.contains("kiln_val_from_boundary"));
+    assert!(prelude.contains("kiln_val_to_boundary"));
+}
