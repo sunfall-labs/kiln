@@ -153,8 +153,8 @@
       "passed": 3580
     },
     "built-ins/RegExpStringIteratorPrototype": {
-      "failed": 24,
-      "passed": 10
+      "failed": 16,
+      "passed": 18
     },
     "built-ins/Set": {
       "failed": 18,
@@ -177,8 +177,8 @@
       "passed": 2257
     },
     "built-ins/StringIteratorPrototype": {
-      "failed": 10,
-      "passed": 4
+      "failed": 4,
+      "passed": 10
     },
     "built-ins/SuppressedError": {
       "failed": 10,
