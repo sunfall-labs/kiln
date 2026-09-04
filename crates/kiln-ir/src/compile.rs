@@ -603,7 +603,7 @@ enum Resolution {
 #[derive(Debug, Clone)]
 struct InstanceElements {
     private: Vec<(String, PrivateKind, String)>,
-    fields: Vec<ClassField>,
+    fields: Vec<(ClassField, Option<String>)>,
 }
 
 /// What makes a constructor a *class* constructor rather than an ordinary function.
@@ -618,7 +618,7 @@ struct ClassBody<'a> {
     /// `super(...arguments)` and nothing else.
     forwards_to_super: bool,
     private_elements: &'a [(String, PrivateKind, String)],
-    fields: &'a [&'a ClassField],
+    fields: &'a [(&'a ClassField, Option<String>)],
 }
 
 impl ClassBody<'_> {
@@ -634,7 +634,11 @@ impl ClassBody<'_> {
     fn elements(&self) -> InstanceElements {
         InstanceElements {
             private: self.private_elements.to_vec(),
-            fields: self.fields.iter().map(|field| (*field).clone()).collect(),
+            fields: self
+                .fields
+                .iter()
+                .map(|(field, binding)| ((*field).clone(), binding.clone()))
+                .collect(),
         }
     }
 }
@@ -5022,6 +5026,17 @@ impl Compiler {
             self.store_home_binding(&binding);
             private_bindings.push((name.clone(), *kind, binding));
         }
+        // A field's *name* is evaluated where the class is defined, once. The binding is
+        // declared here so the constructor compiled below captures it; what it holds is computed
+        // further down, once the class binding exists to be the receiver `ToPropertyKey` reads.
+        let field_bindings: Vec<(&ClassField, Option<String>)> = instance_fields
+            .iter()
+            .map(|field| {
+                let binding = matches!(field.key, ObjectKey::Computed(_))
+                    .then(|| self.declare_home_binding(class.span));
+                (*field, binding)
+            })
+            .collect();
         self.next_is_method = true;
         let compiled = self.compile_constructor(
             &constructor,
@@ -5033,7 +5048,7 @@ impl Compiler {
                 // error with no message.
                 forwards_to_super: synthesized_derived,
                 private_elements: &private_bindings,
-                fields: &instance_fields,
+                fields: &field_bindings,
             }),
         );
         self.home_bindings.pop();
@@ -5051,6 +5066,24 @@ impl Compiler {
         } else {
             Instruction::StoreLocal(local.slot)
         });
+
+        // Now the class binding exists, each computed field name is evaluated and converted --
+        // once, here, where the class is defined. A name whose `toString` has an effect has it
+        // once rather than once per instance, and one that refuses does so when the class is
+        // written rather than when it is first constructed. The class is pushed beneath the key
+        // because that is the pair `ToPropertyKey` reads; storing the name consumes it, and the
+        // receiver is dropped afterwards.
+        for (field, binding) in &field_bindings {
+            let (ObjectKey::Computed(key), Some(binding)) = (&field.key, binding) else {
+                continue;
+            };
+            let binding = binding.clone();
+            self.load_local_or_cell(local);
+            self.expression(key);
+            self.code.push(Instruction::ToPropertyKey);
+            self.store_home_binding(&binding);
+            self.code.push(Instruction::Pop);
+        }
 
         let prototype = self.constant_index(Constant::String("prototype".to_owned()));
 
@@ -5479,7 +5512,7 @@ impl Compiler {
     fn emit_instance_elements(
         &mut self,
         private_elements: &[(String, PrivateKind, String)],
-        fields: &[&ClassField],
+        fields: &[(&ClassField, Option<String>)],
         span: Span,
     ) -> Option<()> {
         for (name, kind, binding) in private_elements {
@@ -5493,8 +5526,16 @@ impl Compiler {
                 .push(Instruction::DefinePrivate { name, kind: *kind });
             self.code.push(Instruction::Pop);
         }
-        for field in fields {
+        for (field, name_binding) in fields {
             self.code.push(Instruction::LoadThis);
+            if let Some(binding) = name_binding {
+                // The name was computed and converted once, where the class is defined.
+                self.load_captured_binding(binding);
+                self.emit_field_value(field);
+                self.code.push(self.set_computed_instruction());
+                self.code.push(Instruction::Pop);
+                continue;
+            }
             match &field.key {
                 ObjectKey::Private(name) => {
                     let name = self.constant_index(Constant::String(self.private_key(name)));
@@ -5526,7 +5567,11 @@ impl Compiler {
         let Some(Some(elements)) = self.pending_elements.last().cloned() else {
             return;
         };
-        let fields: Vec<&ClassField> = elements.fields.iter().collect();
+        let fields: Vec<(&ClassField, Option<String>)> = elements
+            .fields
+            .iter()
+            .map(|(field, binding)| (field, binding.clone()))
+            .collect();
         self.emit_instance_elements(&elements.private, &fields, span);
     }
 
