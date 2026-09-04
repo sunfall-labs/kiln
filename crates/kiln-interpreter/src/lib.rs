@@ -1085,7 +1085,7 @@ fn record_prototype(target: &Value, prototype: Value) -> bool {
 fn exotic_reserved_name(target: &Value, key: &str) -> bool {
     match target {
         Value::TypedArray(_) => canonical_numeric_index(key).is_some(),
-        Value::RegExp(_) => key == "lastIndex",
+        Value::RegExp(_) => false,
         _ => false,
     }
 }
@@ -3675,12 +3675,13 @@ pub struct RegExpData {
     /// The `d` flag. Read once here rather than off `flags` at every match, and kept beside the
     /// other two for the same reason they are: a flag the matcher consults is not a string search.
     has_indices: bool,
-    /// Where the next `g` or `y` search starts, in UTF-16 units. Mutable and program-visible,
-    /// which is why two evaluations of one literal must not share an object.
-    last_index: std::cell::Cell<usize>,
-    /// The properties a program put on the regexp by name. `lastIndex` is not one of them: it
-    /// lives in the slot above so that the search and a read of `r.lastIndex` cannot disagree
-    /// about where the next match starts.
+    /// The properties a program put on the regexp by name, and `lastIndex` among them.
+    ///
+    /// It was a `Cell` beside this store, so that the search and a read of `r.lastIndex` could
+    /// not disagree. One store cannot disagree with itself either, and the slot could not carry
+    /// what the language says `lastIndex` is: an own property with attributes. It had no
+    /// descriptor, `defineProperty` did not reach it, and a strict write to a frozen one
+    /// succeeded -- where the specification writes it with `Set(..., true)` and throws.
     properties: RefCell<ObjectData>,
 }
 
@@ -16259,22 +16260,29 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let subject: Vec<u16> = subject_text.encode_utf16().collect();
                 // Only `g` and `y` carry a cursor; a plain pattern always searches from the
                 // start, however many times it is used.
+                // `ToLength(Get(R, "lastIndex"))` happens for every regexp, global or not: the
+                // read is the program's own property and a `valueOf` on it runs and may throw.
+                // Only a `g` or `y` pattern then *uses* the cursor; a plain one searches from
+                // the start however many times it is used.
+                let regexp = Rc::clone(regexp);
+                let cursor = self.read_length(receiver, "lastIndex", instruction)?;
                 let start = if regexp.global || regexp.sticky {
-                    regexp.last_index.get()
+                    cursor
                 } else {
                     0
                 };
-                let found = regexp_search(regexp, &subject, start);
+                let found = regexp_search(&regexp, &subject, start);
                 if (regexp.global || regexp.sticky) && found.is_none() {
                     // A failed search resets the cursor, which is what stops a `g` regexp from
                     // being permanently stuck past the end.
-                    regexp.last_index.set(0);
+                    self.set_last_index(receiver, 0.0, instruction)?;
                 }
                 if let Some((range, _, _)) = &found
                     && (regexp.global || regexp.sticky)
                 {
-                    regexp.last_index.set(range.end);
+                    self.set_last_index(receiver, range.end as f64, instruction)?;
                 }
+                let regexp = &regexp;
                 if matches!(native, Native::RegExpTest) {
                     return Ok(Value::Boolean(found.is_some()));
                 }
@@ -16601,7 +16609,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if results.is_empty() && matches!(native, Native::StringMatch) {
                     return Ok(Value::Null);
                 }
-                regexp.last_index.set(0);
+                self.set_last_index(&pattern, 0.0, instruction)?;
                 Ok(Value::Array(ArrayData::new(results)))
             }
             Native::QueueMicrotask => {
@@ -26328,11 +26336,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         index: f64,
         instruction: usize,
     ) -> Result<(), ExecutionError> {
-        self.set_computed(
+        // `Set(R, "lastIndex", v, true)` -- a *throwing* write, which is the whole reason the
+        // specification spells the last argument. A refused write that is merely swallowed
+        // leaves a `g` cursor where it was, and the loop that advances it never terminates.
+        self.assign_with_strict(
             target,
             &Value::String("lastIndex".to_owned()),
             Value::Number(index),
             instruction,
+            true,
         )
     }
 
@@ -28971,7 +28983,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 "unicode" => Value::Boolean(regexp.flags.contains('u')),
                 "unicodeSets" => Value::Boolean(regexp.flags.contains('v')),
                 "hasIndices" => Value::Boolean(regexp.flags.contains('d')),
-                "lastIndex" => Value::Number(regexp.last_index.get() as f64),
                 // Everything else -- the five symbol-keyed methods included -- through the
                 // realm's store and then the table, so an instance and `RegExp.prototype` can
                 // never resolve a name differently.
@@ -29945,17 +29956,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Ok(())
                 }
             },
-            // `lastIndex` is the one property a regexp keeps outside its store, and writing it
-            // is how a program drives a sticky or global search by hand.
-            Value::RegExp(regexp) if key.property_key() == "lastIndex" => {
-                let index = value.as_number();
-                regexp.last_index.set(if index.is_finite() && index > 0.0 {
-                    index as usize
-                } else {
-                    0
-                });
-                Ok(())
-            }
             // Every other name on an exotic object is an ordinary property of an ordinary
             // object, so the write walks the chain exactly as it would on one: an own accessor
             // takes it, the chain's accessor takes it, a getter-only accessor swallows it, and
@@ -39573,8 +39573,22 @@ fn build_regexp(pattern: &str, flags: &str) -> Option<Value> {
         global: flags.contains('g'),
         sticky: flags.contains('y'),
         has_indices: flags.contains('d'),
-        last_index: std::cell::Cell::new(0),
-        properties: RefCell::new(ObjectData::default()),
+        properties: RefCell::new({
+            // `lastIndex` is an ordinary own data property, which is what lets
+            // `Object.defineProperty(r, "lastIndex", {writable: false})` be seen by the
+            // matcher: writable, not enumerated, and not configurable.
+            let mut data = ObjectData::default();
+            data.define_value(
+                "lastIndex",
+                Value::Number(0.0),
+                Attributes {
+                    writable: true,
+                    enumerable: false,
+                    configurable: false,
+                },
+            );
+            data
+        }),
     })))
 }
 
