@@ -34048,8 +34048,25 @@ fn call_native(
             }
         }
         Native::BigIntToString => {
-            let Value::BigInt(value) = receiver else {
-                return Ok(Value::Undefined);
+            // `thisBigIntValue`, with the same refusal: `undefined` for a receiver that is not
+            // one reads as an answer rather than as the TypeError the language gives.
+            let held;
+            let value = match receiver {
+                Value::BigInt(value) => value,
+                other => match wrapped_primitive(other) {
+                    Some(Value::BigInt(inner)) => {
+                        held = inner;
+                        &held
+                    }
+                    _ => {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: format!(
+                                "BigInt.prototype.toString called on {}",
+                                receiver.to_display_string()
+                            ),
+                        });
+                    }
+                },
             };
             match arguments.first().map(Value::as_number) {
                 None | Some(10.0) => Value::String(value.to_string()),
@@ -34201,7 +34218,27 @@ fn call_native(
                 });
             }
         },
-        Native::PrimitiveToString => Value::String(receiver.to_display_string()),
+        // `thisSymbolValue`: a symbol, or a symbol in a wrapper, and nothing else. Answering the
+        // display form of whatever it was called on meant
+        // `Symbol.prototype.toString.call({})` read back "[object Object]" rather than refusing,
+        // which a program probing for a symbol cannot tell from a real answer.
+        Native::PrimitiveToString => {
+            let symbol = match receiver {
+                Value::Symbol(_) => receiver.clone(),
+                other => match wrapped_primitive(other) {
+                    Some(inner @ Value::Symbol(_)) => inner,
+                    _ => {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: format!(
+                                "Symbol.prototype.toString called on {}",
+                                receiver.to_display_string()
+                            ),
+                        });
+                    }
+                },
+            };
+            Value::String(symbol.to_display_string())
+        }
         // `Function.prototype.toString` is one of the few built-ins that checks what it was
         // called on: the specification throws for a receiver that is not callable rather than
         // describing it. `Function.prototype.toString.call({})` is a TypeError, and answering
