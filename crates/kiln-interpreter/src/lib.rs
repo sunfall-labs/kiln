@@ -27027,10 +27027,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // "number" is a shared inaccuracy, not a divergence, and is noted in NOTES.md.
         let exotic =
             self.read_property(value, WellKnown::ToPrimitive.property_key(), instruction)?;
-        if matches!(
-            exotic,
-            Value::Function(_) | Value::Native(_, _) | Value::Callback(_, _)
-        ) {
+        // `GetMethod` refuses a value that is neither callable nor nullish, and it refuses it
+        // *here* rather than falling through: a program that wrote `@@toPrimitive = 1` said how
+        // this value reduces, and quietly reducing it some other way answered
+        // "[object Object]" where the language throws.
+        if !exotic.is_nullish() && !is_callable(&exotic) {
+            return Err(ExecutionError::NotCallable {
+                instruction,
+                value: exotic.type_name(),
+            });
+        }
+        if is_callable(&exotic) {
             let hint = Value::String(if prefer_string { "string" } else { "default" }.to_owned());
             let produced =
                 self.call_value(&exotic, value.clone(), Vec::from([hint]), instruction)?;
