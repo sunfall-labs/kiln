@@ -1736,6 +1736,13 @@ pub enum PrototypeTable {
     /// `%IteratorPrototype%`, where the iterator helpers live and which every iterator this
     /// realm makes answers from.
     Iterator,
+    /// `%GeneratorPrototype%` and `%AsyncGeneratorPrototype%`: `next`, `return` and `throw`, and
+    /// the tag. A generator object reaches one of these through its function's `prototype`, which
+    /// is the link that made `Object.getPrototypeOf(g())` answer null -- so every test that walks
+    /// a generator's chain read `undefined.next` instead of a method the value has answered all
+    /// along. Both sit above `%IteratorPrototype%`.
+    Generator,
+    AsyncGenerator,
     /// The three wrapper tables. Each answers to almost nothing of its own -- `toString` and
     /// `valueOf` -- but a program that names one is nearly always about to `call` that method
     /// onto a receiver it supplies, which is precisely what a marker supports.
@@ -37743,6 +37750,10 @@ fn prototype_of(value: &Value) -> Value {
         // missing, and the one every `instanceof Date` walks.
         Value::Date(_) => Value::Native(Native::PrototypeOf(PrototypeTable::Date), realm),
         Value::Promise(_) => Value::Native(Native::PrototypeOf(PrototypeTable::Promise), realm),
+        // A generator inherits from its *function's* `prototype`, exactly as an instance does --
+        // and that object now points at `%GeneratorPrototype%`. This answered null, so every walk
+        // of a generator's chain ended before it reached a method.
+        Value::Generator(state) => prototype_object(&state.borrow().closure),
         // A regexp is a value kind here rather than an object, and without this link
         // `/x/ instanceof RegExp` is false and `RegExp.prototype.isPrototypeOf(/x/)` denies it --
         // a chain a program can see is missing, and the one every brand check walks.
@@ -42052,15 +42063,69 @@ fn promise_method(name: &str) -> Value {
 /// and what a console reads to print `C {}` rather than `{}`. The two point at each other, so a
 /// class that is never collected keeps its prototype alive; a realm's constructors outlive the
 /// program anyway.
+/// Which generator table a function's `prototype` object inherits from, or `None` for an
+/// ordinary function whose `prototype` is an ordinary object.
+/// What `%GeneratorPrototype%` and `%AsyncGeneratorPrototype%` answer.
+///
+/// The three methods are the same `Callback`s a generator value already resolves by name, so a
+/// program that takes one off the prototype and calls it on a generator gets the same function
+/// the generator hands back itself.
+fn generator_prototype_method(asynchronous: bool, name: &str) -> Value {
+    match name {
+        "next" if asynchronous => {
+            Value::Callback(CallbackMethod::AsyncGeneratorNext, RealmId::PRIMARY)
+        }
+        "return" if asynchronous => {
+            Value::Callback(CallbackMethod::AsyncGeneratorReturn, RealmId::PRIMARY)
+        }
+        "throw" if asynchronous => {
+            Value::Callback(CallbackMethod::AsyncGeneratorThrow, RealmId::PRIMARY)
+        }
+        "next" => Value::Callback(CallbackMethod::GeneratorNext, RealmId::PRIMARY),
+        "return" => Value::Callback(CallbackMethod::GeneratorReturn, RealmId::PRIMARY),
+        "throw" => Value::Callback(CallbackMethod::GeneratorThrow, RealmId::PRIMARY),
+        key if key == WellKnown::ToStringTag.property_key() => Value::String(
+            if asynchronous {
+                "AsyncGenerator"
+            } else {
+                "Generator"
+            }
+            .to_owned(),
+        ),
+        _ => Value::Undefined,
+    }
+}
+
+fn generator_prototype_table(closure: &Rc<Closure>) -> Option<PrototypeTable> {
+    let proto = closure.program.functions.get(closure.function as usize)?;
+    if proto.async_generator {
+        Some(PrototypeTable::AsyncGenerator)
+    } else if proto.generator {
+        Some(PrototypeTable::Generator)
+    } else {
+        None
+    }
+}
+
 fn prototype_object(closure: &Rc<Closure>) -> Value {
     let mut slot = closure.prototype.borrow_mut();
     if let Some(existing) = slot.as_ref() {
         return existing.clone();
     }
     let mut data = ObjectData::default();
-    // Not enumerated: the link back is the realm's, so `Object.keys(C.prototype)` is empty for a
-    // class that declared nothing and `for (const k in new C())` walks the fields alone.
-    data.set_non_enumerable("constructor", Value::Function(Rc::clone(closure)));
+    // A generator function's `prototype` is not an ordinary one: it carries no `constructor` at
+    // all, and it is the object its generators inherit from -- so it points at
+    // `%GeneratorPrototype%` rather than at `Object.prototype`. That is the link the chain was
+    // missing.
+    match generator_prototype_table(closure) {
+        Some(table) => {
+            data.set_prototype(Value::Native(Native::PrototypeOf(table), RealmId::PRIMARY));
+        }
+        // Not enumerated: the link back is the realm's, so `Object.keys(C.prototype)` is empty
+        // for a class that declared nothing and `for (const k in new C())` walks the fields
+        // alone.
+        None => data.set_non_enumerable("constructor", Value::Function(Rc::clone(closure))),
+    }
     let prototype = Value::Object(Rc::new(RefCell::new(data)));
     *slot = Some(prototype.clone());
     prototype
@@ -44096,6 +44161,12 @@ const DATA_VIEW_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::Na
     "setBigInt64",
     "setBigUint64",
 ]);
+/// `%GeneratorPrototype%` and `%AsyncGeneratorPrototype%` publish the same three names. The
+/// `constructor` the specification gives them is an intrinsic this engine has no object for, so
+/// it is absent rather than wrong -- see `Native::property`.
+const GENERATOR_MEMBERS: intrinsic_members::NamedMembers =
+    intrinsic_members::NamedMembers::new(&["next", "return", "throw"]);
+
 const ITERATOR_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
     "map", "filter", "take", "drop", "flatMap", "reduce", "toArray", "forEach", "some", "every",
     "find", "includes", "join",
@@ -44236,6 +44307,7 @@ fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'static [&'static
         PrototypeTable::SharedArrayBuffer => SHARED_ARRAY_BUFFER_MEMBERS.names(),
         PrototypeTable::DataView => DATA_VIEW_MEMBERS.names(),
         PrototypeTable::Iterator => ITERATOR_MEMBERS.names(),
+        PrototypeTable::Generator | PrototypeTable::AsyncGenerator => GENERATOR_MEMBERS.names(),
         PrototypeTable::Boolean | PrototypeTable::Symbol => WRAPPER_MEMBERS.names(),
         PrototypeTable::BigInt => BIG_INT_MEMBERS.names(),
         PrototypeTable::Promise => PROMISE_MEMBERS.names(),
