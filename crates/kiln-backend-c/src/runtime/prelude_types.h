@@ -342,6 +342,10 @@ typedef struct kiln_object {
     kiln_value *slots;
     size_t slot_capacity;
     kiln_value inline_slots[KILN_C99_INLINE_SLOTS];
+    /* Dense elements vector for integer keys (ADR 0050 Milestone 5) */
+    kiln_value *elements;
+    size_t element_count;
+    size_t element_capacity;
 } kiln_object;
 
 /* A prototype chain is built by the program, so its length is the program's business -- but the
