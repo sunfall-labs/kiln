@@ -7676,9 +7676,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         instruction: usize,
     ) -> Result<f64, ExecutionError> {
         match capability {
-            ClockCapability::Virtual => {
-                Ok(self.with_realm(|realm| realm.now()).as_secs_f64() * 1_000.0)
-            }
+            ClockCapability::Virtual => Ok(self.with_realm(kiln_runtime::Realm::now_milliseconds)),
             ClockCapability::Host => self
                 .host
                 .call(HostOp::ClockNow, &[])
@@ -15777,7 +15775,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // Monotonic measurement stays on the Tokio-owned virtual clock. A host-backed Date
             // must not make elapsed-time APIs jump when the operating-system wall clock changes.
             Native::PerformanceNow => Ok(Value::Number(
-                self.with_realm(|realm| realm.now()).as_secs_f64() * 1_000.0,
+                self.with_realm(kiln_runtime::Realm::now_milliseconds),
             )),
             Native::ProcessHrtimeBigInt => {
                 let nanoseconds = self.with_realm(|realm| realm.now()).as_nanos();

@@ -2146,7 +2146,7 @@ mod realm {
             let Some(now) = realm_clock_reading(&realm) else {
                 return RUNTIME_ERROR;
             };
-            let milliseconds = now.as_millis() as f64;
+            let milliseconds = kiln_runtime::epoch_milliseconds(now);
             // SAFETY: null was rejected and the caller supplies a writable slot.
             unsafe { out_milliseconds.write(milliseconds) };
             0
