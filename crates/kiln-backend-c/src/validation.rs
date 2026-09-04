@@ -415,6 +415,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::StoreGlobal(_)
         | Instruction::DefineAccessor { .. }
         | Instruction::DefineMethod
+        | Instruction::DefineNamedProperty
         | Instruction::DefinePrivate { .. }
         | Instruction::SpreadObject
         | Instruction::SpreadInto
@@ -606,7 +607,9 @@ fn stack_effect(
         }
         // The half and the key are consumed; the target stays, so a class body can define
         // several accessors on one object without reloading it.
-        Instruction::DefineAccessor { .. } | Instruction::DefineMethod => {
+        Instruction::DefineAccessor { .. }
+        | Instruction::DefineMethod
+        | Instruction::DefineNamedProperty => {
             if height < 3 {
                 Err(underflow(3))
             } else {

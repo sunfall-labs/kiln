@@ -12246,6 +12246,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 // A class's methods are properties of the class, not of anything it makes, so
                 // they are not enumerated -- see `Instruction::DefineMethod`.
+                // Like `DefineMethod`, but the property is enumerated: an object literal's
+                // members are, and a class's methods are not.
+                Instruction::DefineNamedProperty => {
+                    let function = self.pop(current)?;
+                    let key = self.pop(current)?;
+                    let coerced = self.computed_key(&key, current);
+                    let Some(key) = self.catchable(coerced, current)? else {
+                        continue;
+                    };
+                    let name = key.property_key();
+                    define_function_name(&function, &key, None);
+                    let target = self.stack.last().cloned().unwrap_or(Value::Undefined);
+                    if let Value::Object(object) = &target {
+                        object
+                            .borrow_mut()
+                            .define_value(&name, function, Attributes::DEFAULT);
+                    }
+                }
                 Instruction::DefineMethod => {
                     let function = self.pop(current)?;
                     let key = self.pop(current)?;
