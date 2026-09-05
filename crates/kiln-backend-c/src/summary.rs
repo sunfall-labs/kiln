@@ -12,8 +12,8 @@ use kiln_digest::Digest;
 use kiln_ir::{FunctionProto, Program};
 
 use crate::graph::{
-    BasicBlock, BlockId, Effect, FunctionGraph, GraphOp, GraphType, Terminator, ValueId,
-    build_function_graph,
+    BasicBlock, BlockId, Effect, FunctionGraph, GraphOp, Proven, Terminator, ValueId,
+    build_function_graph, proven_types,
 };
 
 /// Coarse lattice type representing a speculative or inferred type guess.
@@ -29,22 +29,6 @@ pub enum TypeGuess {
     Callable,
     Undefined,
     Null,
-}
-
-impl From<GraphType> for TypeGuess {
-    fn from(gt: GraphType) -> Self {
-        match gt {
-            GraphType::Val => TypeGuess::Unknown,
-            GraphType::Number => TypeGuess::Number,
-            GraphType::Int => TypeGuess::Int,
-            GraphType::Boolean => TypeGuess::Boolean,
-            GraphType::String => TypeGuess::String,
-            GraphType::Object => TypeGuess::Object,
-            GraphType::Callable => TypeGuess::Callable,
-            GraphType::Undefined => TypeGuess::Undefined,
-            GraphType::Null => TypeGuess::Null,
-        }
-    }
 }
 
 /// Compact per-function summary extracted from the SSA Value Graph / bytecode.
@@ -129,12 +113,24 @@ pub fn summarize_graph(graph: &FunctionGraph) -> FunctionSummary {
         }
     }
 
-    // Map each ValueId to its defining GraphOp and GraphType
-    let mut val_map: HashMap<ValueId, (&GraphOp, GraphType)> =
+    // Map each ValueId to its defining GraphOp and what is *proven* about its type. A summary
+    // claims nothing it cannot prove.
+    let proven = proven_types(graph);
+    let mut val_map: HashMap<ValueId, (&GraphOp, TypeGuess)> =
         HashMap::with_capacity(graph.next_value_id as usize);
     for block in &graph.blocks {
-        for (vid, op, ty) in &block.operations {
-            val_map.insert(*vid, (op, *ty));
+        for (vid, op) in &block.operations {
+            let guess = match proven.get(vid) {
+                Some(Proven::Number) => TypeGuess::Number,
+                Some(Proven::Boolean) => TypeGuess::Boolean,
+                Some(Proven::String) => TypeGuess::String,
+                Some(Proven::Object) => TypeGuess::Object,
+                Some(Proven::Callable) => TypeGuess::Callable,
+                Some(Proven::Undefined) => TypeGuess::Undefined,
+                Some(Proven::Null) => TypeGuess::Null,
+                None => TypeGuess::Unknown,
+            };
+            val_map.insert(*vid, (op, guess));
         }
     }
 
@@ -182,7 +178,7 @@ pub fn summarize_graph(graph: &FunctionGraph) -> FunctionSummary {
         .any(|b| {
             b.operations
                 .iter()
-                .any(|(_, op, _)| matches!(op, GraphOp::LoadArguments))
+                .any(|(_, op)| matches!(op, GraphOp::LoadArguments))
         });
 
     let mut can_throw = false;
@@ -192,7 +188,7 @@ pub fn summarize_graph(graph: &FunctionGraph) -> FunctionSummary {
             break;
         }
         if block.exception_handler.is_none() {
-            for (_, op, _) in &block.operations {
+            for (_, op) in &block.operations {
                 if op.effect() != Effect::Pure {
                     can_throw = true;
                     break;
@@ -212,7 +208,7 @@ pub fn summarize_graph(graph: &FunctionGraph) -> FunctionSummary {
             matches!(
                 b.terminator,
                 Terminator::Jump(_) | Terminator::Branch { .. } | Terminator::Return(_)
-            ) && b.operations.iter().all(|(_, op, _)| {
+            ) && b.operations.iter().all(|(_, op)| {
                 op.effect() == Effect::Pure || matches!(op, GraphOp::StoreLocal { .. })
             })
         });
@@ -231,7 +227,7 @@ pub fn summarize_graph(graph: &FunctionGraph) -> FunctionSummary {
 
 fn resolve_type(
     val: ValueId,
-    val_map: &HashMap<ValueId, (&GraphOp, GraphType)>,
+    val_map: &HashMap<ValueId, (&GraphOp, TypeGuess)>,
     visited: &mut HashSet<ValueId>,
 ) -> TypeGuess {
     if !visited.insert(val) {
@@ -260,7 +256,7 @@ fn resolve_type(
 
 fn collect_sites(
     val: ValueId,
-    val_map: &HashMap<ValueId, (&GraphOp, GraphType)>,
+    val_map: &HashMap<ValueId, (&GraphOp, TypeGuess)>,
     visited: &mut HashSet<ValueId>,
     sites: &mut Vec<u32>,
 ) {
@@ -295,8 +291,11 @@ fn collect_sites(
 
 /// Extract a `FunctionSummary` from a function prototype and its containing program.
 pub fn summarize_function(proto: &FunctionProto, program: &Program) -> FunctionSummary {
-    let graph = build_function_graph(proto, program);
-    summarize_graph(&graph)
+    match build_function_graph(proto, program) {
+        Ok(graph) => summarize_graph(&graph),
+        // A function the graph cannot represent has no facts to publish.
+        Err(_) => FunctionSummary::default(),
+    }
 }
 
 /// Extract summaries for all declared functions in a program.

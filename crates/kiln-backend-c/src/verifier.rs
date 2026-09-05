@@ -237,7 +237,7 @@ pub fn verify_function_graph(graph: &FunctionGraph) -> Result<(), VerifierError>
     let mut def_site: HashMap<ValueId, (BlockId, usize)> = HashMap::new();
 
     for block in &graph.blocks {
-        for (idx, (vid, _, _)) in block.operations.iter().enumerate() {
+        for (idx, (vid, _)) in block.operations.iter().enumerate() {
             if def_site.insert(*vid, (block.id, idx)).is_some() {
                 return Err(VerifierError::DuplicateValueDefinition(*vid));
             }
@@ -251,7 +251,7 @@ pub fn verify_function_graph(graph: &FunctionGraph) -> Result<(), VerifierError>
     };
 
     for block in &graph.blocks {
-        for (op_idx, (_vid, op, _)) in block.operations.iter().enumerate() {
+        for (op_idx, (_vid, op)) in block.operations.iter().enumerate() {
             let check_operand = |used_val: ValueId| -> Result<(), VerifierError> {
                 let &(def_block, def_idx) =
                     def_site.get(&used_val).ok_or(VerifierError::UseBeforeDef {
@@ -283,11 +283,7 @@ pub fn verify_function_graph(graph: &FunctionGraph) -> Result<(), VerifierError>
                 | GraphOp::CheckTdz { value, .. }
                 | GraphOp::Unary { value, .. }
                 | GraphOp::IterableToArray(value)
-                | GraphOp::ImportDynamic(value)
-                | GraphOp::UnboxNumber(value)
-                | GraphOp::BoxNumber(value)
-                | GraphOp::UnboxInt(value)
-                | GraphOp::BoxInt(value) => {
+                | GraphOp::ImportDynamic(value) => {
                     check_operand(*value)?;
                 }
                 GraphOp::Binary { left, right, .. } => {
@@ -357,32 +353,12 @@ pub fn verify_function_graph(graph: &FunctionGraph) -> Result<(), VerifierError>
                 GraphOp::SuperGet { prototype, .. } => {
                     check_operand(*prototype)?;
                 }
-                GraphOp::SuperSet {
-                    prototype, value, ..
-                } => {
-                    check_operand(*prototype)?;
-                    check_operand(*value)?;
-                }
-                GraphOp::PrivateGet { object, .. }
-                | GraphOp::PrivateMethod { object, .. }
-                | GraphOp::PrivateGetter { object, .. }
-                | GraphOp::PrivateSetter { object, .. }
-                | GraphOp::InPrivate { object, .. } => {
+                GraphOp::PrivateGet { object, .. } => {
                     check_operand(*object)?;
                 }
                 GraphOp::PrivateSet { object, value, .. } => {
                     check_operand(*object)?;
                     check_operand(*value)?;
-                }
-                GraphOp::Guard {
-                    condition,
-                    deopt_target,
-                    ..
-                } => {
-                    check_operand(*condition)?;
-                    if !block_map.contains_key(deopt_target) {
-                        return Err(VerifierError::UnknownBlock(*deopt_target));
-                    }
                 }
                 GraphOp::Phi { inputs } => {
                     if inputs.len() != block.predecessors.len()
@@ -490,7 +466,7 @@ pub fn verify_function_graph(graph: &FunctionGraph) -> Result<(), VerifierError>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::{BasicBlock, BlockId, FunctionGraph, GraphOp, GraphType, Terminator};
+    use crate::graph::{BasicBlock, BlockId, FunctionGraph, GraphOp, Terminator};
     use kiln_ir::Constant;
 
     #[test]
@@ -507,7 +483,6 @@ mod tests {
                     index: 0,
                     constant: Constant::Number(42),
                 },
-                GraphType::Number,
             )],
             terminator: Terminator::Return(Some(v0)),
             predecessors: vec![],
@@ -537,7 +512,6 @@ mod tests {
                     index: 0,
                     constant: Constant::Boolean(true),
                 },
-                GraphType::Boolean,
             )],
             terminator: Terminator::Branch {
                 condition: v_cond,
@@ -558,7 +532,6 @@ mod tests {
                     index: 1,
                     constant: Constant::Number(100),
                 },
-                GraphType::Number,
             )],
             terminator: Terminator::Return(Some(v_in_b1)),
             predecessors: vec![b0],

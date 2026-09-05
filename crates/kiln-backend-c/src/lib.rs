@@ -421,8 +421,7 @@ pub mod summary;
 pub mod verifier;
 pub use emit_graph::emit_function_from_graph;
 pub use graph::{
-    BasicBlock, BlockId, FunctionGraph, GraphOp, GraphType, SiteId, Terminator, ValueId,
-    build_function_graph,
+    BasicBlock, BlockId, FunctionGraph, GraphOp, SiteId, Terminator, ValueId, build_function_graph,
 };
 pub use rules::{
     FusedPattern, is_fused_with_previous, is_fusible_binary, match_rule, relational_op_symbol,
@@ -950,49 +949,13 @@ fn render_constant_value(symbol: &str, constant_idx: u32, constant: &Constant) -
 const GRAPH_EMITTER_ENABLED: bool = true;
 
 fn can_emit_from_graph(proto: &FunctionProto) -> bool {
-    if !GRAPH_EMITTER_ENABLED {
-        return false;
-    }
-    if proto.generator || proto.asynchronous {
-        return false;
-    }
-    if !handler_targets(&proto.code).is_empty() {
-        return false;
-    }
-    for inst in &proto.code {
-        match inst {
-            Instruction::Const(_)
-            | Instruction::LoadLocal(_)
-            | Instruction::StoreLocal(_)
-            | Instruction::Pop
-            | Instruction::Dup
-            | Instruction::Dup2
-            | Instruction::Unary(_)
-            | Instruction::Binary(_)
-            | Instruction::Jump(_)
-            | Instruction::JumpIfFalse(_)
-            | Instruction::JumpIfTruthy(_)
-            | Instruction::Return
-            | Instruction::Throw
-            | Instruction::Call { .. }
-            | Instruction::CallMethod { .. }
-            | Instruction::GetProperty(_)
-            | Instruction::SetProperty(_)
-            | Instruction::SetPropertyStrict { .. }
-            | Instruction::GetComputed
-            | Instruction::SetComputed
-            | Instruction::SetComputedStrict { .. }
-            | Instruction::NewArray { .. }
-            | Instruction::LoadGlobal(_)
-            | Instruction::StoreGlobal(_)
-            | Instruction::LoadCell(_)
-            | Instruction::StoreCell(_)
-            | Instruction::NewCell(_)
-            | Instruction::MarkUninitialized(_) => {}
-            _ => return false,
-        }
-    }
-    true
+    // Generators and handlers need frame and unwind support the graph emitter does not have
+    // yet; beyond that, the builder says what it lowers and `emit_graph::can_lower` says what
+    // it emits. There is no third list.
+    GRAPH_EMITTER_ENABLED
+        && !proto.generator
+        && !proto.asynchronous
+        && handler_targets(&proto.code).is_empty()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1007,8 +970,10 @@ fn render_function(
     strict_functions: &[bool],
 ) {
     let scalar_proto = !proto_produces_references(proto, program);
-    if can_emit_from_graph(proto) {
-        let graph = build_function_graph(proto, program);
+    if can_emit_from_graph(proto)
+        && let Ok(graph) = build_function_graph(proto, program)
+        && emit_graph::can_lower(&graph)
+    {
         // A graph the verifier rejects is a compiler bug, not a reason to use the other emitter
         // quietly. Under `KILN_GRAPH_STRICT` it aborts the build naming the function; the gate
         // sets it. It changes only whether the build fails, never what is emitted, so it cannot

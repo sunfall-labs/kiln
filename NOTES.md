@@ -160,6 +160,38 @@ reasons** — that is the interpreter backlog, sorted by how many tests each unb
 
 ---
 
+## Consolidation after the graph emitter: one proof, no second list, nothing silent (2026-09-05, Claude `kiln-fast`)
+
+Four things were removable once the emitter was correct, and each was a place two truths could
+drift apart.
+
+- **The per-operation `GraphType` on the graph is gone.** It said `a - b` was a number without
+  looking at `a` or `b`, and the summaries module (step 1.5) was reading it. What replaces it is
+  `proven_types` in `graph.rs`: a small sound lattice -- number, boolean, string, object,
+  callable, undefined, null -- computed as an optimistic fixpoint, where a value is a kind only
+  when its operation and operands prove it. Summaries now claim exactly what is proven and
+  nothing else; the emitter's `double` twins are the number slice of the same proof.
+- **The 28-entry instruction whitelist in `lib.rs` is gone.** Eligibility is now the builder
+  (`build_function_graph` returns `Err` for an instruction it does not lower, instead of the
+  `_ => {}` that silently dropped it) plus `emit_graph::can_lower`, which lives beside the arms
+  it describes. There is no third list to fall out of step.
+- **The dead speculation and private-member variants are gone** -- `Guard`, `Box*`, `Unbox*`,
+  `PrivateGetter` and friends, `SuperSet`, `ImportMeta` -- along with the verifier arms that
+  checked operands nothing produced. They come back when something produces them.
+- **A comparison of two proven numbers branches on the doubles.** `if (d3 < d9)` in the loop
+  header instead of materialising a boolean and asking it for its truthiness.
+
+What is left to delete, in order, and what each waits on: `locals[]` for slots that are not
+cells, once the emitter's LoadLocal ops are only in the entry block (they are; the array is
+kept for cells and clang already drops the dead stores); the stack-shaped
+`kiln_c99_op_val_*` prelude entry points, which the graph emitter calls through one-element
+arrays, once the stack emitter no longer needs them; and the stack emitter itself with its rule
+table -- about 4,000 lines of `lib.rs` -- once `can_lower` covers generators, handlers and the
+instructions it still refuses. That last one is the prize, and it is a coverage march through
+the native corpus, one instruction family per run.
+
+---
+
 ## The loop benchmark at 29 ms, from 233, with nothing guessed (2026-09-05, Claude `kiln-fast`)
 
 `bench/cpu/loop.mjs`, warm median, same machine at load 5: node 25 ms, stack emitter 233, graph
