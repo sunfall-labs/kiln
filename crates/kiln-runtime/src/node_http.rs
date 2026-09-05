@@ -820,6 +820,7 @@ impl HttpResponse {
             .any(|(name, _)| name.eq_ignore_ascii_case("connection"));
         let no_body = matches!(self.status, 100..=199 | 204 | 304);
         if !has_length && !no_body {
+            headers.retain(|(name, _)| !name.eq_ignore_ascii_case("transfer-encoding"));
             headers.push(("Content-Length".into(), self.body.len().to_string()));
         }
         if !has_connection && !keep_alive {
