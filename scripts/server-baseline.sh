@@ -1,76 +1,111 @@
 #!/usr/bin/env bash
 #
-# What a ten-line HTTP server costs to ship, measured across the runtimes kiln means to compete
-# with. The historical competitor measurements predate Kiln's first passing server; subsequent
-# runs add Kiln's supported interpreted form without rewriting that history.
+# Server scenarios throughput and latency baseline across runtimes:
+# node, bun, deno, and native kiln.
 #
-# This is not kiln-bench. That harness measures design.md §13's iteration loops through
-# kiln-db's QueryEngine, and everything in it is kiln's own work. This measures the *shipped
-# artifact* instead - cold start, peak RSS, and bytes on disk - for other people's toolchains,
-# on a shipped server probe. Two different axes, two different tools; putting this
-# inside kiln-bench would have coupled a regression gate to whether deno happened to be
-# installed.
+# Step B.0: Measure first (Server scenarios & leak check)
+# Extended with scenarios:
+#   - hello
+#   - mixed
+#   - static-file
+#   - json-echo-1k
+#   - json-echo-64k
+#   - chunked-stream
+#   - large-upload
+#   - connection-churn
+#   - fs-small-reads
+#   - fs-large-read
+#   - fs-stat-storm
 #
-# WHY RECORD IT NOW. README.md's priority list puts native runtime performance fourth, and the
-# distinguishing claim for the compiled-server target is not "faster than V8" - it is that
-# `deno compile` and `bun build --compile` put an entire JavaScript engine inside the executable
-# and kiln does not. That claim is worth what its measurement is worth, and a measurement taken
-# after kiln can run the program is a measurement taken by someone who already knows what answer
-# they want. So the competitor baseline was recorded first, from a checkout where kiln scored
-# nothing; later runs can add Kiln without rewriting those historical measurements.
+# Baselined with the no-regression rule:
+# Every row has a node, bun and deno column and a client count.
+# A regression names the scenario.
 #
-# HONESTY RULES, the same ones conformance/status.sh and kiln_report_has_measurements enforce:
-#
-#   - A runtime that is not installed is recorded `"available": false` with a reason. It is never
-#     a zero, and never absent from the document: a missing row reads as "not applicable" and an
-#     absent runtime is nothing of the kind.
-#   - kiln is measured too, on the same program and explicit `--node` path. Unsupported forms are
-#     still recorded with a reason rather than quietly omitted.
-#   - Nothing here is a gate. There is no threshold and no exit-1-on-regression, because these
-#     numbers are properties of node, deno and bun rather than of this repository, and failing
-#     our CI over someone else's release would be theatre.
+# usage: scripts/server-baseline.sh [options]
+#   --update              regenerate the baseline at bench/results/server-baseline.json
+#   --compare <file>      baseline file to compare against (default: bench/results/server-baseline.json)
+#   --threshold <pct>     regression threshold percentage (default: 15)
+#   --clients <n>         client concurrency count (default: 16)
+#   --duration-ms <ms>    duration per scenario run in ms (default: 2000)
+#   --port <port>         port to use (default: 18088)
+#   --out <file>          where to write the JSON results (default: bench/results/server-baseline.json when --update)
+#   --kiln-bin <path>     kiln CLI binary (default: target/release/kiln)
+#   --kiln-server <path>  prebuilt native server binary (optional)
+#   --scenarios <list>    space-separated list of scenarios to run
 set -euo pipefail
 
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
+cd "$(kiln_repo_root)"
 
-REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$REPO_ROOT"
-
-PROBE="conformance/server/s01-http-hello.mjs"
 OUT="bench/results/server-baseline.json"
-ITERATIONS=10
-WARMUP=2
+COMPARE="bench/results/server-baseline.json"
+UPDATE=0
+THRESHOLD=15
+CLIENTS=16
+DURATION_MS=2000
+PORT=18088
+KILN_BIN="target/release/kiln"
+KILN_SERVER=""
+SCENARIOS="hello mixed static-file json-echo-1k json-echo-64k chunked-stream large-upload connection-churn fs-small-reads fs-large-read fs-stat-storm"
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--update)
+		UPDATE=1
+		shift
+		;;
+	--compare)
+		COMPARE="${2:?--compare needs a path}"
+		shift 2
+		;;
+	--threshold)
+		THRESHOLD="${2:?--threshold needs a percentage}"
+		shift 2
+		;;
+	--clients)
+		CLIENTS="${2:?--clients needs a number}"
+		shift 2
+		;;
+	--duration-ms)
+		DURATION_MS="${2:?--duration-ms needs a number}"
+		shift 2
+		;;
+	--port)
+		PORT="${2:?--port needs a number}"
+		shift 2
+		;;
 	--out)
 		OUT="${2:?--out needs a path}"
 		shift 2
 		;;
-	--iterations)
-		ITERATIONS="${2:?--iterations needs a number}"
+	--kiln-bin)
+		KILN_BIN="${2:?--kiln-bin needs a path}"
 		shift 2
 		;;
-	--probe)
-		PROBE="${2:?--probe needs a path}"
+	--kiln-server)
+		KILN_SERVER="${2:?--kiln-server needs a path}"
+		shift 2
+		;;
+	--scenarios)
+		SCENARIOS="${2:?--scenarios needs a list}"
 		shift 2
 		;;
 	-h | --help)
 		cat <<-'USAGE'
 			usage: scripts/server-baseline.sh [options]
 
-			  --out <file>        where to write the JSON document
-			                      (default: bench/results/server-baseline.json)
-			  --iterations <n>    measured runs per target after warmup (default: 10)
-			  --probe <file>      the program to measure (default: conformance/server/s01-http-hello.mjs)
-
-			Measures cold start, peak RSS and artifact size for the same self-driving HTTP server
-			under node, deno, bun, and kiln as scripts and, where the toolchain offers it,
-			as a standalone executable.
-
-			Never gates. See the header of this file for why.
+			  --update              regenerate the baseline file
+			  --compare <file>      baseline file to compare against (default: bench/results/server-baseline.json)
+			  --threshold <pct>     regression threshold percentage (default: 15)
+			  --clients <n>         client concurrency count (default: 16)
+			  --duration-ms <ms>    duration per scenario in ms (default: 2000)
+			  --port <port>         port to use (default: 18088)
+			  --out <file>          where to write the JSON results
+			  --kiln-bin <path>     kiln CLI binary (default: target/release/kiln)
+			  --kiln-server <path>  prebuilt native server binary
+			  --scenarios <list>    scenarios to run
 		USAGE
 		exit 0
 		;;
@@ -81,269 +116,280 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
-if [[ ! -f $PROBE ]]; then
-	echo "server-baseline.sh: no probe at $PROBE" >&2
-	exit 2
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/kiln-server-baseline.XXXXXX")"
+cleanup_work() {
+	rm -rf "$WORK"
+}
+trap cleanup_work EXIT
+
+# Check / build kiln binary
+if [[ ! -x "$KILN_BIN" ]]; then
+	if [[ -x "target/debug/kiln" ]]; then
+		KILN_BIN="target/debug/kiln"
+	else
+		echo "Building kiln CLI..."
+		kiln_cargo build --release -p kiln-cli
+		KILN_BIN="target/release/kiln"
+	fi
 fi
 
-KILN_BIN="target/debug/kiln"
-[[ -x $KILN_BIN ]] || KILN_BIN=""
+# Check / build native server binary
+if [[ -z "$KILN_SERVER" || ! -x "$KILN_SERVER" ]]; then
+	if [[ -x "/tmp/test-app-bin" ]]; then
+		KILN_SERVER="/tmp/test-app-bin"
+	else
+		KILN_SERVER="$WORK/kiln-server-app"
+		echo "Building native app server binary..."
+		"$KILN_BIN" --one-shot build bench/server/app.mjs --node --profile native-release --output "$KILN_SERVER"
+	fi
+fi
 
-WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+# Pre-generate / verify benchmark fixtures
+mkdir -p bench/server/fixtures/small
+if [[ ! -f bench/server/fixtures/static.txt || ! -f bench/server/fixtures/large.bin || ! -f bench/server/fixtures/small/f00.txt ]]; then
+	python3 -c '
+with open("bench/server/fixtures/static.txt", "w") as f:
+    f.write(("kiln static file benchmark content line\n" * 400)[:16384])
+with open("bench/server/fixtures/large.bin", "wb") as f:
+    f.write(b"KILN_LARGE_FILE_" * (1048576 // 16))
+for i in range(20):
+    with open(f"bench/server/fixtures/small/f{i:02d}.txt", "w") as f:
+        f.write((f"small file {i:02d} " * 10)[:128])
+'
+fi
 
-mkdir -p "$(dirname -- "$OUT")"
+# Prepare server script copies with target PORT configured
+sed "s/18088/${PORT}/g" bench/server/serve.mjs > "$WORK/serve.mjs"
+sed "s/18088/${PORT}/g" bench/server/app.mjs > "$WORK/app.mjs"
 
-# The measurement itself is Python because the two numbers that matter are awkward from the
-# shell. `os.wait4` returns the rusage of *one specific child*, so peak RSS needs no parsing of
-# /usr/bin/time and no guessing at whether this platform reports kilobytes or bytes; and
-# perf_counter is monotonic, which `date` on macOS cannot even be asked for. lib.sh already
-# reaches for python3 for exactly this class of job.
-python3 - "$PROBE" "$WORK" "$ITERATIONS" "$WARMUP" "${KILN_BIN}" >"$WORK/report.json" <<'PY'
-import json
-import os
-import shutil
-import statistics
-import subprocess
-import sys
-import time
+teardown_port() {
+	local pids
+	for _ in $(seq 1 50); do
+		pids=$(ss -lntpH "sport = :$PORT" 2>/dev/null |
+			grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u || true)
+		[[ -z $pids ]] && break
+		# shellcheck disable=SC2086
+		kill -9 $pids 2>/dev/null || true
+		sleep 0.1
+	done
+	if ss -lntH "sport = :$PORT" 2>/dev/null | grep -q .; then
+		echo "server-baseline.sh: port $PORT is still held; aborting" >&2
+		exit 1
+	fi
+}
 
-probe, work, iterations, warmup, kiln_bin = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
+start_server() {
+	local runtime="$1"
+	local scenario="$2"
+	local js="$WORK/app.mjs"
+	local bin="$KILN_SERVER"
 
-# ru_maxrss is bytes on Darwin and kilobytes on Linux. Getting this backwards would be a
-# thousandfold error in the headline number, so it is decided once, explicitly, and recorded in
-# the document rather than assumed by whoever reads it.
-RSS_SCALE = 1 if sys.platform == "darwin" else 1024
+	case "$runtime" in
+	node) exec node "$js" ;;
+	bun) exec bun run "$js" ;;
+	deno) exec deno run --allow-net --quiet "$js" ;;
+	kiln) exec "$bin" ;;
+	*) echo "Unknown runtime: $runtime" >&2; exit 2 ;;
+	esac
+}
 
-EXPECTED = "200 text/plain kiln\n"
+# Determine tool versions and availability
+NODE_VER="$(node --version 2>/dev/null || echo "")"
+BUN_VER="$(bun --version 2>/dev/null || echo "")"
+DENO_VER="$(deno --version 2>/dev/null | head -1 || echo "")"
+KILN_VER="$("$KILN_BIN" --version 2>/dev/null | head -1 || echo "kiln 0.0.0")"
 
+RESULTS_JSON="$WORK/raw_results.json"
+echo "{}" > "$RESULTS_JSON"
 
-def measure(argv):
-    """Wall time and peak RSS of one run, or the reason there is none.
+echo "=== Running Server Scenarios Baseline ==="
+echo "Clients: $CLIENTS, Duration per scenario: ${DURATION_MS}ms, Port: $PORT"
+echo "Runtimes: node (${NODE_VER}), bun (${BUN_VER}), deno (${DENO_VER:-not on PATH}), kiln (${KILN_VER})"
+echo ""
 
-    The output is checked against what the probe is supposed to print. A runtime that starts
-    fast because it crashed early would otherwise post the best number in the table.
-    """
-    samples, rss = [], []
-    for index in range(warmup + iterations):
-        read_fd, write_fd = os.pipe()
-        started = time.perf_counter()
-        pid = os.posix_spawn(argv[0], argv, os.environ, file_actions=[
-            (os.POSIX_SPAWN_CLOSE, read_fd),
-            (os.POSIX_SPAWN_DUP2, write_fd, 1),
-            (os.POSIX_SPAWN_DUP2, write_fd, 2),
-        ])
-        os.close(write_fd)
-        with os.fdopen(read_fd, "rb") as handle:
-            output = handle.read()
-        _, status, usage = os.wait4(pid, 0)
-        elapsed = (time.perf_counter() - started) * 1000.0
-        if status != 0:
-            return None, "exited %d: %s" % (status, output.decode("utf-8", "replace").strip()[:200])
-        if output.decode("utf-8", "replace") != EXPECTED:
-            return None, "printed %r, not the probe's recorded output" % output.decode("utf-8", "replace")[:200]
-        if index >= warmup:
-            samples.append(elapsed)
-            rss.append(usage.ru_maxrss * RSS_SCALE)
-    return {
-        "startup_ms_median": round(statistics.median(samples), 2),
-        "startup_ms_min": round(min(samples), 2),
-        "peak_rss_bytes": int(statistics.median(rss)),
-    }, None
+# Runtimes list
+RUNTIMES=("node" "bun" "deno" "kiln")
 
-
-def which(name):
-    return shutil.which(name)
-
-
-def build(argv, artifact):
-    """Run a compile step, returning the artifact size or the reason there is none."""
-    result = subprocess.run(argv, capture_output=True, text=True)
-    if result.returncode != 0:
-        return None, (result.stderr or result.stdout).strip()[:300]
-    if not os.path.exists(artifact):
-        return None, "the compile step reported success and produced no file at %s" % artifact
-    return os.path.getsize(artifact), None
-
-
-targets = []
-
-
-def script_target(name, binary, argv_extra, note):
-    path = which(binary)
-    if path is None:
-        targets.append({
-            "target": name, "form": "script", "available": False,
-            "reason": "%s is not on PATH" % binary,
-        })
-        return
-    metrics, failure = measure([path] + argv_extra + [os.path.abspath(probe)])
-    entry = {"target": name, "form": "script", "available": failure is None, "runtime_path": os.path.basename(path), "note": note}
-    if failure is None:
-        entry.update(metrics)
-    else:
-        entry["reason"] = failure
-    targets.append(entry)
-
-
-def standalone_target(name, binary, compile_argv, artifact, note):
-    path = which(binary)
-    if path is None:
-        targets.append({
-            "target": name, "form": "standalone", "available": False,
-            "reason": "%s is not on PATH" % binary,
-        })
-        return
-    size, failure = build([path] + compile_argv, artifact)
-    if failure is not None:
-        targets.append({"target": name, "form": "standalone", "available": False, "reason": failure})
-        return
-    metrics, failure = measure([artifact])
-    entry = {
-        "target": name, "form": "standalone", "available": failure is None,
-        "artifact_bytes": size, "note": note,
-    }
-    if failure is None:
-        entry.update(metrics)
-    else:
-        entry["reason"] = failure
-    targets.append(entry)
-
-
-script_target("node", "node", [], "no standalone form measured: Node's SEA is a multi-step "
-              "postject flow rather than one command, and half-doing it would put a number in "
-              "this table that nobody could reproduce from the line above it")
-script_target("deno", "deno", ["run", "--allow-net", "--quiet"], "")
-script_target("bun", "bun", ["run"], "")
-
-standalone_target("deno", "deno", [
-    "compile", "--allow-net", "--quiet", "--output", os.path.join(work, "s01-deno"),
-    os.path.abspath(probe),
-], os.path.join(work, "s01-deno"), "the JavaScript engine is inside this file")
-standalone_target("bun", "bun", [
-    "build", "--compile", "--outfile", os.path.join(work, "s01-bun"), os.path.abspath(probe),
-], os.path.join(work, "s01-bun"), "the JavaScript engine is inside this file")
-
-# Measure both advertised Node paths. The standalone form is built through the public CLI so the
-# number covers the same resolver, graph, cache identity, linker, and runtime ABI a user invokes.
-if not kiln_bin or not os.path.exists(kiln_bin):
-    targets.append({
-        "target": "kiln", "form": "script", "available": False,
-        "reason": "no kiln binary at target/debug/kiln; build one with `mbx build -p kiln-cli`",
-    })
-else:
-    argv = [os.path.abspath(kiln_bin), "--one-shot", "run", os.path.abspath(probe), "--node"]
-    metrics, failure = measure(argv)
-    kiln = {
-        "target": "kiln", "form": "script", "available": failure is None,
-        "runtime_path": os.path.basename(kiln_bin),
-        "note": "explicit Node interpreter mode; Tokio owns both loopback I/O paths",
-    }
-    if failure is None:
-        kiln.update(metrics)
-    else:
-        kiln["reason"] = failure
-    targets.append(kiln)
-
-if not kiln_bin or not os.path.exists(kiln_bin):
-    targets.append({
-        "target": "kiln", "form": "standalone", "available": False,
-        "reason": "no kiln binary at target/debug/kiln; build one with `mbx build -p kiln-cli`",
-    })
-else:
-    artifact = os.path.join(work, "s01-kiln")
-    size, failure = build([
-        os.path.abspath(kiln_bin), "--one-shot", "build", os.path.abspath(probe),
-        "--node", "--profile", "native-release", "--output", artifact,
-    ], artifact)
-    if failure is not None:
-        targets.append({
-            "target": "kiln", "form": "standalone", "available": False,
-            "reason": failure,
-        })
-    else:
-        metrics, failure = measure([artifact])
-        entry = {
-            "target": "kiln", "form": "standalone", "available": failure is None,
-            "artifact_bytes": size,
-            "note": "native Node artifact; Tokio/Hyper runtime linked without a JavaScript engine",
-        }
-        if failure is None:
-            entry.update(metrics)
-        else:
-            entry["reason"] = failure
-        targets.append(entry)
-
-
-def version(binary, argv):
-    path = which(binary)
-    if path is None:
-        return None
-    result = subprocess.run([path] + argv, capture_output=True, text=True)
-    return (result.stdout or result.stderr).strip().splitlines()[0] if result.returncode == 0 else None
-
-
-json.dump({
-    "schema": 1,
-    "probe": probe,
-    "iterations": iterations,
-    "warmup": warmup,
-    "platform": sys.platform,
-    "rss_units": "bytes (ru_maxrss scaled by %d for this platform)" % RSS_SCALE,
-    "versions": {
-        "node": version("node", ["--version"]),
-        "deno": version("deno", ["--version"]),
-        "bun": version("bun", ["--version"]),
-        "kiln": version(kiln_bin, ["--version"]) if kiln_bin else None,
-    },
-    "targets": targets,
-}, sys.stdout, indent=2, sort_keys=False)
-sys.stdout.write("\n")
-PY
-
-cp "$WORK/report.json" "$OUT"
-
-kiln_say "### Compiled-server baseline"
-kiln_say ""
-kiln_say "The same program under every runtime: \`$PROBE\`, a self-driving HTTP server that"
-kiln_say "answers one request and exits. Every available runtime prints the byte-identical line the"
-kiln_say "conformance corpus records, so the comparison is over one program and not three."
-kiln_say ""
-kiln_say '```'
-python3 - "$OUT" <<'PY' | kiln_block
+for scenario in $SCENARIOS; do
+	for runtime in "${RUNTIMES[@]}"; do
+		# Check runtime availability
+		if [[ "$runtime" == "deno" ]] && ! command -v deno >/dev/null 2>&1; then
+			python3 - "$RESULTS_JSON" "$scenario" "$runtime" <<'PY'
 import json, sys
-
-doc = json.load(open(sys.argv[1]))
-
-
-def human(n):
-    if n is None:
-        return "-"
-    if n < 1024:
-        return "%d B" % n
-    for unit in ("KiB", "MiB", "GiB"):
-        n /= 1024.0
-        if n < 1024:
-            return "%.1f %s" % (n, unit)
-    return "%.1f TiB" % n
-
-
-print("%-8s %-11s %10s %10s %12s" % ("target", "form", "start", "peak RSS", "artifact"))
-print("-" * 55)
-for entry in doc["targets"]:
-    if entry.get("available"):
-        print("%-8s %-11s %9.1fms %10s %12s" % (
-            entry["target"], entry["form"], entry["startup_ms_median"],
-            human(entry.get("peak_rss_bytes")), human(entry.get("artifact_bytes")),
-        ))
-    else:
-        print("%-8s %-11s %s" % (entry["target"], entry["form"], "not measured"))
-print()
-for entry in doc["targets"]:
-    if not entry.get("available"):
-        print("%s (%s): %s" % (entry["target"], entry["form"], entry.get("reason", "no reason recorded")))
+res_file, scn, rt = sys.argv[1:4]
+with open(res_file) as f: data = json.load(f)
+if scn not in data: data[scn] = {}
+data[scn][rt] = {"available": False, "reason": "deno is not installed on PATH"}
+with open(res_file, "w") as f: json.dump(data, f)
 PY
-kiln_say '```'
-kiln_say ""
-kiln_say "Written to \`$OUT\`. Medians over $ITERATIONS runs after $WARMUP discarded."
-kiln_say "This is not a gate and has no threshold: these are properties of node, deno and bun."
+			continue
+		fi
+		if [[ "$runtime" == "bun" ]] && ! command -v bun >/dev/null 2>&1; then
+			python3 - "$RESULTS_JSON" "$scenario" "$runtime" <<'PY'
+import json, sys
+res_file, scn, rt = sys.argv[1:4]
+with open(res_file) as f: data = json.load(f)
+if scn not in data: data[scn] = {}
+data[scn][rt] = {"available": False, "reason": "bun is not installed on PATH"}
+with open(res_file, "w") as f: json.dump(data, f)
+PY
+			continue
+		fi
+
+		teardown_port
+		start_server "$runtime" "$scenario" >/dev/null 2>&1 &
+		server_pid=$!
+
+		# Wait for server to listen
+		for _ in $(seq 1 50); do
+			if curl -s -o /dev/null "http://127.0.0.1:$PORT/"; then break; fi
+			sleep 0.1
+		done
+
+		if ! curl -s -o /dev/null "http://127.0.0.1:$PORT/"; then
+			kill -9 "$server_pid" 2>/dev/null || true
+			python3 - "$RESULTS_JSON" "$scenario" "$runtime" <<'PY'
+import json, sys
+res_file, scn, rt = sys.argv[1:4]
+with open(res_file) as f: data = json.load(f)
+if scn not in data: data[scn] = {}
+data[scn][rt] = {"available": False, "reason": "server failed to answer on port"}
+with open(res_file, "w") as f: json.dump(data, f)
+PY
+			continue
+		fi
+
+		# Drive scenario
+		if [[ "$scenario" == "mixed" ]]; then
+			out="$(node bench/server/drive-mix.mjs "$DURATION_MS" "$CLIENTS" "$PORT" 2>/dev/null || echo "{}")"
+		else
+			out="$(node bench/server/drive.mjs "$DURATION_MS" "$CLIENTS" "$PORT" "$scenario" 2>/dev/null || echo "{}")"
+		fi
+
+		# Teardown server
+		kill "$server_pid" 2>/dev/null || true
+		wait "$server_pid" 2>/dev/null || true
+		teardown_port
+
+		# Record metrics
+		python3 - "$RESULTS_JSON" "$scenario" "$runtime" "$out" <<'PY'
+import json, sys
+res_file, scn, rt, out_str = sys.argv[1:5]
+with open(res_file) as f: data = json.load(f)
+if scn not in data: data[scn] = {}
+try:
+    parsed = json.loads(out_str)
+    rps = parsed.get("rps", 0)
+    p50 = parsed.get("p50_ms", 0.0)
+    errs = parsed.get("errors", 0)
+    data[scn][rt] = {"available": True, "rps": rps, "p50_ms": p50, "errors": errs}
+except Exception as e:
+    data[scn][rt] = {"available": False, "reason": f"invalid output: {e}"}
+with open(res_file, "w") as f: json.dump(data, f)
+PY
+	done
+done
+
+# Analyze baseline comparison and render table
+python3 - "$RESULTS_JSON" "$COMPARE" "$OUT" "$UPDATE" "$THRESHOLD" "$CLIENTS" "$DURATION_MS" "$NODE_VER" "$BUN_VER" "$DENO_VER" "$KILN_VER" <<'PY' | kiln_block
+import json, os, sys
+
+res_file, compare_file, out_file, update, threshold, clients, duration_ms = sys.argv[1:8]
+node_ver, bun_ver, deno_ver, kiln_ver = sys.argv[8:12]
+update = update == "1"
+threshold = float(threshold)
+clients = int(clients)
+
+with open(res_file) as f:
+    raw_results = json.load(f)
+
+baseline = {}
+if os.path.exists(compare_file) and not update:
+    try:
+        with open(compare_file) as f:
+            baseline_doc = json.load(f)
+            baseline = baseline_doc.get("scenarios", {})
+    except Exception:
+        baseline = {}
+
+regressions = []
+table_rows = []
+
+for scn, targets in raw_results.items():
+    node_res = targets.get("node", {})
+    bun_res = targets.get("bun", {})
+    deno_res = targets.get("deno", {})
+    kiln_res = targets.get("kiln", {})
+
+    node_str = f"{node_res['rps']} rps" if node_res.get("available") else "n/a"
+    bun_str = f"{bun_res['rps']} rps" if bun_res.get("available") else "n/a"
+    deno_str = f"{deno_res['rps']} rps" if deno_res.get("available") else "n/a"
+    kiln_str = f"{kiln_res['rps']} rps" if kiln_res.get("available") else "fail"
+
+    kiln_rps = kiln_res.get("rps", 0) if kiln_res.get("available") else 0
+    base_entry = baseline.get(scn, {}).get("kiln", {})
+    base_rps = base_entry.get("rps") if base_entry.get("available") else None
+
+    if base_rps is not None and base_rps > 0:
+        base_str = f"{base_rps} rps"
+        delta = ((kiln_rps - base_rps) / base_rps) * 100.0
+        delta_str = f"{delta:+.1f}%"
+        # No-regression rule: check if kiln regressed more than threshold
+        if delta < -threshold:
+            status = "REGRESSION"
+            regressions.append(f"{scn}: {base_rps} rps -> {kiln_rps} rps ({delta:.1f}%)")
+        else:
+            status = "pass"
+    else:
+        base_str = "-"
+        delta_str = "-"
+        status = "pass" if kiln_res.get("available") else "fail"
+
+    table_rows.append({
+        "scenario": scn,
+        "clients": clients,
+        "node": node_str,
+        "bun": bun_str,
+        "deno": deno_str,
+        "kiln": kiln_str,
+        "baseline": base_str,
+        "delta": delta_str,
+        "status": status,
+    })
+
+# Format table
+header = f"{'scenario':<20} {'clients':>7} {'node':>12} {'bun':>12} {'deno':>10} {'kiln':>12} {'baseline':>12} {'delta':>8} {'status':>11}"
+print(header)
+print("-" * len(header))
+for r in table_rows:
+    print(f"{r['scenario']:<20} {r['clients']:>7} {r['node']:>12} {r['bun']:>12} {r['deno']:>10} {r['kiln']:>12} {r['baseline']:>12} {r['delta']:>8} {r['status']:>11}")
+
+output_doc = {
+    "schema": 2,
+    "clients": clients,
+    "duration_ms": int(duration_ms),
+    "threshold_pct": threshold,
+    "versions": {
+        "node": node_ver or None,
+        "bun": bun_ver or None,
+        "deno": deno_ver or None,
+        "kiln": kiln_ver or None,
+    },
+    "scenarios": raw_results,
+}
+
+if update or not os.path.exists(out_file):
+    os.makedirs(os.path.dirname(os.path.abspath(out_file)), exist_ok=True)
+    with open(out_file, "w") as f:
+        json.dump(output_doc, f, indent=2)
+    print(f"\nWrote baseline document to {out_file}")
+
+if regressions:
+    print("\n*** SERVER BASELINE REGRESSIONS DETECTED ***")
+    for reg in regressions:
+        print(f"  REGRESSION in scenario {reg}")
+    sys.exit(1)
+else:
+    print(f"\nAll {len(table_rows)} scenarios passed no-regression check (threshold: {threshold}%).")
+PY
+

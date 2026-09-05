@@ -5,9 +5,14 @@
 set -euo pipefail
 procs="${1:?processes}"; conns="${2:?connections per process}"; duration="${3:-5000}"; port="${4:-18088}"; workload="${5:-hello}"
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-driver=drive.mjs; [[ $workload == mixed ]] && driver=drive-mix.mjs
 tmp="$(mktemp -d)"
-for i in $(seq 1 "$procs"); do node "$HERE/$driver" "$duration" "$conns" "$port" > "$tmp/$i.json" & done
+for i in $(seq 1 "$procs"); do
+	if [[ $workload == mixed ]]; then
+		node "$HERE/drive-mix.mjs" "$duration" "$conns" "$port" > "$tmp/$i.json" &
+	else
+		node "$HERE/drive.mjs" "$duration" "$conns" "$port" "$workload" > "$tmp/$i.json" &
+	fi
+done
 wait
 python3 - "$tmp" "$procs" "$conns" <<'PY'
 import json,sys,glob

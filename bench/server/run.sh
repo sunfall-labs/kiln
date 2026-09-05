@@ -32,12 +32,8 @@ CONCURRENCIES="${CONCURRENCIES:-1 16 64}"
 WORKLOAD="${WORKLOAD:-hello}"
 PORT="${PORT:-18088}"
 case "$WORKLOAD" in
-hello) DRIVER=drive.mjs ;;
 mixed) DRIVER=drive-mix.mjs ;;
-*)
-	echo "run.sh: WORKLOAD must be hello or mixed, not '$WORKLOAD'" >&2
-	exit 2
-	;;
+*) DRIVER=drive.mjs ;;
 esac
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -66,7 +62,11 @@ echo "server=$label workload=$WORKLOAD pid=$server rss_start_kib=$(rss)"
 for round in $(seq 1 "$ROUNDS"); do
 	for c in $CONCURRENCIES; do
 		printf 'round=%s c=%-3s ' "$round" "$c"
-		node "$HERE/$DRIVER" "$DURATION_MS" "$c" "$PORT" | cut -c1-160
+		if [[ "$WORKLOAD" == "mixed" ]]; then
+			node "$HERE/$DRIVER" "$DURATION_MS" "$c" "$PORT" | cut -c1-160
+		else
+			node "$HERE/$DRIVER" "$DURATION_MS" "$c" "$PORT" "$WORKLOAD" | cut -c1-160
+		fi
 	done
 done
 echo "server=$label rss_end_kib=$(rss) alive=$(ps -p "$server" -o pid= | tr -d ' ')"
