@@ -4,6 +4,9 @@ static void *kiln_c99_node_hidden_pointer(kiln_value object, const char *key, si
 static int kiln_c99_node_materialize_header(kiln_value headers_obj, const char *key, size_t key_len, kiln_value *out);
 static void kiln_c99_node_materialize_all_headers(kiln_value headers_obj);
 static int kiln_c99_node_has_lazy_header(kiln_value headers_obj, const char *key, size_t key_len);
+static int kiln_c99_val_call(kiln_host *host, kiln_val callee, const kiln_val *args, size_t argc,
+                             int depth, kiln_value *thrown, const char *inst_site, size_t inst_idx,
+                             const char *inst_op, kiln_val *out);
 
 static int kiln_c99_backlog_names(const char *owner, const char *key, size_t key_len) {
     size_t index;
@@ -1111,17 +1114,76 @@ static kiln_value kiln_c99_static_text(const char *text, size_t len) {
     return kiln_c99_value(KILN_VALUE_STRING, 0, text, len);
 }
 
-static const char kiln_c99_empty_string[] = "";
+static inline size_t kiln_c99_utf8_to_utf16_len(const char *text, size_t len) {
+    size_t count = 0;
+    for (size_t i = 0; i < len; ++i) {
+        unsigned char b = (unsigned char)text[i];
+        if ((b & 0xC0) != 0x80) {
+            count += ((b & 0xF8) == 0xF0) ? 2 : 1;
+        }
+    }
+    return count;
+}
+
+static kiln_val kiln_c99_val_from_text(const char *bytes, size_t len) {
+    if (len == 0 || bytes == NULL) {
+        return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_c99_empty_string);
+    }
+    if (len == 1 && (unsigned char)bytes[0] < 128) {
+        return kiln_c99_val_single_char((unsigned char)bytes[0]);
+    }
+    char *copy = kiln_c99_gc_alloc_text(len);
+    if (copy == NULL) {
+        return KILN_VAL_UNDEFINED;
+    }
+    memcpy(copy, bytes, len);
+    kiln_string *s = ((kiln_string *)copy) - 1;
+    int is_ascii = 1;
+    for (size_t i = 0; i < len; ++i) {
+        if ((unsigned char)copy[i] >= 0x80) { is_ascii = 0; break; }
+    }
+    s->length = is_ascii ? len : kiln_c99_utf8_to_utf16_len(copy, len);
+    s->byte_len = len;
+    s->bytes = copy;
+    return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, s);
+}
+
+static kiln_val kiln_c99_val_from_ascii(const char *bytes, size_t len) {
+    if (len == 0 || bytes == NULL) {
+        return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_c99_empty_string);
+    }
+    if (len == 1 && (unsigned char)bytes[0] < 128) {
+        return kiln_c99_val_single_char((unsigned char)bytes[0]);
+    }
+    char *copy = kiln_c99_gc_alloc_text(len);
+    if (copy == NULL) {
+        return KILN_VAL_UNDEFINED;
+    }
+    memcpy(copy, bytes, len);
+    kiln_string *s = ((kiln_string *)copy) - 1;
+    s->length = len;
+    s->byte_len = len;
+    s->bytes = copy;
+    return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, s);
+}
 
 static kiln_value kiln_c99_copy_text(const char *text, size_t len) {
-    if (len == 0) {
-        return kiln_c99_value(KILN_VALUE_STRING, 0, kiln_c99_empty_string, 0);
+    if (len == 0 || text == NULL) {
+        return kiln_c99_value(KILN_VALUE_STRING, 0, kiln_c99_empty_chars, 0);
     }
     char *copy = kiln_c99_gc_alloc_text(len);
     if (copy == NULL) {
         return kiln_c99_undefined();
     }
     memcpy(copy, text, len);
+    kiln_string *s = ((kiln_string *)copy) - 1;
+    int is_ascii = 1;
+    for (size_t i = 0; i < len; ++i) {
+        if ((unsigned char)copy[i] >= 0x80) { is_ascii = 0; break; }
+    }
+    s->length = is_ascii ? len : kiln_c99_utf8_to_utf16_len(copy, len);
+    s->byte_len = len;
+    s->bytes = copy;
     return kiln_c99_value(KILN_VALUE_STRING, 0, copy, len);
 }
 
@@ -4697,10 +4759,16 @@ static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_v
             }
         }
         /* Growing leaves holes, which read as undefined and are not the same thing. */
+        if (slot > array->count) {
+            array->is_numeric = 0;
+        }
         for (fill = array->count; fill < slot; ++fill) {
             array->elements[fill] = KILN_VAL_HOLE;
         }
         array->elements[slot] = kiln_val_from_boundary(value);
+        if (array->is_numeric && !KILN_VAL_IS_NUMBER(array->elements[slot])) {
+            array->is_numeric = 0;
+        }
         if (slot + 1 > array->count) {
             array->count = slot + 1;
         }
@@ -5009,7 +5077,11 @@ static int kiln_c99_array_push(kiln_value target, kiln_value value) {
     if (status != KILN_C99_OK) {
         return status;
     }
-    array->elements[array->count] = kiln_val_from_boundary(value);
+    kiln_val v = kiln_val_from_boundary(value);
+    if (array->is_numeric && !KILN_VAL_IS_NUMBER(v)) {
+        array->is_numeric = 0;
+    }
+    array->elements[array->count] = v;
     array->count += 1;
     return KILN_C99_OK;
 }
@@ -5020,6 +5092,9 @@ static int kiln_c99_array_push_val(kiln_value target, kiln_val value) {
                                   sizeof *array->elements);
     if (status != KILN_C99_OK) {
         return status;
+    }
+    if (array->is_numeric && !KILN_VAL_IS_NUMBER(value)) {
+        array->is_numeric = 0;
     }
     array->elements[array->count] = value;
     array->count += 1;
@@ -5714,6 +5789,100 @@ static size_t kiln_c99_unit_position(kiln_value value, size_t length, size_t fal
  * -- every one of these works on code units and every one of those works on elements. */
 static int kiln_c99_invoke_string_method(kiln_value *result, uint64_t code, kiln_value receiver,
                                          const kiln_value *args, size_t argc) {
+    if (kiln_c99_string_is_ascii(receiver)) {
+        if (code == KILN_C99_METHOD_STRING_SLICE || code == KILN_C99_METHOD_SUBSTRING) {
+            int relative = (code == KILN_C99_METHOD_STRING_SLICE);
+            size_t start = kiln_c99_unit_position(argc > 0 ? args[0] : kiln_c99_undefined(), receiver.len, 0, relative);
+            size_t end = kiln_c99_unit_position(argc > 1 ? args[1] : kiln_c99_undefined(), receiver.len, receiver.len, relative);
+            if (!relative && start > end) {
+                size_t swap = start;
+                start = end;
+                end = swap;
+            }
+            if (start >= end) {
+                *result = kiln_c99_static_text("", 0);
+            } else {
+                *result = kiln_c99_copy_text(receiver.ptr + start, end - start);
+            }
+            return KILN_C99_OK;
+        }
+        if (code == KILN_C99_METHOD_STRING_INDEX_OF || code == KILN_C99_METHOD_STRING_INCLUDES) {
+            kiln_value needle_arg = argc > 0 ? args[0] : kiln_c99_undefined();
+            kiln_value shown = kiln_c99_text(needle_arg);
+            if (shown.tag == KILN_VALUE_STRING && kiln_c99_string_is_ascii(shown)) {
+                size_t from = kiln_c99_unit_position(argc > 1 ? args[1] : kiln_c99_undefined(), receiver.len, 0, 0);
+                if (shown.len == 0) {
+                    double at = from > receiver.len ? (double)receiver.len : (double)from;
+                    if (code == KILN_C99_METHOD_STRING_INDEX_OF) *result = kiln_c99_number(at);
+                    else *result = kiln_c99_boolean(1);
+                    return KILN_C99_OK;
+                }
+                if (from >= receiver.len) {
+                    if (code == KILN_C99_METHOD_STRING_INDEX_OF) *result = kiln_c99_number(-1.0);
+                    else *result = kiln_c99_boolean(0);
+                    return KILN_C99_OK;
+                }
+                const char *found = kiln_c99_memmem(receiver.ptr + from, receiver.len - from, shown.ptr, shown.len);
+                if (code == KILN_C99_METHOD_STRING_INDEX_OF) {
+                    *result = kiln_c99_number(found != NULL ? (double)(found - receiver.ptr) : -1.0);
+                } else {
+                    *result = kiln_c99_boolean(found != NULL);
+                }
+                return KILN_C99_OK;
+            }
+        }
+        if (code == KILN_C99_METHOD_SPLIT) {
+            kiln_value sep = argc > 0 ? args[0] : kiln_c99_undefined();
+            if (sep.tag == KILN_VALUE_UNDEFINED) {
+                kiln_value built;
+                int st = kiln_c99_new_array_with_capacity(&built, 1, 0);
+                if (st != KILN_C99_OK) return st;
+                kiln_array *arr = kiln_c99_array_of(built);
+                arr->elements[arr->count++] = kiln_val_from_boundary(receiver);
+                *result = built;
+                return KILN_C99_OK;
+            }
+            kiln_value shown = kiln_c99_text(sep);
+            if (shown.tag == KILN_VALUE_STRING && kiln_c99_string_is_ascii(shown)) {
+                kiln_value built;
+                if (shown.len == 0) {
+                    int st = kiln_c99_new_array_with_capacity(&built, receiver.len, 0);
+                    if (st != KILN_C99_OK) return st;
+                    kiln_array *arr = kiln_c99_array_of(built);
+                    for (size_t i = 0; i < receiver.len; ++i) {
+                        arr->elements[arr->count++] = kiln_c99_val_single_char((unsigned char)receiver.ptr[i]);
+                    }
+                    *result = built;
+                    return KILN_C99_OK;
+                }
+                int st = kiln_c99_new_array_with_capacity(&built, 8, 0);
+                if (st != KILN_C99_OK) return st;
+                const char *p = receiver.ptr;
+                const char *end = receiver.ptr + receiver.len;
+                while (p <= end) {
+                    const char *next = NULL;
+                    if (shown.len == 1) {
+                        next = (const char *)memchr(p, shown.ptr[0], (size_t)(end - p));
+                    } else {
+                        next = kiln_c99_memmem(p, (size_t)(end - p), shown.ptr, shown.len);
+                    }
+                    if (next != NULL) {
+                        kiln_value piece = kiln_c99_copy_text(p, (size_t)(next - p));
+                        st = kiln_c99_array_push(built, piece);
+                        if (st != KILN_C99_OK) return st;
+                        p = next + shown.len;
+                    } else {
+                        kiln_value piece = kiln_c99_copy_text(p, (size_t)(end - p));
+                        st = kiln_c99_array_push(built, piece);
+                        if (st != KILN_C99_OK) return st;
+                        break;
+                    }
+                }
+                *result = built;
+                return KILN_C99_OK;
+            }
+        }
+    }
     uint16_t *units = NULL;
     uint16_t *needle = NULL;
     size_t count = 0;
@@ -15794,6 +15963,16 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 element == KILN_VAL_HOLE) {
                 continue;
             }
+            if (KILN_VAL_IS_STRING(element)) {
+                const kiln_string *s = (const kiln_string *)KILN_VAL_PTR(element);
+                if (s != NULL && s->byte_len > 0) {
+                    if (kiln_c99_text_append(&joined, s->bytes, s->byte_len) != KILN_C99_OK) {
+                        free(joined.bytes);
+                        return KILN_C99_OUT_OF_MEMORY;
+                    }
+                }
+                continue;
+            }
             {
                 kiln_value shown = kiln_c99_text(kiln_val_to_boundary(element));
                 if (shown.tag != KILN_VALUE_STRING ||
@@ -15846,15 +16025,15 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         size_t end = kiln_c99_relative_index(argc > 1 ? args[1] : kiln_c99_undefined(),
                                              array->count, array->count);
         kiln_value built;
-        status = kiln_c99_new_array(&built);
+        size_t slice_len = (end > start && start < array->count) ? (end < array->count ? end - start : array->count - start) : 0;
+        status = kiln_c99_new_array_with_capacity(&built, slice_len, array->is_numeric);
         if (status != KILN_C99_OK) {
             return status;
         }
-        for (index = start; index < end && index < array->count; ++index) {
-            status = kiln_c99_array_push(built, kiln_val_to_boundary(array->elements[index]));
-            if (status != KILN_C99_OK) {
-                return status;
-            }
+        if (slice_len > 0) {
+            kiln_array *b_arr = kiln_c99_array_of(built);
+            memcpy(b_arr->elements, array->elements + start, slice_len * sizeof(kiln_val));
+            b_arr->count = slice_len;
         }
         *result = built;
         return KILN_C99_OK;
@@ -16045,6 +16224,61 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         kiln_value built = kiln_c99_undefined();
         kiln_value callback = argc > 0 ? args[0] : kiln_c99_undefined();
         kiln_value self_value = argc > 1 ? args[1] : kiln_c99_undefined();
+        kiln_val vcallee = kiln_val_from_boundary(callback);
+        if (code == KILN_C99_METHOD_MAP && KILN_VAL_IS_CLOSURE(vcallee) && self_value.tag == KILN_VALUE_UNDEFINED) {
+            kiln_value built_val;
+            status = kiln_c99_new_array_with_capacity(&built_val, array->count, array->is_numeric);
+            if (status != KILN_C99_OK) return status;
+            kiln_array *built_arr = kiln_c99_array_of(built_val);
+            kiln_val vrecv = kiln_val_from_boundary(receiver);
+            size_t length = array->count;
+            for (index = 0; index < length && index < array->count; ++index) {
+                if (array->elements[index] == KILN_VAL_HOLE) {
+                    built_arr->elements[built_arr->count++] = KILN_VAL_HOLE;
+                    built_arr->is_numeric = 0;
+                    continue;
+                }
+                kiln_val vvisit[3];
+                vvisit[0] = array->elements[index];
+                vvisit[1] = kiln_c99_val_from_double((double)index);
+                vvisit[2] = vrecv;
+                kiln_val prod = KILN_VAL_UNDEFINED;
+                status = kiln_c99_val_call(host, vcallee, vvisit, 3, depth, thrown, NULL, 0, NULL, &prod);
+                if (status != KILN_C99_OK) return status;
+                if (built_arr->is_numeric && !KILN_VAL_IS_NUMBER(prod)) {
+                    built_arr->is_numeric = 0;
+                }
+                built_arr->elements[built_arr->count++] = prod;
+            }
+            *result = built_val;
+            return KILN_C99_OK;
+        }
+        if (code == KILN_C99_METHOD_FILTER && KILN_VAL_IS_CLOSURE(vcallee) && self_value.tag == KILN_VALUE_UNDEFINED) {
+            kiln_value built_val;
+            status = kiln_c99_new_array_with_capacity(&built_val, array->count, array->is_numeric);
+            if (status != KILN_C99_OK) return status;
+            kiln_array *built_arr = kiln_c99_array_of(built_val);
+            kiln_val vrecv = kiln_val_from_boundary(receiver);
+            size_t length = array->count;
+            for (index = 0; index < length && index < array->count; ++index) {
+                if (array->elements[index] == KILN_VAL_HOLE) {
+                    continue;
+                }
+                kiln_val elem = array->elements[index];
+                kiln_val vvisit[3];
+                vvisit[0] = elem;
+                vvisit[1] = kiln_c99_val_from_double((double)index);
+                vvisit[2] = vrecv;
+                kiln_val prod = KILN_VAL_UNDEFINED;
+                status = kiln_c99_val_call(host, vcallee, vvisit, 3, depth, thrown, NULL, 0, NULL, &prod);
+                if (status != KILN_C99_OK) return status;
+                if (kiln_c99_val_truthy(prod)) {
+                    built_arr->elements[built_arr->count++] = elem;
+                }
+            }
+            *result = built_val;
+            return KILN_C99_OK;
+        }
         if (code != KILN_C99_METHOD_FOR_EACH) {
             status = kiln_c99_new_array(&built);
             if (status != KILN_C99_OK) {
@@ -16472,6 +16706,27 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             }
             accumulator = kiln_val_to_boundary(array->elements[index]);
             index += 1;
+        }
+        kiln_val vcallee = kiln_val_from_boundary(callback);
+        if (KILN_VAL_IS_CLOSURE(vcallee)) {
+            kiln_val vacc = kiln_val_from_boundary(accumulator);
+            kiln_val vrecv = kiln_val_from_boundary(receiver);
+            for (; index < length && index < array->count; ++index) {
+                if (array->elements[index] == KILN_VAL_HOLE) {
+                    continue;
+                }
+                kiln_val vvisit[4];
+                vvisit[0] = vacc;
+                vvisit[1] = array->elements[index];
+                vvisit[2] = kiln_c99_val_from_double((double)index);
+                vvisit[3] = vrecv;
+                status = kiln_c99_val_call(host, vcallee, vvisit, 4, depth, thrown, NULL, 0, NULL, &vacc);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+            }
+            *result = kiln_val_to_boundary(vacc);
+            return KILN_C99_OK;
         }
         for (; index < length && index < array->count; ++index) {
             kiln_value visit[4];
@@ -16936,6 +17191,7 @@ static int kiln_c99_delete(kiln_host *host, kiln_value target, const char *key, 
         }
         if (slot >= 0.0 && (size_t)slot < array->count) {
             array->elements[(size_t)slot] = KILN_VAL_HOLE;
+            array->is_numeric = 0;
         }
         return KILN_C99_OK;
     }
@@ -25164,18 +25420,11 @@ static kiln_value kiln_val_to_boundary(kiln_val v) {
             uint64_t tag = v & KILN_TAG_MASK;
             void *ptr = KILN_VAL_PTR(v);
             if (tag == KILN_TAG_STRING_PREFIX) {
-                const char *p = (const char *)ptr;
-                size_t len = 0;
-                if (p) {
-                    kiln_gc_heap *heap = kiln_c99_gc_heap();
-                    kiln_gc_block *block = heap != NULL ? kiln_c99_gc_lookup(heap, p) : NULL;
-                    if (block != NULL && (block->kind & KILN_GC_KIND_MASK) == KILN_GC_STRING) {
-                        len = block->size;
-                    } else {
-                        len = strlen(p);
-                    }
+                const kiln_string *s = (const kiln_string *)ptr;
+                if (s == NULL) {
+                    return kiln_c99_value(KILN_VALUE_STRING, 0, kiln_c99_empty_chars, 0);
                 }
-                return kiln_c99_value(KILN_VALUE_STRING, 0, p, len);
+                return kiln_c99_value(KILN_VALUE_STRING, 0, s->bytes, s->byte_len);
             }
             if (tag == KILN_TAG_CLOSURE_PREFIX) {
                 return kiln_c99_value(KILN_VALUE_FUNCTION, (uint64_t)(uintptr_t)ptr, NULL, 0);
@@ -25220,6 +25469,10 @@ static kiln_value kiln_val_to_boundary(kiln_val v) {
 }
 
 static size_t kiln_c99_val_string_length(kiln_val v) {
+    if (KILN_LIKELY(KILN_VAL_IS_STRING(v))) {
+        const kiln_string *s = (const kiln_string *)KILN_VAL_PTR(v);
+        if (s != NULL) return s->length;
+    }
     return kiln_c99_string_length(kiln_val_to_boundary(v));
 }
 
@@ -25229,6 +25482,9 @@ static int kiln_c99_val_array_push_fast(kiln_val receiver, kiln_val arg, kiln_va
         if (KILN_LIKELY(kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY)) {
             kiln_array *arr = (kiln_array *)ptr;
             if (KILN_LIKELY(!arr->frozen && !arr->not_extensible)) {
+                if (arr->is_numeric && !KILN_VAL_IS_NUMBER(arg)) {
+                    arr->is_numeric = 0;
+                }
                 if (KILN_LIKELY(arr->count < arr->capacity)) {
                     arr->elements[arr->count] = arg;
                     arr->count += 1;
@@ -25410,10 +25666,44 @@ static int kiln_c99_val_compare(uint16_t operation, kiln_val left, kiln_val righ
     if (operation == 7) { /* StrictEqual */
         if (left == right) { *result = 1; return 1; }
         if (KILN_VAL_IS_NUMBER(left) || KILN_VAL_IS_NUMBER(right)) { *result = 0; return 1; }
+        if (KILN_VAL_IS_STRING(left) && KILN_VAL_IS_STRING(right)) {
+            const kiln_string *s1 = (const kiln_string *)KILN_VAL_PTR(left);
+            const kiln_string *s2 = (const kiln_string *)KILN_VAL_PTR(right);
+            if (s1->byte_len != s2->byte_len) { *result = 0; return 1; }
+            *result = (s1->bytes == s2->bytes || memcmp(s1->bytes, s2->bytes, s1->byte_len) == 0);
+            return 1;
+        }
+    }
+    if (operation == 15) { /* Equal */
+        if (left == right) { *result = 1; return 1; }
+        if (KILN_VAL_IS_STRING(left) && KILN_VAL_IS_STRING(right)) {
+            const kiln_string *s1 = (const kiln_string *)KILN_VAL_PTR(left);
+            const kiln_string *s2 = (const kiln_string *)KILN_VAL_PTR(right);
+            if (s1->byte_len != s2->byte_len) { *result = 0; return 1; }
+            *result = (s1->bytes == s2->bytes || memcmp(s1->bytes, s2->bytes, s1->byte_len) == 0);
+            return 1;
+        }
     }
     if (operation == 8) { /* StrictNotEqual */
         if (left == right) { *result = 0; return 1; }
         if (KILN_VAL_IS_NUMBER(left) || KILN_VAL_IS_NUMBER(right)) { *result = 1; return 1; }
+        if (KILN_VAL_IS_STRING(left) && KILN_VAL_IS_STRING(right)) {
+            const kiln_string *s1 = (const kiln_string *)KILN_VAL_PTR(left);
+            const kiln_string *s2 = (const kiln_string *)KILN_VAL_PTR(right);
+            if (s1->byte_len != s2->byte_len) { *result = 1; return 1; }
+            *result = !(s1->bytes == s2->bytes || memcmp(s1->bytes, s2->bytes, s1->byte_len) == 0);
+            return 1;
+        }
+    }
+    if (operation == 16) { /* NotEqual */
+        if (left == right) { *result = 0; return 1; }
+        if (KILN_VAL_IS_STRING(left) && KILN_VAL_IS_STRING(right)) {
+            const kiln_string *s1 = (const kiln_string *)KILN_VAL_PTR(left);
+            const kiln_string *s2 = (const kiln_string *)KILN_VAL_PTR(right);
+            if (s1->byte_len != s2->byte_len) { *result = 1; return 1; }
+            *result = !(s1->bytes == s2->bytes || memcmp(s1->bytes, s2->bytes, s1->byte_len) == 0);
+            return 1;
+        }
     }
     return 0;
 }
@@ -25455,17 +25745,40 @@ static kiln_val kiln_c99_val_binary_fast(uint16_t operation, kiln_val left, kiln
     }
     if ((operation == 7 || operation == 15) && left == right) return KILN_VAL_TRUE;
     if ((operation == 8 || operation == 16) && left == right) return KILN_VAL_FALSE;
-    if (KILN_VAL_IS_STRING(left) && KILN_VAL_IS_STRING(right)) {
-        kiln_value l = kiln_val_to_boundary(left);
-        kiln_value r = kiln_val_to_boundary(right);
-        if (operation == 7 || operation == 15) {
-            if (l.len != r.len) return KILN_VAL_FALSE;
-            return (l.ptr == r.ptr || memcmp(l.ptr, r.ptr, l.len) == 0) ? KILN_VAL_TRUE : KILN_VAL_FALSE;
+    if (operation == 1 && KILN_VAL_IS_STRING(left) && KILN_VAL_IS_STRING(right)) {
+        const kiln_string *s1 = (const kiln_string *)KILN_VAL_PTR(left);
+        const kiln_string *s2 = (const kiln_string *)KILN_VAL_PTR(right);
+        size_t total_bytes = s1->byte_len + s2->byte_len;
+        char *buf = kiln_c99_gc_alloc_text(total_bytes);
+        if (buf != NULL) {
+            memcpy(buf, s1->bytes, s1->byte_len);
+            memcpy(buf + s1->byte_len, s2->bytes, s2->byte_len);
+            kiln_string *s = ((kiln_string *)buf) - 1;
+            s->length = s1->length + s2->length;
+            s->byte_len = total_bytes;
+            s->bytes = buf;
+            return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, s);
         }
-        if (operation == 8 || operation == 16) {
-            if (l.len != r.len) return KILN_VAL_TRUE;
-            return (l.ptr == r.ptr || memcmp(l.ptr, r.ptr, l.len) == 0) ? KILN_VAL_FALSE : KILN_VAL_TRUE;
-        }
+    }
+    if ((operation == 7 || operation == 15) && KILN_VAL_IS_STRING(left) && KILN_VAL_IS_STRING(right)) {
+        if (left == right) return KILN_VAL_TRUE;
+        const kiln_string *s1 = (const kiln_string *)KILN_VAL_PTR(left);
+        const kiln_string *s2 = (const kiln_string *)KILN_VAL_PTR(right);
+        size_t len1 = s1 ? s1->byte_len : 0;
+        size_t len2 = s2 ? s2->byte_len : 0;
+        if (len1 != len2) return KILN_VAL_FALSE;
+        if (len1 == 0) return KILN_VAL_TRUE;
+        return memcmp(s1->bytes, s2->bytes, len1) == 0 ? KILN_VAL_TRUE : KILN_VAL_FALSE;
+    }
+    if ((operation == 8 || operation == 16) && KILN_VAL_IS_STRING(left) && KILN_VAL_IS_STRING(right)) {
+        if (left == right) return KILN_VAL_FALSE;
+        const kiln_string *s1 = (const kiln_string *)KILN_VAL_PTR(left);
+        const kiln_string *s2 = (const kiln_string *)KILN_VAL_PTR(right);
+        size_t len1 = s1 ? s1->byte_len : 0;
+        size_t len2 = s2 ? s2->byte_len : 0;
+        if (len1 != len2) return KILN_VAL_TRUE;
+        if (len1 == 0) return KILN_VAL_FALSE;
+        return memcmp(s1->bytes, s2->bytes, len1) != 0 ? KILN_VAL_TRUE : KILN_VAL_FALSE;
     }
     return kiln_val_from_boundary(kiln_c99_binary(operation, kiln_val_to_boundary(left), kiln_val_to_boundary(right)));
 }
@@ -25810,31 +26123,13 @@ static int kiln_c99_val_read_element(kiln_host *host, kiln_val target, kiln_val 
         memcpy(&idx, &key, sizeof(idx));
         if (idx >= 0.0 && idx <= 4294967294.0 && floor(idx) == idx) {
             size_t slot = (size_t)idx;
-            const char *p = (const char *)KILN_VAL_PTR(target);
-            size_t len = 0;
-            kiln_gc_heap *heap = kiln_c99_gc_heap();
-            kiln_gc_block *block = heap != NULL ? kiln_c99_gc_lookup(heap, p) : NULL;
-            if (block != NULL && (block->kind & KILN_GC_KIND_MASK) == KILN_GC_STRING) {
-                len = block->size;
-            } else if (p != NULL) {
-                len = strlen(p);
-            }
-            if (slot < len) {
-                unsigned char ch = (unsigned char)p[slot];
-                if (ch < 0x80) {
-                    size_t i;
-                    int all_ascii = 1;
-                    for (i = 0; i <= slot; ++i) {
-                        if ((unsigned char)p[i] >= 0x80) { all_ascii = 0; break; }
-                    }
-                    if (all_ascii) {
-                        uint16_t unit = (uint16_t)ch;
-                        kiln_value s = kiln_c99_from_units(&unit, 1);
-                        *out = kiln_val_from_boundary(s);
-                        return KILN_C99_OK;
-                    }
+            const kiln_string *str = (const kiln_string *)KILN_VAL_PTR(target);
+            if (str != NULL && slot < str->length) {
+                if (str->length == str->byte_len) {
+                    *out = kiln_c99_val_single_char((unsigned char)str->bytes[slot]);
+                    return KILN_C99_OK;
                 }
-                kiln_c99_utf16_iter iterator = {p, len, 0, 0, 0};
+                kiln_c99_utf16_iter iterator = {str->bytes, str->byte_len, 0, 0, 0};
                 size_t position = 0;
                 uint16_t unit;
                 while (kiln_c99_utf16_next(&iterator, &unit)) {
@@ -25845,6 +26140,9 @@ static int kiln_c99_val_read_element(kiln_host *host, kiln_val target, kiln_val 
                     }
                     position += 1;
                 }
+            } else if (str != NULL && slot >= str->length) {
+                *out = KILN_VAL_UNDEFINED;
+                return KILN_C99_OK;
             }
         }
     }
@@ -25868,6 +26166,9 @@ static int kiln_c99_val_write_element(kiln_host *host, kiln_val target, kiln_val
             if (gc_kind == KILN_GC_ARRAY) {
                 kiln_array *array = (kiln_array *)ptr;
                 if (KILN_LIKELY(!array->frozen && slot < array->count)) {
+                    if (array->is_numeric && !KILN_VAL_IS_NUMBER(value)) {
+                        array->is_numeric = 0;
+                    }
                     array->elements[slot] = value;
                     return KILN_C99_OK;
                 }

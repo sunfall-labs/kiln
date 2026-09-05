@@ -1288,15 +1288,20 @@ fn render_constant_declarations(output: &mut String, program: &Program, symbol: 
     for (index, constant) in program.constants.iter().enumerate() {
         match constant {
             Constant::String(value) => {
+                let byte_len = value.len();
+                let utf16_len = value.encode_utf16().count();
                 writeln!(
                     output,
-                    "static const char {symbol}_constant_{index}[] = {};",
+                    "static const struct {{ kiln_string header; char bytes[{}]; }} {symbol}_string_{index} = {{ {{ {utf16_len}, {byte_len}, {symbol}_string_{index}.bytes }}, {} }};",
+                    byte_len + 1,
                     c_string(value)
                 )
                 .unwrap();
-                if value.contains('\0') {
-                    writeln!(output, "static void *{symbol}_string_{index} = NULL;").unwrap();
-                }
+                writeln!(
+                    output,
+                    "#define {symbol}_constant_{index} ({symbol}_string_{index}.bytes)"
+                )
+                .unwrap();
             }
             Constant::BigInt(digits) => {
                 writeln!(

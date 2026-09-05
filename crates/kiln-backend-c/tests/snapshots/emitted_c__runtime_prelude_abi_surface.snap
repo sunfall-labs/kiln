@@ -675,6 +675,31 @@ typedef uint64_t kiln_val;
 #define KILN_VAL_PTR(v)          ((void *)((uint64_t)(v) & KILN_PAYLOAD_MASK))
 #define KILN_VAL_TAG_PTR(pfx, p) ((kiln_val)((pfx) | ((uint64_t)(uintptr_t)(p) & KILN_PAYLOAD_MASK)))
 #define KILN_VAL_IS_DOUBLE(v)    KILN_VAL_IS_NUMBER(v)
+typedef struct kiln_string {
+static const char kiln_c99_empty_chars[] = "";
+static const kiln_string kiln_c99_empty_string = { 0, 0, kiln_c99_empty_chars };
+static const char kiln_c99_single_char_bytes[256][2] = {
+#define ROW4(a)   { (char)(a), 0 }, { (char)((a)+1), 0 }, { (char)((a)+2), 0 }, { (char)((a)+3), 0 }
+#define ROW16(a)  ROW4(a), ROW4((a)+4), ROW4((a)+8), ROW4((a)+12)
+#define ROW64(a)  ROW16(a), ROW16((a)+16), ROW16((a)+32), ROW16((a)+48)
+#undef ROW64
+#undef ROW16
+#undef ROW4
+static const kiln_string kiln_c99_ascii_strings[256] = {
+#define S4(a)   { 1, 1, kiln_c99_single_char_bytes[a] }, { 1, 1, kiln_c99_single_char_bytes[(a)+1] }, { 1, 1, kiln_c99_single_char_bytes[(a)+2] }, { 1, 1, kiln_c99_single_char_bytes[(a)+3] }
+#define S16(a)  S4(a), S4((a)+4), S4((a)+8), S4((a)+12)
+#define S64(a)  S16(a), S16((a)+16), S16((a)+32), S16((a)+48)
+#undef S64
+#undef S16
+#undef S4
+static inline kiln_val kiln_c99_val_single_char(unsigned char ch) {
+static inline const char *kiln_c99_memmem(const char *haystack, size_t haystack_len,
+#ifdef KILN_SEPARATE_PRELUDE
+extern kiln_val kiln_c99_val_from_text(const char *bytes, size_t len);
+#else
+static kiln_val kiln_c99_val_from_text(const char *bytes, size_t len);
+static kiln_value kiln_val_to_boundary(kiln_val v);
+#endif
 static inline kiln_val kiln_val_from_boundary(kiln_value v) {
 static inline kiln_val kiln_c99_val_from_double(double d) {
 int32_t kiln_bigint_is_zero(const void *handle);
@@ -682,7 +707,6 @@ static inline int kiln_c99_val_truthy(kiln_val v) {
 static int kiln_c99_speculate_mode = -2;
 static inline int kiln_c99_speculate_exit_active(void) {
 static inline int kiln_c99_guard_should_exit(uint32_t *counter) {
-static kiln_value kiln_val_to_boundary(kiln_val v);
 typedef enum kiln_typed_kind {
 typedef struct kiln_typed_buffer {
 typedef struct kiln_typed_array {
@@ -1293,6 +1317,7 @@ static int kiln_c99_node_diagnostics(kiln_host *host, kiln_value *out, uint64_t 
 static int kiln_c99_node_util(kiln_host *host, kiln_value *out, uint64_t code,
 format_oom:
 static int kiln_c99_new_array(kiln_value *out) {
+static int kiln_c99_new_array_with_capacity(kiln_value *out, size_t capacity, int is_numeric) {
 static size_t kiln_c99_typed_width(kiln_typed_kind kind) {
 static const char *kiln_c99_typed_name(kiln_typed_kind kind) {
 static int kiln_c99_builtin_typed_kind(uint64_t builtin, kiln_typed_kind *kind) {
@@ -1453,6 +1478,7 @@ static void *kiln_c99_node_hidden_pointer(kiln_value object, const char *key, si
 static int kiln_c99_node_materialize_header(kiln_value headers_obj, const char *key, size_t key_len, kiln_value *out);
 static void kiln_c99_node_materialize_all_headers(kiln_value headers_obj);
 static int kiln_c99_node_has_lazy_header(kiln_value headers_obj, const char *key, size_t key_len);
+static int kiln_c99_val_call(kiln_host *host, kiln_val callee, const kiln_val *args, size_t argc,
 static int kiln_c99_backlog_names(const char *owner, const char *key, size_t key_len) {
 static int kiln_c99_has_surface(uint64_t builtin) {
 static const kiln_builtin_member *kiln_c99_builtin_member(uint64_t builtin, const char *key,
@@ -1500,7 +1526,9 @@ static kiln_value kiln_c99_number_bits(uint64_t bits) {
 static double kiln_c99_as_number(kiln_value value) {
 static int kiln_c99_truthy(kiln_value value) {
 static kiln_value kiln_c99_static_text(const char *text, size_t len) {
-static const char kiln_c99_empty_string[] = "";
+static inline size_t kiln_c99_utf8_to_utf16_len(const char *text, size_t len) {
+static kiln_val kiln_c99_val_from_text(const char *bytes, size_t len) {
+static kiln_val kiln_c99_val_from_ascii(const char *bytes, size_t len) {
 static kiln_value kiln_c99_copy_text(const char *text, size_t len) {
 static kiln_value kiln_c99_control_diagnostic(void) {
 #define KILN_DIAGNOSTIC_DECIMAL(subject) do { \
