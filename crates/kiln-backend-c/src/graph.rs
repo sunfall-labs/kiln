@@ -343,6 +343,10 @@ impl FunctionGraph {
     pub fn block_mut(&mut self, id: BlockId) -> Option<&mut BasicBlock> {
         self.blocks.iter_mut().find(|b| b.id == id)
     }
+
+    pub fn summary(&self) -> crate::summary::FunctionSummary {
+        crate::summary::summarize_graph(self)
+    }
 }
 
 /// Abstract state tracking during bytecode-to-SSA graph interpretation.

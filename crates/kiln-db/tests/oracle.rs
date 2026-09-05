@@ -16,7 +16,9 @@
 //! how a particular engine reaches the answer, and only memoized-equals-fresh survives a change
 //! of backend.
 
-use kiln_db::{Compiled, FileId, Interface, MemoEngine, Parsed, Project, QueryEngine, Stats};
+use kiln_db::{
+    Compiled, FileId, FunctionSummary, Interface, MemoEngine, Parsed, Project, QueryEngine, Stats,
+};
 use kiln_hir::{
     Export, ExportName, ExportOrigin, Expression as HirExpression,
     ExpressionKind as HirExpressionKind, Item, ItemKind, Literal, Module, SourceGoal, SourceKind,
@@ -82,19 +84,91 @@ fn oracle_frontend(_path: &str, text: &str) -> Module {
                 span: Span::new(line as u32, line as u32 + 1),
             })
             .collect(),
-        // A body that varies with the source. It was empty at first, which made every text in
-        // the pool compile to identical bytecode and turned the `irs` comparison in `Observed`
-        // into a comparison of a constant. One statement per line, carrying that line's length,
-        // is enough to make the IR discriminate without pretending this is a real lowering.
+        // A body that varies with the source. Functions generate real Function statements so that
+        // summaries discriminate and early cutoff can be tested across both functions and variables.
         body: text
             .lines()
             .enumerate()
-            .map(|(line, source_line)| HirStatement {
-                kind: HirStatementKind::Expression(HirExpression {
-                    kind: HirExpressionKind::Literal(Literal::Number(source_line.len() as u64)),
-                    span: Span::new(line as u32, line as u32 + 1),
-                }),
-                span: Span::new(line as u32, line as u32 + 1),
+            .map(|(line, source_line)| {
+                let trimmed = source_line.trim_start();
+                let stripped = trimmed
+                    .strip_prefix("export ")
+                    .unwrap_or(trimmed)
+                    .trim_start();
+                if stripped.starts_with("function ") || stripped.starts_with("async function ") {
+                    let rest = stripped.strip_prefix("async ").unwrap_or(stripped);
+                    let rest = rest.strip_prefix("function ").unwrap_or(rest).trim_start();
+                    let name: String = rest
+                        .chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+                        .collect();
+                    let name = if name.is_empty() {
+                        "fn".to_string()
+                    } else {
+                        name
+                    };
+
+                    let mut fn_body = Vec::new();
+                    if source_line.contains("throw") {
+                        fn_body.push(HirStatement {
+                            kind: HirStatementKind::Throw(HirExpression {
+                                kind: HirExpressionKind::Literal(Literal::Number(1)),
+                                span: Span::new(line as u32, line as u32 + 1),
+                            }),
+                            span: Span::new(line as u32, line as u32 + 1),
+                        });
+                    } else if source_line.contains("return \"") || source_line.contains("return '")
+                    {
+                        fn_body.push(HirStatement {
+                            kind: HirStatementKind::Return(Some(HirExpression {
+                                kind: HirExpressionKind::Literal(Literal::String("str".into())),
+                                span: Span::new(line as u32, line as u32 + 1),
+                            })),
+                            span: Span::new(line as u32, line as u32 + 1),
+                        });
+                    } else if source_line.contains("return") {
+                        let num = if source_line.contains("return 2") {
+                            2
+                        } else if source_line.contains("return 1") {
+                            1
+                        } else {
+                            source_line.len() as u64
+                        };
+                        fn_body.push(HirStatement {
+                            kind: HirStatementKind::Return(Some(HirExpression {
+                                kind: HirExpressionKind::Literal(Literal::Number(num)),
+                                span: Span::new(line as u32, line as u32 + 1),
+                            })),
+                            span: Span::new(line as u32, line as u32 + 1),
+                        });
+                    }
+
+                    HirStatement {
+                        kind: HirStatementKind::Function(Box::new(kiln_hir::Function {
+                            strict: false,
+                            binds_own_name: false,
+                            asynchronous: stripped.starts_with("async "),
+                            name: Some(name),
+                            arrow: false,
+                            generator: false,
+                            parameters: Vec::new(),
+                            rest: None,
+                            body: fn_body,
+                            span: Span::new(line as u32, line as u32 + 1),
+                        })),
+                        span: Span::new(line as u32, line as u32 + 1),
+                    }
+                } else {
+                    HirStatement {
+                        kind: HirStatementKind::Expression(HirExpression {
+                            kind: HirExpressionKind::Literal(Literal::Number(
+                                source_line.len() as u64
+                            )),
+                            span: Span::new(line as u32, line as u32 + 1),
+                        }),
+                        span: Span::new(line as u32, line as u32 + 1),
+                    }
+                }
             })
             .collect(),
         requested_modules: Vec::new(),
@@ -122,7 +196,7 @@ use proptest::test_runner::TestCaseError;
 /// them vanishingly rare.
 const PATHS: [&str; 4] = ["a.js", "b.js", "c.js", "d.js"];
 
-const TEXTS: [&str; 7] = [
+const TEXTS: [&str; 10] = [
     "",
     "const hidden = 1;\n",
     "export const alpha = 1;\n",
@@ -131,7 +205,13 @@ const TEXTS: [&str; 7] = [
     "export const alpha = 1;\nexport const beta = 2;\n",
     // An interface is a set of names, so this is the same interface as the line above.
     "export const beta = 2;\nexport const alpha = 1;\n",
-    "export function alpha() {}\nexport function alpha() {}\n",
+    "export function alpha() { return 1; }\n",
+    // Same summary as the line above (returns number, pure, no throw): early cutoff at interface.
+    "export function alpha() { return 2; }\n",
+    // Different summary (returns string):
+    "export function alpha() { return \"str\"; }\n",
+    // Different summary (throws):
+    "export function alpha() { throw 1; }\n",
 ];
 
 /// One step of a generated history. Indices are reduced modulo the live state when the step runs,
@@ -141,6 +221,7 @@ enum Op {
     Intern(usize),
     SetSource(usize, usize),
     Parse(usize),
+    Summaries(usize),
     Interface(usize),
     Project,
 }
@@ -150,6 +231,7 @@ fn histories() -> impl Strategy<Value = Vec<Op>> {
         2 => (0..PATHS.len()).prop_map(Op::Intern),
         6 => (0..PATHS.len(), 0..TEXTS.len()).prop_map(|(file, text)| Op::SetSource(file, text)),
         2 => (0..PATHS.len()).prop_map(Op::Parse),
+        2 => (0..PATHS.len()).prop_map(Op::Summaries),
         2 => (0..PATHS.len()).prop_map(Op::Interface),
         2 => Just(Op::Project),
     ];
@@ -173,6 +255,7 @@ struct Observed {
     /// struct's doc comment warns about. When a query joins `QueryEngine`, add it here in the
     /// same change.
     irs: Vec<Compiled>,
+    summaries: Vec<Vec<FunctionSummary>>,
     interfaces: Vec<Interface>,
     project: Project,
 }
@@ -186,12 +269,14 @@ fn observe(db: &mut MemoEngine, files: usize, top_down: bool) -> Observed {
     let mut sources = Vec::with_capacity(files);
     let mut parses = Vec::with_capacity(files);
     let mut irs = Vec::with_capacity(files);
+    let mut summaries = Vec::with_capacity(files);
     let mut interfaces = Vec::with_capacity(files);
     for index in 0..files {
         let file = FileId(index as u32);
         sources.push(db.source(file).unwrap_or_default().to_string());
         parses.push(db.parse(file));
         irs.push(db.ir(file));
+        summaries.push(db.function_summaries(file));
         interfaces.push(db.interface(file));
     }
 
@@ -199,6 +284,7 @@ fn observe(db: &mut MemoEngine, files: usize, top_down: bool) -> Observed {
         sources,
         parses,
         irs,
+        summaries,
         interfaces,
         project: project.unwrap_or_else(|| db.project()),
     }
@@ -241,6 +327,9 @@ fn apply(db: &mut MemoEngine, inputs: &mut Vec<(String, Option<String>)>, op: Op
         Op::Parse(slot) if !inputs.is_empty() => {
             db.parse(FileId((slot % inputs.len()) as u32));
         }
+        Op::Summaries(slot) if !inputs.is_empty() => {
+            db.function_summaries(FileId((slot % inputs.len()) as u32));
+        }
         Op::Interface(slot) if !inputs.is_empty() => {
             db.interface(FileId((slot % inputs.len()) as u32));
         }
@@ -248,7 +337,7 @@ fn apply(db: &mut MemoEngine, inputs: &mut Vec<(String, Option<String>)>, op: Op
             db.project();
         }
         // A file-addressed step before anything is interned has nothing to address.
-        Op::SetSource(..) | Op::Parse(_) | Op::Interface(_) => {}
+        Op::SetSource(..) | Op::Parse(_) | Op::Summaries(_) | Op::Interface(_) => {}
     }
 }
 
@@ -303,6 +392,26 @@ fn the_text_pool_produces_distinguishable_ir() {
     assert!(
         distinct.len() > 1,
         "every text in the pool compiled to the same IR, so comparing it proves nothing"
+    );
+}
+
+#[test]
+fn the_text_pool_produces_distinguishable_summaries() {
+    let mut db = MemoEngine::new(oracle_frontend);
+    let file = db.intern("a.js");
+
+    let mut distinct: Vec<Vec<FunctionSummary>> = Vec::new();
+    for text in TEXTS {
+        db.set_source(file, text.to_string());
+        let summaries = db.function_summaries(file);
+        if !distinct.contains(&summaries) {
+            distinct.push(summaries);
+        }
+    }
+
+    assert!(
+        distinct.len() > 1,
+        "every text in the pool produced the same function summaries, so comparing them proves nothing"
     );
 }
 

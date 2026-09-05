@@ -10,6 +10,7 @@ mod hash;
 
 pub use engine::MemoEngine;
 pub use hash::content_hash;
+pub use kiln_backend_c::{FunctionSummary, TypeGuess};
 pub use kiln_digest::Digest;
 pub use kiln_hir::Module as HirModule;
 pub use kiln_ir::{CompileDiagnostic, ModuleProgram, Program};
@@ -185,7 +186,7 @@ fn linkage_digest(descriptors: &[LinkageDescriptor]) -> Digest {
     Digest::hash(&encoded)
 }
 
-/// The externally visible surface of a module, including runtime export wiring.
+/// The externally visible surface of a module, including runtime export wiring and function summaries.
 ///
 /// This is the early-cutoff point. A dependent is recomputed only when this value *changes*,
 /// which is how design.md §3's "interface hash" is realised without maintaining a second hash
@@ -196,6 +197,8 @@ pub struct Interface {
     pub interface_hash: u64,
     pub exports: Vec<String>,
     pub linkage: Linkage,
+    pub summaries_digest: Digest,
+    pub summaries: Vec<FunctionSummary>,
 }
 
 impl Interface {
@@ -205,30 +208,53 @@ impl Interface {
     }
 
     /// Build an interface from declared runtime exports and normalized runtime wiring.
-    pub fn from_exports_and_linkage(mut exports: Vec<String>, linkage: Linkage) -> Self {
+    pub fn from_exports_and_linkage(exports: Vec<String>, linkage: Linkage) -> Self {
+        Self::from_exports_linkage_and_summaries(exports, linkage, Vec::new())
+    }
+
+    /// Build an interface from declared runtime exports, normalized runtime wiring, and function summaries.
+    pub fn from_exports_linkage_and_summaries(
+        mut exports: Vec<String>,
+        linkage: Linkage,
+        summaries: Vec<FunctionSummary>,
+    ) -> Self {
         exports.sort();
         exports.dedup();
+        let summaries_digest = kiln_backend_c::summary::summaries_digest(&summaries);
         let names_hash = hash::hash_names(&exports);
-        let interface_hash = if linkage.descriptors.is_empty() {
-            // Preserve the long-standing wire spelling for modules without re-export wiring.
-            names_hash
-        } else {
-            let mut summary = hash::Fnv1a::new();
-            summary.write(b"kiln-interface-with-linkage-v1\0");
-            summary.write_u64(names_hash);
-            summary.write(linkage.digest.as_bytes());
-            summary.finish()
-        };
+        let interface_hash =
+            if linkage.descriptors.is_empty() && summaries_digest == Digest::default() {
+                // Preserve the long-standing wire spelling for modules without re-export wiring or summaries.
+                names_hash
+            } else {
+                let mut summary = hash::Fnv1a::new();
+                summary.write(b"kiln-interface-with-linkage-and-summaries-v1\0");
+                summary.write_u64(names_hash);
+                summary.write(linkage.digest.as_bytes());
+                summary.write(summaries_digest.as_bytes());
+                summary.finish()
+            };
         Self {
             interface_hash,
             exports,
             linkage,
+            summaries_digest,
+            summaries,
         }
     }
 
     /// Build the complete interface value retained by the database from parsed HIR.
     pub fn from_module(module: &HirModule) -> Self {
         Self::from_exports_and_linkage(module.runtime_export_names(), Linkage::from_module(module))
+    }
+
+    /// Build the complete interface value from parsed HIR and extracted function summaries.
+    pub fn from_module_and_summaries(module: &HirModule, summaries: Vec<FunctionSummary>) -> Self {
+        Self::from_exports_linkage_and_summaries(
+            module.runtime_export_names(),
+            Linkage::from_module(module),
+            summaries,
+        )
     }
 }
 
@@ -282,6 +308,7 @@ impl Project {
                 .then_with(|| left.exports.cmp(&right.exports))
                 .then_with(|| left.interface_hash.cmp(&right.interface_hash))
                 .then_with(|| left.linkage.cmp(&right.linkage))
+                .then_with(|| left.summaries_digest.cmp(&right.summaries_digest))
         });
 
         let mut summary = hash::Fnv1a::new();
@@ -295,6 +322,7 @@ impl Project {
             summary.write(path.as_bytes());
             summary.write_u64(interface.interface_hash);
             summary.write(interface.linkage.digest.as_bytes());
+            summary.write(interface.summaries_digest.as_bytes());
 
             write_framed(&mut identity, path.as_bytes());
             write_len(&mut identity, interface.exports.len());
@@ -302,6 +330,7 @@ impl Project {
                 write_framed(&mut identity, export.as_bytes());
             }
             identity.extend_from_slice(interface.linkage.digest.as_bytes());
+            identity.extend_from_slice(interface.summaries_digest.as_bytes());
             write_len(&mut identity, interface.linkage.descriptors.len());
             for descriptor in &interface.linkage.descriptors {
                 identity.push(match descriptor.kind {
@@ -393,6 +422,13 @@ pub trait QueryEngine {
     /// default preserves compatibility for small test/reference engines.
     fn module_ir(&mut self, file: FileId) -> CompiledModule {
         kiln_ir::compile_module(&self.parse(file).module)
+    }
+    /// Per-function summaries for all declared functions in the module.
+    fn function_summaries(&mut self, file: FileId) -> Vec<FunctionSummary> {
+        match self.ir(file) {
+            Ok(program) => kiln_backend_c::summarize_program(&program),
+            Err(_) => Vec::new(),
+        }
     }
     fn interface(&mut self, file: FileId) -> Interface;
     fn project(&mut self) -> Project;

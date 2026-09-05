@@ -18,11 +18,11 @@
 use ahash::AHashMap;
 
 use crate::{
-    Compiled, CompiledModule, FileId, Frontend, Interface, Parsed, Project, QueryEngine, Revision,
-    Stats,
+    Compiled, CompiledModule, FileId, Frontend, FunctionSummary, Interface, Parsed, Project,
+    QueryEngine, Revision, Stats,
 };
 #[cfg(test)]
-use crate::{Linkage, hash::content_hash};
+use crate::{Digest, Linkage, hash::content_hash};
 #[cfg(test)]
 use kiln_hir::{Export, ExportName, ExportOrigin, Item, ItemKind, Module, SourceKind, Span};
 
@@ -52,6 +52,7 @@ enum QueryKey {
     Parse(FileId),
     Ir(FileId),
     ModuleIr(FileId),
+    Summaries(FileId),
     Interface(FileId),
     Project,
     /// Test-only query whose dependency is the other `Cyclic`. The v0 graph is acyclic by
@@ -90,6 +91,7 @@ struct FileState {
     parse: Option<Memo<Parsed>>,
     ir: Option<Memo<Compiled>>,
     module_ir: Option<Memo<CompiledModule>>,
+    summaries: Option<Memo<Vec<FunctionSummary>>>,
     interface: Option<Memo<Interface>>,
 }
 
@@ -237,6 +239,17 @@ impl MemoEngine {
                     &mut self.stats,
                 )
             }
+            QueryKey::Summaries(file) => {
+                let (value, deps) = self.compute_summaries(file);
+                let index = file.0 as usize;
+                store(
+                    &mut self.files[index].summaries,
+                    value,
+                    deps,
+                    now,
+                    &mut self.stats,
+                )
+            }
             QueryKey::Interface(file) => {
                 let (value, deps) = self.compute_interface(file);
                 self.stats.interface_computed += 1;
@@ -291,15 +304,31 @@ impl MemoEngine {
         (kiln_ir::compile_module(&parsed.value.module), vec![dep])
     }
 
-    fn compute_interface(&mut self, file: FileId) -> (Interface, Vec<QueryKey>) {
-        let dep = QueryKey::Parse(file);
+    fn compute_summaries(&mut self, file: FileId) -> (Vec<FunctionSummary>, Vec<QueryKey>) {
+        let dep = QueryKey::Ir(file);
         self.force(dep);
+        let ir = self.file(file).ir.as_ref().expect(FORCED);
+        let summaries = match &ir.value {
+            Ok(program) => kiln_backend_c::summarize_program(program),
+            Err(_) => Vec::new(),
+        };
+        (summaries, vec![dep])
+    }
+
+    fn compute_interface(&mut self, file: FileId) -> (Interface, Vec<QueryKey>) {
+        let parse_dep = QueryKey::Parse(file);
+        let summaries_dep = QueryKey::Summaries(file);
+        self.force(parse_dep);
+        self.force(summaries_dep);
         let parsed = self.file(file).parse.as_ref().expect(FORCED);
+        let summaries = self.file(file).summaries.as_ref().expect(FORCED);
 
         // Normalized, because equality of this value is what gates every dependent (adr/0003):
-        // declared names are a set, while runtime re-export wiring is a sorted descriptor list.
-        let interface = Interface::from_module(&parsed.value.module);
-        (interface, vec![dep])
+        // declared names are a set, runtime re-export wiring is a sorted descriptor list, and
+        // function summaries guard body changes.
+        let interface =
+            Interface::from_module_and_summaries(&parsed.value.module, summaries.value.clone());
+        (interface, vec![parse_dep, summaries_dep])
     }
 
     fn compute_project(&mut self) -> (Project, Vec<QueryKey>) {
@@ -346,6 +375,7 @@ impl MemoEngine {
             QueryKey::Parse(file) => self.file(file).parse.as_ref().map(|memo| &memo.meta),
             QueryKey::Ir(file) => self.file(file).ir.as_ref().map(|memo| &memo.meta),
             QueryKey::ModuleIr(file) => self.file(file).module_ir.as_ref().map(|memo| &memo.meta),
+            QueryKey::Summaries(file) => self.file(file).summaries.as_ref().map(|memo| &memo.meta),
             QueryKey::Interface(file) => self.file(file).interface.as_ref().map(|memo| &memo.meta),
             QueryKey::Project => self.project.as_ref().map(|memo| &memo.meta),
             #[cfg(test)]
@@ -365,6 +395,11 @@ impl MemoEngine {
             QueryKey::ModuleIr(file) => self
                 .file_mut(file)
                 .module_ir
+                .as_mut()
+                .map(|memo| &mut memo.meta),
+            QueryKey::Summaries(file) => self
+                .file_mut(file)
+                .summaries
                 .as_mut()
                 .map(|memo| &mut memo.meta),
             QueryKey::Interface(file) => self
@@ -413,6 +448,7 @@ impl MemoEngine {
             QueryKey::Parse(file) => format!("parse({})", path(file)),
             QueryKey::Ir(file) => format!("ir({})", path(file)),
             QueryKey::ModuleIr(file) => format!("module_ir({})", path(file)),
+            QueryKey::Summaries(file) => format!("summaries({})", path(file)),
             QueryKey::Interface(file) => format!("interface({})", path(file)),
             QueryKey::Project => "project()".to_string(),
             #[cfg(test)]
@@ -553,6 +589,60 @@ fn linkage_frontend(path: &str, text: &str) -> Module {
     module
 }
 
+#[cfg(test)]
+fn summary_frontend(path: &str, text: &str) -> Module {
+    let mut module = fixture_frontend(path, text);
+    for (idx, line) in text.lines().enumerate() {
+        if line.contains("function") {
+            let mut fn_body = Vec::new();
+            if line.contains("throw") {
+                fn_body.push(kiln_hir::Statement {
+                    kind: kiln_hir::StatementKind::Throw(kiln_hir::Expression {
+                        kind: kiln_hir::ExpressionKind::Literal(kiln_hir::Literal::Number(1)),
+                        span: Span::default(),
+                    }),
+                    span: Span::default(),
+                });
+            } else if line.contains("return \"") || line.contains("return '") {
+                fn_body.push(kiln_hir::Statement {
+                    kind: kiln_hir::StatementKind::Return(Some(kiln_hir::Expression {
+                        kind: kiln_hir::ExpressionKind::Literal(kiln_hir::Literal::String(
+                            "str".into(),
+                        )),
+                        span: Span::default(),
+                    })),
+                    span: Span::default(),
+                });
+            } else if line.contains("return") {
+                let num = if line.contains("return 2") { 2 } else { 1 };
+                fn_body.push(kiln_hir::Statement {
+                    kind: kiln_hir::StatementKind::Return(Some(kiln_hir::Expression {
+                        kind: kiln_hir::ExpressionKind::Literal(kiln_hir::Literal::Number(num)),
+                        span: Span::default(),
+                    })),
+                    span: Span::default(),
+                });
+            }
+            module.body.push(kiln_hir::Statement {
+                kind: kiln_hir::StatementKind::Function(Box::new(kiln_hir::Function {
+                    strict: false,
+                    binds_own_name: false,
+                    asynchronous: false,
+                    name: Some("f".to_owned()),
+                    arrow: false,
+                    generator: false,
+                    parameters: Vec::new(),
+                    rest: None,
+                    body: fn_body,
+                    span: Span::default(),
+                })),
+                span: Span::new(idx as u32, idx as u32 + 1),
+            });
+        }
+    }
+    module
+}
+
 impl QueryEngine for MemoEngine {
     fn intern(&mut self, path: &str) -> FileId {
         if let Some(file) = self.by_path.get(path) {
@@ -568,6 +658,7 @@ impl QueryEngine for MemoEngine {
             parse: None,
             ir: None,
             module_ir: None,
+            summaries: None,
             interface: None,
         });
         self.by_path.insert(path.to_string(), file);
@@ -629,6 +720,7 @@ impl QueryEngine for MemoEngine {
         state.parse = None;
         state.ir = None;
         state.module_ir = None;
+        state.summaries = None;
         // Keep the small interface memo. Restoring an equal file can still cut off here after its
         // parse is rebuilt, without retaining the heavyweight parse value while it is inactive.
         state.source_set = false;
@@ -662,6 +754,16 @@ impl QueryEngine for MemoEngine {
         self.force(QueryKey::ModuleIr(file));
         self.file(file)
             .module_ir
+            .as_ref()
+            .expect(FORCED)
+            .value
+            .clone()
+    }
+
+    fn function_summaries(&mut self, file: FileId) -> Vec<FunctionSummary> {
+        self.force(QueryKey::Summaries(file));
+        self.file(file)
+            .summaries
             .as_ref()
             .expect(FORCED)
             .value
@@ -745,10 +847,10 @@ mod tests {
             Stats {
                 revision: 2,
                 parse_computed: 2,
-                ir_computed: 0,
+                ir_computed: 2,
                 interface_computed: 2,
                 project_computed: 1,
-                validated: 0,
+                validated: 2,
                 early_cutoff: 0,
             }
         );
@@ -761,10 +863,10 @@ mod tests {
             Stats {
                 revision: 2,
                 parse_computed: 2,
-                ir_computed: 0,
+                ir_computed: 2,
                 interface_computed: 2,
                 project_computed: 1,
-                validated: 2,
+                validated: 4,
                 early_cutoff: 0,
             },
             "already-verified memos should be served straight from cache"
@@ -845,7 +947,7 @@ mod tests {
 
         assert_eq!(after, before);
         assert_eq!(db.stats().project_computed, 0);
-        assert_eq!(db.stats().early_cutoff, 1);
+        assert_eq!(db.stats().early_cutoff, 2);
     }
 
     #[test]
@@ -867,7 +969,7 @@ mod tests {
         assert_ne!(after.interface_hash, before.interface_hash);
         assert_ne!(after.identity_digest, before.identity_digest);
         assert_eq!(db.stats().project_computed, 1);
-        assert_eq!(db.stats().early_cutoff, 0);
+        assert_eq!(db.stats().early_cutoff, 1);
     }
 
     #[test]
@@ -904,11 +1006,15 @@ mod tests {
             interface_hash: 7,
             exports: vec!["alpha".to_owned()],
             linkage: Linkage::empty(),
+            summaries: Vec::new(),
+            summaries_digest: Digest::default(),
         };
         let beta = Interface {
             interface_hash: 7,
             exports: vec!["beta".to_owned()],
             linkage: Linkage::empty(),
+            summaries: Vec::new(),
+            summaries_digest: Digest::default(),
         };
 
         let alpha_project = Project::from_interfaces([("same.js", &alpha)]);
@@ -1007,11 +1113,11 @@ mod tests {
             Stats {
                 revision: 3,
                 parse_computed: 1,
-                ir_computed: 0,
+                ir_computed: 1,
                 interface_computed: 1,
                 project_computed: 0,
-                validated: 4,
-                early_cutoff: 1,
+                validated: 10,
+                early_cutoff: 2,
             }
         );
         assert_eq!(
@@ -1039,11 +1145,11 @@ mod tests {
             Stats {
                 revision: 3,
                 parse_computed: 1,
-                ir_computed: 0,
+                ir_computed: 1,
                 interface_computed: 1,
                 project_computed: 1,
-                validated: 4,
-                early_cutoff: 0,
+                validated: 10,
+                early_cutoff: 1,
             }
         );
     }
@@ -1138,7 +1244,7 @@ mod tests {
         assert_eq!(db.stats().project_computed, 0);
         assert_eq!(
             db.stats().early_cutoff,
-            1,
+            2,
             "the interface recomputed to an equal value"
         );
     }
@@ -1397,7 +1503,7 @@ mod tests {
         assert_eq!(db.stats().parse_computed, 1);
         assert_eq!(db.stats().interface_computed, 1);
         assert_eq!(db.stats().project_computed, 0);
-        assert_eq!(db.stats().early_cutoff, 1);
+        assert_eq!(db.stats().early_cutoff, 2);
     }
 
     #[test]
@@ -1408,5 +1514,82 @@ mod tests {
             Project::from_interfaces(std::iter::empty::<(&str, &Interface)>())
         );
         assert_eq!(db.revision(), Revision(0));
+    }
+
+    #[test]
+    fn function_summaries_are_memoized_and_cutoff_when_unchanged() {
+        let mut db = MemoEngine::new(summary_frontend);
+        let file = db.intern("a.js");
+        db.set_source(file, "function f() { return 1; }\n".to_owned());
+
+        let first = db.function_summaries(file);
+        assert_eq!(first.len(), 1);
+        assert_eq!(db.stats().parse_computed, 1);
+        assert_eq!(db.stats().ir_computed, 1);
+
+        db.reset_stats();
+        let second = db.function_summaries(file);
+        assert_eq!(second, first);
+        assert_eq!(db.stats().validated, 1);
+
+        // Edit that changes the constant returned (1 -> 2), keeping summary identical.
+        db.reset_stats();
+        db.set_source(file, "function f() { return 2; }\n".to_owned());
+        let third = db.function_summaries(file);
+        assert_eq!(third, first);
+        assert_eq!(db.stats().parse_computed, 1);
+        assert_eq!(db.stats().ir_computed, 1);
+        assert_eq!(db.stats().early_cutoff, 1);
+    }
+
+    #[test]
+    fn summary_changing_body_edit_propagates_to_interface_and_project() {
+        let mut db = MemoEngine::new(summary_frontend);
+        let file = db.intern("a.js");
+        db.set_source(file, "export function f() { return 1; }\n".to_owned());
+        let before_project = db.project();
+        let before_interface = db.interface(file);
+
+        // Edit return type from Number to String -> changes summary and interface_hash.
+        db.reset_stats();
+        db.set_source(file, "export function f() { return \"str\"; }\n".to_owned());
+        let after_project = db.project();
+        let after_interface = db.interface(file);
+
+        assert_ne!(
+            before_interface.summaries_digest,
+            after_interface.summaries_digest
+        );
+        assert_ne!(
+            before_interface.interface_hash,
+            after_interface.interface_hash
+        );
+        assert_ne!(
+            before_project.identity_digest,
+            after_project.identity_digest
+        );
+        assert_eq!(db.stats().project_computed, 1);
+    }
+
+    #[test]
+    fn summary_preserving_body_edit_cuts_off_at_interface() {
+        let mut db = MemoEngine::new(summary_frontend);
+        let file = db.intern("a.js");
+        db.set_source(file, "export function f() { return 1; }\n".to_owned());
+        let before_project = db.project();
+        let before_interface = db.interface(file);
+
+        // Edit body 1 -> 2 preserves summary (both return TypeGuess::Number).
+        db.reset_stats();
+        db.set_source(file, "export function f() { return 2; }\n".to_owned());
+        let after_project = db.project();
+        let after_interface = db.interface(file);
+
+        assert_eq!(before_interface, after_interface);
+        assert_eq!(before_project, after_project);
+        assert_eq!(db.stats().project_computed, 0);
+        // ir recomputes (different bytecode), summaries recompute (same summary -> cutoff),
+        // interface recomputes (same interface -> cutoff).
+        assert_eq!(db.stats().early_cutoff, 2);
     }
 }

@@ -10,6 +10,7 @@ repository.workspace = true
 # See ADRs 0006 and 0010.
 [dependencies]
 ahash = { workspace = true }
+kiln-backend-c = { workspace = true }
 kiln-digest = { workspace = true }
 kiln-hir = { workspace = true }
 kiln-ir = { workspace = true }
