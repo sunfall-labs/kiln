@@ -414,6 +414,14 @@ pub use prelude::*;
 mod validation;
 pub(crate) use validation::*;
 
+pub mod graph;
+pub mod verifier;
+pub use graph::{
+    BasicBlock, BlockId, FunctionGraph, GraphOp, GraphType, SiteId, Terminator, ValueId,
+    build_function_graph,
+};
+pub use verifier::{VerifierError, verify_function_graph};
+
 /// Whether any body in this program can produce a value the embedding boundary cannot carry.
 ///
 /// The boundary conversions depend on it, and they are not free to emit unconditionally:

@@ -4565,3 +4565,104 @@ int main(void) {{
         String::from_utf8_lossy(&run.stderr)
     );
 }
+
+#[test]
+fn value_graph_builds_and_verifies_scalar_loop() {
+    // for (let i = 0; i < 10; i++) sum += i;
+    let proto = FunctionProto {
+        span: kiln_ir::Span::default(),
+        prologue_end: 0,
+        declared_length: 0,
+        name: Some("loop_test".into()),
+        parameter_count: 0,
+        local_count: 2,
+        code: vec![
+            Instruction::Const(0),      // 0
+            Instruction::StoreLocal(0), // sum = 0
+            Instruction::Const(0),      // 0
+            Instruction::StoreLocal(1), // i = 0
+            // loop header: pc = 4
+            Instruction::LoadLocal(1),
+            Instruction::Const(1), // 10
+            Instruction::Binary(BinaryOp::LessThan),
+            Instruction::JumpIfFalse(15),
+            // loop body: pc = 8
+            Instruction::LoadLocal(0),
+            Instruction::LoadLocal(1),
+            Instruction::Binary(BinaryOp::Add),
+            Instruction::StoreLocal(0), // sum += i
+            Instruction::LoadLocal(1),
+            Instruction::Const(2), // 1
+            Instruction::Binary(BinaryOp::Add),
+            Instruction::StoreLocal(1), // i++
+            Instruction::Jump(4),
+            // exit: pc = 17
+            Instruction::LoadLocal(0),
+            Instruction::Return,
+        ],
+        arrow: false,
+        generator: false,
+        asynchronous: false,
+        async_generator: false,
+        mapped_arguments: false,
+        upvalues: Vec::new(),
+    };
+
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants: vec![
+            Constant::Number(0),
+            Constant::Number(10),
+            Constant::Number(1),
+        ],
+        code: vec![Instruction::Return],
+        local_count: 0,
+        functions: vec![proto.clone()],
+    };
+
+    let graph = build_function_graph(&proto, &program);
+    assert!(!graph.blocks.is_empty());
+    assert!(verify_function_graph(&graph).is_ok());
+}
+
+#[test]
+fn value_graph_builds_and_verifies_try_catch() {
+    let proto = FunctionProto {
+        span: kiln_ir::Span::default(),
+        prologue_end: 0,
+        declared_length: 0,
+        name: Some("try_catch".into()),
+        parameter_count: 0,
+        local_count: 2,
+        code: vec![
+            Instruction::PushHandler(5),
+            Instruction::Const(0),
+            Instruction::Throw,
+            Instruction::PopHandler,
+            Instruction::Jump(7),
+            // catch handler at pc = 5
+            Instruction::StoreLocal(1), // catch err
+            Instruction::Const(1),
+            Instruction::Return,
+        ],
+        arrow: false,
+        generator: false,
+        asynchronous: false,
+        async_generator: false,
+        mapped_arguments: false,
+        upvalues: Vec::new(),
+    };
+
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants: vec![Constant::String("err".into()), Constant::Number(42)],
+        code: vec![Instruction::Return],
+        local_count: 0,
+        functions: vec![proto.clone()],
+    };
+
+    let graph = build_function_graph(&proto, &program);
+    assert!(verify_function_graph(&graph).is_ok());
+}
