@@ -25,6 +25,21 @@
 #
 # A probe that the *interpreter* cannot run is a failure either way: this corpus is not the place
 # to discover that, and a probe nobody can run measures nothing.
+# `wait -n` and `BASHPID` need bash 4.3 or newer. macOS ships 3.2 as /bin/bash, and under it this
+# script's cleanup trap deletes the shared results directory instead of its own while the script
+# still exits 0 -- two full corpus runs were lost to that on 2026-09-05. Re-exec once under a bash
+# that has them, the way scripts/gate.sh does, rather than leaving it to the caller's environment.
+if [[ ${BASH_VERSINFO[0]} -lt 4 ]]; then
+	for candidate in /opt/homebrew/bin/bash /usr/local/bin/bash "$(command -v bash)"; do
+		# shellcheck disable=SC2016
+		if [[ -x $candidate ]] && [[ $("$candidate" -c 'echo ${BASH_VERSINFO[0]}') -ge 4 ]]; then
+			exec "$candidate" "${BASH_SOURCE[0]}" "$@"
+		fi
+	done
+	echo "native.sh: needs bash 4 or newer; install one (brew install bash)" >&2
+	exit 1
+fi
+
 set -euo pipefail
 
 # shellcheck source-path=SCRIPTDIR

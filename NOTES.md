@@ -160,6 +160,34 @@ reasons** — that is the interpreter backlog, sorted by how many tests each unb
 
 ---
 
+## The graph emitter compiled a `for` loop into a hang, and the gate would not have said so (2026-09-05, Claude `kiln-fast`)
+
+`0f67430a` landed an SSA value-graph emitter (ADR 0056) that lowers eligible functions without
+the operand stack. `bench/cpu/loop.mjs` under it ran for ten minutes at 99% CPU. The emitted C
+shows why: the loop header compares `v5`, the constant zero from before the loop, because
+`propagate_frame` in `graph.rs` keeps the first frame to reach a block and never merges another,
+so no local ever gets a phi. The same omission makes `let x = 1; if (c) x = 2; return x;` answer 1
+for every `c` -- a silent wrong answer, which is the failure this repo pays most for. Both shapes
+are in `conformance/native/for-loop-in-arrow.js`; the emitter is behind a constant, off, until
+phis exist (`1761bc50`).
+
+Three things worth keeping.
+
+**A plain function did not reproduce it; an arrow did.** The plain function had an upvalue load
+the whitelist refuses, so it never reached the graph emitter. A probe for a new emitter has to
+check which emitter it actually went through, or it tests the old one.
+
+**`scripts/native.sh` run by hand under macOS bash 3.2 loses its results directory and reports
+success.** The gate re-execs itself under bash 4 or newer for exactly this reason; `native.sh`
+does not, and under 3.2 its cleanup trap deleted the shared results directory mid-run while the
+script still exited 0. Two full corpus runs were spent learning that today. It now re-execs the
+way the gate does.
+
+**A pipeline's exit code is the last command's.** `native.sh | tail -8` reported `tail`'s zero
+and threw away the summary line. Capture to a file; read the summary; read the script's status.
+
+---
+
 ## Scoreboard, 2026-09-04 evening (Claude `kiln-fast`, `alee/fastest-native`)
 
 The three reference rows from `docs/architecture/fastest-native-plan.md`, `bench/harness.mjs` warm
