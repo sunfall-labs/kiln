@@ -71,6 +71,20 @@ ships 3.2, `mise run` finds it, and under 3.2 `thirdparty.sh` loses `BASHPID` an
 deletes the shared results directory instead of its own -- every bundle then reports "missing" and
 the change under test takes the blame.
 
+### Run the gate once, at the end, not as a progress bar
+
+The full gate is expensive: several hundred native compiles, the thirdparty bundles, three corpora
+and the Test262 baseline, and several agents share one machine and one CPU budget. Run it **once,
+when the change is finished**, and not after every edit. While iterating, run the narrowest thing
+that can answer the question you actually have: the one crate's tests, `scripts/native.sh` for a
+prelude change, `kiln test` on the one corpus directory the change touches, or the single probe
+that failed. `gate-quick` is the widest loop worth running mid-change, and even that is minutes.
+
+Two habits that waste the most. Rebuilding and re-measuring on every commit that lands on `main`
+-- a rebase costs a release build plus a cache-cold native compile of the prelude, and the number
+you get is a clock reading unless the change under test is yours. And running the whole Test262
+baseline to check a change that touches one chunk; `scripts/test262.sh` takes a chunk.
+
 ## Running the test corpora
 
 Each corpus declares itself either through a `manifest.toml` beside the files or through Test262
