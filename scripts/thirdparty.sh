@@ -54,9 +54,84 @@ fi
 
 KILN="${KILN_BIN:-}"
 if [[ -z $KILN ]]; then
-	kiln_cargo build --locked -p kiln-cli >&2
-	KILN="$(kiln_repo_root)/target/debug/kiln"
+	if [[ -x "$(kiln_repo_root)/target/release/kiln" ]]; then
+		KILN="$(kiln_repo_root)/target/release/kiln"
+	else
+		kiln_cargo build --locked -p kiln-cli >&2
+		KILN="$(kiln_repo_root)/target/debug/kiln"
+	fi
 fi
+
+BENCH=0
+UPDATE=0
+THRESHOLD="${KILN_THIRDPARTY_THRESHOLD:-25}"
+MIN_DELTA_MS="${KILN_THIRDPARTY_MIN_DELTA_MS:-3.0}"
+BASELINE="${KILN_THIRDPARTY_BASELINE:-bench/results/thirdparty-baseline.json}"
+PROFILE="${KILN_THIRDPARTY_PROFILE:-native-release}"
+PASSES="${PASSES:-5}"
+WARMUP="${WARMUP:-1}"
+TARGET_BUNDLES=""
+
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+		--bench | --timing | --baseline)
+			BENCH=1
+			shift
+			;;
+		--update)
+			BENCH=1
+			UPDATE=1
+			shift
+			;;
+		--threshold)
+			THRESHOLD="${2:?--threshold requires a percentage}"
+			shift 2
+			;;
+		--min-delta-ms)
+			MIN_DELTA_MS="${2:?--min-delta-ms requires milliseconds}"
+			shift 2
+			;;
+		--baseline-file)
+			BASELINE="${2:?--baseline-file requires a path}"
+			shift 2
+			;;
+		--profile)
+			PROFILE="${2:?--profile requires a profile name}"
+			shift 2
+			;;
+		--passes)
+			PASSES="${2:?--passes requires a count}"
+			shift 2
+			;;
+		--warmup)
+			WARMUP="${2:?--warmup requires a count}"
+			shift 2
+			;;
+		--bundles)
+			TARGET_BUNDLES="${2:?--bundles requires bundle names}"
+			shift 2
+			;;
+		-h | --help)
+			echo "Usage: scripts/thirdparty.sh [options]"
+			echo ""
+			echo "Options:"
+			echo "  --bench, --timing, --baseline   Time thirdparty bundles and verify against baseline"
+			echo "  --update                        Regenerate/update the committed baseline JSON"
+			echo "  --threshold <pct>               Regression threshold percentage (default: 25)"
+			echo "  --min-delta-ms <ms>             Minimum absolute delta in ms to consider regression (default: 3.0)"
+			echo "  --baseline-file <path>          Path to baseline JSON (default: bench/results/thirdparty-baseline.json)"
+			echo "  --profile <profile>             Native build profile (default: native-release)"
+			echo "  --passes <count>                Timing iterations per bundle (default: 5)"
+			echo "  --warmup <count>                Warmup iterations per bundle (default: 1)"
+			echo "  --bundles <names>               Comma-separated list of bundle names to test"
+			exit 0
+			;;
+		*)
+			echo "Unknown argument: $1" >&2
+			exit 1
+			;;
+	esac
+done
 
 # The four probes build.sh bundles as CommonJS for the *node* platform, because the libraries
 # behind them reach `path`, `fs`, `os` and `util` and cannot be bundled for the neutral one at
@@ -84,6 +159,133 @@ cleanup() {
 	fi
 }
 trap cleanup EXIT
+
+if [[ $BENCH -eq 1 ]]; then
+	python3 - "$KILN" "$BUNDLES" "$BASELINE" "$WORK_DIR" "$UPDATE" "$THRESHOLD" "$MIN_DELTA_MS" "$PROFILE" "$PASSES" "$WARMUP" "$NODE_PLATFORM" "$TARGET_BUNDLES" <<'PY'
+import json, os, statistics, subprocess, sys, time
+
+kiln, bundles_dir, baseline_path, work_dir, update_str, threshold_str, min_delta_str, profile, passes_str, warmup_str, node_platform_str, target_bundles_str = sys.argv[1:13]
+
+update = update_str == "1"
+threshold = float(threshold_str)
+min_delta_ms = float(min_delta_str)
+passes = max(1, int(passes_str))
+warmup = max(0, int(warmup_str))
+node_platform = set(node_platform_str.split())
+
+DEFAULT_BASELINE_BUNDLES = [
+    "postcss", "zod", "acorn", "chalk", "datefns", "dayjs", "immer",
+    "marked", "ms", "mustache", "rxjs", "semver", "uuid", "vue-reactivity", "yaml"
+]
+
+if os.path.exists(baseline_path):
+    with open(baseline_path) as handle:
+        baseline = json.load(handle)
+else:
+    baseline = {"schema": 1, "profile": profile, "threshold_pct": threshold, "bundles": {}}
+
+# Determine bundles to measure
+if target_bundles_str:
+    bundle_names = [b.strip() for b in target_bundles_str.split(",") if b.strip()]
+elif baseline.get("bundles"):
+    bundle_names = sorted(baseline["bundles"].keys())
+else:
+    bundle_names = DEFAULT_BASELINE_BUNDLES
+
+print(f"thirdparty baseline (profile={profile}, threshold={threshold:.1f}%, min_delta={min_delta_ms:.1f}ms, passes={passes}, warmup={warmup}):")
+
+measured = {}
+regressions = []
+gains = []
+
+for index, name in enumerate(bundle_names, 1):
+    bundle_path = os.path.join(bundles_dir, f"{name}.bundle.js")
+    if not os.path.exists(bundle_path):
+        print(f"[{index}/{len(bundle_names)}] {name:16} (bundle absent on disk; skipped)", flush=True)
+        continue
+
+    bin_path = os.path.join(work_dir, f"{name}.bin")
+    adapter = ["--node"] if name in node_platform else []
+    build_cmd = [kiln, "--one-shot", *adapter, "build", bundle_path, "--profile", profile, "--output", bin_path]
+    built = subprocess.run(build_cmd, capture_output=True, text=True)
+    if built.returncode != 0 or not os.path.exists(bin_path):
+        err_snippet = built.stderr.strip().splitlines()
+        err_msg = err_snippet[-1] if err_snippet else f"exit {built.returncode}"
+        regressions.append(f"{name}: native compilation failed ({err_msg})")
+        print(f"[{index}/{len(bundle_names)}] {name:16} COMPILE FAILED ({err_msg})", flush=True)
+        continue
+
+    # Warmup passes to avoid page-fault noise on fresh binaries
+    for _ in range(warmup):
+        subprocess.run([bin_path], capture_output=True)
+
+    # Execute passes
+    times = []
+    failed = False
+    for _ in range(passes):
+        t0 = time.perf_counter()
+        proc = subprocess.run([bin_path], capture_output=True)
+        t1 = time.perf_counter()
+        if proc.returncode != 0:
+            err_snippet = proc.stderr.decode("utf-8", errors="replace").strip().splitlines()
+            err_msg = err_snippet[-1] if err_snippet else f"exit {proc.returncode}"
+            regressions.append(f"{name}: native execution failed ({err_msg})")
+            print(f"[{index}/{len(bundle_names)}] {name:16} RUN FAILED ({err_msg})", flush=True)
+            failed = True
+            break
+        times.append((t1 - t0) * 1000.0)
+
+    if failed or not times:
+        continue
+
+    median_ms = round(statistics.median(times), 2)
+    min_ms = round(min(times), 2)
+    measured[name] = {"median_ms": median_ms, "min_ms": min_ms}
+
+    was = baseline.get("bundles", {}).get(name)
+    if was and "median_ms" in was:
+        was_ms = was["median_ms"]
+        diff_ms = median_ms - was_ms
+        pct = (diff_ms / was_ms) * 100.0 if was_ms > 0 else 0.0
+        if diff_ms > min_delta_ms and pct > threshold:
+            regressions.append(f"{name}: was {was_ms:.2f}ms, now {median_ms:.2f}ms (+{pct:.1f}% > {threshold:.1f}% threshold)")
+            mark = f"  REGRESSED (+{pct:.1f}%)"
+        elif diff_ms < -min_delta_ms and pct < -threshold:
+            gains.append(f"{name}: was {was_ms:.2f}ms, now {median_ms:.2f}ms ({pct:.1f}%)")
+            mark = f"  {diff_ms:+.2f}ms (gain)"
+        else:
+            mark = f"  ({pct:+.1f}%)"
+        print(f"[{index}/{len(bundle_names)}] {name:16} {median_ms:.2f}ms (baseline {was_ms:.2f}ms){mark}", flush=True)
+    else:
+        print(f"[{index}/{len(bundle_names)}] {name:16} {median_ms:.2f}ms (new)", flush=True)
+
+if update:
+    baseline["schema"] = 1
+    baseline["profile"] = profile
+    baseline["threshold_pct"] = threshold
+    baseline.setdefault("bundles", {})
+    baseline["bundles"].update(measured)
+    os.makedirs(os.path.dirname(os.path.abspath(baseline_path)), exist_ok=True)
+    with open(baseline_path, "w") as handle:
+        json.dump(baseline, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    print(f"\nwrote {baseline_path}: {len(baseline['bundles'])} bundle(s) recorded")
+    sys.exit(0)
+
+for line in gains:
+    print(f"gain     {line}")
+for line in regressions:
+    print(f"REGRESS  {line}", file=sys.stderr)
+
+if regressions:
+    regressed_names = [r.split(":")[0].strip() for r in regressions]
+    sys.exit(f"\n{len(regressions)} bundle(s) regressed: {', '.join(regressed_names)}; accept them with --update if intended")
+
+total_measured = len(measured)
+print(f"\nno regressions across {total_measured} bundle(s)" + (f", {len(gains)} gained" if gains else ""))
+PY
+	exit 0
+fi
 
 run_interpreted() {
 	trap - EXIT

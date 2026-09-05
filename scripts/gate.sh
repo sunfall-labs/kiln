@@ -102,6 +102,7 @@ step "crate tests" "$BASH" -c '
 
 step "native parity" expect_clean "native" "0 diverged" "$BASH" ./scripts/native.sh
 step "thirdparty" expect_clean "thirdparty" "0 diverged" "$BASH" ./scripts/thirdparty.sh
+step "thirdparty baseline" ./scripts/thirdparty.sh --bench
 
 if [[ $QUICK -eq 0 ]]; then
 	for corpus in node server regress; do
