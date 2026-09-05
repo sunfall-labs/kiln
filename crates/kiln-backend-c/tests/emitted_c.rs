@@ -1810,5 +1810,7 @@ fn method_inline_cache_prelude_surface() {
     assert!(prelude.contains("uint8_t has_cached_method;"));
     assert!(prelude.contains("uint64_t cached_method;"));
     assert!(prelude.contains("site->has_cached_method"));
-    assert!(prelude.contains("kiln_c99_invoke_method(host, &call_result, method.bits, self_value"));
+    // The method call on machine values: a built-in method is invoked with its receiver at the
+    // boundary, after the site's cache has answered the lookup.
+    assert!(prelude.contains("kiln_c99_invoke_method(host, &bresult, bmethod.bits, bself"));
 }

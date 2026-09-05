@@ -219,7 +219,7 @@ pub(crate) fn emit_tail_instruction(
         Instruction::ToPropertyKey => {
             writeln!(
                 output,
-                "    {{ int status = kiln_c99_op_val_to_property_key(host, stack, &sp, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                "    {{ int status = kiln_c99_val_to_property_key(host, stack[sp - 2], stack[sp - 1], depth, thrown, &stack[sp - 1]); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
             )
             .unwrap();
         }
