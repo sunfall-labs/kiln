@@ -1076,11 +1076,15 @@ name = "kiln-backend-c"
 version = "0.0.0"
 dependencies = [
  "kiln-builtin-surface",
+ "kiln-digest",
  "kiln-host-abi",
  "kiln-ir",
+ "kiln-module-graph",
  "kiln-native-number",
  "kiln-native-number-abi",
  "memchr",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1092,6 +1096,7 @@ name = "kiln-db"
 version = "0.0.0"
 dependencies = [
  "ahash",
+ "kiln-backend-c",
  "kiln-digest",
  "kiln-hir",
  "kiln-ir",
@@ -1190,6 +1195,7 @@ dependencies = [
  "kiln-ir",
  "kiln-module-resolver",
  "kiln-runtime",
+ "serde",
 ]
 
 [[package]]
