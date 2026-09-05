@@ -366,6 +366,9 @@ pub fn proven_types_with(
         .iter()
         .flat_map(|b| b.operations.iter().map(|(vid, _)| (*vid, None)))
         .collect();
+    for (&vid, &kind) in assumptions {
+        state.insert(vid, Some(kind));
+    }
     let number = |state: &HashMap<ValueId, Option<Proven>>, v: &ValueId| {
         matches!(state.get(v), Some(None) | Some(Some(Proven::Number)))
     };
@@ -373,8 +376,6 @@ pub fn proven_types_with(
         let mut changed = false;
         for block in &graph.blocks {
             for (vid, op) in &block.operations {
-                // `Some(kind)` proves it; `None` proves nothing. An operand still unconstrained
-                // counts as agreeing, which is the optimism.
                 if let Some(&assumed) = assumptions.get(vid) {
                     finish(&mut state, vid, Some(assumed), &mut changed);
                     continue;
@@ -494,10 +495,117 @@ fn finish(
 
 /// The values proven to be numbers; what the emitter types as `double`.
 pub fn proven_numbers(graph: &FunctionGraph) -> std::collections::HashSet<ValueId> {
-    proven_types(graph)
+    proven_numbers_with_assumptions(graph, &HashMap::new())
+}
+
+/// The values proven to be numbers given speculative assumptions about initial values/parameters.
+pub fn proven_numbers_with_assumptions(
+    graph: &FunctionGraph,
+    assumptions: &HashMap<ValueId, Proven>,
+) -> std::collections::HashSet<ValueId> {
+    proven_types_with(graph, assumptions)
         .into_iter()
         .filter_map(|(vid, kind)| (kind == Proven::Number).then_some(vid))
         .collect()
+}
+
+/// Parameter slots (0..proto.parameter_count) that can be speculatively assumed to be numbers.
+///
+/// In Step 2.1 of fastest-native-plan.md, versioning emits a guarded unboxed clone and generic
+/// fallback clone for regions where parameter inputs arrive untyped but are consumed in
+/// arithmetic, comparisons, or numeric phis.
+pub fn candidate_number_parameters(graph: &FunctionGraph, proto: &FunctionProto) -> Vec<usize> {
+    if proto.parameter_count == 0 || proto.generator || proto.asynchronous || proto.mapped_arguments
+    {
+        return Vec::new();
+    }
+    let baseline = proven_numbers(graph);
+    let mut all_assumptions = HashMap::new();
+    for slot in 0..proto.parameter_count as usize {
+        if let Some(&vid) = graph.initial_locals.get(slot) {
+            all_assumptions.insert(vid, Proven::Number);
+        }
+    }
+    if all_assumptions.is_empty() {
+        return Vec::new();
+    }
+    let speculative = proven_numbers_with_assumptions(graph, &all_assumptions);
+    let mut useful = Vec::new();
+    for slot in 0..proto.parameter_count as usize {
+        if let Some(&param_vid) = graph.initial_locals.get(slot) {
+            // Check if param_vid is consumed by any operation that benefits from being numeric
+            let consumed = graph.blocks.iter().any(|b| {
+                b.operations.iter().any(|(vid, op)| match op {
+                    GraphOp::Binary { op, left, right }
+                        if !matches!(op, BinaryOp::In | BinaryOp::InstanceOf) =>
+                    {
+                        if *left == param_vid || *right == param_vid {
+                            let other = if *left == param_vid { right } else { left };
+                            speculative.contains(other) || baseline.contains(other)
+                        } else {
+                            false
+                        }
+                    }
+                    GraphOp::Unary { value, .. } => *value == param_vid,
+                    GraphOp::Phi { inputs } => {
+                        speculative.contains(vid) && inputs.iter().any(|(_, v)| *v == param_vid)
+                    }
+                    GraphOp::StoreLocal { value, .. } | GraphOp::StoreCell { value, .. } => {
+                        *value == param_vid && speculative.contains(vid)
+                    }
+                    _ => false,
+                })
+            });
+            if consumed {
+                useful.push(slot);
+            }
+        }
+    }
+    if useful.is_empty() {
+        return Vec::new();
+    }
+    // Verify that the useful parameters unlock numbers beyond the baseline and assumed params
+    let useful_assumptions: HashMap<ValueId, Proven> = useful
+        .iter()
+        .filter_map(|&slot| {
+            graph
+                .initial_locals
+                .get(slot)
+                .map(|&vid| (vid, Proven::Number))
+        })
+        .collect();
+    let verified_spec = proven_numbers_with_assumptions(graph, &useful_assumptions);
+    let has_body_numbers = verified_spec
+        .iter()
+        .any(|vid| !baseline.contains(vid) && !useful_assumptions.contains_key(vid));
+    let has_numeric_comparison = graph.blocks.iter().any(|b| {
+        b.operations.iter().any(|(_, op)| match op {
+            GraphOp::Binary {
+                op:
+                    BinaryOp::LessThan
+                    | BinaryOp::LessThanOrEqual
+                    | BinaryOp::GreaterThan
+                    | BinaryOp::GreaterThanOrEqual
+                    | BinaryOp::StrictEqual
+                    | BinaryOp::StrictNotEqual
+                    | BinaryOp::LooseEqual
+                    | BinaryOp::LooseNotEqual,
+                left,
+                right,
+            } => {
+                useful_assumptions.contains_key(left)
+                    && (verified_spec.contains(right) || baseline.contains(right))
+                    || useful_assumptions.contains_key(right)
+                        && (verified_spec.contains(left) || baseline.contains(left))
+            }
+            _ => false,
+        })
+    });
+    if has_body_numbers || has_numeric_comparison {
+        useful
+    } else {
+        Vec::new()
+    }
 }
 
 /// The operand-stack effect of an instruction the graph lowers through `tail.rs`: how many

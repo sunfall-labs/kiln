@@ -811,6 +811,7 @@ pub(crate) fn closure_construction(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_functions(
     output: &mut String,
     program: &Program,

@@ -52,6 +52,7 @@ typedef uint64_t kiln_val;
 #define KILN_VAL_IS_CLOSURE(v)   (((v) & KILN_TAG_MASK) == KILN_TAG_CLOSURE_PREFIX)
 #define KILN_VAL_PTR(v)          ((void *)((uint64_t)(v) & KILN_PAYLOAD_MASK))
 #define KILN_VAL_TAG_PTR(pfx, p) ((kiln_val)((pfx) | ((uint64_t)(uintptr_t)(p) & KILN_PAYLOAD_MASK)))
+#define KILN_VAL_IS_DOUBLE(v)    KILN_VAL_IS_NUMBER(v)
 
 static inline kiln_val kiln_val_from_boundary(kiln_value v) {
     if (v.tag == KILN_VALUE_NUMBER) {
@@ -110,6 +111,43 @@ static inline int kiln_c99_val_truthy(kiln_val v) {
         return p != NULL && p[0] != '\0';
     }
     return 1;
+}
+
+/* =========================================================================
+ * Step 2.1: Speculation and Versioning Runtime Support
+ * ========================================================================= */
+static int kiln_c99_speculate_mode = -2;
+
+static inline int kiln_c99_speculate_exit_active(void) {
+    if (kiln_c99_speculate_mode == -2) {
+        const char *s = getenv("KILN_SPECULATE");
+        if (s && strcmp(s, "exit") == 0) {
+            kiln_c99_speculate_mode = 1;
+        } else if (s && strcmp(s, "0") == 0) {
+            kiln_c99_speculate_mode = -1;
+        } else {
+            kiln_c99_speculate_mode = 0;
+        }
+    }
+    return kiln_c99_speculate_mode;
+}
+
+static inline int kiln_c99_guard_should_exit(uint32_t *counter) {
+    int mode = kiln_c99_speculate_exit_active();
+    if (KILN_UNLIKELY(mode == -1)) {
+        return 1;
+    }
+    if (KILN_UNLIKELY(mode == 1)) {
+        if ((*counter)++ == 0) {
+            return 1;
+        }
+        static uint64_t rng = 0x853c49e6748fea9bULL;
+        rng ^= rng >> 12;
+        rng ^= rng << 25;
+        rng ^= rng >> 27;
+        return (rng & 1) != 0;
+    }
+    return 0;
 }
 
 static kiln_value kiln_val_to_boundary(kiln_val v);

@@ -4660,6 +4660,149 @@ fn proven_numbers_reach_a_loop_carried_phi_and_stop_at_a_parameter() {
 }
 
 #[test]
+fn versioning_emits_two_clones_with_entry_guard_and_loop_exit() {
+    let proto = FunctionProto {
+        span: kiln_ir::Span::default(),
+        prologue_end: 0,
+        declared_length: 1,
+        name: Some("sum_to_n".into()),
+        parameter_count: 1,
+        local_count: 3,
+        code: vec![
+            Instruction::Const(0),
+            Instruction::StoreLocal(1),
+            Instruction::Const(0),
+            Instruction::StoreLocal(2),
+            Instruction::LoadLocal(2), // 4: header
+            Instruction::LoadLocal(0),
+            Instruction::Binary(BinaryOp::LessThan),
+            Instruction::JumpIfFalse(17),
+            Instruction::LoadLocal(1), // 8
+            Instruction::LoadLocal(2),
+            Instruction::Binary(BinaryOp::Add),
+            Instruction::StoreLocal(1),
+            Instruction::LoadLocal(2),
+            Instruction::Const(1),
+            Instruction::Binary(BinaryOp::Add),
+            Instruction::StoreLocal(2),
+            Instruction::Jump(4),
+            Instruction::LoadLocal(1), // 17
+            Instruction::Return,
+        ],
+        arrow: false,
+        generator: false,
+        asynchronous: false,
+        async_generator: false,
+        mapped_arguments: false,
+        upvalues: Vec::new(),
+    };
+    let prog = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants: vec![Constant::Number(0), Constant::Number(1)],
+        code: vec![Instruction::Return],
+        local_count: 0,
+        functions: vec![proto.clone()],
+    };
+    let graph = build_function_graph(&proto, &prog).unwrap();
+    let candidates = crate::graph::candidate_number_parameters(&graph, &proto);
+    assert_eq!(
+        candidates,
+        vec![0],
+        "parameter slot 0 is candidate for numeric speculation"
+    );
+
+    let generated = emit(&prog).expect("program with candidate parameter emits");
+    let src = &generated.source;
+
+    // Must name the invariant in the comments/guard
+    let param_inv = lookup_speculation_invariant("parameter_number");
+    let loop_inv = lookup_speculation_invariant("loop_speculation_exit");
+    assert!(src.contains(&format!("Speculation entry guard [{}]", param_inv.name)));
+    assert!(src.contains(&format!("Speculation exit check [{}]", loop_inv.name)));
+
+    // Must emit two clones
+    assert!(src.contains("/* Clone A: guarded fast path */"));
+    assert!(src.contains("kiln_fast_block_"));
+    assert!(src.contains("/* Clone B: generic fallback path */"));
+    assert!(src.contains("kiln_generic_block_"));
+    assert!(src.contains("KILN_VAL_IS_DOUBLE(args[0])"));
+}
+
+#[test]
+fn speculation_invariants_table_is_sound_and_complete() {
+    assert_eq!(assert_speculation_invariants(SPECULATION_INVARIANTS), 2);
+    let p = lookup_speculation_invariant("parameter_number");
+    assert!(!p.name.is_empty() && !p.language_rule.is_empty());
+    let l = lookup_speculation_invariant("loop_speculation_exit");
+    assert!(!l.name.is_empty() && !l.language_rule.is_empty());
+}
+
+#[test]
+fn speculation_disabled_emits_generic_clone_alone() {
+    let proto = FunctionProto {
+        span: kiln_ir::Span::default(),
+        prologue_end: 0,
+        declared_length: 1,
+        name: Some("sum_to_n_no_spec".into()),
+        parameter_count: 1,
+        local_count: 3,
+        code: vec![
+            Instruction::Const(0),
+            Instruction::StoreLocal(1),
+            Instruction::Const(0),
+            Instruction::StoreLocal(2),
+            Instruction::LoadLocal(2),
+            Instruction::LoadLocal(0),
+            Instruction::Binary(BinaryOp::LessThan),
+            Instruction::JumpIfFalse(17),
+            Instruction::LoadLocal(1),
+            Instruction::LoadLocal(2),
+            Instruction::Binary(BinaryOp::Add),
+            Instruction::StoreLocal(1),
+            Instruction::LoadLocal(2),
+            Instruction::Const(1),
+            Instruction::Binary(BinaryOp::Add),
+            Instruction::StoreLocal(2),
+            Instruction::Jump(4),
+            Instruction::LoadLocal(1),
+            Instruction::Return,
+        ],
+        arrow: false,
+        generator: false,
+        asynchronous: false,
+        async_generator: false,
+        mapped_arguments: false,
+        upvalues: Vec::new(),
+    };
+    let prog = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants: vec![Constant::Number(0), Constant::Number(1)],
+        code: vec![Instruction::Return],
+        local_count: 0,
+        functions: vec![proto.clone()],
+    };
+    let orig = std::env::var("KILN_SPECULATE").ok();
+    unsafe {
+        std::env::set_var("KILN_SPECULATE", "0");
+    }
+    let generated = emit(&prog).expect("emits with speculation disabled");
+    unsafe {
+        if let Some(val) = orig {
+            std::env::set_var("KILN_SPECULATE", val);
+        } else {
+            std::env::remove_var("KILN_SPECULATE");
+        }
+    }
+    let src = &generated.source;
+    assert!(!src.contains("/* Clone A: guarded fast path */"));
+    assert!(!src.contains("kiln_fast_block_"));
+    assert!(!src.contains("Speculation entry guard"));
+    assert!(src.contains("kiln_block_"));
+}
+
+#[test]
 fn value_graph_merges_locals_at_a_loop_header_with_phis() {
     // let sum = 0; let i = 0; while (i < 10) { sum += i; i++; } return sum;
     //

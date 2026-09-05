@@ -7,7 +7,11 @@
 //! - Materializes call arguments into local stack arrays at call sites only, avoiding whole-body address-taking.
 
 use crate::direct::{CallPlan, direct_callable};
-use crate::graph::{BasicBlock, BlockId, FunctionGraph, GraphOp, Terminator, ValueId};
+use crate::graph::{
+    BasicBlock, BlockId, FunctionGraph, GraphOp, Proven, Terminator, ValueId,
+    candidate_number_parameters, proven_numbers_with_assumptions,
+};
+use crate::prelude::lookup_speculation_invariant;
 use crate::tail::{TailContext, emit_tail_instruction};
 use crate::{BuiltinLoad, builtin_load, closure_construction, proto_publishes_frame};
 use kiln_ir::Upvalue;
@@ -357,35 +361,7 @@ pub fn emit_entry_from_graph(
     );
 }
 
-/// The SSA value declarations, every block with its terminator, and the tail: what a function
-/// body and the entry point share once their prologues are written.
-#[allow(clippy::too_many_arguments)]
-fn emit_blocks(
-    output: &mut String,
-    graph: &FunctionGraph,
-    proto: &FunctionProto,
-    program: &Program,
-    symbol: &str,
-    scalar_proto: bool,
-    diagnostic_site: &str,
-    frame_stacks: &[usize],
-    strict_functions: &[bool],
-    array_slots: &HashSet<u32>,
-    site: &Site<'_>,
-    plan: &CallPlan,
-    kind: EntryKind,
-) {
-    let body_start = output.len();
-    // 4. Declare SSA value locals. A value proven to be a number also gets a `double` twin:
-    // typed operations compute the double directly, with no tag test and no memcpy, and box it
-    // into the `kiln_val` twin for whoever reads the value untyped. Clang deletes a box nothing
-    // reads. Nothing here is a guess, so nothing here needs a guard.
-    let numbers = &plan.numbers;
-    let defs: std::collections::HashMap<ValueId, &GraphOp> = graph
-        .blocks
-        .iter()
-        .flat_map(|b| b.operations.iter().map(|(v, op)| (*v, op)))
-        .collect();
+fn emit_ssa_declarations(output: &mut String, graph: &FunctionGraph, numbers: &HashSet<ValueId>) {
     if !numbers.is_empty() {
         let mut ids: Vec<u32> = numbers.iter().map(|v| v.0).collect();
         ids.sort_unstable();
@@ -408,12 +384,33 @@ fn emit_blocks(
         }
         output.push_str(";\n");
     }
+}
 
-    // 5. Basic blocks emission
+#[allow(clippy::too_many_arguments)]
+fn emit_block_sequence(
+    output: &mut String,
+    graph: &FunctionGraph,
+    proto: &FunctionProto,
+    program: &Program,
+    symbol: &str,
+    scalar_proto: bool,
+    diagnostic_site: &str,
+    frame_stacks: &[usize],
+    strict_functions: &[bool],
+    array_slots: &HashSet<u32>,
+    site: &Site<'_>,
+    plan: &CallPlan,
+    kind: EntryKind,
+    numbers: &HashSet<ValueId>,
+    defs: &std::collections::HashMap<ValueId, &GraphOp>,
+    block_prefix: &str,
+    is_fast_clone: bool,
+) {
+    let self_index = match site {
+        Site::Function { index } => Some(*index),
+        Site::Entry { .. } => None,
+    };
     for block in &graph.blocks {
-        // A resume target's landing, reached only from the dispatch switch: it hands what the
-        // suspend spilled and what the caller sent to the block's stack phis and falls into the
-        // block. A rejection or a `throw()` arrives as a throw into the block's handler instead.
         for from in &graph.blocks {
             if let Terminator::Suspend {
                 resume,
@@ -424,7 +421,7 @@ fn emit_blocks(
                 && *resume == block.id
             {
                 let landing_unwind = match block.exception_handler {
-                    Some(handler) => format!("goto kiln_block_{};", handler.0),
+                    Some(handler) => format!("goto {block_prefix}{};", handler.0),
                     None => "goto kiln_unwind;".to_owned(),
                 };
                 let phis: Vec<u32> = block
@@ -449,18 +446,37 @@ fn emit_blocks(
                 }
             }
         }
-        writeln!(output, "kiln_block_{}:;", block.id.0).unwrap();
+        writeln!(output, "{block_prefix}{}:;", block.id.0).unwrap();
         if graph.seam_block == Some(block.id) {
-            // The seam between parameter binding and the body: the binding run by the call
-            // stops here, and the first `next` starts here.
             output
                 .push_str("    if (frame->binding) { frame->sp = 0; return KILN_C99_YIELDED; }\n");
         }
-        // Where a throw in this block goes: its innermost handler, or out of the body.
         let unwind = match block.exception_handler {
-            Some(handler) => format!("goto kiln_block_{};", handler.0),
+            Some(handler) => format!("goto {block_prefix}{};", handler.0),
             None => "goto kiln_unwind;".to_owned(),
         };
+
+        if is_fast_clone && block.predecessors.len() >= 2 {
+            let loop_inv = lookup_speculation_invariant("loop_speculation_exit");
+            writeln!(
+                output,
+                "    /* Speculation exit check [{}]: {} */",
+                loop_inv.name, loop_inv.language_rule
+            )
+            .unwrap();
+            writeln!(
+                output,
+                "    static uint32_t kiln_loop_guard_{} = 0;",
+                block.id.0
+            )
+            .unwrap();
+            writeln!(
+                output,
+                "    if (KILN_UNLIKELY(kiln_c99_guard_should_exit(&kiln_loop_guard_{}))) goto kiln_generic_block_{};",
+                block.id.0, block.id.0
+            )
+            .unwrap();
+        }
 
         for &(vid, ref op) in &block.operations {
             emit_graph_op(
@@ -480,10 +496,7 @@ fn emit_blocks(
                 &unwind,
                 plan,
                 kind,
-                match site {
-                    Site::Function { index } => Some(*index),
-                    Site::Entry { .. } => None,
-                },
+                self_index,
             );
         }
 
@@ -493,11 +506,157 @@ fn emit_blocks(
             block,
             &block.terminator,
             numbers,
-            &defs,
+            defs,
             &unwind,
             site,
             scalar_proto,
             kind,
+            block_prefix,
+        );
+    }
+}
+
+/// The SSA value declarations, every block with its terminator, and the tail: what a function
+/// body and the entry point share once their prologues are written.
+#[allow(clippy::too_many_arguments)]
+fn emit_blocks(
+    output: &mut String,
+    graph: &FunctionGraph,
+    proto: &FunctionProto,
+    program: &Program,
+    symbol: &str,
+    scalar_proto: bool,
+    diagnostic_site: &str,
+    frame_stacks: &[usize],
+    strict_functions: &[bool],
+    array_slots: &HashSet<u32>,
+    site: &Site<'_>,
+    plan: &CallPlan,
+    kind: EntryKind,
+) {
+    let body_start = output.len();
+    let candidate_params = candidate_number_parameters(graph, proto);
+    let speculate_enabled = std::env::var("KILN_SPECULATE").as_deref() != Ok("0");
+    let suspends = graph
+        .blocks
+        .iter()
+        .any(|b| matches!(b.terminator, Terminator::Suspend { .. }))
+        || graph.seam_block.is_some();
+    let versioning =
+        speculate_enabled && !candidate_params.is_empty() && !suspends && kind == EntryKind::Boxed;
+
+    let baseline_numbers = &plan.numbers;
+    let defs: std::collections::HashMap<ValueId, &GraphOp> = graph
+        .blocks
+        .iter()
+        .flat_map(|b| b.operations.iter().map(|(v, op)| (*v, op)))
+        .collect();
+
+    if versioning {
+        let candidate_assumptions: std::collections::HashMap<ValueId, Proven> = candidate_params
+            .iter()
+            .filter_map(|&slot| {
+                graph
+                    .initial_locals
+                    .get(slot)
+                    .map(|&vid| (vid, Proven::Number))
+            })
+            .collect();
+        let speculative_numbers = proven_numbers_with_assumptions(graph, &candidate_assumptions);
+        let mut all_numbers = baseline_numbers.clone();
+        all_numbers.extend(&speculative_numbers);
+
+        emit_ssa_declarations(output, graph, &all_numbers);
+
+        let index = match site {
+            Site::Function { index } => *index,
+            _ => 0,
+        };
+        let invariant = lookup_speculation_invariant("parameter_number");
+        writeln!(
+            output,
+            "    /* Speculation entry guard [{}]: {} */",
+            invariant.name, invariant.language_rule
+        )
+        .unwrap();
+        writeln!(output, "    static uint32_t kiln_guard_entry_{index} = 0;").unwrap();
+        let mut conds = vec![format!(
+            "!kiln_c99_guard_should_exit(&kiln_guard_entry_{index})"
+        )];
+        for &slot in &candidate_params {
+            conds.push(format!(
+                "(argc > {slot} && KILN_VAL_IS_DOUBLE(args[{slot}]))"
+            ));
+        }
+        let entry_id = graph.entry_block.0;
+        writeln!(
+            output,
+            "    if (KILN_LIKELY({})) {{\n        goto kiln_fast_block_{entry_id};\n    }} else {{\n        goto kiln_generic_block_{entry_id};\n    }}",
+            conds.join(" && ")
+        )
+        .unwrap();
+
+        writeln!(output, "    /* Clone A: guarded fast path */").unwrap();
+        emit_block_sequence(
+            output,
+            graph,
+            proto,
+            program,
+            symbol,
+            scalar_proto,
+            diagnostic_site,
+            frame_stacks,
+            strict_functions,
+            array_slots,
+            site,
+            plan,
+            kind,
+            &all_numbers,
+            &defs,
+            "kiln_fast_block_",
+            true,
+        );
+
+        writeln!(output, "    /* Clone B: generic fallback path */").unwrap();
+        emit_block_sequence(
+            output,
+            graph,
+            proto,
+            program,
+            symbol,
+            scalar_proto,
+            diagnostic_site,
+            frame_stacks,
+            strict_functions,
+            array_slots,
+            site,
+            plan,
+            kind,
+            baseline_numbers,
+            &defs,
+            "kiln_generic_block_",
+            false,
+        );
+    } else {
+        emit_ssa_declarations(output, graph, baseline_numbers);
+        emit_block_sequence(
+            output,
+            graph,
+            proto,
+            program,
+            symbol,
+            scalar_proto,
+            diagnostic_site,
+            frame_stacks,
+            strict_functions,
+            array_slots,
+            site,
+            plan,
+            kind,
+            baseline_numbers,
+            &defs,
+            "kiln_block_",
+            false,
         );
     }
 
@@ -781,7 +940,7 @@ fn emit_graph_op(
             // A body that cannot hold a reference has no `thrown` slot; a dead-zone read there
             // is refused by the helper, loudly, rather than crashing or answering `undefined`.
             let thrown = if scalar_proto { "NULL" } else { "thrown" };
-            let check = status_check(diagnostic_site, pc, &label, unwind);
+            let check = status_check(diagnostic_site, pc, label, unwind);
             writeln!(
                 output,
                 "    {{ const kiln_val *cell = (const kiln_val *)KILN_VAL_PTR(locals[{slot}]); int status = kiln_c99_val_check_tdz(*cell, {thrown}); {check} v{v} = *cell; }}"
@@ -803,7 +962,7 @@ fn emit_graph_op(
         // An upvalue is a box the closure was handed; the load checks the temporal dead zone
         // the way a cell load does, and the store writes the box.
         GraphOp::LoadUpvalue(index) => {
-            let check = status_check(diagnostic_site, pc, &label, unwind);
+            let check = status_check(diagnostic_site, pc, label, unwind);
             writeln!(
                 output,
                 "    {{ const kiln_val *cell = (const kiln_val *)KILN_VAL_PTR(upvalues[{index}]); int status = kiln_c99_val_check_tdz(*cell, thrown); {check} v{v} = *cell; }}"
@@ -978,7 +1137,7 @@ fn emit_graph_op(
                     let slow = if scalar_proto {
                         format!("v{v} = kiln_c99_val_unary_fast({code}, v{x});")
                     } else {
-                        let check = status_check(diagnostic_site, pc, &label, unwind);
+                        let check = status_check(diagnostic_site, pc, label, unwind);
                         format!(
                             "kiln_value ans; int status = kiln_c99_unary_checked({code}, host, kiln_val_to_boundary(v{x}), &ans, depth, thrown); {check} v{v} = kiln_val_from_boundary(ans);"
                         )
@@ -1057,7 +1216,7 @@ fn emit_graph_op(
             let slow = if scalar_proto {
                 format!("v{v} = kiln_c99_val_binary_fast({code}, v{l}, v{r});")
             } else {
-                let check = status_check(diagnostic_site, pc, &label, unwind);
+                let check = status_check(diagnostic_site, pc, label, unwind);
                 format!(
                     "int status = KILN_C99_OK; v{v} = kiln_c99_val_binary({code}, host, v{l}, v{r}, &status, depth, thrown); {check}"
                 )
@@ -1104,7 +1263,7 @@ fn emit_graph_op(
             } else {
                 " (void)kiln_c99_global_object_val(&recv);"
             };
-            let check = status_check(diagnostic_site, pc, &label, unwind);
+            let check = status_check(diagnostic_site, pc, label, unwind);
             // A function calling itself through its own binding is calling the very closure
             // that is running: its upvalue table is this one, and the callee value need not be
             // read at all.
@@ -1182,7 +1341,7 @@ fn emit_graph_op(
                     "{static_branches} else {{ status = plain->body(&ctx_call, &call_result, plain->upvalues, &recv, call_args, (size_t){argc}); }}"
                 )
             };
-            let check = status_check(diagnostic_site, pc, &label, unwind);
+            let check = status_check(diagnostic_site, pc, label, unwind);
             writeln!(
                 output,
                 "    {{ kiln_val call_stack[{n}] = {{ {init} }}; const kiln_val *call_args = {argc} > 0 ? &call_stack[1] : NULL; kiln_closure *plain = KILN_VAL_IS_CLOSURE(call_stack[0]) ? (kiln_closure *)KILN_VAL_PTR(call_stack[0]) : NULL; if (KILN_LIKELY(plain != NULL && !plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ kiln_val call_result = KILN_VAL_UNDEFINED; kiln_val recv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&recv); kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status; {indirect} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; v{v} = call_result; }} else {{ int status = kiln_c99_val_call(host, call_stack[0], call_args, (size_t){argc}, depth, thrown, \"{diagnostic_site}\", (size_t){pc}, \"{label}\", &v{v}); {check} }} }}",
@@ -1209,7 +1368,7 @@ fn emit_graph_op(
                     .collect::<Vec<_>>()
                     .join(", ")
             };
-            let check = status_check(diagnostic_site, pc, &label, unwind);
+            let check = status_check(diagnostic_site, pc, label, unwind);
             writeln!(
                 output,
                 "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_val call_args[{n}] = {{ {init} }}; int status = kiln_c99_val_call_method(host, v{}, call_args, (size_t){argc}, {symbol}_key_{name}, {key_len}, depth, thrown, &site, \"{diagnostic_site}\", (size_t){pc}, \"{label}\", &v{v}); {check} }}",
@@ -1224,7 +1383,7 @@ fn emit_graph_op(
             for arg in args {
                 init.push_str(&format!(", v{}", arg.0));
             }
-            let check = status_check(diagnostic_site, pc, &label, unwind);
+            let check = status_check(diagnostic_site, pc, label, unwind);
             writeln!(
                 output,
                 "    {{ kiln_val call_stack[{n}] = {{ {init} }}; int status = kiln_c99_val_new(host, call_stack[0], {argc} > 0 ? &call_stack[1] : NULL, (size_t){argc}, depth, thrown, &v{v}); {check} }}",
@@ -1240,7 +1399,7 @@ fn emit_graph_op(
             } else {
                 "kiln_c99_new_object(&built)".to_owned()
             };
-            let check = status_check(diagnostic_site, pc, &label, unwind);
+            let check = status_check(diagnostic_site, pc, label, unwind);
             let mut defines = String::new();
             for (key, value) in pairs {
                 defines.push_str(&format!(
@@ -1323,7 +1482,7 @@ fn emit_graph_op(
                 Some(Constant::String(s)) => s.len(),
                 _ => 0,
             };
-            let check = status_check(diagnostic_site, pc, &label, unwind);
+            let check = status_check(diagnostic_site, pc, label, unwind);
             writeln!(
                 output,
                 "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_val_read_property(host, v{o}, {symbol}_key_{name}, {key_len}, depth, thrown, &site, &v{v}); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(v{o})); {check} }}",
@@ -1348,7 +1507,7 @@ fn emit_graph_op(
                 _ => 0,
             };
             let strict = matches!(op, GraphOp::SetPropertyStrict { strict: true, .. }) as u8;
-            let check = status_check(diagnostic_site, pc, &label, unwind);
+            let check = status_check(diagnostic_site, pc, label, unwind);
             writeln!(
                 output,
                 "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_val_write_property(host, v{}, {symbol}_key_{name}, {key_len}, v{}, {strict}, depth, thrown, &site); {check} v{v} = v{}; }}",
@@ -1357,7 +1516,7 @@ fn emit_graph_op(
             .unwrap();
         }
         GraphOp::GetComputed { object, key, .. } => {
-            let check = status_check(diagnostic_site, pc, &label, unwind);
+            let check = status_check(diagnostic_site, pc, label, unwind);
             writeln!(
                 output,
                 "    {{ int status = kiln_c99_val_read_element(host, v{o}, v{k}, depth, thrown, &v{v}); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(kiln_val_to_boundary(v{o}), kiln_val_to_boundary(v{k})); {check} }}",
@@ -1373,7 +1532,7 @@ fn emit_graph_op(
             object, key, value, ..
         } => {
             let strict = matches!(op, GraphOp::SetComputedStrict { strict: true, .. }) as u8;
-            let check = status_check(diagnostic_site, pc, &label, unwind);
+            let check = status_check(diagnostic_site, pc, label, unwind);
             writeln!(
                 output,
                 "    {{ int status = kiln_c99_val_write_element(host, v{}, v{}, v{}, {strict}, depth, thrown); {check} v{v} = v{}; }}",
@@ -1388,6 +1547,7 @@ fn emit_graph_op(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_terminator(
     output: &mut String,
     graph: &FunctionGraph,
@@ -1399,6 +1559,7 @@ fn emit_terminator(
     site: &Site<'_>,
     scalar_proto: bool,
     kind: EntryKind,
+    block_prefix: &str,
 ) {
     match terminator {
         Terminator::Return(value) => match site {
@@ -1478,7 +1639,7 @@ fn emit_terminator(
         }
         Terminator::Jump(target) => {
             emit_phi_assignments(output, graph, current_block.id, *target, numbers);
-            writeln!(output, "    goto kiln_block_{};", target.0).unwrap();
+            writeln!(output, "    goto {block_prefix}{};", target.0).unwrap();
         }
         Terminator::Branch {
             condition,
@@ -1507,10 +1668,10 @@ fn emit_terminator(
             .unwrap_or_else(|| format!("kiln_c99_val_truthy(v{})", condition.0));
             writeln!(output, "    if ({test}) {{").unwrap();
             emit_phi_assignments(output, graph, current_block.id, *true_block, numbers);
-            writeln!(output, "        goto kiln_block_{};", true_block.0).unwrap();
+            writeln!(output, "        goto {block_prefix}{};", true_block.0).unwrap();
             output.push_str("    } else {\n");
             emit_phi_assignments(output, graph, current_block.id, *false_block, numbers);
-            writeln!(output, "        goto kiln_block_{};", false_block.0).unwrap();
+            writeln!(output, "        goto {block_prefix}{};", false_block.0).unwrap();
             output.push_str("    }\n");
         }
         Terminator::Suspend {
