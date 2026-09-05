@@ -160,6 +160,34 @@ reasons** — that is the interpreter backlog, sorted by how many tests each unb
 
 ---
 
+## What it took to make the graph emitter correct on five probes, and what it still needs (2026-09-05, Claude `kiln-fast`)
+
+After the phis went in, the emitter compiled `loop.mjs` correctly at 158 ms (stack emitter 165 to
+212) and every probe shape I could think of: parameters, ternary merges, a swap across a back
+edge, `break`, inner `let`s. Then the native corpus, with the emitter on and `KILN_GRAPH_STRICT=1`,
+failed on its first probe: a string constant lowered as a bare C array. Fixed; the second probe
+failed on `kiln_c99_op_new_array_val`, which does not exist. A grep of every prelude helper
+`emit_graph.rs` names found nine that do not exist. Reading the ones that do found the larger
+problem: every arithmetic and comparison fallback calls the *pure* `kiln_c99_binary`, which cannot
+run the program's `valueOf` or `toString` and cannot throw -- the exact class of bug the
+"convert on the machine" series (`baeaabfa` through `36a3dbdc`) closed in the stack emitter.
+Method calls pass `NULL` for the site and lose the inline cache. Parameters read as `undefined`
+because nothing defined the initial SSA values.
+
+So the emitter stays off. What lands is the correctness work with tests, strict verification in
+the gate, and the list in plan step 1.3 of what turning it on requires. The lesson is not about
+the emitter. It is that **a new emitter is not landed until the native corpus has run through
+it**, and the corpus stops at the first failure, so "run it once" means "run it until it is
+green". Nothing else in the repository can stand in for that: the unit tests drove the graph
+builder and verifier directly and passed throughout.
+
+Two smaller things. `ugrep` is `grep` on this machine and skips the cache records as binary,
+so a content search over `.kiln/cache/generated-c` silently matches nothing; use `/usr/bin/grep
+-a`. And a file outside the worktree caches under its own directory's `.kiln`, not the
+worktree's.
+
+---
+
 ## The graph emitter compiled a `for` loop into a hang, and the gate would not have said so (2026-09-05, Claude `kiln-fast`)
 
 `0f67430a` landed an SSA value-graph emitter (ADR 0056) that lowers eligible functions without

@@ -4567,6 +4567,111 @@ int main(void) {{
 }
 
 #[test]
+fn value_graph_merges_locals_at_a_loop_header_with_phis() {
+    // let sum = 0; let i = 0; while (i < 10) { sum += i; i++; } return sum;
+    //
+    // The header (pc 4) has two predecessors, the entry and the back edge. Each local it reads
+    // must be a phi with one input per predecessor; without that the header compared the
+    // pre-loop `i` forever (conformance/native/for-loop-in-arrow.js).
+    let proto = FunctionProto {
+        span: kiln_ir::Span::default(),
+        prologue_end: 0,
+        declared_length: 0,
+        name: Some("phi_loop".into()),
+        parameter_count: 0,
+        local_count: 2,
+        code: vec![
+            Instruction::Const(0),
+            Instruction::StoreLocal(0),
+            Instruction::Const(0),
+            Instruction::StoreLocal(1),
+            Instruction::LoadLocal(1), // 4: header
+            Instruction::Const(1),
+            Instruction::Binary(BinaryOp::LessThan),
+            Instruction::JumpIfFalse(17),
+            Instruction::LoadLocal(0), // 8: body
+            Instruction::LoadLocal(1),
+            Instruction::Binary(BinaryOp::Add),
+            Instruction::StoreLocal(0),
+            Instruction::LoadLocal(1),
+            Instruction::Const(2),
+            Instruction::Binary(BinaryOp::Add),
+            Instruction::StoreLocal(1),
+            Instruction::Jump(4),
+            Instruction::LoadLocal(0), // 17: exit
+            Instruction::Return,
+        ],
+        arrow: false,
+        generator: false,
+        asynchronous: false,
+        async_generator: false,
+        mapped_arguments: false,
+        upvalues: Vec::new(),
+    };
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants: vec![
+            Constant::Number(0),
+            Constant::Number(10),
+            Constant::Number(1),
+        ],
+        code: vec![Instruction::Return],
+        local_count: 0,
+        functions: vec![proto.clone()],
+    };
+
+    let graph = build_function_graph(&proto, &program);
+    verify_function_graph(&graph).expect("a loop with phis verifies");
+
+    let header = graph
+        .blocks
+        .iter()
+        .find(|b| b.predecessors.len() == 2)
+        .expect("the loop header has two predecessors");
+    let phis: Vec<&Vec<(BlockId, ValueId)>> = header
+        .operations
+        .iter()
+        .filter_map(|(_, op, _)| match op {
+            GraphOp::Phi { inputs } => Some(inputs),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(phis.len(), 2, "one phi per local at the header");
+    for inputs in &phis {
+        assert_eq!(inputs.len(), 2, "one input per predecessor");
+        for pred in &header.predecessors {
+            assert_eq!(inputs.iter().filter(|(b, _)| b == pred).count(), 1);
+        }
+    }
+    // The condition reads the phi, not the pre-loop constant.
+    let phi_ids: Vec<ValueId> = header
+        .operations
+        .iter()
+        .filter(|(_, op, _)| matches!(op, GraphOp::Phi { .. }))
+        .map(|(v, _, _)| *v)
+        .collect();
+    let compares_a_phi = header
+        .operations
+        .iter()
+        .any(|(_, op, _)| matches!(op, GraphOp::Binary { left, .. } if phi_ids.contains(left)));
+    assert!(compares_a_phi, "the header's compare must read a phi");
+
+    // The entry block defines every slot the function starts with, so a parameter read or a
+    // phi input has a definition to point at.
+    let entry = graph.block(graph.entry_block).unwrap();
+    let defined: Vec<ValueId> = entry
+        .operations
+        .iter()
+        .filter(|(_, op, _)| matches!(op, GraphOp::LoadLocal(_)))
+        .map(|(v, _, _)| *v)
+        .collect();
+    for slot_value in &graph.initial_locals {
+        assert!(defined.contains(slot_value));
+    }
+}
+
+#[test]
 fn value_graph_builds_and_verifies_scalar_loop() {
     // for (let i = 0; i < 10; i++) sum += i;
     let proto = FunctionProto {

@@ -22,6 +22,10 @@
 # They are executed rather than passed to `bash` so their `#!/usr/bin/env bash` picks the newer one.
 set -euo pipefail
 
+# A value graph the verifier rejects is a compiler bug. Without this the backend falls back to the
+# stack emitter and nobody learns of it; with it the build aborts naming the function.
+export KILN_GRAPH_STRICT=1
+
 # macOS ships bash 3.2 as `/bin/bash`, and `#!/usr/bin/env bash` finds it whenever a caller's PATH
 # does not put a newer one first -- which `mise run` does not. Under 3.2 `thirdparty.sh` loses
 # `wait -n` and `BASHPID`, and its cleanup trap deletes the *shared* results directory instead of

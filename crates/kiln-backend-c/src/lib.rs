@@ -1009,7 +1009,20 @@ fn render_function(
     let scalar_proto = !proto_produces_references(proto, program);
     if can_emit_from_graph(proto) {
         let graph = build_function_graph(proto, program);
-        if verifier::verify_function_graph(&graph).is_ok() {
+        // A graph the verifier rejects is a compiler bug, not a reason to use the other emitter
+        // quietly. Under `KILN_GRAPH_STRICT` it aborts the build naming the function; the gate
+        // sets it. It changes only whether the build fails, never what is emitted, so it cannot
+        // put two different outputs under one cache key.
+        let verdict = verifier::verify_function_graph(&graph);
+        if let Err(error) = &verdict {
+            if std::env::var_os("KILN_GRAPH_STRICT").is_some() {
+                panic!(
+                    "graph verifier rejected function {index} ({}) in {diagnostic_site}: {error}",
+                    proto.name.as_deref().unwrap_or("<anonymous>")
+                );
+            }
+        }
+        if verdict.is_ok() {
             emit_function_from_graph(
                 output,
                 &graph,
