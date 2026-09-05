@@ -1000,6 +1000,7 @@ dependencies = [
  "kiln-native-number-abi",
  "memchr",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1032,9 +1033,12 @@ name = "kiln-cli"
 version = "0.0.0"
 dependencies = [
  "frontend-oxc",
+ "kiln-backend-c",
  "kiln-daemon",
  "kiln-hir",
  "kiln-host-abi",
+ "kiln-ir",
+ "kiln-module-graph",
  "kiln-module-resolver",
  "kiln-native-runtime",
  "kiln-proto",

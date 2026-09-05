@@ -46,3 +46,12 @@ run = "./scripts/check-http-close-contract.sh"
 [tasks.silent-undefined]
 description = "The expensive class: a native member read answering undefined (several hundred compiles)"
 run = "./scripts/check-silent-undefined.sh"
+
+[tasks.facts]
+description = "Check the committed whole-program facts baseline for benchmarks and bundles"
+run = "./scripts/facts-baseline.sh --check"
+
+[tasks.facts-update]
+description = "Regenerate the whole-program facts baseline (deliberate: the diff is the record)"
+run = "./scripts/facts-baseline.sh --update"
+

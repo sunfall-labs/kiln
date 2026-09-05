@@ -7,6 +7,8 @@
 !/bench/results/server-baseline.json
 # Third-party bundle performance baseline (fastest-native Step 0.6)
 !/bench/results/thirdparty-baseline.json
+# Whole-program facts baseline for benchmarks and bundles (fastest-native Step 1.7)
+!/bench/results/facts-baseline.json
 .DS_Store
 /.kiln/
 
