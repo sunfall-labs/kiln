@@ -174,6 +174,16 @@ impl ProgramFacts {
             module.immutable_bindings.sort();
         }
         self.modules.sort_by(|a, b| a.path.cmp(&b.path));
+        // A verdict's reason names the module it was found in. It is recorded in a baseline
+        // read on other machines, so it names it relative to the checkout, like the modules.
+        if let ClosedWorldVerdict::Open { reasons } = &mut self.world
+            && !root_str.is_empty()
+        {
+            let prefix = format!("{}/", root_str.trim_end_matches('/'));
+            for reason in reasons.iter_mut() {
+                *reason = reason.replace(&prefix, "");
+            }
+        }
     }
 
     /// Compare this ProgramFacts against an expected baseline ProgramFacts.
