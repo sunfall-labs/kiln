@@ -7019,7 +7019,7 @@ static kiln_value kiln_c99_node_http_target_text(const char *bytes, size_t len) 
     if (len == 1 && bytes[0] == '/') {
         return kiln_c99_static_text(kiln_c99_slash, 1);
     }
-    return kiln_c99_static_text(bytes, len);
+    return kiln_c99_copy_text(bytes, len);
 }
 
 /* A request method as a value, without copying bytes that are always one of nine spellings.
@@ -7037,7 +7037,7 @@ static kiln_value kiln_c99_node_http_method_text(const char *bytes, size_t len) 
             return kiln_c99_static_text(name, len);
         }
     }
-    return kiln_c99_static_text(bytes, len);
+    return kiln_c99_copy_text(bytes, len);
 }
 
 static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *event,
