@@ -63,6 +63,7 @@ static int kiln_module_78eefada6f9a430a971c166d0826322b_body(kiln_host *host, ki
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     kiln_c99_reset_diagnostics();
     for (size_t slot = 0; slot < (size_t)1; ++slot) locals[slot] = KILN_VAL_UNDEFINED;
+    int64_t i4 = 0, i5 = 0;
     double d4 = 0.0, d5 = 0.0;
     kiln_val v0 = KILN_VAL_UNDEFINED, v1 = KILN_VAL_UNDEFINED, v2 = KILN_VAL_UNDEFINED, v3 = KILN_VAL_UNDEFINED, v4 = KILN_VAL_UNDEFINED, v5 = KILN_VAL_UNDEFINED, v6 = KILN_VAL_UNDEFINED, v7 = KILN_VAL_UNDEFINED, v8 = KILN_VAL_UNDEFINED, v9 = KILN_VAL_UNDEFINED, v10 = KILN_VAL_UNDEFINED;
 kiln_block_0:;
@@ -72,8 +73,10 @@ kiln_block_0:;
     v3 = kiln_val_from_boundary(kiln_c99_builtin(KILN_C99_BUILTIN_UINT8_ARRAY));
     v4 = UINT64_C(4607182418800017408);
     memcpy(&d4, &v4, sizeof(d4));
+    i4 = 1LL;
     v5 = UINT64_C(4611686018427387904);
     memcpy(&d5, &v5, sizeof(d5));
+    i5 = 2LL;
     { kiln_value built; int status = kiln_c99_new_array(&built); if (status != KILN_C99_OK) return status; status = kiln_c99_array_push(built, kiln_val_to_boundary(v4)); if (status != KILN_C99_OK) return status; status = kiln_c99_array_push(built, kiln_val_to_boundary(v5)); if (status != KILN_C99_OK) return status; v6 = kiln_val_from_boundary(built); }
     { kiln_val call_stack[2] = { v3, v6 }; int status = kiln_c99_val_new(host, call_stack[0], 1 > 0 ? &call_stack[1] : NULL, (size_t)1, depth, thrown, &v7); if (status == KILN_C99_THROWN) goto kiln_unwind; if (status == KILN_C99_CONTROL_ERROR) { kiln_c99_note_refusal("kiln_module_78eefada6f9a430a971c166d0826322b", (size_t)7, "New", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; }
     { kiln_value built; int status = kiln_c99_make_closure(&built, kiln_module_78eefada6f9a430a971c166d0826322b_fn_0, kiln_module_78eefada6f9a430a971c166d0826322b_name_0, 8, NULL, 0, "kiln_module_78eefada6f9a430a971c166d0826322b", UINT32_C(0), UINT32_C(0), 0, 0, 0, 0, 1, KILN_VAL_UNDEFINED, kiln_val_from_boundary(kiln_c99_new_target), UINT32_C(1), UINT32_C(2), UINT32_C(4), UINT32_C(0), NULL, UINT32_C(0)); if (status != KILN_C99_OK) return status; v8 = kiln_val_from_boundary(built); }
