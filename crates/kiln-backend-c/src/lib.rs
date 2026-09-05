@@ -35,6 +35,8 @@ pub struct EmissionPolicy {
     pub timezone: EmissionStringPolicy,
     pub locale: EmissionStringPolicy,
     pub decoupled_prelude: bool,
+    pub type_profile_record: bool,
+    pub type_profile: Option<std::sync::Arc<graph::TypeProfile>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -422,7 +424,8 @@ pub use facts::{
     FunctionFacts, ModuleFactsReport, ProgramFacts, SiteFact, analyze_graph, analyze_program,
 };
 pub use graph::{
-    BasicBlock, BlockId, FunctionGraph, GraphOp, SiteId, Terminator, ValueId, build_function_graph,
+    BasicBlock, BlockId, FunctionGraph, FunctionTypeProfile, GraphOp, SiteId, SiteTypeProfile,
+    Terminator, TypeProfile, ValueId, build_function_graph,
 };
 pub use summary::{
     FunctionSummary, TypeGuess, summarize_function, summarize_graph, summarize_program,
@@ -821,7 +824,48 @@ fn render_functions(
     strict_functions: &[bool],
     graphs: &[FunctionGraph],
     direct: &direct::DirectPlan,
+    policy: &EmissionPolicy,
 ) {
+    if policy.type_profile_record {
+        output.push_str(
+            "static inline uint32_t kiln_profile_tag_of(kiln_val v) {\n\
+             if (KILN_VAL_IS_DOUBLE(v)) return 1;\n\
+             if (KILN_VAL_IS_BOOLEAN(v)) return 2;\n\
+             if (KILN_VAL_IS_STRING(v)) return 4;\n\
+             if (KILN_VAL_IS_OBJECT(v)) return 8;\n\
+             if (KILN_VAL_IS_UNDEFINED(v)) return 16;\n\
+             if (KILN_VAL_IS_NULL(v)) return 32;\n\
+             return 64;\n\
+             }\n\
+             static inline const char *kiln_profile_tag_name(uint32_t tag) {\n\
+             switch (tag) {\n\
+             case 1: return \"number\";\n\
+             case 2: return \"boolean\";\n\
+             case 4: return \"string\";\n\
+             case 8: return \"object\";\n\
+             case 16: return \"undefined\";\n\
+             case 32: return \"null\";\n\
+             default: return \"unknown\";\n\
+             }\n\
+             }\n",
+        );
+        writeln!(output, "static void {symbol}_dump_type_profile(void);").unwrap();
+        for (index, proto) in program.functions.iter().enumerate() {
+            if proto.parameter_count > 0 {
+                writeln!(
+                    output,
+                    "static uint32_t {symbol}_fn_{index}_param_tags[{}] = {{0}};",
+                    proto.parameter_count
+                )
+                .unwrap();
+            }
+            writeln!(
+                output,
+                "static uint32_t {symbol}_fn_{index}_return_tag = 0;"
+            )
+            .unwrap();
+        }
+    }
     for index in 0..program.functions.len() {
         writeln!(
             output,
@@ -864,7 +908,8 @@ fn render_functions(
     }
     for (index, proto) in program.functions.iter().enumerate() {
         let scalar_proto = !proto_produces_references(proto, program);
-        emit_function_from_graph(
+        let func_profile = policy.type_profile.as_ref().and_then(|p| p.function(index));
+        emit_graph::emit_function_from_graph_with_profile(
             output,
             &graphs[index],
             proto,
@@ -877,9 +922,11 @@ fn render_functions(
             strict_functions,
             &direct.functions[index],
             emit_graph::EntryKind::Boxed,
+            func_profile,
+            policy.type_profile_record,
         );
         if let Some(typed) = &direct.typed[index] {
-            emit_function_from_graph(
+            emit_graph::emit_function_from_graph_with_profile(
                 output,
                 &graphs[index],
                 proto,
@@ -894,8 +941,80 @@ fn render_functions(
                 emit_graph::EntryKind::Typed {
                     returns_number: typed.typed_returns[index],
                 },
+                func_profile,
+                policy.type_profile_record,
             );
         }
+    }
+    if policy.type_profile_record {
+        writeln!(output, "static int {symbol}_profile_dumped = 0;").unwrap();
+        writeln!(output, "static void {symbol}_dump_type_profile(void) {{").unwrap();
+        writeln!(output, "    if ({symbol}_profile_dumped) return;").unwrap();
+        writeln!(output, "    {symbol}_profile_dumped = 1;").unwrap();
+        let default_file = if diagnostic_site.is_empty() {
+            "kiln-native.typeprofile".to_owned()
+        } else {
+            let base = diagnostic_site
+                .strip_suffix(".mjs")
+                .or_else(|| diagnostic_site.strip_suffix(".js"))
+                .or_else(|| diagnostic_site.strip_suffix(".ts"))
+                .unwrap_or(diagnostic_site);
+            format!("{base}.typeprofile")
+        };
+        writeln!(
+            output,
+            "    const char *path = getenv(\"KILN_TYPE_PROFILE_FILE\");"
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "    if (!path || !path[0]) path = \"{default_file}\";"
+        )
+        .unwrap();
+        writeln!(output, "    FILE *f = fopen(path, \"w\");").unwrap();
+        writeln!(output, "    if (!f) return;").unwrap();
+        writeln!(
+            output,
+            "    fprintf(f, \"{{\\n  \\\"version\\\": 1,\\n  \\\"functions\\\": [\\n\");"
+        )
+        .unwrap();
+        for (index, proto) in program.functions.iter().enumerate() {
+            let is_last = index + 1 == program.functions.len();
+            writeln!(
+                output,
+                "    fprintf(f, \"    {{\\n      \\\"index\\\": {index},\\n\");"
+            )
+            .unwrap();
+            if let Some(name) = &proto.name {
+                let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+                writeln!(
+                    output,
+                    "    fprintf(f, \"      \\\"name\\\": \\\"{escaped}\\\",\\n\");"
+                )
+                .unwrap();
+            }
+            writeln!(output, "    fprintf(f, \"      \\\"parameters\\\": [\");").unwrap();
+            for p in 0..proto.parameter_count {
+                let comma = if p > 0 { ", " } else { "" };
+                writeln!(
+                    output,
+                    "    fprintf(f, \"{comma}\\\"%s\\\"\", kiln_profile_tag_name({symbol}_fn_{index}_param_tags[{p}]));"
+                ).unwrap();
+            }
+            writeln!(output, "    fprintf(f, \"],\\n\");").unwrap();
+            writeln!(
+                output,
+                "    fprintf(f, \"      \\\"return_type\\\": \\\"%s\\\"\\n    }}{}\\n\", kiln_profile_tag_name({symbol}_fn_{index}_return_tag));",
+                if is_last { "" } else { "," }
+            ).unwrap();
+        }
+        writeln!(
+            output,
+            "    fprintf(f, \"  ],\\n  \\\"sites\\\": []\\n}}\\n\");"
+        )
+        .unwrap();
+        writeln!(output, "    fclose(f);").unwrap();
+        writeln!(output, "}}\n").unwrap();
     }
 }
 
@@ -1031,6 +1150,7 @@ fn render_entry(
     body: &FunctionProto,
     graph: &FunctionGraph,
     calls: &direct::CallPlan,
+    policy: &EmissionPolicy,
 ) -> Result<(), EmitError> {
     let callables = produces_references(program);
     let entry_symbol = if callables {
@@ -1058,6 +1178,9 @@ fn render_entry(
     )
     .unwrap();
     render_key_prologue(output, symbol, keyed);
+    if policy.type_profile_record {
+        writeln!(output, "    (void)atexit({symbol}_dump_type_profile);").unwrap();
+    }
     // A module's `this` is undefined: a module is strict, and strict mode does not substitute
     // the global object. An arrow made here snapshots it, so it is declared for that read too.
     output.push_str("    kiln_val receiver = KILN_VAL_UNDEFINED; (void)receiver;\n");
@@ -1135,7 +1258,7 @@ fn render_entry(
             }
         }
     }
-    emit_graph::emit_entry_from_graph(
+    emit_graph::emit_entry_from_graph_with_profile(
         output,
         graph,
         body,
@@ -1149,6 +1272,7 @@ fn render_entry(
         exports,
         commonjs,
         calls,
+        policy.type_profile_record,
     );
     output.push_str("}\n");
     Ok(())
@@ -1651,6 +1775,7 @@ fn render(
         &strict_functions,
         &graphs,
         &direct,
+        policy,
     );
     render_entry(
         &mut output,
@@ -1664,6 +1789,7 @@ fn render(
         &body,
         &entry_graph,
         &direct.entry,
+        policy,
     )?;
     if callables {
         render_scalar_realm_wrapper(&mut output, symbol);
@@ -1746,6 +1872,7 @@ fn render_module(
         &strict_functions,
         &graphs,
         &direct,
+        policy,
     );
     render_entry(
         &mut output,
@@ -1759,6 +1886,7 @@ fn render_module(
         &body,
         &entry_graph,
         &direct.entry,
+        policy,
     )?;
     if commonjs {
         /* The launcher cannot manufacture native objects without coupling itself to this private
@@ -2443,6 +2571,20 @@ fn hash_module_with_policy_and_seed(
     }
     hash_string_policy(&mut hash, &policy.timezone);
     hash_string_policy(&mut hash, &policy.locale);
+    if policy.type_profile_record {
+        hash ^= 0x72;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    if let Some(prof) = &policy.type_profile {
+        hash ^= 0x73;
+        hash = hash.wrapping_mul(0x100000001b3);
+        if let Ok(json) = prof.to_json() {
+            for b in json.as_bytes() {
+                hash ^= u64::from(*b);
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+        }
+    }
     hash
 }
 
