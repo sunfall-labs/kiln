@@ -410,6 +410,7 @@ pub use prelude::*;
 mod validation;
 pub(crate) use validation::*;
 
+mod direct;
 pub mod emit_graph;
 pub mod facts;
 pub mod graph;
@@ -817,13 +818,26 @@ fn render_functions(
     symbol: &str,
     diagnostic_site: &str,
     strict_functions: &[bool],
-) -> Result<(), EmitError> {
+    graphs: &[FunctionGraph],
+    direct: &direct::DirectPlan,
+) {
     for index in 0..program.functions.len() {
         writeln!(
             output,
             "static inline int {symbol}_fn_{index}(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc);"
         )
         .unwrap();
+        if direct.has_typed_entry(index as u32) {
+            writeln!(
+                output,
+                "static inline int {symbol}_fn_{index}_t({});",
+                emit_graph::typed_signature(
+                    &program.functions[index],
+                    direct.entry.typed_returns[index]
+                )
+            )
+            .unwrap();
+        }
     }
     for (index, proto) in program.functions.iter().enumerate() {
         if let Some(name) = &proto.name {
@@ -848,18 +862,40 @@ fn render_functions(
         .unwrap();
     }
     for (index, proto) in program.functions.iter().enumerate() {
-        render_function(
+        let scalar_proto = !proto_produces_references(proto, program);
+        emit_function_from_graph(
             output,
-            program,
+            &graphs[index],
             proto,
-            &plan.functions,
-            index,
+            program,
             symbol,
+            index,
+            scalar_proto,
             diagnostic_site,
+            &plan.functions,
             strict_functions,
-        )?;
+            &direct.functions[index],
+            emit_graph::EntryKind::Boxed,
+        );
+        if let Some(typed) = &direct.typed[index] {
+            emit_function_from_graph(
+                output,
+                &graphs[index],
+                proto,
+                program,
+                symbol,
+                index,
+                scalar_proto,
+                diagnostic_site,
+                &plan.functions,
+                strict_functions,
+                typed,
+                emit_graph::EntryKind::Typed {
+                    returns_number: typed.typed_returns[index],
+                },
+            );
+        }
     }
-    Ok(())
 }
 
 /// Whether this body's parameter binding runs during the call rather than at the first
@@ -886,39 +922,6 @@ fn binds_at_call(proto: &FunctionProto) -> bool {
 /// options; emission that varied with the environment under one key would poison the cache.
 /// The unit tests drive `build_function_graph` and `emit_function_from_graph` directly and do
 /// not go through this switch.
-#[allow(clippy::too_many_arguments)]
-fn render_function(
-    output: &mut String,
-    program: &Program,
-    proto: &FunctionProto,
-    frame_stacks: &[usize],
-    index: usize,
-    symbol: &str,
-    diagnostic_site: &str,
-    strict_functions: &[bool],
-) -> Result<(), EmitError> {
-    let scalar_proto = !proto_produces_references(proto, program);
-    let graph = graph_for(
-        proto,
-        program,
-        &format!("function {index}"),
-        diagnostic_site,
-    )?;
-    emit_function_from_graph(
-        output,
-        &graph,
-        proto,
-        program,
-        symbol,
-        index,
-        scalar_proto,
-        diagnostic_site,
-        frame_stacks,
-        strict_functions,
-    );
-    Ok(())
-}
-
 /// The value graph a body is emitted from: built from its bytecode, checked to lower whole, and
 /// verified. There is no other emitter, so each failure is the unit's: an instruction the builder
 /// has no lowering for is `Unsupported`, and a graph the verifier rejects is a bytecode this
@@ -971,6 +974,40 @@ fn entry_proto(program: &Program) -> FunctionProto {
     }
 }
 
+/// Every body's graph, built and verified before any is emitted, and the unit's direct-call
+/// plan over all of them: which calls are by name, which enter a typed clone, and what each
+/// body proves a number once those verdicts are folded in.
+fn plan_unit(
+    program: &Program,
+    diagnostic_site: &str,
+) -> Result<
+    (
+        Vec<FunctionGraph>,
+        FunctionProto,
+        FunctionGraph,
+        direct::DirectPlan,
+    ),
+    EmitError,
+> {
+    let graphs = program
+        .functions
+        .iter()
+        .enumerate()
+        .map(|(index, proto)| {
+            graph_for(
+                proto,
+                program,
+                &format!("function {index}"),
+                diagnostic_site,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let body = entry_proto(program);
+    let entry_graph = graph_for(&body, program, "the module body", diagnostic_site)?;
+    let direct = direct::DirectPlan::plan(program, &graphs, &entry_graph);
+    Ok((graphs, body, entry_graph, direct))
+}
+
 /// The unit's entry point: opened with the embedding signature, its locals declared and the
 /// imports bound into them, then the body from its graph.
 ///
@@ -989,6 +1026,9 @@ fn render_entry(
     strict_functions: &[bool],
     keyed: bool,
     module: Option<(&ModuleProgram, bool)>,
+    body: &FunctionProto,
+    graph: &FunctionGraph,
+    calls: &direct::CallPlan,
 ) -> Result<(), EmitError> {
     let callables = produces_references(program);
     let entry_symbol = if callables {
@@ -997,8 +1037,6 @@ fn render_entry(
         symbol.to_owned()
     };
     let module_scope = uses_module_scope(program);
-    let body = entry_proto(program);
-    let graph = graph_for(&body, program, "the module body", diagnostic_site)?;
     let linkage = if callables { "static " } else { "" };
     match module {
         None => writeln!(
@@ -1039,7 +1077,7 @@ fn render_entry(
     let mut array_slots: HashSet<u32> = if module_scope {
         (0..program.local_count).collect()
     } else {
-        emit_graph::array_slots(&graph, program)
+        emit_graph::array_slots(graph, program)
     };
     let mut exports: Option<&[kiln_ir::ExportBinding]> = None;
     let mut commonjs = false;
@@ -1097,8 +1135,8 @@ fn render_entry(
     }
     emit_graph::emit_entry_from_graph(
         output,
-        &graph,
-        &body,
+        graph,
+        body,
         program,
         symbol,
         !callables,
@@ -1108,6 +1146,7 @@ fn render_entry(
         &array_slots,
         exports,
         commonjs,
+        calls,
     );
     output.push_str("}\n");
     Ok(())
@@ -1600,6 +1639,7 @@ fn render(
         program.local_count,
         !keys.is_empty(),
     );
+    let (graphs, body, entry_graph, direct) = plan_unit(program, symbol)?;
     render_functions(
         &mut output,
         program,
@@ -1607,7 +1647,9 @@ fn render(
         symbol,
         symbol,
         &strict_functions,
-    )?;
+        &graphs,
+        &direct,
+    );
     render_entry(
         &mut output,
         program,
@@ -1617,6 +1659,9 @@ fn render(
         &strict_functions,
         !keys.is_empty(),
         None,
+        &body,
+        &entry_graph,
+        &direct.entry,
     )?;
     if callables {
         render_scalar_realm_wrapper(&mut output, symbol);
@@ -1689,6 +1734,7 @@ fn render_module(
         program.local_count,
         !keys.is_empty(),
     );
+    let (graphs, body, entry_graph, direct) = plan_unit(program, diagnostic_site)?;
     render_functions(
         &mut output,
         program,
@@ -1696,7 +1742,9 @@ fn render_module(
         symbol,
         diagnostic_site,
         &strict_functions,
-    )?;
+        &graphs,
+        &direct,
+    );
     render_entry(
         &mut output,
         program,
@@ -1706,6 +1754,9 @@ fn render_module(
         &strict_functions,
         !keys.is_empty(),
         Some((module, commonjs)),
+        &body,
+        &entry_graph,
+        &direct.entry,
     )?;
     if commonjs {
         /* The launcher cannot manufacture native objects without coupling itself to this private

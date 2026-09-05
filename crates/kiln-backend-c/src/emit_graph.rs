@@ -6,9 +6,8 @@
 //! - Retains `locals[]` only when needed for closure cells or generator suspension frames.
 //! - Materializes call arguments into local stack arrays at call sites only, avoiding whole-body address-taking.
 
-use crate::graph::{
-    BasicBlock, BlockId, FunctionGraph, GraphOp, Terminator, ValueId, proven_numbers,
-};
+use crate::direct::{CallPlan, direct_callable};
+use crate::graph::{BasicBlock, BlockId, FunctionGraph, GraphOp, Terminator, ValueId};
 use crate::tail::{TailContext, emit_tail_instruction};
 use crate::{BuiltinLoad, builtin_load, closure_construction, proto_publishes_frame};
 use kiln_ir::Upvalue;
@@ -68,16 +67,49 @@ fn lowers(op: &GraphOp) -> bool {
     )
 }
 
+/// Which clone of a function body this is. The boxed entry is what a closure carries and what
+/// every generic call reaches. The typed entry (`_t`) is reached only by direct calls that
+/// proved every argument a number and passed exactly the parameter count: inside it the
+/// parameters are numbers by contract, and nothing checks what the caller already proved.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+    Boxed,
+    /// The parameters arrive as `double`s. When the plan proved the return a number, the result
+    /// leaves as one too, through `double *result`; otherwise through `kiln_val *result`.
+    Typed {
+        returns_number: bool,
+    },
+}
+
 /// Which body a graph is emitted as: a function, called through a closure, or the unit's entry
 /// point, which the embedding calls once with the module's imports and takes the exports from.
 pub enum Site<'a> {
-    Function,
+    Function {
+        /// This function's index, so a call to itself can reuse its own upvalue table.
+        index: u32,
+    },
     Entry {
         /// The module's exports, read from `locals[]` at the return; `None` for a scalar unit.
         exports: Option<&'a [ExportBinding]>,
         /// A CommonJS unit: its one export is `module.exports`, read from the `module` slot.
         commonjs: bool,
     },
+}
+
+/// The typed entry's parameter list: what a direct call has in registers, the parameters as
+/// the doubles they are, and the result as one where the plan proved it.
+pub fn typed_signature(proto: &FunctionProto, returns_number: bool) -> String {
+    let result = if returns_number {
+        "double *result"
+    } else {
+        "kiln_val *result"
+    };
+    let params: String = (0..proto.parameter_count)
+        .map(|k| format!(", double p{k}"))
+        .collect();
+    format!(
+        "kiln_host *host, kiln_value *thrown, int depth, kiln_val *upvalues, kiln_val receiver, {result}{params}"
+    )
 }
 
 /// The slots that must exist in `locals[]`: cells, and slots some block loads other than the
@@ -134,6 +166,8 @@ pub fn emit_function_from_graph(
     diagnostic_site: &str,
     frame_stacks: &[usize],
     strict_functions: &[bool],
+    plan: &CallPlan,
+    kind: EntryKind,
 ) {
     // 1. Function comment header
     if let Some(name) = proto.name.as_deref().filter(|name| {
@@ -142,36 +176,65 @@ pub fn emit_function_from_graph(
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$')
     }) {
-        writeln!(output, "/* function {index}: {name} */").unwrap();
+        match kind {
+            EntryKind::Boxed => writeln!(output, "/* function {index}: {name} */").unwrap(),
+            EntryKind::Typed { .. } => {
+                writeln!(output, "/* function {index}: {name}, typed entry */").unwrap()
+            }
+        }
     }
 
-    // 2. Signature
-    writeln!(
-        output,
-        "static inline int {symbol}_fn_{index}(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc) {{"
-    )
-    .unwrap();
+    // 2. Signature. The typed entry takes what a direct call has in registers: no context
+    // struct to build and read back, no argument array, no count. Every caller of it proved
+    // the arguments are numbers and passed exactly the parameter count.
+    match kind {
+        EntryKind::Boxed => writeln!(
+            output,
+            "static inline int {symbol}_fn_{index}(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc) {{"
+        )
+        .unwrap(),
+        EntryKind::Typed { returns_number } => {
+            writeln!(
+                output,
+                "static inline int {symbol}_fn_{index}_t({}) {{",
+                typed_signature(proto, returns_number)
+            )
+            .unwrap();
+        }
+    }
 
-    // 3. Context & arguments setup
-    if scalar_proto {
+    // 3. Context & arguments setup. `ctx` is never null: every caller, the runtime's and the
+    // emitted direct path alike, passes its own.
+    if matches!(kind, EntryKind::Typed { .. }) {
+        output.push_str(
+            "    (void)upvalues; (void)receiver; (void)host; (void)thrown; (void)depth;\n",
+        );
+    } else if scalar_proto {
         output.push_str("    (void)ctx; (void)receiver_ptr; (void)upvalues;\n");
     } else {
-        output.push_str("    kiln_host *host = ctx ? ctx->host : NULL;\n");
-        output.push_str("    kiln_value *thrown = ctx ? ctx->thrown : NULL;\n");
-        output.push_str("    kiln_generator *frame = ctx ? ctx->frame : NULL;\n");
-        output.push_str("    int depth = ctx ? ctx->depth : 0;\n");
+        output.push_str("    kiln_host *host = ctx->host;\n");
+        output.push_str("    kiln_value *thrown = ctx->thrown;\n");
+        output.push_str("    kiln_generator *frame = ctx->frame;\n");
+        output.push_str("    int depth = ctx->depth;\n");
         output.push_str(
             "    kiln_val receiver = receiver_ptr ? *receiver_ptr : KILN_VAL_UNDEFINED;\n",
         );
         output.push_str("    (void)receiver_ptr;\n");
-        writeln!(
-            output,
-            "    kiln_c99_frame_mapped_arguments = {};",
-            i32::from(proto.mapped_arguments)
-        )
-        .unwrap();
+        // Which of the two `arguments` objects a mention in this body, or in an arrow made
+        // here, would build. Only such a body reads the frame global, so only such a body
+        // writes it; a plain body leaves its caller's value alone.
+        if proto_publishes_frame(proto) {
+            writeln!(
+                output,
+                "    kiln_c99_frame_mapped_arguments = {};",
+                i32::from(proto.mapped_arguments)
+            )
+            .unwrap();
+        }
     }
-    output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
+    if kind == EntryKind::Boxed {
+        output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
+    }
 
     // `locals[]` exists only for slots that are read through the array: a cell (the slot holds
     // the box, and closures read the box), or a slot some block loads because no SSA value
@@ -220,7 +283,11 @@ pub fn emit_function_from_graph(
             "    for (size_t slot = 0; slot < (size_t){locals}; ++slot) locals[slot] = KILN_VAL_UNDEFINED;"
         )
         .unwrap();
-        if proto.parameter_count > 0 {
+        if proto.parameter_count > 0 && matches!(kind, EntryKind::Typed { .. }) {
+            for k in 0..proto.parameter_count {
+                writeln!(output, "    locals[{k}] = kiln_c99_val_from_double(p{k});").unwrap();
+            }
+        } else if proto.parameter_count > 0 {
             writeln!(
                 output,
                 "    for (size_t slot = 0; slot < (size_t){} && slot < argc; ++slot) locals[slot] = args[slot];",
@@ -229,7 +296,7 @@ pub fn emit_function_from_graph(
             .unwrap();
         }
     }
-    if proto.parameter_count == 0 && !suspends {
+    if proto.parameter_count == 0 && !suspends && kind == EntryKind::Boxed {
         output.push_str("    (void)args; (void)argc;\n");
     }
 
@@ -244,7 +311,11 @@ pub fn emit_function_from_graph(
         frame_stacks,
         strict_functions,
         &array_slots,
-        &Site::Function,
+        &Site::Function {
+            index: index as u32,
+        },
+        plan,
+        kind,
     );
     output.push_str("}\n");
 }
@@ -267,6 +338,7 @@ pub fn emit_entry_from_graph(
     array_slots: &HashSet<u32>,
     exports: Option<&[ExportBinding]>,
     commonjs: bool,
+    plan: &CallPlan,
 ) {
     emit_blocks(
         output,
@@ -280,6 +352,8 @@ pub fn emit_entry_from_graph(
         strict_functions,
         array_slots,
         &Site::Entry { exports, commonjs },
+        plan,
+        EntryKind::Boxed,
     );
 }
 
@@ -298,13 +372,15 @@ fn emit_blocks(
     strict_functions: &[bool],
     array_slots: &HashSet<u32>,
     site: &Site<'_>,
+    plan: &CallPlan,
+    kind: EntryKind,
 ) {
     let body_start = output.len();
     // 4. Declare SSA value locals. A value proven to be a number also gets a `double` twin:
     // typed operations compute the double directly, with no tag test and no memcpy, and box it
     // into the `kiln_val` twin for whoever reads the value untyped. Clang deletes a box nothing
     // reads. Nothing here is a guess, so nothing here needs a guard.
-    let numbers = proven_numbers(graph);
+    let numbers = &plan.numbers;
     let defs: std::collections::HashMap<ValueId, &GraphOp> = graph
         .blocks
         .iter()
@@ -395,13 +471,19 @@ fn emit_blocks(
                 symbol,
                 diagnostic_site,
                 scalar_proto,
-                &numbers,
+                numbers,
                 array_slots,
                 proto,
                 frame_stacks,
                 strict_functions,
                 &graph.origins,
                 &unwind,
+                plan,
+                kind,
+                match site {
+                    Site::Function { index } => Some(*index),
+                    Site::Entry { .. } => None,
+                },
             );
         }
 
@@ -410,24 +492,34 @@ fn emit_blocks(
             graph,
             block,
             &block.terminator,
-            &numbers,
+            numbers,
             &defs,
             &unwind,
             site,
             scalar_proto,
+            kind,
         );
     }
 
     // 6. Unwind and refusal handlers
     match site {
-        Site::Function => {
+        Site::Function { .. } => {
             output.push_str("kiln_unwind:;\n");
             output.push_str("    return KILN_C99_THROWN;\n");
             if !scalar_proto {
+                // The diagnostic travels in the realm's control record, which the entry point
+                // reads; a boxed body also carries it in its result, a double result cannot.
                 output.push_str("kiln_refusal:;\n");
-                output.push_str(
-                    "    *result = kiln_val_from_boundary(kiln_c99_control_diagnostic());\n",
-                );
+                if !matches!(
+                    kind,
+                    EntryKind::Typed {
+                        returns_number: true
+                    }
+                ) {
+                    output.push_str(
+                        "    *result = kiln_val_from_boundary(kiln_c99_control_diagnostic());\n",
+                    );
+                }
                 output.push_str("    return KILN_C99_CONTROL_ERROR;\n");
             }
         }
@@ -571,6 +663,9 @@ fn emit_graph_op(
     strict_functions: &[bool],
     origins: &std::collections::HashMap<ValueId, crate::graph::Origin>,
     unwind: &str,
+    plan: &CallPlan,
+    kind: EntryKind,
+    self_index: Option<u32>,
 ) {
     let v = vid.0;
     let typed = numbers.contains(&vid);
@@ -632,6 +727,15 @@ fn emit_graph_op(
         GraphOp::LoadLocal(slot) => {
             if in_array(slot) {
                 writeln!(output, "    v{v} = locals[{slot}];").unwrap();
+            } else if *slot < proto.parameter_count && matches!(kind, EntryKind::Typed { .. }) {
+                // The typed entry's contract: exactly the parameter count of arguments, each a
+                // number, arriving as the double itself. The box is made here and deleted by
+                // the C compiler wherever nothing reads the value untyped.
+                writeln!(
+                    output,
+                    "    d{v} = p{slot}; v{v} = kiln_c99_val_from_double(p{slot});"
+                )
+                .unwrap();
             } else if *slot < proto.parameter_count {
                 writeln!(
                     output,
@@ -640,6 +744,10 @@ fn emit_graph_op(
                 .unwrap();
             } else {
                 writeln!(output, "    v{v} = KILN_VAL_UNDEFINED;").unwrap();
+            }
+            if typed && !(*slot < proto.parameter_count && matches!(kind, EntryKind::Typed { .. }))
+            {
+                writeln!(output, "    memcpy(&d{v}, &v{v}, sizeof(d{v}));").unwrap();
             }
         }
         GraphOp::StoreLocal { slot, value } => {
@@ -653,6 +761,22 @@ fn emit_graph_op(
         }
         // A cell is a shared box: the load checks the temporal dead zone and reads through it,
         // the store writes through it.
+        GraphOp::LoadCell(slot) if plan.unchecked.contains(&vid) => {
+            // A binding the plan proved is never in its dead zone: the closure, or `undefined`
+            // before it, and nothing can read it in between.
+            writeln!(
+                output,
+                "    v{v} = *(const kiln_val *)KILN_VAL_PTR(locals[{slot}]);"
+            )
+            .unwrap();
+        }
+        GraphOp::LoadUpvalue(index) if plan.unchecked.contains(&vid) => {
+            writeln!(
+                output,
+                "    v{v} = *(const kiln_val *)KILN_VAL_PTR(upvalues[{index}]);"
+            )
+            .unwrap();
+        }
         GraphOp::LoadCell(slot) => {
             // A body that cannot hold a reference has no `thrown` slot; a dead-zone read there
             // is refused by the helper, loudly, rather than crashing or answering `undefined`.
@@ -868,10 +992,13 @@ fn emit_graph_op(
             }
         }
         GraphOp::Binary { op, left, right }
-            if numbers.contains(left) && numbers.contains(right) =>
+            if numbers.contains(left)
+                && numbers.contains(right)
+                && !matches!(op, BinaryOp::In | BinaryOp::InstanceOf) =>
         {
             // Both operands proven numbers: no tag test, no memcpy. A comparison yields the
-            // boolean directly; arithmetic computes the double twin and boxes it.
+            // boolean directly; arithmetic computes the double twin and boxes it. `in` and
+            // `instanceof` on two numbers are a `TypeError` the generic lowering throws.
             let (l, r) = (left.0, right.0);
             let (a, b) = (format!("d{l}"), format!("d{r}"));
             match op {
@@ -890,7 +1017,7 @@ fn emit_graph_op(
                 BinaryOp::BitwiseAnd | BinaryOp::BitwiseOr | BinaryOp::BitwiseXor | BinaryOp::ShiftLeft | BinaryOp::ShiftRight | BinaryOp::UnsignedShiftRight => {
                     writeln!(output, "    v{v} = kiln_c99_val_binary_fast({}, v{l}, v{r}); memcpy(&d{v}, &v{v}, sizeof(d{v}));", binary_code(*op)).unwrap()
                 }
-                BinaryOp::In | BinaryOp::InstanceOf => unreachable!("`in` and `instanceof` are never proven numeric"),
+                BinaryOp::In | BinaryOp::InstanceOf => unreachable!("`in` and `instanceof` take the generic lowering"),
             }
         }
         // `in` and `instanceof` are not arithmetic: they go inline against their own prelude
@@ -951,6 +1078,83 @@ fn emit_graph_op(
         // A call is the direct path on `kiln_val`: a plain closure that
         // publishes no frame is entered directly, a body this unit compiled is called by name so
         // the C compiler may inline it, and everything else goes through the runtime.
+        GraphOp::Call { callee, args, .. }
+            if plan
+                .known
+                .get(callee)
+                .is_some_and(|&target| direct_callable(&program.functions[target as usize])) =>
+        {
+            // The callee is the closure of a proto this unit compiled, so the body is called by
+            // name: no callable test, no body-pointer comparison, and the receiver the language
+            // gives a plain function, decided here. A site that proved every argument a number
+            // enters the typed clone. What the direct path does not cover -- a `super()` in
+            // flight, the depth limit -- takes the generic call, which answers the same way.
+            let target = plan.known[callee];
+            let argc = args.len();
+            let init = if args.is_empty() {
+                "KILN_VAL_UNDEFINED".to_owned()
+            } else {
+                args.iter()
+                    .map(|a| format!("v{}", a.0))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let receiver = if strict_functions[target as usize] {
+                ""
+            } else {
+                " (void)kiln_c99_global_object_val(&recv);"
+            };
+            let check = status_check(diagnostic_site, pc, &label, unwind);
+            // A function calling itself through its own binding is calling the very closure
+            // that is running: its upvalue table is this one, and the callee value need not be
+            // read at all.
+            let own_upvalues = matches!(self_index, Some(index) if index == target);
+            let upvalues = if own_upvalues {
+                "upvalues".to_owned()
+            } else {
+                format!("((kiln_closure *)KILN_VAL_PTR(v{}))->upvalues", callee.0)
+            };
+            let (direct, twin) = if plan.typed_sites.contains(&vid) {
+                let doubles: String = args.iter().map(|a| format!(", d{}", a.0)).collect();
+                if plan.typed_returns[target as usize] {
+                    // The result comes back as the double it is; the box is made here and
+                    // deleted by the C compiler wherever nothing reads it untyped.
+                    (
+                        format!(
+                            "int status = {symbol}_fn_{target}_t(host, thrown, depth + 1, {upvalues}, recv, &d{v}{doubles}); v{v} = kiln_c99_val_from_double(d{v});"
+                        ),
+                        String::new(),
+                    )
+                } else {
+                    (
+                        format!(
+                            "int status = {symbol}_fn_{target}_t(host, thrown, depth + 1, {upvalues}, recv, &v{v}{doubles});"
+                        ),
+                        String::new(),
+                    )
+                }
+            } else {
+                let twin = if typed {
+                    format!(" memcpy(&d{v}, &v{v}, sizeof(d{v}));")
+                } else {
+                    String::new()
+                };
+                (
+                    format!(
+                        "kiln_val call_args[{n}] = {{ {init} }}; kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status = {symbol}_fn_{target}(&ctx_call, &v{v}, {upvalues}, &recv, {argc} > 0 ? call_args : NULL, (size_t){argc});",
+                        n = argc.max(1)
+                    ),
+                    twin,
+                )
+            };
+            writeln!(
+                output,
+                "    if (KILN_LIKELY(!kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ kiln_val recv = KILN_VAL_UNDEFINED;{receiver} {direct} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status;{twin} }} else {{ kiln_val call_args[{n}] = {{ {init} }}; int status = kiln_c99_val_call(host, v{c}, {argc} > 0 ? call_args : NULL, (size_t){argc}, depth, thrown, \"{diagnostic_site}\", (size_t){pc}, \"{label}\", &v{v}); {check}{twin} }}",
+                n = argc.max(1),
+                c = callee.0
+            )
+            .unwrap();
+        }
         GraphOp::Call { callee, args, .. } => {
             let argc = args.len();
             let mut init = format!("v{}", callee.0);
@@ -1194,10 +1398,28 @@ fn emit_terminator(
     unwind: &str,
     site: &Site<'_>,
     scalar_proto: bool,
+    kind: EntryKind,
 ) {
     match terminator {
         Terminator::Return(value) => match site {
-            Site::Function => match value {
+            Site::Function { .. }
+                if matches!(
+                    kind,
+                    EntryKind::Typed {
+                        returns_number: true
+                    }
+                ) =>
+            {
+                match value {
+                    Some(val) if numbers.contains(val) => {
+                        writeln!(output, "    *result = d{}; return KILN_C99_OK;", val.0).unwrap();
+                    }
+                    // The plan proved every reachable return a number; a return of anything
+                    // else is in a block nothing reaches. It answers as a bug would, loudly.
+                    _ => output.push_str("    goto kiln_refusal;\n"),
+                }
+            }
+            Site::Function { .. } => match value {
                 Some(val) => {
                     writeln!(output, "    *result = v{}; return KILN_C99_OK;", val.0).unwrap();
                 }

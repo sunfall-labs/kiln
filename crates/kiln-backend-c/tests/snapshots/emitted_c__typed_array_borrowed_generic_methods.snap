@@ -29,10 +29,10 @@ static inline int kiln_module_78eefada6f9a430a971c166d0826322b_fn_0(kiln_call_co
 static const char kiln_module_78eefada6f9a430a971c166d0826322b_name_0[] = "receiver";
 /* function 0: receiver */
 static inline int kiln_module_78eefada6f9a430a971c166d0826322b_fn_0(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc) {
-    kiln_host *host = ctx ? ctx->host : NULL;
-    kiln_value *thrown = ctx ? ctx->thrown : NULL;
-    kiln_generator *frame = ctx ? ctx->frame : NULL;
-    int depth = ctx ? ctx->depth : 0;
+    kiln_host *host = ctx->host;
+    kiln_value *thrown = ctx->thrown;
+    kiln_generator *frame = ctx->frame;
+    int depth = ctx->depth;
     kiln_val receiver = receiver_ptr ? *receiver_ptr : KILN_VAL_UNDEFINED;
     (void)receiver_ptr;
     kiln_c99_frame_mapped_arguments = 0;

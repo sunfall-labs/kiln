@@ -4920,6 +4920,10 @@ fn value_graph_lowers_to_c_without_stack_or_sp() {
     assert!(verify_function_graph(&graph).is_ok());
 
     let mut output = String::new();
+    let plan = crate::direct::CallPlan {
+        numbers: crate::graph::proven_numbers(&graph),
+        ..Default::default()
+    };
     emit_function_from_graph(
         &mut output,
         &graph,
@@ -4931,6 +4935,8 @@ fn value_graph_lowers_to_c_without_stack_or_sp() {
         "scalar_loop",
         &[4],
         &[true],
+        &plan,
+        crate::emit_graph::EntryKind::Boxed,
     );
 
     // Invariants per Step 1.3:
