@@ -600,6 +600,9 @@ typedef struct kiln_array {
     int frozen;
     /* `Object.preventExtensions`. An existing index still takes a write; a new one does not. */
     int not_extensible;
+    int64_t match_index;
+    kiln_value match_input;
+    kiln_val inline_elements[8];
 } kiln_array;
 
 /* A suspended body.
@@ -753,6 +756,12 @@ typedef struct kiln_settler {
  * `kiln_regexp`. */
 typedef struct kiln_regexp {
     void *handle;
+    int (*matcher)(const uint16_t *units, size_t count, size_t start,
+                   int64_t *ranges, size_t capacity, size_t *groups,
+                   int *matched);
+    int (*matcher_ascii)(const uint8_t *bytes, size_t count, size_t start,
+                         int64_t *ranges, size_t capacity, size_t *groups,
+                         int *matched);
     const char *source;
     size_t source_len;
     const char *flags;
@@ -760,6 +769,12 @@ typedef struct kiln_regexp {
     int global;
     int sticky;
     double last_index;
+    const char *cached_subject_ptr;
+    size_t cached_subject_len;
+    int cached_is_ascii;
+    size_t cached_group_count;
+    int64_t cached_ranges[64];
+    kiln_val cached_elements[32];
 } kiln_regexp;
 
 /* A symbol: a property key with an identity of its own.

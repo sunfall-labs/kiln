@@ -95,6 +95,8 @@ extern int kiln_c99_global_binding(kiln_value *out, const char *name, size_t nam
 extern int kiln_c99_declare_global(const char *name, size_t name_len, int configurable);
 extern int kiln_c99_bigint_constant(void **cache, const char *digits, size_t len, kiln_value *out);
 extern int kiln_c99_new_regexp(kiln_value *out, const char *source, size_t source_len, const char *flags, size_t flags_len, kiln_value *thrown);
+extern int kiln_c99_new_regexp_matcher(kiln_value *out, const char *source, size_t source_len, const char *flags, size_t flags_len, int (*matcher)(const uint16_t *units, size_t count, size_t start, int64_t *ranges, size_t capacity, size_t *groups, int *matched), int (*matcher_ascii)(const uint8_t *bytes, size_t count, size_t start, int64_t *ranges, size_t capacity, size_t *groups, int *matched), kiln_value *thrown);
+extern void kiln_c99_materialize_match_properties(kiln_array *arr);
 extern kiln_value kiln_c99_property_key(kiln_value key);
 extern int kiln_c99_new_symbol(kiln_value *out, kiln_value description);
 extern int kiln_c99_symbol_for(kiln_value *out, kiln_value key);
@@ -251,6 +253,8 @@ extern int kiln_c99_val_make_cell(kiln_val *slot);
 extern kiln_val kiln_c99_val_from_double(double d);
 extern size_t kiln_c99_val_string_length(kiln_val v);
 extern int kiln_c99_val_array_push_fast(kiln_val receiver, kiln_val arg, kiln_val *out);
+extern int kiln_c99_val_regexp_test_fast(kiln_val receiver, kiln_val arg, kiln_val *out);
+extern int kiln_c99_val_regexp_exec_fast(kiln_val receiver, kiln_val arg, kiln_val *out);
 extern kiln_val kiln_c99_string_constant(void **cached, const char *bytes, size_t len);
 extern void kiln_c99_gc_mark_vals(struct kiln_gc_heap *heap, const kiln_val *values, size_t count);
 

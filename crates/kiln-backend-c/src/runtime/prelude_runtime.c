@@ -2051,6 +2051,7 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
         kiln_array *array = (kiln_array *)payload;
         kiln_c99_gc_mark_vals(heap, array->elements, array->count);
         kiln_c99_gc_mark_value(heap, &array->properties);
+        kiln_c99_gc_mark_value(heap, &array->match_input);
         break;
     }
     case KILN_GC_GENERATOR: {
@@ -2192,8 +2193,12 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
          * string the program built; the block table decides which. The provider handle is not a
          * block and is released by the finaliser instead. */
         kiln_regexp *regexp = (kiln_regexp *)payload;
+        size_t ci;
         kiln_c99_gc_mark_block(heap, regexp->source);
         kiln_c99_gc_mark_block(heap, regexp->flags);
+        for (ci = 0; ci < regexp->cached_group_count && ci < 32; ++ci) {
+            kiln_c99_gc_mark_val(heap, regexp->cached_elements[ci]);
+        }
         break;
     }
     case KILN_GC_SYMBOL: {
@@ -2229,9 +2234,13 @@ static void kiln_c99_gc_finalize(kiln_gc_block *block) {
     case KILN_GC_CLOSURE:
         free(((kiln_closure *)payload)->upvalues);
         break;
-    case KILN_GC_ARRAY:
-        free(((kiln_array *)payload)->elements);
+    case KILN_GC_ARRAY: {
+        kiln_array *arr = (kiln_array *)payload;
+        if (arr->elements != NULL && arr->elements != arr->inline_elements) {
+            free(arr->elements);
+        }
         break;
+    }
     case KILN_GC_GENERATOR: {
         kiln_generator *frame = (kiln_generator *)payload;
         free(frame->locals);
@@ -3300,6 +3309,8 @@ static int kiln_c99_new_array(kiln_value *out) {
     array->properties = kiln_c99_undefined();
     array->frozen = 0;
     array->not_extensible = 0;
+    array->match_index = -1;
+    array->match_input = kiln_c99_undefined();
     *out = kiln_c99_value(KILN_VALUE_ARRAY, (uint64_t)(uintptr_t)array, NULL, 0);
     return KILN_C99_OK;
 }
@@ -4070,10 +4081,20 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
                 array->count = (size_t)wanted;
                 return KILN_C99_OK;
             }
-            status = kiln_c99_reserve((void **)&array->elements, &array->capacity, (size_t)wanted,
-                                      sizeof *array->elements);
-            if (status != KILN_C99_OK) {
-                return status;
+            if (array->elements == array->inline_elements) {
+                size_t grown = 16;
+                while (grown < (size_t)wanted) grown *= 2;
+                kiln_val *moved = (kiln_val *)malloc(grown * sizeof(kiln_val));
+                if (KILN_UNLIKELY(moved == NULL)) return KILN_C99_OUT_OF_MEMORY;
+                memcpy(moved, array->inline_elements, array->count * sizeof(kiln_val));
+                array->elements = moved;
+                array->capacity = grown;
+            } else {
+                status = kiln_c99_reserve((void **)&array->elements, &array->capacity, (size_t)wanted,
+                                          sizeof *array->elements);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
             }
             for (at = array->count; at < (size_t)wanted; ++at) {
                 array->elements[at] = KILN_VAL_HOLE;
@@ -6958,6 +6979,8 @@ static int kiln_c99_new_regexp(kiln_value *out, const char *source, size_t sourc
         return KILN_C99_OUT_OF_MEMORY;
     }
     regexp->handle = handle;
+    regexp->matcher = NULL;
+    regexp->matcher_ascii = NULL;
     regexp->source = source;
     regexp->source_len = source_len;
     regexp->flags = flags;
@@ -6965,6 +6988,10 @@ static int kiln_c99_new_regexp(kiln_value *out, const char *source, size_t sourc
     regexp->global = 0;
     regexp->sticky = 0;
     regexp->last_index = 0.0;
+    regexp->cached_subject_ptr = NULL;
+    regexp->cached_subject_len = 0;
+    regexp->cached_is_ascii = 0;
+    regexp->cached_group_count = 0;
     for (index = 0; index < flags_len; ++index) {
         if (flags[index] == 'g') {
             regexp->global = 1;
@@ -6974,6 +7001,60 @@ static int kiln_c99_new_regexp(kiln_value *out, const char *source, size_t sourc
     }
     *out = kiln_c99_value(KILN_VALUE_REGEXP, (uint64_t)(uintptr_t)regexp, NULL, 0);
     return KILN_C99_OK;
+}
+
+static int kiln_c99_new_regexp_matcher(kiln_value *out, const char *source, size_t source_len,
+                                       const char *flags, size_t flags_len,
+                                       int (*matcher)(const uint16_t *units, size_t count, size_t start,
+                                                      int64_t *ranges, size_t capacity, size_t *groups,
+                                                      int *matched),
+                                       int (*matcher_ascii)(const uint8_t *bytes, size_t count, size_t start,
+                                                            int64_t *ranges, size_t capacity, size_t *groups,
+                                                            int *matched),
+                                       kiln_value *thrown) {
+    kiln_regexp *regexp;
+    size_t index;
+    if (matcher == NULL) {
+        return kiln_c99_new_regexp(out, source, source_len, flags, flags_len, thrown);
+    }
+    regexp = (kiln_regexp *)kiln_c99_gc_alloc(KILN_GC_REGEXP, sizeof *regexp);
+    if (regexp == NULL) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    regexp->handle = NULL;
+    regexp->matcher = matcher;
+    regexp->matcher_ascii = matcher_ascii;
+    regexp->source = source;
+    regexp->source_len = source_len;
+    regexp->flags = flags;
+    regexp->flags_len = flags_len;
+    regexp->global = 0;
+    regexp->sticky = 0;
+    regexp->last_index = 0.0;
+    regexp->cached_subject_ptr = NULL;
+    regexp->cached_subject_len = 0;
+    regexp->cached_is_ascii = 0;
+    regexp->cached_group_count = 0;
+    for (index = 0; index < flags_len; ++index) {
+        if (flags[index] == 'g') {
+            regexp->global = 1;
+        } else if (flags[index] == 'y') {
+            regexp->sticky = 1;
+        }
+    }
+    *out = kiln_c99_value(KILN_VALUE_REGEXP, (uint64_t)(uintptr_t)regexp, NULL, 0);
+    return KILN_C99_OK;
+}
+
+static void kiln_c99_materialize_match_properties(kiln_array *arr) {
+    kiln_value props;
+    if (kiln_c99_new_object(&props) != KILN_C99_OK) {
+        return;
+    }
+    kiln_c99_put_mode(NULL, props, "index", 5, kiln_c99_number((double)arr->match_index), 0, 0, NULL);
+    kiln_c99_put_mode(NULL, props, "input", 5, arr->match_input, 0, 0, NULL);
+    kiln_c99_put_mode(NULL, props, "groups", 6, kiln_c99_undefined(), 0, 0, NULL);
+    arr->properties = props;
 }
 
 /* One search, and the match it found.
@@ -6987,6 +7068,19 @@ static int kiln_c99_regexp_find(kiln_regexp *regexp, const uint16_t *units, size
     *matched = 0;
     *groups = 0;
     if (start > count) {
+        return KILN_C99_OK;
+    }
+    if (regexp->matcher != NULL) {
+        int status = regexp->matcher(units, count, start, ranges, capacity, groups, matched);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        if (*matched) {
+            if (regexp->sticky && ranges[0] != (int64_t)start) {
+                *matched = 0;
+                return KILN_C99_OK;
+            }
+        }
         return KILN_C99_OK;
     }
     if (kiln_regexp_search(regexp->handle, units, count, start, ranges, capacity) != 1) {

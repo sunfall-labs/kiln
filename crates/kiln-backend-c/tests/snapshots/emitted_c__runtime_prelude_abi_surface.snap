@@ -1,5 +1,6 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
+assertion_line: 801
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -1400,6 +1401,8 @@ static const char *kiln_c99_temporal_builtin_name(uint64_t builtin) {
 static int kiln_c99_temporal_unsupported(kiln_value *thrown, const char *owner, const char *member,
 static kiln_regexp *kiln_c99_regexp_of(kiln_value value) {
 static int kiln_c99_new_regexp(kiln_value *out, const char *source, size_t source_len,
+static int kiln_c99_new_regexp_matcher(kiln_value *out, const char *source, size_t source_len,
+static void kiln_c99_materialize_match_properties(kiln_array *arr) {
 static int kiln_c99_regexp_find(kiln_regexp *regexp, const uint16_t *units, size_t count,
 static kiln_symbol *kiln_c99_symbol_of(kiln_value value) {
 static const kiln_symbol kiln_c99_well_known[] = {
@@ -1879,6 +1882,8 @@ static kiln_val kiln_c99_string_constant(void **cached, const char *bytes, size_
 static kiln_value kiln_val_to_boundary(kiln_val v) {
 static size_t kiln_c99_val_string_length(kiln_val v) {
 static int kiln_c99_val_array_push_fast(kiln_val receiver, kiln_val arg, kiln_val *out) {
+static int kiln_c99_val_regexp_test_fast(kiln_val receiver, kiln_val arg, kiln_val *out) {
+static int kiln_c99_val_regexp_exec_fast(kiln_val receiver, kiln_val arg, kiln_val *out) {
 static int kiln_c99_val_compare(uint16_t operation, kiln_val left, kiln_val right, int *result) {
 static kiln_val kiln_c99_val_binary_fast(uint16_t operation, kiln_val left, kiln_val right) {
 static kiln_val kiln_c99_val_binary(uint16_t operation, kiln_host *host, kiln_val left, kiln_val right, int *status, int depth, kiln_value *thrown) {
