@@ -1352,7 +1352,7 @@ fn emit_graph_op(
                     writeln!(output, "    i{v} = (int64_t)((int32_t)i{l} ^ (int32_t)i{r}); d{v} = (double)i{v}; v{v} = kiln_c99_val_from_double(d{v});").unwrap();
                 }
                 BinaryOp::ShiftLeft => {
-                    writeln!(output, "    i{v} = (int64_t)((int32_t)i{l} << ((uint32_t)i{r} & 31)); d{v} = (double)i{v}; v{v} = kiln_c99_val_from_double(d{v});").unwrap();
+                    writeln!(output, "    i{v} = (int64_t)(int32_t)((uint32_t)i{l} << ((uint32_t)i{r} & 31)); d{v} = (double)i{v}; v{v} = kiln_c99_val_from_double(d{v});").unwrap();
                 }
                 BinaryOp::ShiftRight => {
                     writeln!(output, "    i{v} = (int64_t)((int32_t)i{l} >> ((uint32_t)i{r} & 31)); d{v} = (double)i{v}; v{v} = kiln_c99_val_from_double(d{v});").unwrap();
@@ -1384,7 +1384,7 @@ fn emit_graph_op(
                     } else if typed_int {
                         writeln!(
                             output,
-                            "    {{ int64_t res; if (KILN_LIKELY(!__builtin_add_overflow(i{l}, i{r}, &res) && res >= -9007199254740991LL && res <= 9007199254740991LL)) {{ i{v} = res; d{v} = (double)res; }} else {{ d{v} = (double)i{l} + (double)i{r}; i{v} = (int64_t)d{v}; }} v{v} = kiln_c99_val_from_double(d{v}); }}"
+                            "    {{ int64_t res; if (KILN_LIKELY(!__builtin_add_overflow(i{l}, i{r}, &res) && res >= -9007199254740991LL && res <= 9007199254740991LL)) {{ i{v} = res; d{v} = (double)res; }} else {{ d{v} = (double)i{l} + (double)i{r}; i{v} = isfinite(d{v}) ? (int64_t)d{v} : 0; }} v{v} = kiln_c99_val_from_double(d{v}); }}"
                         ).unwrap();
                     } else {
                         writeln!(output, "    d{v} = (double)i{l} + (double)i{r}; v{v} = kiln_c99_val_from_double(d{v});").unwrap();
@@ -1396,7 +1396,7 @@ fn emit_graph_op(
                     } else if typed_int {
                         writeln!(
                             output,
-                            "    {{ int64_t res; if (KILN_LIKELY(!__builtin_sub_overflow(i{l}, i{r}, &res) && res >= -9007199254740991LL && res <= 9007199254740991LL)) {{ i{v} = res; d{v} = (double)res; }} else {{ d{v} = (double)i{l} - (double)i{r}; i{v} = (int64_t)d{v}; }} v{v} = kiln_c99_val_from_double(d{v}); }}"
+                            "    {{ int64_t res; if (KILN_LIKELY(!__builtin_sub_overflow(i{l}, i{r}, &res) && res >= -9007199254740991LL && res <= 9007199254740991LL)) {{ i{v} = res; d{v} = (double)res; }} else {{ d{v} = (double)i{l} - (double)i{r}; i{v} = isfinite(d{v}) ? (int64_t)d{v} : 0; }} v{v} = kiln_c99_val_from_double(d{v}); }}"
                         ).unwrap();
                     } else {
                         writeln!(output, "    d{v} = (double)i{l} - (double)i{r}; v{v} = kiln_c99_val_from_double(d{v});").unwrap();
@@ -1405,19 +1405,19 @@ fn emit_graph_op(
                 BinaryOp::Multiply => {
                     writeln!(output, "    d{v} = (double)i{l} * (double)i{r}; v{v} = kiln_c99_val_from_double(d{v});").unwrap();
                     if typed_int {
-                        writeln!(output, "    i{v} = (int64_t)d{v};").unwrap();
+                        writeln!(output, "    i{v} = isfinite(d{v}) ? (int64_t)d{v} : 0;").unwrap();
                     }
                 }
                 BinaryOp::Divide => {
                     writeln!(output, "    d{v} = (double)i{l} / (double)i{r}; v{v} = kiln_c99_val_from_double(d{v});").unwrap();
                     if typed_int {
-                        writeln!(output, "    i{v} = (int64_t)d{v};").unwrap();
+                        writeln!(output, "    i{v} = isfinite(d{v}) ? (int64_t)d{v} : 0;").unwrap();
                     }
                 }
                 BinaryOp::Exponentiate => {
                     writeln!(output, "    d{v} = pow((double)i{l}, (double)i{r}); v{v} = kiln_c99_val_from_double(d{v});").unwrap();
                     if typed_int {
-                        writeln!(output, "    i{v} = (int64_t)d{v};").unwrap();
+                        writeln!(output, "    i{v} = isfinite(d{v}) ? (int64_t)d{v} : 0;").unwrap();
                     }
                 }
                 BinaryOp::In | BinaryOp::InstanceOf => {
