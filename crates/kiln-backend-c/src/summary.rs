@@ -250,7 +250,7 @@ fn resolve_type(
                 }
                 common_type.unwrap_or(TypeGuess::Unknown)
             }
-            _ => TypeGuess::from(*gtype),
+            _ => *gtype,
         }
     } else {
         TypeGuess::Unknown

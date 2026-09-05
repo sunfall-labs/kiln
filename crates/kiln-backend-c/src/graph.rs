@@ -488,13 +488,11 @@ fn finish(
                 }
             }
         }
-        Some(Some(prior)) => {
-            if verdict != Some(prior) {
-                state.remove(vid);
-                *changed = true;
-            }
+        Some(Some(prior)) if verdict != Some(prior) => {
+            state.remove(vid);
+            *changed = true;
         }
-        None => {}
+        None | Some(Some(_)) => {}
     }
 }
 
@@ -1450,10 +1448,10 @@ pub fn build_function_graph(
     // Phase 3b: fill the phi inputs collected while the predecessors were walked.
     for block in &mut basic_blocks {
         for (vid, op) in &mut block.operations {
-            if let GraphOp::Phi { inputs } = op {
-                if let Some(collected) = merges.inputs.get(vid) {
-                    *inputs = collected.clone();
-                }
+            if let GraphOp::Phi { inputs } = op
+                && let Some(collected) = merges.inputs.get(vid)
+            {
+                *inputs = collected.clone();
             }
         }
     }
@@ -1518,10 +1516,10 @@ fn propagate_frame(
                 v
             }
         };
-        if let Some(list) = merges.inputs.get_mut(&phi) {
-            if !list.iter().any(|(b, _)| *b == from) {
-                list.push((from, value));
-            }
+        if let Some(list) = merges.inputs.get_mut(&phi)
+            && !list.iter().any(|(b, _)| *b == from)
+        {
+            list.push((from, value));
         }
     }
     if set.stack.is_none() {
@@ -1537,10 +1535,10 @@ fn propagate_frame(
     if let Some(stack) = &set.stack {
         // A depth mismatch leaves a phi short of an input, which the verifier rejects.
         for (phi, value) in stack.iter().zip(outgoing.stack.iter()) {
-            if let Some(list) = merges.inputs.get_mut(phi) {
-                if !list.iter().any(|(b, _)| *b == from) {
-                    list.push((from, *value));
-                }
+            if let Some(list) = merges.inputs.get_mut(phi)
+                && !list.iter().any(|(b, _)| *b == from)
+            {
+                list.push((from, *value));
             }
         }
     }

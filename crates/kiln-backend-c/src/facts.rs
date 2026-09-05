@@ -199,14 +199,16 @@ fn analyze_program_functions(program: &Program) -> Vec<FunctionFacts> {
             upvalues: Vec::new(),
             span: kiln_ir::Span::default(),
         };
-        let graph = build_function_graph(&top_level_proto, program);
-        functions.push(extract_function_facts(&graph, program));
+        if let Ok(graph) = build_function_graph(&top_level_proto, program) {
+            functions.push(extract_function_facts(&graph, program));
+        }
     }
 
     // Analyze each declared function
     for proto in &program.functions {
-        let graph = build_function_graph(proto, program);
-        functions.push(extract_function_facts(&graph, program));
+        if let Ok(graph) = build_function_graph(proto, program) {
+            functions.push(extract_function_facts(&graph, program));
+        }
     }
 
     functions
@@ -217,7 +219,7 @@ fn extract_function_facts(graph: &FunctionGraph, program: &Program) -> FunctionF
     let mut sites = Vec::new();
 
     for block in &graph.blocks {
-        for (_value_id, op, _graph_type) in &block.operations {
+        for (_value_id, op) in &block.operations {
             match op {
                 GraphOp::GetProperty { name, site, .. } => {
                     sites.push(SiteFact {
