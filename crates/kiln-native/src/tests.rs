@@ -312,8 +312,8 @@ fn live_cache_identity_catalogue_covers_every_stage_and_profile_family() {
 
     assert_eq!(
         identities.len(),
-        41,
-        "seven generated-source families, one number provider, and eleven stage families across three profiles"
+        52,
+        "seven generated-source families, one number provider, and eleven stage families across four profiles"
     );
 
     let tool = builder.toolchain().identity();
@@ -323,6 +323,7 @@ fn live_cache_identity_catalogue_covers_every_stage_and_profile_family() {
         CacheProfile::Debug,
         CacheProfile::Check,
         CacheProfile::Release,
+        CacheProfile::Profile,
     ] {
         for identity in [
             cache_identity(
