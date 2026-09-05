@@ -2089,7 +2089,7 @@ fn the_default_daemon_serves_the_real_query_engine() {
     assert_eq!(stats.parse_computed, 1);
     assert_eq!(stats.interface_computed, 1);
     assert_eq!(stats.project_computed, 0);
-    assert_eq!(stats.early_cutoff, 1);
+    assert_eq!(stats.early_cutoff, 2);
 
     client
         .request(&Request::SetSource {
