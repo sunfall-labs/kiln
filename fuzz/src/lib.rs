@@ -190,7 +190,9 @@ pub mod ir;
 pub mod js;
 pub mod node;
 pub mod oracle;
+pub mod speculate_runner;
 pub mod triage;
+pub mod typed_js;
 
 #[cfg(test)]
 mod tests {

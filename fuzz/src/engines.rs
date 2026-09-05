@@ -293,25 +293,40 @@ impl Native {
     /// redirected to files rather than pipes, which also removes the classic deadlock where a
     /// child fills the pipe buffer while the parent is blocked waiting for it to exit.
     pub fn run(&self, program: &Program, tag: &str) -> Result<NativeRun, Outcome> {
-        let directory = self.workspace.join(tag);
+        self.run_with_speculate(program, tag, "1")
+    }
+
+    pub fn run_with_speculate(
+        &self,
+        program: &Program,
+        tag: &str,
+        speculate: &str,
+    ) -> Result<NativeRun, Outcome> {
+        let directory = self.workspace.join(format!("{tag}_spec_{speculate}"));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).map_err(|error| {
             Outcome::Unavailable(format!("cannot create work directory: {error}"))
         })?;
         let executable = directory.join("program");
 
-        let report = self
-            .builder
-            .build(
-                program,
-                &NativeBuildOptions::new(executable.clone(), self.profile),
-            )
-            .map_err(|error| classify_build_error(&error))?;
+        unsafe {
+            std::env::set_var("KILN_SPECULATE", speculate);
+        }
+        let build_res = self.builder.build(
+            program,
+            &NativeBuildOptions::new(executable.clone(), self.profile),
+        );
+        unsafe {
+            std::env::remove_var("KILN_SPECULATE");
+        }
+
+        let report = build_res.map_err(|error| classify_build_error(&error))?;
 
         let stdout_path = directory.join("stdout");
         let stderr_path = directory.join("stderr");
         let mut child = Command::new(&executable)
             .env(NATIVE_RESULT_PATH_ENV, directory.join("result.bin"))
+            .env("KILN_SPECULATE", speculate)
             .stdin(Stdio::null())
             .stdout(Stdio::from(create(&stdout_path)?))
             .stderr(Stdio::from(create(&stderr_path)?))
@@ -338,11 +353,6 @@ impl Native {
                     SCREENING_LIMITS.max_steps
                 )));
             }
-            // Fine-grained, because the thing being waited on usually finishes in single-digit
-            // milliseconds. The first execution of a freshly written binary is far slower than
-            // the second -- around 180 ms here, which is macOS validating a signature it has
-            // never seen -- and that cost is inherent to compiling a new program every
-            // iteration rather than something the poll interval can recover.
             std::thread::sleep(Duration::from_micros(250));
         };
 
