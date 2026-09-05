@@ -163,6 +163,14 @@ pub trait ActiveHttpRuntime {
         id: u64,
         data: Vec<u8>,
     ) -> Option<node_stream::WriteDisposition>;
+    fn end_response_bytes(
+        &mut self,
+        resource: ResourceId,
+        id: u64,
+        data: bytes::Bytes,
+    ) -> Option<node_stream::WriteDisposition> {
+        self.end_response(resource, id, data.to_vec())
+    }
     /// Attach the client engine to a connected stream.
     fn start_client_connection(&mut self, resource: ResourceId) -> bool;
     fn send_client_request(
@@ -1691,6 +1699,17 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
             .end_response_bytes(resource, id, bytes::Bytes::from(data))
     }
 
+    fn end_response_bytes(
+        &mut self,
+        resource: ResourceId,
+        id: u64,
+        data: bytes::Bytes,
+    ) -> Option<node_stream::WriteDisposition> {
+        self.state
+            .http_server
+            .end_response_bytes(resource, id, data)
+    }
+
     fn start_client_connection(&mut self, resource: ResourceId) -> bool {
         self.client_attach_queued(resource)
     }
@@ -1924,6 +1943,72 @@ impl TokioHost {
                 self.insert_immediate(request, sequence, referenced, result);
                 return request;
             }
+            AsyncHostOp::ReadFile { path } => {
+                const MAX_REALM_READ_SIZE: u64 = 128 * 1024; // 131,072 bytes
+                match std::fs::File::open(&path) {
+                    Ok(mut file) => {
+                        let file_size = file.metadata().map(|m| m.len()).unwrap_or(u64::MAX);
+                        if file_size <= MAX_REALM_READ_SIZE {
+                            use std::io::Read;
+                            let mut data = Vec::with_capacity(file_size as usize);
+                            match file.read_to_end(&mut data) {
+                                Ok(_) => {
+                                    self.insert_immediate(
+                                        request,
+                                        sequence,
+                                        referenced,
+                                        Ok(AsyncHostValue::Bytes(data)),
+                                    );
+                                    return request;
+                                }
+                                Err(error) => {
+                                    self.insert_immediate(
+                                        request,
+                                        sequence,
+                                        referenced,
+                                        Err(io_error("open", path, error)),
+                                    );
+                                    return request;
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        self.insert_immediate(
+                            request,
+                            sequence,
+                            referenced,
+                            Err(io_error("open", path, error)),
+                        );
+                        return request;
+                    }
+                }
+                AsyncHostOp::ReadFile { path }
+            }
+            AsyncHostOp::Stat { path } => {
+                let result = std::fs::metadata(&path)
+                    .map(|metadata| {
+                        AsyncHostValue::FileStat(FileStat {
+                            size: metadata.len(),
+                            is_file: metadata.is_file(),
+                            is_directory: metadata.is_dir(),
+                        })
+                    })
+                    .map_err(|error| io_error("stat", path, error));
+                self.insert_immediate(request, sequence, referenced, result);
+                return request;
+            }
+            AsyncHostOp::WriteFile { path, data } => {
+                const MAX_REALM_WRITE_SIZE: usize = 64 * 1024; // 65,536 bytes
+                if data.len() <= MAX_REALM_WRITE_SIZE {
+                    let result = std::fs::write(&path, &data)
+                        .map(|()| AsyncHostValue::Undefined)
+                        .map_err(|error| io_error("open", path, error));
+                    self.insert_immediate(request, sequence, referenced, result);
+                    return request;
+                }
+                AsyncHostOp::WriteFile { path, data }
+            }
             AsyncHostOp::TcpListen { host, port } => {
                 self.spawn_task(request, sequence, referenced, async move {
                     let result = bind_tcp_listener(host.as_str(), port)
@@ -2140,7 +2225,6 @@ impl TokioHost {
                 });
                 return request;
             }
-            operation => operation,
         };
         self.spawn_task(request, sequence, referenced, async move {
             let result = execute_async_host_op(operation).await;
@@ -2387,23 +2471,7 @@ impl TokioHost {
 
 impl AsyncHostOps for TokioHost {
     fn start(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId {
-        assert!(!self.shutdown, "a shut down realm cannot start host work");
-        let request = RequestId::new(self.next_request);
-        self.next_request = self.next_request.wrapping_add(1).max(1);
-        let sequence = self.next_sequence;
-        self.next_sequence = self.next_sequence.wrapping_add(1);
-        self.spawn_task(request, sequence, referenced, async move {
-            let result = execute_async_host_op(operation)
-                .await
-                .map(HostCompletionValue::Public);
-            HostCompletion {
-                request,
-                sequence,
-                lifecycle: None,
-                result,
-            }
-        });
-        request
+        self.start_on(operation, referenced)
     }
 
     fn cancel(&mut self, request: RequestId) -> bool {
@@ -3420,6 +3488,71 @@ mod tests {
                 is_directory: false,
             }))
         );
+    }
+
+    #[test]
+    fn tokio_host_handles_large_file_reads_and_writes() {
+        let directory = TestDirectory::new("async-large-files");
+        let path = directory.join("large.bin");
+        let path_str = path.to_string_lossy().into_owned();
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+
+        // Write > 64 KiB (e.g. 100 KiB) to exercise thread pool write fallback
+        let large_data = vec![42u8; 100 * 1024];
+        let write = runtime.start_host_op(
+            AsyncHostOp::WriteFile {
+                path: path_str.clone(),
+                data: large_data.clone(),
+            },
+            true,
+        );
+        assert_eq!(
+            next_host_completion(&mut runtime)
+                .expect("large write completes")
+                .request,
+            write
+        );
+
+        // Read > 128 KiB: write a 200 KiB file directly and read it via start_host_op
+        let read_path = directory.join("read_large.bin");
+        let read_path_str = read_path.to_string_lossy().into_owned();
+        let read_data = vec![7u8; 200 * 1024];
+        std::fs::write(&read_path, &read_data).expect("seed large file");
+
+        let read = runtime.start_host_op(
+            AsyncHostOp::ReadFile {
+                path: read_path_str,
+            },
+            true,
+        );
+        let completion = next_host_completion(&mut runtime).expect("large read completes");
+        assert_eq!(completion.request, read);
+        assert_eq!(completion.result, Ok(AsyncHostValue::Bytes(read_data)));
+    }
+
+    #[test]
+    fn tokio_host_fast_fails_missing_files_and_stats_on_realm_thread() {
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        let missing_path = "/path/to/definitely/nonexistent/file.bin".to_string();
+
+        let stat_req = runtime.start_host_op(
+            AsyncHostOp::Stat {
+                path: missing_path.clone(),
+            },
+            true,
+        );
+        let stat_comp = next_host_completion(&mut runtime).expect("stat completes");
+        assert_eq!(stat_comp.request, stat_req);
+        let stat_err = stat_comp.result.expect_err("missing file stat fails");
+        assert_eq!(stat_err.code, "ENOENT");
+        assert_eq!(stat_err.syscall, "stat");
+
+        let read_req = runtime.start_host_op(AsyncHostOp::ReadFile { path: missing_path }, true);
+        let read_comp = next_host_completion(&mut runtime).expect("read completes");
+        assert_eq!(read_comp.request, read_req);
+        let read_err = read_comp.result.expect_err("missing file read fails");
+        assert_eq!(read_err.code, "ENOENT");
+        assert_eq!(read_err.syscall, "open");
     }
 
     #[test]
@@ -4782,7 +4915,7 @@ mod tests {
             status: 200,
             reason: None,
             headers: vec![("Content-Type".into(), "text/plain".into())],
-            body: request.body,
+            body: bytes::Bytes::from(request.body),
         }
         .encode(request.keep_alive);
         runtime.start_host_op(

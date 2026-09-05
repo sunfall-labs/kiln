@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 
+use bytes::Bytes;
 use kiln_host_abi::{Completion, RequestId, ResourceId};
 
 use crate::node_stream::{
@@ -72,6 +73,23 @@ impl HttpConnectionDriver {
     }
 
     pub fn write_response(
+        &mut self,
+        response: HttpResponse,
+        keep_alive: bool,
+    ) -> (WriteDisposition, Vec<StreamAction>) {
+        self.stream.write(response.encode(keep_alive))
+    }
+
+    pub fn write_static_response(
+        &mut self,
+        content_type: &str,
+        body: Bytes,
+        keep_alive: bool,
+    ) -> (WriteDisposition, Vec<StreamAction>) {
+        self.write_response(HttpResponse::static_file(content_type, body), keep_alive)
+    }
+
+    pub fn write_response_bytes(
         &mut self,
         response: HttpResponse,
         keep_alive: bool,
@@ -610,7 +628,7 @@ pub struct HttpResponse {
     pub status: u16,
     pub reason: Option<String>,
     pub headers: Vec<(String, String)>,
-    pub body: Vec<u8>,
+    pub body: Bytes,
 }
 
 /// One protocol-level transition while decoding an HTTP/1 client response.
@@ -778,6 +796,31 @@ fn parse_response_head(bytes: &[u8]) -> Result<(HttpResponseHead, BodyKind), Htt
 }
 
 impl HttpResponse {
+    pub fn new(status: u16, headers: Vec<(String, String)>, body: impl Into<Bytes>) -> Self {
+        Self {
+            status,
+            reason: None,
+            headers,
+            body: body.into(),
+        }
+    }
+
+    /// Build a static file response with direct `Bytes`.
+    pub fn static_file(content_type: &str, body: Bytes) -> Self {
+        Self {
+            status: 200,
+            reason: Some("OK".into()),
+            headers: vec![
+                ("Content-Type".into(), content_type.into()),
+                ("Content-Length".into(), body.len().to_string()),
+            ],
+            body,
+        }
+    }
+
+    pub fn encode_bytes(self, keep_alive: bool) -> Bytes {
+        Bytes::from(self.encode(keep_alive))
+    }
     /// Encode a response whose body will be written incrementally.
     ///
     /// HTTP/1.1 uses chunked framing when the caller did not provide a length. The adapter owns
@@ -967,7 +1010,7 @@ mod tests {
             status: 200,
             reason: None,
             headers: vec![("Content-Type".into(), "text/plain".into())],
-            body: b"hello".to_vec(),
+            body: Bytes::from_static(b"hello"),
         }
         .encode(false);
         assert_eq!(
@@ -982,10 +1025,23 @@ mod tests {
             status: 204,
             reason: None,
             headers: Vec::new(),
-            body: b"must not be sent".to_vec(),
+            body: Bytes::from_static(b"must not be sent"),
         }
         .encode(true);
         assert_eq!(bytes, b"HTTP/1.1 204 No Content\r\n\r\n");
+    }
+
+    #[test]
+    fn static_file_response_encodes_direct_bytes() {
+        let body = Bytes::from_static(b"static payload");
+        let resp = HttpResponse::static_file("text/plain", body.clone());
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, body);
+        let bytes = resp.encode_bytes(true);
+        assert_eq!(
+            bytes.as_ref(),
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 14\r\n\r\nstatic payload"
+        );
     }
 
     #[test]

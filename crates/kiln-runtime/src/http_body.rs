@@ -44,7 +44,7 @@ impl BodySink {
 
 #[derive(Debug, Clone)]
 struct Shared {
-    state: DuplexState<Vec<u8>>,
+    state: DuplexState<bytes::Bytes>,
     next_submission: u64,
     in_flight: Option<RequestId>,
     finish_emitted: bool,
@@ -96,17 +96,16 @@ impl ResponseBodyDriver {
         }
     }
 
-    pub(crate) fn write(&mut self, data: Vec<u8>) -> WriteDisposition {
-        let disposition = self
-            .shared
-            .borrow_mut()
-            .state
-            .enqueue_write(data.clone(), data.len());
+    pub(crate) fn write(&mut self, data: impl Into<bytes::Bytes>) -> WriteDisposition {
+        let data = data.into();
+        let len = data.len();
+        let disposition = self.shared.borrow_mut().state.enqueue_write(data, len);
         self.wake();
         disposition
     }
 
-    pub(crate) fn end(&mut self, data: Vec<u8>) -> WriteDisposition {
+    pub(crate) fn end(&mut self, data: impl Into<bytes::Bytes>) -> WriteDisposition {
+        let data = data.into();
         let disposition = if data.is_empty() {
             WriteDisposition {
                 ready: self.shared.borrow().state.buffered_bytes() == 0,
@@ -202,9 +201,7 @@ impl hyper::body::Body for ResponseBody {
                 if shared.complete() {
                     shared.finish();
                 }
-                return std::task::Poll::Ready(Some(Ok(hyper::body::Frame::data(
-                    bytes::Bytes::from(payload),
-                ))));
+                return std::task::Poll::Ready(Some(Ok(hyper::body::Frame::data(payload))));
             }
         }
         if shared.state.end_requested()
@@ -356,7 +353,7 @@ mod tests {
     #[test]
     fn empty_end_emits_finish_before_eof() {
         let mut body = ResponseBodyDriver::new(8);
-        assert!(body.end(Vec::new()).ready);
+        assert!(body.end(Vec::<u8>::new()).ready);
         let (mut frames, mut events) = body_with_events(&body);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
