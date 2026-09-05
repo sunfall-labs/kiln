@@ -11,6 +11,7 @@ use crate::graph::{
     BasicBlock, BlockId, FunctionGraph, FunctionTypeProfile, GraphOp, InductionVariable, Proven,
     Terminator, ValueId, as_safe_integer, candidate_number_parameters_with_profile,
     find_induction_variables, proven_ints_with_assumptions, proven_numbers_with_assumptions,
+    resolve_const_string,
 };
 use crate::prelude::lookup_speculation_invariant;
 use crate::tail::{TailContext, emit_tail_instruction};
@@ -117,40 +118,7 @@ pub fn typed_signature(proto: &FunctionProto, returns_number: bool) -> String {
     )
 }
 
-/// The slots that must exist in `locals[]`: cells, and slots some block loads other than the
-/// entry block's definitions of the initial values.
-pub(crate) fn array_slots(graph: &FunctionGraph, program: &Program) -> HashSet<u32> {
-    let mut slots = HashSet::new();
-    if graph.blocks.iter().any(|b| b.exception_handler.is_some()) {
-        // A handler reads the locals as they were at the throw, which can be any point of the
-        // protected region: every slot lives in the array.
-        return (0..graph.local_count).collect();
-    }
-    for block in &graph.blocks {
-        for (_, op) in &block.operations {
-            match op {
-                GraphOp::LoadCell(slot)
-                | GraphOp::StoreCell { slot, .. }
-                | GraphOp::MakeCell(slot) => {
-                    slots.insert(*slot);
-                }
-                GraphOp::LoadLocal(slot) if block.id != graph.entry_block => {
-                    slots.insert(*slot);
-                }
-                GraphOp::MakeFunction { index, .. } => {
-                    // A closure copies its captured boxes out of the array.
-                    for upvalue in &program.functions[*index as usize].upvalues {
-                        if let Upvalue::ParentLocal(slot) = upvalue {
-                            slots.insert(*slot);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    slots
-}
+pub(crate) use crate::graph::array_slots;
 
 /// Whether every operation in `graph` has a lowering below. This is the one place that decides
 /// what the emitter takes; `graph_for` asks it and fails the unit's emission otherwise.
@@ -491,6 +459,22 @@ fn emit_ssa_declarations(
         }
         output.push_str(";\n");
     }
+    if !graph.scalar_objects.is_empty() {
+        let mut sorted_objs: Vec<_> = graph.scalar_objects.values().collect();
+        sorted_objs.sort_by_key(|s| s.alloc_id.0);
+        for s in sorted_objs {
+            let alloc = s.alloc_id.0;
+            for &idx in s.fields.values() {
+                writeln!(
+                    output,
+                    "    kiln_val v{alloc}_f_{idx} = KILN_VAL_UNDEFINED;"
+                )
+                .unwrap();
+                writeln!(output, "    double d{alloc}_f_{idx} = 0.0;").unwrap();
+                writeln!(output, "    int64_t i{alloc}_f_{idx} = 0;").unwrap();
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -593,6 +577,7 @@ fn emit_block_sequence(
                 output,
                 vid,
                 op,
+                graph,
                 program,
                 symbol,
                 diagnostic_site,
@@ -944,6 +929,7 @@ fn emit_graph_op(
     output: &mut String,
     vid: ValueId,
     op: &GraphOp,
+    graph: &FunctionGraph,
     program: &Program,
     symbol: &str,
     diagnostic_site: &str,
@@ -1229,6 +1215,16 @@ fn emit_graph_op(
             writeln!(output, "    v{v} = KILN_VAL_UNINITIALIZED;").unwrap();
         }
         GraphOp::CheckTdz { slot: _, value } => {
+            if graph.scalar_alias_map.contains_key(value) {
+                writeln!(output, "    v{v} = v{};", value.0).unwrap();
+                if typed {
+                    writeln!(output, "    d{v} = d{};", value.0).unwrap();
+                }
+                if typed_int {
+                    writeln!(output, "    i{v} = i{};", value.0).unwrap();
+                }
+                return;
+            }
             let thrown = if scalar_proto { "NULL" } else { "thrown" };
             writeln!(
                 output,
@@ -2063,6 +2059,49 @@ fn emit_graph_op(
             .unwrap();
         }
         GraphOp::NewObject { pairs, .. } => {
+            if let Some(scalar_obj) = graph.scalar_objects.get(&vid) {
+                let alloc = vid.0;
+                let written_indices: HashSet<usize> = pairs
+                    .iter()
+                    .filter_map(|(k, _)| {
+                        resolve_const_string(*k, defs, program)
+                            .and_then(|s| scalar_obj.fields.get(s))
+                            .copied()
+                    })
+                    .collect();
+                for &field_idx in scalar_obj.fields.values() {
+                    if !written_indices.contains(&field_idx) {
+                        writeln!(output, "    v{alloc}_f_{field_idx} = KILN_VAL_UNDEFINED;")
+                            .unwrap();
+                        writeln!(output, "    d{alloc}_f_{field_idx} = 0.0;").unwrap();
+                        writeln!(output, "    i{alloc}_f_{field_idx} = 0;").unwrap();
+                    }
+                }
+                for (key, val) in pairs {
+                    if let Some(prop_name) = resolve_const_string(*key, defs, program)
+                        && let Some(&field_idx) = scalar_obj.fields.get(prop_name)
+                    {
+                        let val_vid = val.0;
+                        writeln!(output, "    v{alloc}_f_{field_idx} = v{val_vid};").unwrap();
+                        if numbers.contains(val) {
+                            writeln!(output, "    d{alloc}_f_{field_idx} = d{val_vid};").unwrap();
+                        } else {
+                            writeln!(
+                                output,
+                                "    memcpy(&d{alloc}_f_{field_idx}, &v{alloc}_f_{field_idx}, sizeof(double));"
+                            )
+                            .unwrap();
+                        }
+                        if ints.contains(val) {
+                            writeln!(output, "    i{alloc}_f_{field_idx} = i{val_vid};").unwrap();
+                        } else {
+                            writeln!(output, "    i{alloc}_f_{field_idx} = 0;").unwrap();
+                        }
+                    }
+                }
+                writeln!(output, "    v{v} = KILN_VAL_UNDEFINED;").unwrap();
+                return;
+            }
             // Sized once for its pairs, then each pair defined in source order.
             let count = pairs.len();
             let alloc = if count > 0 {
@@ -2149,6 +2188,29 @@ fn emit_graph_op(
         // Property and element access call the value-shaped helpers directly: the same
         // functions the stack-shaped entry points wrap, without the one-element arrays.
         GraphOp::GetProperty { object, name, .. } => {
+            if let Some(&root) = graph.scalar_alias_map.get(object)
+                && let Some(scalar_obj) = graph.scalar_objects.get(&root)
+            {
+                let alloc = root.0;
+                if let Some(&field_idx) = scalar_obj.field_by_name_index.get(name) {
+                    writeln!(output, "    v{v} = v{alloc}_f_{field_idx};").unwrap();
+                    if typed {
+                        writeln!(output, "    d{v} = d{alloc}_f_{field_idx};").unwrap();
+                    }
+                    if typed_int {
+                        writeln!(output, "    i{v} = i{alloc}_f_{field_idx};").unwrap();
+                    }
+                } else {
+                    writeln!(output, "    v{v} = KILN_VAL_UNDEFINED;").unwrap();
+                    if typed {
+                        writeln!(output, "    d{v} = 0.0;").unwrap();
+                    }
+                    if typed_int {
+                        writeln!(output, "    i{v} = 0;").unwrap();
+                    }
+                }
+                return;
+            }
             let key_str = match program.constants.get(*name as usize) {
                 Some(Constant::String(s)) => s.as_str(),
                 _ => "",
@@ -2214,6 +2276,37 @@ fn emit_graph_op(
             value,
             ..
         } => {
+            if let Some(&root) = graph.scalar_alias_map.get(object)
+                && let Some(scalar_obj) = graph.scalar_objects.get(&root)
+            {
+                let alloc = root.0;
+                let val = value.0;
+                if let Some(&field_idx) = scalar_obj.field_by_name_index.get(name) {
+                    writeln!(output, "    v{alloc}_f_{field_idx} = v{val};").unwrap();
+                    if numbers.contains(value) {
+                        writeln!(output, "    d{alloc}_f_{field_idx} = d{val};").unwrap();
+                    } else {
+                        writeln!(
+                            output,
+                            "    memcpy(&d{alloc}_f_{field_idx}, &v{alloc}_f_{field_idx}, sizeof(double));"
+                        )
+                        .unwrap();
+                    }
+                    if ints.contains(value) {
+                        writeln!(output, "    i{alloc}_f_{field_idx} = i{val};").unwrap();
+                    } else {
+                        writeln!(output, "    i{alloc}_f_{field_idx} = 0;").unwrap();
+                    }
+                }
+                writeln!(output, "    v{v} = v{val};").unwrap();
+                if typed {
+                    writeln!(output, "    d{v} = d{val};").unwrap();
+                }
+                if typed_int {
+                    writeln!(output, "    i{v} = i{val};").unwrap();
+                }
+                return;
+            }
             let key_str = match program.constants.get(*name as usize) {
                 Some(Constant::String(s)) => s.as_str(),
                 _ => "",
@@ -2251,6 +2344,30 @@ fn emit_graph_op(
             .unwrap();
         }
         GraphOp::GetComputed { object, key, .. } => {
+            if let Some(&root) = graph.scalar_alias_map.get(object)
+                && let Some(scalar_obj) = graph.scalar_objects.get(&root)
+                && let Some(key_str) = resolve_const_string(*key, defs, program)
+            {
+                let alloc = root.0;
+                if let Some(&field_idx) = scalar_obj.fields.get(key_str) {
+                    writeln!(output, "    v{v} = v{alloc}_f_{field_idx};").unwrap();
+                    if typed {
+                        writeln!(output, "    d{v} = d{alloc}_f_{field_idx};").unwrap();
+                    }
+                    if typed_int {
+                        writeln!(output, "    i{v} = i{alloc}_f_{field_idx};").unwrap();
+                    }
+                } else {
+                    writeln!(output, "    v{v} = KILN_VAL_UNDEFINED;").unwrap();
+                    if typed {
+                        writeln!(output, "    d{v} = 0.0;").unwrap();
+                    }
+                    if typed_int {
+                        writeln!(output, "    i{v} = 0;").unwrap();
+                    }
+                }
+                return;
+            }
             let check = status_check(diagnostic_site, pc, label, unwind);
             writeln!(
                 output,
@@ -2288,6 +2405,38 @@ fn emit_graph_op(
         | GraphOp::SetComputedStrict {
             object, key, value, ..
         } => {
+            if let Some(&root) = graph.scalar_alias_map.get(object)
+                && let Some(scalar_obj) = graph.scalar_objects.get(&root)
+                && let Some(key_str) = resolve_const_string(*key, defs, program)
+            {
+                let alloc = root.0;
+                let val = value.0;
+                if let Some(&field_idx) = scalar_obj.fields.get(key_str) {
+                    writeln!(output, "    v{alloc}_f_{field_idx} = v{val};").unwrap();
+                    if numbers.contains(value) {
+                        writeln!(output, "    d{alloc}_f_{field_idx} = d{val};").unwrap();
+                    } else {
+                        writeln!(
+                            output,
+                            "    memcpy(&d{alloc}_f_{field_idx}, &v{alloc}_f_{field_idx}, sizeof(double));"
+                        )
+                        .unwrap();
+                    }
+                    if ints.contains(value) {
+                        writeln!(output, "    i{alloc}_f_{field_idx} = i{val};").unwrap();
+                    } else {
+                        writeln!(output, "    i{alloc}_f_{field_idx} = 0;").unwrap();
+                    }
+                }
+                writeln!(output, "    v{v} = v{val};").unwrap();
+                if typed {
+                    writeln!(output, "    d{v} = d{val};").unwrap();
+                }
+                if typed_int {
+                    writeln!(output, "    i{v} = i{val};").unwrap();
+                }
+                return;
+            }
             let strict = matches!(op, GraphOp::SetComputedStrict { strict: true, .. }) as u8;
             let check = status_check(diagnostic_site, pc, label, unwind);
             writeln!(
