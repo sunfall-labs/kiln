@@ -673,10 +673,14 @@ typedef uint64_t kiln_val;
 #define KILN_VAL_IS_CLOSURE(v)   (((v) & KILN_TAG_MASK) == KILN_TAG_CLOSURE_PREFIX)
 #define KILN_VAL_PTR(v)          ((void *)((uint64_t)(v) & KILN_PAYLOAD_MASK))
 #define KILN_VAL_TAG_PTR(pfx, p) ((kiln_val)((pfx) | ((uint64_t)(uintptr_t)(p) & KILN_PAYLOAD_MASK)))
+#define KILN_VAL_IS_DOUBLE(v)    KILN_VAL_IS_NUMBER(v)
 static inline kiln_val kiln_val_from_boundary(kiln_value v) {
 static inline kiln_val kiln_c99_val_from_double(double d) {
 int32_t kiln_bigint_is_zero(const void *handle);
 static inline int kiln_c99_val_truthy(kiln_val v) {
+static int kiln_c99_speculate_mode = -2;
+static inline int kiln_c99_speculate_exit_active(void) {
+static inline int kiln_c99_guard_should_exit(uint32_t *counter) {
 static kiln_value kiln_val_to_boundary(kiln_val v);
 typedef enum kiln_typed_kind {
 typedef struct kiln_typed_buffer {

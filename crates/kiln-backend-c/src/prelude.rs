@@ -1884,6 +1884,69 @@ pub const fn absent_answer_sites(rows: &[AbsentAnswer]) -> usize {
     total
 }
 
+/// An entry in the table of speculation invariants.
+///
+/// Invariant from `fastest-native-plan.md` and ADR 0056:
+/// "A guard names its invariant. Every speculation is a row in a const table naming the
+/// language rule it relies on, the way ABSENT_ANSWER_SITES works; an unlisted guard does not
+/// compile."
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpeculationInvariant {
+    pub name: &'static str,
+    pub language_rule: &'static str,
+}
+
+pub const SPECULATION_INVARIANTS: &[SpeculationInvariant] = &[
+    SpeculationInvariant {
+        name: "parameter_number",
+        language_rule: "ECMA-262 §7.1.3 ToNumber: If argument is a Number, no conversion is performed and operations can proceed unboxed",
+    },
+    SpeculationInvariant {
+        name: "loop_speculation_exit",
+        language_rule: "ECMA-262 §14.7.5: Loop header state deoptimizes cleanly to generic locals",
+    },
+];
+
+pub const fn assert_speculation_invariants(rows: &[SpeculationInvariant]) -> usize {
+    let mut index = 0;
+    while index < rows.len() {
+        assert!(
+            !rows[index].name.is_empty() && !rows[index].language_rule.is_empty(),
+            "a SPECULATION_INVARIANTS row does not say what language rule it relies on"
+        );
+        index += 1;
+    }
+    index
+}
+
+pub const fn lookup_speculation_invariant(name: &str) -> &'static SpeculationInvariant {
+    let mut i = 0;
+    while i < SPECULATION_INVARIANTS.len() {
+        let a = SPECULATION_INVARIANTS[i].name.as_bytes();
+        let b = name.as_bytes();
+        if a.len() == b.len() {
+            let mut j = 0;
+            let mut eq = true;
+            while j < a.len() {
+                if a[j] != b[j] {
+                    eq = false;
+                    break;
+                }
+                j += 1;
+            }
+            if eq {
+                return &SPECULATION_INVARIANTS[i];
+            }
+        }
+        i += 1;
+    }
+    panic!("an unlisted guard does not compile: invariant name not in SPECULATION_INVARIANTS");
+}
+
+const _: usize = assert_speculation_invariants(SPECULATION_INVARIANTS);
+const _: &SpeculationInvariant = lookup_speculation_invariant("parameter_number");
+const _: &SpeculationInvariant = lookup_speculation_invariant("loop_speculation_exit");
+
 /// A refusal in the emitted prelude names what it lacked, and an `undefined` answer names what
 /// proves the name absent.
 ///
@@ -3906,6 +3969,7 @@ pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_introspect_pending", C99StateOwner::Process),
     ("kiln_c99_introspect_armed", C99StateOwner::Process),
     ("kiln_c99_root_shape", C99StateOwner::Constant),
+    ("kiln_c99_speculate_mode", C99StateOwner::Process),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

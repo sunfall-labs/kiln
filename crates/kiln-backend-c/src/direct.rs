@@ -80,11 +80,7 @@ pub struct DirectPlan {
 impl DirectPlan {
     pub fn plan(program: &Program, graphs: &[FunctionGraph], entry: &FunctionGraph) -> Self {
         let known = known_callees(program, graphs, entry);
-        let direct: Vec<bool> = program
-            .functions
-            .iter()
-            .map(|proto| direct_callable(proto))
-            .collect();
+        let direct: Vec<bool> = program.functions.iter().map(direct_callable).collect();
         let typed_eligible: Vec<bool> = program
             .functions
             .iter()
