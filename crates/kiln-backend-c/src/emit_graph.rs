@@ -46,6 +46,7 @@ fn lowers(op: &GraphOp) -> bool {
             | GraphOp::LoadUpvalue(_)
             | GraphOp::StoreUpvalue { .. }
             | GraphOp::LoadBuiltin(_)
+            | GraphOp::CaughtValue
             | GraphOp::MakeCell(_)
             | GraphOp::LoadGlobal(_)
             | GraphOp::StoreGlobal { .. }
@@ -75,6 +76,11 @@ fn lowers(op: &GraphOp) -> bool {
 /// entry block's definitions of the initial values.
 fn array_slots(graph: &FunctionGraph, program: &Program) -> HashSet<u32> {
     let mut slots = HashSet::new();
+    if graph.blocks.iter().any(|b| b.exception_handler.is_some()) {
+        // A handler reads the locals as they were at the throw, which can be any point of the
+        // protected region: every slot lives in the array.
+        return (0..graph.local_count).collect();
+    }
     for block in &graph.blocks {
         for (_, op) in &block.operations {
             match op {
@@ -221,6 +227,11 @@ pub fn emit_function_from_graph(
     // 5. Basic blocks emission
     for block in &graph.blocks {
         writeln!(output, "kiln_block_{}:;", block.id.0).unwrap();
+        // Where a throw in this block goes: its innermost handler, or out of the body.
+        let unwind = match block.exception_handler {
+            Some(handler) => format!("goto kiln_block_{};", handler.0),
+            None => "goto kiln_unwind;".to_owned(),
+        };
 
         for &(vid, ref op) in &block.operations {
             emit_graph_op(
@@ -237,10 +248,19 @@ pub fn emit_function_from_graph(
                 frame_stacks,
                 strict_functions,
                 &graph.origins,
+                &unwind,
             );
         }
 
-        emit_terminator(output, graph, block, &block.terminator, &numbers, &defs);
+        emit_terminator(
+            output,
+            graph,
+            block,
+            &block.terminator,
+            &numbers,
+            &defs,
+            &unwind,
+        );
     }
 
     // 6. Unwind and refusal handlers
@@ -257,9 +277,9 @@ pub fn emit_function_from_graph(
 /// One status check after a runtime call. A throw unwinds; a refusal is attributed to this site
 /// and reported through `kiln_refusal`, which carries the diagnostic in the result the way the
 /// stack emitter does; anything else returns as it is.
-fn status_check(diagnostic_site: &str, pc: u32, operation: &str) -> String {
+fn status_check(diagnostic_site: &str, pc: u32, operation: &str, unwind: &str) -> String {
     format!(
-        "if (status == KILN_C99_THROWN) goto kiln_unwind; if (status == KILN_C99_CONTROL_ERROR) {{ kiln_c99_note_refusal(\"{diagnostic_site}\", (size_t){pc}, \"{operation}\", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; }} if (status != KILN_C99_OK) return status;"
+        "if (status == KILN_C99_THROWN) {unwind} if (status == KILN_C99_CONTROL_ERROR) {{ kiln_c99_note_refusal(\"{diagnostic_site}\", (size_t){pc}, \"{operation}\", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; }} if (status != KILN_C99_OK) return status;"
     )
 }
 
@@ -369,6 +389,7 @@ fn emit_graph_op(
     frame_stacks: &[usize],
     strict_functions: &[bool],
     origins: &std::collections::HashMap<ValueId, crate::graph::Origin>,
+    unwind: &str,
 ) {
     let v = vid.0;
     let typed = numbers.contains(&vid);
@@ -452,7 +473,7 @@ fn emit_graph_op(
         // A cell is a shared box, the same one the stack emitter makes and reads through the
         // same helpers: the load checks the temporal dead zone, the store writes the box.
         GraphOp::LoadCell(slot) => {
-            let check = status_check(diagnostic_site, pc, &label);
+            let check = status_check(diagnostic_site, pc, &label, unwind);
             writeln!(
                 output,
                 "    {{ kiln_val cell_stack[1]; size_t cell_sp = 0; int status = kiln_c99_op_val_load_cell(locals[{slot}], cell_stack, &cell_sp, thrown); {check} v{v} = cell_stack[0]; }}"
@@ -474,7 +495,7 @@ fn emit_graph_op(
         // An upvalue is a box the closure was handed; the load checks the temporal dead zone
         // the way a cell load does, and the store writes the box.
         GraphOp::LoadUpvalue(index) => {
-            let check = status_check(diagnostic_site, pc, &label);
+            let check = status_check(diagnostic_site, pc, &label, unwind);
             writeln!(
                 output,
                 "    {{ kiln_val cell_stack[1]; size_t cell_sp = 0; int status = kiln_c99_op_val_load_cell(upvalues[{index}], cell_stack, &cell_sp, thrown); {check} v{v} = cell_stack[0]; }}"
@@ -502,6 +523,14 @@ fn emit_graph_op(
                 .unwrap();
             }
         },
+        GraphOp::CaughtValue => {
+            // Landing in a handler: the throw is handled, and the value is the block's first.
+            writeln!(
+                output,
+                "    kiln_c99_forget_handled_throw(); v{v} = kiln_val_from_boundary(*thrown);"
+            )
+            .unwrap();
+        }
         GraphOp::MakeCell(slot) => {
             writeln!(
                 output,
@@ -549,7 +578,7 @@ fn emit_graph_op(
         GraphOp::CheckTdz { slot: _, value } => {
             writeln!(
                 output,
-                "    {{ int status = kiln_c99_val_check_tdz(v{}, thrown); if (status == KILN_C99_THROWN) goto kiln_unwind; if (status != KILN_C99_OK) return status; }}",
+                "    {{ int status = kiln_c99_val_check_tdz(v{}, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
                 value.0
             )
             .unwrap();
@@ -606,7 +635,7 @@ fn emit_graph_op(
                     let slow = if scalar_proto {
                         format!("v{v} = kiln_c99_val_unary_fast({code}, v{x});")
                     } else {
-                        let check = status_check(diagnostic_site, pc, &label);
+                        let check = status_check(diagnostic_site, pc, &label, unwind);
                         format!(
                             "kiln_value ans; int status = kiln_c99_unary_checked({code}, host, kiln_val_to_boundary(v{x}), &ans, depth, thrown); {check} v{v} = kiln_val_from_boundary(ans);"
                         )
@@ -655,7 +684,7 @@ fn emit_graph_op(
         } => {
             writeln!(
                 output,
-                "    {{ kiln_value container = kiln_val_to_boundary(v{r}); int answer; if (!kiln_c99_is_reference(container) && container.tag != KILN_VALUE_DATE) {{ (void)kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, \"Cannot use 'in' to search for a property in a non-object\"); goto kiln_unwind; }} int status = kiln_c99_has_computed(host, container, kiln_val_to_boundary(v{l}), &answer, depth, thrown); if (status == KILN_C99_THROWN) goto kiln_unwind; if (status != KILN_C99_OK) return status; v{v} = answer ? KILN_VAL_TRUE : KILN_VAL_FALSE; }}",
+                "    {{ kiln_value container = kiln_val_to_boundary(v{r}); int answer; if (!kiln_c99_is_reference(container) && container.tag != KILN_VALUE_DATE) {{ (void)kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, \"Cannot use 'in' to search for a property in a non-object\"); {unwind} }} int status = kiln_c99_has_computed(host, container, kiln_val_to_boundary(v{l}), &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; v{v} = answer ? KILN_VAL_TRUE : KILN_VAL_FALSE; }}",
                 l = left.0,
                 r = right.0
             )
@@ -682,7 +711,7 @@ fn emit_graph_op(
             let slow = if scalar_proto {
                 format!("v{v} = kiln_c99_val_binary_fast({code}, v{l}, v{r});")
             } else {
-                let check = status_check(diagnostic_site, pc, &label);
+                let check = status_check(diagnostic_site, pc, &label, unwind);
                 format!(
                     "int status = KILN_C99_OK; v{v} = kiln_c99_val_binary({code}, host, v{l}, v{r}, &status, depth, thrown); {check}"
                 )
@@ -730,10 +759,10 @@ fn emit_graph_op(
                     "{static_branches} else {{ status = plain->body(&ctx_call, &call_result, plain->upvalues, &recv, call_args, (size_t){argc}); }}"
                 )
             };
-            let check = status_check(diagnostic_site, pc, &label);
+            let check = status_check(diagnostic_site, pc, &label, unwind);
             writeln!(
                 output,
-                "    {{ kiln_val call_stack[{n}] = {{ {init} }}; size_t call_sp = {n}; kiln_closure *plain = KILN_VAL_IS_CLOSURE(call_stack[0]) ? (kiln_closure *)KILN_VAL_PTR(call_stack[0]) : NULL; if (KILN_LIKELY(plain != NULL && !plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ kiln_val call_result = KILN_VAL_UNDEFINED; const kiln_val *call_args = {argc} > 0 ? &call_stack[1] : NULL; kiln_val recv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&recv); kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status; {indirect} if (status == KILN_C99_THROWN) goto kiln_unwind; if (status != KILN_C99_OK) return status; v{v} = call_result; }} else {{ int status = kiln_c99_op_val_call(host, call_stack, &call_sp, (size_t){argc}, depth, thrown, \"{diagnostic_site}\", (size_t){pc}, \"{label}\"); {check} v{v} = call_stack[0]; }} }}",
+                "    {{ kiln_val call_stack[{n}] = {{ {init} }}; size_t call_sp = {n}; kiln_closure *plain = KILN_VAL_IS_CLOSURE(call_stack[0]) ? (kiln_closure *)KILN_VAL_PTR(call_stack[0]) : NULL; if (KILN_LIKELY(plain != NULL && !plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ kiln_val call_result = KILN_VAL_UNDEFINED; const kiln_val *call_args = {argc} > 0 ? &call_stack[1] : NULL; kiln_val recv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&recv); kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status; {indirect} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; v{v} = call_result; }} else {{ int status = kiln_c99_op_val_call(host, call_stack, &call_sp, (size_t){argc}, depth, thrown, \"{diagnostic_site}\", (size_t){pc}, \"{label}\"); {check} v{v} = call_stack[0]; }} }}",
                 n = argc + 1
             )
             .unwrap();
@@ -757,7 +786,7 @@ fn emit_graph_op(
                     .collect::<Vec<_>>()
                     .join(", ")
             };
-            let check = status_check(diagnostic_site, pc, &label);
+            let check = status_check(diagnostic_site, pc, &label, unwind);
             writeln!(
                 output,
                 "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_val call_args[{n}] = {{ {init} }}; int status = kiln_c99_val_call_method(host, v{}, call_args, (size_t){argc}, {symbol}_key_{name}, {key_len}, depth, thrown, &site, \"{diagnostic_site}\", (size_t){pc}, \"{label}\", &v{v}); {check} }}",
@@ -772,7 +801,7 @@ fn emit_graph_op(
             for arg in args {
                 init.push_str(&format!(", v{}", arg.0));
             }
-            let check = status_check(diagnostic_site, pc, &label);
+            let check = status_check(diagnostic_site, pc, &label, unwind);
             writeln!(
                 output,
                 "    {{ kiln_val call_stack[{n}] = {{ {init} }}; size_t call_sp = {n}; int status = kiln_c99_op_val_new(host, call_stack, &call_sp, (size_t){argc}, depth, thrown); {check} v{v} = call_stack[0]; }}",
@@ -789,7 +818,7 @@ fn emit_graph_op(
             } else {
                 "kiln_c99_new_object(&built)".to_owned()
             };
-            let check = status_check(diagnostic_site, pc, &label);
+            let check = status_check(diagnostic_site, pc, &label, unwind);
             let mut defines = String::new();
             for (key, value) in pairs {
                 defines.push_str(&format!(
@@ -872,7 +901,7 @@ fn emit_graph_op(
                 Some(Constant::String(s)) => s.len(),
                 _ => 0,
             };
-            let check = status_check(diagnostic_site, pc, &label);
+            let check = status_check(diagnostic_site, pc, &label, unwind);
             writeln!(
                 output,
                 "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_val_read_property(host, v{o}, {symbol}_key_{name}, {key_len}, depth, thrown, &site, &v{v}); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(v{o})); {check} }}",
@@ -897,7 +926,7 @@ fn emit_graph_op(
                 _ => 0,
             };
             let strict = matches!(op, GraphOp::SetPropertyStrict { strict: true, .. }) as u8;
-            let check = status_check(diagnostic_site, pc, &label);
+            let check = status_check(diagnostic_site, pc, &label, unwind);
             writeln!(
                 output,
                 "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_val_write_property(host, v{}, {symbol}_key_{name}, {key_len}, v{}, {strict}, depth, thrown, &site); {check} v{v} = v{}; }}",
@@ -906,7 +935,7 @@ fn emit_graph_op(
             .unwrap();
         }
         GraphOp::GetComputed { object, key, .. } => {
-            let check = status_check(diagnostic_site, pc, &label);
+            let check = status_check(diagnostic_site, pc, &label, unwind);
             writeln!(
                 output,
                 "    {{ int status = kiln_c99_val_read_element(host, v{o}, v{k}, depth, thrown, &v{v}); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(kiln_val_to_boundary(v{o}), kiln_val_to_boundary(v{k})); {check} }}",
@@ -922,7 +951,7 @@ fn emit_graph_op(
             object, key, value, ..
         } => {
             let strict = matches!(op, GraphOp::SetComputedStrict { strict: true, .. }) as u8;
-            let check = status_check(diagnostic_site, pc, &label);
+            let check = status_check(diagnostic_site, pc, &label, unwind);
             writeln!(
                 output,
                 "    {{ int status = kiln_c99_val_write_element(host, v{}, v{}, v{}, {strict}, depth, thrown); {check} v{v} = v{}; }}",
@@ -949,6 +978,7 @@ fn emit_terminator(
     terminator: &Terminator,
     numbers: &HashSet<ValueId>,
     defs: &std::collections::HashMap<ValueId, &GraphOp>,
+    unwind: &str,
 ) {
     match terminator {
         Terminator::Return(Some(val)) => {
@@ -960,7 +990,7 @@ fn emit_terminator(
         Terminator::Throw(val) => {
             writeln!(
                 output,
-                "    *thrown = kiln_val_to_boundary(v{}); goto kiln_unwind;",
+                "    *thrown = kiln_val_to_boundary(v{}); {unwind}",
                 val.0
             )
             .unwrap();

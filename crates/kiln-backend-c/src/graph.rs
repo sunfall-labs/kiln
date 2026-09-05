@@ -6,7 +6,7 @@
 //! and resolving operand dependencies into direct value edges.
 
 use kiln_ir::{BinaryOp, Constant, FunctionProto, HostOp, Instruction, Program, UnaryOp};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// Strongly typed identifier for an SSA value in the graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -54,6 +54,9 @@ pub enum GraphOp {
     },
     /// A name the compiler resolved to something the runtime supplies.
     LoadBuiltin(kiln_ir::Builtin),
+    /// The value a handler block starts with: what was thrown into it. Only ever the first
+    /// operation of a handler block.
+    CaughtValue,
     MakeCell(u32),
     LoadGlobal(u32),
     StoreGlobal {
@@ -577,7 +580,19 @@ pub fn build_function_graph(
                 }
             }
             Instruction::PushHandler(target) => {
+                // The handler is a block of its own, and so is everything after the push: a
+                // block's innermost handler is one static fact, decided by the pre-pass below
+                // from the state at the block's end, so no block may straddle a push or a pop.
                 block_starts.insert(*target as usize);
+                if pc + 1 < code.len() {
+                    block_starts.insert(pc + 1);
+                }
+            }
+            Instruction::PopHandler => {
+                block_starts.insert(pc);
+                if pc + 1 < code.len() {
+                    block_starts.insert(pc + 1);
+                }
             }
             Instruction::Yield | Instruction::Await if pc + 1 < code.len() => {
                 block_starts.insert(pc + 1);
@@ -620,6 +635,13 @@ pub fn build_function_graph(
 
     let mut handler_stack = Vec::new();
     let mut block_handlers = vec![None; num_blocks];
+    let handler_targets: HashSet<BlockId> = code
+        .iter()
+        .filter_map(|inst| match inst {
+            Instruction::PushHandler(target) => pc_to_block.get(&(*target as usize)).copied(),
+            _ => None,
+        })
+        .collect();
     for (b_idx, &(start, end)) in block_ranges.iter().enumerate() {
         for inst in &code[start..end] {
             match inst {
@@ -679,6 +701,8 @@ pub fn build_function_graph(
             Some(Instruction::Return | Instruction::Throw) => {}
             _ => succs.extend(next),
         }
+        // A protected block can leave through its handler from any throwing operation.
+        succs.extend(block_handlers[b_idx]);
         for succ in succs {
             let list = &mut static_preds[succ.0 as usize];
             if !list.contains(&this) {
@@ -688,7 +712,9 @@ pub fn build_function_graph(
     }
     let mut merges: MergeState = MergeState::default();
     for (b_idx, preds) in static_preds.iter().enumerate() {
-        if preds.len() < 2 {
+        // A handler block merges nothing: a throw can happen mid-block, when the locals are
+        // half stored, so its locals come from the array and its stack is fixed at the push.
+        if preds.len() < 2 || handler_targets.contains(&BlockId(b_idx as u32)) {
             continue;
         }
         let block_id = BlockId(b_idx as u32);
@@ -719,6 +745,7 @@ pub fn build_function_graph(
         );
     }
 
+    let mut handler_caught: HashMap<BlockId, ValueId> = HashMap::new();
     for (b_idx, &(start, end)) in block_ranges.iter().enumerate() {
         let block_id = BlockId(b_idx as u32);
         let mut frame = block_entry_frames
@@ -745,6 +772,16 @@ pub fn build_function_graph(
             for &phi in set.locals.iter().chain(set.stack.iter().flatten()) {
                 operations.push((phi, GraphOp::Phi { inputs: Vec::new() }));
             }
+        }
+        if let Some(&caught) = handler_caught.get(&block_id) {
+            operations.push((caught, GraphOp::CaughtValue));
+            graph.origins.insert(
+                caught,
+                Origin {
+                    pc: start as u32,
+                    label: "CaughtValue".to_owned(),
+                },
+            );
         }
 
         for (offset, inst) in code[start..end].iter().enumerate() {
@@ -1395,9 +1432,21 @@ pub fn build_function_graph(
                     operations.push((res, GraphOp::ImportDynamic(specifier)));
                     frame.stack.push(res);
                 }
-                // Handlers were consumed by the pre-pass that assigns each block its handler;
-                // the walk itself carries its frame straight through them.
-                Instruction::PushHandler(_) | Instruction::PopHandler => {}
+                Instruction::PushHandler(target) => {
+                    // The handler starts with the operand stack as it is here, plus the thrown
+                    // value; its locals are read from the array, since a throw can land from
+                    // any point of the protected region.
+                    let handler = pc_to_containing_block(*target as usize);
+                    let caught = graph.alloc_value();
+                    let mut stack = frame.stack.clone();
+                    stack.push(caught);
+                    block_entry_frames.entry(handler).or_insert(AbstractFrame {
+                        stack,
+                        locals: HashMap::new(),
+                    });
+                    handler_caught.insert(handler, caught);
+                }
+                Instruction::PopHandler => {}
                 other => {
                     return Err(UnsupportedInstruction {
                         pc,
@@ -1435,6 +1484,11 @@ pub fn build_function_graph(
             );
         }
 
+        if let Some(handler) = block_handlers[b_idx]
+            && !successors.contains(&handler)
+        {
+            successors.push(handler);
+        }
         basic_blocks.push(BasicBlock {
             id: block_id,
             operations,
