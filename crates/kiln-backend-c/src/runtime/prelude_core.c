@@ -25456,260 +25456,6 @@ static int kiln_c99_write_element(kiln_host *host, kiln_value target, kiln_value
     return kiln_c99_set_computed_mode(host, target, key, value, strict, depth, thrown);
 }
 
-static int kiln_c99_op_get_property(kiln_host *host, kiln_value *stack, size_t *sp,
-                                    const char *key, size_t key_len,
-                                    int depth, kiln_value *thrown, kiln_c99_site *site) {
-    kiln_value read;
-    kiln_value target = stack[*sp - 1];
-    int status = kiln_c99_read_property(host, target, key, key_len, depth, thrown, site, &read);
-    if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(target);
-    if (status != KILN_C99_OK) return status;
-    stack[*sp - 1] = read;
-    return KILN_C99_OK;
-}
-
-/* `ToPropertyKey` of the top of the stack, in place.
- *
- * Only a reference does anything: a primitive is already a key, and leaving it alone keeps the
- * numeric fast path in the property instructions. That also makes this idempotent, so the
- * conversion `kiln_c99_get_computed` still performs is a no-op rather than a second call into
- * the program's own `toString`.
- *
- * A nullish target also passes through: the order is fixed, and the read that follows throws
- * for it before the key would have converted. */
-static int kiln_c99_op_to_property_key(kiln_host *host, kiln_value *stack, size_t *sp,
-                                       int depth, kiln_value *thrown) {
-    kiln_value reduced;
-    int status = kiln_c99_reduce_key(host, stack[*sp - 2], stack[*sp - 1], &reduced, depth, thrown);
-    if (status != KILN_C99_OK) {
-        return status;
-    }
-    stack[*sp - 1] = reduced;
-    return KILN_C99_OK;
-}
-
-static int kiln_c99_op_get_computed(kiln_host *host, kiln_value *stack, size_t *sp,
-                                    int depth, kiln_value *thrown) {
-    kiln_value key = stack[--(*sp)];
-    kiln_value read;
-    kiln_value target = stack[*sp - 1];
-    int status = kiln_c99_read_element(host, target, key, depth, thrown, &read);
-    if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) {
-        kiln_c99_note_get_computed_refusal(target, key);
-    }
-    if (status != KILN_C99_OK) return status;
-    stack[*sp - 1] = read;
-    return KILN_C99_OK;
-}
-
-static int kiln_c99_op_call_method(kiln_host *host, kiln_value *stack, size_t *sp,
-                                   const char *key, size_t key_len, size_t argc,
-                                   int depth, kiln_value *thrown, kiln_c99_site *site,
-                                   const char *inst_site, size_t inst_idx, const char *inst_op,
-                                   kiln_value *result) {
-    kiln_value method;
-    kiln_value call_result = kiln_c99_undefined();
-    kiln_value self_value = stack[*sp - argc - 1];
-    const kiln_value *call_args = argc > 0 ? &stack[*sp - argc] : NULL;
-    int status;
-
-    status = kiln_c99_read_property(host, self_value, key, key_len, depth, thrown, site, &method);
-    if (status == KILN_C99_CONTROL_ERROR) {
-        if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = self_value.tag;
-        if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = "CallMethod property lookup refused";
-        kiln_c99_note_refusal(inst_site, inst_idx, inst_op, (size_t)kiln_c99_diagnostic_active_depth);
-    } else if (status == KILN_C99_THROWN) {
-        if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = "CallMethod property lookup threw";
-        kiln_c99_note_refusal(inst_site, inst_idx, inst_op, (size_t)kiln_c99_diagnostic_active_depth);
-    }
-    if (status != KILN_C99_OK) {
-        return status;
-    }
-
-    {
-        kiln_closure *plain = method.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(method) : NULL;
-        if (plain != NULL && (plain->arrow || plain->strict) && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {
-            kiln_val vreceiver = plain->arrow ? plain->captured_this : kiln_val_from_boundary(self_value);
-            kiln_val vargs[argc > 0 ? argc : 1];
-            for (size_t i = 0; i < argc; ++i) vargs[i] = kiln_val_from_boundary(call_args[i]);
-            kiln_val vres = KILN_VAL_UNDEFINED;
-            status = kiln_c99_invoke_closure(host, &vres, plain, vreceiver, argc > 0 ? vargs : NULL, argc, depth, thrown, NULL, 0);
-            call_result = kiln_val_to_boundary(vres);
-        } else if (method.tag == KILN_VALUE_METHOD && depth < KILN_C99_MAX_CALL_DEPTH) {
-            status = kiln_c99_invoke_method(host, &call_result, method.bits, self_value, call_args, argc, depth, thrown);
-        } else {
-            status = kiln_c99_call(host, &call_result, method, self_value, call_args, argc, depth, thrown);
-        }
-    }
-    if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {
-        if (result != NULL) *result = call_result;
-        return status;
-    }
-    if (status == KILN_C99_CONTROL_ERROR) {
-        if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = self_value.tag;
-        if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = "CallMethod invocation refused";
-        kiln_c99_note_refusal(inst_site, inst_idx, inst_op, (size_t)kiln_c99_diagnostic_active_depth);
-    } else if (status == KILN_C99_THROWN) {
-        if (kiln_c99_diagnostic_detail == NULL) {
-            kiln_c99_diagnostic_receiver_tag = self_value.tag;
-            kiln_c99_diagnostic_detail = "CallMethod invocation threw";
-        }
-        kiln_c99_note_refusal(inst_site, inst_idx, inst_op, (size_t)kiln_c99_diagnostic_active_depth);
-    }
-
-    if (status != KILN_C99_OK) return status;
-
-    *sp -= (argc + 1);
-    stack[(*sp)++] = call_result;
-    return KILN_C99_OK;
-}
-
-static int kiln_c99_op_call(kiln_host *host, kiln_value *stack, size_t *sp, size_t argc,
-                            int depth, kiln_value *thrown,
-                            const char *inst_site, size_t inst_idx, const char *inst_op,
-                            kiln_value *result) {
-    kiln_value call_result = kiln_c99_undefined();
-    kiln_value callee = stack[*sp - argc - 1];
-    const kiln_value *call_args = argc > 0 ? &stack[*sp - argc] : NULL;
-    int status;
-
-    {
-        kiln_closure *plain = callee.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(callee) : NULL;
-        if (plain != NULL && (plain->arrow || plain->strict) && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {
-            kiln_val vreceiver = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED;
-            kiln_val vargs[argc > 0 ? argc : 1];
-            for (size_t i = 0; i < argc; ++i) vargs[i] = kiln_val_from_boundary(call_args[i]);
-            kiln_val vres = KILN_VAL_UNDEFINED;
-            status = kiln_c99_invoke_closure(host, &vres, plain, vreceiver, argc > 0 ? vargs : NULL, argc, depth, thrown, NULL, 0);
-            call_result = kiln_val_to_boundary(vres);
-        } else if (callee.tag == KILN_VALUE_METHOD && depth < KILN_C99_MAX_CALL_DEPTH) {
-            status = kiln_c99_invoke_method(host, &call_result, callee.bits, kiln_c99_undefined(), call_args, argc, depth, thrown);
-        } else {
-            status = kiln_c99_call(host, &call_result, callee, kiln_c99_undefined(), call_args, argc, depth, thrown);
-        }
-    }
-
-    if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {
-        if (result != NULL) *result = call_result;
-        return status;
-    }
-    if (status == KILN_C99_CONTROL_ERROR) {
-        if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = callee.tag;
-        if (kiln_c99_diagnostic_site == NULL && kiln_c99_diagnostic_operation == NULL && kiln_c99_diagnostic_detail == NULL) {
-            kiln_c99_diagnostic_detail = "Call callee is unsupported by the native callable model";
-        }
-        kiln_c99_note_refusal(inst_site, inst_idx, inst_op, (size_t)kiln_c99_diagnostic_active_depth);
-    }
-
-    if (status != KILN_C99_OK) return status;
-
-    *sp -= (argc + 1);
-    stack[(*sp)++] = call_result;
-    return KILN_C99_OK;
-}
-
-static int kiln_c99_op_new(kiln_host *host, kiln_value *stack, size_t *sp, size_t argc,
-                           int depth, kiln_value *thrown) {
-    kiln_value built;
-    kiln_value callee = stack[*sp - argc - 1];
-    const kiln_value *call_args = argc > 0 ? &stack[*sp - argc] : NULL;
-    int status;
-
-    status = kiln_c99_construct(host, &built, callee, call_args, argc, depth, thrown);
-
-    if (status == KILN_C99_CONTROL_ERROR) {
-        if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = callee.tag;
-        if (callee.tag == KILN_VALUE_BUILTIN && kiln_c99_diagnostic_function == NULL) {
-            const char *named = kiln_c99_builtin_name(callee.bits);
-            if (named != NULL) {
-                kiln_c99_diagnostic_function = named;
-                kiln_c99_diagnostic_function_len = strlen(named);
-            }
-        }
-        if (kiln_c99_diagnostic_detail == NULL) {
-            kiln_c99_diagnostic_detail = "New target is unsupported by the native constructor model";
-        }
-    }
-
-    if (status != KILN_C99_OK) return status;
-
-    *sp -= (argc + 1);
-    stack[(*sp)++] = built;
-    return KILN_C99_OK;
-}
-
-static int kiln_c99_op_load_cell(kiln_value cell, kiln_value *stack, size_t *sp, kiln_value *thrown) {
-    kiln_val *target = kiln_c99_cell_of(cell);
-    if (*target == KILN_VAL_UNINITIALIZED) {
-        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, "cannot access a binding before its declaration");
-    }
-    stack[(*sp)++] = kiln_val_to_boundary(*target);
-    return KILN_C99_OK;
-}
-
-static int kiln_c99_check_tdz(kiln_value val, kiln_value *thrown) {
-    if (val.tag == KILN_VALUE_UNINITIALIZED) {
-        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, "cannot access a binding before its declaration");
-    }
-    return KILN_C99_OK;
-}
-
-static int kiln_c99_op_set_property(kiln_host *host, kiln_value *stack, size_t *sp,
-                                    const char *key, size_t key_len, int strict,
-                                    int depth, kiln_value *thrown, kiln_c99_site *site) {
-    kiln_value member = stack[--(*sp)];
-    kiln_value target = stack[*sp - 1];
-    int status = kiln_c99_write_property(host, target, key, key_len, member, strict, depth, thrown, site);
-    if (status != KILN_C99_OK) return status;
-    stack[*sp - 1] = member;
-    return KILN_C99_OK;
-}
-
-static int kiln_c99_op_set_computed(kiln_host *host, kiln_value *stack, size_t *sp,
-                                    int strict, int depth, kiln_value *thrown) {
-    kiln_value member = stack[--(*sp)];
-    kiln_value key = stack[--(*sp)];
-    kiln_value target = stack[*sp - 1];
-    int status = kiln_c99_write_element(host, target, key, member, strict, depth, thrown);
-    if (status != KILN_C99_OK) return status;
-    stack[*sp - 1] = member;
-    return KILN_C99_OK;
-}
-
-static int kiln_c99_op_val_get_property(kiln_host *host, kiln_val *stack, size_t *sp,
-                                        const char *key, size_t key_len,
-                                        int depth, kiln_value *thrown, kiln_c99_site *site) {
-    kiln_val read;
-    kiln_val target = stack[*sp - 1];
-    int status = kiln_c99_val_read_property(host, target, key, key_len, depth, thrown, site, &read);
-    if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(target));
-    if (status != KILN_C99_OK) return status;
-    stack[*sp - 1] = read;
-    return KILN_C99_OK;
-}
-
-static int kiln_c99_op_val_set_property(kiln_host *host, kiln_val *stack, size_t *sp,
-                                        const char *key, size_t key_len, int strict,
-                                        int depth, kiln_value *thrown, kiln_c99_site *site) {
-    kiln_val member = stack[--(*sp)];
-    kiln_val target = stack[*sp - 1];
-    int status = kiln_c99_val_write_property(host, target, key, key_len, member, strict, depth, thrown, site);
-    if (status != KILN_C99_OK) return status;
-    stack[*sp - 1] = member;
-    return KILN_C99_OK;
-}
-
-static int kiln_c99_op_val_to_property_key(kiln_host *host, kiln_val *stack, size_t *sp,
-                                           int depth, kiln_value *thrown) {
-    kiln_value reduced;
-    kiln_value target = kiln_val_to_boundary(stack[*sp - 2]);
-    kiln_value key = kiln_val_to_boundary(stack[*sp - 1]);
-    int status = kiln_c99_reduce_key(host, target, key, &reduced, depth, thrown);
-    if (status != KILN_C99_OK) return status;
-    stack[*sp - 1] = kiln_val_from_boundary(reduced);
-    return KILN_C99_OK;
-}
-
 static int kiln_c99_val_read_element(kiln_host *host, kiln_val target, kiln_val key,
                                      int depth, kiln_value *thrown, kiln_val *out) {
     if (KILN_LIKELY((KILN_VAL_IS_OBJECT(target) || ((target & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX)) && KILN_VAL_IS_NUMBER(key))) {
@@ -25771,31 +25517,6 @@ static int kiln_c99_val_write_element(kiln_host *host, kiln_val target, kiln_val
     kiln_value k = kiln_val_to_boundary(key);
     kiln_value v = kiln_val_to_boundary(value);
     return kiln_c99_write_element(host, t, k, v, strict, depth, thrown);
-}
-
-static int kiln_c99_op_val_get_computed(kiln_host *host, kiln_val *stack, size_t *sp,
-                                        int depth, kiln_value *thrown) {
-    kiln_val key = stack[--(*sp)];
-    kiln_val target = stack[*sp - 1];
-    kiln_val read;
-    int status = kiln_c99_val_read_element(host, target, key, depth, thrown, &read);
-    if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) {
-        kiln_c99_note_get_computed_refusal(kiln_val_to_boundary(target), kiln_val_to_boundary(key));
-    }
-    if (status != KILN_C99_OK) return status;
-    stack[*sp - 1] = read;
-    return KILN_C99_OK;
-}
-
-static int kiln_c99_op_val_set_computed(kiln_host *host, kiln_val *stack, size_t *sp,
-                                        int strict, int depth, kiln_value *thrown) {
-    kiln_val member = stack[--(*sp)];
-    kiln_val key = stack[--(*sp)];
-    kiln_val target = stack[*sp - 1];
-    int status = kiln_c99_val_write_element(host, target, key, member, strict, depth, thrown);
-    if (status != KILN_C99_OK) return status;
-    stack[*sp - 1] = member;
-    return KILN_C99_OK;
 }
 
 /* A method call on machine values, end to end. The property is read once through the site's
@@ -25860,33 +25581,20 @@ done:
     return status;
 }
 
-static int kiln_c99_op_val_call_method(kiln_host *host, kiln_val *stack, size_t *sp,
-                                       const char *key, size_t key_len, size_t argc,
-                                       int depth, kiln_value *thrown, kiln_c99_site *site,
-                                       const char *inst_site, size_t inst_idx, const char *inst_op) {
-    kiln_value bstack[argc + 1];
-    for (size_t i = 0; i < argc + 1; ++i) {
-        bstack[i] = kiln_val_to_boundary(stack[*sp - argc - 1 + i]);
-    }
-    size_t bsp = argc + 1;
-    int status = kiln_c99_op_call_method(host, bstack, &bsp, key, key_len, argc, depth, thrown, site, inst_site, inst_idx, inst_op, NULL);
-    if (status != KILN_C99_OK) return status;
-    *sp -= (argc + 1);
-    stack[(*sp)++] = kiln_val_from_boundary(bstack[bsp - 1]);
-    return KILN_C99_OK;
-}
-
-static int kiln_c99_op_val_call(kiln_host *host, kiln_val *stack, size_t *sp, size_t argc,
-                                int depth, kiln_value *thrown,
-                                const char *inst_site, size_t inst_idx, const char *inst_op) {
-    kiln_val callee_val = stack[*sp - argc - 1];
-    kiln_closure *plain = KILN_VAL_IS_CLOSURE(callee_val) ? (kiln_closure *)KILN_VAL_PTR(callee_val) : NULL;
+/* A call on machine values. A plain closure is entered directly with the receiver the language
+ * gives it: an arrow's captured `this`, the global object for sloppy code, `undefined` otherwise.
+ * Anything else -- a built-in method, a generator, a bound or proxied callable -- crosses the
+ * boundary once. A refusal or a throw is attributed to the instruction that made the call. */
+static int kiln_c99_val_call(kiln_host *host, kiln_val callee, const kiln_val *args, size_t argc,
+                             int depth, kiln_value *thrown, const char *inst_site, size_t inst_idx,
+                             const char *inst_op, kiln_val *out) {
+    kiln_closure *plain = KILN_VAL_IS_CLOSURE(callee) ? (kiln_closure *)KILN_VAL_PTR(callee) : NULL;
     if (plain != NULL && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {
         kiln_val call_result = KILN_VAL_UNDEFINED;
-        const kiln_val *call_args = argc > 0 ? &stack[*sp - argc] : NULL;
         kiln_val recv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED;
+        int status;
         if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&recv);
-        int status = kiln_c99_invoke_closure(host, &call_result, plain, recv, call_args, argc, depth, thrown, NULL, 0);
+        status = kiln_c99_invoke_closure(host, &call_result, plain, recv, args, argc, depth, thrown, NULL, 0);
         if (status == KILN_C99_CONTROL_ERROR && (call_result & KILN_TAG_MASK) == KILN_TAG_STRING_PREFIX) {
             return status;
         }
@@ -25902,42 +25610,71 @@ static int kiln_c99_op_val_call(kiln_host *host, kiln_val *stack, size_t *sp, si
             kiln_c99_note_refusal(inst_site, inst_idx, inst_op, (size_t)kiln_c99_diagnostic_active_depth);
         }
         if (status != KILN_C99_OK) return status;
-        *sp -= (argc + 1);
-        stack[(*sp)++] = call_result;
+        *out = call_result;
         return KILN_C99_OK;
     }
-    kiln_value bstack[argc + 1];
-    for (size_t i = 0; i < argc + 1; ++i) {
-        bstack[i] = kiln_val_to_boundary(stack[*sp - argc - 1 + i]);
+    {
+        kiln_value bcallee = kiln_val_to_boundary(callee);
+        kiln_value bargs[argc > 0 ? argc : 1];
+        kiln_value call_result = kiln_c99_undefined();
+        int status;
+        for (size_t i = 0; i < argc; ++i) bargs[i] = kiln_val_to_boundary(args[i]);
+        if (bcallee.tag == KILN_VALUE_METHOD && depth < KILN_C99_MAX_CALL_DEPTH) {
+            status = kiln_c99_invoke_method(host, &call_result, bcallee.bits, kiln_c99_undefined(), argc > 0 ? bargs : NULL, argc, depth, thrown);
+        } else {
+            status = kiln_c99_call(host, &call_result, bcallee, kiln_c99_undefined(), argc > 0 ? bargs : NULL, argc, depth, thrown);
+        }
+        if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {
+            return status;
+        }
+        if (status == KILN_C99_CONTROL_ERROR) {
+            if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = bcallee.tag;
+            if (kiln_c99_diagnostic_site == NULL && kiln_c99_diagnostic_operation == NULL && kiln_c99_diagnostic_detail == NULL) {
+                kiln_c99_diagnostic_detail = "Call callee is unsupported by the native callable model";
+            }
+            kiln_c99_note_refusal(inst_site, inst_idx, inst_op, (size_t)kiln_c99_diagnostic_active_depth);
+        }
+        if (status != KILN_C99_OK) return status;
+        *out = kiln_val_from_boundary(call_result);
+        return KILN_C99_OK;
     }
-    size_t bsp = argc + 1;
-    int status = kiln_c99_op_call(host, bstack, &bsp, argc, depth, thrown, inst_site, inst_idx, inst_op, NULL);
+}
+
+/* `new` on machine values: the constructor and its arguments cross the boundary once, and the
+ * instance comes back as a machine value. A refusal names the built-in it was refused on. */
+static int kiln_c99_val_new(kiln_host *host, kiln_val callee, const kiln_val *args, size_t argc,
+                            int depth, kiln_value *thrown, kiln_val *out) {
+    kiln_value bcallee = kiln_val_to_boundary(callee);
+    kiln_value bargs[argc > 0 ? argc : 1];
+    kiln_value built;
+    int status;
+    for (size_t i = 0; i < argc; ++i) bargs[i] = kiln_val_to_boundary(args[i]);
+    status = kiln_c99_construct(host, &built, bcallee, argc > 0 ? bargs : NULL, argc, depth, thrown);
+    if (status == KILN_C99_CONTROL_ERROR) {
+        if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = bcallee.tag;
+        if (bcallee.tag == KILN_VALUE_BUILTIN && kiln_c99_diagnostic_function == NULL) {
+            const char *named = kiln_c99_builtin_name(bcallee.bits);
+            if (named != NULL) {
+                kiln_c99_diagnostic_function = named;
+                kiln_c99_diagnostic_function_len = strlen(named);
+            }
+        }
+        if (kiln_c99_diagnostic_detail == NULL) {
+            kiln_c99_diagnostic_detail = "New target is unsupported by the native constructor model";
+        }
+    }
     if (status != KILN_C99_OK) return status;
-    *sp -= (argc + 1);
-    stack[(*sp)++] = kiln_val_from_boundary(bstack[bsp - 1]);
+    *out = kiln_val_from_boundary(built);
     return KILN_C99_OK;
 }
 
-static int kiln_c99_op_val_new(kiln_host *host, kiln_val *stack, size_t *sp, size_t argc,
-                               int depth, kiln_value *thrown) {
-    kiln_value bstack[argc + 1];
-    for (size_t i = 0; i < argc + 1; ++i) {
-        bstack[i] = kiln_val_to_boundary(stack[*sp - argc - 1 + i]);
-    }
-    size_t bsp = argc + 1;
-    int status = kiln_c99_op_new(host, bstack, &bsp, argc, depth, thrown);
+/* `ToPropertyKey` on machine values, against the object it will index. */
+static int kiln_c99_val_to_property_key(kiln_host *host, kiln_val target, kiln_val key,
+                                        int depth, kiln_value *thrown, kiln_val *out) {
+    kiln_value reduced;
+    int status = kiln_c99_reduce_key(host, kiln_val_to_boundary(target), kiln_val_to_boundary(key), &reduced, depth, thrown);
     if (status != KILN_C99_OK) return status;
-    *sp -= (argc + 1);
-    stack[(*sp)++] = kiln_val_from_boundary(bstack[bsp - 1]);
-    return KILN_C99_OK;
-}
-
-static int kiln_c99_op_val_load_cell(kiln_val cell, kiln_val *stack, size_t *sp, kiln_value *thrown) {
-    kiln_val *target = (kiln_val *)KILN_VAL_PTR(cell);
-    if (*target == KILN_VAL_UNINITIALIZED) {
-        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, "cannot access a binding before its declaration");
-    }
-    stack[(*sp)++] = *target;
+    *out = kiln_val_from_boundary(reduced);
     return KILN_C99_OK;
 }
 

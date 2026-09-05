@@ -4693,6 +4693,13 @@ to eight lines; `native.sh` prints its refusal backlog last, so the summary line
 cut, and `thirdparty.sh` printed the verdict and cut the name of the bundle that diverged. Both had
 to run again to read what they had already said once. `AGENTS.md` now says to keep the whole log.
 
+**Nothing in the prelude takes a stack any more.** The eighteen `kiln_c99_op_*` entry points --
+the `kiln_value` originals and their `kiln_val` twins that each copied a slice of the operand
+stack across the boundary and back -- are deleted. Four were still called: a call, a `new`, a
+key reduction, and a cell load. The first three are now `kiln_c99_val_call`, `kiln_c99_val_new`
+and `kiln_c99_val_to_property_key`, machine values in and one out, and a cell or upvalue read is
+the dead-zone check plus a load through the box, inline in the body.
+
 Gate at the end, once: native 106 matched / 6 refused / 0 diverged, thirdparty 17 and 17 matched,
 differential 106 matched with the one pre-existing `proxy-descriptor-keys` row, crate tests green
 with snapshots regenerated. Still open: `finally` skipped when its `catch` throws

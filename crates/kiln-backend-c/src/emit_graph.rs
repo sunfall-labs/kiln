@@ -651,8 +651,8 @@ fn emit_graph_op(
                 writeln!(output, "    d{v} = d{};", value.0).unwrap();
             }
         }
-        // A cell is a shared box, made and read through the prelude's helpers: the load checks
-        // the temporal dead zone, the store writes the box.
+        // A cell is a shared box: the load checks the temporal dead zone and reads through it,
+        // the store writes through it.
         GraphOp::LoadCell(slot) => {
             // A body that cannot hold a reference has no `thrown` slot; a dead-zone read there
             // is refused by the helper, loudly, rather than crashing or answering `undefined`.
@@ -660,7 +660,7 @@ fn emit_graph_op(
             let check = status_check(diagnostic_site, pc, &label, unwind);
             writeln!(
                 output,
-                "    {{ kiln_val cell_stack[1]; size_t cell_sp = 0; int status = kiln_c99_op_val_load_cell(locals[{slot}], cell_stack, &cell_sp, {thrown}); {check} v{v} = cell_stack[0]; }}"
+                "    {{ const kiln_val *cell = (const kiln_val *)KILN_VAL_PTR(locals[{slot}]); int status = kiln_c99_val_check_tdz(*cell, {thrown}); {check} v{v} = *cell; }}"
             )
             .unwrap();
         }
@@ -682,7 +682,7 @@ fn emit_graph_op(
             let check = status_check(diagnostic_site, pc, &label, unwind);
             writeln!(
                 output,
-                "    {{ kiln_val cell_stack[1]; size_t cell_sp = 0; int status = kiln_c99_op_val_load_cell(upvalues[{index}], cell_stack, &cell_sp, thrown); {check} v{v} = cell_stack[0]; }}"
+                "    {{ const kiln_val *cell = (const kiln_val *)KILN_VAL_PTR(upvalues[{index}]); int status = kiln_c99_val_check_tdz(*cell, thrown); {check} v{v} = *cell; }}"
             )
             .unwrap();
         }
@@ -981,7 +981,7 @@ fn emit_graph_op(
             let check = status_check(diagnostic_site, pc, &label, unwind);
             writeln!(
                 output,
-                "    {{ kiln_val call_stack[{n}] = {{ {init} }}; size_t call_sp = {n}; kiln_closure *plain = KILN_VAL_IS_CLOSURE(call_stack[0]) ? (kiln_closure *)KILN_VAL_PTR(call_stack[0]) : NULL; if (KILN_LIKELY(plain != NULL && !plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ kiln_val call_result = KILN_VAL_UNDEFINED; const kiln_val *call_args = {argc} > 0 ? &call_stack[1] : NULL; kiln_val recv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&recv); kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status; {indirect} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; v{v} = call_result; }} else {{ int status = kiln_c99_op_val_call(host, call_stack, &call_sp, (size_t){argc}, depth, thrown, \"{diagnostic_site}\", (size_t){pc}, \"{label}\"); {check} v{v} = call_stack[0]; }} }}",
+                "    {{ kiln_val call_stack[{n}] = {{ {init} }}; const kiln_val *call_args = {argc} > 0 ? &call_stack[1] : NULL; kiln_closure *plain = KILN_VAL_IS_CLOSURE(call_stack[0]) ? (kiln_closure *)KILN_VAL_PTR(call_stack[0]) : NULL; if (KILN_LIKELY(plain != NULL && !plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ kiln_val call_result = KILN_VAL_UNDEFINED; kiln_val recv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&recv); kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status; {indirect} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; v{v} = call_result; }} else {{ int status = kiln_c99_val_call(host, call_stack[0], call_args, (size_t){argc}, depth, thrown, \"{diagnostic_site}\", (size_t){pc}, \"{label}\", &v{v}); {check} }} }}",
                 n = argc + 1
             )
             .unwrap();
@@ -1023,7 +1023,7 @@ fn emit_graph_op(
             let check = status_check(diagnostic_site, pc, &label, unwind);
             writeln!(
                 output,
-                "    {{ kiln_val call_stack[{n}] = {{ {init} }}; size_t call_sp = {n}; int status = kiln_c99_op_val_new(host, call_stack, &call_sp, (size_t){argc}, depth, thrown); {check} v{v} = call_stack[0]; }}",
+                "    {{ kiln_val call_stack[{n}] = {{ {init} }}; int status = kiln_c99_val_new(host, call_stack[0], {argc} > 0 ? &call_stack[1] : NULL, (size_t){argc}, depth, thrown, &v{v}); {check} }}",
                 n = argc + 1
             )
             .unwrap();

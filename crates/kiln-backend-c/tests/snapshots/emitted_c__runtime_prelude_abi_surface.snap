@@ -1884,29 +1884,13 @@ static void kiln_c99_note_get_property_refusal(kiln_value target) {
 static void kiln_c99_note_get_computed_refusal(kiln_value target, kiln_value key) {
 static int kiln_c99_read_element(kiln_host *host, kiln_value target, kiln_value key,
 static int kiln_c99_write_element(kiln_host *host, kiln_value target, kiln_value key,
-static int kiln_c99_op_get_property(kiln_host *host, kiln_value *stack, size_t *sp,
-static int kiln_c99_op_to_property_key(kiln_host *host, kiln_value *stack, size_t *sp,
-static int kiln_c99_op_get_computed(kiln_host *host, kiln_value *stack, size_t *sp,
-static int kiln_c99_op_call_method(kiln_host *host, kiln_value *stack, size_t *sp,
-static int kiln_c99_op_call(kiln_host *host, kiln_value *stack, size_t *sp, size_t argc,
-static int kiln_c99_op_new(kiln_host *host, kiln_value *stack, size_t *sp, size_t argc,
-static int kiln_c99_op_load_cell(kiln_value cell, kiln_value *stack, size_t *sp, kiln_value *thrown) {
-static int kiln_c99_check_tdz(kiln_value val, kiln_value *thrown) {
-static int kiln_c99_op_set_property(kiln_host *host, kiln_value *stack, size_t *sp,
-static int kiln_c99_op_set_computed(kiln_host *host, kiln_value *stack, size_t *sp,
-static int kiln_c99_op_val_get_property(kiln_host *host, kiln_val *stack, size_t *sp,
-static int kiln_c99_op_val_set_property(kiln_host *host, kiln_val *stack, size_t *sp,
-static int kiln_c99_op_val_to_property_key(kiln_host *host, kiln_val *stack, size_t *sp,
 static int kiln_c99_val_read_element(kiln_host *host, kiln_val target, kiln_val key,
 static int kiln_c99_val_write_element(kiln_host *host, kiln_val target, kiln_val key,
-static int kiln_c99_op_val_get_computed(kiln_host *host, kiln_val *stack, size_t *sp,
-static int kiln_c99_op_val_set_computed(kiln_host *host, kiln_val *stack, size_t *sp,
 static int kiln_c99_val_call_method(kiln_host *host, kiln_val receiver, const kiln_val *args,
 done:
-static int kiln_c99_op_val_call_method(kiln_host *host, kiln_val *stack, size_t *sp,
-static int kiln_c99_op_val_call(kiln_host *host, kiln_val *stack, size_t *sp, size_t argc,
-static int kiln_c99_op_val_new(kiln_host *host, kiln_val *stack, size_t *sp, size_t argc,
-static int kiln_c99_op_val_load_cell(kiln_val cell, kiln_val *stack, size_t *sp, kiln_value *thrown) {
+static int kiln_c99_val_call(kiln_host *host, kiln_val callee, const kiln_val *args, size_t argc,
+static int kiln_c99_val_new(kiln_host *host, kiln_val callee, const kiln_val *args, size_t argc,
+static int kiln_c99_val_to_property_key(kiln_host *host, kiln_val target, kiln_val key,
 static int kiln_c99_val_check_tdz(kiln_val val, kiln_value *thrown) {
 static int kiln_c99_val_make_cell(kiln_val *slot) {
 static void kiln_c99_gc_unit_roots(void *opaque, void *context, int phase) {
