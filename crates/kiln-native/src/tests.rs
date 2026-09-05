@@ -6460,3 +6460,157 @@ fn native_build_with_march_native_opt_in_succeeds() {
         .expect("run native executable");
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "42");
 }
+
+#[test]
+fn parse_worker_count_semantics() {
+    assert_eq!(parse_worker_count(None), 1);
+    assert_eq!(parse_worker_count(Some("")), 1);
+    assert_eq!(parse_worker_count(Some("0")), 1);
+    assert_eq!(parse_worker_count(Some("-1")), 1);
+    assert_eq!(parse_worker_count(Some("-42")), 1);
+    assert_eq!(parse_worker_count(Some("foo")), 1);
+    assert_eq!(parse_worker_count(Some("4bad")), 1);
+    assert_eq!(parse_worker_count(Some("1")), 1);
+    assert_eq!(parse_worker_count(Some("4")), 4);
+    assert_eq!(parse_worker_count(Some("16")), 16);
+    assert_eq!(parse_worker_count(Some("1024")), 1024);
+    assert_eq!(parse_worker_count(Some("2000")), 1024);
+
+    // Case-insensitive "auto"
+    assert_eq!(parse_worker_count_with(Some("auto"), || 8), 8);
+    assert_eq!(parse_worker_count_with(Some("Auto"), || 8), 8);
+    assert_eq!(parse_worker_count_with(Some("AUTO"), || 8), 8);
+    assert_eq!(parse_worker_count_with(Some("aUtO"), || 8), 8);
+    assert_eq!(parse_worker_count_with(Some("auto"), || 0), 1);
+    assert_eq!(parse_worker_count_with(Some("auto"), || 2048), 1024);
+    assert_eq!(parse_worker_count_with(Some("auto!"), || 8), 1);
+
+    // Live auto queries actual online cpus
+    let live = parse_worker_count(Some("auto"));
+    assert!(live >= 1 && live <= 1024);
+}
+
+#[test]
+fn kiln_cli_worker_count_c_runtime_matches_contract() {
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native worker count test: no C compiler found");
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-worker-count");
+    let c_source = r#"
+#include <locale.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+#ifndef _WIN32
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
+
+static long kiln_cli_worker_count(void) {
+    const char *setting = getenv("KILN_WORKERS");
+    char *end = NULL;
+    long count;
+    if (setting == NULL || *setting == '\0') return 1;
+    if ((setting[0] == 'a' || setting[0] == 'A') &&
+        (setting[1] == 'u' || setting[1] == 'U') &&
+        (setting[2] == 't' || setting[2] == 'T') &&
+        (setting[3] == 'o' || setting[3] == 'O') &&
+        setting[4] == '\0') {
+#ifndef _WIN32
+        long cpus = sysconf(_SC_NPROCESSORS_ONLN);
+        count = cpus > 0 ? cpus : 1;
+#else
+        count = 1;
+#endif
+    } else {
+        count = strtol(setting, &end, 10);
+        if (end == setting || *end != '\0' || count < 1) return 1;
+    }
+    if (count < 1) count = 1;
+    if (count > 1024) count = 1024;
+    return count;
+}
+
+int main(void) {
+    printf("%ld\n", kiln_cli_worker_count());
+    return 0;
+}
+"#;
+    let src_file = project.path.join("test_worker.c");
+    let obj_file = project.path.join("test_worker.o");
+    let bin_file = project.path.join("test_worker");
+    fs::write(&src_file, c_source).expect("write C source");
+
+    toolchain
+        .compile_c(&src_file, &obj_file, &CompileOptions::default())
+        .expect("compile C probe");
+    toolchain
+        .link_executable(&[obj_file], &bin_file, &LinkOptions::default())
+        .expect("link C probe");
+
+    let run_with = |env_val: Option<&str>| -> String {
+        let mut cmd = Command::new(&bin_file);
+        if let Some(val) = env_val {
+            cmd.env("KILN_WORKERS", val);
+        } else {
+            cmd.env_remove("KILN_WORKERS");
+        }
+        let output = cmd.output_when_launchable().expect("run probe");
+        assert!(output.status.success());
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+
+    assert_eq!(run_with(None), "1");
+    assert_eq!(run_with(Some("")), "1");
+    assert_eq!(run_with(Some("0")), "1");
+    assert_eq!(run_with(Some("-5")), "1");
+    assert_eq!(run_with(Some("invalid")), "1");
+    assert_eq!(run_with(Some("4abc")), "1");
+    assert_eq!(run_with(Some("1")), "1");
+    assert_eq!(run_with(Some("4")), "4");
+    assert_eq!(run_with(Some("2000")), "1024");
+
+    let auto_res = run_with(Some("auto"));
+    let auto_count: usize = auto_res.parse().expect("valid integer from auto");
+    assert!(auto_count >= 1 && auto_count <= 1024);
+    assert_eq!(run_with(Some("Auto")), auto_res);
+    assert_eq!(run_with(Some("AUTO")), auto_res);
+}
+
+#[test]
+fn native_build_launcher_supports_workers_auto() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native workers auto test: no C compiler found");
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-workers-auto");
+    let entry = project.path.join("main.mjs");
+    fs::write(&entry, "console.log('workers-ok');").expect("write fixture");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("source graph compiles");
+    let output = project.path.join("program");
+    let options = NativeBuildOptions::new(output, NativeProfile::Dev);
+    let report = project
+        .builder(toolchain)
+        .build_graph(&graph, &options)
+        .expect("native build succeeds");
+
+    // Run with KILN_WORKERS=auto
+    let out = Command::new(&report.output)
+        .env("KILN_WORKERS", "auto")
+        .output_when_launchable()
+        .expect("run native executable with KILN_WORKERS=auto");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("workers-ok"));
+}

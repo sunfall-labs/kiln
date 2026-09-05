@@ -66,13 +66,14 @@ kiln leads hello world and trails bun on the small service by four percent while
 per request than either (23.7 microseconds of CPU against bun's 26.7).
 
 A realm owns its thread, so the way kiln uses the other fifteen cores is `KILN_WORKERS`, which
-forks that many realms over one `SO_REUSEPORT` listener. With four of them the small service
-serves **51.8k**, ahead of bun, and ten client processes are needed before the load generator
-stops being the limit:
+forks that many realms over one `SO_REUSEPORT` listener. Setting `KILN_WORKERS=auto` detects the
+number of online CPU cores via `sysconf(_SC_NPROCESSORS_ONLN)` (clamped 1..1024) and forks one
+realm per core. With four of them the small service serves **51.8k**, ahead of bun, and ten client
+processes are needed before the load generator stops being the limit:
 
-| clients | workers=1 | workers=2 | workers=4 |
-|---|---|---|---|
-| 10 (hello) | 47.1k | 84.4k | **107.8k** |
+| clients | workers=1 | workers=2 | workers=4 | workers=auto |
+|---|---|---|---|---|
+| 10 (hello) | 47.1k | 84.4k | **107.8k** | 86.1k |
 
 The comparison table above stays single-realm because that is the like-for-like core-for-core
 number, and it is the one to beat. Absolute figures are about half the macOS table further up,
