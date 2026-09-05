@@ -850,6 +850,7 @@ async fn handle(
     id: u64,
     request: Request<Incoming>,
 ) -> Response<EngineBody> {
+    let _ = shared.flush_deferred();
     let (parts, mut body) = request.into_parts();
     let http_10 = parts.version == hyper::Version::HTTP_10;
     let head_request = parts.method == hyper::Method::HEAD;

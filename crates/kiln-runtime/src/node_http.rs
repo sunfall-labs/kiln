@@ -106,12 +106,153 @@ impl HttpConnectionDriver {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HttpHeaders {
+    raw: Option<Vec<u8>>,
+    entries: Vec<(String, String)>,
+}
+
+fn find_raw_header<'a>(raw: &'a [u8], name: &str) -> Option<&'a str> {
+    let mut at = 0;
+    while at < raw.len() {
+        let name_start = at;
+        while at < raw.len() && raw[at] != 0 {
+            at += 1;
+        }
+        let Ok(key) = std::str::from_utf8(&raw[name_start..at]) else {
+            return None;
+        };
+        at += 1;
+        let val_start = at;
+        while at < raw.len() && raw[at] != 0 {
+            at += 1;
+        }
+        let Ok(val) = std::str::from_utf8(&raw[val_start..at]) else {
+            return None;
+        };
+        at += 1;
+        if key.eq_ignore_ascii_case(name) {
+            return Some(val);
+        }
+    }
+    None
+}
+
+impl HttpHeaders {
+    pub const fn new() -> Self {
+        Self {
+            raw: None,
+            entries: Vec::new(),
+        }
+    }
+
+    pub fn from_raw(raw: Vec<u8>) -> Self {
+        Self {
+            raw: Some(raw),
+            entries: Vec::new(),
+        }
+    }
+
+    pub fn from_entries(entries: Vec<(String, String)>) -> Self {
+        Self { raw: None, entries }
+    }
+
+    pub fn header(&self, name: &str) -> Option<&str> {
+        if !self.entries.is_empty() {
+            return self
+                .entries
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str());
+        }
+        if let Some(raw) = &self.raw {
+            return find_raw_header(raw, name);
+        }
+        None
+    }
+
+    pub fn headers_object(&self) -> BTreeMap<String, String> {
+        let mut headers = BTreeMap::new();
+        if !self.entries.is_empty() {
+            for (name, value) in &self.entries {
+                headers
+                    .entry(name.to_ascii_lowercase())
+                    .and_modify(|existing: &mut String| {
+                        existing.push_str(", ");
+                        existing.push_str(value);
+                    })
+                    .or_insert_with(|| value.clone());
+            }
+            return headers;
+        }
+        if let Some(raw) = &self.raw {
+            let mut at = 0;
+            while at < raw.len() {
+                let name_start = at;
+                while at < raw.len() && raw[at] != 0 {
+                    at += 1;
+                }
+                let Ok(key) = std::str::from_utf8(&raw[name_start..at]) else {
+                    break;
+                };
+                at += 1;
+                let val_start = at;
+                while at < raw.len() && raw[at] != 0 {
+                    at += 1;
+                }
+                let Ok(val) = std::str::from_utf8(&raw[val_start..at]) else {
+                    break;
+                };
+                at += 1;
+                headers
+                    .entry(key.to_ascii_lowercase())
+                    .and_modify(|existing: &mut String| {
+                        existing.push_str(", ");
+                        existing.push_str(val);
+                    })
+                    .or_insert_with(|| val.to_string());
+            }
+        }
+        headers
+    }
+
+    pub fn entries(&mut self) -> &[(String, String)] {
+        if self.entries.is_empty()
+            && let Some(raw) = &self.raw
+        {
+            self.entries = crate::unflatten_headers(raw);
+        }
+        &self.entries
+    }
+}
+
+impl std::ops::Deref for HttpHeaders {
+    type Target = [(String, String)];
+
+    fn deref(&self) -> &Self::Target {
+        &self.entries
+    }
+}
+
+impl From<Vec<(String, String)>> for HttpHeaders {
+    fn from(entries: Vec<(String, String)>) -> Self {
+        Self::from_entries(entries)
+    }
+}
+
+impl From<HttpHeaders> for Vec<(String, String)> {
+    fn from(mut headers: HttpHeaders) -> Self {
+        headers.entries();
+        headers.entries
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpRequest {
     pub method: String,
     pub target: String,
     pub version: HttpVersion,
-    pub headers: Vec<(String, String)>,
+    pub headers: HttpHeaders,
     pub body: Vec<u8>,
     pub keep_alive: bool,
 }
@@ -129,24 +270,11 @@ pub enum HttpRequestEvent {
 
 impl HttpRequest {
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
+        self.headers.header(name)
     }
 
     pub fn headers_object(&self) -> BTreeMap<String, String> {
-        let mut headers = BTreeMap::new();
-        for (name, value) in &self.headers {
-            headers
-                .entry(name.to_ascii_lowercase())
-                .and_modify(|existing: &mut String| {
-                    existing.push_str(", ");
-                    existing.push_str(value);
-                })
-                .or_insert_with(|| value.clone());
-        }
-        headers
+        self.headers.headers_object()
     }
 }
 
@@ -223,7 +351,7 @@ impl Http1Decoder {
                 method: head.method,
                 target: head.target,
                 version: head.version,
-                headers: head.headers,
+                headers: head.headers.into(),
                 body,
                 keep_alive: head.keep_alive,
             });
@@ -256,7 +384,7 @@ impl Http1Decoder {
                     method: head.method,
                     target: head.target,
                     version: head.version,
-                    headers: head.headers,
+                    headers: head.headers.into(),
                     body: Vec::new(),
                     keep_alive: head.keep_alive,
                 };
@@ -767,7 +895,7 @@ mod tests {
                     method: "POST".into(),
                     target: "/".into(),
                     version: HttpVersion::Http11,
-                    headers: vec![("content-length".into(), "5".into())],
+                    headers: vec![("content-length".into(), "5".into())].into(),
                     body: Vec::new(),
                     keep_alive: true,
                 }),
@@ -785,7 +913,7 @@ mod tests {
                     method: "GET".into(),
                     target: "/next".into(),
                     version: HttpVersion::Http11,
-                    headers: Vec::new(),
+                    headers: HttpHeaders::new(),
                     body: Vec::new(),
                     keep_alive: true,
                 }),

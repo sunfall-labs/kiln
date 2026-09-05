@@ -1,5 +1,10 @@
 };
 
+static void *kiln_c99_node_hidden_pointer(kiln_value object, const char *key, size_t key_len);
+static int kiln_c99_node_materialize_header(kiln_value headers_obj, const char *key, size_t key_len, kiln_value *out);
+static void kiln_c99_node_materialize_all_headers(kiln_value headers_obj);
+static int kiln_c99_node_has_lazy_header(kiln_value headers_obj, const char *key, size_t key_len);
+
 static int kiln_c99_backlog_names(const char *owner, const char *key, size_t key_len) {
     size_t index;
     if (owner == NULL) {
@@ -2586,6 +2591,7 @@ static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value 
         *out = built;
         return KILN_C99_OK;
     }
+    kiln_c99_node_materialize_all_headers(target);
     /* `OrdinaryOwnPropertyKeys`: the string keys, then the symbol keys, each in insertion order.
      * Two passes because the order is part of the answer -- a copy that walks them reproduces
      * it, and the specification puts every symbol after every name. */
@@ -2782,6 +2788,9 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 }
                 return kiln_c99_call(host, out, object->properties[index].getter, target, NULL, 0,
                                      depth, thrown);
+            }
+            if (kiln_c99_node_materialize_header(current, key, key_len, out)) {
+                return KILN_C99_OK;
             }
             current = object->prototype;
         }
@@ -6699,7 +6708,7 @@ static int kiln_c99_node_set_hidden_pointer(kiln_value object, const char *key, 
 static int kiln_c99_is_node_hidden_key(const char *key, size_t key_len) {
     static const char *const names[] = {
         "@@node:socket", "@@node:server", "@@node:client", "@@node:response",
-        "@@kiln:node:is-file", "@@kiln:node:is-directory",
+        "@@node:lazy-headers", "@@kiln:node:is-file", "@@kiln:node:is-directory",
     };
     size_t index;
     /* Every reserved name is `@@`-prefixed and nearly every key a program reads is not, so the
@@ -6722,6 +6731,107 @@ static void *kiln_c99_node_hidden_pointer(kiln_value object, const char *key, si
         slot->value.len != 0xFFFFFFFFu)
         return NULL;
     return (void *)(uintptr_t)slot->value.bits;
+}
+
+static int kiln_c99_ascii_case_equal(const char *a, size_t a_len, const char *b, size_t b_len) {
+    size_t i;
+    if (a_len != b_len) return 0;
+    for (i = 0; i < a_len; ++i) {
+        unsigned char ca = (unsigned char)a[i];
+        unsigned char cb = (unsigned char)b[i];
+        if (ca >= 'A' && ca <= 'Z') ca += 'a' - 'A';
+        if (cb >= 'A' && cb <= 'Z') cb += 'a' - 'A';
+        if (ca != cb) return 0;
+    }
+    return 1;
+}
+
+static int kiln_c99_node_materialize_header(kiln_value headers_obj, const char *key, size_t key_len, kiln_value *out) {
+    if (headers_obj.tag != KILN_VALUE_OBJECT) return 0;
+    kiln_object *obj = kiln_c99_object_of(headers_obj);
+    if (obj->shape != NULL || obj->properties == NULL) return 0;
+    kiln_node_response *resp = (kiln_node_response *)kiln_c99_node_hidden_pointer(headers_obj, "@@node:lazy-headers", 19);
+    size_t at = 0;
+    if (resp == NULL || resp->request_headers == NULL) return 0;
+    while (at < resp->request_headers_len) {
+        const char *hname = resp->request_headers + at;
+        size_t hname_len = strlen(hname);
+        const char *hval;
+        size_t hval_len;
+        at += hname_len + 1;
+        if (at > resp->request_headers_len) break;
+        hval = resp->request_headers + at;
+        hval_len = strlen(hval);
+        at += hval_len + 1;
+        if (at > resp->request_headers_len) break;
+        if (kiln_c99_ascii_case_equal(hname, hname_len, key, key_len)) {
+            char *owned_name = hname_len == 0 ? NULL : kiln_c99_gc_alloc_text(hname_len);
+            if (hname_len != 0 && owned_name != NULL) {
+                memcpy(owned_name, hname, hname_len);
+            }
+            kiln_value val = kiln_c99_copy_text(hval, hval_len);
+            kiln_c99_put(NULL, headers_obj, owned_name, hname_len, val, 0, NULL);
+            if (out != NULL) *out = val;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void kiln_c99_node_materialize_all_headers(kiln_value headers_obj) {
+    if (headers_obj.tag != KILN_VALUE_OBJECT) return;
+    kiln_object *obj = kiln_c99_object_of(headers_obj);
+    if (obj->shape != NULL || obj->properties == NULL) return;
+    kiln_node_response *resp = (kiln_node_response *)kiln_c99_node_hidden_pointer(headers_obj, "@@node:lazy-headers", 19);
+    size_t at = 0;
+    int dummy;
+    if (resp == NULL || resp->request_headers == NULL) return;
+    kiln_c99_delete(NULL, headers_obj, "@@node:lazy-headers", 19, &dummy, 0, NULL);
+    while (at < resp->request_headers_len) {
+        const char *hname = resp->request_headers + at;
+        size_t hname_len = strlen(hname);
+        const char *hval;
+        size_t hval_len;
+        at += hname_len + 1;
+        if (at > resp->request_headers_len) break;
+        hval = resp->request_headers + at;
+        hval_len = strlen(hval);
+        at += hval_len + 1;
+        if (at > resp->request_headers_len) break;
+        if (kiln_c99_own_index(obj, NULL, hname, hname_len) == obj->count) {
+            char *owned_name = hname_len == 0 ? NULL : kiln_c99_gc_alloc_text(hname_len);
+            if (hname_len != 0 && owned_name != NULL) {
+                memcpy(owned_name, hname, hname_len);
+            }
+            kiln_c99_put(NULL, headers_obj, owned_name, hname_len,
+                         kiln_c99_copy_text(hval, hval_len), 0, NULL);
+        }
+    }
+}
+
+static int kiln_c99_node_has_lazy_header(kiln_value headers_obj, const char *key, size_t key_len) {
+    if (headers_obj.tag != KILN_VALUE_OBJECT) return 0;
+    kiln_object *obj = kiln_c99_object_of(headers_obj);
+    if (obj->shape != NULL || obj->properties == NULL) return 0;
+    kiln_node_response *resp = (kiln_node_response *)kiln_c99_node_hidden_pointer(headers_obj, "@@node:lazy-headers", 19);
+    size_t at = 0;
+    if (resp == NULL || resp->request_headers == NULL) return 0;
+    while (at < resp->request_headers_len) {
+        const char *hname = resp->request_headers + at;
+        size_t hname_len = strlen(hname);
+        const char *hval;
+        size_t hval_len;
+        at += hname_len + 1;
+        if (at > resp->request_headers_len) break;
+        hval = resp->request_headers + at;
+        hval_len = strlen(hval);
+        at += hval_len + 1;
+        if (at > resp->request_headers_len) break;
+        if (kiln_c99_ascii_case_equal(hname, hname_len, key, key_len)) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 static int kiln_c99_node_client_try_start(kiln_node_client_request *request) {
@@ -6903,6 +7013,15 @@ static const char kiln_c99_http_version_11[] = "1.1";
 static const char kiln_c99_http_version_10[] = "1.0";
 static const char kiln_c99_transfer_encoding_chunked[] = "chunked";
 
+static const char kiln_c99_slash[] = "/";
+
+static kiln_value kiln_c99_node_http_target_text(const char *bytes, size_t len) {
+    if (len == 1 && bytes[0] == '/') {
+        return kiln_c99_static_text(kiln_c99_slash, 1);
+    }
+    return kiln_c99_static_text(bytes, len);
+}
+
 /* A request method as a value, without copying bytes that are always one of nine spellings.
  *
  * Every method a server sees is a token from a fixed registry, so the string a program reads
@@ -6918,7 +7037,7 @@ static kiln_value kiln_c99_node_http_method_text(const char *bytes, size_t len) 
             return kiln_c99_static_text(name, len);
         }
     }
-    return kiln_c99_copy_text(bytes, len);
+    return kiln_c99_static_text(bytes, len);
 }
 
 static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *event,
@@ -6934,112 +7053,175 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
     if (socket == NULL || event == NULL) return KILN_C99_INVALID_ARGUMENT;
     client = kiln_c99_node_client_for_id(socket, event->id);
     if (event->kind == 1) {
-        response = (kiln_node_response *)kiln_c99_gc_calloc(KILN_GC_NODE_RESPONSE,
-                                                            sizeof *response);
-        if (response == NULL) return KILN_C99_OUT_OF_MEMORY;
-        response->socket = socket;
-        response->request_id = event->id;
-        response->status = 200;
-        /* Twelve own properties follow: the hidden response pointer, ten data members and the
-         * lazy `headers` accessor. Sizing the array for them once is one allocation instead of
-         * three. */
-        status = kiln_c99_new_object_with_capacity(&request, 12);
-        if (status == KILN_C99_OK) {
-            kiln_value prototype;
-            status = kiln_c99_node_incoming_message_prototype(&prototype);
-            if (status == KILN_C99_OK) status = kiln_c99_set_prototype(request, prototype);
+        int recycled = 0;
+        if (socket->recycled_response != NULL && socket->recycled_response->ended) {
+            response = socket->recycled_response;
+            socket->recycled_response = NULL;
+            recycled = 1;
+        } else {
+            response = (kiln_node_response *)kiln_c99_gc_calloc(KILN_GC_NODE_RESPONSE,
+                                                                sizeof *response);
+            if (response == NULL) return KILN_C99_OUT_OF_MEMORY;
         }
-        if (status == KILN_C99_OK)
-            status = kiln_c99_node_set_hidden_pointer(request, "@@node:response", 15, response);
-        /* Every property below is a first write to an object created three statements ago, onto a
-         * prototype chain the runtime linked itself.  `kiln_c99_own_data` is what `kiln_c99_put`
-         * would have produced -- writable, enumerable, configurable data -- without the walk up
-         * that chain looking for a setter that cannot be there. */
-        if (status == KILN_C99_OK)
+        if (recycled) {
+            if (response->request_headers_owned && response->request_headers != NULL) {
+                free(response->request_headers);
+                response->request_headers = NULL;
+                response->request_headers_owned = 0;
+            }
+            response->socket = socket;
+            response->request_id = event->id;
+            response->status = 200;
+            response->started = 0;
+            response->ended = 0;
+            request = response->request;
+
+            response->request_headers = (char *)event->headers;
+            response->request_headers_len = event->headers_len;
+            response->request_headers_owned = 0;
+
             status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_METHOD,
                                        kiln_c99_node_http_method_text(
                                            (const char *)event->method,
                                            (size_t)event->method_len));
-        if (status == KILN_C99_OK)
-            status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_URL,
-                                       kiln_c99_copy_text((const char *)event->target,
-                                                          (size_t)event->target_len));
-        /* Two spellings, both constants: a copy per request bought nothing a literal does not
-         * already give, and the string a program reads is indistinguishable either way. */
-        if (status == KILN_C99_OK)
-            status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_HTTP_VERSION,
-                                       event->version_minor
-                                           ? kiln_c99_static_text(kiln_c99_http_version_11, 3)
-                                           : kiln_c99_static_text(kiln_c99_http_version_10, 3));
-        if (status == KILN_C99_OK)
-            status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_HTTP_VERSION_MAJOR, kiln_c99_number(1.0));
-        if (status == KILN_C99_OK)
-            status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_HTTP_VERSION_MINOR,
-                                       kiln_c99_number(event->version_minor ? 1.0 : 0.0));
-        if (status == KILN_C99_OK)
-            status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_ABORTED, kiln_c99_boolean(0));
-        if (status == KILN_C99_OK)
-            status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_COMPLETE, kiln_c99_boolean(0));
-        if (status == KILN_C99_OK)
-            status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_DESTROYED, kiln_c99_boolean(0));
-        if (status == KILN_C99_OK)
-            status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_SOCKET, socket->object);
-        if (status == KILN_C99_OK)
-            status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_CONNECTION, socket->object);
-        /* `headers` is an accessor until it is read.  Building the table eagerly cost one
-         * object and two heap strings per header on every request, and the common server reads
-         * one header or none.  The flattened bytes are copied instead -- one malloc and one
-         * memcpy of the whole block -- and the first read turns them into the object, in the
-         * same own slot, at the same position in the key order.  See
-         * KILN_C99_METHOD_NODE_REQUEST_HEADERS_GET in `kiln_c99_node_http`. */
-        if (status == KILN_C99_OK && event->headers_len != 0) {
-            response->request_headers = (char *)malloc(event->headers_len);
-            if (response->request_headers == NULL) {
-                status = KILN_C99_OUT_OF_MEMORY;
-            } else {
-                memcpy(response->request_headers, event->headers, event->headers_len);
-                response->request_headers_len = event->headers_len;
-            }
-        }
-        if (status == KILN_C99_OK)
-            status = kiln_c99_define_accessor(
-                request, "headers", 7,
-                kiln_c99_method(KILN_C99_METHOD_NODE_REQUEST_HEADERS_GET),
-                kiln_c99_method(KILN_C99_METHOD_NODE_REQUEST_HEADERS_SET), 1);
-        /* Eight on the response: the hidden pointer and seven data members. */
-        if (status == KILN_C99_OK)
-            status = kiln_c99_new_object_with_capacity(&response->object, 8);
-        if (status == KILN_C99_OK) status = kiln_c99_new_object(&response->headers);
-        /* The registered native constructor graph already builds exactly this surface --
-         * EventEmitter, Writable, then the eight response methods -- once per realm.  Linking
-         * the live response to it costs one pointer instead of seventeen inserts, and makes a
-         * served `res` and a `new http.ServerResponse()` the same shape for the first time. */
-        if (status == KILN_C99_OK) {
-            kiln_value prototype;
-            status = kiln_c99_callable_prototype(
-                kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE), &prototype);
             if (status == KILN_C99_OK)
-                status = kiln_c99_set_prototype(response->object, prototype);
+                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_URL,
+                                           kiln_c99_node_http_target_text(
+                                               (const char *)event->target,
+                                               (size_t)event->target_len));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_HTTP_VERSION,
+                                           event->version_minor
+                                               ? kiln_c99_static_text(kiln_c99_http_version_11, 3)
+                                               : kiln_c99_static_text(kiln_c99_http_version_10, 3));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_HTTP_VERSION_MAJOR, kiln_c99_number(1.0));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_HTTP_VERSION_MINOR,
+                                           kiln_c99_number(event->version_minor ? 1.0 : 0.0));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_ABORTED, kiln_c99_boolean(0));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_COMPLETE, kiln_c99_boolean(0));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_DESTROYED, kiln_c99_boolean(0));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_define_accessor(
+                    request, "headers", 7,
+                    kiln_c99_method(KILN_C99_METHOD_NODE_REQUEST_HEADERS_GET),
+                    kiln_c99_method(KILN_C99_METHOD_NODE_REQUEST_HEADERS_SET), 1);
+            if (status == KILN_C99_OK) {
+                int dummy;
+                kiln_c99_delete(NULL, request, "@@node:events", 13, &dummy, 0, NULL);
+            }
+
+            if (status == KILN_C99_OK)
+                status = kiln_c99_own_data_hot_key(response->object, KILN_C99_HOT_KEY_STATUS_CODE,
+                                           kiln_c99_number(200.0));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_own_data(response->object, "headersSent", 11, kiln_c99_boolean(0));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_own_data(response->object, "writableEnded", 13,
+                                           kiln_c99_boolean(0));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_own_data_hot_key(response->object, KILN_C99_HOT_KEY_DESTROYED, kiln_c99_boolean(0));
+            if (status == KILN_C99_OK) {
+                int dummy;
+                kiln_c99_delete(NULL, response->object, "@@node:events", 13, &dummy, 0, NULL);
+            }
+
+            if (status == KILN_C99_OK && response->headers.tag == KILN_VALUE_OBJECT) {
+                kiln_object *hdr_obj = kiln_c99_object_of(response->headers);
+                hdr_obj->count = 0;
+                hdr_obj->shape = &kiln_c99_root_shape;
+                hdr_obj->slots = hdr_obj->inline_slots;
+                hdr_obj->slot_capacity = KILN_C99_INLINE_SLOTS;
+                for (size_t slot_i = 0; slot_i < KILN_C99_INLINE_SLOTS; ++slot_i) {
+                    hdr_obj->inline_slots[slot_i] = KILN_VAL_UNDEFINED;
+                }
+            }
+        } else {
+            response->socket = socket;
+            response->request_id = event->id;
+            response->status = 200;
+            status = kiln_c99_new_object_with_capacity(&request, 12);
+            if (status == KILN_C99_OK) {
+                kiln_value prototype;
+                status = kiln_c99_node_incoming_message_prototype(&prototype);
+                if (status == KILN_C99_OK) status = kiln_c99_set_prototype(request, prototype);
+            }
+            if (status == KILN_C99_OK)
+                status = kiln_c99_node_set_hidden_pointer(request, "@@node:response", 15, response);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_METHOD,
+                                           kiln_c99_node_http_method_text(
+                                               (const char *)event->method,
+                                               (size_t)event->method_len));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_URL,
+                                           kiln_c99_node_http_target_text(
+                                               (const char *)event->target,
+                                               (size_t)event->target_len));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_HTTP_VERSION,
+                                           event->version_minor
+                                               ? kiln_c99_static_text(kiln_c99_http_version_11, 3)
+                                               : kiln_c99_static_text(kiln_c99_http_version_10, 3));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_HTTP_VERSION_MAJOR, kiln_c99_number(1.0));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_HTTP_VERSION_MINOR,
+                                           kiln_c99_number(event->version_minor ? 1.0 : 0.0));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_ABORTED, kiln_c99_boolean(0));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_COMPLETE, kiln_c99_boolean(0));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_DESTROYED, kiln_c99_boolean(0));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_SOCKET, socket->object);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_CONNECTION, socket->object);
+            if (status == KILN_C99_OK && event->headers_len != 0) {
+                response->request_headers = (char *)event->headers;
+                response->request_headers_len = event->headers_len;
+                response->request_headers_owned = 0;
+            }
+            if (status == KILN_C99_OK)
+                status = kiln_c99_define_accessor(
+                    request, "headers", 7,
+                    kiln_c99_method(KILN_C99_METHOD_NODE_REQUEST_HEADERS_GET),
+                    kiln_c99_method(KILN_C99_METHOD_NODE_REQUEST_HEADERS_SET), 1);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_new_object_with_capacity(&response->object, 8);
+            if (status == KILN_C99_OK) status = kiln_c99_new_object(&response->headers);
+            if (status == KILN_C99_OK) {
+                kiln_value prototype;
+                status = kiln_c99_callable_prototype(
+                    kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE), &prototype);
+                if (status == KILN_C99_OK)
+                    status = kiln_c99_set_prototype(response->object, prototype);
+            }
+            if (status == KILN_C99_OK)
+                status = kiln_c99_node_set_hidden_pointer(response->object, "@@node:response", 15,
+                                                          response);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_own_data(response->object, "req", 3, request);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_own_data_hot_key(response->object, KILN_C99_HOT_KEY_SOCKET, socket->object);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_own_data_hot_key(response->object, KILN_C99_HOT_KEY_CONNECTION, socket->object);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_own_data_hot_key(response->object, KILN_C99_HOT_KEY_STATUS_CODE,
+                                           kiln_c99_number(200.0));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_own_data(response->object, "headersSent", 11, kiln_c99_boolean(0));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_own_data(response->object, "writableEnded", 13,
+                                           kiln_c99_boolean(0));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_own_data_hot_key(response->object, KILN_C99_HOT_KEY_DESTROYED, kiln_c99_boolean(0));
         }
-        if (status == KILN_C99_OK)
-            status = kiln_c99_node_set_hidden_pointer(response->object, "@@node:response", 15,
-                                                      response);
-        if (status == KILN_C99_OK)
-            status = kiln_c99_own_data(response->object, "req", 3, request);
-        if (status == KILN_C99_OK)
-            status = kiln_c99_own_data_hot_key(response->object, KILN_C99_HOT_KEY_SOCKET, socket->object);
-        if (status == KILN_C99_OK)
-            status = kiln_c99_own_data_hot_key(response->object, KILN_C99_HOT_KEY_CONNECTION, socket->object);
-        if (status == KILN_C99_OK)
-            status = kiln_c99_own_data_hot_key(response->object, KILN_C99_HOT_KEY_STATUS_CODE,
-                                       kiln_c99_number(200.0));
-        if (status == KILN_C99_OK)
-            status = kiln_c99_own_data(response->object, "headersSent", 11, kiln_c99_boolean(0));
-        if (status == KILN_C99_OK)
-            status = kiln_c99_own_data(response->object, "writableEnded", 13,
-                                       kiln_c99_boolean(0));
-        if (status == KILN_C99_OK)
-            status = kiln_c99_own_data_hot_key(response->object, KILN_C99_HOT_KEY_DESTROYED, kiln_c99_boolean(0));
         if (status != KILN_C99_OK) return status;
         response->request = request;
         response->next = socket->responses;
@@ -7079,6 +7261,16 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
                 status = kiln_c99_node_emit(socket->host, response->object, "finish",
                                             kiln_c99_undefined(), 0, 0, exception);
                 kiln_c99_node_unlink_response(response);
+                if (socket->recycled_response != NULL &&
+                    socket->recycled_response != response) {
+                    if (socket->recycled_response->request_headers_owned &&
+                        socket->recycled_response->request_headers != NULL) {
+                        free(socket->recycled_response->request_headers);
+                        socket->recycled_response->request_headers = NULL;
+                        socket->recycled_response->request_headers_owned = 0;
+                    }
+                }
+                socket->recycled_response = response;
                 return status;
             }
         }
@@ -7198,6 +7390,7 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
         int status;
         socket->closing = 1;
         socket->closed = 1;
+        socket->recycled_response = NULL;
         kiln_c99_node_unlink_socket(socket);
         if (kiln_c99_node_socket_ready_state(socket, "closed", 6) != KILN_C99_OK)
             KILN_C99_REFUSE("a socket ready state that could not be recorded");
@@ -7403,6 +7596,7 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
             int status;
             socket->close_request = 0;
             socket->closed = 1;
+            socket->recycled_response = NULL;
             kiln_c99_node_unlink_socket(socket);
             if (kiln_c99_node_socket_ready_state(socket, "closed", 6) != KILN_C99_OK)
                 KILN_C99_REFUSE("a socket ready state that could not be recorded");
@@ -8199,34 +8393,12 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
         if (code == KILN_C99_METHOD_NODE_REQUEST_HEADERS_SET) {
             built = argc > 0 ? args[0] : kiln_c99_undefined();
         } else {
-            size_t at = 0;
-            /* The byte buffer this reads carries names and values, not a count, so the exact
-             * number of headers is not known before the loop below without a first pass just to
-             * find it. Most requests carry under a dozen; hinting 8 gets an ordinary one there in
-             * one allocation instead of the 4 -> 8 -> 16 a capacity-0 object would walk through
-             * one `kiln_c99_put` at a time, and costs nothing when there turn out to be fewer. */
             status = kiln_c99_new_object_with_capacity(&built, 8);
             if (status != KILN_C99_OK) return status;
-            while (response != NULL && response->request_headers != NULL &&
-                   at < response->request_headers_len) {
-                const char *name = response->request_headers + at;
-                size_t name_len = strlen(name);
-                const char *value;
-                size_t value_len;
-                char *owned_name;
-                at += name_len + 1;
-                if (at > response->request_headers_len)
-                    KILN_C99_REFUSE("a request header buffer that ends inside a header");
-                value = response->request_headers + at;
-                value_len = strlen(value);
-                at += value_len + 1;
-                if (at > response->request_headers_len)
-                    KILN_C99_REFUSE("a request header buffer that ends inside a header");
-                owned_name = name_len == 0 ? NULL : kiln_c99_gc_alloc_text(name_len);
-                if (name_len != 0 && owned_name == NULL) return KILN_C99_OUT_OF_MEMORY;
-                if (name_len != 0) memcpy(owned_name, name, name_len);
-                status = kiln_c99_put(NULL, built, owned_name, name_len,
-                                      kiln_c99_copy_text(value, value_len), 0, NULL);
+            if (response != NULL && response->request_headers != NULL &&
+                response->request_headers_len != 0) {
+                status = kiln_c99_node_set_hidden_pointer(built, "@@node:lazy-headers", 19,
+                                                          response);
                 if (status != KILN_C99_OK) return status;
             }
         }
@@ -16526,6 +16698,10 @@ static int kiln_c99_has_property(kiln_host *host, kiln_value target, const char 
                     *answer = 1;
                     return KILN_C99_OK;
                 }
+                if (kiln_c99_node_has_lazy_header(current, key, key_len)) {
+                    *answer = 1;
+                    return KILN_C99_OK;
+                }
             }
             current = object->prototype;
         }
@@ -16714,6 +16890,7 @@ static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out
         return status;
     }
     if (target.tag == KILN_VALUE_OBJECT) {
+        kiln_c99_node_materialize_all_headers(target);
         kiln_object *object = kiln_c99_object_of(target);
         if (object->properties == NULL && object->shape != NULL) {
             if (object->elements != NULL) {
@@ -17857,6 +18034,7 @@ static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const 
         if (object->shape != NULL) {
             kiln_c99_ensure_dictionary(object);
         }
+        kiln_c99_node_materialize_header(store, key, key_len, NULL);
         for (index = 0; index < object->count; ++index) {
             kiln_property property;
             if (!kiln_c99_same_key(&object->properties[index], key, key_len)) {
@@ -17974,6 +18152,9 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
         }
         for (index = 0; index < object->count && !*found; ++index) {
             *found = kiln_c99_same_key(&object->properties[index], name.ptr, name.len);
+        }
+        if (!*found && kiln_c99_node_has_lazy_header(target, name.ptr, name.len)) {
+            *found = 1;
         }
         return KILN_C99_OK;
     case KILN_VALUE_ARRAY:
