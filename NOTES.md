@@ -4650,6 +4650,7 @@ dump came back behind 352 NUL bytes -- not a formatter bug, but `: > serve.err` 
 the server still held an fd into, so the next `write` landed at the old offset and left a hole. A
 `write(2)` diagnostic writes at the file offset like anything else.
 
+<<<<<<< HEAD
 ## The stack emitter is gone (2026-09-05, Claude `alee/fastest-native`)
 
 Every body the C backend emits now comes from the value graph (ADR 0056): functions, generators,
@@ -4705,3 +4706,22 @@ differential 106 matched with the one pre-existing `proxy-descriptor-keys` row, 
 with snapshots regenerated. Still open: `finally` skipped when its `catch` throws
 (`.scratch/finally-after-throw-in-catch`), which is in `kiln-ir`'s lowering and shows on both
 engines.
+
+## 2026-09-05
+
+### Step B.7: Workers by default (`KILN_WORKERS=auto`)
+
+`KILN_WORKERS=auto` allows natively compiled servers to automatically scale worker realms to
+match the number of available CPU cores under `SO_REUSEPORT`.
+
+* **Implementation**: The generated C launcher (`kiln_cli_worker_count`) matches `"auto"`
+  (case-insensitive). On Unix/Linux, it queries online CPU cores via `sysconf(_SC_NPROCESSORS_ONLN)`,
+  falling back to 1 if <= 0 or on Windows, and bounds the count to `[1, 1024]`.
+* **Rust helpers**: Exposed `parse_worker_count` and `parse_worker_count_with` in `kiln-native`
+  mirroring the C launcher semantics.
+* **Verification & Benchmark**: Added unit tests and C runtime execution tests in `kiln-native`.
+  Recorded ten-client-process throughput measurements across worker configurations in
+  `bench/results/workers-ten-process.md`. At 10 client processes (160 connections), throughput
+  scales from 63.3k rps (1 worker) up to 95.5k rps (4 workers) and 86.1k rps (`auto`, 16 cores),
+  with p50 latency dropping from 2.40 ms to 1.36–1.48 ms.
+

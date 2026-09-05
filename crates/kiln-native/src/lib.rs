@@ -4251,14 +4251,29 @@ static int kiln_cli_run_realm(int argc, char **argv, int writes_result) {
  * copied to, which is the point of shipping a binary; baking it in at `kiln build` would tie the
  * artifact to the box that built it.
  *
+ * "auto" (case-insensitive) queries online CPU cores via sysconf(_SC_NPROCESSORS_ONLN).
  * Absent, unparseable or below one means one realm -- exactly the behaviour before this existed. */
 static long kiln_cli_worker_count(void) {
     const char *setting = getenv("KILN_WORKERS");
     char *end = NULL;
     long count;
     if (setting == NULL || *setting == '\0') return 1;
-    count = strtol(setting, &end, 10);
-    if (end == setting || *end != '\0' || count < 1) return 1;
+    if ((setting[0] == 'a' || setting[0] == 'A') &&
+        (setting[1] == 'u' || setting[1] == 'U') &&
+        (setting[2] == 't' || setting[2] == 'T') &&
+        (setting[3] == 'o' || setting[3] == 'O') &&
+        setting[4] == '\0') {
+#ifndef _WIN32
+        long cpus = sysconf(_SC_NPROCESSORS_ONLN);
+        count = cpus > 0 ? cpus : 1;
+#else
+        count = 1;
+#endif
+    } else {
+        count = strtol(setting, &end, 10);
+        if (end == setting || *end != '\0' || count < 1) return 1;
+    }
+    if (count < 1) count = 1;
     if (count > 1024) count = 1024;
     return count;
 }
@@ -5000,6 +5015,68 @@ int {wrapper_symbol}(kiln_host *host, kiln_value *result) {{
         "if (value.tag == KILN_VALUE_STRING) { free((void *)value.ptr); value.ptr = NULL; value.len = 0; }",
     ));
     Ok(output)
+}
+
+/// Parse the `KILN_WORKERS` environment setting, matching the launcher's `kiln_cli_worker_count` C logic.
+///
+/// Semantics:
+/// - Unset or empty: 1
+/// - `"auto"` (case-insensitive): number of online CPU cores via `sysconf(_SC_NPROCESSORS_ONLN)` on Unix/Linux (1 on Windows), clamped to `1..=1024`
+/// - Valid integer string >= 1: clamped to `1..=1024`
+/// - Invalid integer string or integer < 1: 1
+pub fn parse_worker_count(setting: Option<&str>) -> usize {
+    parse_worker_count_with(setting, default_online_cpus)
+}
+
+/// Parse the `KILN_WORKERS` setting using a custom provider for online CPU cores.
+pub fn parse_worker_count_with<F>(setting: Option<&str>, online_cpus: F) -> usize
+where
+    F: FnOnce() -> usize,
+{
+    let Some(setting) = setting else { return 1 };
+    if setting.is_empty() {
+        return 1;
+    }
+    if setting.eq_ignore_ascii_case("auto") {
+        let count = online_cpus();
+        count.clamp(1, 1024)
+    } else {
+        match setting.parse::<isize>() {
+            Ok(count) if count >= 1 => (count as usize).min(1024),
+            _ => 1,
+        }
+    }
+}
+
+fn default_online_cpus() -> usize {
+    #[cfg(unix)]
+    {
+        unsafe extern "C" {
+            fn sysconf(name: std::ffi::c_int) -> std::ffi::c_long;
+        }
+        #[cfg(target_os = "linux")]
+        const _SC_NPROCESSORS_ONLN: std::ffi::c_int = 84;
+        #[cfg(target_os = "macos")]
+        const _SC_NPROCESSORS_ONLN: std::ffi::c_int = 58;
+        #[cfg(target_os = "freebsd")]
+        const _SC_NPROCESSORS_ONLN: std::ffi::c_int = 58;
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd")))]
+        let cpus = -1;
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+        let cpus = unsafe { sysconf(_SC_NPROCESSORS_ONLN) };
+
+        if cpus > 0 {
+            cpus as usize
+        } else {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        1
+    }
 }
 
 #[cfg(test)]
