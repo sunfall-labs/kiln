@@ -560,6 +560,20 @@ pub const KNOWN_RESPONSE_MEMBERS: &[&str] = &[
     "writableEnded",
 ];
 
+pub const DISTINCTIVE_REQUEST_MEMBERS: &[&str] = &["url", "headers", "rawHeaders", "httpVersion"];
+
+pub const DISTINCTIVE_RESPONSE_MEMBERS: &[&str] = &[
+    "end",
+    "write",
+    "writeHead",
+    "setHeader",
+    "getHeader",
+    "hasHeader",
+    "removeHeader",
+    "headersSent",
+    "writableEnded",
+];
+
 pub fn extract_handlers_from_graph(graph: &ModuleGraph) -> Vec<HandlerFacts> {
     let mut handlers = Vec::new();
     for node in graph.modules() {
@@ -792,9 +806,6 @@ pub fn extract_handlers_from_program(program: &Program) -> Vec<HandlerFacts> {
             url_specialized = true;
         }
 
-        let has_req_member = req_members_read
-            .iter()
-            .any(|m| KNOWN_REQUEST_MEMBERS.contains(&m.as_str()));
         let has_res_member = res_members_read
             .iter()
             .any(|m| KNOWN_RESPONSE_MEMBERS.contains(&m.as_str()));
@@ -802,10 +813,20 @@ pub fn extract_handlers_from_program(program: &Program) -> Vec<HandlerFacts> {
             KNOWN_RESPONSE_MEMBERS.contains(&m.as_str())
                 && !KNOWN_REQUEST_MEMBERS.contains(&m.as_str())
         });
+        let has_distinctive_res = res_members_read
+            .iter()
+            .any(|m| DISTINCTIVE_RESPONSE_MEMBERS.contains(&m.as_str()));
+        let has_distinctive_req = req_members_read
+            .iter()
+            .any(|m| DISTINCTIVE_REQUEST_MEMBERS.contains(&m.as_str()));
 
-        // It is an HTTP handler if param 0 reads request members or param 1 reads response members,
-        // and param 0 does not exclusively read response members.
-        if (has_req_member || has_res_member) && !param0_has_res_only {
+        // It is an HTTP handler if param 1 uses distinctive response members, or param 0
+        // uses distinctive request members along with response members, and param 0 does
+        // not exclusively read response members.
+        let is_handler = (has_distinctive_res || (has_distinctive_req && has_res_member))
+            && !param0_has_res_only;
+
+        if is_handler {
             let request_members_omitted = KNOWN_REQUEST_MEMBERS
                 .iter()
                 .filter(|&&m| !req_members_read.contains(m))
