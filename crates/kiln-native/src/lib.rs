@@ -385,9 +385,14 @@ impl NativeBuilder {
         let (launcher_bytes, launcher_source_digest, launcher_generated_c_cache_hit) =
             self.cached_payload(&launcher_source_key, launcher.as_bytes())?;
 
+        let march_opt = if options.march_native {
+            "\0march-native"
+        } else {
+            ""
+        };
         let object_options = Digest::hash(
             format!(
-                "c11\0{}\0{}\0generator-{C_GENERATOR_VERSION}",
+                "c11\0{}\0{}\0generator-{C_GENERATOR_VERSION}{march_opt}",
                 identity.kind,
                 profile.as_str()
             )
@@ -500,6 +505,7 @@ impl NativeBuilder {
 
         let compile_options = CompileOptions {
             profile: profile.toolchain(),
+            march_native: options.march_native,
             ..CompileOptions::default()
         };
         let compile_started = Instant::now();
@@ -738,9 +744,14 @@ impl NativeBuilder {
         shared_module_source.extend_from_slice(module_wrapper.as_bytes());
         let (module_source, module_source_digest, generated_c_hit) =
             self.cached_payload(&shared_source_key, &shared_module_source)?;
+        let march_opt = if options.march_native {
+            "\0march-native"
+        } else {
+            ""
+        };
         let object_options = Digest::hash(
             format!(
-                "shared-library\0pic\0c11\0{}\0{}\0generator-{C_GENERATOR_VERSION}",
+                "shared-library\0pic\0c11\0{}\0{}\0generator-{C_GENERATOR_VERSION}{march_opt}",
                 identity.kind,
                 profile.as_str()
             )
@@ -858,6 +869,7 @@ impl NativeBuilder {
         let compile_options = CompileOptions {
             profile: profile.toolchain(),
             position_independent: true,
+            march_native: options.march_native,
             ..CompileOptions::default()
         };
         let compile_started = Instant::now();
@@ -1095,9 +1107,14 @@ impl NativeBuilder {
         let (wrapper_bytes, wrapper_source_digest, wrapper_generated_c_hit) =
             self.cached_payload(&wrapper_source_key, wrapper.as_bytes())?;
 
+        let march_opt = if options.march_native {
+            "\0march-native"
+        } else {
+            ""
+        };
         let module_object_options = Digest::hash(
             format!(
-                "shared-graph\0pic\0c11\0visibility-hidden\0{}\0{}",
+                "shared-graph\0pic\0c11\0visibility-hidden\0{}\0{}{march_opt}",
                 identity.kind,
                 profile.as_str()
             )
@@ -1105,7 +1122,7 @@ impl NativeBuilder {
         );
         let wrapper_object_options = Digest::hash(
             format!(
-                "shared-graph\0pic\0c11\0{}\0{}",
+                "shared-graph\0pic\0c11\0{}\0{}{march_opt}",
                 identity.kind,
                 profile.as_str()
             )
@@ -1118,6 +1135,7 @@ impl NativeBuilder {
         let mut module_compile_options = CompileOptions {
             profile: profile.toolchain(),
             position_independent: true,
+            march_native: options.march_native,
             ..CompileOptions::default()
         };
         module_compile_options
@@ -1126,6 +1144,7 @@ impl NativeBuilder {
         let wrapper_compile_options = CompileOptions {
             profile: profile.toolchain(),
             position_independent: true,
+            march_native: options.march_native,
             ..CompileOptions::default()
         };
         let mut module_keys = Vec::with_capacity(modules.len());
@@ -1168,7 +1187,7 @@ impl NativeBuilder {
             self.cached_payload(&prelude_source_key, prelude_source.as_bytes())?;
         let shared_prelude_object_options = Digest::hash(
             format!(
-                "shared-library\0pic\0c11\0{}\0{}\0generator-{C_GENERATOR_VERSION}",
+                "shared-library\0pic\0c11\0{}\0{}\0generator-{C_GENERATOR_VERSION}{march_opt}",
                 identity.kind,
                 profile.as_str()
             )
@@ -1570,9 +1589,14 @@ impl NativeBuilder {
         let (launcher_bytes, launcher_source_digest, launcher_generated_c_cache_hit) =
             self.cached_payload(&launcher_source_key, launcher.as_bytes())?;
 
+        let march_opt = if options.march_native {
+            "\0march-native"
+        } else {
+            ""
+        };
         let object_options = Digest::hash(
             format!(
-                "c11\0{}\0{}\0generator-{C_GENERATOR_VERSION}",
+                "c11\0{}\0{}\0generator-{C_GENERATOR_VERSION}{march_opt}",
                 identity.kind,
                 profile.as_str()
             )
@@ -1580,6 +1604,7 @@ impl NativeBuilder {
         );
         let compile_options = CompileOptions {
             profile: profile.toolchain(),
+            march_native: options.march_native,
             ..CompileOptions::default()
         };
         let compile_started = Instant::now();
