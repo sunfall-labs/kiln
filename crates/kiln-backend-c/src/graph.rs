@@ -340,6 +340,16 @@ pub enum Proven {
 }
 
 pub fn proven_types(graph: &FunctionGraph) -> HashMap<ValueId, Proven> {
+    proven_types_with(graph, &HashMap::new())
+}
+
+/// `proven_types` with `assumptions` taken as given: a value the unit has proven by other
+/// means -- a typed entry's parameter, a direct call whose typed entry returns a number -- has
+/// its verdict here rather than one computed from its operation.
+pub fn proven_types_with(
+    graph: &FunctionGraph,
+    assumptions: &HashMap<ValueId, Proven>,
+) -> HashMap<ValueId, Proven> {
     // A resume target's stack phis also take what a suspend spilled and what the caller sent,
     // neither of which is an input here, so they prove nothing.
     let resume_targets: std::collections::HashSet<BlockId> = graph
@@ -365,6 +375,10 @@ pub fn proven_types(graph: &FunctionGraph) -> HashMap<ValueId, Proven> {
             for (vid, op) in &block.operations {
                 // `Some(kind)` proves it; `None` proves nothing. An operand still unconstrained
                 // counts as agreeing, which is the optimism.
+                if let Some(&assumed) = assumptions.get(vid) {
+                    finish(&mut state, vid, Some(assumed), &mut changed);
+                    continue;
+                }
                 let verdict: Option<Proven> = match op {
                     GraphOp::Const { constant, .. } => Some(match constant {
                         Constant::Number(_) => Proven::Number,

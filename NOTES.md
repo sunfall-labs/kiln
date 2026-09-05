@@ -4605,7 +4605,6 @@ Measurements on 16 cores:
 
 Combined wall-clock test iteration time dropped from **~16.5 minutes down to ~1 minute**.
 
-||||||| parent of 9a4990e (Answer SIGUSR1 with heap, runtime and connection counts at the turn boundary)
 ## A compiled server will now tell you what it is doing (2026-09-03, Claude `worktree-agent-a998e1ca35c141473`)
 
 `kill -USR1` on a `kiln build` binary writes three lines to stderr -- heap, runtime, connections --
@@ -4650,7 +4649,6 @@ dump came back behind 352 NUL bytes -- not a formatter bug, but `: > serve.err` 
 the server still held an fd into, so the next `write` landed at the old offset and left a hole. A
 `write(2)` diagnostic writes at the file offset like anything else.
 
-<<<<<<< HEAD
 ## The stack emitter is gone (2026-09-05, Claude `work/fastest-native`)
 
 Every body the C backend emits now comes from the value graph (ADR 0056): functions, generators,
@@ -4725,3 +4723,45 @@ match the number of available CPU cores under `SO_REUSEPORT`.
   scales from 63.3k rps (1 worker) up to 95.5k rps (4 workers) and 86.1k rps (`auto`, 16 cores),
   with p50 latency dropping from 2.40 ms to 1.36–1.48 ms.
 
+## Direct calls and typed entries, by proof (2026-09-05, Claude `work/fastest-native`)
+
+Plan step 2.3. A call whose callee the unit can name is a C call by name, and a callee whose
+arguments the caller proved numbers is entered through a second clone whose parameters are
+`double`s. `direct.rs` answers both questions for the whole unit before any body is emitted.
+fib went from 51 ms to 31 against node's 22, at a load average of 5; the machine code of the
+typed entry is the compare, the two subtractions, two calls and the add, plus the two tests the
+direct path keeps (the depth limit and the `super()` flag) and the spills any recursion pays.
+
+**The binding rule had to survive hoisting.** The obvious rule -- a binding with exactly one
+store, of a `MakeFunction` -- matched nothing, because the compiler lowers `function fib` as a
+cell stored twice: `undefined` first, the closure second, both at the top of the module body.
+The rule that holds is that everything before the defining store in the owner's entry block is
+inert: constants, cells, marks, closures being made, loads that cannot run code. Then no
+executor -- the owner, a closure it made, a caller -- can observe the binding between the two
+stores, and a read that could be in the dead zone throws before it reaches the call. The same
+fact says when the dead-zone check itself can go: a binding the owner never marks uninitialized
+holds `undefined` from its first instruction.
+
+**The typed entry is reached by proof, not by guess.** Its contract is exactly the parameter
+count of arguments, every one a number. A site calls it only when its own body proves that;
+everyone else calls the boxed entry, which is unchanged. So the second clone needs no guard and
+carries none, which is the "two clones, never more" invariant from the plan with the second
+reached from the outside rather than by a guarded jump. Whether the typed entry returns a
+`double` is a greatest fixpoint: assume every one does, prove each body under that assumption
+plus its own typed parameters, drop the ones whose return is not a number, repeat. fib's return
+was judged not a number on the first run because the compiler leaves a `return undefined` block
+after every body that nothing reaches; the proof now skips blocks with no predecessor.
+
+**Three shapes of the same call, measured.** Through an argument array and a context struct
+the callee null-tests: 43 ms. With scalar `kiln_val` parameters: 42. With `double` parameters,
+a `double` result, the argument array built only on the slow path, and the running closure's
+own upvalue table on self-recursion: 31. The disassembly is what told the difference: an array
+stored on every call for a path that never runs, two dependent loads to fetch a table the
+function already held, and a NaN canonicalisation on every argument that only a boxed use
+needs. A `kiln_val` that is a number is its double's bits, so the caller boxes the result and
+the C compiler deletes the box where nothing reads it untyped.
+
+Not done: the plan's 5 ms for fib. The hand-emitted `double fib(double)` reaches 2 ms because
+clang inlines levels of the recursion, which it cannot do through a status-returning call with
+a pointer result; a `double`-returning entry with a sentinel for a throw is the next thing to
+try. The `frame` benchmark is untouched by design: every function in it publishes a frame.
