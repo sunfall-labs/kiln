@@ -564,11 +564,7 @@ fn emit_graph_op(
             let fast = unary_fast_body(*op)
                 .expect("a proven-number unary has a numeric body")
                 .replace("value", &format!("v{x}"))
-                .replace("kiln_c99_val_from_double(", "(")
-                .replace(
-                    "kiln_c99_val_unary_fast(5, v",
-                    "kiln_c99_val_unary_fast(5, v",
-                );
+                .replace("kiln_c99_val_from_double(", "(");
             match op {
                 UnaryOp::Plus | UnaryOp::ToNumeric => {
                     writeln!(output, "    d{v} = d{x}; v{v} = v{x};").unwrap();
