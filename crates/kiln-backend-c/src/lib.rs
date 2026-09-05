@@ -5,7 +5,11 @@
 //! using the numeric [`kiln_host_abi::HostOp`] value.  In particular, it never writes stdout (or
 //! otherwise bakes CLI policy into an object file).
 
-use std::{collections::HashSet, fmt::Write as _, sync::Arc};
+use std::{
+    collections::{HashSet, VecDeque},
+    fmt::Write as _,
+    sync::Arc,
+};
 
 use kiln_host_abi::{HOST_ABI_VERSION, HostOp};
 use kiln_ir::{
@@ -464,6 +468,42 @@ fn produces_references(program: &Program) -> bool {
             .all(|proto| scalar_only(&proto.code))
 }
 
+/// Whether this function proto produces references or needs checked arithmetic.
+/// False for a purely scalar function that holds no BigInt and cannot throw or refuse.
+fn proto_produces_references(proto: &FunctionProto, program: &Program) -> bool {
+    if proto.generator
+        || proto.asynchronous
+        || proto.mapped_arguments
+        || proto.parameter_count > 0
+        || !proto.upvalues.is_empty()
+    {
+        return true;
+    }
+    let scalar_only = |code: &[Instruction]| {
+        code.iter().all(|instruction| match instruction {
+            Instruction::Const(c_idx) => matches!(
+                program.constants.get(*c_idx as usize),
+                Some(Constant::Number(_)) | Some(Constant::Boolean(_)) | Some(Constant::Null)
+            ),
+            Instruction::LoadLocal(_)
+            | Instruction::StoreLocal(_)
+            | Instruction::Pop
+            | Instruction::Dup
+            | Instruction::Dup2
+            | Instruction::Unary(_)
+            | Instruction::Jump(_)
+            | Instruction::JumpIfFalse(_)
+            | Instruction::JumpIfTruthy(_)
+            | Instruction::JumpIfNotNullish(_)
+            | Instruction::Return
+            | Instruction::MarkUninitialized(_) => true,
+            Instruction::Binary(op) => !matches!(op, BinaryOp::In | BinaryOp::InstanceOf),
+            _ => false,
+        })
+    };
+    !scalar_only(&proto.code)
+}
+
 /// Whether anything in this program reaches module scope from inside a call.
 ///
 /// A module binding outlives every call and is shared by all of them, so when one is read from a
@@ -585,14 +625,144 @@ fn handler_targets(code: &[Instruction]) -> Vec<u32> {
     targets
 }
 
-/// The local slots a body puts into the temporal dead zone.
-fn dead_zone_slots(code: &[Instruction]) -> HashSet<u32> {
-    code.iter()
+/// Definite-assignment TDZ analysis over a sequence of instructions.
+/// Tracks which local/global slots can be uninitialized (in TDZ) immediately before each instruction.
+#[derive(Debug, Clone)]
+struct TdzAnalysis {
+    all_marked: HashSet<u32>,
+    uninitialized_at: Vec<HashSet<u32>>,
+}
+
+impl TdzAnalysis {
+    fn is_guarded(&self, index: usize, slot: u32) -> bool {
+        if !self.all_marked.contains(&slot) {
+            return false;
+        }
+        self.uninitialized_at
+            .get(index)
+            .is_some_and(|set| set.contains(&slot))
+    }
+}
+
+fn compute_tdz_analysis(code: &[Instruction]) -> TdzAnalysis {
+    let all_marked: HashSet<u32> = code
+        .iter()
         .filter_map(|instruction| match instruction {
             Instruction::MarkUninitialized(local) => Some(*local),
             _ => None,
         })
-        .collect()
+        .collect();
+
+    if all_marked.is_empty() || code.is_empty() {
+        return TdzAnalysis {
+            all_marked,
+            uninitialized_at: Vec::new(),
+        };
+    }
+
+    let n = code.len();
+    let mut successors = vec![Vec::new(); n];
+    let mut handler_stack = Vec::new();
+
+    for (index, inst) in code.iter().enumerate() {
+        match inst {
+            Instruction::PushHandler(target) => {
+                handler_stack.push(*target as usize);
+                if index + 1 < n {
+                    successors[index].push(index + 1);
+                }
+            }
+            Instruction::PopHandler => {
+                handler_stack.pop();
+                if index + 1 < n {
+                    successors[index].push(index + 1);
+                }
+            }
+            Instruction::Jump(target) => {
+                let target = *target as usize;
+                if target < n {
+                    successors[index].push(target);
+                }
+            }
+            Instruction::JumpIfFalse(target)
+            | Instruction::JumpIfTruthy(target)
+            | Instruction::JumpIfNotNullish(target) => {
+                let target = *target as usize;
+                if target < n {
+                    successors[index].push(target);
+                }
+                if index + 1 < n {
+                    successors[index].push(index + 1);
+                }
+            }
+            Instruction::Return | Instruction::Throw => {
+                // Terminating instructions; no normal fallthrough
+            }
+            _ => {
+                if index + 1 < n {
+                    successors[index].push(index + 1);
+                }
+            }
+        }
+        if let Some(&handler_target) = handler_stack
+            .last()
+            .filter(|&&target| target < n && !successors[index].contains(&target))
+        {
+            successors[index].push(handler_target);
+        }
+    }
+
+    let mut in_set: Vec<HashSet<u32>> = vec![HashSet::new(); n];
+    let mut out_set: Vec<HashSet<u32>> = vec![HashSet::new(); n];
+    let mut in_worklist = vec![false; n];
+    let mut visited = vec![false; n];
+    let mut worklist = VecDeque::new();
+
+    worklist.push_back(0);
+    in_worklist[0] = true;
+    visited[0] = true;
+
+    while let Some(u) = worklist.pop_front() {
+        in_worklist[u] = false;
+
+        let mut new_out = in_set[u].clone();
+        match &code[u] {
+            Instruction::MarkUninitialized(slot) => {
+                new_out.insert(*slot);
+            }
+            Instruction::StoreLocal(slot)
+            | Instruction::StoreCell(slot)
+            | Instruction::StoreGlobal(slot) => {
+                new_out.remove(slot);
+            }
+            _ => {}
+        }
+
+        let out_changed = new_out != out_set[u];
+        out_set[u] = new_out;
+
+        for &v in &successors[u] {
+            let mut changed = false;
+            if !visited[v] {
+                visited[v] = true;
+                changed = true;
+            }
+            for &slot in &out_set[u] {
+                if in_set[v].insert(slot) {
+                    changed = true;
+                }
+            }
+            if (changed || out_changed) && !in_worklist[v] {
+                worklist.push_back(v);
+                in_worklist[v] = true;
+            }
+        }
+    }
+
+    TdzAnalysis {
+        all_marked,
+        uninitialized_at: in_set,
+    }
 }
 
 /// Emit one C function per compiled body, forward-declared so a closure made before a body is
@@ -1592,11 +1762,12 @@ fn render_function(
     diagnostic_site: &str,
     strict_functions: &[bool],
 ) {
+    let scalar_proto = !proto_produces_references(proto, program);
     let max_stack = frame_stacks[index];
     let locals = usize::try_from(proto.local_count).unwrap().max(1);
     // Only when the name is already a C identifier: it goes into a comment, and a name is
     // program text that could otherwise close one.
-    if let Some(name) = proto.name.as_ref().filter(|name| {
+    if let Some(name) = proto.name.as_deref().filter(|name| {
         !name.is_empty()
             && name
                 .bytes()
@@ -1610,21 +1781,27 @@ fn render_function(
     )
     .unwrap();
     output.push_str("    size_t sp = 0;\n    size_t slot;\n");
-    output.push_str("    kiln_host *host = ctx ? ctx->host : NULL;\n");
-    output.push_str("    kiln_value *thrown = ctx ? ctx->thrown : NULL;\n");
-    output.push_str("    kiln_generator *frame = ctx ? ctx->frame : NULL;\n");
-    output.push_str("    int depth = ctx ? ctx->depth : 0;\n");
-    output.push_str("    kiln_val receiver = receiver_ptr ? *receiver_ptr : KILN_VAL_UNDEFINED;\n");
-    output.push_str("    (void)receiver_ptr;\n");
-    // Which of the two `arguments` objects a mention in this body would build. Set on every
-    // entry, a generator's resumptions included, because the frame global it writes is shared
-    // by whatever else is running and is only restored at the call boundary.
-    writeln!(
-        output,
-        "    kiln_c99_frame_mapped_arguments = {};",
-        i32::from(proto.mapped_arguments)
-    )
-    .unwrap();
+    if scalar_proto {
+        output.push_str("    (void)ctx; (void)receiver_ptr; (void)upvalues;\n");
+    } else {
+        output.push_str("    kiln_host *host = ctx ? ctx->host : NULL;\n");
+        output.push_str("    kiln_value *thrown = ctx ? ctx->thrown : NULL;\n");
+        output.push_str("    kiln_generator *frame = ctx ? ctx->frame : NULL;\n");
+        output.push_str("    int depth = ctx ? ctx->depth : 0;\n");
+        output.push_str(
+            "    kiln_val receiver = receiver_ptr ? *receiver_ptr : KILN_VAL_UNDEFINED;\n",
+        );
+        output.push_str("    (void)receiver_ptr;\n");
+        // Which of the two `arguments` objects a mention in this body would build. Set on every
+        // entry, a generator's resumptions included, because the frame global it writes is shared
+        // by whatever else is running and is only restored at the call boundary.
+        writeln!(
+            output,
+            "    kiln_c99_frame_mapped_arguments = {};",
+            i32::from(proto.mapped_arguments)
+        )
+        .unwrap();
+    }
     let handlers = handler_targets(&proto.code);
     // A generator and an async function both suspend, and every part of their state has to
     // outlive the call that stopped in the middle of them.
@@ -1693,8 +1870,10 @@ fn render_function(
         writeln!(output, "    kiln_val locals[{locals}];").unwrap();
         render_handler_prologue(output, &handlers, proto.code.len(), suspends);
         output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
-        output.push_str("    (void)thrown; (void)frame;\n");
-        output.push_str("    (void)host; (void)upvalues; (void)depth; (void)receiver;\n");
+        if !scalar_proto {
+            output.push_str("    (void)thrown; (void)frame;\n");
+            output.push_str("    (void)host; (void)upvalues; (void)depth; (void)receiver;\n");
+        }
         writeln!(
             output,
             "    for (slot = 0; slot < (size_t){locals}; ++slot) locals[slot] = KILN_VAL_UNDEFINED;"
@@ -1722,15 +1901,19 @@ fn render_function(
         source: &program.source,
         symbol,
         diagnostic_site,
-        callables: produces_references(program),
+        callables: !scalar_proto,
         handlers,
         site: ReturnSite::Body,
-        guarded: dead_zone_slots(&proto.code),
+        tdz: compute_tdz_analysis(&proto.code),
         code: &proto.code,
         jump_targets,
     };
     for position in 0..proto.code.len() {
-        writeln!(output, "kiln_label_{position}:;").unwrap();
+        if emitter.jump_targets.contains(&(position as u32))
+            || (binds_at_call(proto) && position == proto.prologue_end as usize)
+        {
+            writeln!(output, "kiln_label_{position}:;").unwrap();
+        }
         // The seam between FunctionDeclarationInstantiation and the body. Reached twice: once
         // by falling out of the binding the *call* ran, which stops here, and once from the
         // resume switch above, where `binding` is clear and the body carries on.
@@ -1741,10 +1924,12 @@ fn render_function(
         emit_instruction(output, &proto.code[position], position, &emitter);
     }
     render_unwind(output, &emitter.handlers, suspends, false);
-    // A body whose control reaches the end without a `Return` is a compiler bug, not a program
-    // error: the lowering always ends a body with one.
-    output.push_str("    goto kiln_refusal;\n");
-    render_refusal(output, true);
+    if !scalar_proto {
+        // A body whose control reaches the end without a `Return` is a compiler bug, not a program
+        // error: the lowering always ends a body with one.
+        output.push_str("    goto kiln_refusal;\n");
+        render_refusal(output, true);
+    }
     output.push_str("}\n");
 }
 
@@ -2307,7 +2492,7 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
             exports: None,
             commonjs: false,
         },
-        guarded: dead_zone_slots(&program.code),
+        tdz: compute_tdz_analysis(&program.code),
         code: &program.code,
         jump_targets,
     };
@@ -2499,7 +2684,7 @@ fn render_module(
             exports: Some(&module.exports),
             commonjs,
         },
-        guarded: dead_zone_slots(&program.code),
+        tdz: compute_tdz_analysis(&program.code),
         code: &program.code,
         jump_targets,
     };
@@ -2610,11 +2795,16 @@ struct Emitter<'a> {
     /// converted first. False for a scalar program, whose emitted bytes must not change.
     callables: bool,
     site: ReturnSite<'a>,
-    /// The local slots this body puts into the temporal dead zone, so a read of one is checked
-    /// and every other read is not.
-    guarded: HashSet<u32>,
+    /// Definite-assignment TDZ analysis for this body.
+    tdz: TdzAnalysis,
     code: &'a [Instruction],
     jump_targets: HashSet<u32>,
+}
+
+impl<'a> Emitter<'a> {
+    fn is_guarded(&self, index: usize, slot: u32) -> bool {
+        self.tdz.is_guarded(index, slot)
+    }
 }
 
 enum ReturnSite<'a> {
@@ -2623,6 +2813,57 @@ enum ReturnSite<'a> {
         commonjs: bool,
     },
     Body,
+}
+
+fn instruction_can_refuse(
+    instruction: &Instruction,
+    code: &[Instruction],
+    constants: &[Constant],
+    index: usize,
+    jump_targets: &HashSet<u32>,
+) -> bool {
+    match instruction {
+        Instruction::Const(_)
+        | Instruction::StoreLocal(_)
+        | Instruction::LoadGlobal(_)
+        | Instruction::StoreGlobal(_)
+        | Instruction::LoadCell(_)
+        | Instruction::StoreCell(_)
+        | Instruction::NewCell(_)
+        | Instruction::Pop
+        | Instruction::Dup
+        | Instruction::Dup2
+        | Instruction::Unary(_)
+        | Instruction::Jump(_)
+        | Instruction::JumpIfFalse(_)
+        | Instruction::JumpIfTruthy(_)
+        | Instruction::JumpIfNotNullish(_)
+        | Instruction::HostCall { .. }
+        | Instruction::Return
+        | Instruction::PushHandler(_)
+        | Instruction::PopHandler
+        | Instruction::Throw
+        | Instruction::MarkUninitialized(_) => false,
+        Instruction::Binary(op) => matches!(op, BinaryOp::In | BinaryOp::InstanceOf),
+        Instruction::LoadLocal(_) => {
+            can_fuse_load_get_property_store(code, index, jump_targets).is_some()
+                || can_fuse_load_get_property_dup_store_pop(code, index, jump_targets).is_some()
+                || can_fuse_load_get_property_pop(code, index, jump_targets).is_some()
+                || can_fuse_load_get_property(code, index, jump_targets).is_some()
+                || can_fuse_load_load_set_property_pop(code, index, jump_targets).is_some()
+                || can_fuse_load_const_set_property_pop(code, constants, index, jump_targets)
+                    .is_some()
+                || can_fuse_load_load_get_computed_dup_store_pop(code, index, jump_targets)
+                    .is_some()
+                || can_fuse_load_load_get_computed_store(code, index, jump_targets).is_some()
+                || can_fuse_load_load_get_computed_pop(code, index, jump_targets).is_some()
+                || can_fuse_load_load_get_computed(code, index, jump_targets).is_some()
+                || can_fuse_load_load_load_set_computed_pop(code, index, jump_targets).is_some()
+                || can_fuse_load_load_const_set_computed_pop(code, constants, index, jump_targets)
+                    .is_some()
+        }
+        _ => true,
+    }
 }
 
 fn emit_instruction(
@@ -2650,7 +2891,7 @@ fn emit_instruction(
         callables,
         handlers,
         site,
-        guarded,
+        tdz: _,
         code: _,
         jump_targets: _,
     } = emitter;
@@ -2868,7 +3109,7 @@ fn emit_instruction(
                 can_fuse_const_load_compare_jump(emitter.code, emitter.constants, index, &emitter.jump_targets)
             {
                 let unwind = unwind_or_return(handlers, site);
-                if guarded.contains(&slot) {
+                if emitter.is_guarded(index + 1, slot) {
                     writeln!(
                         output,
                         "    {{ int status = kiln_c99_val_check_tdz(locals[{slot}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
@@ -2900,7 +3141,7 @@ fn emit_instruction(
                 can_fuse_const_load_binary_store(emitter.code, emitter.constants, index, &emitter.jump_targets)
             {
                 let unwind = unwind_or_return(handlers, site);
-                if guarded.contains(&src) {
+                if emitter.is_guarded(index + 1, src) {
                     writeln!(
                         output,
                         "    {{ int status = kiln_c99_val_check_tdz(locals[{src}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
@@ -2940,7 +3181,7 @@ fn emit_instruction(
                 can_fuse_const_load_binary(emitter.code, emitter.constants, index, &emitter.jump_targets)
             {
                 let unwind = unwind_or_return(handlers, site);
-                if guarded.contains(&src) {
+                if emitter.is_guarded(index + 1, src) {
                     writeln!(
                         output,
                         "    {{ int status = kiln_c99_val_check_tdz(locals[{src}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
@@ -3056,7 +3297,7 @@ fn emit_instruction(
             .unwrap();
         }
         Instruction::LoadCell(local) => {
-            if guarded.contains(local) {
+            if emitter.is_guarded(index, *local) {
                 let unwind = unwind_or_return(handlers, site);
                 writeln!(
                     output,
@@ -3253,7 +3494,7 @@ fn emit_instruction(
             .unwrap();
         }
         Instruction::LoadLocal(local) => {
-            if guarded.contains(local) {
+            if emitter.is_guarded(index, *local) {
                 let unwind = unwind_or_return(handlers, site);
                 writeln!(
                     output,
@@ -3290,7 +3531,7 @@ fn emit_instruction(
                 can_fuse_load_load_compare_jump(emitter.code, index, &emitter.jump_targets)
             {
                 let unwind = unwind_or_return(handlers, site);
-                if guarded.contains(&slot2) {
+                if emitter.is_guarded(index + 1, slot2) {
                     writeln!(
                         output,
                         "    {{ int status = kiln_c99_val_check_tdz(locals[{slot2}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
@@ -3369,7 +3610,7 @@ fn emit_instruction(
                 can_fuse_load_load_binary_store(emitter.code, index, &emitter.jump_targets)
             {
                 let unwind = unwind_or_return(handlers, site);
-                if guarded.contains(&src2) {
+                if emitter.is_guarded(index + 1, src2) {
                     writeln!(
                         output,
                         "    {{ int status = kiln_c99_val_check_tdz(locals[{src2}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
@@ -3442,7 +3683,7 @@ fn emit_instruction(
                 can_fuse_load_load_binary(emitter.code, index, &emitter.jump_targets)
             {
                 let unwind = unwind_or_return(handlers, site);
-                if guarded.contains(&src2) {
+                if emitter.is_guarded(index + 1, src2) {
                     writeln!(
                         output,
                         "    {{ int status = kiln_c99_val_check_tdz(locals[{src2}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
@@ -3489,7 +3730,7 @@ fn emit_instruction(
                     unreachable!("verification rejects a non-string property name before emission")
                 };
                 let unwind = unwind_or_return(handlers, site);
-                if guarded.contains(&val) {
+                if emitter.is_guarded(index + 1, val) {
                     writeln!(
                         output,
                         "    {{ int status = kiln_c99_val_check_tdz(locals[{val}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
@@ -3575,7 +3816,7 @@ fn emit_instruction(
                 can_fuse_load_load_get_computed_dup_store_pop(emitter.code, index, &emitter.jump_targets)
             {
                 let unwind = unwind_or_return(handlers, site);
-                if guarded.contains(&src2) {
+                if emitter.is_guarded(index + 1, src2) {
                     writeln!(
                         output,
                         "    {{ int status = kiln_c99_val_check_tdz(locals[{src2}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
@@ -3591,7 +3832,7 @@ fn emit_instruction(
                 can_fuse_load_load_get_computed_store(emitter.code, index, &emitter.jump_targets)
             {
                 let unwind = unwind_or_return(handlers, site);
-                if guarded.contains(&src2) {
+                if emitter.is_guarded(index + 1, src2) {
                     writeln!(
                         output,
                         "    {{ int status = kiln_c99_val_check_tdz(locals[{src2}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
@@ -3607,7 +3848,7 @@ fn emit_instruction(
                 can_fuse_load_load_get_computed_pop(emitter.code, index, &emitter.jump_targets)
             {
                 let unwind = unwind_or_return(handlers, site);
-                if guarded.contains(&src2) {
+                if emitter.is_guarded(index + 1, src2) {
                     writeln!(
                         output,
                         "    {{ int status = kiln_c99_val_check_tdz(locals[{src2}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
@@ -3623,7 +3864,7 @@ fn emit_instruction(
                 can_fuse_load_load_get_computed(emitter.code, index, &emitter.jump_targets)
             {
                 let unwind = unwind_or_return(handlers, site);
-                if guarded.contains(&src2) {
+                if emitter.is_guarded(index + 1, src2) {
                     writeln!(
                         output,
                         "    {{ int status = kiln_c99_val_check_tdz(locals[{src2}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
@@ -3639,14 +3880,14 @@ fn emit_instruction(
                 can_fuse_load_load_load_set_computed_pop(emitter.code, index, &emitter.jump_targets)
             {
                 let unwind = unwind_or_return(handlers, site);
-                if guarded.contains(&key) {
+                if emitter.is_guarded(index + 1, key) {
                     writeln!(
                         output,
                         "    {{ int status = kiln_c99_val_check_tdz(locals[{key}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
                     )
                     .unwrap();
                 }
-                if guarded.contains(&val) {
+                if emitter.is_guarded(index + 2, val) {
                     writeln!(
                         output,
                         "    {{ int status = kiln_c99_val_check_tdz(locals[{val}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
@@ -3665,7 +3906,7 @@ fn emit_instruction(
                 let const_val = render_constant_value(symbol, c_idx, &constants[c_idx as usize])
                     .expect("BigInt excluded by can_fuse_load_load_const_set_computed_pop");
                 let unwind = unwind_or_return(handlers, site);
-                if guarded.contains(&key) {
+                if emitter.is_guarded(index + 1, key) {
                     writeln!(
                         output,
                         "    {{ int status = kiln_c99_val_check_tdz(locals[{key}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
@@ -3810,7 +4051,7 @@ fn emit_instruction(
         // Module scope is one array for the whole module, so a read from a function body names
         // it directly rather than reaching for a frame that may no longer exist.
         Instruction::LoadGlobal(slot) => {
-            if guarded.contains(slot) {
+            if emitter.is_guarded(index, *slot) {
                 let unwind = unwind_or_return(handlers, site);
                 writeln!(
                     output,
@@ -4463,12 +4704,20 @@ fn emit_instruction(
          * visible. Returning directly from a closure loses that state when an imported function
          * crosses back to its caller. */
         let refusal_target = "goto kiln_refusal;";
-        let refusal = format!(
-            "{control_refusal} {refusal_target} }} if (status != KILN_C99_OK) return status;"
-        );
-        let replaced = emitted.replace("if (status != KILN_C99_OK) return status;", &refusal);
-        output.truncate(before);
-        output.push_str(&replaced);
+        if instruction_can_refuse(
+            instruction,
+            emitter.code,
+            emitter.constants,
+            index,
+            &emitter.jump_targets,
+        ) {
+            let refusal = format!(
+                "{control_refusal} {refusal_target} }} if (status != KILN_C99_OK) return status;"
+            );
+            let replaced = emitted.replace("if (status != KILN_C99_OK) return status;", &refusal);
+            output.truncate(before);
+            output.push_str(&replaced);
+        }
     }
 }
 

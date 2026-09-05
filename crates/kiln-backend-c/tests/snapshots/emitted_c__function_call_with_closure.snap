@@ -26,16 +26,10 @@ static inline int kiln_module_bd146fc2eb2d61295dd314af611e5344_fn_0(kiln_call_co
     (void)host; (void)upvalues; (void)depth; (void)receiver;
     for (slot = 0; slot < (size_t)2; ++slot) locals[slot] = KILN_VAL_UNDEFINED;
     for (slot = 0; slot < (size_t)1 && slot < argc; ++slot) locals[slot] = args[slot];
-kiln_label_0:;
     { int status = kiln_c99_op_val_load_cell(upvalues[0], stack, &sp, thrown); if (status == KILN_C99_THROWN) return status; if (status == KILN_C99_CONTROL_ERROR || status == KILN_C99_THROWN) { kiln_c99_note_refusal("kiln_module_bd146fc2eb2d61295dd314af611e5344", (size_t)0, "LoadUpvalue", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; }
-kiln_label_1:;
     stack[sp++] = locals[0];
-kiln_label_2:;
-    { kiln_val right = stack[--sp]; kiln_val left = stack[--sp]; kiln_val answer; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left) && KILN_VAL_IS_NUMBER(right))) { double a; double b; memcpy(&a, &left, sizeof(a)); memcpy(&b, &right, sizeof(b)); answer = kiln_c99_val_from_double(a + b); } else { int status; answer = kiln_c99_val_binary(1, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) return status; if (status == KILN_C99_CONTROL_ERROR || status == KILN_C99_THROWN) { kiln_c99_note_refusal("kiln_module_bd146fc2eb2d61295dd314af611e5344", (size_t)2, "Binary", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; } locals[1] = answer; }
-kiln_label_3:;
-kiln_label_4:;
+    { kiln_val right = stack[--sp]; kiln_val left = stack[--sp]; kiln_val answer; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left) && KILN_VAL_IS_NUMBER(right))) { double a; double b; memcpy(&a, &left, sizeof(a)); memcpy(&b, &right, sizeof(b)); answer = kiln_c99_val_from_double(a + b); } else { int status; answer = kiln_c99_val_binary(1, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) return status; if (status != KILN_C99_OK) return status; } locals[1] = answer; }
     stack[sp++] = locals[1];
-kiln_label_5:;
     *result = sp == 0 ? KILN_VAL_UNDEFINED : stack[--sp]; return KILN_C99_OK;
     goto kiln_refusal;
 kiln_refusal:;
@@ -55,7 +49,7 @@ static int kiln_module_bd146fc2eb2d61295dd314af611e5344_body(kiln_host *host, ki
     locals[0] = KILN_VAL_UNDEFINED;
     locals[1] = KILN_VAL_UNDEFINED;
 kiln_label_0:;
-    { int status = kiln_c99_val_make_cell(&locals[0]); if (status == KILN_C99_CONTROL_ERROR || status == KILN_C99_THROWN) { kiln_c99_note_refusal("kiln_module_bd146fc2eb2d61295dd314af611e5344", (size_t)0, "NewCell", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; }
+    { int status = kiln_c99_val_make_cell(&locals[0]); if (status != KILN_C99_OK) return status; }
 kiln_label_1:;
     stack[sp++] = UINT64_C(4621819117588971520);
 kiln_label_2:;
