@@ -160,6 +160,37 @@ reasons** — that is the interpreter backlog, sorted by how many tests each unb
 
 ---
 
+## The bundles caught what the corpora did not: two more places the graph emitter went generic (2026-09-05, Claude `kiln-fast`)
+
+With the graph emitter on, `scripts/thirdparty.sh` reported three native divergences: mustache
+printed `Hello !` for `Hello kiln! [1][2]`, and postcss and vue-reactivity died with SIGSEGV.
+The native and differential corpora had been clean. Both bugs were the same shape -- a place
+where the stack emitter had a special case and the graph emitter took the generic path:
+
+- `in` and `instanceof` were handed to the binary helper as codes 13 and 14, which treats them
+  as "non-coercing" and answers something that is not `in`. The stack emitter lowers both
+  inline against `kiln_c99_has_computed` and `kiln_c99_instance_of`; the graph emitter now does
+  the same, verbatim. mustache's `hasProperty` is `obj != null && typeof obj === "object" &&
+  propName in obj`.
+- `MarkUninitialized` wrote the sentinel into the slot. When the slot holds a cell -- a
+  block-scoped `let` captured by a closure, re-entered by a loop -- the stack emitter writes the
+  sentinel *through* the cell; writing over it dropped the cell pointer and the next `StoreCell`
+  dereferenced the sentinel.
+
+Found by bisecting graph emission over function index with a temporary limit in
+`can_emit_from_graph`, one bundle build per probe with the generated-C cache cleared between
+builds because emission that varies with the environment must never hit the cache. Fourteen
+builds to the function; its source recovered from the closure-creation site's offset into the
+embedded module text.
+
+`conformance/native/graph-emitter-in-and-cells.js` holds both shapes, and the emitted C for it
+was checked to contain the cell-aware mark and the inline `in` inside graph-emitted functions,
+so the probe tests the emitter it is meant to test. The rule from this: **the thirdparty bundles
+are part of "the corpus" for an emitter change.** They took 40 seconds and found what 216
+hand-written probes did not.
+
+---
+
 ## Consolidation after the graph emitter: one proof, no second list, nothing silent (2026-09-05, Claude `kiln-fast`)
 
 Four things were removable once the emitter was correct, and each was a place two truths could
