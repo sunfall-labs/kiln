@@ -55,13 +55,23 @@ pub(crate) fn emit_tail_instruction(
             };
             // A fresh object every time the literal is evaluated, because `lastIndex` is mutable
             // and program-visible: two evaluations of one literal must not share a cursor.
-            writeln!(
-                output,
-                "    {{ kiln_value built; int status = kiln_c99_new_regexp(&built, {symbol}_constant_{pattern}, {}, {symbol}_constant_{flags}, {}, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = kiln_val_from_boundary(built); }}",
-                source.len(),
-                letters.len()
-            )
-            .unwrap();
+            if crate::regex::try_compile_regex(source, letters).is_some() {
+                writeln!(
+                    output,
+                    "    {{ kiln_value built; int status = kiln_c99_new_regexp_matcher(&built, {symbol}_constant_{pattern}, {}, {symbol}_constant_{flags}, {}, {symbol}_re_{pattern}_{flags}, {symbol}_re_{pattern}_{flags}_ascii, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = kiln_val_from_boundary(built); }}",
+                    source.len(),
+                    letters.len()
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    output,
+                    "    {{ kiln_value built; int status = kiln_c99_new_regexp(&built, {symbol}_constant_{pattern}, {}, {symbol}_constant_{flags}, {}, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = kiln_val_from_boundary(built); }}",
+                    source.len(),
+                    letters.len()
+                )
+                .unwrap();
+            }
         }
         Instruction::CallComputed { argc } => {
             // Not a `GetComputed` followed by a `Call`: that would discard the receiver, and

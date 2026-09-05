@@ -22,7 +22,7 @@ pub const C_ABI_VERSION: u32 = 1;
 /// This is deliberately independent from [`C_ABI_VERSION`]: diagnostics and private helper code
 /// can change emitted object bytes without changing the public embedding layout. Native artifact
 /// keys include this revision so those objects are never reused across generator changes.
-pub const C_GENERATOR_VERSION: u32 = 29;
+pub const C_GENERATOR_VERSION: u32 = 30;
 
 /// Realm policy that changes observable native execution.
 ///
@@ -416,6 +416,7 @@ mod direct;
 pub mod emit_graph;
 pub mod facts;
 pub mod graph;
+pub mod regex;
 pub mod summary;
 mod tail;
 pub mod verifier;
@@ -1311,6 +1312,37 @@ fn render_constant_declarations(output: &mut String, program: &Program, symbol: 
     }
 }
 
+fn render_regex_matchers(output: &mut String, program: &Program, symbol: &str) {
+    let mut seen = std::collections::BTreeSet::new();
+
+    let emit_if_compiled = |inst: &Instruction,
+                            seen: &mut std::collections::BTreeSet<(u32, u32)>,
+                            output: &mut String| {
+        if let Instruction::NewRegExp { pattern, flags } = inst {
+            if seen.insert((*pattern, *flags)) {
+                if let (Constant::String(source), Constant::String(letters)) = (
+                    &program.constants[*pattern as usize],
+                    &program.constants[*flags as usize],
+                ) {
+                    if let Some(compiled) = crate::regex::try_compile_regex(source, letters) {
+                        let prefix = format!("{symbol}_re_{pattern}_{flags}");
+                        crate::regex::emit_regex_matcher(output, &prefix, &compiled);
+                    }
+                }
+            }
+        }
+    };
+
+    for inst in &program.code {
+        emit_if_compiled(inst, &mut seen, output);
+    }
+    for func in &program.functions {
+        for inst in &func.code {
+            emit_if_compiled(inst, &mut seen, output);
+        }
+    }
+}
+
 /// The constants a named-property instruction uses as its key, sorted and deduplicated: the
 /// unit's share of the realm's intern table (ADR 0047).
 fn property_key_constants(program: &Program) -> Vec<u32> {
@@ -1748,6 +1780,7 @@ fn render(
     )
     .unwrap();
     render_constant_declarations(&mut output, program, symbol);
+    render_regex_matchers(&mut output, program, symbol);
     let keys = property_key_constants(program);
     render_key_table(&mut output, program, symbol, &keys);
     if uses_module_scope(program) {
@@ -1845,6 +1878,7 @@ fn render_module(
     )
     .unwrap();
     render_constant_declarations(&mut output, program, symbol);
+    render_regex_matchers(&mut output, program, symbol);
     let keys = property_key_constants(program);
     render_key_table(&mut output, program, symbol, &keys);
     if uses_module_scope(program) {
