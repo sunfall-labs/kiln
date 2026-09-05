@@ -229,6 +229,7 @@ extern int kiln_c99_op_val_set_property(kiln_host *host, kiln_val *stack, size_t
 extern int kiln_c99_op_val_to_property_key(kiln_host *host, kiln_val *stack, size_t *sp, int depth, kiln_value *thrown);
 extern int kiln_c99_op_val_get_computed(kiln_host *host, kiln_val *stack, size_t *sp, int depth, kiln_value *thrown);
 extern int kiln_c99_op_val_set_computed(kiln_host *host, kiln_val *stack, size_t *sp, int strict, int depth, kiln_value *thrown);
+extern int kiln_c99_val_call_method(kiln_host *host, kiln_val receiver, const kiln_val *args, size_t argc, const char *key, size_t key_len, int depth, kiln_value *thrown, kiln_c99_site *site, const char *inst_site, size_t inst_idx, const char *inst_op, kiln_val *out);
 extern int kiln_c99_op_val_call_method(kiln_host *host, kiln_val *stack, size_t *sp, const char *key, size_t key_len, size_t argc, int depth, kiln_value *thrown, kiln_c99_site *site, const char *inst_site, size_t inst_idx, const char *inst_op);
 extern int kiln_c99_op_val_call(kiln_host *host, kiln_val *stack, size_t *sp, size_t argc, int depth, kiln_value *thrown, const char *inst_site, size_t inst_idx, const char *inst_op);
 extern int kiln_c99_op_val_new(kiln_host *host, kiln_val *stack, size_t *sp, size_t argc, int depth, kiln_value *thrown);

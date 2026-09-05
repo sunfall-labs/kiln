@@ -25741,6 +25741,68 @@ static int kiln_c99_op_val_set_computed(kiln_host *host, kiln_val *stack, size_t
     return KILN_C99_OK;
 }
 
+/* A method call on machine values, end to end. The property is read once through the site's
+ * inline cache on `kiln_val`; a plain strict or arrow closure that publishes no frame is entered
+ * directly with the machine arguments; only a built-in method or an exotic callee crosses to the
+ * boundary representation, and then only its arguments. This is the seam the shape and slot
+ * migration left in front of every method call: the stack-shaped op below converts the whole
+ * frame both ways and re-reads nothing, but it does convert. */
+static int kiln_c99_val_call_method(kiln_host *host, kiln_val receiver, const kiln_val *args,
+                                    size_t argc, const char *key, size_t key_len, int depth,
+                                    kiln_value *thrown, kiln_c99_site *site,
+                                    const char *inst_site, size_t inst_idx, const char *inst_op,
+                                    kiln_val *out) {
+    kiln_val method;
+    int status = kiln_c99_val_read_property(host, receiver, key, key_len, depth, thrown, site, &method);
+    if (status == KILN_C99_CONTROL_ERROR) {
+        if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = kiln_val_to_boundary(receiver).tag;
+        if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = "CallMethod property lookup refused";
+        kiln_c99_note_refusal(inst_site, inst_idx, inst_op, (size_t)kiln_c99_diagnostic_active_depth);
+    } else if (status == KILN_C99_THROWN) {
+        if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = "CallMethod property lookup threw";
+        kiln_c99_note_refusal(inst_site, inst_idx, inst_op, (size_t)kiln_c99_diagnostic_active_depth);
+    }
+    if (status != KILN_C99_OK) return status;
+
+    if (KILN_VAL_IS_CLOSURE(method)) {
+        kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(method);
+        if ((plain->arrow || plain->strict) && !plain->generator && !kiln_c99_inheriting_new_target &&
+            depth < KILN_C99_MAX_CALL_DEPTH) {
+            kiln_val vreceiver = plain->arrow ? plain->captured_this : receiver;
+            *out = KILN_VAL_UNDEFINED;
+            status = kiln_c99_invoke_closure(host, out, plain, vreceiver, args, argc, depth, thrown, NULL, 0);
+            goto done;
+        }
+    }
+    {
+        /* A built-in method or an exotic callee: the boundary representation, arguments only. */
+        kiln_value bmethod = kiln_val_to_boundary(method);
+        kiln_value bself = kiln_val_to_boundary(receiver);
+        kiln_value bargs[argc > 0 ? argc : 1];
+        kiln_value bresult = kiln_c99_undefined();
+        for (size_t i = 0; i < argc; ++i) bargs[i] = kiln_val_to_boundary(args[i]);
+        if (bmethod.tag == KILN_VALUE_METHOD && depth < KILN_C99_MAX_CALL_DEPTH) {
+            status = kiln_c99_invoke_method(host, &bresult, bmethod.bits, bself, argc > 0 ? bargs : NULL, argc, depth, thrown);
+        } else {
+            status = kiln_c99_call(host, &bresult, bmethod, bself, argc > 0 ? bargs : NULL, argc, depth, thrown);
+        }
+        *out = kiln_val_from_boundary(bresult);
+    }
+done:
+    if (status == KILN_C99_CONTROL_ERROR) {
+        if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = kiln_val_to_boundary(receiver).tag;
+        if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = "CallMethod invocation refused";
+        kiln_c99_note_refusal(inst_site, inst_idx, inst_op, (size_t)kiln_c99_diagnostic_active_depth);
+    } else if (status == KILN_C99_THROWN) {
+        if (kiln_c99_diagnostic_detail == NULL) {
+            kiln_c99_diagnostic_receiver_tag = kiln_val_to_boundary(receiver).tag;
+            kiln_c99_diagnostic_detail = "CallMethod invocation threw";
+        }
+        kiln_c99_note_refusal(inst_site, inst_idx, inst_op, (size_t)kiln_c99_diagnostic_active_depth);
+    }
+    return status;
+}
+
 static int kiln_c99_op_val_call_method(kiln_host *host, kiln_val *stack, size_t *sp,
                                        const char *key, size_t key_len, size_t argc,
                                        int depth, kiln_value *thrown, kiln_c99_site *site,

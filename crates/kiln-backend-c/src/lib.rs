@@ -971,10 +971,45 @@ fn render_function(
     strict_functions: &[bool],
 ) -> Result<(), EmitError> {
     let scalar_proto = !proto_produces_references(proto, program);
-    if can_emit_from_graph(proto)
-        && let Ok(graph) = build_function_graph(proto, program)
-        && emit_graph::can_lower(&graph)
-    {
+    // `KILN_GRAPH_CENSUS=1` prints one line per function that does not take the graph emitter,
+    // naming why. Diagnostics only; it changes nothing emitted, so it cannot affect the cache.
+    let census = std::env::var_os("KILN_GRAPH_CENSUS").is_some();
+    let census_line = |reason: String| {
+        if census {
+            eprintln!("graph-census\t{diagnostic_site}\t{index}\t{reason}");
+        }
+    };
+    if !can_emit_from_graph(proto) {
+        census_line(if proto.generator || proto.asynchronous {
+            "generator-or-async".to_owned()
+        } else if !handler_targets(&proto.code).is_empty() {
+            "handlers".to_owned()
+        } else {
+            "switched-off".to_owned()
+        });
+    }
+    let built = if can_emit_from_graph(proto) {
+        match build_function_graph(proto, program) {
+            Ok(graph) => {
+                if emit_graph::can_lower(&graph) {
+                    Some(graph)
+                } else {
+                    census_line(format!(
+                        "cannot-lower {}",
+                        emit_graph::first_unlowerable(&graph).unwrap_or_default()
+                    ));
+                    None
+                }
+            }
+            Err(unsupported) => {
+                census_line(format!("builder {}", unsupported.instruction));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(graph) = built {
         // A graph the verifier rejects is a compiler bug, not a reason to use the other emitter
         // quietly. Under `KILN_GRAPH_STRICT` it aborts the build naming the function; the gate
         // sets it. It changes only whether the build fails, never what is emitted, so it cannot
