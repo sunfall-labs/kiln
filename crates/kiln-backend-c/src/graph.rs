@@ -20,22 +20,8 @@ pub struct BlockId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SiteId(pub u32);
 
-/// Lattice types tracked in the value graph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum GraphType {
-    #[default]
-    Val,
-    Number,
-    Int,
-    Boolean,
-    String,
-    Object,
-    Callable,
-    Undefined,
-    Null,
-}
-
-/// Operation effect category (two-valued invariant per ADR 0056).
+/// What an operation may do besides produce its value: nothing, or anything. Two-valued on
+/// purpose (plan invariant); a finer lattice waits for a benchmark that needs one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Effect {
     Pure,
@@ -179,11 +165,6 @@ pub enum GraphOp {
         prototype: ValueId,
         name: u32,
     },
-    SuperSet {
-        prototype: ValueId,
-        name: u32,
-        value: ValueId,
-    },
     SuperCall {
         constructor: ValueId,
         args: Vec<ValueId>,
@@ -197,37 +178,9 @@ pub enum GraphOp {
         slot: u32,
         value: ValueId,
     },
-    PrivateMethod {
-        object: ValueId,
-        slot: u32,
-    },
-    PrivateGetter {
-        object: ValueId,
-        slot: u32,
-    },
-    PrivateSetter {
-        object: ValueId,
-        slot: u32,
-    },
-    InPrivate {
-        object: ValueId,
-        slot: u32,
-    },
 
     // Modules
     ImportDynamic(ValueId),
-    ImportMeta,
-
-    // Speculation and Invariants
-    Guard {
-        condition: ValueId,
-        invariant_row: u32,
-        deopt_target: BlockId,
-    },
-    UnboxNumber(ValueId),
-    BoxNumber(ValueId),
-    UnboxInt(ValueId),
-    BoxInt(ValueId),
 
     // SSA Phi
     Phi {
@@ -243,10 +196,6 @@ impl GraphOp {
             | Self::LoadLocal(_)
             | Self::LoadThis
             | Self::LoadNewTarget
-            | Self::UnboxNumber(_)
-            | Self::BoxNumber(_)
-            | Self::UnboxInt(_)
-            | Self::BoxInt(_)
             | Self::Phi { .. } => Effect::Pure,
             Self::Unary {
                 op: UnaryOp::Not | UnaryOp::BitwiseNot | UnaryOp::Void,
@@ -292,7 +241,7 @@ pub enum Terminator {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BasicBlock {
     pub id: BlockId,
-    pub operations: Vec<(ValueId, GraphOp, GraphType)>,
+    pub operations: Vec<(ValueId, GraphOp)>,
     pub terminator: Terminator,
     pub predecessors: Vec<BlockId>,
     pub successors: Vec<BlockId>,
@@ -361,90 +310,193 @@ struct AbstractFrame {
     locals: HashMap<u32, ValueId>,
 }
 
-/// The values a function is *proven* to hold as numbers, with no guess anywhere.
+/// What a value is *proven* to be, with no guess anywhere.
 ///
-/// A number literal is a number; arithmetic on two numbers is a number; a phi is a number when
-/// every input is. Nothing else is, so a parameter, a property read or a call result never
-/// qualifies, and no guard is needed for what this returns: the proof is by construction.
-/// This is the optimistic fixpoint over the phis -- assume every phi is a number and downgrade
-/// until nothing changes -- which is what lets a loop's induction variable be proven from its
-/// literal start through its own increment.
+/// A literal is its own kind; arithmetic on two numbers is a number; a comparison, `!`, `in`
+/// and `instanceof` are booleans whatever their operands; `typeof` is a string; an array
+/// literal is an object; a function expression is callable; a phi is a kind when every input
+/// is that kind. Nothing else is proven, so a parameter, a property read or a call result never
+/// is, and no guard is needed for anything here: the proof is by construction.
 ///
-/// The graph builder's per-operation `GraphType` is not this: it marks `a - b` a number without
-/// looking at `a` or `b`, which is wrong for two bigints. Emission must use this set.
-pub fn proven_numbers(graph: &FunctionGraph) -> std::collections::HashSet<ValueId> {
-    use std::collections::HashSet;
-    // Greatest fixpoint: admit every value, then remove what the rules cannot keep, until
-    // stable. Starting from the full set is what makes a loop-carried phi survive: its
-    // back-edge input is defined later in block order, and a pass that had not yet admitted it
-    // would remove the phi first and never get it back.
-    let mut numbers: HashSet<ValueId> = graph
+/// This is the optimistic fixpoint: every value starts unconstrained, is lowered to what its
+/// operation and operands allow, and settles. Starting unconstrained is what lets a loop's
+/// induction variable be proven from its literal start through its own increment: the phi's
+/// back-edge input is defined later in block order and would otherwise be judged before it
+/// existed.
+///
+/// There is deliberately no per-operation type stored on the graph: the one that used to be
+/// there marked `a - b` a number without looking at `a` or `b`, which is wrong for bigints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Proven {
+    Number,
+    Boolean,
+    String,
+    Object,
+    Callable,
+    Undefined,
+    Null,
+}
+
+pub fn proven_types(graph: &FunctionGraph) -> HashMap<ValueId, Proven> {
+    // `None` in `state` is "unconstrained so far"; an absent key is "proven nothing".
+    let mut state: HashMap<ValueId, Option<Proven>> = graph
         .blocks
         .iter()
-        .flat_map(|b| b.operations.iter().map(|(vid, _, _)| *vid))
+        .flat_map(|b| b.operations.iter().map(|(vid, _)| (*vid, None)))
         .collect();
+    let number = |state: &HashMap<ValueId, Option<Proven>>, v: &ValueId| {
+        matches!(state.get(v), Some(None) | Some(Some(Proven::Number)))
+    };
     loop {
         let mut changed = false;
         for block in &graph.blocks {
-            for (vid, op, _) in &block.operations {
-                let is_number = match op {
-                    GraphOp::Const { constant, .. } => matches!(constant, Constant::Number(_)),
-                    GraphOp::Binary { op, left, right } => {
-                        numbers.contains(left)
-                            && numbers.contains(right)
-                            && matches!(
-                                op,
-                                BinaryOp::Add
-                                    | BinaryOp::Subtract
-                                    | BinaryOp::Multiply
-                                    | BinaryOp::Divide
-                                    | BinaryOp::Remainder
-                                    | BinaryOp::Exponentiate
-                                    | BinaryOp::BitwiseAnd
-                                    | BinaryOp::BitwiseOr
-                                    | BinaryOp::BitwiseXor
-                                    | BinaryOp::ShiftLeft
-                                    | BinaryOp::ShiftRight
-                                    | BinaryOp::UnsignedShiftRight
-                            )
-                    }
-                    GraphOp::Unary { op, value } => {
-                        numbers.contains(value)
-                            && matches!(
-                                op,
-                                UnaryOp::Plus
-                                    | UnaryOp::Negate
-                                    | UnaryOp::ToNumeric
-                                    | UnaryOp::Increment
-                                    | UnaryOp::Decrement
-                                    | UnaryOp::BitwiseNot
-                            )
-                    }
+            for (vid, op) in &block.operations {
+                // `Some(kind)` proves it; `None` proves nothing. An operand still unconstrained
+                // counts as agreeing, which is the optimism.
+                let verdict: Option<Proven> = match op {
+                    GraphOp::Const { constant, .. } => Some(match constant {
+                        Constant::Number(_) => Proven::Number,
+                        Constant::String(_) => Proven::String,
+                        Constant::Boolean(_) => Proven::Boolean,
+                        Constant::Undefined => Proven::Undefined,
+                        Constant::Null => Proven::Null,
+                        Constant::BigInt(_) => {
+                            finish(&mut state, vid, None, &mut changed);
+                            continue;
+                        }
+                    }),
+                    GraphOp::Binary { op, left, right } => match op {
+                        BinaryOp::StrictEqual
+                        | BinaryOp::StrictNotEqual
+                        | BinaryOp::LooseEqual
+                        | BinaryOp::LooseNotEqual
+                        | BinaryOp::LessThan
+                        | BinaryOp::LessThanOrEqual
+                        | BinaryOp::GreaterThan
+                        | BinaryOp::GreaterThanOrEqual
+                        | BinaryOp::In
+                        | BinaryOp::InstanceOf => Some(Proven::Boolean),
+                        _ => (number(&state, left) && number(&state, right))
+                            .then_some(Proven::Number),
+                    },
+                    GraphOp::Unary { op, value } => match op {
+                        UnaryOp::Not => Some(Proven::Boolean),
+                        UnaryOp::TypeOf => Some(Proven::String),
+                        UnaryOp::Void => Some(Proven::Undefined),
+                        _ => number(&state, value).then_some(Proven::Number),
+                    },
+                    GraphOp::NewArray { .. } => Some(Proven::Object),
+                    GraphOp::MakeFunction { .. } => Some(Proven::Callable),
                     GraphOp::StoreLocal { value, .. }
                     | GraphOp::StoreCell { value, .. }
                     | GraphOp::StoreGlobal { value, .. }
-                    | GraphOp::CheckTdz { value, .. } => numbers.contains(value),
-                    GraphOp::Phi { inputs } => inputs.iter().all(|(_, v)| numbers.contains(v)),
-                    _ => false,
-                };
-                if is_number != numbers.contains(vid) {
-                    if is_number {
-                        numbers.insert(*vid);
-                    } else {
-                        numbers.remove(vid);
+                    | GraphOp::CheckTdz { value, .. } => state.get(value).copied().flatten(),
+                    GraphOp::Phi { inputs } => {
+                        let mut agreed: Option<Proven> = None;
+                        let mut disagree = false;
+                        for (_, input) in inputs {
+                            match state.get(input).copied().flatten() {
+                                None if state.contains_key(input) && state[input].is_none() => {}
+                                None => {
+                                    disagree = true;
+                                    break;
+                                }
+                                Some(kind) => match agreed {
+                                    None => agreed = Some(kind),
+                                    Some(prior) if prior == kind => {}
+                                    Some(_) => {
+                                        disagree = true;
+                                        break;
+                                    }
+                                },
+                            }
+                        }
+                        if disagree {
+                            None
+                        } else if agreed.is_none() {
+                            // Every input is still unconstrained: stay unconstrained.
+                            continue;
+                        } else {
+                            agreed
+                        }
                     }
-                    changed = true;
-                }
+                    _ => None,
+                };
+                finish(&mut state, vid, verdict, &mut changed);
             }
         }
         if !changed {
-            return numbers;
+            break;
         }
+    }
+    state
+        .into_iter()
+        .filter_map(|(vid, kind)| kind.map(|k| (vid, k)))
+        .collect()
+}
+
+/// Record a verdict for `vid`: unconstrained becomes the verdict; a proven kind may only be
+/// withdrawn, never changed, so the iteration is monotone and terminates.
+fn finish(
+    state: &mut HashMap<ValueId, Option<Proven>>,
+    vid: &ValueId,
+    verdict: Option<Proven>,
+    changed: &mut bool,
+) {
+    match state.get(vid).copied() {
+        Some(None) => {
+            // Unconstrained: take the verdict, or mark "proven nothing" by removing the key.
+            match verdict {
+                Some(kind) => {
+                    state.insert(*vid, Some(kind));
+                    *changed = true;
+                }
+                None => {
+                    state.remove(vid);
+                    *changed = true;
+                }
+            }
+        }
+        Some(Some(prior)) => {
+            if verdict != Some(prior) {
+                state.remove(vid);
+                *changed = true;
+            }
+        }
+        None => {}
     }
 }
 
-/// Abstract-interpret stack bytecode into a verified SSA Value Graph.
-pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> FunctionGraph {
+/// The values proven to be numbers; what the emitter types as `double`.
+pub fn proven_numbers(graph: &FunctionGraph) -> std::collections::HashSet<ValueId> {
+    proven_types(graph)
+        .into_iter()
+        .filter_map(|(vid, kind)| (kind == Proven::Number).then_some(vid))
+        .collect()
+}
+
+/// An instruction the graph builder does not lower. The emitter falls back to the stack machine
+/// for the function, loudly under `KILN_GRAPH_STRICT`; nothing is silently skipped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsupportedInstruction {
+    pub pc: usize,
+    pub instruction: String,
+}
+
+impl std::fmt::Display for UnsupportedInstruction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the value graph does not lower {} at pc {}",
+            self.instruction, self.pc
+        )
+    }
+}
+
+pub fn build_function_graph(
+    proto: &FunctionProto,
+    program: &Program,
+) -> Result<FunctionGraph, UnsupportedInstruction> {
     let mut graph =
         FunctionGraph::new(proto.name.clone(), proto.parameter_count, proto.local_count);
 
@@ -458,7 +510,6 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                 index: 0,
                 constant: Constant::Undefined,
             },
-            GraphType::Undefined,
         )];
         graph.blocks.push(BasicBlock {
             id: block_id,
@@ -468,7 +519,7 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
             successors: Vec::new(),
             exception_handler: None,
         });
-        return graph;
+        return Ok(graph);
     }
 
     // Phase 1: Identify Basic Block boundaries
@@ -658,12 +709,12 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
             // which is the bound parameters and `undefined`. A phi or a use elsewhere then has a
             // definition to point at; before this, a parameter read through the graph had none.
             for (slot, &vid) in graph.initial_locals.clone().iter().enumerate() {
-                operations.push((vid, GraphOp::LoadLocal(slot as u32), GraphType::Val));
+                operations.push((vid, GraphOp::LoadLocal(slot as u32)));
             }
         }
         if let Some(set) = merges.phis.get(&block_id) {
             for &phi in set.locals.iter().chain(set.stack.iter().flatten()) {
-                operations.push((phi, GraphOp::Phi { inputs: Vec::new() }, GraphType::Val));
+                operations.push((phi, GraphOp::Phi { inputs: Vec::new() }));
             }
         }
 
@@ -677,21 +728,12 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                         .get(*c_idx as usize)
                         .cloned()
                         .unwrap_or(Constant::Undefined);
-                    let gtype = match &constant {
-                        Constant::Number(_) => GraphType::Number,
-                        Constant::String(_) => GraphType::String,
-                        Constant::Boolean(_) => GraphType::Boolean,
-                        Constant::Null => GraphType::Null,
-                        Constant::Undefined => GraphType::Undefined,
-                        Constant::BigInt(_) => GraphType::Val,
-                    };
                     operations.push((
                         val,
                         GraphOp::Const {
                             index: *c_idx,
                             constant,
                         },
-                        gtype,
                     ));
                     frame.stack.push(val);
                 }
@@ -700,7 +742,7 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                         v
                     } else {
                         let v = graph.alloc_value();
-                        operations.push((v, GraphOp::LoadLocal(*slot), GraphType::Val));
+                        operations.push((v, GraphOp::LoadLocal(*slot)));
                         frame.locals.insert(*slot, v);
                         v
                     };
@@ -716,7 +758,6 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                                 slot: *slot,
                                 value: val,
                             },
-                            GraphType::Val,
                         ));
                     }
                 }
@@ -740,18 +781,12 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                 Instruction::Unary(op) => {
                     let operand = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
                     let res = graph.alloc_value();
-                    let gtype = match op {
-                        UnaryOp::Not => GraphType::Boolean,
-                        UnaryOp::Plus | UnaryOp::Negate => GraphType::Number,
-                        _ => GraphType::Val,
-                    };
                     operations.push((
                         res,
                         GraphOp::Unary {
                             op: *op,
                             value: operand,
                         },
-                        gtype,
                     ));
                     frame.stack.push(res);
                 }
@@ -759,24 +794,6 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                     let right = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
                     let left = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
                     let res = graph.alloc_value();
-                    let gtype = match op {
-                        BinaryOp::StrictEqual
-                        | BinaryOp::StrictNotEqual
-                        | BinaryOp::LooseEqual
-                        | BinaryOp::LooseNotEqual
-                        | BinaryOp::LessThan
-                        | BinaryOp::LessThanOrEqual
-                        | BinaryOp::GreaterThan
-                        | BinaryOp::GreaterThanOrEqual
-                        | BinaryOp::In
-                        | BinaryOp::InstanceOf => GraphType::Boolean,
-                        BinaryOp::Subtract
-                        | BinaryOp::Multiply
-                        | BinaryOp::Divide
-                        | BinaryOp::Remainder
-                        | BinaryOp::Exponentiate => GraphType::Number,
-                        _ => GraphType::Val,
-                    };
                     operations.push((
                         res,
                         GraphOp::Binary {
@@ -784,7 +801,6 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                             left,
                             right,
                         },
-                        gtype,
                     ));
                     frame.stack.push(res);
                 }
@@ -909,7 +925,7 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                     let callee = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
                     let site = graph.alloc_site();
                     let result = graph.alloc_value();
-                    operations.push((result, GraphOp::Call { callee, args, site }, GraphType::Val));
+                    operations.push((result, GraphOp::Call { callee, args, site }));
                     frame.stack.push(result);
                 }
                 Instruction::CallMethod { name, argc } => {
@@ -929,7 +945,6 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                             args,
                             site,
                         },
-                        GraphType::Val,
                     ));
                     frame.stack.push(result);
                 }
@@ -951,7 +966,6 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                             args,
                             site,
                         },
-                        GraphType::Val,
                     ));
                     frame.stack.push(result);
                 }
@@ -970,7 +984,6 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                             args,
                             site,
                         },
-                        GraphType::Val,
                     ));
                     frame.stack.push(result);
                 }
@@ -985,7 +998,6 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                             name: *name,
                             site,
                         },
-                        GraphType::Val,
                     ));
                     frame.stack.push(result);
                 }
@@ -1002,7 +1014,6 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                             value,
                             site,
                         },
-                        GraphType::Val,
                     ));
                     frame.stack.push(result);
                 }
@@ -1020,7 +1031,6 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                             strict: *strict,
                             site,
                         },
-                        GraphType::Val,
                     ));
                     frame.stack.push(result);
                 }
@@ -1029,11 +1039,7 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                     let object = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
                     let site = graph.alloc_site();
                     let result = graph.alloc_value();
-                    operations.push((
-                        result,
-                        GraphOp::GetComputed { object, key, site },
-                        GraphType::Val,
-                    ));
+                    operations.push((result, GraphOp::GetComputed { object, key, site }));
                     frame.stack.push(result);
                 }
                 Instruction::SetComputed => {
@@ -1050,7 +1056,6 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                             value,
                             site,
                         },
-                        GraphType::Val,
                     ));
                     frame.stack.push(result);
                 }
@@ -1069,7 +1074,6 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                             strict: *strict,
                             site,
                         },
-                        GraphType::Val,
                     ));
                     frame.stack.push(result);
                 }
@@ -1082,7 +1086,6 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                             index: *index,
                             site,
                         },
-                        GraphType::Callable,
                     ));
                     frame.stack.push(result);
                 }
@@ -1094,17 +1097,13 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                     elements.reverse();
                     let site = graph.alloc_site();
                     let result = graph.alloc_value();
-                    operations.push((
-                        result,
-                        GraphOp::NewArray { elements, site },
-                        GraphType::Object,
-                    ));
+                    operations.push((result, GraphOp::NewArray { elements, site }));
                     frame.stack.push(result);
                 }
                 Instruction::IterableToArray => {
                     let iter = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
                     let result = graph.alloc_value();
-                    operations.push((result, GraphOp::IterableToArray(iter), GraphType::Object));
+                    operations.push((result, GraphOp::IterableToArray(iter)));
                     frame.stack.push(result);
                 }
                 Instruction::SpreadInto => {
@@ -1117,7 +1116,6 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                             target,
                             iterable: iter,
                         },
-                        GraphType::Object,
                     ));
                     frame.stack.push(result);
                 }
@@ -1125,36 +1123,32 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                     let key = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
                     let object = *frame.stack.last().unwrap_or(&key);
                     let result = graph.alloc_value();
-                    operations.push((
-                        result,
-                        GraphOp::ToPropertyKey { object, key },
-                        GraphType::Val,
-                    ));
+                    operations.push((result, GraphOp::ToPropertyKey { object, key }));
                     frame.stack.push(result);
                 }
                 Instruction::LoadThis => {
                     let result = graph.alloc_value();
-                    operations.push((result, GraphOp::LoadThis, GraphType::Val));
+                    operations.push((result, GraphOp::LoadThis));
                     frame.stack.push(result);
                 }
                 Instruction::LoadNewTarget => {
                     let result = graph.alloc_value();
-                    operations.push((result, GraphOp::LoadNewTarget, GraphType::Val));
+                    operations.push((result, GraphOp::LoadNewTarget));
                     frame.stack.push(result);
                 }
                 Instruction::LoadArguments => {
                     let result = graph.alloc_value();
-                    operations.push((result, GraphOp::LoadArguments, GraphType::Object));
+                    operations.push((result, GraphOp::LoadArguments));
                     frame.stack.push(result);
                 }
                 Instruction::RestArguments(offset) => {
                     let result = graph.alloc_value();
-                    operations.push((result, GraphOp::RestArguments(*offset), GraphType::Object));
+                    operations.push((result, GraphOp::RestArguments(*offset)));
                     frame.stack.push(result);
                 }
                 Instruction::LoadCell(slot) => {
                     let result = graph.alloc_value();
-                    operations.push((result, GraphOp::LoadCell(*slot), GraphType::Val));
+                    operations.push((result, GraphOp::LoadCell(*slot)));
                     frame.stack.push(result);
                 }
                 Instruction::StoreCell(slot) => {
@@ -1166,17 +1160,16 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                                 slot: *slot,
                                 value: val,
                             },
-                            GraphType::Val,
                         ));
                     }
                 }
                 Instruction::NewCell(slot) => {
                     let res = graph.alloc_value();
-                    operations.push((res, GraphOp::MakeCell(*slot), GraphType::Val));
+                    operations.push((res, GraphOp::MakeCell(*slot)));
                 }
                 Instruction::LoadGlobal(slot) => {
                     let result = graph.alloc_value();
-                    operations.push((result, GraphOp::LoadGlobal(*slot), GraphType::Val));
+                    operations.push((result, GraphOp::LoadGlobal(*slot)));
                     frame.stack.push(result);
                 }
                 Instruction::StoreGlobal(slot) => {
@@ -1188,13 +1181,12 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                                 slot: *slot,
                                 value: val,
                             },
-                            GraphType::Val,
                         ));
                     }
                 }
                 Instruction::MarkUninitialized(slot) => {
                     let res = graph.alloc_value();
-                    operations.push((res, GraphOp::MarkUninitialized(*slot), GraphType::Val));
+                    operations.push((res, GraphOp::MarkUninitialized(*slot)));
                     frame.locals.insert(*slot, res);
                 }
                 Instruction::Yield => {
@@ -1237,11 +1229,7 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                     let prototype = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
                     let object = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
                     let res = graph.alloc_value();
-                    operations.push((
-                        res,
-                        GraphOp::SetPrototype { object, prototype },
-                        GraphType::Object,
-                    ));
+                    operations.push((res, GraphOp::SetPrototype { object, prototype }));
                     frame.stack.push(res);
                 }
                 Instruction::LoadSuperProperty(name) => {
@@ -1253,7 +1241,6 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                             prototype: proto_val,
                             name: *name,
                         },
-                        GraphType::Val,
                     ));
                     frame.stack.push(res);
                 }
@@ -1269,7 +1256,6 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                             key,
                             site,
                         },
-                        GraphType::Val,
                     ));
                     frame.stack.push(res);
                 }
@@ -1287,7 +1273,6 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                             constructor: ctor,
                             args,
                         },
-                        GraphType::Val,
                     ));
                     frame.stack.push(res);
                 }
@@ -1300,7 +1285,6 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                             object,
                             slot: *slot,
                         },
-                        GraphType::Val,
                     ));
                     frame.stack.push(res);
                 }
@@ -1315,7 +1299,6 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                             slot: *slot,
                             value,
                         },
-                        GraphType::Val,
                     ));
                     frame.stack.push(res);
                 }
@@ -1325,20 +1308,24 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                         args.push(arg);
                     }
                     let res = graph.alloc_value();
-                    operations.push((
-                        res,
-                        GraphOp::DirectEval { site_idx: 0, args },
-                        GraphType::Val,
-                    ));
+                    operations.push((res, GraphOp::DirectEval { site_idx: 0, args }));
                     frame.stack.push(res);
                 }
                 Instruction::DynamicImport => {
                     let specifier = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
                     let res = graph.alloc_value();
-                    operations.push((res, GraphOp::ImportDynamic(specifier), GraphType::Object));
+                    operations.push((res, GraphOp::ImportDynamic(specifier)));
                     frame.stack.push(res);
                 }
-                _ => {}
+                // Handlers were consumed by the pre-pass that assigns each block its handler;
+                // the walk itself carries its frame straight through them.
+                Instruction::PushHandler(_) | Instruction::PopHandler => {}
+                other => {
+                    return Err(UnsupportedInstruction {
+                        pc,
+                        instruction: format!("{other:?}"),
+                    });
+                }
             }
         }
 
@@ -1370,7 +1357,7 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
 
     // Phase 3b: fill the phi inputs collected while the predecessors were walked.
     for block in &mut basic_blocks {
-        for (vid, op, _) in &mut block.operations {
+        for (vid, op) in &mut block.operations {
             if let GraphOp::Phi { inputs } = op {
                 if let Some(collected) = merges.inputs.get(vid) {
                     *inputs = collected.clone();
@@ -1394,7 +1381,7 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
     }
 
     graph.blocks = basic_blocks;
-    graph
+    Ok(graph)
 }
 
 /// The phis a merge block owns: one per local slot, allocated before the walk, and one per stack
@@ -1424,7 +1411,7 @@ fn propagate_frame(
     target: BlockId,
     outgoing: &AbstractFrame,
     graph: &mut FunctionGraph,
-    operations: &mut Vec<(ValueId, GraphOp, GraphType)>,
+    operations: &mut Vec<(ValueId, GraphOp)>,
 ) {
     let Some(set) = merges.phis.get_mut(&target) else {
         frames.entry(target).or_insert_with(|| outgoing.clone());
@@ -1435,7 +1422,7 @@ fn propagate_frame(
             Some(&v) => v,
             None => {
                 let v = graph.alloc_value();
-                operations.push((v, GraphOp::LoadLocal(slot as u32), GraphType::Val));
+                operations.push((v, GraphOp::LoadLocal(slot as u32)));
                 v
             }
         };

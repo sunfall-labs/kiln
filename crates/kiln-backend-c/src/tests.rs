@@ -4616,25 +4616,32 @@ fn proven_numbers_reach_a_loop_carried_phi_and_stop_at_a_parameter() {
         local_count: 0,
         functions: vec![proto.clone()],
     };
-    let graph = build_function_graph(&proto, &program);
+    let graph = build_function_graph(&proto, &program).unwrap();
     verify_function_graph(&graph).unwrap();
     let numbers = crate::graph::proven_numbers(&graph);
 
-    let header = graph.blocks.iter().find(|b| b.predecessors.len() == 2).unwrap();
+    let header = graph
+        .blocks
+        .iter()
+        .find(|b| b.predecessors.len() == 2)
+        .unwrap();
     let phis: Vec<ValueId> = header
         .operations
         .iter()
-        .filter(|(_, op, _)| matches!(op, GraphOp::Phi { .. }))
-        .map(|(v, _, _)| *v)
+        .filter(|(_, op)| matches!(op, GraphOp::Phi { .. }))
+        .map(|(v, _)| *v)
         .collect();
     // Slot 0 is the parameter: its phi is not proven. Slots 1 and 2 are.
-    assert!(!numbers.contains(&phis[0]), "a parameter's phi is never proven");
+    assert!(
+        !numbers.contains(&phis[0]),
+        "a parameter's phi is never proven"
+    );
     assert!(numbers.contains(&phis[1]), "sum is proven through its phi");
     assert!(numbers.contains(&phis[2]), "i is proven through its phi");
 
     // Every arithmetic result in the body is proven; the compare against `n` is not.
     for block in &graph.blocks {
-        for (vid, op, _) in &block.operations {
+        for (vid, op) in &block.operations {
             if let GraphOp::Binary { op, left, .. } = op {
                 match op {
                     BinaryOp::Add => assert!(numbers.contains(vid), "sum += i and i++ are typed"),
@@ -4706,7 +4713,7 @@ fn value_graph_merges_locals_at_a_loop_header_with_phis() {
         functions: vec![proto.clone()],
     };
 
-    let graph = build_function_graph(&proto, &program);
+    let graph = build_function_graph(&proto, &program).unwrap();
     verify_function_graph(&graph).expect("a loop with phis verifies");
 
     let header = graph
@@ -4717,7 +4724,7 @@ fn value_graph_merges_locals_at_a_loop_header_with_phis() {
     let phis: Vec<&Vec<(BlockId, ValueId)>> = header
         .operations
         .iter()
-        .filter_map(|(_, op, _)| match op {
+        .filter_map(|(_, op)| match op {
             GraphOp::Phi { inputs } => Some(inputs),
             _ => None,
         })
@@ -4733,13 +4740,13 @@ fn value_graph_merges_locals_at_a_loop_header_with_phis() {
     let phi_ids: Vec<ValueId> = header
         .operations
         .iter()
-        .filter(|(_, op, _)| matches!(op, GraphOp::Phi { .. }))
-        .map(|(v, _, _)| *v)
+        .filter(|(_, op)| matches!(op, GraphOp::Phi { .. }))
+        .map(|(v, _)| *v)
         .collect();
     let compares_a_phi = header
         .operations
         .iter()
-        .any(|(_, op, _)| matches!(op, GraphOp::Binary { left, .. } if phi_ids.contains(left)));
+        .any(|(_, op)| matches!(op, GraphOp::Binary { left, .. } if phi_ids.contains(left)));
     assert!(compares_a_phi, "the header's compare must read a phi");
 
     // The entry block defines every slot the function starts with, so a parameter read or a
@@ -4748,8 +4755,8 @@ fn value_graph_merges_locals_at_a_loop_header_with_phis() {
     let defined: Vec<ValueId> = entry
         .operations
         .iter()
-        .filter(|(_, op, _)| matches!(op, GraphOp::LoadLocal(_)))
-        .map(|(v, _, _)| *v)
+        .filter(|(_, op)| matches!(op, GraphOp::LoadLocal(_)))
+        .map(|(v, _)| *v)
         .collect();
     for slot_value in &graph.initial_locals {
         assert!(defined.contains(slot_value));
@@ -4811,7 +4818,7 @@ fn value_graph_builds_and_verifies_scalar_loop() {
         functions: vec![proto.clone()],
     };
 
-    let graph = build_function_graph(&proto, &program);
+    let graph = build_function_graph(&proto, &program).unwrap();
     assert!(!graph.blocks.is_empty());
     assert!(verify_function_graph(&graph).is_ok());
 }
@@ -4853,7 +4860,7 @@ fn value_graph_builds_and_verifies_try_catch() {
         functions: vec![proto.clone()],
     };
 
-    let graph = build_function_graph(&proto, &program);
+    let graph = build_function_graph(&proto, &program).unwrap();
     assert!(verify_function_graph(&graph).is_ok());
 }
 
@@ -4908,7 +4915,7 @@ fn value_graph_lowers_to_c_without_stack_or_sp() {
         functions: vec![proto.clone()],
     };
 
-    let graph = build_function_graph(&proto, &program);
+    let graph = build_function_graph(&proto, &program).unwrap();
     assert!(verify_function_graph(&graph).is_ok());
 
     let mut output = String::new();

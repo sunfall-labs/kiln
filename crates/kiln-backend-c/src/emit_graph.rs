@@ -13,6 +13,45 @@ use kiln_ir::{BinaryOp, Constant, FunctionProto, Program, UnaryOp};
 use std::collections::HashSet;
 use std::fmt::Write;
 
+/// Whether every operation in `graph` has a lowering below. This is the one place that decides
+/// what the graph emitter takes; `render_function` asks it and otherwise uses the stack emitter.
+pub fn can_lower(graph: &FunctionGraph) -> bool {
+    graph.blocks.iter().all(|block| {
+        !matches!(
+            block.terminator,
+            Terminator::Yield { .. } | Terminator::Await { .. }
+        ) && block.operations.iter().all(|(_, op)| {
+            matches!(
+                op,
+                GraphOp::Const { .. }
+                    | GraphOp::LoadLocal(_)
+                    | GraphOp::StoreLocal { .. }
+                    | GraphOp::LoadCell(_)
+                    | GraphOp::StoreCell { .. }
+                    | GraphOp::MakeCell(_)
+                    | GraphOp::LoadGlobal(_)
+                    | GraphOp::StoreGlobal { .. }
+                    | GraphOp::LoadThis
+                    | GraphOp::LoadNewTarget
+                    | GraphOp::MarkUninitialized(_)
+                    | GraphOp::CheckTdz { .. }
+                    | GraphOp::Unary { .. }
+                    | GraphOp::Binary { .. }
+                    | GraphOp::Call { .. }
+                    | GraphOp::CallMethod { .. }
+                    | GraphOp::NewArray { .. }
+                    | GraphOp::GetProperty { .. }
+                    | GraphOp::SetProperty { .. }
+                    | GraphOp::SetPropertyStrict { .. }
+                    | GraphOp::GetComputed { .. }
+                    | GraphOp::SetComputed { .. }
+                    | GraphOp::SetComputedStrict { .. }
+                    | GraphOp::Phi { .. }
+            )
+        })
+    })
+}
+
 /// Emits the C99 function body for a function proto using its SSA Value Graph.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_function_from_graph(
@@ -87,6 +126,11 @@ pub fn emit_function_from_graph(
     // into the `kiln_val` twin for whoever reads the value untyped. Clang deletes a box nothing
     // reads. Nothing here is a guess, so nothing here needs a guard.
     let numbers = proven_numbers(graph);
+    let defs: std::collections::HashMap<ValueId, &GraphOp> = graph
+        .blocks
+        .iter()
+        .flat_map(|b| b.operations.iter().map(|(v, op)| (*v, op)))
+        .collect();
     if !numbers.is_empty() {
         let mut ids: Vec<u32> = numbers.iter().map(|v| v.0).collect();
         ids.sort_unstable();
@@ -114,7 +158,7 @@ pub fn emit_function_from_graph(
     for block in &graph.blocks {
         writeln!(output, "kiln_block_{}:;", block.id.0).unwrap();
 
-        for &(vid, ref op, _gtype) in &block.operations {
+        for &(vid, ref op) in &block.operations {
             emit_graph_op(
                 output,
                 vid,
@@ -127,7 +171,7 @@ pub fn emit_function_from_graph(
             );
         }
 
-        emit_terminator(output, graph, block, &block.terminator, &numbers);
+        emit_terminator(output, graph, block, &block.terminator, &numbers, &defs);
     }
 
     // 6. Unwind and refusal handlers
@@ -649,6 +693,7 @@ fn emit_terminator(
     current_block: &BasicBlock,
     terminator: &Terminator,
     numbers: &HashSet<ValueId>,
+    defs: &std::collections::HashMap<ValueId, &GraphOp>,
 ) {
     match terminator {
         Terminator::Return(Some(val)) => {
@@ -674,7 +719,27 @@ fn emit_terminator(
             true_block,
             false_block,
         } => {
-            writeln!(output, "    if (kiln_c99_val_truthy(v{})) {{", condition.0).unwrap();
+            // A comparison of two proven numbers branches on the doubles directly; anything
+            // else asks the value for its truthiness.
+            let test = match defs.get(condition) {
+                Some(GraphOp::Binary { op, left, right })
+                    if numbers.contains(left) && numbers.contains(right) =>
+                {
+                    let sym = match op {
+                        BinaryOp::LessThan => Some("<"),
+                        BinaryOp::LessThanOrEqual => Some("<="),
+                        BinaryOp::GreaterThan => Some(">"),
+                        BinaryOp::GreaterThanOrEqual => Some(">="),
+                        BinaryOp::StrictEqual | BinaryOp::LooseEqual => Some("=="),
+                        BinaryOp::StrictNotEqual | BinaryOp::LooseNotEqual => Some("!="),
+                        _ => None,
+                    };
+                    sym.map(|sym| format!("d{} {sym} d{}", left.0, right.0))
+                }
+                _ => None,
+            }
+            .unwrap_or_else(|| format!("kiln_c99_val_truthy(v{})", condition.0));
+            writeln!(output, "    if ({test}) {{").unwrap();
             emit_phi_assignments(output, graph, current_block.id, *true_block, numbers);
             writeln!(output, "        goto kiln_block_{};", true_block.0).unwrap();
             output.push_str("    } else {\n");
@@ -704,7 +769,7 @@ fn emit_phi_assignments(
         return;
     };
     let mut moves: Vec<(u32, u32)> = Vec::new();
-    for &(phi_vid, ref op, _) in &target_block.operations {
+    for &(phi_vid, ref op) in &target_block.operations {
         if let GraphOp::Phi { inputs } = op {
             for &(pred, in_vid) in inputs {
                 if pred == from && in_vid != phi_vid {
