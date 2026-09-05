@@ -6487,7 +6487,7 @@ fn parse_worker_count_semantics() {
 
     // Live auto queries actual online cpus
     let live = parse_worker_count(Some("auto"));
-    assert!(live >= 1 && live <= 1024);
+    assert!((1..=1024).contains(&live));
 }
 
 #[test]
@@ -6575,7 +6575,7 @@ int main(void) {
 
     let auto_res = run_with(Some("auto"));
     let auto_count: usize = auto_res.parse().expect("valid integer from auto");
-    assert!(auto_count >= 1 && auto_count <= 1024);
+    assert!((1..=1024).contains(&auto_count));
     assert_eq!(run_with(Some("Auto")), auto_res);
     assert_eq!(run_with(Some("AUTO")), auto_res);
 }

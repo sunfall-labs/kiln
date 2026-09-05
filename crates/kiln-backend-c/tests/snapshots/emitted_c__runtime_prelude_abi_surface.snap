@@ -1342,6 +1342,7 @@ static int kiln_c99_random(kiln_host *host, double *out) {
 static int kiln_c99_hex_digit(char character) {
 static int kiln_c99_append_hex(kiln_text *text, unsigned value, int width) {
 static int kiln_c99_valid_utf8(const char *bytes, size_t len) {
+static kiln_node_response *kiln_c99_active_http_response = NULL;
 static int kiln_c99_url_construct(kiln_value *out, const kiln_value *args, size_t argc,
 static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,
 static int kiln_c99_form_decode(const char *bytes, size_t len, kiln_value *out) {
@@ -1576,6 +1577,8 @@ static int kiln_c99_install_event_emitter_methods(kiln_value target) {
 static int kiln_c99_install_readable_methods(kiln_value target) {
 static int kiln_c99_install_writable_methods(kiln_value target) {
 static int kiln_c99_install_server_response_methods(kiln_value target) {
+static const char kiln_c99_http_version_11[] = "1.1";
+static const char kiln_c99_http_version_10[] = "1.0";
 static int kiln_c99_node_incoming_message_prototype(kiln_value *out) {
 static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_node_set_hidden_pointer(kiln_value object, const char *key, size_t key_len,
@@ -1596,8 +1599,6 @@ static void kiln_c99_node_cancel_request(uint64_t *request) {
 static int kiln_c99_node_close_socket(kiln_node_socket *socket, int force) {
 static int kiln_c99_node_socket_object(kiln_node_socket *socket, kiln_value *thrown) {
 static int kiln_c99_node_socket_ready_state(kiln_node_socket *socket,
-static const char kiln_c99_http_version_11[] = "1.1";
-static const char kiln_c99_http_version_10[] = "1.0";
 static const char kiln_c99_transfer_encoding_chunked[] = "chunked";
 static const char kiln_c99_slash[] = "/";
 static kiln_value kiln_c99_node_http_target_text(const char *bytes, size_t len) {
