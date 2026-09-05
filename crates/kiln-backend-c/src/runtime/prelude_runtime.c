@@ -2044,7 +2044,7 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
             for (index = 0; index < object->shape->property_count; ++index) {
                 kiln_c99_gc_mark_block(heap, object->shape->keys[index]);
                 if (object->slots != NULL) {
-                    kiln_c99_gc_mark_value(heap, &object->slots[index]);
+                    kiln_c99_gc_mark_val(heap, object->slots[index]);
                 }
             }
         }
@@ -2685,7 +2685,7 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
         object->properties[pos].accessor = 0;
         object->properties[pos].refused = 0;
         object->properties[pos].value = (object->slots != NULL && i < object->slot_capacity)
-                                          ? object->slots[i]
+                                          ? kiln_val_to_boundary(object->slots[i])
                                           : kiln_c99_undefined();
         object->properties[pos].getter = kiln_c99_undefined();
         object->properties[pos].setter = kiln_c99_undefined();
@@ -2721,7 +2721,7 @@ static int kiln_c99_new_object(kiln_value *out) {
     object->slots = object->inline_slots;
     object->slot_capacity = KILN_C99_INLINE_SLOTS;
     for (size_t slot_i = 0; slot_i < KILN_C99_INLINE_SLOTS; ++slot_i) {
-        object->inline_slots[slot_i] = kiln_c99_undefined();
+        object->inline_slots[slot_i] = KILN_VAL_UNDEFINED;
     }
     object->elements = NULL;
     object->element_count = 0;
@@ -2746,13 +2746,13 @@ static int kiln_c99_new_object_with_capacity(kiln_value *out, size_t capacity) {
     }
     object = kiln_c99_object_of(*out);
     if (capacity > KILN_C99_INLINE_SLOTS) {
-        kiln_value *new_slots = (kiln_value *)malloc(capacity * sizeof(kiln_value));
+        kiln_val *new_slots = (kiln_val *)malloc(capacity * sizeof(kiln_val));
         size_t i;
         if (new_slots == NULL) {
             return KILN_C99_OUT_OF_MEMORY;
         }
         for (i = 0; i < capacity; ++i) {
-            new_slots[i] = kiln_c99_undefined();
+            new_slots[i] = KILN_VAL_UNDEFINED;
         }
         object->slots = new_slots;
         object->slot_capacity = capacity;
@@ -4196,7 +4196,7 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
         uint32_t slot;
         if (kiln_c99_shape_find_slot(object->shape, ikey, &slot)) {
             if (slot < object->slot_capacity) {
-                object->slots[slot] = value;
+                object->slots[slot] = kiln_val_from_boundary(value);
                 return KILN_C99_OK;
             }
         } else if (!object->not_extensible &&
@@ -4209,29 +4209,29 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
                     uint32_t new_slot = next_shape->slot_index;
                     if (new_slot >= object->slot_capacity) {
                         size_t new_cap = object->slot_capacity == 0 ? KILN_C99_INLINE_SLOTS : object->slot_capacity * 2;
-                        kiln_value *new_slots;
+                        kiln_val *new_slots;
                         while (new_slot >= new_cap) new_cap *= 2;
                         if (object->slots == object->inline_slots) {
-                            new_slots = (kiln_value *)malloc(new_cap * sizeof(kiln_value));
+                            new_slots = (kiln_val *)malloc(new_cap * sizeof(kiln_val));
                             if (new_slots == NULL) return KILN_C99_OUT_OF_MEMORY;
-                            memcpy(new_slots, object->inline_slots, KILN_C99_INLINE_SLOTS * sizeof(kiln_value));
+                            memcpy(new_slots, object->inline_slots, KILN_C99_INLINE_SLOTS * sizeof(kiln_val));
                         } else if (object->slots == NULL) {
-                            new_slots = (kiln_value *)malloc(new_cap * sizeof(kiln_value));
+                            new_slots = (kiln_val *)malloc(new_cap * sizeof(kiln_val));
                             if (new_slots == NULL) return KILN_C99_OUT_OF_MEMORY;
                         } else {
-                            new_slots = (kiln_value *)realloc(object->slots, new_cap * sizeof(kiln_value));
+                            new_slots = (kiln_val *)realloc(object->slots, new_cap * sizeof(kiln_val));
                             if (new_slots == NULL) return KILN_C99_OUT_OF_MEMORY;
                         }
                         {
                             size_t fill_i;
                             for (fill_i = object->slot_capacity; fill_i < new_cap; ++fill_i) {
-                                new_slots[fill_i] = kiln_c99_undefined();
+                                new_slots[fill_i] = KILN_VAL_UNDEFINED;
                             }
                         }
                         object->slots = new_slots;
                         object->slot_capacity = new_cap;
                     }
-                    object->slots[new_slot] = value;
+                    object->slots[new_slot] = kiln_val_from_boundary(value);
                     object->shape = next_shape;
                     return KILN_C99_OK;
                 }

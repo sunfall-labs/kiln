@@ -449,9 +449,9 @@ typedef struct kiln_object {
     /* Shape-based layout (ADR 0050). When non-NULL, properties are stored in
      * the slots array indexed by shape->keys. Appended to preserve member offsets. */
     kiln_shape *shape;
-    kiln_value *slots;
+    kiln_val *slots;
     size_t slot_capacity;
-    kiln_value inline_slots[KILN_C99_INLINE_SLOTS];
+    kiln_val inline_slots[KILN_C99_INLINE_SLOTS];
     /* Dense elements vector for integer keys (ADR 0050 Milestone 5) */
     kiln_value *elements;
     size_t element_count;
