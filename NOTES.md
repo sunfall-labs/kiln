@@ -160,6 +160,31 @@ reasons** — that is the interpreter backlog, sorted by how many tests each unb
 
 ---
 
+## Scoreboard, 2026-09-04 evening (Claude `kiln-fast`, `alee/fastest-native`)
+
+The three reference rows from `docs/architecture/fastest-native-plan.md`, `bench/harness.mjs` warm
+median in milliseconds, three interleaved passes at `44822464` with all five NaN-boxing seam
+commits in. Load average 2.8 to 4.6, so treat `loop` as a bound and the other two as measurements
+(they held to within a millisecond across passes; `loop`'s emitted body is byte-identical to the
+previous commit's and it drifted with the load).
+
+| | node | native `84b2087b` | native `cf93bb61` | native `44822464` | hand-emitted ceiling |
+| --- | --- | --- | --- | --- | --- |
+| `cpu/loop` | 25 | 279 | 162 | 185 to 212 | 28.7 |
+| `cpu/fib` | 21 | 92 | 118 | 57 | 3.4 |
+| `non-io/class-poly` | 0.47 | 50.5 | 62.7 | 56 | 0.3 to 0.9 |
+
+What moved `fib` is the calling convention and slots no longer converting per call. What holds
+`class-poly` above its starting point is `CallMethod`: `kiln_c99_op_call_method` and the generic
+`read_property` behind it still take `kiln_value`, so a method call crosses the seam twice. That
+is the remaining slice of plan step 0.3.
+
+`.scratch/fastest-native/measure.sh` now refuses above a load average of 1.5; the same `loop`
+binary read 156 and 296 ms two runs apart at a load near 4 earlier today, and an identical
+emitted body was briefly called a regression.
+
+---
+
 ## Log
 
 **2026-08-29, Codex.** I am finishing the current explicit-module-graph vertical slice through

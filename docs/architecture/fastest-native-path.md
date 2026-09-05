@@ -89,18 +89,25 @@ workload the same way (median of twenty repetitions, on stderr; the checksum sta
 All three answer node's checksum. The "today" column is `cf93bb61`, with bodies NaN-boxed; the
 column before it is the same source at `84b2087b`, whole process, for the size of that step.
 
-| | node, warm | native at `84b2087b` | native today, warm | hand-emitted C, warm | ceiling vs node |
-| --- | --- | --- | --- | --- | --- |
-| `cpu/loop` | 25.5 ms | 279 ms | 162 ms | 28.7 ms | level |
-| `cpu/fib` | 21.3 ms | 92 ms | 118 ms | 3.4 ms | 6x ahead |
-| `non-io/class-poly` | 0.48 ms | 50.5 ms | 62.7 ms | 0.3 to 0.9 ms | level |
+| | node, warm | native at `84b2087b` | bodies boxed, `cf93bb61` | seam done, `44822464` | hand-emitted C, warm | ceiling vs node |
+| --- | --- | --- | --- | --- | --- | --- |
+| `cpu/loop` | 25 ms | 279 ms | 162 ms | 185 to 212 ms | 28.7 ms | level |
+| `cpu/fib` | 21 ms | 92 ms | 118 ms | 57 ms | 3.4 ms | 6x ahead |
+| `non-io/class-poly` | 0.47 ms | 50.5 ms | 62.7 ms | 56 ms | 0.3 to 0.9 ms | level |
+
+The `44822464` column is three interleaved passes at a load average between 2.8 and 4.6; fib and
+class-poly were stable to within a millisecond across them, loop drifted upward with the load and
+its emitted body is byte-identical to `cf93bb61`'s, so its column is the machine and not the
+change.
 
 Node's few percent on the two level rows is real, not noise. V8 runs that loop on int32 values
 with `% 7` strength-reduced to a multiply, and the class-poly figure includes allocating the
 thousand objects each repetition. The hand-written C is a plausible target, not a lower bound.
 
-The NaN-boxing step is instructive on its own. It moved `loop` by 1.7x and moved `fib` and
-`class-poly` the wrong way, by about a quarter each. The bodies hold `kiln_val` now, but
+The NaN-boxing step is instructive on its own. Boxing the bodies alone moved `loop` by 1.7x and
+moved `fib` and `class-poly` the wrong way, by about a quarter each; finishing the data side of
+the seam four commits later took `fib` to 57 ms, 1.6x under its starting point, and brought
+`class-poly` back to within a tenth of its. The bodies hold `kiln_val` now, but
 `kiln_body_fn`, the prelude's entry points and the object slots still take the 16-byte
 `kiln_value`, so every call and every property access converts on the way in and out: the
 emitter gained 84 `kiln_val_to_boundary` and `from_boundary` sites in that one commit. A loop
