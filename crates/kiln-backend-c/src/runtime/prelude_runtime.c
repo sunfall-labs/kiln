@@ -316,12 +316,22 @@ static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value 
                                  kiln_value *thrown);
 static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value callee,
                               const kiln_value *args, size_t argc, int depth, kiln_value *thrown);
+static int kiln_c99_call_val(kiln_host *host, kiln_val *result, kiln_val callee,
+                             kiln_val receiver, const kiln_val *args, size_t argc,
+                             int depth, kiln_value *thrown);
+static int kiln_c99_construct_val(kiln_host *host, kiln_val *result, kiln_val callee,
+                                  const kiln_val *args, size_t argc,
+                                  int depth, kiln_value *thrown);
+static int kiln_c99_super_call_val(kiln_host *host, kiln_val *produced, kiln_val parent,
+                                   kiln_val receiver, const kiln_val *args, size_t argc,
+                                   int depth, kiln_value *thrown);
 static int kiln_c99_store_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                               kiln_value *out, int depth, kiln_value *thrown, int *found);
 static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char *key,
                                  size_t key_len, const char *ikey, kiln_value *out, int depth,
                                  kiln_value *thrown);
 static int kiln_c99_array_push(kiln_value target, kiln_value value);
+static int kiln_c99_array_push_val(kiln_value target, kiln_val value);
 static int kiln_c99_prototype_object(kiln_value function, kiln_value *out);
 static int kiln_c99_callable_prototype(kiln_value callable, kiln_value *out);
 static int kiln_c99_install_event_emitter_methods(kiln_value target);
@@ -664,7 +674,7 @@ static int kiln_c99_node_stream(kiln_host *host, kiln_value *result, uint64_t co
         if (buffer == NULL || buffer->value.tag != KILN_VALUE_ARRAY) return kiln_c99_throw_not_a(thrown, receiver, "Readable");
         queue = kiln_c99_array_of(buffer->value);
         if (queue->count == 0) { *result = kiln_c99_null(); return KILN_C99_OK; }
-        *result = queue->elements[0];
+        *result = kiln_val_to_boundary(queue->elements[0]);
         for (index = 1; index < queue->count; ++index) queue->elements[index - 1] = queue->elements[index];
         queue->count -= 1;
         return KILN_C99_OK;
@@ -2076,7 +2086,7 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
         break;
     case KILN_GC_ARRAY: {
         kiln_array *array = (kiln_array *)payload;
-        kiln_c99_gc_mark_values(heap, array->elements, array->count);
+        kiln_c99_gc_mark_vals(heap, array->elements, array->count);
         kiln_c99_gc_mark_value(heap, &array->properties);
         break;
     }
@@ -2959,7 +2969,7 @@ static int kiln_c99_abort(kiln_host *host, kiln_value signal, kiln_value reason,
     if (listeners.tag != KILN_VALUE_ARRAY) return KILN_C99_OK;
     for (index = 0; index < kiln_c99_array_of(listeners)->count; ++index) {
         kiln_value ignored;
-        kiln_value listener = kiln_c99_array_of(listeners)->elements[index];
+        kiln_value listener = kiln_val_to_boundary(kiln_c99_array_of(listeners)->elements[index]);
         status = kiln_c99_call(host, &ignored, listener, signal, &event, 1, depth, thrown);
         if (status != KILN_C99_OK) return status;
     }
@@ -3025,15 +3035,16 @@ static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value rec
                                         "Buffer.concat needs an array");
         items = kiln_c99_array_of(first);
         for (at = 0; at < items->count; ++at) {
-            if (items->elements[at].tag != KILN_VALUE_TYPED_ARRAY)
+            kiln_value item_val = kiln_val_to_boundary(items->elements[at]);
+            if (item_val.tag != KILN_VALUE_TYPED_ARRAY)
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                             "Buffer.concat entries must be typed arrays");
-            total += kiln_c99_typed_array_of(items->elements[at])->length;
+            total += kiln_c99_typed_array_of(item_val)->length;
         }
         status = kiln_c99_typed_alloc(out, KILN_TYPED_UINT8, total);
         if (status != KILN_C99_OK) return status;
         for (at = 0; at < items->count; ++at) {
-            kiln_typed_array *view = kiln_c99_typed_array_of(items->elements[at]);
+            kiln_typed_array *view = kiln_c99_typed_array_of(kiln_val_to_boundary(items->elements[at]));
             kiln_typed_array *target = kiln_c99_typed_array_of(*out);
             size_t index;
             /* A Buffer is a `Uint8Array`, and so is what `Buffer.concat` allocates, so the
@@ -3137,7 +3148,7 @@ static int kiln_c99_node_dns_lookup(kiln_host *host, kiln_value *out,
         status = kiln_c99_call(host, out, callback, kiln_c99_undefined(), callback_args, 2,
                                depth, thrown);
     } else {
-        kiln_value first = kiln_c99_array_of(addresses)->elements[0];
+        kiln_value first = kiln_val_to_boundary(kiln_c99_array_of(addresses)->elements[0]);
         callback_args[0] = kiln_c99_null();
         status = kiln_c99_get(host, first, "address", 7, &callback_args[1], depth, thrown);
         if (status == KILN_C99_OK)
@@ -3652,7 +3663,7 @@ static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
     view->is_buffer = 0;
     for (index = 0; index < count; ++index) {
         double item = source.tag == KILN_VALUE_ARRAY
-                          ? kiln_c99_as_number(kiln_c99_array_of(source)->elements[index])
+                          ? kiln_c99_as_number(kiln_val_to_boundary(kiln_c99_array_of(source)->elements[index]))
                       : source.tag == KILN_VALUE_TYPED_ARRAY
                           ? kiln_c99_typed_get(kiln_c99_typed_array_of(source), index)
                           : 0.0;
@@ -4091,7 +4102,7 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
                 return status;
             }
             for (at = array->count; at < (size_t)wanted; ++at) {
-                array->elements[at] = kiln_c99_hole();
+                array->elements[at] = KILN_VAL_HOLE;
             }
             array->count = (size_t)wanted;
             return KILN_C99_OK;

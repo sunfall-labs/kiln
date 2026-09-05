@@ -157,6 +157,7 @@ extern int kiln_c99_write_would_accept(kiln_value target, const char *key, size_
 extern int kiln_c99_set_computed(kiln_host *host, kiln_value target, kiln_value key, kiln_value value, int depth, kiln_value *thrown);
 extern int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_value value);
 extern int kiln_c99_array_push(kiln_value target, kiln_value value);
+extern int kiln_c99_array_push_val(kiln_value target, kiln_val value);
 extern kiln_value kiln_c99_inspect(kiln_value value);
 extern int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *event, void *host, void *thrown);
 extern int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code, kiln_value receiver, const kiln_value *args, size_t argc, int depth, kiln_value *thrown);
@@ -181,6 +182,8 @@ extern int kiln_c99_throw_error(kiln_value *thrown, uint64_t kind, const char *m
 extern kiln_promise *kiln_c99_promise_of(kiln_value value);
 extern int kiln_c99_bind_with(kiln_value *out, kiln_value target, kiln_value receiver, const kiln_value *arguments, size_t count);
 extern int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value callee, const kiln_value *args, size_t argc, int depth, kiln_value *thrown);
+extern int kiln_c99_construct_val(kiln_host *host, kiln_val *result, kiln_val callee, const kiln_val *args, size_t argc, int depth, kiln_value *thrown);
+extern int kiln_c99_call_val(kiln_host *host, kiln_val *result, kiln_val callee, kiln_val receiver, const kiln_val *args, size_t argc, int depth, kiln_value *thrown);
 extern int kiln_c99_super_call(kiln_host *host, kiln_value *produced, kiln_value parent, kiln_value receiver, const kiln_value *args, size_t argc, int depth, kiln_value *thrown);
 extern int kiln_c99_adopt_super(kiln_value *receiver, kiln_value produced);
 extern int kiln_c99_super_call_val(kiln_host *host, kiln_val *produced, kiln_val parent, kiln_val receiver, const kiln_val *args, size_t argc, int depth, kiln_value *thrown);

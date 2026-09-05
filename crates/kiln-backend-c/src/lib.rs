@@ -2722,7 +2722,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value list = kiln_val_to_boundary(stack[--sp]); kiln_value callee = kiln_val_to_boundary(stack[--sp]); kiln_value built; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) {{ {direct_refusal} }} given = kiln_c99_array_of(list); status = kiln_c99_construct(host, &built, callee, given->count == 0 ? NULL : given->elements, given->count, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = kiln_val_from_boundary(built); }}"
+                "    {{ kiln_value list = kiln_val_to_boundary(stack[--sp]); kiln_val callee = stack[--sp]; kiln_val built = KILN_VAL_UNDEFINED; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) {{ {direct_refusal} }} given = kiln_c99_array_of(list); status = kiln_c99_construct_val(host, &built, callee, given->count == 0 ? NULL : given->elements, given->count, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = built; }}"
             )
             .unwrap();
         }
@@ -4004,7 +4004,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value list = kiln_val_to_boundary(stack[--sp]); kiln_value callee = kiln_val_to_boundary(stack[--sp]); kiln_value self_value = kiln_val_to_boundary(stack[sp - 1]); kiln_value call_result; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) {{ {direct_refusal} }} given = kiln_c99_array_of(list); status = kiln_c99_call(host, &call_result, callee, self_value, given->count == 0 ? NULL : given->elements, given->count, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_val_from_boundary(call_result); }}"
+                "    {{ kiln_value list = kiln_val_to_boundary(stack[--sp]); kiln_val callee = stack[--sp]; kiln_val self_value = stack[sp - 1]; kiln_val call_result = KILN_VAL_UNDEFINED; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) {{ {direct_refusal} }} given = kiln_c99_array_of(list); status = kiln_c99_call_val(host, &call_result, callee, self_value, given->count == 0 ? NULL : given->elements, given->count, depth, thrown); if (status == KILN_C99_THROWN) {{ {unwind} }} if (status != KILN_C99_OK) return status; stack[sp - 1] = call_result; }}"
             )
             .unwrap();
         }
@@ -4014,7 +4014,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value list = kiln_val_to_boundary(stack[--sp]); kiln_value parent = kiln_val_to_boundary(stack[--sp]); kiln_value call_result; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) {{ {direct_refusal} }} given = kiln_c99_array_of(list); status = kiln_c99_super_call(host, &call_result, parent, kiln_val_to_boundary(receiver), given->count == 0 ? NULL : given->elements, given->count, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super_val(&receiver, kiln_val_from_boundary(call_result)); if (status != KILN_C99_OK) return status; stack[sp++] = kiln_val_from_boundary(call_result); }}"
+                "    {{ kiln_value list = kiln_val_to_boundary(stack[--sp]); kiln_val parent = stack[--sp]; kiln_val call_result = KILN_VAL_UNDEFINED; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) {{ {direct_refusal} }} given = kiln_c99_array_of(list); status = kiln_c99_super_call_val(host, &call_result, parent, receiver, given->count == 0 ? NULL : given->elements, given->count, depth, thrown); if (status == KILN_C99_THROWN) {{ {unwind} }} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super_val(&receiver, call_result); if (status != KILN_C99_OK) return status; stack[sp++] = call_result; }}"
             )
             .unwrap();
         }

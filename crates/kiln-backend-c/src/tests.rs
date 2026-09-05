@@ -2837,9 +2837,9 @@ int main(void) {
     if (kiln_c99_call(NULL, &result, method, kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY),
                       arguments, 3, 0, &thrown) != KILN_C99_OK) return 3;
     if (result.tag != KILN_VALUE_ARRAY || kiln_c99_array_of(result)->count != 2) return 4;
-    value = kiln_c99_array_of(result)->elements[0];
+    value = kiln_val_to_boundary(kiln_c99_array_of(result)->elements[0]);
     if (value.tag != KILN_VALUE_UNDEFINED) return 5;
-    value = kiln_c99_array_of(result)->elements[1];
+    value = kiln_val_to_boundary(kiln_c99_array_of(result)->elements[1]);
     if (value.tag != KILN_VALUE_UNDEFINED) return 6;
     return 0;
 }

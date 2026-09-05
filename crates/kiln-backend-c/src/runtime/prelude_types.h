@@ -512,7 +512,7 @@ typedef struct kiln_proxy {
  * grows it and the gap is filled with holes, which read as undefined and are not the same thing --
  * `1 in [1, , 3]` is false and `[1, , 3].map(f)` does not call `f` for the middle. */
 typedef struct kiln_array {
-    kiln_value *elements;
+    kiln_val *elements;
     size_t count;
     size_t capacity;
     /* Properties that are not elements: `a.total = 1`, and the `index`, `input` and `groups` a

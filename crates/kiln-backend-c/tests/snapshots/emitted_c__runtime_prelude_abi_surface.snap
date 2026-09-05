@@ -1,5 +1,6 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
+assertion_line: 800
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -975,9 +976,13 @@ static int kiln_c99_proxy_define(kiln_host *host, kiln_value proxy, kiln_value k
 static int kiln_c99_proxy_all_keys(kiln_host *host, kiln_value proxy, kiln_value *out, int depth,
 static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value *out, int depth,
 static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value callee,
+static int kiln_c99_call_val(kiln_host *host, kiln_val *result, kiln_val callee,
+static int kiln_c99_construct_val(kiln_host *host, kiln_val *result, kiln_val callee,
+static int kiln_c99_super_call_val(kiln_host *host, kiln_val *produced, kiln_val parent,
 static int kiln_c99_store_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char *key,
 static int kiln_c99_array_push(kiln_value target, kiln_value value);
+static int kiln_c99_array_push_val(kiln_value target, kiln_val value);
 static int kiln_c99_prototype_object(kiln_value function, kiln_value *out);
 static int kiln_c99_callable_prototype(kiln_value callable, kiln_value *out);
 static int kiln_c99_install_event_emitter_methods(kiln_value target);
@@ -1545,6 +1550,7 @@ static int kiln_c99_set_computed(kiln_host *host, kiln_value target, kiln_value 
 static int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_value value) {
 static int kiln_c99_put_refused(kiln_value target, const char *key, size_t key_len) {
 static int kiln_c99_array_push(kiln_value target, kiln_value value) {
+static int kiln_c99_array_push_val(kiln_value target, kiln_val value) {
 #define KILN_C99_INSPECT_DEPTH 2
 static int kiln_c99_quote(kiln_text *text, const char *bytes, size_t len) {
 static int kiln_c99_inspect_key(kiln_text *text, const char *key, size_t len) {
@@ -1664,12 +1670,13 @@ static int kiln_c99_data_view_write_bits(kiln_host *host, uint64_t code, kiln_va
 #define KILN_C99_COERCED_INLINE 8
 typedef struct {
 static int kiln_c99_sort_compare_value(kiln_c99_sort_context *ctx, kiln_value a,
+static int kiln_c99_sort_compare_val(kiln_c99_sort_context *ctx, kiln_val a,
 typedef struct {
 static int kiln_c99_sort_compare_typed(kiln_c99_typed_sort_context *ctx, double a,
 typedef struct {
 static size_t kiln_c99_timsort_min_run_length(size_t n) {
 #define KILN_DEF_TIMSORT(SUFFIX, TYPE, CTX_TYPE, CMP_FUNC)                                         \
-KILN_DEF_TIMSORT(value, kiln_value, kiln_c99_sort_context, kiln_c99_sort_compare_value)
+KILN_DEF_TIMSORT(val, kiln_val, kiln_c99_sort_context, kiln_c99_sort_compare_val)
 KILN_DEF_TIMSORT(typed, double, kiln_c99_typed_sort_context, kiln_c99_sort_compare_typed)
 static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, uint64_t code,
@@ -1832,6 +1839,8 @@ static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
 static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value callee,
 static int kiln_c99_super_call(kiln_host *host, kiln_value *produced, kiln_value parent,
 static int kiln_c99_adopt_super(kiln_value *receiver, kiln_value produced) {
+static int kiln_c99_call_val(kiln_host *host, kiln_val *result, kiln_val callee,
+static int kiln_c99_construct_val(kiln_host *host, kiln_val *result, kiln_val callee,
 static int kiln_c99_super_call_val(kiln_host *host, kiln_val *produced, kiln_val parent,
 static int kiln_c99_adopt_super_val(kiln_val *receiver, kiln_val produced) {
 static int kiln_c99_can_be_prototype(kiln_value value) {

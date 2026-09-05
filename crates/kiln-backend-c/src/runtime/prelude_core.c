@@ -1408,17 +1408,17 @@ static kiln_value kiln_c99_text(kiln_value value) {
         kiln_text joined = {NULL, 0, 0};
         size_t index;
         for (index = 0; index < array->count; ++index) {
-            kiln_value element = array->elements[index];
+            kiln_val element = array->elements[index];
             if (index != 0 && kiln_c99_text_append(&joined, ",", 1) != KILN_C99_OK) {
                 free(joined.bytes);
                 return kiln_c99_undefined();
             }
-            if (element.tag == KILN_VALUE_UNDEFINED || element.tag == KILN_VALUE_NULL ||
-                kiln_c99_is_hole(element)) {
+            if (element == KILN_VAL_UNDEFINED || element == KILN_VAL_NULL ||
+                element == KILN_VAL_HOLE) {
                 continue;
             }
             {
-                kiln_value shown = kiln_c99_text(element);
+                kiln_value shown = kiln_c99_text(kiln_val_to_boundary(element));
                 if (shown.tag != KILN_VALUE_STRING ||
                     kiln_c99_text_append(&joined, shown.ptr, shown.len) != KILN_C99_OK) {
                     free(joined.bytes);
@@ -2370,7 +2370,7 @@ static int kiln_c99_proxy_own_keys(kiln_host *host, kiln_value proxy, kiln_value
         int found;
         /* Re-read each time: a `getOwnPropertyDescriptor` trap is a program function and may
          * have grown the list the handler handed back. */
-        kiln_value key = kiln_c99_array_of(listed)->elements[index];
+        kiln_value key = kiln_val_to_boundary(kiln_c99_array_of(listed)->elements[index]);
         if (key.tag == KILN_VALUE_SYMBOL) {
             /* `Reflect.ownKeys` reports symbols and this does not: the enumerable string keys
              * are what `Object.keys` and `for...in` walk. */
@@ -4563,8 +4563,8 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
             return kiln_c99_get(host, target, key.tag == KILN_VALUE_STRING ? key.ptr : NULL,
                                 key.tag == KILN_VALUE_STRING ? key.len : 0, out, depth, thrown);
         }
-        *out = (size_t)index < array->count && !kiln_c99_is_hole(array->elements[(size_t)index])
-                   ? array->elements[(size_t)index]
+        *out = (size_t)index < array->count && array->elements[(size_t)index] != KILN_VAL_HOLE
+                   ? kiln_val_to_boundary(array->elements[(size_t)index])
                    : kiln_c99_undefined();
         return KILN_C99_OK;
     }
@@ -4656,9 +4656,9 @@ static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_v
         }
         /* Growing leaves holes, which read as undefined and are not the same thing. */
         for (fill = array->count; fill < slot; ++fill) {
-            array->elements[fill] = kiln_c99_hole();
+            array->elements[fill] = KILN_VAL_HOLE;
         }
-        array->elements[slot] = value;
+        array->elements[slot] = kiln_val_from_boundary(value);
         if (slot + 1 > array->count) {
             array->count = slot + 1;
         }
@@ -4967,6 +4967,18 @@ static int kiln_c99_array_push(kiln_value target, kiln_value value) {
     if (status != KILN_C99_OK) {
         return status;
     }
+    array->elements[array->count] = kiln_val_from_boundary(value);
+    array->count += 1;
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_array_push_val(kiln_value target, kiln_val value) {
+    kiln_array *array = kiln_c99_array_of(target);
+    int status = kiln_c99_reserve((void **)&array->elements, &array->capacity, array->count + 1,
+                                  sizeof *array->elements);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
     array->elements[array->count] = value;
     array->count += 1;
     return KILN_C99_OK;
@@ -5088,12 +5100,12 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
             if (index != 0 && kiln_c99_text_append_c(text, ", ") != KILN_C99_OK) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
-            if (kiln_c99_is_hole(array->elements[index])) {
+            if (array->elements[index] == KILN_VAL_HOLE) {
                 /* A run of holes is reported as a count rather than repeated, which is what
                  * makes a sparse array readable at all. */
                 size_t run = 1;
                 while (index + run < array->count &&
-                       kiln_c99_is_hole(array->elements[index + run])) {
+                       array->elements[index + run] == KILN_VAL_HOLE) {
                     run += 1;
                 }
                 if (kiln_c99_text_append_c(text, "<") != KILN_C99_OK ||
@@ -5105,7 +5117,7 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
                 index += run - 1;
                 continue;
             }
-            if (kiln_c99_inspect_into(text, array->elements[index], depth + 1) != KILN_C99_OK) {
+            if (kiln_c99_inspect_into(text, kiln_val_to_boundary(array->elements[index]), depth + 1) != KILN_C99_OK) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
         }
@@ -6517,11 +6529,12 @@ static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t cod
     bucket = kiln_c99_undefined();
     for (index = 0; index < entries->count; ++index) {
         kiln_value found;
-        if (entries->elements[index].tag != KILN_VALUE_OBJECT) continue;
-        status = kiln_c99_get(NULL, entries->elements[index], "name", 4, &found, 0, NULL);
+        kiln_value entry = kiln_val_to_boundary(entries->elements[index]);
+        if (entry.tag != KILN_VALUE_OBJECT) continue;
+        status = kiln_c99_get(NULL, entry, "name", 4, &found, 0, NULL);
         if (status < KILN_C99_OK) return status;
         if (kiln_c99_strict_equal(found, name)) {
-            bucket = entries->elements[index];
+            bucket = entry;
             break;
         }
     }
@@ -6591,7 +6604,7 @@ static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t cod
             status = kiln_c99_new_array(result);
             for (index = 0; status == KILN_C99_OK && index < stored->count; ++index) {
                 kiln_value callback;
-                status = kiln_c99_get(NULL, stored->elements[index], "callback", 8, &callback, 0,
+                status = kiln_c99_get(NULL, kiln_val_to_boundary(stored->elements[index]), "callback", 8, &callback, 0,
                                       NULL);
                 if (status == KILN_C99_OK) status = kiln_c99_array_push(*result, callback);
             }
@@ -6603,7 +6616,7 @@ static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t cod
                 return kiln_c99_throw_not_a(thrown, wanted, "function");
             for (index = stored->count; index > 0; --index) {
                 kiln_value callback;
-                status = kiln_c99_get(NULL, stored->elements[index - 1], "callback", 8, &callback,
+                status = kiln_c99_get(NULL, kiln_val_to_boundary(stored->elements[index - 1]), "callback", 8, &callback,
                                       0, NULL);
                 if (status != KILN_C99_OK) return status;
                 if (kiln_c99_strict_equal(callback, wanted)) {
@@ -6621,22 +6634,23 @@ static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t cod
             kiln_array *copy;
             status = kiln_c99_new_array(&snapshot);
             for (index = 0; status == KILN_C99_OK && index < stored->count; ++index)
-                status = kiln_c99_array_push(snapshot, stored->elements[index]);
+                status = kiln_c99_array_push(snapshot, kiln_val_to_boundary(stored->elements[index]));
             if (status != KILN_C99_OK) return status;
             copy = kiln_c99_array_of(snapshot);
             for (index = 0; index < copy->count; ++index) {
                 kiln_value callback;
                 kiln_value once;
                 kiln_value ignored;
-                status = kiln_c99_get(NULL, copy->elements[index], "callback", 8, &callback, 0,
+                kiln_value copy_elem = kiln_val_to_boundary(copy->elements[index]);
+                status = kiln_c99_get(NULL, copy_elem, "callback", 8, &callback, 0,
                                       NULL);
                 if (status == KILN_C99_OK)
-                    status = kiln_c99_get(NULL, copy->elements[index], "once", 4, &once, 0, NULL);
+                    status = kiln_c99_get(NULL, copy_elem, "once", 4, &once, 0, NULL);
                 if (status != KILN_C99_OK) return status;
                 if (kiln_c99_truthy(once)) {
                     size_t live;
                     for (live = 0; live < stored->count; ++live) {
-                        if (kiln_c99_strict_equal(stored->elements[live], copy->elements[index])) {
+                        if (stored->elements[live] == copy->elements[index]) {
                             memmove(stored->elements + live, stored->elements + live + 1,
                                     (stored->count - live - 1) * sizeof *stored->elements);
                             --stored->count;
@@ -10029,6 +10043,11 @@ static int kiln_c99_sort_compare_value(kiln_c99_sort_context *ctx, kiln_value a,
     }
 }
 
+static int kiln_c99_sort_compare_val(kiln_c99_sort_context *ctx, kiln_val a,
+                                     kiln_val b, double *out_order) {
+    return kiln_c99_sort_compare_value(ctx, kiln_val_to_boundary(a), kiln_val_to_boundary(b), out_order);
+}
+
 typedef struct {
     kiln_host *host;
     kiln_value comparator;
@@ -10597,7 +10616,7 @@ static size_t kiln_c99_timsort_min_run_length(size_t n) {
         return status;                                                                             \
     }
 
-KILN_DEF_TIMSORT(value, kiln_value, kiln_c99_sort_context, kiln_c99_sort_compare_value)
+KILN_DEF_TIMSORT(val, kiln_val, kiln_c99_sort_context, kiln_c99_sort_compare_val)
 KILN_DEF_TIMSORT(typed, double, kiln_c99_typed_sort_context, kiln_c99_sort_compare_typed)
 
 static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
@@ -11272,7 +11291,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             return status;
         }
         for (index = 0; index < items->count; ++index) {
-            kiln_value element = items->elements[index];
+            kiln_value element = kiln_val_to_boundary(items->elements[index]);
             double converted;
             if (kiln_c99_is_callable(mapper)) {
                 kiln_value visit[2];
@@ -11388,10 +11407,13 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 }
                 given = kiln_c99_array_of(gathered);
             }
-            return kiln_c99_call(host, result, receiver,
-                                 argc > 0 ? args[0] : kiln_c99_undefined(),
-                                 given == NULL || given->count == 0 ? NULL : given->elements,
-                                 given == NULL ? 0 : given->count, depth, thrown);
+            kiln_val call_result_val = KILN_VAL_UNDEFINED;
+            status = kiln_c99_call_val(host, &call_result_val, kiln_val_from_boundary(receiver),
+                                           argc > 0 ? kiln_val_from_boundary(args[0]) : KILN_VAL_UNDEFINED,
+                                           given == NULL || given->count == 0 ? NULL : given->elements,
+                                           given == NULL ? 0 : given->count, depth, thrown);
+            if (status == KILN_C99_OK) *result = kiln_val_to_boundary(call_result_val);
+            return status;
         }
         case KILN_C99_METHOD_FUNCTION_BIND:
             return kiln_c99_bind_with(result, receiver,
@@ -11552,14 +11574,14 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 kiln_array *held = kiln_c99_array_of(listeners);
                 size_t write = 0;
                 for (index = 0; index < held->count; ++index) {
-                    if (!kiln_c99_strict_equal(held->elements[index], listener))
+                    if (!kiln_c99_strict_equal(kiln_val_to_boundary(held->elements[index]), listener))
                         held->elements[write++] = held->elements[index];
                 }
                 held->count = write;
             } else if (kiln_c99_is_callable(listener)) {
                 kiln_array *held = kiln_c99_array_of(listeners);
                 for (index = 0; index < held->count; ++index)
-                    if (kiln_c99_strict_equal(held->elements[index], listener)) break;
+                    if (kiln_c99_strict_equal(kiln_val_to_boundary(held->elements[index]), listener)) break;
                 if (index == held->count) {
                     status = kiln_c99_array_push(listeners, listener);
                     if (status != KILN_C99_OK) return status;
@@ -11646,25 +11668,26 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 kiln_value follower;
                 kiln_value listen;
                 kiln_value listen_args[2];
-                status = kiln_c99_get(host, items->elements[index], "aborted", 7, &aborted,
+                kiln_value item_val = kiln_val_to_boundary(items->elements[index]);
+                status = kiln_c99_get(host, item_val, "aborted", 7, &aborted,
                                       depth, thrown);
                 if (status != KILN_C99_OK) return status;
                 if (kiln_c99_truthy(aborted)) {
-                    status = kiln_c99_get(host, items->elements[index], "reason", 6, &reason,
+                    status = kiln_c99_get(host, item_val, "reason", 6, &reason,
                                           depth, thrown);
                     if (status != KILN_C99_OK) return status;
                     return kiln_c99_abort(host, *result, reason, depth, thrown);
                 }
                 status = kiln_c99_bind_with(&follower,
                                             kiln_c99_method(KILN_C99_METHOD_ABORT_SIGNAL_FOLLOW),
-                                            *result, &items->elements[index], 1);
+                                            *result, &item_val, 1);
                 if (status == KILN_C99_OK)
-                    status = kiln_c99_get(host, items->elements[index], "addEventListener", 16,
+                    status = kiln_c99_get(host, item_val, "addEventListener", 16,
                                           &listen, depth, thrown);
                 listen_args[0] = kiln_c99_copy_text("abort", 5);
                 listen_args[1] = follower;
                 if (status == KILN_C99_OK)
-                    status = kiln_c99_call(host, &reason, listen, items->elements[index],
+                    status = kiln_c99_call(host, &reason, listen, item_val,
                                            listen_args, 2, depth, thrown);
                 if (status != KILN_C99_OK) return status;
             }
@@ -12398,7 +12421,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 listed = kiln_c99_array_of(keys);
                 for (index = 0; index < listed->count; ++index) {
                     kiln_value read;
-                    kiln_value key = listed->elements[index];
+                    kiln_value key = kiln_val_to_boundary(listed->elements[index]);
                     status = kiln_c99_get_computed(host, args[0], key, &read, depth, thrown);
                     if (status != KILN_C99_OK) {
                         return status;
@@ -12432,14 +12455,14 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 kiln_array *array = kiln_c99_array_of(args[0]);
                 status = kiln_c99_new_array(&built);
                 for (index = 0; index < array->count && status == KILN_C99_OK; ++index) {
-                    if (kiln_c99_is_hole(array->elements[index])) {
+                    if (array->elements[index] == KILN_VAL_HOLE) {
                         continue;
                     }
                     if (code == KILN_C99_METHOD_OBJECT_KEYS) {
                         status = kiln_c99_array_push(
                             built, kiln_c99_text(kiln_c99_number((double)index)));
                     } else if (code == KILN_C99_METHOD_OBJECT_VALUES) {
-                        status = kiln_c99_array_push(built, array->elements[index]);
+                        status = kiln_c99_array_push(built, kiln_val_to_boundary(array->elements[index]));
                     } else {
                         kiln_value pair;
                         status = kiln_c99_new_array(&pair);
@@ -12448,7 +12471,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                                 pair, kiln_c99_text(kiln_c99_number((double)index)));
                         }
                         if (status == KILN_C99_OK) {
-                            status = kiln_c99_array_push(pair, array->elements[index]);
+                            status = kiln_c99_array_push(pair, kiln_val_to_boundary(array->elements[index]));
                         }
                         if (status == KILN_C99_OK) {
                             status = kiln_c99_array_push(built, pair);
@@ -13079,7 +13102,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     if (status != KILN_C99_OK) {
                         break;
                     }
-                    element = given->elements[index];
+                    element = kiln_val_to_boundary(given->elements[index]);
                     if (element.tag != KILN_VALUE_PROMISE) {
                         kiln_value immediate;
                         status = kiln_c99_new_promise(&immediate);
@@ -13265,7 +13288,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     }
                 }
                 if (slot < array->count) {
-                    array->elements[slot] = recorded;
+                    array->elements[slot] = kiln_val_from_boundary(recorded);
                 }
             }
             {
@@ -13444,7 +13467,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                             }
                         }
                     } else {
-                        produced = array->elements[position];
+                        produced = kiln_val_to_boundary(array->elements[position]);
                     }
                 }
                 status = status == KILN_C99_OK
@@ -13861,9 +13884,9 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 /* A hole reads as undefined here: `for...of` visits every position, unlike
                  * `forEach`, which skips one. */
                 status = kiln_c99_array_push(snapshot,
-                                             kiln_c99_is_hole(array->elements[index])
+                                             array->elements[index] == KILN_VAL_HOLE
                                                  ? kiln_c99_undefined()
-                                                 : array->elements[index]);
+                                                 : kiln_val_to_boundary(array->elements[index]));
             }
             if (status != KILN_C99_OK) {
                 return status;
@@ -14257,7 +14280,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             status = kiln_c99_new_array(&symbols);
             for (index = 0; index < kiln_c99_array_of(listed)->count && status == KILN_C99_OK;
                  ++index) {
-                kiln_value key = kiln_c99_array_of(listed)->elements[index];
+                kiln_value key = kiln_val_to_boundary(kiln_c99_array_of(listed)->elements[index]);
                 if (key.tag != KILN_VALUE_SYMBOL) {
                     continue;
                 }
@@ -14280,7 +14303,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             status = kiln_c99_new_array(&named);
             for (index = 0; index < kiln_c99_array_of(listed)->count && status == KILN_C99_OK;
                  ++index) {
-                kiln_value key = kiln_c99_array_of(listed)->elements[index];
+                kiln_value key = kiln_val_to_boundary(kiln_c99_array_of(listed)->elements[index]);
                 if (key.tag == KILN_VALUE_SYMBOL) {
                     continue;
                 }
@@ -14447,9 +14470,13 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                                 "arguments");
             }
             list = kiln_c99_array_of(args[2]);
-            return kiln_c99_call(host, result, args[0], args[1],
-                                 list->count == 0 ? NULL : list->elements, list->count, depth,
-                                 thrown);
+            kiln_val call_result_val = KILN_VAL_UNDEFINED;
+            status = kiln_c99_call_val(host, &call_result_val, kiln_val_from_boundary(args[0]),
+                                       kiln_val_from_boundary(args[1]),
+                                       list->count == 0 ? NULL : list->elements, list->count, depth,
+                                       thrown);
+            if (status == KILN_C99_OK) *result = kiln_val_to_boundary(call_result_val);
+            return status;
         }
         case KILN_C99_METHOD_REFLECT_CONSTRUCT: {
             kiln_array *list;
@@ -14462,9 +14489,12 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 KILN_C99_REFUSE("Reflect.construct with a new.target other than the callee");
             }
             list = kiln_c99_array_of(args[1]);
-            return kiln_c99_construct(host, result, args[0],
-                                      list->count == 0 ? NULL : list->elements, list->count,
-                                      depth, thrown);
+            kiln_val built_val = KILN_VAL_UNDEFINED;
+            status = kiln_c99_construct_val(host, &built_val, kiln_val_from_boundary(args[0]),
+                                            list->count == 0 ? NULL : list->elements, list->count,
+                                            depth, thrown);
+            if (status == KILN_C99_OK) *result = kiln_val_to_boundary(built_val);
+            return status;
         }
         case KILN_C99_METHOD_ERROR_CAPTURE_STACK_TRACE:
             /* A release build strips unwind tables, so there are no frames to read: the
@@ -14571,9 +14601,9 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             }
             segments = kiln_c99_array_of(raw);
             for (at = 0; at < segments->count; ++at) {
-                kiln_value piece = kiln_c99_is_hole(segments->elements[at])
+                kiln_value piece = segments->elements[at] == KILN_VAL_HOLE
                                        ? kiln_c99_undefined()
-                                       : segments->elements[at];
+                                       : kiln_val_to_boundary(segments->elements[at]);
                 kiln_value shown = kiln_c99_text(piece);
                 if (shown.tag != KILN_VALUE_STRING ||
                     kiln_c99_text_append(&built, shown.ptr, shown.len) != KILN_C99_OK) {
@@ -14605,13 +14635,14 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             pairs = kiln_c99_array_of(args[0]);
             for (index = 0; index < pairs->count; ++index) {
                 kiln_array *pair;
-                if (pairs->elements[index].tag != KILN_VALUE_ARRAY) {
+                kiln_value entry = kiln_val_to_boundary(pairs->elements[index]);
+                if (entry.tag != KILN_VALUE_ARRAY) {
                     KILN_C99_REFUSE("Object.fromEntries given an entry that is not an array");
                 }
-                pair = kiln_c99_array_of(pairs->elements[index]);
+                pair = kiln_c99_array_of(entry);
                 status = kiln_c99_set_computed(
-                    host, built, pair->count > 0 ? pair->elements[0] : kiln_c99_undefined(),
-                    pair->count > 1 ? pair->elements[1] : kiln_c99_undefined(), depth, thrown);
+                    host, built, pair->count > 0 && pair->elements[0] != KILN_VAL_HOLE ? kiln_val_to_boundary(pair->elements[0]) : kiln_c99_undefined(),
+                    pair->count > 1 && pair->elements[1] != KILN_VAL_HOLE ? kiln_val_to_boundary(pair->elements[1]) : kiln_c99_undefined(), depth, thrown);
                 if (status != KILN_C99_OK) {
                     return status;
                 }
@@ -14721,7 +14752,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             for (index = 0; index < collected->count; ++index) {
                 kiln_value visit[2];
                 kiln_value produced;
-                visit[0] = collected->elements[index];
+                visit[0] = kiln_val_to_boundary(collected->elements[index]);
                 visit[1] = kiln_c99_number((double)index);
                 status = kiln_c99_call(host, &produced, mapper,
                                        argc > 2 ? args[2] : kiln_c99_undefined(), visit, 2, depth,
@@ -14729,7 +14760,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 if (status != KILN_C99_OK) {
                     return status;
                 }
-                collected->elements[index] = produced;
+                collected->elements[index] = kiln_val_from_boundary(produced);
             }
             *result = built;
             return KILN_C99_OK;
@@ -15299,7 +15330,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             }
             for (index = 0; index < count; ++index) {
                 items[index] = args[0].tag == KILN_VALUE_ARRAY
-                                   ? kiln_c99_as_number(kiln_c99_array_of(args[0])->elements[index])
+                                   ? kiln_c99_as_number(kiln_val_to_boundary(kiln_c99_array_of(args[0])->elements[index]))
                                    : kiln_c99_typed_get(kiln_c99_typed_array_of(args[0]), index);
             }
             for (index = 0; index < count; ++index) {
@@ -15412,7 +15443,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             return KILN_C99_OK;
         }
         array->count -= 1;
-        *result = array->elements[array->count];
+        *result = kiln_val_to_boundary(array->elements[array->count]);
         return KILN_C99_OK;
     case KILN_C99_METHOD_JOIN: {
         kiln_text joined = {NULL, 0, 0};
@@ -15428,19 +15459,19 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             len = shown.len;
         }
         for (index = 0; index < array->count; ++index) {
-            kiln_value element = array->elements[index];
+            kiln_val element = array->elements[index];
             if (index != 0 && kiln_c99_text_append(&joined, bytes, len) != KILN_C99_OK) {
                 free(joined.bytes);
                 return KILN_C99_OUT_OF_MEMORY;
             }
             /* A nullish element, and a hole, contribute nothing -- which is what makes
              * `[1, , 3].join()` produce "1,,3" rather than "1,undefined,3". */
-            if (element.tag == KILN_VALUE_UNDEFINED || element.tag == KILN_VALUE_NULL ||
-                kiln_c99_is_hole(element)) {
+            if (element == KILN_VAL_UNDEFINED || element == KILN_VAL_NULL ||
+                element == KILN_VAL_HOLE) {
                 continue;
             }
             {
-                kiln_value shown = kiln_c99_text(element);
+                kiln_value shown = kiln_c99_text(kiln_val_to_boundary(element));
                 if (shown.tag != KILN_VALUE_STRING ||
                     kiln_c99_text_append(&joined, shown.ptr, shown.len) != KILN_C99_OK) {
                     free(joined.bytes);
@@ -15461,7 +15492,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                                                array->count, 0);
         int found = 0;
         for (index = start; index < array->count; ++index) {
-            if (kiln_c99_is_hole(array->elements[index])) {
+            if (array->elements[index] == KILN_VAL_HOLE) {
                 /* The only place `indexOf` and `includes` disagree, and the reason `includes`
                  * exists: one skips a hole and the other reads it as undefined. */
                 found = code == KILN_C99_METHOD_INCLUDES && needle.tag == KILN_VALUE_UNDEFINED;
@@ -15470,9 +15501,10 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 }
                 continue;
             }
+            kiln_value elem_val = kiln_val_to_boundary(array->elements[index]);
             found = code == KILN_C99_METHOD_INCLUDES
-                        ? kiln_c99_same_value_zero(array->elements[index], needle)
-                        : kiln_c99_strict_equal(array->elements[index], needle);
+                        ? kiln_c99_same_value_zero(elem_val, needle)
+                        : kiln_c99_strict_equal(elem_val, needle);
             if (found) {
                 break;
             }
@@ -15495,7 +15527,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             return status;
         }
         for (index = start; index < end && index < array->count; ++index) {
-            status = kiln_c99_array_push(built, array->elements[index]);
+            status = kiln_c99_array_push(built, kiln_val_to_boundary(array->elements[index]));
             if (status != KILN_C99_OK) {
                 return status;
             }
@@ -15511,7 +15543,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             return status;
         }
         for (index = 0; index < array->count; ++index) {
-            status = kiln_c99_array_push(built, array->elements[index]);
+            status = kiln_c99_array_push(built, kiln_val_to_boundary(array->elements[index]));
             if (status != KILN_C99_OK) {
                 return status;
             }
@@ -15522,7 +15554,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             if (args[argument].tag == KILN_VALUE_ARRAY) {
                 kiln_array *other = kiln_c99_array_of(args[argument]);
                 for (index = 0; index < other->count; ++index) {
-                    status = kiln_c99_array_push(built, other->elements[index]);
+                    status = kiln_c99_array_push(built, kiln_val_to_boundary(other->elements[index]));
                     if (status != KILN_C99_OK) {
                         return status;
                     }
@@ -15559,8 +15591,8 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             }
             /* A hole is visited as undefined here, unlike `find`: the language added the
              * last-first pair after it stopped skipping them. */
-            visit[0] = kiln_c99_is_hole(array->elements[at]) ? kiln_c99_undefined()
-                                                             : array->elements[at];
+            visit[0] = array->elements[at] == KILN_VAL_HOLE ? kiln_c99_undefined()
+                                                            : kiln_val_to_boundary(array->elements[at]);
             visit[1] = kiln_c99_number((double)at);
             visit[2] = receiver;
             status = kiln_c99_call(host, &produced, callback, self_value, visit, 3, depth, thrown);
@@ -15595,7 +15627,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         }
         status = kiln_c99_new_array(&removed);
         for (index = 0; index < removing && status == KILN_C99_OK; ++index) {
-            status = kiln_c99_array_push(removed, array->elements[start + index]);
+            status = kiln_c99_array_push(removed, kiln_val_to_boundary(array->elements[start + index]));
         }
         if (status != KILN_C99_OK) {
             return status;
@@ -15617,7 +15649,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     tail * sizeof *array->elements);
         }
         for (index = 0; index < inserting; ++index) {
-            array->elements[start + index] = args[index + 2];
+            array->elements[start + index] = kiln_val_from_boundary(args[index + 2]);
         }
         array->count = array->count - removing + inserting;
         /* The removed elements, which is what makes `splice` usable as a queue read. */
@@ -15651,7 +15683,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         } else {
             /* The seed is the last element that is *there*: an array of nothing but holes has no
              * answer to give, exactly as an empty one does not. */
-            while (at > 0 && kiln_c99_is_hole(array->elements[at - 1])) {
+            while (at > 0 && array->elements[at - 1] == KILN_VAL_HOLE) {
                 at -= 1;
             }
             if (at == 0) {
@@ -15659,16 +15691,16 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                                             "Reduce of empty array with no initial value");
             }
             at -= 1;
-            accumulator = array->elements[at];
+            accumulator = kiln_val_to_boundary(array->elements[at]);
         }
         while (at > 0) {
             kiln_value visit[4];
             at -= 1;
-            if (at >= array->count || kiln_c99_is_hole(array->elements[at])) {
+            if (at >= array->count || array->elements[at] == KILN_VAL_HOLE) {
                 continue;
             }
             visit[0] = accumulator;
-            visit[1] = array->elements[at];
+            visit[1] = kiln_val_to_boundary(array->elements[at]);
             visit[2] = kiln_c99_number((double)at);
             visit[3] = receiver;
             status = kiln_c99_call(host, &accumulator, callback, kiln_c99_undefined(), visit, 4,
@@ -15705,7 +15737,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 /* Every element walk skips a hole and visits an undefined. `map` still has to
                  * *leave* one: its result has an entry per input position, and skipping would
                  * shift everything after it. */
-                if (kiln_c99_is_hole(array->elements[index])) {
+                if (array->elements[index] == KILN_VAL_HOLE) {
                     if (code == KILN_C99_METHOD_MAP ||
                         code == KILN_C99_METHOD_ARRAY_GENERIC_MAP) {
                         status = kiln_c99_array_push(built, kiln_c99_hole());
@@ -15715,7 +15747,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     }
                     continue;
                 }
-                visit[0] = array->elements[index];
+                visit[0] = kiln_val_to_boundary(array->elements[index]);
                 visit[1] = kiln_c99_number((double)index);
                 visit[2] = receiver;
                 status = kiln_c99_call(host, &produced, callback, self_value, visit, 3, depth, thrown);
@@ -15763,8 +15795,8 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         relative = trunc(relative);
         position = relative < 0.0 ? (double)array->count + relative : relative;
         *result = position >= 0.0 && position < (double)array->count &&
-                          !kiln_c99_is_hole(array->elements[(size_t)position])
-                      ? array->elements[(size_t)position]
+                          array->elements[(size_t)position] != KILN_VAL_HOLE
+                      ? kiln_val_to_boundary(array->elements[(size_t)position])
                       : kiln_c99_undefined();
         return KILN_C99_OK;
     }
@@ -15793,10 +15825,10 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             limit = from >= (double)array->count ? array->count : (size_t)from + 1;
         }
         for (index = limit; index > 0; --index) {
-            if (kiln_c99_is_hole(array->elements[index - 1])) {
+            if (array->elements[index - 1] == KILN_VAL_HOLE) {
                 continue;
             }
-            if (kiln_c99_strict_equal(array->elements[index - 1], needle)) {
+            if (kiln_c99_strict_equal(kiln_val_to_boundary(array->elements[index - 1]), needle)) {
                 found = (double)(index - 1);
                 break;
             }
@@ -15819,13 +15851,13 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             kiln_value produced;
             /* `find` and `findIndex` visit a hole as undefined, where `some` and `every` skip
              * it -- the same split `includes` and `indexOf` make. */
-            if (kiln_c99_is_hole(array->elements[index])) {
+            if (array->elements[index] == KILN_VAL_HOLE) {
                 if (code == KILN_C99_METHOD_ARRAY_SOME || code == KILN_C99_METHOD_ARRAY_EVERY) {
                     continue;
                 }
                 visit[0] = kiln_c99_undefined();
             } else {
-                visit[0] = array->elements[index];
+                visit[0] = kiln_val_to_boundary(array->elements[index]);
             }
             visit[1] = kiln_c99_number((double)index);
             visit[2] = receiver;
@@ -15840,7 +15872,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         }
         switch (code) {
         case KILN_C99_METHOD_ARRAY_FIND:
-            *result = matched && index < array->count ? array->elements[index]
+            *result = matched && index < array->count ? kiln_val_to_boundary(array->elements[index])
                                                       : kiln_c99_undefined();
             if (result->tag == KILN_VALUE_HOLE) {
                 *result = kiln_c99_undefined();
@@ -15873,13 +15905,13 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 "The comparison function must be either a function or undefined");
         }
         for (index = 0; index < array->count; ++index) {
-            if (!kiln_c99_is_hole(array->elements[index]) &&
-                array->elements[index].tag != KILN_VALUE_UNDEFINED) {
+            if (array->elements[index] != KILN_VAL_HOLE &&
+                array->elements[index] != KILN_VAL_UNDEFINED) {
                 array->elements[live++] = array->elements[index];
             }
         }
         for (index = live; index < array->count; ++index) {
-            array->elements[index] = kiln_c99_undefined();
+            array->elements[index] = KILN_VAL_UNDEFINED;
         }
         if (live > 1) {
             kiln_c99_sort_context ctx;
@@ -15887,7 +15919,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             ctx.comparator = comparator;
             ctx.depth = depth;
             ctx.thrown = thrown;
-            status = kiln_c99_timsort_value(&ctx, array->elements, live);
+            status = kiln_c99_timsort_val(&ctx, array->elements, live);
             if (status != KILN_C99_OK) {
                 return status;
             }
@@ -15899,7 +15931,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
     case KILN_C99_METHOD_ARRAY_REVERSE: {
         size_t half;
         for (half = 0; half * 2 + 1 < array->count; ++half) {
-            kiln_value swap = array->elements[half];
+            kiln_val swap = array->elements[half];
             array->elements[half] = array->elements[array->count - 1 - half];
             array->elements[array->count - 1 - half] = swap;
         }
@@ -15949,9 +15981,9 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             return status;
         }
         for (index = 0; index < array->count; ++index) {
-            kiln_value element = kiln_c99_is_hole(array->elements[index])
+            kiln_value element = array->elements[index] == KILN_VAL_HOLE
                                      ? kiln_c99_undefined()
-                                     : array->elements[index];
+                                     : kiln_val_to_boundary(array->elements[index]);
             if (code == KILN_C99_METHOD_ARRAY_WITH && index == replacing) {
                 /* Stored as it was handed over: the replacement is the one argument of these
                  * four that must not be converted to anything. */
@@ -15993,8 +16025,8 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             *result = kiln_c99_undefined();
             return KILN_C99_OK;
         }
-        *result = kiln_c99_is_hole(array->elements[0]) ? kiln_c99_undefined()
-                                                       : array->elements[0];
+        *result = array->elements[0] == KILN_VAL_HOLE ? kiln_c99_undefined()
+                                                       : kiln_val_to_boundary(array->elements[0]);
         memmove(array->elements, array->elements + 1,
                 (array->count - 1) * sizeof *array->elements);
         array->count -= 1;
@@ -16009,7 +16041,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         }
         memmove(array->elements + argc, array->elements, array->count * sizeof *array->elements);
         for (added = 0; added < argc; ++added) {
-            array->elements[added] = args[added];
+            array->elements[added] = kiln_val_from_boundary(args[added]);
         }
         array->count += argc;
         *result = kiln_c99_number((double)array->count);
@@ -16017,12 +16049,13 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
     }
     case KILN_C99_METHOD_ARRAY_FILL: {
         kiln_value filler = argc > 0 ? args[0] : kiln_c99_undefined();
+        kiln_val filler_val = kiln_val_from_boundary(filler);
         size_t start = kiln_c99_relative_index(argc > 1 ? args[1] : kiln_c99_undefined(),
                                                array->count, 0);
         size_t end = kiln_c99_relative_index(argc > 2 ? args[2] : kiln_c99_undefined(),
                                              array->count, array->count);
         for (index = start; index < end; ++index) {
-            array->elements[index] = filler;
+            array->elements[index] = filler_val;
         }
         *result = receiver;
         return KILN_C99_OK;
@@ -16039,10 +16072,11 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             return status;
         }
         for (index = 0; index < array->count && status == KILN_C99_OK; ++index) {
-            kiln_value element = array->elements[index];
-            if (kiln_c99_is_hole(element)) {
+            kiln_val elem_v = array->elements[index];
+            if (elem_v == KILN_VAL_HOLE) {
                 continue;
             }
+            kiln_value element = kiln_val_to_boundary(elem_v);
             if (element.tag == KILN_VALUE_ARRAY && depth_wanted >= 1.0) {
                 kiln_value flattened;
                 kiln_value inner_depth = kiln_c99_number(depth_wanted - 1.0);
@@ -16055,7 +16089,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 }
                 nested = kiln_c99_array_of(flattened);
                 for (inner = 0; inner < nested->count && status == KILN_C99_OK; ++inner) {
-                    status = kiln_c99_array_push(built, nested->elements[inner]);
+                    status = kiln_c99_array_push(built, kiln_val_to_boundary(nested->elements[inner]));
                 }
                 continue;
             }
@@ -16077,9 +16111,9 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     status = kiln_c99_array_push(pair, entry);
                 }
                 if (status == KILN_C99_OK) {
-                    status = kiln_c99_array_push(pair, kiln_c99_is_hole(array->elements[index])
+                    status = kiln_c99_array_push(pair, array->elements[index] == KILN_VAL_HOLE
                                                            ? kiln_c99_undefined()
-                                                           : array->elements[index]);
+                                                           : kiln_val_to_boundary(array->elements[index]));
                 }
                 entry = pair;
             }
@@ -16103,7 +16137,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             /* Without a seed the accumulator is the first element that is *there*: folding a
              * hole in would turn every sum over a sparse array into NaN. An array of nothing but
              * holes has no answer to give, exactly as an empty one does not. */
-            while (index < length && kiln_c99_is_hole(array->elements[index])) {
+            while (index < length && array->elements[index] == KILN_VAL_HOLE) {
                 index += 1;
             }
             if (index >= length) {
@@ -16112,16 +16146,16 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                             "Reduce of empty array with no initial value");
             }
-            accumulator = array->elements[index];
+            accumulator = kiln_val_to_boundary(array->elements[index]);
             index += 1;
         }
         for (; index < length && index < array->count; ++index) {
             kiln_value visit[4];
-            if (kiln_c99_is_hole(array->elements[index])) {
+            if (array->elements[index] == KILN_VAL_HOLE) {
                 continue;
             }
             visit[0] = accumulator;
-            visit[1] = array->elements[index];
+            visit[1] = kiln_val_to_boundary(array->elements[index]);
             visit[2] = kiln_c99_number((double)index);
             visit[3] = receiver;
             status = kiln_c99_call(host, &accumulator, callback, kiln_c99_undefined(), visit, 4,
@@ -16157,9 +16191,9 @@ static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value sourc
             /* Iteration *reads* each position, so a hole arrives as the undefined it reads as.
              * That is what makes `[...[1, , 3]]` a dense three-element array where `map` over
              * the same input leaves the hole alone. */
-            status = kiln_c99_array_push(target, kiln_c99_is_hole(array->elements[index])
+            status = kiln_c99_array_push(target, array->elements[index] == KILN_VAL_HOLE
                                                      ? kiln_c99_undefined()
-                                                     : array->elements[index]);
+                                                     : kiln_val_to_boundary(array->elements[index]));
             if (status != KILN_C99_OK) {
                 return status;
             }
@@ -16400,7 +16434,7 @@ static int kiln_c99_has_property(kiln_host *host, kiln_value target, const char 
         }
         if (index >= 0.0) {
             kiln_array *array = kiln_c99_array_of(target);
-            *answer = (size_t)index < array->count && !kiln_c99_is_hole(array->elements[(size_t)index]);
+            *answer = (size_t)index < array->count && array->elements[(size_t)index] != KILN_VAL_HOLE;
             return KILN_C99_OK;
         }
         /* A name an array carries beside its elements -- `a.total`, the `index` on a match
@@ -16573,7 +16607,7 @@ static int kiln_c99_delete(kiln_host *host, kiln_value target, const char *key, 
             return KILN_C99_OK;
         }
         if (slot >= 0.0 && (size_t)slot < array->count) {
-            array->elements[(size_t)slot] = kiln_c99_hole();
+            array->elements[(size_t)slot] = KILN_VAL_HOLE;
         }
         return KILN_C99_OK;
     }
@@ -16720,7 +16754,7 @@ static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out
          * gives "0" and "1", not 0 and 1. */
         kiln_array *array = kiln_c99_array_of(target);
         for (index = 0; index < array->count; ++index) {
-            if (kiln_c99_is_hole(array->elements[index])) {
+            if (array->elements[index] == KILN_VAL_HOLE) {
                 continue;
             }
             status = kiln_c99_array_push(built, kiln_c99_text(kiln_c99_number((double)index)));
@@ -16774,7 +16808,7 @@ static int kiln_c99_keys_contain(kiln_value keys, const char *key, size_t key_le
     kiln_array *list = kiln_c99_array_of(keys);
     size_t index;
     for (index = 0; index < list->count; ++index) {
-        kiln_value name = list->elements[index];
+        kiln_value name = kiln_val_to_boundary(list->elements[index]);
         if (name.tag == KILN_VALUE_STRING && name.len == key_len &&
             (key_len == 0 || memcmp(name.ptr, key, key_len) == 0)) {
             return 1;
@@ -16935,7 +16969,7 @@ static int kiln_c99_spread_proxy(kiln_host *host, kiln_value target, kiln_value 
     /* The list is found again each time round, because a descriptor or a `get` trap is a program
      * function and may have grown the array the handler handed back. */
     for (index = 0; index < kiln_c99_array_of(listed)->count; ++index) {
-        kiln_value key = kiln_c99_array_of(listed)->elements[index];
+        kiln_value key = kiln_val_to_boundary(kiln_c99_array_of(listed)->elements[index]);
         kiln_value descriptor;
         kiln_value enumerable;
         kiln_value copied;
@@ -17034,7 +17068,7 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
             kiln_value name;
             int status;
             if (source.tag == KILN_VALUE_ARRAY &&
-                kiln_c99_is_hole(kiln_c99_array_of(source)->elements[at])) {
+                kiln_c99_array_of(source)->elements[at] == KILN_VAL_HOLE) {
                 continue;
             }
             status = kiln_c99_get_computed(host, source, kiln_c99_number((double)at), &element,
@@ -17409,9 +17443,9 @@ static int kiln_c99_define_property(kiln_host *host, kiln_value target, const ch
             }
             /* Growing leaves holes, which read as undefined and are not the same thing. */
             for (fill = array->count; fill < slot; ++fill) {
-                array->elements[fill] = kiln_c99_hole();
+                array->elements[fill] = KILN_VAL_HOLE;
             }
-            array->elements[slot] = value;
+            array->elements[slot] = kiln_val_from_boundary(value);
             if (slot + 1 > array->count) {
                 array->count = slot + 1;
             }
@@ -17784,14 +17818,14 @@ static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const 
             return status;
         }
         if (at >= 0.0) {
-            if ((size_t)at >= array->count || kiln_c99_is_hole(array->elements[(size_t)at])) {
+            if ((size_t)at >= array->count || array->elements[(size_t)at] == KILN_VAL_HOLE) {
                 return KILN_C99_OK;
             }
             status = kiln_c99_new_object(&built);
             if (status != KILN_C99_OK) {
                 return status;
             }
-            status = kiln_c99_put(NULL, built, "value", 5, array->elements[(size_t)at], 0, NULL);
+            status = kiln_c99_put(NULL, built, "value", 5, kiln_val_to_boundary(array->elements[(size_t)at]), 0, NULL);
             if (status == KILN_C99_OK) {
                 status = kiln_c99_put(NULL, built, "writable", 8,
                                       kiln_c99_boolean(!array->frozen), 0, NULL);
@@ -18389,7 +18423,7 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
         for (index = 0; index < array->count; ++index) {
             int wrote;
             KILN_JSON_BREAK(index == 0);
-            status = kiln_c99_json_value(host, text, array->elements[index], indent, indent_len,
+            status = kiln_c99_json_value(host, text, kiln_val_to_boundary(array->elements[index]), indent, indent_len,
                                          nested.bytes, nested.len, &wrote, depth, &frame, thrown);
             if (status != KILN_C99_OK) {
                 free(nested.bytes);
@@ -18497,7 +18531,7 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
         KILN_JSON_OPEN(is_array ? "[" : "{");
         for (index = 0; index < count; ++index) {
             kiln_value key = is_array ? kiln_c99_text(kiln_c99_number((double)index))
-                                      : kiln_c99_array_of(keys)->elements[index];
+                                      : kiln_val_to_boundary(kiln_c99_array_of(keys)->elements[index]);
             kiln_value member;
             kiln_text member_text = {NULL, 0, 0};
             int wrote;
@@ -21501,7 +21535,7 @@ static int kiln_c99_array_constructor(kiln_value *out, const kiln_value *args, s
             return status;
         }
         for (index = 0; index < (size_t)length; ++index) {
-            array->elements[index] = kiln_c99_hole();
+            array->elements[index] = KILN_VAL_HOLE;
         }
         array->count = (size_t)length;
         *out = built;
@@ -22901,7 +22935,7 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
                     if (keys.tag == KILN_VALUE_ARRAY) {
                         kiln_array *arr = kiln_c99_array_of(keys);
                         for (size_t i = 0; i < arr->count; ++i) {
-                            kiln_dyn_scope_set(scope, var_name, var_name_len, arr->elements[i]);
+                            kiln_dyn_scope_set(scope, var_name, var_name_len, kiln_val_to_boundary(arr->elements[i]));
                             kiln_dyn_lexer blex;
                             memset(&blex, 0, sizeof(blex));
                             blex.src = body_src;
@@ -22948,7 +22982,10 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
                     if (target.tag == KILN_VALUE_ARRAY) {
                         kiln_array *arr = kiln_c99_array_of(target);
                         for (size_t i = 0; i < arr->count; ++i) {
-                            kiln_dyn_scope_set(scope, var_name, var_name_len, arr->elements[i]);
+                            kiln_value elem = arr->elements[i] == KILN_VAL_HOLE
+                                                  ? kiln_c99_undefined()
+                                                  : kiln_val_to_boundary(arr->elements[i]);
+                            kiln_dyn_scope_set(scope, var_name, var_name_len, elem);
                             kiln_dyn_lexer blex;
                             memset(&blex, 0, sizeof(blex));
                             blex.src = body_src;
@@ -23697,7 +23734,7 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
             {
                 kiln_array *given = kiln_c99_array_of(gathered);
                 for (index = 0; index < given->count; ++index) {
-                    kiln_value key = given->elements[index];
+                    kiln_value key = kiln_val_to_boundary(given->elements[index]);
                     kiln_value member = key;
                     if (is_map) {
                         kiln_array *pair;
@@ -23705,8 +23742,12 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
                             KILN_C99_REFUSE("a Map built from an entry that is not an array");
                         }
                         pair = kiln_c99_array_of(key);
-                        key = pair->count > 0 ? pair->elements[0] : kiln_c99_undefined();
-                        member = pair->count > 1 ? pair->elements[1] : kiln_c99_undefined();
+                        key = pair->count > 0 && pair->elements[0] != KILN_VAL_HOLE
+                                  ? kiln_val_to_boundary(pair->elements[0])
+                                  : kiln_c99_undefined();
+                        member = pair->count > 1 && pair->elements[1] != KILN_VAL_HOLE
+                                     ? kiln_val_to_boundary(pair->elements[1])
+                                     : kiln_c99_undefined();
                     }
                     status = kiln_c99_collection_put(built, key, member);
                     if (status != KILN_C99_OK) {
@@ -23903,19 +23944,74 @@ static int kiln_c99_adopt_super(kiln_value *receiver, kiln_value produced) {
     return KILN_C99_OK;
 }
 
+static int kiln_c99_call_val(kiln_host *host, kiln_val *result, kiln_val callee,
+                             kiln_val receiver, const kiln_val *args, size_t argc,
+                             int depth, kiln_value *thrown) {
+    kiln_value bcallee = kiln_val_to_boundary(callee);
+    kiln_value breceiver = kiln_val_to_boundary(receiver);
+    kiln_value inline_args[16];
+    kiln_value *bargs = inline_args;
+    if (argc > 16) {
+        bargs = (kiln_value *)malloc(argc * sizeof(kiln_value));
+        if (bargs == NULL) return KILN_C99_OUT_OF_MEMORY;
+    }
+    if (args != NULL) {
+        for (size_t i = 0; i < argc; ++i) {
+            bargs[i] = args[i] == KILN_VAL_HOLE ? kiln_c99_undefined() : kiln_val_to_boundary(args[i]);
+        }
+    }
+    kiln_value bresult = kiln_c99_undefined();
+    int status = kiln_c99_call(host, &bresult, bcallee, breceiver, (argc > 0 && args != NULL) ? bargs : NULL, argc, depth, thrown);
+    if (bargs != inline_args) free(bargs);
+    if (status == KILN_C99_OK) {
+        *result = kiln_val_from_boundary(bresult);
+    }
+    return status;
+}
+
+static int kiln_c99_construct_val(kiln_host *host, kiln_val *result, kiln_val callee,
+                                  const kiln_val *args, size_t argc,
+                                  int depth, kiln_value *thrown) {
+    kiln_value bcallee = kiln_val_to_boundary(callee);
+    kiln_value inline_args[16];
+    kiln_value *bargs = inline_args;
+    if (argc > 16) {
+        bargs = (kiln_value *)malloc(argc * sizeof(kiln_value));
+        if (bargs == NULL) return KILN_C99_OUT_OF_MEMORY;
+    }
+    if (args != NULL) {
+        for (size_t i = 0; i < argc; ++i) {
+            bargs[i] = args[i] == KILN_VAL_HOLE ? kiln_c99_undefined() : kiln_val_to_boundary(args[i]);
+        }
+    }
+    kiln_value bresult = kiln_c99_undefined();
+    int status = kiln_c99_construct(host, &bresult, bcallee, (argc > 0 && args != NULL) ? bargs : NULL, argc, depth, thrown);
+    if (bargs != inline_args) free(bargs);
+    if (status == KILN_C99_OK) {
+        *result = kiln_val_from_boundary(bresult);
+    }
+    return status;
+}
+
 static int kiln_c99_super_call_val(kiln_host *host, kiln_val *produced, kiln_val parent,
                                    kiln_val receiver, const kiln_val *args, size_t argc,
                                    int depth, kiln_value *thrown) {
     kiln_value bparent = kiln_val_to_boundary(parent);
     kiln_value breceiver = kiln_val_to_boundary(receiver);
-    kiln_value bargs_buf[argc > 0 ? argc : 1];
+    kiln_value inline_args[16];
+    kiln_value *bargs = inline_args;
+    if (argc > 16) {
+        bargs = (kiln_value *)malloc(argc * sizeof(kiln_value));
+        if (bargs == NULL) return KILN_C99_OUT_OF_MEMORY;
+    }
     if (args != NULL) {
         for (size_t i = 0; i < argc; ++i) {
-            bargs_buf[i] = kiln_val_to_boundary(args[i]);
+            bargs[i] = args[i] == KILN_VAL_HOLE ? kiln_c99_undefined() : kiln_val_to_boundary(args[i]);
         }
     }
     kiln_value bproduced = kiln_c99_undefined();
-    int status = kiln_c99_super_call(host, &bproduced, bparent, breceiver, (argc > 0 && args != NULL) ? bargs_buf : NULL, argc, depth, thrown);
+    int status = kiln_c99_super_call(host, &bproduced, bparent, breceiver, (argc > 0 && args != NULL) ? bargs : NULL, argc, depth, thrown);
+    if (bargs != inline_args) free(bargs);
     if (status == KILN_C99_OK) {
         *produced = kiln_val_from_boundary(bproduced);
     }
@@ -25073,8 +25169,8 @@ static int kiln_c99_read_element(kiln_host *host, kiln_value target, kiln_value 
         if (KILN_LIKELY(idx >= 0.0 && idx <= 4294967294.0 && floor(idx) == idx)) {
             size_t slot = (size_t)idx;
             const kiln_array *array = kiln_c99_array_of(target);
-            if (KILN_LIKELY(slot < array->count && !kiln_c99_is_hole(array->elements[slot]))) {
-                *out = array->elements[slot];
+            if (KILN_LIKELY(slot < array->count && array->elements[slot] != KILN_VAL_HOLE)) {
+                *out = kiln_val_to_boundary(array->elements[slot]);
                 return KILN_C99_OK;
             }
         }
@@ -25102,7 +25198,7 @@ static int kiln_c99_write_element(kiln_host *host, kiln_value target, kiln_value
             size_t slot = (size_t)idx;
             kiln_array *array = kiln_c99_array_of(target);
             if (KILN_LIKELY(!array->frozen && slot < array->count)) {
-                array->elements[slot] = value;
+                array->elements[slot] = kiln_val_from_boundary(value);
                 return KILN_C99_OK;
             }
         }
@@ -25387,8 +25483,8 @@ static int kiln_c99_val_read_element(kiln_host *host, kiln_val target, kiln_val 
             uint32_t gc_kind = kiln_c99_gc_kind_of_ptr(ptr);
             if (gc_kind == KILN_GC_ARRAY) {
                 const kiln_array *array = (const kiln_array *)ptr;
-                if (KILN_LIKELY(slot < array->count && !kiln_c99_is_hole(array->elements[slot]))) {
-                    *out = kiln_val_from_boundary(array->elements[slot]);
+                if (KILN_LIKELY(slot < array->count && array->elements[slot] != KILN_VAL_HOLE)) {
+                    *out = array->elements[slot];
                     return KILN_C99_OK;
                 }
             } else if (gc_kind == KILN_GC_OBJECT) {
@@ -25420,7 +25516,7 @@ static int kiln_c99_val_write_element(kiln_host *host, kiln_val target, kiln_val
             if (gc_kind == KILN_GC_ARRAY) {
                 kiln_array *array = (kiln_array *)ptr;
                 if (KILN_LIKELY(!array->frozen && slot < array->count)) {
-                    array->elements[slot] = kiln_val_to_boundary(value);
+                    array->elements[slot] = value;
                     return KILN_C99_OK;
                 }
             } else if (gc_kind == KILN_GC_OBJECT) {
