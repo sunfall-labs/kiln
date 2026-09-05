@@ -415,11 +415,15 @@ mod validation;
 pub(crate) use validation::*;
 
 pub mod emit_graph;
+pub mod facts;
 pub mod graph;
 pub mod rules;
 pub mod summary;
 pub mod verifier;
 pub use emit_graph::emit_function_from_graph;
+pub use facts::{
+    FunctionFacts, ModuleFactsReport, ProgramFacts, SiteFact, analyze_graph, analyze_program,
+};
 pub use graph::{
     BasicBlock, BlockId, FunctionGraph, GraphOp, SiteId, Terminator, ValueId, build_function_graph,
 };

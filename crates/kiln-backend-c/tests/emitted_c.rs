@@ -1370,6 +1370,7 @@ fn linked_module() -> ModuleProgram {
             local_slot: 2,
         }],
         strictness: kiln_ir::Strictness::default(),
+        ..Default::default()
     }
 }
 

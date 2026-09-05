@@ -517,6 +517,8 @@ pub enum Request {
         output: Option<String>,
         profile: NativeProfile,
         source_view: SourceView,
+        #[serde(default)]
+        explain: bool,
     },
     /// Build from an exact database snapshot, publishing only if that snapshot remains current.
     NativeBuildAtRevision {
@@ -528,6 +530,8 @@ pub enum Request {
         profile: NativeProfile,
         source_view: SourceView,
         expected_revision: u64,
+        #[serde(default)]
+        explain: bool,
     },
     /// Emit, compile, and link one scalar module as a shared library for an embedding host.
     NativeSharedBuild {
@@ -667,6 +671,8 @@ pub struct NativeBuildSummary {
     pub compile_millis: u64,
     pub link_millis: u64,
     pub total_millis: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<String>,
 }
 
 /// Measurements and cache observability for one embedded shared-library build.
@@ -985,6 +991,7 @@ mod tests {
                     output: Some("/project/server".to_owned()),
                     profile: NativeProfile::Release,
                     source_view: SourceView(12),
+                    explain: false,
                 },
                 serde_json::json!({"NativeBuild": {
                     "path": "server.mjs",
@@ -992,7 +999,8 @@ mod tests {
                     "node": true,
                     "output": "/project/server",
                     "profile": "Release",
-                    "source_view": 12
+                    "source_view": 12,
+                    "explain": false
                 }}),
             ),
             (

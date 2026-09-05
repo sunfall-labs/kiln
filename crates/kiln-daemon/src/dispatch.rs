@@ -186,12 +186,15 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
             output,
             profile,
             source_view: _,
+            explain,
         } => (
             match native_graph(engine, resolutions, &path, &project_root, node) {
-                Ok(Some(graph)) => native_build_graph(&graph, path, project_root, output, profile),
+                Ok(Some(graph)) => {
+                    native_build_graph(&graph, path, project_root, output, profile, explain)
+                }
                 Ok(None) => match native_program(engine, &path) {
                     Ok(program) => {
-                        native_build_program(program, path, project_root, output, profile)
+                        native_build_program(program, path, project_root, output, profile, explain)
                     }
                     Err(message) => Response::Error { message },
                 },
@@ -1316,13 +1319,16 @@ fn native_built(
     project_root: &Path,
     builder: &kiln_native::NativeBuilder,
     report: kiln_native::NativeBuildReport,
+    explanation: Option<String>,
 ) -> Response {
     crate::cache_gc::record_publication(
         project_root,
         crate::cache_gc::published_bytes(&report),
         native_cache_identities(builder),
     );
-    Response::NativeBuilt(native_summary(report))
+    let mut summary = native_summary(report);
+    summary.explanation = explanation;
+    Response::NativeBuilt(summary)
 }
 
 /// Answer a finished shared-library build, accounting for what it published into the cache.
@@ -1418,6 +1424,7 @@ pub(crate) fn native_build_program(
     project_root: String,
     output: Option<String>,
     profile: NativeProfile,
+    explain: bool,
 ) -> Response {
     let project_root = PathBuf::from(project_root);
     let builder = match discover_native_builder(&project_root) {
@@ -1452,7 +1459,14 @@ pub(crate) fn native_build_program(
             march_native: false,
         },
     ) {
-        Ok(report) => native_built(&project_root, &builder, report),
+        Ok(report) => {
+            let explanation = if explain {
+                Some(kiln_backend_c::facts::analyze_program(&program, Some(&path)).format_explain())
+            } else {
+                None
+            };
+            native_built(&project_root, &builder, report, explanation)
+        }
         Err(error) => Response::Error {
             message: error.to_string(),
         },
@@ -1580,6 +1594,7 @@ pub(crate) fn native_build_graph(
     project_root: String,
     output: Option<String>,
     profile: NativeProfile,
+    explain: bool,
 ) -> Response {
     let project_root = PathBuf::from(project_root);
     let builder = match discover_native_builder(&project_root) {
@@ -1614,7 +1629,14 @@ pub(crate) fn native_build_graph(
             march_native: false,
         },
     ) {
-        Ok(report) => native_built(&project_root, &builder, report),
+        Ok(report) => {
+            let explanation = if explain {
+                Some(kiln_backend_c::facts::analyze_graph(graph).format_explain())
+            } else {
+                None
+            };
+            native_built(&project_root, &builder, report, explanation)
+        }
         Err(error) => Response::Error {
             message: error.to_string(),
         },
@@ -1749,6 +1771,7 @@ fn native_summary(report: kiln_native::NativeBuildReport) -> NativeBuildSummary 
         compile_millis: millis(report.timings.compile),
         link_millis: millis(report.timings.link),
         total_millis: millis(report.timings.total),
+        explanation: None,
     }
 }
 

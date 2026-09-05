@@ -18,6 +18,7 @@ pub(crate) struct NativeBuildAtRevisionParams {
     pub output: Option<String>,
     pub profile: NativeProfile,
     pub node: bool,
+    pub explain: bool,
     pub source_view: SourceView,
     pub expected_revision: u64,
 }
@@ -45,6 +46,7 @@ pub trait Backend: Send {
             node: params.node,
             output: params.output,
             profile: params.profile,
+            explain: params.explain,
             source_view: params.source_view,
             expected_revision: params.expected_revision,
         })? {
@@ -143,6 +145,7 @@ pub trait Backend: Send {
             other => Err(mismatch("Run", &other)),
         }
     }
+    #[allow(clippy::too_many_arguments)]
     fn native_build_at_view(
         &mut self,
         path: String,
@@ -150,6 +153,7 @@ pub trait Backend: Send {
         output: Option<String>,
         profile: NativeProfile,
         node: bool,
+        explain: bool,
         source_view: SourceView,
     ) -> Result<SourceResponse<NativeBuildSummary>> {
         match self.request(Request::NativeBuild {
@@ -158,6 +162,7 @@ pub trait Backend: Send {
             output,
             profile,
             node,
+            explain,
             source_view,
         })? {
             Response::NativeBuilt(summary) => Ok(SourceResponse::Ready(summary)),

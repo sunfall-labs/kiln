@@ -12,6 +12,7 @@ kiln-interpreter = { path = "../kiln-interpreter" }
 kiln-ir = { path = "../kiln-ir" }
 kiln-module-resolver = { path = "../kiln-module-resolver" }
 kiln-runtime = { workspace = true }
+serde = { workspace = true }
 
 [dev-dependencies]
 frontend-oxc = { path = "../frontend-oxc" }

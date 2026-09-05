@@ -2208,3 +2208,142 @@ fn a_declaration_cannot_bind_through_a_reference() {
         "the diagnostic names what it refused: {diagnostics:?}"
     );
 }
+
+#[test]
+fn compile_module_detects_immutable_and_mutable_bindings() {
+    let mut m = module(vec![
+        statement(StatementKind::Variable {
+            kind: VariableKind::Const,
+            declarations: vec![VariableDeclarator {
+                pattern: Pattern::Identifier("a".into()),
+                initializer: Some(number(1.0)),
+                span: Span::default(),
+            }],
+        }),
+        statement(StatementKind::Variable {
+            kind: VariableKind::Let,
+            declarations: vec![VariableDeclarator {
+                pattern: Pattern::Identifier("b".into()),
+                initializer: Some(number(2.0)),
+                span: Span::default(),
+            }],
+        }),
+        statement(StatementKind::Expression(Expression {
+            kind: ExpressionKind::Assignment {
+                operator: AssignmentOperator::Assign,
+                target: "b".into(),
+                value: Box::new(number(3.0)),
+            },
+            span: Span::default(),
+        })),
+        function("c", &[], vec![]),
+    ]);
+    m.exports.push(Export {
+        exported: Some(ExportName::Name("a".into())),
+        origin: ExportOrigin::Local { local: "a".into() },
+        type_only: false,
+        span: Span::default(),
+        statement_span: Span::default(),
+    });
+    m.exports.push(Export {
+        exported: Some(ExportName::Name("b".into())),
+        origin: ExportOrigin::Local { local: "b".into() },
+        type_only: false,
+        span: Span::default(),
+        statement_span: Span::default(),
+    });
+    m.exports.push(Export {
+        exported: Some(ExportName::Name("c".into())),
+        origin: ExportOrigin::Local { local: "c".into() },
+        type_only: false,
+        span: Span::default(),
+        statement_span: Span::default(),
+    });
+
+    let linked = compile_module(&m).expect("compilation succeeds");
+    assert!(
+        linked
+            .link_facts
+            .immutable_bindings
+            .contains(&"a".to_string())
+    );
+    assert!(
+        !linked
+            .link_facts
+            .immutable_bindings
+            .contains(&"b".to_string())
+    );
+    assert!(
+        linked
+            .link_facts
+            .immutable_bindings
+            .contains(&"c".to_string())
+    );
+    assert!(!linked.link_facts.direct_eval);
+    assert!(!linked.link_facts.new_function);
+    assert!(linked.link_facts.dynamic_imports.is_empty());
+}
+
+#[test]
+fn compile_module_detects_direct_eval() {
+    let m = module(vec![statement(StatementKind::Expression(Expression {
+        kind: ExpressionKind::Call {
+            callee: Box::new(identifier("eval")),
+            arguments: vec![ListElement::Item(Expression {
+                kind: ExpressionKind::Literal(Literal::String("1 + 1".into())),
+                span: Span::default(),
+            })],
+            optional: false,
+        },
+        span: Span::default(),
+    }))]);
+    let linked = compile_module(&m).expect("compilation succeeds");
+    assert!(linked.link_facts.direct_eval);
+}
+
+#[test]
+fn compile_module_detects_new_function() {
+    let m = module(vec![statement(StatementKind::Expression(Expression {
+        kind: ExpressionKind::New {
+            callee: Box::new(identifier("Function")),
+            arguments: vec![ListElement::Item(Expression {
+                kind: ExpressionKind::Literal(Literal::String("return 42;".into())),
+                span: Span::default(),
+            })],
+        },
+        span: Span::default(),
+    }))]);
+    let linked = compile_module(&m).expect("compilation succeeds");
+    assert!(linked.link_facts.new_function);
+}
+
+#[test]
+fn compile_module_detects_dynamic_imports() {
+    let m = module(vec![
+        statement(StatementKind::Expression(Expression {
+            kind: ExpressionKind::ImportCall {
+                specifier: Box::new(Expression {
+                    kind: ExpressionKind::Literal(Literal::String("foo.js".into())),
+                    span: Span::default(),
+                }),
+                options: None,
+            },
+            span: Span::default(),
+        })),
+        statement(StatementKind::Expression(Expression {
+            kind: ExpressionKind::ImportCall {
+                specifier: Box::new(identifier("runtimeSpecifier")),
+                options: None,
+            },
+            span: Span::default(),
+        })),
+    ]);
+    let linked = compile_module(&m).expect("compilation succeeds");
+    assert_eq!(
+        linked.link_facts.dynamic_imports,
+        vec![
+            DynamicImportTarget::Static("foo.js".into()),
+            DynamicImportTarget::Dynamic
+        ]
+    );
+}

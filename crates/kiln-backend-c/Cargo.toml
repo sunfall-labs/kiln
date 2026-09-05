@@ -10,9 +10,11 @@ kiln-builtin-surface = { workspace = true }
 kiln-digest = { workspace = true }
 kiln-host-abi = { workspace = true }
 kiln-ir = { workspace = true }
+kiln-module-graph = { workspace = true }
 kiln-native-number = { workspace = true }
 kiln-native-number-abi = { workspace = true }
 memchr = { workspace = true }
+serde = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }

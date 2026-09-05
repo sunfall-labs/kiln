@@ -537,6 +537,45 @@ pub struct Program {
     pub source: Arc<str>,
 }
 
+impl Default for Program {
+    fn default() -> Self {
+        Self {
+            version: BYTECODE_VERSION,
+            constants: Vec::new(),
+            code: Vec::new(),
+            local_count: 0,
+            functions: Vec::new(),
+            source: "".into(),
+        }
+    }
+}
+
+impl Program {
+    /// Whether this program or any nested function prototype contains [`Instruction::DirectEval`].
+    pub fn has_direct_eval(&self) -> bool {
+        self.code
+            .iter()
+            .any(|inst| matches!(inst, Instruction::DirectEval(_)))
+            || self.functions.iter().any(|f| {
+                f.code
+                    .iter()
+                    .any(|inst| matches!(inst, Instruction::DirectEval(_)))
+            })
+    }
+
+    /// Whether this program or any nested function prototype contains [`Instruction::DynamicImport`].
+    pub fn has_dynamic_import(&self) -> bool {
+        self.code
+            .iter()
+            .any(|inst| matches!(inst, Instruction::DynamicImport))
+            || self.functions.iter().any(|f| {
+                f.code
+                    .iter()
+                    .any(|inst| matches!(inst, Instruction::DynamicImport))
+            })
+    }
+}
+
 /// One compiled function body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionProto {
@@ -1040,9 +1079,31 @@ pub struct ExportBinding {
     pub local_slot: u32,
 }
 
+/// Target specifier for a dynamic import (`import(...)`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum DynamicImportTarget {
+    /// Statically known string literal, e.g. `import("./foo.js")`.
+    Static(String),
+    /// Non-statically-resolvable expression, e.g. `import(expr)`.
+    Dynamic,
+}
+
+/// Whole-program linking and closed-world facts extracted for one compiled module.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ModuleLinkFacts {
+    /// Module-level bindings that are never mutated across the program.
+    pub immutable_bindings: Vec<String>,
+    /// Whether the module syntax contains direct `eval(...)`.
+    pub direct_eval: bool,
+    /// Whether the module syntax contains `new Function(...)` or dynamic `Function(...)`.
+    pub new_function: bool,
+    /// Dynamic import call sites and their targets.
+    pub dynamic_imports: Vec<DynamicImportTarget>,
+}
+
 /// Linkage-aware bytecode for one module. [`Program`] stays parser- and graph-independent so the
 /// existing single-file interpreter and native backend APIs remain stable.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ModuleProgram {
     pub program: Program,
     /// Runtime evaluation dependencies, including side-effect-only imports, in source order.
@@ -1056,6 +1117,8 @@ pub struct ModuleProgram {
     /// object and a write refused by a frozen object is discarded. The linker cannot infer this
     /// from the bytecode, so the compiler that knew the goal has to say it here.
     pub strictness: Strictness,
+    /// Whole-program linking and closed-world facts.
+    pub link_facts: ModuleLinkFacts,
 }
 
 /// What a pattern walk does when it reaches a name.

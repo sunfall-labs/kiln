@@ -71,6 +71,7 @@ pub enum Command {
         shared: bool,
         node: bool,
         march_native: bool,
+        explain: bool,
     },
     Test {
         path: PathBuf,
@@ -127,6 +128,7 @@ where
     let mut workers: Option<usize> = None;
     let mut shared = false;
     let mut march_native = false;
+    let mut explain = false;
     let mut dry_run = false;
     let mut only_positional = false;
 
@@ -215,6 +217,9 @@ where
                 }
                 workers = Some(count);
             }
+            "--explain" => {
+                explain = true;
+            }
             _ => {
                 return Err(Error::usage(format!("unknown option `{arg}`")));
             }
@@ -282,6 +287,9 @@ where
     if workers.is_some() && name != "run" {
         return Err(Error::usage("--workers only applies to `kiln run`"));
     }
+    if explain && name != "build" {
+        return Err(Error::usage("--explain only applies to `kiln build`"));
+    }
     // The native backend compiles the step counter out entirely, so a budget there would be a
     // flag that silently does nothing -- which is the one thing this parser refuses to be.
     if max_steps.is_some() && native {
@@ -310,6 +318,7 @@ where
             shared,
             node,
             march_native,
+            explain,
         },
         "test" => Command::Test {
             path: PathBuf::from(one_operand(&name, &mut positional)?),
@@ -579,6 +588,7 @@ mod tests {
                 shared: false,
                 node: false,
                 march_native: false,
+                explain: false,
             }
         );
         assert!(matches!(
@@ -877,6 +887,7 @@ mod tests {
                 shared: false,
                 node: false,
                 march_native: true,
+                explain: false,
             }
         );
         assert_eq!(
@@ -888,6 +899,7 @@ mod tests {
                 shared: false,
                 node: false,
                 march_native: true,
+                explain: false,
             }
         );
         assert_eq!(
@@ -902,5 +914,22 @@ mod tests {
                 march_native: true,
             }
         );
+    }
+
+    #[test]
+    fn explain_option_parses_for_build() {
+        assert_eq!(
+            run(&["build", "src/main.ts", "--explain"]).command,
+            Command::Build {
+                path: PathBuf::from("src/main.ts"),
+                output: None,
+                profile: NativeProfile::Dev,
+                shared: false,
+                node: false,
+                march_native: false,
+                explain: true,
+            }
+        );
+        assert!(usage_error(&["run", "a.js", "--explain"]).contains("only applies"));
     }
 }

@@ -992,6 +992,7 @@ fn native_dependency_program(value: u64) -> ModuleProgram {
             body: true,
             functions: Vec::new(),
         },
+        link_facts: kiln_ir::ModuleLinkFacts::default(),
     }
 }
 
@@ -1025,6 +1026,7 @@ fn native_entry_program() -> ModuleProgram {
             body: true,
             functions: Vec::new(),
         },
+        link_facts: kiln_ir::ModuleLinkFacts::default(),
     }
 }
 

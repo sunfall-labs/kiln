@@ -748,6 +748,7 @@ impl Refresher {
                             output: Some(private_output.to_string_lossy().into_owned()),
                             profile: NativeProfile::Dev,
                             node: job.node,
+                            explain: false,
                             source_view: job.source_view,
                             expected_revision: job.revision,
                         })
@@ -1355,6 +1356,7 @@ mod tests {
             compile_millis: 1,
             link_millis: 1,
             total_millis: 3,
+            explanation: None,
         }
     }
 

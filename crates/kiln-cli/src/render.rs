@@ -206,6 +206,10 @@ pub fn native_build(source: &str, summary: &NativeBuildSummary) -> String {
             summary.emit_millis, summary.compile_millis, summary.link_millis
         ),
     );
+    if let Some(explanation) = &summary.explanation {
+        out.push('\n');
+        out.push_str(explanation);
+    }
     out
 }
 
@@ -700,5 +704,31 @@ mod tests {
         assert!(!out.contains("runtime object"), "{out}");
         assert!(!out.contains("launcher object"), "{out}");
         assert!(!out.contains("executable"), "{out}");
+    }
+
+    #[test]
+    fn native_build_renders_explanation_when_present() {
+        let summary = NativeBuildSummary {
+            module_symbol: "kiln_module_main".to_owned(),
+            output_path: "bin/main".to_owned(),
+            compiler_identity: "cc".to_owned(),
+            generated_c_cache_hit: false,
+            app_object_cache_hit: false,
+            runtime_object_cache_hit: false,
+            launcher_object_cache_hit: false,
+            executable_cache_hit: false,
+            generated_c_bytes: 100,
+            app_object_bytes: 200,
+            runtime_object_bytes: 300,
+            launcher_object_bytes: 400,
+            executable_bytes: 500,
+            emit_millis: 1,
+            compile_millis: 2,
+            link_millis: 3,
+            total_millis: 6,
+            explanation: Some("facts:\n  closed world: closed\n".to_string()),
+        };
+        let out = native_build("src/main.ts", &summary);
+        assert!(out.contains("facts:\n  closed world: closed"), "{out}");
     }
 }

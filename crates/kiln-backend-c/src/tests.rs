@@ -121,6 +121,7 @@ fn runtime_module_materializer_stays_inside_the_backend_value_abi() {
             local_slot: 0,
         }],
         strictness: kiln_ir::Strictness::default(),
+        ..Default::default()
     };
     let emitted = emit_runtime_module_with_logical_path(
         &module,
@@ -154,6 +155,7 @@ fn executable_namespace_wrapper_materializes_sorted_immutable_namespace() {
         imports: Vec::new(),
         exports: Vec::new(),
         strictness: kiln_ir::Strictness::default(),
+        ..Default::default()
     };
     let generated = emit_module_with_logical_path(&module, "src/namespace.js")
         .expect("namespace helper module emits");
@@ -287,6 +289,7 @@ fn executable_runtime_event_emitter_preserves_order_once_and_removal() {
             local_slot: 0,
         }],
         strictness: kiln_ir::Strictness::default(),
+        ..Default::default()
     };
     let generated = emit_runtime_module_with_logical_path(
         &module,
@@ -763,6 +766,7 @@ fn logical_path_diagnostics_name_source_and_operation() {
         imports: Vec::new(),
         exports: Vec::new(),
         strictness: kiln_ir::Strictness::default(),
+        ..Default::default()
     };
     let generated = emit_module_with_logical_path(&module, "node_modules/@fastify/error/index.js")
         .expect("logical module emits");
@@ -1264,6 +1268,7 @@ fn module(
         imports,
         exports,
         strictness: kiln_ir::Strictness::default(),
+        ..Default::default()
     }
 }
 

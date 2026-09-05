@@ -313,6 +313,7 @@ server.listen(0, "127.0.0.1", () => {
                 kiln_proto::NativeProfile::Dev,
                 false,
                 true,
+                false,
             )
             .expect("build standalone native Node server")
         };
@@ -392,6 +393,7 @@ server.listen(0, "127.0.0.1", () => {
                 kiln_proto::NativeProfile::Dev,
                 false,
                 true,
+                false,
             )
             .expect("build standalone native request-body server")
         };
@@ -654,6 +656,49 @@ server.listen(0, "127.0.0.1", () => {
         };
         assert!(summary.succeeded, "{:?}", summary.diagnostics);
         assert_eq!(summary.stdout, "42\n");
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[test]
+    fn one_shot_native_build_with_explain_prints_facts() {
+        let fixture =
+            std::env::temp_dir().join(format!("kiln-cli-explain-fixture-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&fixture);
+        std::fs::create_dir_all(&fixture).expect("create explain fixture");
+        let source = fixture.join("main.ts");
+        let artifact = fixture.join("main");
+        std::fs::write(
+            &source,
+            "export const greeting = 'hello';\nexport function add(a: number, b: number): number { return a + b; }\nconsole.log(add(1, 2));\n",
+        )
+        .expect("write source");
+
+        let built = {
+            let mut session = OneShot::start().expect("start an in-process engine");
+            commands::build(
+                &mut session,
+                &source,
+                &fixture,
+                Some(&artifact),
+                kiln_proto::NativeProfile::Dev,
+                false,
+                false,
+                true,
+            )
+            .expect("build with explain")
+        };
+
+        assert_eq!(built.exit_code, 0);
+        assert!(
+            built.text.contains("Whole-Program Fixpoint Facts"),
+            "{}",
+            built.text
+        );
+        assert!(built.text.contains("World: closed"), "{}", built.text);
+        assert!(built.text.contains("Immutable Bindings:"), "{}", built.text);
+        assert!(built.text.contains("greeting"), "{}", built.text);
+        assert!(built.text.contains("Function add"), "{}", built.text);
+        assert!(built.text.contains("Sites:"), "{}", built.text);
         let _ = std::fs::remove_dir_all(&fixture);
     }
 }
