@@ -1318,18 +1318,16 @@ fn render_regex_matchers(output: &mut String, program: &Program, symbol: &str) {
     let emit_if_compiled = |inst: &Instruction,
                             seen: &mut std::collections::BTreeSet<(u32, u32)>,
                             output: &mut String| {
-        if let Instruction::NewRegExp { pattern, flags } = inst {
-            if seen.insert((*pattern, *flags)) {
-                if let (Constant::String(source), Constant::String(letters)) = (
-                    &program.constants[*pattern as usize],
-                    &program.constants[*flags as usize],
-                ) {
-                    if let Some(compiled) = crate::regex::try_compile_regex(source, letters) {
-                        let prefix = format!("{symbol}_re_{pattern}_{flags}");
-                        crate::regex::emit_regex_matcher(output, &prefix, &compiled);
-                    }
-                }
-            }
+        if let Instruction::NewRegExp { pattern, flags } = inst
+            && seen.insert((*pattern, *flags))
+            && let (Constant::String(source), Constant::String(letters)) = (
+                &program.constants[*pattern as usize],
+                &program.constants[*flags as usize],
+            )
+            && let Some(compiled) = crate::regex::try_compile_regex(source, letters)
+        {
+            let prefix = format!("{symbol}_re_{pattern}_{flags}");
+            crate::regex::emit_regex_matcher(output, &prefix, &compiled);
         }
     };
 
