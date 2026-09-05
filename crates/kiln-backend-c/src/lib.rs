@@ -414,8 +414,10 @@ pub use prelude::*;
 mod validation;
 pub(crate) use validation::*;
 
+pub mod emit_graph;
 pub mod graph;
 pub mod verifier;
+pub use emit_graph::emit_function_from_graph;
 pub use graph::{
     BasicBlock, BlockId, FunctionGraph, GraphOp, GraphType, SiteId, Terminator, ValueId,
     build_function_graph,
@@ -1759,6 +1761,49 @@ fn is_fused_with_previous(
     false
 }
 
+fn can_emit_from_graph(proto: &FunctionProto) -> bool {
+    if proto.generator || proto.asynchronous {
+        return false;
+    }
+    if !handler_targets(&proto.code).is_empty() {
+        return false;
+    }
+    for inst in &proto.code {
+        match inst {
+            Instruction::Const(_)
+            | Instruction::LoadLocal(_)
+            | Instruction::StoreLocal(_)
+            | Instruction::Pop
+            | Instruction::Dup
+            | Instruction::Dup2
+            | Instruction::Unary(_)
+            | Instruction::Binary(_)
+            | Instruction::Jump(_)
+            | Instruction::JumpIfFalse(_)
+            | Instruction::JumpIfTruthy(_)
+            | Instruction::Return
+            | Instruction::Throw
+            | Instruction::Call { .. }
+            | Instruction::CallMethod { .. }
+            | Instruction::GetProperty(_)
+            | Instruction::SetProperty(_)
+            | Instruction::SetPropertyStrict { .. }
+            | Instruction::GetComputed
+            | Instruction::SetComputed
+            | Instruction::SetComputedStrict { .. }
+            | Instruction::NewArray { .. }
+            | Instruction::LoadGlobal(_)
+            | Instruction::StoreGlobal(_)
+            | Instruction::LoadCell(_)
+            | Instruction::StoreCell(_)
+            | Instruction::NewCell(_)
+            | Instruction::MarkUninitialized(_) => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_function(
     output: &mut String,
@@ -1771,6 +1816,22 @@ fn render_function(
     strict_functions: &[bool],
 ) {
     let scalar_proto = !proto_produces_references(proto, program);
+    if can_emit_from_graph(proto) {
+        let graph = build_function_graph(proto, program);
+        if verifier::verify_function_graph(&graph).is_ok() {
+            emit_function_from_graph(
+                output,
+                &graph,
+                proto,
+                program,
+                symbol,
+                index,
+                scalar_proto,
+                diagnostic_site,
+            );
+            return;
+        }
+    }
     let max_stack = frame_stacks[index];
     let locals = usize::try_from(proto.local_count).unwrap().max(1);
     // Only when the name is already a C identifier: it goes into a comment, and a name is

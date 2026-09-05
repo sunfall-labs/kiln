@@ -486,7 +486,14 @@ mod tests {
 
         graph.blocks.push(BasicBlock {
             id: b0,
-            operations: vec![(v0, GraphOp::Const(Constant::Number(42)), GraphType::Number)],
+            operations: vec![(
+                v0,
+                GraphOp::Const {
+                    index: 0,
+                    constant: Constant::Number(42),
+                },
+                GraphType::Number,
+            )],
             terminator: Terminator::Return(Some(v0)),
             predecessors: vec![],
             successors: vec![],
@@ -511,7 +518,10 @@ mod tests {
             id: b0,
             operations: vec![(
                 v_cond,
-                GraphOp::Const(Constant::Boolean(true)),
+                GraphOp::Const {
+                    index: 0,
+                    constant: Constant::Boolean(true),
+                },
                 GraphType::Boolean,
             )],
             terminator: Terminator::Branch {
@@ -529,7 +539,10 @@ mod tests {
             id: b1,
             operations: vec![(
                 v_in_b1,
-                GraphOp::Const(Constant::Number(100)),
+                GraphOp::Const {
+                    index: 1,
+                    constant: Constant::Number(100),
+                },
                 GraphType::Number,
             )],
             terminator: Terminator::Return(Some(v_in_b1)),

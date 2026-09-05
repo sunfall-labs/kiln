@@ -46,7 +46,10 @@ pub enum Effect {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GraphOp {
     // Constants and Literals
-    Const(Constant),
+    Const {
+        index: u32,
+        constant: Constant,
+    },
     LoadLocal(u32),
     StoreLocal {
         slot: u32,
@@ -236,7 +239,7 @@ impl GraphOp {
     /// Effect classification for this operation.
     pub fn effect(&self) -> Effect {
         match self {
-            Self::Const(_)
+            Self::Const { .. }
             | Self::LoadLocal(_)
             | Self::LoadThis
             | Self::LoadNewTarget
@@ -360,7 +363,10 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
         let ret_val = graph.alloc_value();
         let ops = vec![(
             ret_val,
-            GraphOp::Const(Constant::Undefined),
+            GraphOp::Const {
+                index: 0,
+                constant: Constant::Undefined,
+            },
             GraphType::Undefined,
         )];
         graph.blocks.push(BasicBlock {
@@ -508,7 +514,14 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                         Constant::Undefined => GraphType::Undefined,
                         Constant::BigInt(_) => GraphType::Val,
                     };
-                    operations.push((val, GraphOp::Const(constant), gtype));
+                    operations.push((
+                        val,
+                        GraphOp::Const {
+                            index: *c_idx,
+                            constant,
+                        },
+                        gtype,
+                    ));
                     frame.stack.push(val);
                 }
                 Instruction::LoadLocal(slot) => {
