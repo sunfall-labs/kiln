@@ -5,6 +5,8 @@
 # Committed for the same reason baseline.json is: a recorded number is what makes a later
 # change in it a diff someone has to justify. Written by scripts/server-baseline.sh.
 !/bench/results/server-baseline.json
+# Third-party bundle performance baseline (fastest-native Step 0.6)
+!/bench/results/thirdparty-baseline.json
 .DS_Store
 /.kiln/
 
