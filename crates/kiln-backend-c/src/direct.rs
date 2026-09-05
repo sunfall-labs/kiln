@@ -60,6 +60,8 @@ pub struct CallPlan {
     pub typed_sites: HashSet<ValueId>,
     /// Every value this body proves a number, with the plan's call verdicts folded in.
     pub numbers: HashSet<ValueId>,
+    /// Every value this body proves an integer, with the plan's call verdicts folded in.
+    pub ints: HashSet<ValueId>,
     /// Reads of a known binding that is never marked uninitialized: the binding holds
     /// `undefined` and then the closure, so the read needs no dead-zone check.
     pub unchecked: HashSet<ValueId>,
@@ -148,7 +150,7 @@ impl DirectPlan {
                     .iter()
                     .filter(|b| b.id == graph.entry_block || !b.predecessors.is_empty())
                     .all(|b| match &b.terminator {
-                        Terminator::Return(Some(v)) => proven.get(v) == Some(&Proven::Number),
+                        Terminator::Return(Some(v)) => proven.get(v).is_some_and(|k| k.is_number()),
                         Terminator::Return(None) => false,
                         _ => true,
                     });
@@ -179,8 +181,12 @@ impl DirectPlan {
                 known: known.known.clone(),
                 typed_sites,
                 numbers: proven
+                    .iter()
+                    .filter_map(|(&v, &kind)| kind.is_number().then_some(v))
+                    .collect(),
+                ints: proven
                     .into_iter()
-                    .filter_map(|(v, kind)| (kind == Proven::Number).then_some(v))
+                    .filter_map(|(v, kind)| (kind == Proven::Int).then_some(v))
                     .collect(),
                 unchecked: known.unchecked.clone(),
                 typed_returns: typed_returns.clone(),
@@ -322,7 +328,7 @@ fn settle(
                 .expect("a settled site");
             site.args
                 .iter()
-                .all(|a| proven.get(a) == Some(&Proven::Number))
+                .all(|a| proven.get(a).is_some_and(|k| k.is_number()))
         });
         if typed_sites.len() == before {
             return (proven, typed_sites);
