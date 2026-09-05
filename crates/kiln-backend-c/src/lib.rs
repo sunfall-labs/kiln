@@ -417,6 +417,7 @@ pub(crate) use validation::*;
 pub mod emit_graph;
 pub mod graph;
 pub mod rules;
+pub mod summary;
 pub mod verifier;
 pub use emit_graph::emit_function_from_graph;
 pub use graph::{
@@ -425,6 +426,9 @@ pub use graph::{
 };
 pub use rules::{
     FusedPattern, is_fused_with_previous, is_fusible_binary, match_rule, relational_op_symbol,
+};
+pub use summary::{
+    FunctionSummary, TypeGuess, summarize_function, summarize_graph, summarize_program,
 };
 pub use verifier::{VerifierError, verify_function_graph};
 

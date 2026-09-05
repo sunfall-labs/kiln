@@ -992,6 +992,7 @@ version = "0.0.0"
 dependencies = [
  "insta",
  "kiln-builtin-surface",
+ "kiln-digest",
  "kiln-host-abi",
  "kiln-ir",
  "kiln-native-number",
@@ -1087,6 +1088,7 @@ name = "kiln-db"
 version = "0.0.0"
 dependencies = [
  "ahash",
+ "kiln-backend-c",
  "kiln-digest",
  "kiln-hir",
  "kiln-ir",
