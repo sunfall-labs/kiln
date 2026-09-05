@@ -2739,7 +2739,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                     uint32_t slot;
                     if (kiln_c99_shape_find_slot(object->shape, ikey, &slot)) {
                         if (slot < object->slot_capacity) {
-                            *out = object->slots[slot];
+                            *out = kiln_val_to_boundary(object->slots[slot]);
                             return KILN_C99_OK;
                         }
                     }
@@ -4280,7 +4280,7 @@ static int kiln_c99_get_site(kiln_host *host, kiln_value target, const char *key
             for (p = 0; p < site->pic_count; ++p) {
                 if (site->entries[p].shape == object->shape &&
                     site->entries[p].slot < object->slot_capacity) {
-                    *out = object->slots[site->entries[p].slot];
+                    *out = kiln_val_to_boundary(object->slots[site->entries[p].slot]);
                     return KILN_C99_OK;
                 }
             }
@@ -4288,7 +4288,7 @@ static int kiln_c99_get_site(kiln_host *host, kiln_value target, const char *key
                 uint32_t slot;
                 if (kiln_c99_shape_find_slot(object->shape, key, &slot)) {
                     if (slot < object->slot_capacity) {
-                        *out = object->slots[slot];
+                        *out = kiln_val_to_boundary(object->slots[slot]);
                         if (site->pic_count < KILN_C99_PIC_SIZE) {
                             site->entries[site->pic_count].shape = object->shape;
                             site->entries[site->pic_count].transition_to = NULL;
@@ -4307,7 +4307,7 @@ static int kiln_c99_get_site(kiln_host *host, kiln_value target, const char *key
                         uint32_t proto_slot;
                         if (kiln_c99_shape_find_slot(proto_obj->shape, key, &proto_slot)) {
                             if (proto_slot < proto_obj->slot_capacity) {
-                                *out = proto_obj->slots[proto_slot];
+                                *out = kiln_val_to_boundary(proto_obj->slots[proto_slot]);
                                 return KILN_C99_OK;
                             }
                         }
@@ -4374,7 +4374,7 @@ static int kiln_c99_put_site(kiln_host *host, kiln_value target, const char *key
                     /* Polymorphic existing-property hit */
                     if (site->entries[p].transition_to == NULL) {
                         if (site->entries[p].slot < object->slot_capacity) {
-                            object->slots[site->entries[p].slot] = value;
+                            object->slots[site->entries[p].slot] = kiln_val_from_boundary(value);
                             return KILN_C99_OK;
                         }
                     }
@@ -4383,7 +4383,7 @@ static int kiln_c99_put_site(kiln_host *host, kiln_value target, const char *key
                              site->entries[p].slot < object->slot_capacity &&
                              (object->prototype.tag == KILN_VALUE_UNDEFINED ||
                               !kiln_c99_has_inherited_setter_or_readonly(object->prototype))) {
-                        object->slots[site->entries[p].slot] = value;
+                        object->slots[site->entries[p].slot] = kiln_val_from_boundary(value);
                         object->shape = (kiln_shape *)site->entries[p].transition_to;
                         return KILN_C99_OK;
                     }
@@ -4393,7 +4393,7 @@ static int kiln_c99_put_site(kiln_host *host, kiln_value target, const char *key
                 uint32_t slot;
                 if (kiln_c99_shape_find_slot(object->shape, key, &slot)) {
                     if (slot < object->slot_capacity) {
-                        object->slots[slot] = value;
+                        object->slots[slot] = kiln_val_from_boundary(value);
                         if (site->pic_count < KILN_C99_PIC_SIZE) {
                             site->entries[site->pic_count].shape = object->shape;
                             site->entries[site->pic_count].transition_to = NULL;
@@ -4881,7 +4881,7 @@ static int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_valu
             if (ikey == NULL) return KILN_C99_OUT_OF_MEMORY;
             if (kiln_c99_shape_find_slot(object->shape, ikey, &slot_idx)) {
                 if (slot_idx < object->slot_capacity) {
-                    object->slots[slot_idx] = value;
+                    object->slots[slot_idx] = kiln_val_from_boundary(value);
                     return KILN_C99_OK;
                 }
             }
@@ -4889,27 +4889,27 @@ static int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_valu
                 uint32_t new_slot = next_shape->slot_index;
                 if (new_slot >= object->slot_capacity) {
                     size_t new_cap = object->slot_capacity == 0 ? KILN_C99_INLINE_SLOTS : object->slot_capacity * 2;
-                    kiln_value *new_slots;
+                    kiln_val *new_slots;
                     size_t fill_i;
                     while (new_slot >= new_cap) new_cap *= 2;
                     if (object->slots == object->inline_slots) {
-                        new_slots = (kiln_value *)malloc(new_cap * sizeof(kiln_value));
+                        new_slots = (kiln_val *)malloc(new_cap * sizeof(kiln_val));
                         if (new_slots == NULL) return KILN_C99_OUT_OF_MEMORY;
-                        memcpy(new_slots, object->inline_slots, KILN_C99_INLINE_SLOTS * sizeof(kiln_value));
+                        memcpy(new_slots, object->inline_slots, KILN_C99_INLINE_SLOTS * sizeof(kiln_val));
                     } else if (object->slots == NULL) {
-                        new_slots = (kiln_value *)malloc(new_cap * sizeof(kiln_value));
+                        new_slots = (kiln_val *)malloc(new_cap * sizeof(kiln_val));
                         if (new_slots == NULL) return KILN_C99_OUT_OF_MEMORY;
                     } else {
-                        new_slots = (kiln_value *)realloc(object->slots, new_cap * sizeof(kiln_value));
+                        new_slots = (kiln_val *)realloc(object->slots, new_cap * sizeof(kiln_val));
                         if (new_slots == NULL) return KILN_C99_OUT_OF_MEMORY;
                     }
                     for (fill_i = object->slot_capacity; fill_i < new_cap; ++fill_i) {
-                        new_slots[fill_i] = kiln_c99_undefined();
+                        new_slots[fill_i] = KILN_VAL_UNDEFINED;
                     }
                     object->slots = new_slots;
                     object->slot_capacity = new_cap;
                 }
-                object->slots[new_slot] = value;
+                object->slots[new_slot] = kiln_val_from_boundary(value);
                 object->shape = next_shape;
                 return KILN_C99_OK;
             }
@@ -12468,7 +12468,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                             }
                             key = kiln_c99_copy_text(skey, key_len);
                             val = (extra->slots != NULL && index < extra->slot_capacity)
-                                      ? extra->slots[index]
+                                      ? kiln_val_to_boundary(extra->slots[index])
                                       : kiln_c99_undefined();
                             if (code == KILN_C99_METHOD_OBJECT_KEYS) {
                                 status = kiln_c99_array_push(built, key);
@@ -12613,7 +12613,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     }
                     key = kiln_c99_copy_text(skey, key_len);
                     val = (object->slots != NULL && index < object->slot_capacity)
-                              ? object->slots[index]
+                              ? kiln_val_to_boundary(object->slots[index])
                               : kiln_c99_undefined();
                     if (code == KILN_C99_METHOD_OBJECT_KEYS) {
                         status = kiln_c99_array_push(built, key);
@@ -12722,7 +12722,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                             }
                         }
                         sval = (source->slots != NULL && index < source->slot_capacity)
-                                   ? source->slots[index]
+                                   ? kiln_val_to_boundary(source->slots[index])
                                    : kiln_c99_undefined();
                         status = kiln_c99_put(host, target, skey, skey_len, sval, depth, thrown);
                         if (status != KILN_C99_OK) {
@@ -17113,7 +17113,7 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
                 }
             }
             sval = (object->slots != NULL && index < object->slot_capacity)
-                       ? object->slots[index]
+                       ? kiln_val_to_boundary(object->slots[index])
                        : kiln_c99_undefined();
             status = kiln_c99_put(host, target, skey, skey_len, sval, depth, thrown);
             if (status != KILN_C99_OK) {
@@ -18603,7 +18603,7 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
                     continue;
                 }
                 member = (object->slots != NULL && index < object->slot_capacity)
-                             ? object->slots[index]
+                             ? kiln_val_to_boundary(object->slots[index])
                              : kiln_c99_undefined();
                 status = kiln_c99_json_value(host, &member_text, member, indent, indent_len,
                                              nested.bytes, nested.len, &wrote, depth, &frame, thrown);
@@ -24899,7 +24899,7 @@ static int kiln_c99_read_property(kiln_host *host, kiln_value target,
         for (p = 0; p < site->pic_count; ++p) {
             if (object->shape == site->entries[p].shape &&
                 site->entries[p].slot < object->slot_capacity) {
-                *out = object->slots[site->entries[p].slot];
+                *out = kiln_val_to_boundary(object->slots[site->entries[p].slot]);
                 return KILN_C99_OK;
             }
         }
@@ -24951,14 +24951,14 @@ static int kiln_c99_write_property(kiln_host *host, kiln_value target,
             if (object->shape == site->entries[p].shape) {
                 if (site->entries[p].transition_to == NULL) {
                     if (KILN_LIKELY(site->entries[p].slot < object->slot_capacity && !object->frozen)) {
-                        object->slots[site->entries[p].slot] = value;
+                        object->slots[site->entries[p].slot] = kiln_val_from_boundary(value);
                         return KILN_C99_OK;
                     }
                 } else if (!object->not_extensible &&
                            site->entries[p].slot < object->slot_capacity &&
                            (object->prototype.tag == KILN_VALUE_UNDEFINED ||
                             !kiln_c99_has_inherited_setter_or_readonly(object->prototype))) {
-                    object->slots[site->entries[p].slot] = value;
+                    object->slots[site->entries[p].slot] = kiln_val_from_boundary(value);
                     object->shape = (kiln_shape *)site->entries[p].transition_to;
                     return KILN_C99_OK;
                 }
@@ -24979,7 +24979,7 @@ static int kiln_c99_val_read_property(kiln_host *host, kiln_val target,
         for (p = 0; p < site->pic_count; ++p) {
             if (object->shape == site->entries[p].shape &&
                 site->entries[p].slot < object->slot_capacity) {
-                *out = kiln_val_from_boundary(object->slots[site->entries[p].slot]);
+                *out = object->slots[site->entries[p].slot];
                 return KILN_C99_OK;
             }
         }
@@ -25003,14 +25003,14 @@ static int kiln_c99_val_write_property(kiln_host *host, kiln_val target,
             if (object->shape == site->entries[p].shape) {
                 if (site->entries[p].transition_to == NULL) {
                     if (KILN_LIKELY(site->entries[p].slot < object->slot_capacity && !object->frozen)) {
-                        object->slots[site->entries[p].slot] = kiln_val_to_boundary(value);
+                        object->slots[site->entries[p].slot] = value;
                         return KILN_C99_OK;
                     }
                 } else if (!object->not_extensible &&
                            site->entries[p].slot < object->slot_capacity &&
                            (object->prototype.tag == KILN_VALUE_UNDEFINED ||
                             !kiln_c99_has_inherited_setter_or_readonly(object->prototype))) {
-                    object->slots[site->entries[p].slot] = kiln_val_to_boundary(value);
+                    object->slots[site->entries[p].slot] = value;
                     object->shape = (kiln_shape *)site->entries[p].transition_to;
                     return KILN_C99_OK;
                 }
