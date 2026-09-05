@@ -267,7 +267,7 @@ struct ServerConnection {
     task: tokio::task::JoinHandle<()>,
 }
 
-struct ConnectionShared {
+pub(crate) struct ConnectionShared {
     resource: ResourceId,
     dispatcher: Rc<Dispatcher>,
     requests: RefCell<HashMap<u64, Rc<ResponseSlot>>>,
@@ -286,6 +286,11 @@ impl ConnectionShared {
     }
 
     fn defer(&self, id: u64, event: BodyEvent) {
+        if event == BodyEvent::Drain
+            && let Some(slot) = self.requests.borrow().get(&id)
+        {
+            slot.notify_drain();
+        }
         self.dispatcher.defer(id, event);
     }
 
@@ -346,6 +351,8 @@ struct EngineResponse {
 /// Where a response accumulates until the service future can hand it to Hyper.
 pub struct ResponseSlot {
     inner: RefCell<SlotInner>,
+    piped_request: Cell<bool>,
+    drain_notify: Notify,
 }
 
 enum ResponseBodyState {
@@ -395,6 +402,93 @@ impl ResponseSlot {
                 state: SlotState::Empty,
                 waker: None,
             }),
+            piped_request: Cell::new(false),
+            drain_notify: Notify::new(),
+        }
+    }
+
+    pub fn set_piped_request(&self, piped: bool) {
+        self.piped_request.set(piped);
+    }
+
+    pub fn is_piped_request(&self) -> bool {
+        self.piped_request.get()
+    }
+
+    pub fn notify_drain(&self) {
+        self.drain_notify.notify_waiters();
+    }
+
+    pub async fn wait_for_drain(&self) {
+        self.drain_notify.notified().await;
+    }
+
+    pub fn is_empty(&self) -> bool {
+        matches!(self.inner.borrow().state, SlotState::Empty)
+    }
+
+    pub(crate) fn ensure_streaming_ready(&self, shared: &Rc<ConnectionShared>, id: u64) {
+        let mut inner = self.inner.borrow_mut();
+        let head_request = inner.head_request;
+        match &mut inner.state {
+            SlotState::Empty => {
+                let status = 200;
+                let mut headers = HeaderMap::new();
+                headers.insert(
+                    hyper::header::TRANSFER_ENCODING,
+                    HeaderValue::from_static("chunked"),
+                );
+                let high_water_mark = crate::node_stream::DEFAULT_HIGH_WATER_MARK;
+                let carries_body = status_allows_body(status) && !head_request;
+                let bodyless = !carries_body;
+                let driver = body_driver(shared, id, high_water_mark);
+                inner.state = SlotState::Ready {
+                    status,
+                    headers,
+                    body: ResponseBodyState::Streaming {
+                        driver,
+                        ended: false,
+                    },
+                    bodyless,
+                };
+                if let Some(waker) = inner.waker.take() {
+                    waker.wake();
+                }
+            }
+            SlotState::Parked {
+                status,
+                headers,
+                high_water_mark,
+            } => {
+                let status = *status;
+                let mut headers = std::mem::take(headers);
+                let high_water_mark = *high_water_mark;
+                let carries_body = status_allows_body(status) && !head_request;
+                let bodyless = !carries_body;
+                if carries_body
+                    && !headers.contains_key(hyper::header::CONTENT_LENGTH)
+                    && !headers.contains_key(hyper::header::TRANSFER_ENCODING)
+                {
+                    headers.insert(
+                        hyper::header::TRANSFER_ENCODING,
+                        HeaderValue::from_static("chunked"),
+                    );
+                }
+                let driver = body_driver(shared, id, high_water_mark);
+                inner.state = SlotState::Ready {
+                    status,
+                    headers,
+                    body: ResponseBodyState::Streaming {
+                        driver,
+                        ended: false,
+                    },
+                    bodyless,
+                };
+                if let Some(waker) = inner.waker.take() {
+                    waker.wake();
+                }
+            }
+            SlotState::Ready { .. } | SlotState::Streaming { .. } | SlotState::Finished => {}
         }
     }
 
@@ -823,6 +917,26 @@ impl HttpServerEngine {
         requests.get(&id).cloned()
     }
 
+    pub fn pipe_request(&mut self, resource: ResourceId, id: u64) -> bool {
+        let Some((shared, slot)) = self.shared_and_slot(resource, id) else {
+            return false;
+        };
+        slot.set_piped_request(true);
+        slot.ensure_streaming_ready(&shared, id);
+        true
+    }
+
+    pub fn response_pipe_target(
+        &mut self,
+        resource: ResourceId,
+        id: u64,
+    ) -> Option<Rc<RefCell<dyn crate::node_stream::PipeTarget>>> {
+        let (shared, slot) = self.shared_and_slot(resource, id)?;
+        Some(Rc::new(RefCell::new(ResponseSlotPipeTarget::new(
+            shared, slot, id,
+        ))))
+    }
+
     fn shared_and_slot(
         &self,
         resource: ResourceId,
@@ -832,6 +946,48 @@ impl HttpServerEngine {
         let connection = table.get(&resource)?;
         let slot = connection.shared.requests.borrow().get(&id).cloned()?;
         Some((Rc::clone(&connection.shared), slot))
+    }
+}
+
+#[derive(Clone)]
+pub struct ResponseSlotPipeTarget {
+    shared: Rc<ConnectionShared>,
+    slot: Rc<ResponseSlot>,
+    id: u64,
+}
+
+impl std::fmt::Debug for ResponseSlotPipeTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResponseSlotPipeTarget")
+            .field("id", &self.id)
+            .finish()
+    }
+}
+
+impl ResponseSlotPipeTarget {
+    pub(crate) fn new(shared: Rc<ConnectionShared>, slot: Rc<ResponseSlot>, id: u64) -> Self {
+        slot.ensure_streaming_ready(&shared, id);
+        Self { shared, slot, id }
+    }
+}
+
+impl crate::node_stream::PipeTarget for ResponseSlotPipeTarget {
+    fn write_chunk(&mut self, data: &[u8]) -> WriteDisposition {
+        self.slot
+            .write(&self.shared, self.id, data)
+            .unwrap_or(WriteDisposition {
+                ready: false,
+                submit_now: false,
+            })
+    }
+
+    fn end_pipe(&mut self) -> WriteDisposition {
+        self.slot
+            .end(&self.shared, self.id, Bytes::new())
+            .unwrap_or(WriteDisposition {
+                ready: true,
+                submit_now: false,
+            })
     }
 }
 
@@ -946,52 +1102,103 @@ async fn handle(
         };
         shared.dispatch(&head)
     };
-    if dispatched {
-        let mut failed = false;
-        while let Some(frame) = body.frame().await {
-            match frame {
-                Ok(frame) => {
-                    if let Ok(data) = frame.into_data()
-                        && !data.is_empty()
-                    {
-                        let event = HttpEvent {
-                            data: &data,
-                            ..HttpEvent::bare(HttpEventKind::RequestData, id)
-                        };
-                        if !shared.dispatch(&event) {
-                            failed = true;
-                            break;
+    let (response, _pump_task) = if dispatched && slot.is_piped_request() {
+        slot.ensure_streaming_ready(&shared, id);
+        let pump_shared = Rc::clone(&shared);
+        let pump_slot = Rc::clone(&slot);
+        let pump = tokio::task::spawn_local(async move {
+            let mut failed = false;
+            while let Some(frame) = body.frame().await {
+                match frame {
+                    Ok(frame) => {
+                        if let Ok(data) = frame.into_data()
+                            && !data.is_empty()
+                        {
+                            let disp = pump_slot.write_bytes(&pump_shared, id, data);
+                            if let Some(disp) = disp
+                                && !disp.ready
+                            {
+                                pump_slot.wait_for_drain().await;
+                            }
                         }
                     }
-                }
-                Err(error) => {
-                    let message = error.to_string();
-                    let event = HttpEvent {
-                        message: message.as_bytes(),
-                        ..HttpEvent::bare(HttpEventKind::Error, id)
-                    };
-                    let _ = shared.dispatch(&event);
-                    failed = true;
-                    break;
+                    Err(error) => {
+                        let message = error.to_string();
+                        let event = HttpEvent {
+                            message: message.as_bytes(),
+                            ..HttpEvent::bare(HttpEventKind::Error, id)
+                        };
+                        let _ = pump_shared.dispatch(&event);
+                        failed = true;
+                        break;
+                    }
                 }
             }
-        }
-        if !failed {
-            let _ = shared.dispatch(&HttpEvent::bare(HttpEventKind::RequestEnd, id));
-        }
-    }
-    let _ = shared.flush_deferred();
-
-    let response = if shared.dispatcher.failed() {
-        unavailable()
+            if !failed {
+                pump_slot.end(&pump_shared, id, Bytes::new());
+                let _ = pump_shared.dispatch(&HttpEvent::bare(HttpEventKind::RequestEnd, id));
+            }
+            let _ = pump_shared.flush_deferred();
+            pump_shared.requests.borrow_mut().remove(&id);
+        });
+        let response = if shared.dispatcher.failed() {
+            unavailable()
+        } else {
+            SlotReady {
+                slot: Rc::clone(&slot),
+            }
+            .await
+        };
+        (response, Some(pump))
     } else {
-        SlotReady {
-            slot: Rc::clone(&slot),
+        if dispatched {
+            let mut failed = false;
+            while let Some(frame) = body.frame().await {
+                match frame {
+                    Ok(frame) => {
+                        if let Ok(data) = frame.into_data()
+                            && !data.is_empty()
+                        {
+                            let event = HttpEvent {
+                                data: &data,
+                                ..HttpEvent::bare(HttpEventKind::RequestData, id)
+                            };
+                            if !shared.dispatch(&event) {
+                                failed = true;
+                                break;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        let event = HttpEvent {
+                            message: message.as_bytes(),
+                            ..HttpEvent::bare(HttpEventKind::Error, id)
+                        };
+                        let _ = shared.dispatch(&event);
+                        failed = true;
+                        break;
+                    }
+                }
+            }
+            if !failed {
+                let _ = shared.dispatch(&HttpEvent::bare(HttpEventKind::RequestEnd, id));
+            }
         }
-        .await
+        let _ = shared.flush_deferred();
+
+        let response = if shared.dispatcher.failed() {
+            unavailable()
+        } else {
+            SlotReady {
+                slot: Rc::clone(&slot),
+            }
+            .await
+        };
+        shared.requests.borrow_mut().remove(&id);
+        let _ = shared.flush_deferred();
+        (response, None)
     };
-    shared.requests.borrow_mut().remove(&id);
-    let _ = shared.flush_deferred();
 
     let EngineResponse {
         status,
@@ -1048,6 +1255,7 @@ mod tests {
         events: RefCell<Vec<(HttpEventKind, u64, Vec<u8>)>>,
         checkpoints: Cell<usize>,
         answer: RefCell<Option<Box<dyn Fn(u64)>>>,
+        answer_head: RefCell<Option<Box<dyn Fn(u64)>>>,
     }
 
     impl HttpDispatch for Recording {
@@ -1068,6 +1276,11 @@ mod tests {
             self.events
                 .borrow_mut()
                 .push((event.kind, event.id, payload));
+            if event.kind == HttpEventKind::RequestHead
+                && let Some(answer) = self.answer_head.borrow().as_ref()
+            {
+                answer(event.id);
+            }
             if event.kind == HttpEventKind::RequestEnd
                 && let Some(answer) = self.answer.borrow().as_ref()
             {
@@ -1113,6 +1326,7 @@ mod tests {
                 events: RefCell::new(Vec::new()),
                 checkpoints: Cell::new(0),
                 answer: RefCell::new(None),
+                answer_head: RefCell::new(None),
             });
             let resource = ResourceId::new(7);
             let answer_engine = Rc::clone(&engine);
@@ -1203,6 +1417,7 @@ mod tests {
                 events: RefCell::new(Vec::new()),
                 checkpoints: Cell::new(0),
                 answer: RefCell::new(None),
+                answer_head: RefCell::new(None),
             });
             let resource = ResourceId::new(9);
             let answer_engine = Rc::clone(&engine);
@@ -1247,6 +1462,7 @@ mod tests {
                 events: RefCell::new(Vec::new()),
                 checkpoints: Cell::new(0),
                 answer: RefCell::new(None),
+                answer_head: RefCell::new(None),
             });
             let resource = ResourceId::new(10);
             let answer_engine = Rc::clone(&engine);
@@ -1275,6 +1491,58 @@ mod tests {
                 text.ends_with("\r\n\r\nstatic payload direct bytes"),
                 "{text}"
             );
+        });
+    }
+
+    #[test]
+    fn piped_request_runs_directly_in_rust_without_chunk_events_to_js() {
+        let (runtime, local) = local();
+        local.block_on(&runtime, async {
+            let (mut client, server) = tokio::io::duplex(4096);
+            let engine = Rc::new(RefCell::new(HttpServerEngine::default()));
+            let recording = Rc::new(Recording {
+                events: RefCell::new(Vec::new()),
+                checkpoints: Cell::new(0),
+                answer: RefCell::new(None),
+                answer_head: RefCell::new(None),
+            });
+            let resource = ResourceId::new(11);
+            let answer_engine = Rc::clone(&engine);
+            *recording.answer_head.borrow_mut() = Some(Box::new(move |id| {
+                let mut engine = answer_engine.borrow_mut();
+                assert!(engine.pipe_request(resource, id));
+            }));
+            assert!(engine.borrow_mut().attach(
+                resource,
+                HostTransport(Box::new(server)),
+                false,
+                recording.clone(),
+            ));
+
+            client
+                .write_all(b"POST /pipe HTTP/1.1\r\nhost: test\r\ncontent-length: 15\r\n\r\n")
+                .await
+                .expect("request head writes");
+            client
+                .write_all(b"hello from pipe")
+                .await
+                .expect("request body writes");
+
+            let text = read_until_complete(&mut client, b"0\r\n\r\n").await;
+            assert!(text.contains("HTTP/1.1 200 OK\r\n"), "{text}");
+            assert!(text.contains("transfer-encoding: chunked\r\n"), "{text}");
+            assert!(text.contains("hello from pipe"), "{text}");
+
+            let events = recording.events.borrow();
+            let kinds: Vec<_> = events.iter().map(|(kind, _, _)| *kind).collect();
+            // Crucial assertion: RequestData must NEVER be dispatched to JS when piped!
+            assert!(
+                !kinds.contains(&HttpEventKind::RequestData),
+                "leaked chunk events: {kinds:?}"
+            );
+            assert!(kinds.contains(&HttpEventKind::RequestHead));
+            assert!(kinds.contains(&HttpEventKind::RequestEnd));
+            assert!(kinds.contains(&HttpEventKind::Finish));
         });
     }
 }

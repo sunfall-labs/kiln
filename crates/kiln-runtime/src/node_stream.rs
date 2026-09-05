@@ -5,7 +5,9 @@
 //! state machine free of Tokio and JavaScript values lets interpreter and native adapters share
 //! it and lets deterministic scripted hosts exercise the same transitions as live sockets.
 
+use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::rc::Rc;
 
 use kiln_host_abi::{
     AsyncHostError, AsyncHostOp, AsyncHostValue, Completion, RequestId, ResourceId,
@@ -13,6 +15,14 @@ use kiln_host_abi::{
 
 /// Default writable high-water mark used by Node byte streams.
 pub const DEFAULT_HIGH_WATER_MARK: usize = 16 * 1024;
+
+/// A destination that can accept direct byte transfers from a readable source.
+pub trait PipeTarget: std::fmt::Debug {
+    /// Write a chunk of data into the destination.
+    fn write_chunk(&mut self, data: &[u8]) -> WriteDisposition;
+    /// Signal the end of the piped data stream.
+    fn end_pipe(&mut self) -> WriteDisposition;
+}
 
 /// One event an adapter must publish after a state transition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,7 +77,7 @@ enum PendingKind {
 }
 
 /// Correlates host requests for one duplex resource and drives its Node-visible state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct StreamDriver {
     resource: ResourceId,
     state: DuplexState<Vec<u8>>,
@@ -75,7 +85,28 @@ pub struct StreamDriver {
     reading: bool,
     closing: bool,
     read_size: usize,
+    pipe_target: Option<Rc<RefCell<dyn PipeTarget>>>,
+    paused_by_backpressure: bool,
 }
+
+impl PartialEq for StreamDriver {
+    fn eq(&self, other: &Self) -> bool {
+        self.resource == other.resource
+            && self.state == other.state
+            && self.requests == other.requests
+            && self.reading == other.reading
+            && self.closing == other.closing
+            && self.read_size == other.read_size
+            && self.paused_by_backpressure == other.paused_by_backpressure
+            && match (&self.pipe_target, &other.pipe_target) {
+                (Some(a), Some(b)) => Rc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+impl Eq for StreamDriver {}
 
 impl StreamDriver {
     pub fn new(resource: ResourceId, high_water_mark: usize) -> Self {
@@ -86,6 +117,36 @@ impl StreamDriver {
             reading: false,
             closing: false,
             read_size: high_water_mark.max(1),
+            pipe_target: None,
+            paused_by_backpressure: false,
+        }
+    }
+
+    pub fn pipe_to(&mut self, target: Rc<RefCell<dyn PipeTarget>>) -> Vec<StreamAction> {
+        self.pipe_target = Some(target);
+        self.start_reading()
+    }
+
+    pub fn unpipe(&mut self) {
+        self.pipe_target = None;
+        self.paused_by_backpressure = false;
+    }
+
+    pub fn is_piped(&self) -> bool {
+        self.pipe_target.is_some()
+    }
+
+    pub const fn is_paused_by_backpressure(&self) -> bool {
+        self.paused_by_backpressure
+    }
+
+    pub fn handle_target_drain(&mut self) -> Vec<StreamAction> {
+        if self.paused_by_backpressure {
+            self.paused_by_backpressure = false;
+            self.reading = true;
+            self.next_read_action().into_iter().collect()
+        } else {
+            Vec::new()
         }
     }
 
@@ -256,12 +317,25 @@ impl StreamDriver {
         match kind {
             PendingKind::Read => match value {
                 AsyncHostValue::Bytes(bytes) if bytes.is_empty() => {
+                    if let Some(target) = &self.pipe_target {
+                        target.borrow_mut().end_pipe();
+                    }
                     actions.extend(self.state.read_eof().into_iter().map(StreamAction::Event));
                 }
                 AsyncHostValue::Bytes(bytes) => {
-                    actions.push(StreamAction::Data(bytes));
-                    if let Some(read) = self.next_read_action() {
-                        actions.push(read);
+                    if let Some(target) = &self.pipe_target {
+                        let disp = target.borrow_mut().write_chunk(&bytes);
+                        if !disp.ready {
+                            self.reading = false;
+                            self.paused_by_backpressure = true;
+                        } else if let Some(read) = self.next_read_action() {
+                            actions.push(read);
+                        }
+                    } else {
+                        actions.push(StreamAction::Data(bytes));
+                        if let Some(read) = self.next_read_action() {
+                            actions.push(read);
+                        }
                     }
                 }
                 _ => actions.push(StreamAction::Error(unexpected_value("read"))),
@@ -335,6 +409,18 @@ impl StreamDriver {
             stream: self.resource,
             max_bytes: self.read_size,
         }))
+    }
+}
+
+impl PipeTarget for StreamDriver {
+    fn write_chunk(&mut self, data: &[u8]) -> WriteDisposition {
+        let (disposition, _) = self.write(data.to_vec());
+        disposition
+    }
+
+    fn end_pipe(&mut self) -> WriteDisposition {
+        let (disposition, _) = self.end(None);
+        disposition
     }
 }
 
@@ -824,5 +910,126 @@ mod tests {
         assert!(stream.close_resource().is_empty());
         assert!(stream.read_eof().contains(&StreamEvent::End));
         assert_eq!(stream.shutdown_completed(), vec![StreamEvent::Finish]);
+    }
+
+    #[derive(Debug, Default)]
+    struct MockPipeTarget {
+        chunks: Vec<Vec<u8>>,
+        ended: bool,
+        ready: bool,
+    }
+
+    impl PipeTarget for MockPipeTarget {
+        fn write_chunk(&mut self, data: &[u8]) -> WriteDisposition {
+            self.chunks.push(data.to_vec());
+            WriteDisposition {
+                ready: self.ready,
+                submit_now: true,
+            }
+        }
+
+        fn end_pipe(&mut self) -> WriteDisposition {
+            self.ended = true;
+            WriteDisposition {
+                ready: true,
+                submit_now: false,
+            }
+        }
+    }
+
+    #[test]
+    fn stream_pipe_to_target_direct_transfer() {
+        let resource = ResourceId::new(10);
+        let mut source = StreamDriver::new(resource, 64);
+        let target = Rc::new(RefCell::new(MockPipeTarget {
+            chunks: Vec::new(),
+            ended: false,
+            ready: true,
+        }));
+        let actions = source.pipe_to(Rc::clone(&target) as Rc<RefCell<dyn PipeTarget>>);
+        assert_eq!(
+            actions,
+            vec![StreamAction::Start(AsyncHostOp::TcpRead {
+                stream: resource,
+                max_bytes: 64,
+            })]
+        );
+
+        let req_id = RequestId::new(1);
+        assert!(source.started(
+            &AsyncHostOp::TcpRead {
+                stream: resource,
+                max_bytes: 64
+            },
+            req_id
+        ));
+
+        // Deliver first chunk
+        let comp = completion(1, AsyncHostValue::Bytes(b"hello pipe".to_vec()));
+        let actions = source.completed(comp).unwrap();
+        // Should request next read, and NOT emit StreamAction::Data!
+        assert_eq!(
+            actions,
+            vec![StreamAction::Start(AsyncHostOp::TcpRead {
+                stream: resource,
+                max_bytes: 64,
+            })]
+        );
+        assert_eq!(target.borrow().chunks, vec![b"hello pipe".to_vec()]);
+        assert!(!target.borrow().ended);
+
+        // Deliver EOF
+        let req_id_2 = RequestId::new(2);
+        assert!(source.started(
+            &AsyncHostOp::TcpRead {
+                stream: resource,
+                max_bytes: 64
+            },
+            req_id_2
+        ));
+        let eof_comp = completion(2, AsyncHostValue::Bytes(Vec::new()));
+        let actions = source.completed(eof_comp).unwrap();
+        assert_eq!(actions, vec![StreamAction::Event(StreamEvent::End)]);
+        assert!(target.borrow().ended);
+    }
+
+    #[test]
+    fn stream_pipe_backpressure_and_drain() {
+        let resource = ResourceId::new(11);
+        let mut source = StreamDriver::new(resource, 64);
+        let target = Rc::new(RefCell::new(MockPipeTarget {
+            chunks: Vec::new(),
+            ended: false,
+            ready: false, // will cause backpressure
+        }));
+        let _ = source.pipe_to(Rc::clone(&target) as Rc<RefCell<dyn PipeTarget>>);
+
+        let req_id = RequestId::new(1);
+        assert!(source.started(
+            &AsyncHostOp::TcpRead {
+                stream: resource,
+                max_bytes: 64
+            },
+            req_id
+        ));
+
+        let comp = completion(1, AsyncHostValue::Bytes(b"heavy chunk".to_vec()));
+        let actions = source.completed(comp).unwrap();
+        // Target was not ready: reading paused, no next read action issued!
+        assert!(actions.is_empty(), "expected no actions, got {actions:?}");
+        assert!(source.is_paused_by_backpressure());
+        assert!(!source.is_reading());
+
+        // Now target drains
+        let drain_actions = source.handle_target_drain();
+        assert_eq!(
+            drain_actions,
+            vec![StreamAction::Start(AsyncHostOp::TcpRead {
+                stream: resource,
+                max_bytes: 64,
+            })]
+        );
+        assert!(!source.is_paused_by_backpressure());
+        assert!(source.is_reading());
     }
 }
