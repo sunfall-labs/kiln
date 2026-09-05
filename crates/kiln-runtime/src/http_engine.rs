@@ -23,6 +23,7 @@ use hyper::header::{HeaderMap, HeaderName, HeaderValue};
 use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
+use hyper_util::server::conn::auto;
 use kiln_host_abi::ResourceId;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Notify;
@@ -30,6 +31,46 @@ use tokio::sync::Notify;
 use crate::HttpCloseMode;
 use crate::http_body::{BodyEvent, BodySink, ResponseBody, ResponseBodyDriver};
 use crate::node_stream::WriteDisposition;
+
+static HTTP3_OVERRIDE: std::sync::atomic::AtomicI8 = std::sync::atomic::AtomicI8::new(-1);
+
+/// Whether HTTP/3 support is enabled via `KILN_HTTP3=1` or `--http3`.
+pub fn http3_enabled() -> bool {
+    let ovr = HTTP3_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed);
+    if ovr >= 0 {
+        return ovr == 1;
+    }
+    static FROM_ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FROM_ENV.get_or_init(|| {
+        let env_set =
+            std::env::var_os("KILN_HTTP3").is_some_and(|value| !value.is_empty() && value != "0");
+        let arg_set = std::env::args_os().any(|arg| arg == "--http3");
+        env_set || arg_set
+    })
+}
+
+/// Override HTTP/3 enablement programmatically (for testing or runtime configuration).
+pub fn set_http3_enabled(enabled: bool) {
+    HTTP3_OVERRIDE.store(i8::from(enabled), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Reset HTTP/3 enablement override to environment/command-line defaults.
+pub fn reset_http3_enabled() {
+    HTTP3_OVERRIDE.store(-1, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LocalExecutor;
+
+impl<Fut> hyper::rt::Executor<Fut> for LocalExecutor
+where
+    Fut: Future + 'static,
+    Fut::Output: 'static,
+{
+    fn execute(&self, fut: Fut) {
+        tokio::task::spawn_local(fut);
+    }
+}
 
 /// `KILN_HTTP_TRACE=1` prints the engine's decisions to stderr.
 pub fn trace_enabled() -> bool {
@@ -1005,15 +1046,15 @@ async fn serve(
         let shared = Rc::clone(&service_shared);
         async move { Ok::<_, std::convert::Infallible>(handle(shared, id, request).await) }
     });
-    let mut builder = hyper::server::conn::http1::Builder::new();
-    builder.auto_date_header(false);
+    let mut builder = auto::Builder::new(LocalExecutor);
+    builder.http1().auto_date_header(false);
     // Node's http.Server always allows a half-open socket: a client may shut its write side
     // after the request and still receive the response. With the socket in Hyper's hands the
     // EOF is seen at once, so refusing half-close would drop every such response before it is
     // written (the bridged engine only surfaced the EOF a round trip later). The option a
     // program passes still selects raw-socket behaviour elsewhere; HTTP keeps Node's rule.
     let _ = allow_half_close;
-    builder.half_close(true);
+    builder.http1().half_close(true);
     let mut connection = Box::pin(builder.serve_connection(TokioIo::new(transport.0), service));
     let result = tokio::select! {
         biased;
@@ -1205,14 +1246,28 @@ async fn handle(
         mut headers,
         body,
     } = response;
+    let is_http2 = parts.version == hyper::Version::HTTP_2;
     let close_delimited = http_10
         && !head_request
         && status_allows_body(status)
         && !headers.contains_key(hyper::header::CONTENT_LENGTH);
-    if !headers.contains_key(hyper::header::CONNECTION)
+    if is_http2 {
+        // RFC 7540 §8.1.2.2: Connection-specific headers MUST NOT appear in HTTP/2 messages.
+        headers.remove(hyper::header::CONNECTION);
+        headers.remove(hyper::header::TRANSFER_ENCODING);
+        headers.remove(hyper::header::UPGRADE);
+        headers.remove("keep-alive");
+        headers.remove("proxy-connection");
+    } else if !headers.contains_key(hyper::header::CONNECTION)
         && (!keep_alive || close_delimited || shared.closing.get())
     {
         headers.insert(hyper::header::CONNECTION, HeaderValue::from_static("close"));
+    }
+    if http3_enabled()
+        && !headers.contains_key("alt-svc")
+        && let Ok(val) = HeaderValue::from_str("h3=\":443\"; ma=86400")
+    {
+        headers.insert(hyper::header::HeaderName::from_static("alt-svc"), val);
     }
     let mut hyper_response = Response::new(body);
     *hyper_response.status_mut() =
@@ -1544,5 +1599,158 @@ mod tests {
             assert!(kinds.contains(&HttpEventKind::RequestEnd));
             assert!(kinds.contains(&HttpEventKind::Finish));
         });
+    }
+
+    #[test]
+    fn http2_cleartext_request_is_served_and_multiplexed() {
+        let (runtime, local) = local();
+        local.block_on(&runtime, async {
+            let (client, server) = tokio::io::duplex(8192);
+            let engine = Rc::new(RefCell::new(HttpServerEngine::default()));
+            let recording = Rc::new(Recording {
+                events: RefCell::new(Vec::new()),
+                checkpoints: Cell::new(0),
+                answer: RefCell::new(None),
+                answer_head: RefCell::new(None),
+            });
+            let resource = ResourceId::new(42);
+            let answer_engine = Rc::clone(&engine);
+            *recording.answer.borrow_mut() = Some(Box::new(move |id| {
+                let mut engine = answer_engine.borrow_mut();
+                assert!(engine.start_response(
+                    resource,
+                    id,
+                    200,
+                    b"content-type\0text/plain\0",
+                    1024,
+                ));
+                let body = format!("h2-response-{id}");
+                let disposition = engine
+                    .end_response(resource, id, body.as_bytes())
+                    .expect("response ends");
+                assert!(disposition.ready);
+            }));
+
+            assert!(engine.borrow_mut().attach(
+                resource,
+                HostTransport(Box::new(server)),
+                false,
+                recording.clone(),
+            ));
+
+            let (mut send_request, client_conn) = h2::client::handshake(client)
+                .await
+                .expect("h2 client handshake");
+            tokio::task::spawn_local(async move {
+                let _ = client_conn.await;
+            });
+
+            // Send first HTTP/2 request
+            let request1 = hyper::http::Request::builder()
+                .method("GET")
+                .uri("http://localhost/h2-first")
+                .body(())
+                .unwrap();
+            let (response1, _send_stream1) = send_request
+                .send_request(request1, true)
+                .expect("send request 1");
+
+            // Send second HTTP/2 request multiplexed on the same connection
+            let request2 = hyper::http::Request::builder()
+                .method("POST")
+                .uri("http://localhost/h2-second")
+                .body(())
+                .unwrap();
+            let (response2, mut send_stream2) = send_request
+                .send_request(request2, false)
+                .expect("send request 2");
+            send_stream2
+                .send_data(Bytes::from_static(b"req2-data"), true)
+                .expect("send data 2");
+
+            let (parts1, mut body1) = response1.await.expect("response 1 arrives").into_parts();
+            assert_eq!(parts1.status, 200);
+            assert_eq!(parts1.headers.get("content-type").unwrap(), "text/plain");
+            // RFC 7540: connection-specific headers must NOT be present in HTTP/2 response
+            assert!(!parts1.headers.contains_key("connection"));
+            let mut body_bytes1 = Vec::new();
+            while let Some(chunk) = body1.data().await {
+                body_bytes1.extend_from_slice(&chunk.expect("chunk 1"));
+            }
+            assert_eq!(&body_bytes1[..], b"h2-response-1");
+
+            let (parts2, mut body2) = response2.await.expect("response 2 arrives").into_parts();
+            assert_eq!(parts2.status, 200);
+            assert!(!parts2.headers.contains_key("connection"));
+            let mut body_bytes2 = Vec::new();
+            while let Some(chunk) = body2.data().await {
+                body_bytes2.extend_from_slice(&chunk.expect("chunk 2"));
+            }
+            assert_eq!(&body_bytes2[..], b"h2-response-2");
+
+            let events = recording.events.borrow();
+            let request_heads: Vec<_> = events
+                .iter()
+                .filter(|(kind, _, _)| *kind == HttpEventKind::RequestHead)
+                .collect();
+            assert_eq!(request_heads.len(), 2);
+        });
+    }
+
+    #[test]
+    fn http3_flag_and_alt_svc_advertising() {
+        reset_http3_enabled();
+        assert!(!http3_enabled());
+
+        set_http3_enabled(true);
+        assert!(http3_enabled());
+
+        let (runtime, local) = local();
+        local.block_on(&runtime, async {
+            let (mut client, server) = tokio::io::duplex(4096);
+            let engine = Rc::new(RefCell::new(HttpServerEngine::default()));
+            let recording = Rc::new(Recording {
+                events: RefCell::new(Vec::new()),
+                checkpoints: Cell::new(0),
+                answer: RefCell::new(None),
+                answer_head: RefCell::new(None),
+            });
+            let resource = ResourceId::new(99);
+            let answer_engine = Rc::clone(&engine);
+            *recording.answer.borrow_mut() = Some(Box::new(move |id| {
+                let mut engine = answer_engine.borrow_mut();
+                assert!(engine.start_response(
+                    resource,
+                    id,
+                    200,
+                    b"content-type\0text/plain\0",
+                    1024,
+                ));
+                let disposition = engine
+                    .end_response(resource, id, b"http3-test")
+                    .expect("response ends");
+                assert!(disposition.ready);
+            }));
+            assert!(engine.borrow_mut().attach(
+                resource,
+                HostTransport(Box::new(server)),
+                false,
+                recording.clone(),
+            ));
+
+            client
+                .write_all(b"GET /h3-probe HTTP/1.1\r\nhost: localhost\r\n\r\n")
+                .await
+                .expect("request writes");
+            let text = read_until_complete(&mut client, b"http3-test").await;
+            assert!(
+                text.contains("alt-svc: h3=\":443\"; ma=86400"),
+                "alt-svc header missing: {text}"
+            );
+        });
+
+        set_http3_enabled(false);
+        assert!(!http3_enabled());
+        reset_http3_enabled();
     }
 }

@@ -4327,6 +4327,20 @@ static long kiln_cli_worker_count(void) {
     return count;
 }
 
+/* Whether HTTP/3 support is enabled via KILN_HTTP3=1 or --http3 flag. */
+#ifndef _WIN32
+extern int setenv(const char *name, const char *value, int overwrite);
+#endif
+static int kiln_cli_http3_enabled(int argc, char **argv) {
+    const char *setting = getenv("KILN_HTTP3");
+    int i;
+    if (setting != NULL && *setting != '\0' && strcmp(setting, "0") != 0) return 1;
+    for (i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--http3") == 0) return 1;
+    }
+    return 0;
+}
+
 /* Extra realms are separate *processes*, not threads, and that is a constraint rather than a
  * preference. A module's namespaces live in `kiln_namespaces`, which is process-global, while the
  * values inside it belong to the realm that made them (ADR 0038). Two realms in one address space
@@ -4344,6 +4358,13 @@ int main(int argc, char **argv) {
     pid_t *children;
 #endif
     if (setlocale(LC_NUMERIC, "C") == NULL) return 1;
+    if (kiln_cli_http3_enabled(argc, argv)) {
+#ifndef _WIN32
+        setenv("KILN_HTTP3", "1", 1);
+#else
+        _putenv("KILN_HTTP3=1");
+#endif
+    }
     workers = kiln_cli_worker_count();
 #ifdef _WIN32
     (void)workers;
@@ -5126,6 +5147,26 @@ fn default_online_cpus() -> usize {
     {
         1
     }
+}
+
+/// Parse the HTTP/3 enablement setting matching the launcher's `kiln_cli_http3_enabled` C logic.
+///
+/// Semantics:
+/// - Enabled if `KILN_HTTP3` is set and not empty and not `"0"`.
+/// - Enabled if command-line arguments include `"--http3"`.
+/// - Otherwise disabled.
+pub fn parse_http3_enabled<I, S>(env_setting: Option<&str>, args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    if let Some(setting) = env_setting
+        && !setting.is_empty()
+        && setting != "0"
+    {
+        return true;
+    }
+    args.into_iter().any(|arg| arg.as_ref() == "--http3")
 }
 
 #[cfg(test)]

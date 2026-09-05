@@ -16,3 +16,6 @@ hyper-util = { workspace = true }
 http-body-util = { workspace = true }
 bytes = { workspace = true }
 libc = { workspace = true }
+
+[dev-dependencies]
+h2 = "0.4"

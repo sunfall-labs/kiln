@@ -6693,3 +6693,126 @@ fn native_build_launcher_supports_workers_auto() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("workers-ok"));
 }
+
+#[test]
+fn parse_http3_enabled_semantics() {
+    assert!(!parse_http3_enabled(None, &[] as &[&str]));
+    assert!(!parse_http3_enabled(Some(""), &[] as &[&str]));
+    assert!(!parse_http3_enabled(Some("0"), &[] as &[&str]));
+    assert!(parse_http3_enabled(Some("1"), &[] as &[&str]));
+    assert!(parse_http3_enabled(Some("true"), &[] as &[&str]));
+
+    // Argv flag "--http3"
+    assert!(parse_http3_enabled(None, ["--http3"]));
+    assert!(parse_http3_enabled(Some("0"), ["--http3"]));
+    assert!(!parse_http3_enabled(None, ["--other", "arg"]));
+}
+
+#[test]
+fn kiln_cli_http3_enabled_c_runtime_matches_contract() {
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native http3 test: no C compiler found");
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-http3-c");
+    let c_source = r#"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static int kiln_cli_http3_enabled(int argc, char **argv) {
+    const char *setting = getenv("KILN_HTTP3");
+    int i;
+    if (setting != NULL && *setting != '\0' && strcmp(setting, "0") != 0) return 1;
+    for (i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--http3") == 0) return 1;
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    printf("%d\n", kiln_cli_http3_enabled(argc, argv));
+    return 0;
+}
+"#;
+    let src_file = project.path.join("test_http3.c");
+    let obj_file = project.path.join("test_http3.o");
+    let bin_file = project.path.join("test_http3");
+    fs::write(&src_file, c_source).expect("write C source");
+
+    toolchain
+        .compile_c(&src_file, &obj_file, &CompileOptions::default())
+        .expect("compile C probe");
+    toolchain
+        .link_executable(&[obj_file], &bin_file, &LinkOptions::default())
+        .expect("link C probe");
+
+    let run_with = |env_val: Option<&str>, args: &[&str]| -> String {
+        let mut cmd = Command::new(&bin_file);
+        for arg in args {
+            cmd.arg(arg);
+        }
+        if let Some(val) = env_val {
+            cmd.env("KILN_HTTP3", val);
+        } else {
+            cmd.env_remove("KILN_HTTP3");
+        }
+        let output = cmd.output_when_launchable().expect("run probe");
+        assert!(output.status.success());
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+
+    assert_eq!(run_with(None, &[]), "0");
+    assert_eq!(run_with(Some(""), &[]), "0");
+    assert_eq!(run_with(Some("0"), &[]), "0");
+    assert_eq!(run_with(Some("1"), &[]), "1");
+    assert_eq!(run_with(Some("true"), &[]), "1");
+    assert_eq!(run_with(None, &["--http3"]), "1");
+    assert_eq!(run_with(Some("0"), &["--http3"]), "1");
+    assert_eq!(run_with(None, &["--other"]), "0");
+}
+
+#[test]
+fn native_build_launcher_supports_http3_flag() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native http3 test: no C compiler found");
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-http3");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "console.log(process.argv.includes('--http3') ? 'http3-active' : 'no-http3');",
+    )
+    .expect("write fixture");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("source graph compiles");
+    let output = project.path.join("program");
+    let options = NativeBuildOptions::new(output, NativeProfile::Dev);
+    let report = project
+        .builder(toolchain)
+        .build_graph(&graph, &options)
+        .expect("native build succeeds");
+
+    // Run without flag
+    let out_default = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run default");
+    assert!(out_default.status.success());
+    assert!(String::from_utf8_lossy(&out_default.stdout).contains("no-http3"));
+
+    // Run with --http3
+    let out_flag = Command::new(&report.output)
+        .arg("--http3")
+        .output_when_launchable()
+        .expect("run with --http3");
+    assert!(out_flag.status.success());
+    assert!(String::from_utf8_lossy(&out_flag.stdout).contains("http3-active"));
+}
