@@ -350,6 +350,7 @@ mod tests {
             code,
             upvalues: Vec::new(),
             span: Span::default(),
+            type_annotations: None,
         }
     }
 

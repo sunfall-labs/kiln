@@ -633,6 +633,7 @@ fn summary_frontend(path: &str, text: &str) -> Module {
                     generator: false,
                     parameters: Vec::new(),
                     rest: None,
+                    return_type: None,
                     body: fn_body,
                     span: Span::default(),
                 })),

@@ -56,10 +56,12 @@ fn function(name: &str, parameters: &[&str], body: Vec<Statement>) -> Statement 
             .iter()
             .map(|name| kiln_hir::Parameter {
                 pattern: kiln_hir::Pattern::Identifier((*name).to_owned()),
+                type_annotation: None,
                 span: Span::default(),
             })
             .collect(),
         rest: None,
+        return_type: None,
         body,
         span: Span::default(),
     })))
@@ -185,6 +187,7 @@ fn strictness_reaches_every_body_written_inside_a_strict_one() {
         asynchronous: false,
         parameters: Vec::new(),
         rest: None,
+        return_type: None,
         body: Vec::new(),
         strict: false,
         span: Span::default(),
@@ -391,10 +394,12 @@ fn arrow(parameters: &[&str], body: Vec<Statement>) -> Expression {
                 .iter()
                 .map(|name| kiln_hir::Parameter {
                     pattern: kiln_hir::Pattern::Identifier((*name).to_owned()),
+                    type_annotation: None,
                     span: Span::default(),
                 })
                 .collect(),
             rest: None,
+            return_type: None,
             body,
             span: Span::default(),
         })),
@@ -747,9 +752,11 @@ fn a_captured_defaulted_identifier_parameter_uses_its_positional_cell() {
                 inner: Box::new(Pattern::Identifier("value".to_owned())),
                 default: Box::new(default),
             },
+            type_annotation: None,
             span: Span::default(),
         }],
         rest: None,
+        return_type: None,
         body: vec![statement(StatementKind::Return(Some(arrow(
             &[],
             vec![statement(StatementKind::Return(Some(identifier("value"))))],
@@ -864,6 +871,7 @@ fn a_prototype_assigned_function_captures_its_module_binding() {
                     generator: false,
                     parameters: Vec::new(),
                     rest: None,
+                    return_type: None,
                     body: vec![statement(StatementKind::Return(Some(identifier(
                         "module_constant",
                     ))))],
@@ -954,9 +962,11 @@ fn a_class_method_default_captures_its_module_binding() {
                 inner: Box::new(Pattern::Identifier("value".to_owned())),
                 default: Box::new(identifier("shared")),
             },
+            type_annotation: None,
             span: Span::default(),
         }],
         rest: None,
+        return_type: None,
         body: vec![statement(StatementKind::Return(Some(identifier("value"))))],
         span: Span::default(),
     };
@@ -1012,6 +1022,7 @@ fn a_nested_class_resolves_the_private_name_declared_by_its_outer_class() {
         generator: false,
         parameters: Vec::new(),
         rest: None,
+        return_type: None,
         body: vec![statement(StatementKind::Return(Some(Expression {
             kind: ExpressionKind::PrivateMember {
                 object: Box::new(identifier("Outer")),
@@ -1045,6 +1056,7 @@ fn a_nested_class_resolves_the_private_name_declared_by_its_outer_class() {
         generator: false,
         parameters: Vec::new(),
         rest: None,
+        return_type: None,
         body: vec![statement(StatementKind::Class(Box::new(inner)))],
         span: Span::default(),
     };
@@ -1100,9 +1112,11 @@ fn a_class_constructor_inside_a_wrapper_captures_the_wrapper_binding() {
         generator: false,
         parameters: vec![kiln_hir::Parameter {
             pattern: Pattern::Identifier("value".to_owned()),
+            type_annotation: None,
             span: Span::default(),
         }],
         rest: None,
+        return_type: None,
         body: vec![statement(StatementKind::Return(Some(Expression {
             kind: ExpressionKind::StaticMember {
                 object: Box::new(identifier("exports")),
@@ -1122,9 +1136,11 @@ fn a_class_constructor_inside_a_wrapper_captures_the_wrapper_binding() {
         generator: false,
         parameters: vec![kiln_hir::Parameter {
             pattern: Pattern::Identifier("exports".to_owned()),
+            type_annotation: None,
             span: Span::default(),
         }],
         rest: None,
+        return_type: None,
         body: vec![statement(StatementKind::Class(Box::new(kiln_hir::Class {
             inferred_name: None,
             name: Some("Name".to_owned()),
@@ -1189,6 +1205,7 @@ fn an_exported_derived_constructor_captures_its_hidden_super_binding() {
                 generator: false,
                 parameters: Vec::new(),
                 rest: None,
+                return_type: None,
                 body: vec![statement(StatementKind::Expression(Expression {
                     kind: ExpressionKind::SuperCall {
                         arguments: Vec::new(),
@@ -2071,9 +2088,11 @@ fn an_enclosing_functions_binding_shadows_a_module_binding() {
             generator: false,
             parameters: vec![kiln_hir::Parameter {
                 pattern: kiln_hir::Pattern::Identifier("shared".into()),
+                type_annotation: None,
                 span: Span::default(),
             }],
             rest: None,
+            return_type: None,
             body: vec![statement(StatementKind::Return(Some(arrow(
                 &[],
                 vec![statement(StatementKind::Return(Some(identifier("shared"))))],

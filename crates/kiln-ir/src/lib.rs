@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-pub use kiln_hir::{Span, VariableKind};
+pub use kiln_hir::{Span, TypeAnnotation, VariableKind};
 pub use kiln_host_abi::HostOp;
 
 /// Version of the bytecode contract produced by this crate.
@@ -633,6 +633,29 @@ pub struct FunctionProto {
     /// for a method is its key and parameter list too -- `({ m(x) {} }).m.toString()` is
     /// `"m(x) {}"`, and for a getter it keeps the `get`.
     pub span: Span,
+    /// TypeScript type annotations, if any.
+    pub type_annotations: Option<TypeAnnotations>,
+}
+
+/// TypeScript type annotations for a function.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TypeAnnotations {
+    pub parameters: Vec<Option<TypeAnnotation>>,
+    pub return_type: Option<TypeAnnotation>,
+}
+
+impl FunctionProto {
+    /// Return the annotated type for parameter `slot`, if any.
+    pub fn parameter_type(&self, slot: usize) -> Option<TypeAnnotation> {
+        self.type_annotations
+            .as_ref()
+            .and_then(|ta| ta.parameters.get(slot).copied().flatten())
+    }
+
+    /// Return the annotated return type, if any.
+    pub fn return_type(&self) -> Option<TypeAnnotation> {
+        self.type_annotations.as_ref().and_then(|ta| ta.return_type)
+    }
 }
 
 /// A global the compiler resolves by name and the runtime provides.

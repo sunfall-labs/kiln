@@ -372,6 +372,7 @@ fn calling_program(argc: u16, arguments: Vec<Instruction>) -> Program {
             local_count: 2,
             code: vec![Instruction::LoadLocal(1), Instruction::Return],
             upvalues: Vec::new(),
+            type_annotations: None,
         }],
     }
 }
@@ -1963,6 +1964,7 @@ fn closures_from_separate_calls_capture_separate_cells() {
                     Instruction::Return,
                 ],
                 upvalues: Vec::new(),
+                type_annotations: None,
             },
             kiln_ir::FunctionProto {
                 span: kiln_ir::Span::default(),
@@ -1985,6 +1987,7 @@ fn closures_from_separate_calls_capture_separate_cells() {
                     Instruction::Return,
                 ],
                 upvalues: vec![Upvalue::ParentLocal(0)],
+                type_annotations: None,
             },
         ],
     };
@@ -2028,6 +2031,7 @@ fn a_captured_cell_outlives_the_frame_that_created_it() {
                     Instruction::Return,
                 ],
                 upvalues: Vec::new(),
+                type_annotations: None,
             },
             kiln_ir::FunctionProto {
                 span: kiln_ir::Span::default(),
@@ -2043,6 +2047,7 @@ fn a_captured_cell_outlives_the_frame_that_created_it() {
                 local_count: 0,
                 code: vec![Instruction::LoadUpvalue(0), Instruction::Return],
                 upvalues: vec![Upvalue::ParentLocal(0)],
+                type_annotations: None,
             },
         ],
     };
@@ -2071,6 +2076,7 @@ fn capturing_a_slot_that_was_never_boxed_is_rejected() {
             local_count: 0,
             code: vec![Instruction::Return],
             upvalues: vec![Upvalue::ParentLocal(0)],
+            type_annotations: None,
         }],
     };
     assert!(matches!(
@@ -2173,6 +2179,7 @@ fn runaway_recursion_is_bounded_by_call_depth() {
                 Instruction::Return,
             ],
             upvalues: Vec::new(),
+            type_annotations: None,
         }],
     };
     let mut host = TestHost {
@@ -2239,6 +2246,7 @@ fn module_slots_are_shared_across_frames() {
                     Instruction::Return,
                 ],
                 upvalues: Vec::new(),
+                type_annotations: None,
             },
             kiln_ir::FunctionProto {
                 span: kiln_ir::Span::default(),
@@ -2254,6 +2262,7 @@ fn module_slots_are_shared_across_frames() {
                 local_count: 0,
                 code: vec![Instruction::LoadGlobal(0), Instruction::Return],
                 upvalues: Vec::new(),
+                type_annotations: None,
             },
         ],
     };
@@ -2384,6 +2393,7 @@ fn symbol_with_throwing_right_value_of(operator: BinaryOp) -> Program {
                     Instruction::Return,
                 ],
                 upvalues: Vec::new(),
+                type_annotations: None,
             },
             kiln_ir::FunctionProto {
                 span: kiln_ir::Span::default(),
@@ -2399,6 +2409,7 @@ fn symbol_with_throwing_right_value_of(operator: BinaryOp) -> Program {
                 local_count: 0,
                 code: vec![Instruction::Const(1), Instruction::Throw],
                 upvalues: Vec::new(),
+                type_annotations: None,
             },
         ],
     }
@@ -3297,6 +3308,7 @@ fn timer_program(schedule: &[(&str, f64)]) -> Program {
                 Instruction::Return,
             ],
             upvalues: Vec::new(),
+            type_annotations: None,
         });
     }
     code.push(Instruction::Return);
@@ -3359,6 +3371,7 @@ fn generator_receiver_program() -> Program {
                 Instruction::Return,
             ],
             upvalues: Vec::new(),
+            type_annotations: None,
         }],
     }
 }
@@ -3437,6 +3450,7 @@ fn node_next_tick_runs_before_promise_reactions() {
                     Instruction::Return,
                 ],
                 upvalues: Vec::new(),
+                type_annotations: None,
             },
             kiln_ir::FunctionProto {
                 span: kiln_ir::Span::default(),
@@ -3459,6 +3473,7 @@ fn node_next_tick_runs_before_promise_reactions() {
                     Instruction::Return,
                 ],
                 upvalues: Vec::new(),
+                type_annotations: None,
             },
         ],
     };
@@ -3489,6 +3504,7 @@ fn an_async_arrow_captures_its_defining_receiver() {
         local_count: 0,
         code: vec![Instruction::MakeFunction(1), Instruction::Return],
         upvalues: Vec::new(),
+        type_annotations: None,
     };
     let arrow = kiln_ir::FunctionProto {
         span: kiln_ir::Span::default(),
@@ -3508,6 +3524,7 @@ fn an_async_arrow_captures_its_defining_receiver() {
             Instruction::Return,
         ],
         upvalues: Vec::new(),
+        type_annotations: None,
     };
     let report = kiln_ir::FunctionProto {
         span: kiln_ir::Span::default(),
@@ -3530,6 +3547,7 @@ fn an_async_arrow_captures_its_defining_receiver() {
             Instruction::Return,
         ],
         upvalues: Vec::new(),
+        type_annotations: None,
     };
     let program = Program {
         source: "".into(),

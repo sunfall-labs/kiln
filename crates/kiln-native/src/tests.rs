@@ -2307,6 +2307,7 @@ fn realm_scheduling_graph(project: &Path) -> ModuleGraph {
                         Instruction::Return,
                     ],
                     upvalues: Vec::new(),
+                    type_annotations: None,
                 },
                 FunctionProto {
                     span: kiln_ir::Span::default(),
@@ -2329,6 +2330,7 @@ fn realm_scheduling_graph(project: &Path) -> ModuleGraph {
                         Instruction::Return,
                     ],
                     upvalues: Vec::new(),
+                    type_annotations: None,
                 },
             ],
         },

@@ -83,6 +83,39 @@ pub struct Module {
     pub panicked: bool,
 }
 
+/// Coarse TypeScript type annotation hints.
+///
+/// Order the trusted annotations by Static Hermes's published results:
+/// (number, int, boolean, string).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum TypeAnnotation {
+    Number,
+    Int,
+    Boolean,
+    String,
+    Void,
+    Any,
+    Other,
+}
+
+impl TypeAnnotation {
+    pub fn is_number(&self) -> bool {
+        matches!(self, TypeAnnotation::Number | TypeAnnotation::Int)
+    }
+
+    pub fn is_int(&self) -> bool {
+        matches!(self, TypeAnnotation::Int)
+    }
+
+    pub fn is_boolean(&self) -> bool {
+        matches!(self, TypeAnnotation::Boolean)
+    }
+
+    pub fn is_string(&self) -> bool {
+        matches!(self, TypeAnnotation::String)
+    }
+}
+
 /// A function's name, parameters and body.
 ///
 /// Boxed at its use site: this is much larger than the other statement payloads, and an unboxed
@@ -113,6 +146,8 @@ pub struct Function {
     /// `...rest`, which binds an array of the arguments beyond the declared parameters. Separate
     /// from `parameters` because it takes no positional slot and its arity is not fixed.
     pub rest: Option<Pattern>,
+    /// TypeScript return type annotation hint, if present.
+    pub return_type: Option<TypeAnnotation>,
     pub body: Vec<Statement>,
     /// The body opened with a `"use strict"` directive of its own.
     ///
@@ -129,6 +164,8 @@ pub struct Parameter {
     /// A parameter binds a pattern, not a name: `f(a)`, `f(a = 1)` and `f({ a })` differ only in
     /// which pattern they bind, and a default is a [`Pattern::WithDefault`] like any other.
     pub pattern: Pattern,
+    /// TypeScript type annotation hint, if present.
+    pub type_annotation: Option<TypeAnnotation>,
     pub span: Span,
 }
 

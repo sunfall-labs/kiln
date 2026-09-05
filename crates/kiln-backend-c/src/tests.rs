@@ -600,6 +600,7 @@ fn executable_numeric_operand_order_matches_symbol_conversion_rules() {
                         Instruction::Return,
                     ],
                     upvalues: Vec::new(),
+                    type_annotations: None,
                 },
                 FunctionProto {
                     span: kiln_ir::Span::default(),
@@ -623,6 +624,7 @@ fn executable_numeric_operand_order_matches_symbol_conversion_rules() {
                         Instruction::Return,
                     ],
                     upvalues: Vec::new(),
+                    type_annotations: None,
                 },
             ],
         })
@@ -1135,6 +1137,7 @@ fn nested_call_refusal_preserves_the_failing_instruction_without_blaming_the_cal
                 Instruction::Return,
             ],
             upvalues: Vec::new(),
+            type_annotations: None,
         }],
     })
     .expect("nested refusal probe emits");
@@ -1791,6 +1794,7 @@ fn function(code: Vec<Instruction>) -> FunctionProto {
         local_count: 0,
         code,
         upvalues: Vec::new(),
+        type_annotations: None,
     }
 }
 
@@ -4608,6 +4612,7 @@ fn proven_numbers_reach_a_loop_carried_phi_and_stop_at_a_parameter() {
         async_generator: false,
         mapped_arguments: false,
         upvalues: Vec::new(),
+        type_annotations: None,
     };
     let program = Program {
         source: "".into(),
@@ -4695,6 +4700,7 @@ fn versioning_emits_two_clones_with_entry_guard_and_loop_exit() {
         async_generator: false,
         mapped_arguments: false,
         upvalues: Vec::new(),
+        type_annotations: None,
     };
     let prog = Program {
         source: "".into(),
@@ -4774,6 +4780,7 @@ fn speculation_disabled_emits_generic_clone_alone() {
         async_generator: false,
         mapped_arguments: false,
         upvalues: Vec::new(),
+        type_annotations: None,
     };
     let prog = Program {
         source: "".into(),
@@ -4843,6 +4850,7 @@ fn value_graph_merges_locals_at_a_loop_header_with_phis() {
         async_generator: false,
         mapped_arguments: false,
         upvalues: Vec::new(),
+        type_annotations: None,
     };
     let program = Program {
         source: "".into(),
@@ -4947,6 +4955,7 @@ fn value_graph_builds_and_verifies_scalar_loop() {
         async_generator: false,
         mapped_arguments: false,
         upvalues: Vec::new(),
+        type_annotations: None,
     };
 
     let program = Program {
@@ -4993,6 +5002,7 @@ fn value_graph_builds_and_verifies_try_catch() {
         async_generator: false,
         mapped_arguments: false,
         upvalues: Vec::new(),
+        type_annotations: None,
     };
 
     let program = Program {
@@ -5044,6 +5054,7 @@ fn value_graph_lowers_to_c_without_stack_or_sp() {
         async_generator: false,
         mapped_arguments: false,
         upvalues: Vec::new(),
+        type_annotations: None,
     };
 
     let program = Program {
@@ -5094,4 +5105,165 @@ fn value_graph_lowers_to_c_without_stack_or_sp() {
     assert!(output.contains("kiln_block_1:;"));
     // 5. Clean C99 return
     assert!(output.contains("return KILN_C99_OK;"));
+}
+
+#[test]
+fn typed_dist_compiles_to_guarded_unboxed_clone_with_entry_guards_matching_untyped() {
+    use kiln_ir::{TypeAnnotation, TypeAnnotations};
+
+    // function dist(x, y) { return x * x + y * y; }
+    let make_proto = |type_annotations: Option<TypeAnnotations>| FunctionProto {
+        span: kiln_ir::Span::default(),
+        prologue_end: 0,
+        declared_length: 2,
+        name: Some("dist".into()),
+        parameter_count: 2,
+        local_count: 2,
+        code: vec![
+            Instruction::LoadLocal(0),
+            Instruction::LoadLocal(0),
+            Instruction::Binary(BinaryOp::Multiply),
+            Instruction::LoadLocal(1),
+            Instruction::LoadLocal(1),
+            Instruction::Binary(BinaryOp::Multiply),
+            Instruction::Binary(BinaryOp::Add),
+            Instruction::Return,
+        ],
+        arrow: false,
+        generator: false,
+        asynchronous: false,
+        async_generator: false,
+        mapped_arguments: false,
+        upvalues: Vec::new(),
+        type_annotations,
+    };
+
+    let untyped_proto = make_proto(None);
+    let typed_proto = make_proto(Some(TypeAnnotations {
+        parameters: vec![Some(TypeAnnotation::Number), Some(TypeAnnotation::Number)],
+        return_type: Some(TypeAnnotation::Number),
+    }));
+
+    let untyped_prog = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants: Vec::new(),
+        code: vec![Instruction::Return],
+        local_count: 0,
+        functions: vec![untyped_proto.clone()],
+    };
+    let typed_prog = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants: Vec::new(),
+        code: vec![Instruction::Return],
+        local_count: 0,
+        functions: vec![typed_proto.clone()],
+    };
+
+    let untyped_graph = build_function_graph(&untyped_proto, &untyped_prog).unwrap();
+    let typed_graph = build_function_graph(&typed_proto, &typed_prog).unwrap();
+
+    let untyped_candidates =
+        crate::graph::candidate_number_parameters(&untyped_graph, &untyped_proto);
+    let typed_candidates = crate::graph::candidate_number_parameters(&typed_graph, &typed_proto);
+
+    assert_eq!(untyped_candidates, vec![0, 1]);
+    assert_eq!(typed_candidates, vec![0, 1]);
+
+    let untyped_c = emit(&untyped_prog).unwrap();
+    let typed_c = emit(&typed_prog).unwrap();
+
+    // Both must emit Clone A (fast unboxed) and Clone B (generic fallback)
+    assert!(typed_c.source.contains("/* Clone A: guarded fast path */"));
+    assert!(
+        typed_c
+            .source
+            .contains("/* Clone B: generic fallback path */")
+    );
+
+    // Both must emit entry guards for parameters 0 and 1
+    assert!(typed_c.source.contains("KILN_VAL_IS_DOUBLE(args[0])"));
+    assert!(typed_c.source.contains("KILN_VAL_IS_DOUBLE(args[1])"));
+
+    // Verify the function bodies emitted for dist match between typed and untyped
+    let extract_fn_body = |src: &str, sym: &str| -> String {
+        let start = src
+            .find("/* function 0: dist */")
+            .expect("dist function definition");
+        let end = src[start..]
+            .find("/* entrypoint */")
+            .map(|offset| start + offset)
+            .unwrap_or(src.len());
+        src[start..end].replace(sym, "kiln_module_SYM")
+    };
+    assert_eq!(
+        extract_fn_body(&typed_c.source, &typed_c.symbol),
+        extract_fn_body(&untyped_c.source, &untyped_c.symbol)
+    );
+}
+
+#[test]
+fn type_annotations_drive_candidate_speculation_without_prior_inferred_uses() {
+    use kiln_ir::{TypeAnnotation, TypeAnnotations};
+
+    // function passthrough(x) { return x; }
+    let make_proto = |type_annotations: Option<TypeAnnotations>| FunctionProto {
+        span: kiln_ir::Span::default(),
+        prologue_end: 0,
+        declared_length: 1,
+        name: Some("passthrough".into()),
+        parameter_count: 1,
+        local_count: 1,
+        code: vec![Instruction::LoadLocal(0), Instruction::Return],
+        arrow: false,
+        generator: false,
+        asynchronous: false,
+        async_generator: false,
+        mapped_arguments: false,
+        upvalues: Vec::new(),
+        type_annotations,
+    };
+
+    let untyped_proto = make_proto(None);
+    let typed_proto = make_proto(Some(TypeAnnotations {
+        parameters: vec![Some(TypeAnnotation::Number)],
+        return_type: Some(TypeAnnotation::Number),
+    }));
+
+    let untyped_prog = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants: Vec::new(),
+        code: vec![Instruction::Return],
+        local_count: 0,
+        functions: vec![untyped_proto.clone()],
+    };
+    let typed_prog = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants: Vec::new(),
+        code: vec![Instruction::Return],
+        local_count: 0,
+        functions: vec![typed_proto.clone()],
+    };
+
+    let untyped_graph = build_function_graph(&untyped_proto, &untyped_prog).unwrap();
+    let typed_graph = build_function_graph(&typed_proto, &typed_prog).unwrap();
+
+    let untyped_candidates =
+        crate::graph::candidate_number_parameters(&untyped_graph, &untyped_proto);
+    let typed_candidates = crate::graph::candidate_number_parameters(&typed_graph, &typed_proto);
+
+    assert_eq!(untyped_candidates, Vec::<usize>::new());
+    assert_eq!(typed_candidates, vec![0]);
+
+    let typed_c = emit(&typed_prog).unwrap();
+    assert!(typed_c.source.contains("/* Clone A: guarded fast path */"));
+    assert!(
+        typed_c
+            .source
+            .contains("/* Clone B: generic fallback path */")
+    );
+    assert!(typed_c.source.contains("KILN_VAL_IS_DOUBLE(args[0])"));
 }

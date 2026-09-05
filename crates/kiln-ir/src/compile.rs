@@ -5108,6 +5108,7 @@ impl Compiler {
             // classes that declared none.
             None => Function {
                 rest: None,
+                return_type: None,
                 asynchronous: false,
                 name: Some(written_name),
                 // A class binds its own name through `class_expression`, not through this.
@@ -6106,6 +6107,20 @@ impl Compiler {
         self.super_property = outer_super_property;
         self.field_initialiser = outer_field_initialiser;
         self.this_binding = outer_this_binding;
+        let parameter_types: Vec<Option<TypeAnnotation>> = function
+            .parameters
+            .iter()
+            .map(|p| p.type_annotation)
+            .collect();
+        let type_annotations =
+            if parameter_types.iter().any(|p| p.is_some()) || function.return_type.is_some() {
+                Some(crate::TypeAnnotations {
+                    parameters: parameter_types,
+                    return_type: function.return_type,
+                })
+            } else {
+                None
+            };
         let proto = FunctionProto {
             name: function.name.clone(),
             arrow: function.arrow,
@@ -6123,6 +6138,7 @@ impl Compiler {
             code: std::mem::replace(&mut self.code, restored.code),
             upvalues: std::mem::replace(&mut self.upvalues, restored.upvalues),
             span: function.span,
+            type_annotations,
         };
         self.scopes = restored.scopes;
         self.function_finalizer_depth = outer_finalizer_depth;

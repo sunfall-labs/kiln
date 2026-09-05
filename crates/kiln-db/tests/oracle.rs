@@ -153,6 +153,7 @@ fn oracle_frontend(_path: &str, text: &str) -> Module {
                             generator: false,
                             parameters: Vec::new(),
                             rest: None,
+                            return_type: None,
                             body: fn_body,
                             span: Span::new(line as u32, line as u32 + 1),
                         })),
