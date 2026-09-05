@@ -1192,13 +1192,10 @@ fn render_constant_value(symbol: &str, constant_idx: u32, constant: &Constant) -
 const GRAPH_EMITTER_ENABLED: bool = true;
 
 fn can_emit_from_graph(proto: &FunctionProto) -> bool {
-    // Generators and handlers need frame and unwind support the graph emitter does not have
-    // yet; beyond that, the builder says what it lowers and `emit_graph::can_lower` says what
-    // it emits. There is no third list.
-    GRAPH_EMITTER_ENABLED
-        && !proto.generator
-        && !proto.asynchronous
-        && handler_targets(&proto.code).is_empty()
+    // Generators need a frame across a suspend that the graph emitter does not have yet; beyond
+    // that, the builder says what it lowers and `emit_graph::can_lower` says what it emits.
+    // There is no third list.
+    GRAPH_EMITTER_ENABLED && !proto.generator && !proto.asynchronous
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1224,8 +1221,6 @@ fn render_function(
     if !can_emit_from_graph(proto) {
         census_line(if proto.generator || proto.asynchronous {
             "generator-or-async".to_owned()
-        } else if !handler_targets(&proto.code).is_empty() {
-            "handlers".to_owned()
         } else {
             "switched-off".to_owned()
         });
