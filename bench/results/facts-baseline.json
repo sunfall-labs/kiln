@@ -40653,7 +40653,7 @@
       "world": {
         "Open": {
           "reasons": [
-            "~/kiln/conformance/thirdparty/ajv.bundle.js: contains Function constructor call"
+            "conformance/thirdparty/ajv.bundle.js: contains Function constructor call"
           ]
         }
       },
@@ -126130,7 +126130,7 @@
       "world": {
         "Open": {
           "reasons": [
-            "~/kiln/conformance/thirdparty/lodash.bundle.js: contains Function constructor call"
+            "conformance/thirdparty/lodash.bundle.js: contains Function constructor call"
           ]
         }
       },
@@ -193866,7 +193866,7 @@
       "world": {
         "Open": {
           "reasons": [
-            "~/kiln/conformance/thirdparty/postcss.bundle.js: contains Function constructor call"
+            "conformance/thirdparty/postcss.bundle.js: contains Function constructor call"
           ]
         }
       },
