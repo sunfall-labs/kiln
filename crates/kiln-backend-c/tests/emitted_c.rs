@@ -957,8 +957,14 @@ fn runtime_prelude_size() {
     // engine: an AST-free recursive descent lexer, parser, lexical scope stack, and dynamic
     // closure trampoline supporting runtime code generation without external engine dependencies,
     // bringing the prelude to 32,507 lines. The ceiling is widened to 35,500.
+    //
+    // Widened on 2026-09-05, at 36,507 lines. The NaN-boxing seam (ADR 0053) put a `kiln_val`
+    // wrapper in front of most of the generic paths -- about 190 boundary conversions -- and the
+    // graph emitter added `kiln_c99_val_call_method`, a method call end to end on machine values.
+    // The wrappers are scaffolding: they disappear as the generic paths take `kiln_val` themselves,
+    // and this ceiling is expected to come back down with them. 38,000 for now.
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 36_500;
+    const CEILING_LINES: usize = 38_000;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
