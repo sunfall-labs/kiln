@@ -53,7 +53,7 @@ pub struct CharClass {
 
 impl CharClass {
     pub fn single(c: u16, ignore_case: bool) -> Self {
-        if ignore_case && (b'a'..=b'z').contains(&(c as u8)) {
+        if ignore_case && (c as u8).is_ascii_lowercase() {
             let lower = c;
             let upper = c - 32;
             Self {
@@ -63,7 +63,7 @@ impl CharClass {
                 is_whitespace: false,
                 is_non_whitespace: false,
             }
-        } else if ignore_case && (b'A'..=b'Z').contains(&(c as u8)) {
+        } else if ignore_case && (c as u8).is_ascii_uppercase() {
             let upper = c;
             let lower = c + 32;
             Self {
@@ -334,15 +334,19 @@ impl<'a> Parser<'a> {
 
                 // Check for quantifier following group:
                 if let Some((min, max, greedy)) = self.parse_quantifier() {
-                    // Supported: optional group (a)? or (class)? where min=0, max=Some(1)
-                    if min == 0 && max == Some(1) && greedy {
+                    // Supported: optional group (a)? or (class)? where min=0, max=Some(1) with 1 char class
+                    if min == 0
+                        && max == Some(1)
+                        && greedy
+                        && inner.len() == 1
+                        && matches!(inner[0], RegexTerm::CharClass(_))
+                    {
                         return Some(RegexTerm::OptionalGroup {
                             group_index: group_idx,
                             terms: inner,
                         });
                     }
-                    // Group with inner quantifier like ([A-Z]+) is handled with quantifier inside
-                    // If quantifier is outside, fallback to regress
+                    // Complex group quantifier: fallback to regress
                     return None;
                 }
 
@@ -592,11 +596,11 @@ impl<'a> Parser<'a> {
         ranges.sort_unstable_by_key(|r| r.0);
         let mut merged: Vec<(u16, u16)> = Vec::new();
         for (s, e) in ranges {
-            if let Some(last) = merged.last_mut() {
-                if s <= last.1.saturating_add(1) {
-                    last.1 = last.1.max(e);
-                    continue;
-                }
+            if let Some(last) = merged.last_mut()
+                && s <= last.1.saturating_add(1)
+            {
+                last.1 = last.1.max(e);
+                continue;
             }
             merged.push((s, e));
         }
@@ -704,6 +708,16 @@ pub fn try_compile_regex(pattern: &str, flags_str: &str) -> Option<CompiledRegex
             }
         }
         branch.terms = flattened;
+    }
+
+    for branch in &branches {
+        for term in &branch.terms {
+            if let RegexTerm::OptionalGroup { terms, .. } = term
+                && (terms.len() != 1 || !matches!(terms[0], RegexTerm::CharClass(_)))
+            {
+                return None;
+            }
+        }
     }
 
     let group_count = parser.group_counter;
@@ -914,17 +928,17 @@ fn emit_matcher_impl(output: &mut String, prefix: &str, compiled: &CompiledRegex
     if (m < {min}) return 0;"
                     )
                     .unwrap();
-                    if let Some(m_val) = max {
-                        if *min == *m_val {
-                            writeln!(
-                                output,
-                                "    return {fn_prefix}_b{b_idx}_step_{}(ctx, pos + {min});",
-                                s_idx + 1
-                            )
-                            .unwrap();
-                            writeln!(output, "}}").unwrap();
-                            continue;
-                        }
+                    if let Some(m_val) = max
+                        && *min == *m_val
+                    {
+                        writeln!(
+                            output,
+                            "    return {fn_prefix}_b{b_idx}_step_{}(ctx, pos + {min});",
+                            s_idx + 1
+                        )
+                        .unwrap();
+                        writeln!(output, "}}").unwrap();
+                        continue;
                     }
                     if *greedy {
                         writeln!(
@@ -1011,10 +1025,20 @@ fn emit_matcher_impl(output: &mut String, prefix: &str, compiled: &CompiledRegex
                             )
                             .unwrap();
                         } else {
-                            panic!("unsupported complex optional group");
+                            writeln!(
+                                output,
+                                "    return {fn_prefix}_b{b_idx}_step_{}(ctx, pos);",
+                                s_idx + 1
+                            )
+                            .unwrap();
                         }
                     } else {
-                        panic!("unsupported complex optional group");
+                        writeln!(
+                            output,
+                            "    return {fn_prefix}_b{b_idx}_step_{}(ctx, pos);",
+                            s_idx + 1
+                        )
+                        .unwrap();
                     }
                 }
             }
@@ -1182,7 +1206,7 @@ impl CompiledRegex {
             } => {
                 let mut m = 0;
                 while pos + m < units.len()
-                    && max.map_or(true, |limit| m < limit)
+                    && max.is_none_or(|limit| m < limit)
                     && self.classes[*class_index].matches(units[pos + m], self.flags.dot_all)
                 {
                     m += 1;
@@ -1190,10 +1214,10 @@ impl CompiledRegex {
                 if m < *min {
                     return false;
                 }
-                if let Some(limit) = max {
-                    if *min == *limit {
-                        return self.match_step(branch, step_idx + 1, units, pos + *min, ranges);
-                    }
+                if let Some(limit) = max
+                    && *min == *limit
+                {
+                    return self.match_step(branch, step_idx + 1, units, pos + *min, ranges);
                 }
                 if *greedy {
                     for k in (*min..=m).rev() {
@@ -1233,23 +1257,23 @@ impl CompiledRegex {
             }
             RegexTerm::Group { .. } => unreachable!(),
             RegexTerm::OptionalGroup { group_index, terms } => {
-                if terms.len() == 1 {
-                    if let RegexTerm::CharClass(class_index) = &terms[0] {
-                        if pos < units.len()
-                            && self.classes[*class_index].matches(units[pos], self.flags.dot_all)
-                        {
-                            let old_start = ranges[*group_index].0;
-                            let old_end = ranges[*group_index].1;
-                            ranges[*group_index].0 = pos as i64;
-                            ranges[*group_index].1 = (pos + 1) as i64;
-                            if self.match_step(branch, step_idx + 1, units, pos + 1, ranges) {
-                                return true;
-                            }
-                            ranges[*group_index].0 = old_start;
-                            ranges[*group_index].1 = old_end;
+                if terms.len() == 1
+                    && let RegexTerm::CharClass(class_index) = &terms[0]
+                {
+                    if pos < units.len()
+                        && self.classes[*class_index].matches(units[pos], self.flags.dot_all)
+                    {
+                        let old_start = ranges[*group_index].0;
+                        let old_end = ranges[*group_index].1;
+                        ranges[*group_index].0 = pos as i64;
+                        ranges[*group_index].1 = (pos + 1) as i64;
+                        if self.match_step(branch, step_idx + 1, units, pos + 1, ranges) {
+                            return true;
                         }
-                        return self.match_step(branch, step_idx + 1, units, pos, ranges);
+                        ranges[*group_index].0 = old_start;
+                        ranges[*group_index].1 = old_end;
                     }
+                    return self.match_step(branch, step_idx + 1, units, pos, ranges);
                 }
                 false
             }
@@ -1291,6 +1315,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::needless_range_loop)]
     fn parity_benchmark_sample() {
         let pattern = r"\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)\]\s+([A-Z]+)\s+([a-zA-Z0-9_\-\.]+):\s+(.*)";
         let sample = "[2026-09-03T14:46:22.123Z] INFO http-server: request handled status=200 duration=12ms path=/api/v1/metrics";
@@ -1319,6 +1344,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::needless_range_loop)]
     fn parity_various_patterns() {
         let test_cases = vec![
             ("a(b)?c", "", "abc"),
