@@ -8,9 +8,9 @@
 
 use crate::direct::{CallPlan, direct_callable};
 use crate::graph::{
-    BasicBlock, BlockId, FunctionGraph, GraphOp, InductionVariable, Proven, Terminator, ValueId,
-    as_safe_integer, candidate_number_parameters, find_induction_variables,
-    proven_ints_with_assumptions, proven_numbers_with_assumptions,
+    BasicBlock, BlockId, FunctionGraph, FunctionTypeProfile, GraphOp, InductionVariable, Proven,
+    Terminator, ValueId, as_safe_integer, candidate_number_parameters_with_profile,
+    find_induction_variables, proven_ints_with_assumptions, proven_numbers_with_assumptions,
 };
 use crate::prelude::lookup_speculation_invariant;
 use crate::tail::{TailContext, emit_tail_instruction};
@@ -174,6 +174,41 @@ pub fn emit_function_from_graph(
     plan: &CallPlan,
     kind: EntryKind,
 ) {
+    emit_function_from_graph_with_profile(
+        output,
+        graph,
+        proto,
+        program,
+        symbol,
+        index,
+        scalar_proto,
+        diagnostic_site,
+        frame_stacks,
+        strict_functions,
+        plan,
+        kind,
+        None,
+        false,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn emit_function_from_graph_with_profile(
+    output: &mut String,
+    graph: &FunctionGraph,
+    proto: &FunctionProto,
+    program: &Program,
+    symbol: &str,
+    index: usize,
+    scalar_proto: bool,
+    diagnostic_site: &str,
+    frame_stacks: &[usize],
+    strict_functions: &[bool],
+    plan: &CallPlan,
+    kind: EntryKind,
+    func_profile: Option<&FunctionTypeProfile>,
+    type_profile_record: bool,
+) {
     // 1. Function comment header
     if let Some(name) = proto.name.as_deref().filter(|name| {
         !name.is_empty()
@@ -239,6 +274,21 @@ pub fn emit_function_from_graph(
     }
     if kind == EntryKind::Boxed {
         output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
+        if type_profile_record && proto.parameter_count > 0 {
+            writeln!(
+                output,
+                "    for (size_t _pi = 0; _pi < argc && _pi < {}; ++_pi) {{ {symbol}_fn_{index}_param_tags[_pi] |= kiln_profile_tag_of(args[_pi]); }}",
+                proto.parameter_count
+            )
+            .unwrap();
+        }
+    } else if matches!(kind, EntryKind::Typed { .. })
+        && type_profile_record
+        && proto.parameter_count > 0
+    {
+        for p in 0..proto.parameter_count {
+            writeln!(output, "    {symbol}_fn_{index}_param_tags[{p}] |= 1;").unwrap();
+        }
     }
 
     // `locals[]` exists only for slots that are read through the array: a cell (the slot holds
@@ -321,6 +371,8 @@ pub fn emit_function_from_graph(
         },
         plan,
         kind,
+        func_profile,
+        type_profile_record,
     );
     output.push_str("}\n");
 }
@@ -345,6 +397,41 @@ pub fn emit_entry_from_graph(
     commonjs: bool,
     plan: &CallPlan,
 ) {
+    emit_entry_from_graph_with_profile(
+        output,
+        graph,
+        proto,
+        program,
+        symbol,
+        scalar_proto,
+        diagnostic_site,
+        frame_stacks,
+        strict_functions,
+        array_slots,
+        exports,
+        commonjs,
+        plan,
+        false,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn emit_entry_from_graph_with_profile(
+    output: &mut String,
+    graph: &FunctionGraph,
+    proto: &FunctionProto,
+    program: &Program,
+    symbol: &str,
+    scalar_proto: bool,
+    diagnostic_site: &str,
+    frame_stacks: &[usize],
+    strict_functions: &[bool],
+    array_slots: &HashSet<u32>,
+    exports: Option<&[ExportBinding]>,
+    commonjs: bool,
+    plan: &CallPlan,
+    type_profile_record: bool,
+) {
     emit_blocks(
         output,
         graph,
@@ -359,6 +446,8 @@ pub fn emit_entry_from_graph(
         &Site::Entry { exports, commonjs },
         plan,
         EntryKind::Boxed,
+        None,
+        type_profile_record,
     );
 }
 
@@ -425,6 +514,7 @@ fn emit_block_sequence(
     ivs: &std::collections::HashMap<ValueId, InductionVariable>,
     block_prefix: &str,
     is_fast_clone: bool,
+    type_profile_record: bool,
 ) {
     let self_index = match site {
         Site::Function { index } => Some(*index),
@@ -536,6 +626,8 @@ fn emit_block_sequence(
             scalar_proto,
             kind,
             block_prefix,
+            symbol,
+            type_profile_record,
         );
     }
 }
@@ -557,9 +649,11 @@ fn emit_blocks(
     site: &Site<'_>,
     plan: &CallPlan,
     kind: EntryKind,
+    func_profile: Option<&FunctionTypeProfile>,
+    type_profile_record: bool,
 ) {
     let body_start = output.len();
-    let candidate_params = candidate_number_parameters(graph, proto);
+    let candidate_params = candidate_number_parameters_with_profile(graph, proto, func_profile);
     let speculate_enabled = std::env::var("KILN_SPECULATE").as_deref() != Ok("0");
     let suspends = graph
         .blocks
@@ -647,6 +741,7 @@ fn emit_blocks(
             &ivs,
             "kiln_fast_block_",
             true,
+            type_profile_record,
         );
 
         writeln!(output, "    /* Clone B: generic fallback path */").unwrap();
@@ -670,6 +765,7 @@ fn emit_blocks(
             &ivs,
             "kiln_generic_block_",
             false,
+            type_profile_record,
         );
     } else {
         emit_ssa_declarations(output, graph, baseline_numbers, baseline_ints);
@@ -693,6 +789,7 @@ fn emit_blocks(
             &ivs,
             "kiln_block_",
             false,
+            type_profile_record,
         );
     }
 
@@ -2246,10 +2343,12 @@ fn emit_terminator(
     scalar_proto: bool,
     kind: EntryKind,
     block_prefix: &str,
+    symbol: &str,
+    type_profile_record: bool,
 ) {
     match terminator {
         Terminator::Return(value) => match site {
-            Site::Function { .. }
+            Site::Function { index }
                 if matches!(
                     kind,
                     EntryKind::Typed {
@@ -2257,6 +2356,9 @@ fn emit_terminator(
                     }
                 ) =>
             {
+                if type_profile_record {
+                    writeln!(output, "    {symbol}_fn_{index}_return_tag |= 1;").unwrap();
+                }
                 match value {
                     Some(val) if numbers.contains(val) => {
                         writeln!(output, "    *result = d{}; return KILN_C99_OK;", val.0).unwrap();
@@ -2266,11 +2368,28 @@ fn emit_terminator(
                     _ => output.push_str("    goto kiln_refusal;\n"),
                 }
             }
-            Site::Function { .. } => match value {
+            Site::Function { index } => match value {
                 Some(val) => {
+                    if type_profile_record {
+                        writeln!(
+                            output,
+                            "    {symbol}_fn_{index}_return_tag |= kiln_profile_tag_of(v{});",
+                            val.0
+                        )
+                        .unwrap();
+                    }
                     writeln!(output, "    *result = v{}; return KILN_C99_OK;", val.0).unwrap();
                 }
-                None => output.push_str("    *result = KILN_VAL_UNDEFINED; return KILN_C99_OK;\n"),
+                None => {
+                    if type_profile_record {
+                        writeln!(
+                            output,
+                            "    {symbol}_fn_{index}_return_tag |= kiln_profile_tag_of(KILN_VAL_UNDEFINED);"
+                        )
+                        .unwrap();
+                    }
+                    output.push_str("    *result = KILN_VAL_UNDEFINED; return KILN_C99_OK;\n");
+                }
             },
             Site::Entry { exports, commonjs } => {
                 // The entry's result crosses the embedding boundary, and a reference must not:
@@ -2311,6 +2430,9 @@ fn emit_terminator(
                         binding.local_slot
                     )
                     .unwrap();
+                }
+                if type_profile_record {
+                    writeln!(output, "    {symbol}_dump_type_profile();").unwrap();
                 }
                 output.push_str("    return KILN_C99_OK;\n");
             }
