@@ -5372,3 +5372,134 @@ fn type_profile_drives_candidate_speculation_and_recording() {
     assert!(c_with_record.source.contains("_fn_0_param_tags[1]"));
     assert!(c_with_record.source.contains("atexit("));
 }
+
+#[test]
+fn executable_scalar_replacement_of_non_escaping_objects_in_loop() {
+    let constants = vec![
+        Constant::Number(0.0f64.to_bits()),     // c0: 0
+        Constant::Number(100.0f64.to_bits()),   // c1: 100
+        Constant::Number(1.0f64.to_bits()),     // c2: 1
+        Constant::String("x".into()),           // c3: "x"
+        Constant::String("y".into()),           // c4: "y"
+        Constant::Number(10000.0f64.to_bits()), // c5: 10000
+    ];
+
+    let code = vec![
+        // sum = 0
+        Instruction::Const(0),
+        Instruction::StoreLocal(0),
+        // i = 0
+        Instruction::Const(0),
+        Instruction::StoreLocal(1),
+        // Loop header: pc 4
+        // i < 100
+        Instruction::LoadLocal(1),
+        Instruction::Const(1),
+        Instruction::Binary(BinaryOp::LessThan),
+        Instruction::JumpIfFalse(29), // Jump to exit (pc 29)
+        // Body: pc 8
+        // p = { x: i, y: i + 1 }
+        Instruction::Const(3),              // "x"
+        Instruction::LoadLocal(1),          // i
+        Instruction::Const(4),              // "y"
+        Instruction::LoadLocal(1),          // i
+        Instruction::Const(2),              // 1
+        Instruction::Binary(BinaryOp::Add), // i + 1
+        Instruction::NewObject { count: 2 },
+        Instruction::StoreLocal(2),
+        // sum = sum + p.x + p.y: pc 16
+        Instruction::LoadLocal(0),
+        Instruction::LoadLocal(2),
+        Instruction::GetProperty(3), // p.x
+        Instruction::Binary(BinaryOp::Add),
+        Instruction::LoadLocal(2),
+        Instruction::GetProperty(4), // p.y
+        Instruction::Binary(BinaryOp::Add),
+        Instruction::StoreLocal(0),
+        // i = i + 1: pc 24
+        Instruction::LoadLocal(1),
+        Instruction::Const(2),
+        Instruction::Binary(BinaryOp::Add),
+        Instruction::StoreLocal(1),
+        // Jump to header (pc 4): pc 28
+        Instruction::Jump(4),
+        // Exit: pc 29
+        // return sum === 10000
+        Instruction::LoadLocal(0),
+        Instruction::Const(5),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::Return,
+    ];
+
+    let prog = program(constants, code, 3);
+    let generated = emit(&prog).expect("scalar replacement loop emits C");
+    let body_symbol = format!("{}_body", generated.symbol);
+    let body_start = generated
+        .source
+        .find(&body_symbol)
+        .expect("body function in generated source");
+    let body_source = &generated.source[body_start..];
+
+    // Zero heap allocations for the object in the function body:
+    assert!(
+        !body_source.contains("kiln_c99_new_object"),
+        "body should not allocate any heap objects in the loop"
+    );
+    assert!(
+        !body_source.contains("kiln_c99_val_read_property"),
+        "body should not perform runtime property reads on non-escaping objects"
+    );
+    assert!(
+        body_source.contains("_f_0"),
+        "body should use scalar replaced field variables"
+    );
+
+    // Compile and execute to verify the computation is exactly correct
+    let executable = std::env::temp_dir().join(format!(
+        "kiln-backend-c-scalar-repl-{}-{}",
+        std::process::id(),
+        generated.program_hash
+    ));
+    let wrapper = format!(
+        "int main(void) {{ kiln_value result; if ({}(NULL, &result) != 0) return 2; return !(result.tag == KILN_VALUE_BOOLEAN && result.bits == 1); }}\n",
+        generated.symbol
+    );
+    let mut child = Command::new("cc")
+        .args([
+            "-std=c99",
+            "-pedantic",
+            "-Werror=implicit-function-declaration",
+            "-x",
+            "c",
+            "-",
+            "-lm",
+            "-o",
+        ])
+        .arg(&executable)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("a C compiler is available for backend tests");
+    child
+        .stdin
+        .take()
+        .expect("stdin is piped")
+        .write_all(linked_source(&generated.source, &wrapper).as_bytes())
+        .expect("scalar replacement source is accepted by cc stdin");
+    let compile = child.wait_with_output().expect("cc exits");
+    assert!(
+        compile.status.success(),
+        "generated scalar replacement C did not compile:\n{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = Command::new(&executable)
+        .output()
+        .expect("generated scalar replacement executable runs");
+    let _ = std::fs::remove_file(&executable);
+    assert!(
+        run.status.success(),
+        "scalar replacement execution failed with status: {:?}, stderr: {}",
+        run.status,
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
