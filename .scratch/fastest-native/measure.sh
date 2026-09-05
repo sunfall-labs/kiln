@@ -12,7 +12,15 @@ set -euo pipefail
 cd "$(dirname -- "${BASH_SOURCE[0]}")/../.."
 KILN="${KILN_BENCH_KILN:-target/release/kiln}"
 [[ -x $KILN ]] || { echo "no kiln at $KILN; mbx build --release -p kiln-cli" >&2; exit 1; }
-command -v hyperfine >/dev/null || { echo "hyperfine is not on PATH" >&2; exit 1; }
+# A number taken while other agents are compiling is a clock reading. On 2026-09-04 the same
+# loop binary read 156 ms and 296 ms two runs apart at a load average near 4, and an identical
+# emitted body was called a regression. Refuse rather than print; KILN_MEASURE_ANYWAY=1 overrides.
+load="$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}' || awk '{print $1}' /proc/loadavg)"
+if [[ -z ${KILN_MEASURE_ANYWAY:-} ]] && awk -v l="$load" 'BEGIN{exit !(l > 1.5)}'; then
+	echo "load average is $load; wait for the machine to go quiet, or set KILN_MEASURE_ANYWAY=1" >&2
+	exit 1
+fi
+echo "load average $load"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/kiln-ceiling.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 # No associative array: macOS ships bash 3.2 and `mise run` finds it (CLAUDE.md).
