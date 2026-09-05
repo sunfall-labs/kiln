@@ -241,7 +241,7 @@ pub fn emit_with_policy(program: &Program, policy: EmissionPolicy) -> Result<CMo
     validate(program)?;
     let (program_hash, symbol_hash) = hash_program_pair_with_policy(program, &policy);
     let symbol = format!("kiln_module_{program_hash:016x}{symbol_hash:016x}");
-    let source = render(program, program_hash, &symbol, &policy);
+    let source = render(program, program_hash, &symbol, &policy)?;
     Ok(CModule {
         symbol,
         source,
@@ -279,7 +279,7 @@ pub fn emit_module_with_policy(
     validate_module(module)?;
     let (program_hash, symbol_hash) = hash_module_pair_with_policy(module, &policy);
     let symbol = format!("kiln_module_{program_hash:016x}{symbol_hash:016x}");
-    let source = render_module(module, program_hash, &symbol, &policy, false, &symbol);
+    let source = render_module(module, program_hash, &symbol, &policy, false, &symbol)?;
     Ok(CModule {
         symbol,
         source,
@@ -312,7 +312,7 @@ pub fn emit_module_with_logical_path_and_policy(
     let (program_hash, _) = hash_module_pair_with_policy(module, &policy);
     let (path_hash, path_hash_seeded) = hash_logical_path_pair(logical_path);
     let symbol = format!("kiln_module_path_{path_hash:016x}{path_hash_seeded:016x}");
-    let source = render_module(module, program_hash, &symbol, &policy, false, logical_path);
+    let source = render_module(module, program_hash, &symbol, &policy, false, logical_path)?;
     Ok(CModule {
         symbol,
         source,
@@ -340,7 +340,7 @@ pub fn emit_commonjs_module_with_logical_path_and_policy(
     let (program_hash, _) = hash_module_pair_with_policy(module, &policy);
     let (path_hash, path_hash_seeded) = hash_logical_path_pair(logical_path);
     let symbol = format!("kiln_module_path_{path_hash:016x}{path_hash_seeded:016x}");
-    let source = render_module(module, program_hash, &symbol, &policy, true, logical_path);
+    let source = render_module(module, program_hash, &symbol, &policy, true, logical_path)?;
     Ok(CModule {
         symbol,
         source,
@@ -791,7 +791,7 @@ fn render_functions(
     symbol: &str,
     diagnostic_site: &str,
     strict_functions: &[bool],
-) {
+) -> Result<(), EmitError> {
     for index in 0..program.functions.len() {
         writeln!(
             output,
@@ -831,8 +831,9 @@ fn render_functions(
             symbol,
             diagnostic_site,
             strict_functions,
-        );
+        )?;
     }
+    Ok(())
 }
 
 /// Whether this body's parameter binding runs during the call rather than at the first
@@ -946,7 +947,7 @@ fn render_constant_value(symbol: &str, constant_idx: u32, constant: &Constant) -
 /// options; emission that varied with the environment under one key would poison the cache.
 /// The unit tests drive `build_function_graph` and `emit_function_from_graph` directly and do
 /// not go through this switch.
-const GRAPH_EMITTER_ENABLED: bool = true;
+const GRAPH_EMITTER_ENABLED: bool = false;
 
 fn can_emit_from_graph(proto: &FunctionProto) -> bool {
     // Generators and handlers need frame and unwind support the graph emitter does not have
@@ -968,7 +969,7 @@ fn render_function(
     symbol: &str,
     diagnostic_site: &str,
     strict_functions: &[bool],
-) {
+) -> Result<(), EmitError> {
     let scalar_proto = !proto_produces_references(proto, program);
     if can_emit_from_graph(proto)
         && let Ok(graph) = build_function_graph(proto, program)
@@ -979,13 +980,18 @@ fn render_function(
         // sets it. It changes only whether the build fails, never what is emitted, so it cannot
         // put two different outputs under one cache key.
         let verdict = verifier::verify_function_graph(&graph);
-        if let Err(error) = &verdict {
-            if std::env::var_os("KILN_GRAPH_STRICT").is_some() {
-                panic!(
-                    "graph verifier rejected function {index} ({}) in {diagnostic_site}: {error}",
+        if let Err(error) = &verdict
+            && std::env::var_os("KILN_GRAPH_STRICT").is_some()
+        {
+            // The graph is built from the bytecode; a graph the verifier rejects is a bytecode
+            // this backend cannot represent safely, which is what `InvalidProgram` names. An
+            // error rather than a panic, so a daemon fails one build and not itself.
+            return Err(EmitError::InvalidProgram {
+                message: format!(
+                    "value graph rejected by the verifier for function {index} ({}) in {diagnostic_site}: {error}",
                     proto.name.as_deref().unwrap_or("<anonymous>")
-                );
-            }
+                ),
+            });
         }
         if verdict.is_ok() {
             emit_function_from_graph(
@@ -998,7 +1004,7 @@ fn render_function(
                 scalar_proto,
                 diagnostic_site,
             );
-            return;
+            return Ok(());
         }
     }
     let max_stack = frame_stacks[index];
@@ -1169,6 +1175,7 @@ fn render_function(
         render_refusal(output, true);
     }
     output.push_str("}\n");
+    Ok(())
 }
 
 /// The constant table.
@@ -1607,7 +1614,12 @@ fn render_emission_policy(output: &mut String, policy: &EmissionPolicy) {
     }
 }
 
-fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionPolicy) -> String {
+fn render(
+    program: &Program,
+    program_hash: u64,
+    symbol: &str,
+    policy: &EmissionPolicy,
+) -> Result<String, EmitError> {
     let plan = validate_program(program).expect("render called after validation");
     // A bare `Program` arrives with no goal and no strictness table: it is a scalar unit, and
     // every one this backend is handed came from a Module goal. Strict throughout keeps its
@@ -1666,7 +1678,7 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
         symbol,
         symbol,
         &strict_functions,
-    );
+    )?;
     writeln!(
         output,
         "{}int {entry_symbol}(kiln_host *host, kiln_value *result) {{",
@@ -1746,7 +1758,7 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
     if callables {
         render_scalar_realm_wrapper(&mut output, symbol);
     }
-    output
+    Ok(output)
 }
 
 fn render_module(
@@ -1756,7 +1768,7 @@ fn render_module(
     policy: &EmissionPolicy,
     commonjs: bool,
     diagnostic_site: &str,
-) -> String {
+) -> Result<String, EmitError> {
     let program = &module.program;
     let plan = validate_program(program).expect("render called after validation");
     let callables = produces_references(program);
@@ -1827,7 +1839,7 @@ fn render_module(
         symbol,
         diagnostic_site,
         &strict_functions,
-    );
+    )?;
     writeln!(
         output,
         "{}int {entry_symbol}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count) {{",
@@ -1950,7 +1962,7 @@ fn render_module(
     if callables {
         render_module_realm_wrapper(&mut output, symbol);
     }
-    output
+    Ok(output)
 }
 
 fn render_runtime_module(

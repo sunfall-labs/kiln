@@ -12,6 +12,8 @@ static inline int kiln_module_f4d3dbd71fb25e3e751b47bde606576f_fn_0(kiln_call_co
 static const char kiln_module_f4d3dbd71fb25e3e751b47bde606576f_name_0[] = "read";
 /* function 0: read */
 static inline int kiln_module_f4d3dbd71fb25e3e751b47bde606576f_fn_0(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc) {
+    size_t sp = 0;
+    size_t slot;
     kiln_host *host = ctx ? ctx->host : NULL;
     kiln_value *thrown = ctx ? ctx->thrown : NULL;
     kiln_generator *frame = ctx ? ctx->frame : NULL;
@@ -19,16 +21,16 @@ static inline int kiln_module_f4d3dbd71fb25e3e751b47bde606576f_fn_0(kiln_call_co
     kiln_val receiver = receiver_ptr ? *receiver_ptr : KILN_VAL_UNDEFINED;
     (void)receiver_ptr;
     kiln_c99_frame_mapped_arguments = 0;
-    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
+    kiln_val stack[1];
     kiln_val locals[1];
-    for (size_t slot = 0; slot < (size_t)1; ++slot) locals[slot] = KILN_VAL_UNDEFINED;
+    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
+    (void)thrown; (void)frame;
+    (void)host; (void)upvalues; (void)depth; (void)receiver;
+    for (slot = 0; slot < (size_t)1; ++slot) locals[slot] = KILN_VAL_UNDEFINED;
     (void)args; (void)argc;
-    kiln_val v0 = KILN_VAL_UNDEFINED;
-kiln_block_0:;
-    v0 = kiln_module_f4d3dbd71fb25e3e751b47bde606576f_globals[0];
-    *result = v0; return KILN_C99_OK;
-kiln_unwind:;
-    return KILN_C99_THROWN;
+    stack[sp++] = kiln_module_f4d3dbd71fb25e3e751b47bde606576f_globals[0];
+    *result = sp == 0 ? KILN_VAL_UNDEFINED : stack[--sp]; return KILN_C99_OK;
+    goto kiln_refusal;
 kiln_refusal:;
     *result = kiln_val_from_boundary(kiln_c99_control_diagnostic());
     return KILN_C99_CONTROL_ERROR;
