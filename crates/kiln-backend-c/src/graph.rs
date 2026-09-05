@@ -46,6 +46,14 @@ pub enum GraphOp {
         slot: u32,
         value: ValueId,
     },
+    /// A captured variable of an enclosing function: the closure's upvalue box, read or written.
+    LoadUpvalue(u32),
+    StoreUpvalue {
+        index: u32,
+        value: ValueId,
+    },
+    /// A name the compiler resolved to something the runtime supplies.
+    LoadBuiltin(kiln_ir::Builtin),
     MakeCell(u32),
     LoadGlobal(u32),
     StoreGlobal {
@@ -150,6 +158,17 @@ pub enum GraphOp {
         elements: Vec<ValueId>,
         site: SiteId,
     },
+    /// An object literal: `count` key/value pairs in source order.
+    NewObject {
+        pairs: Vec<(ValueId, ValueId)>,
+        site: SiteId,
+    },
+    /// `new callee(args)`.
+    New {
+        callee: ValueId,
+        args: Vec<ValueId>,
+        site: SiteId,
+    },
     IterableToArray(ValueId),
     SpreadInto {
         target: ValueId,
@@ -194,6 +213,7 @@ impl GraphOp {
         match self {
             Self::Const { .. }
             | Self::LoadLocal(_)
+            | Self::LoadBuiltin(_)
             | Self::LoadThis
             | Self::LoadNewTarget
             | Self::Phi { .. } => Effect::Pure,
@@ -262,6 +282,16 @@ pub struct FunctionGraph {
     /// from `locals[]` after the parameters are bound; without that definition a parameter read
     /// through the graph was `undefined`.
     pub initial_locals: Vec<ValueId>,
+    /// Where each value came from: the bytecode index and the label a refusal note names, the
+    /// same label the stack emitter gives the instruction. Recorded once, at the walk.
+    pub origins: HashMap<ValueId, Origin>,
+}
+
+/// The bytecode an operation was lowered from, for diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Origin {
+    pub pc: u32,
+    pub label: String,
 }
 
 impl FunctionGraph {
@@ -275,6 +305,7 @@ impl FunctionGraph {
             next_value_id: 0,
             next_site_id: 0,
             initial_locals: Vec::new(),
+            origins: HashMap::new(),
         }
     }
 
@@ -720,6 +751,7 @@ pub fn build_function_graph(
 
         for (offset, inst) in code[start..end].iter().enumerate() {
             let pc = start + offset;
+            let ops_before = operations.len();
             match inst {
                 Instruction::Const(c_idx) => {
                     let val = graph.alloc_value();
@@ -1146,6 +1178,54 @@ pub fn build_function_graph(
                     operations.push((result, GraphOp::RestArguments(*offset)));
                     frame.stack.push(result);
                 }
+                Instruction::LoadUpvalue(index) => {
+                    let res = graph.alloc_value();
+                    operations.push((res, GraphOp::LoadUpvalue(*index)));
+                    frame.stack.push(res);
+                }
+                Instruction::StoreUpvalue(index) => {
+                    let value = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
+                    let res = graph.alloc_value();
+                    operations.push((
+                        res,
+                        GraphOp::StoreUpvalue {
+                            index: *index,
+                            value,
+                        },
+                    ));
+                }
+                Instruction::LoadBuiltin(builtin) => {
+                    let res = graph.alloc_value();
+                    operations.push((res, GraphOp::LoadBuiltin(*builtin)));
+                    frame.stack.push(res);
+                }
+                Instruction::New { argc } => {
+                    let argc = usize::from(*argc);
+                    let mut args = Vec::with_capacity(argc);
+                    for _ in 0..argc {
+                        args.push(frame.stack.pop().unwrap_or_else(|| graph.alloc_value()));
+                    }
+                    args.reverse();
+                    let callee = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
+                    let res = graph.alloc_value();
+                    let site = graph.alloc_site();
+                    operations.push((res, GraphOp::New { callee, args, site }));
+                    frame.stack.push(res);
+                }
+                Instruction::NewObject { count } => {
+                    let count = usize::try_from(*count).unwrap_or(0);
+                    let mut pairs = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        let value = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
+                        let key = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
+                        pairs.push((key, value));
+                    }
+                    pairs.reverse();
+                    let res = graph.alloc_value();
+                    let site = graph.alloc_site();
+                    operations.push((res, GraphOp::NewObject { pairs, site }));
+                    frame.stack.push(res);
+                }
                 Instruction::LoadCell(slot) => {
                     let result = graph.alloc_value();
                     operations.push((result, GraphOp::LoadCell(*slot)));
@@ -1325,6 +1405,18 @@ pub fn build_function_graph(
                         pc,
                         instruction: format!("{other:?}"),
                     });
+                }
+            }
+            if operations.len() > ops_before {
+                let label = crate::instruction_diagnostic(inst, &program.constants);
+                for (vid, _) in &operations[ops_before..] {
+                    graph.origins.insert(
+                        *vid,
+                        Origin {
+                            pc: pc as u32,
+                            label: label.clone(),
+                        },
+                    );
                 }
             }
         }

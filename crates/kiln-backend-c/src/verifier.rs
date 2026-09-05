@@ -279,6 +279,7 @@ pub fn verify_function_graph(graph: &FunctionGraph) -> Result<(), VerifierError>
             match op {
                 GraphOp::StoreLocal { value, .. }
                 | GraphOp::StoreCell { value, .. }
+                | GraphOp::StoreUpvalue { value, .. }
                 | GraphOp::StoreGlobal { value, .. }
                 | GraphOp::CheckTdz { value, .. }
                 | GraphOp::Unary { value, .. }
@@ -289,6 +290,18 @@ pub fn verify_function_graph(graph: &FunctionGraph) -> Result<(), VerifierError>
                 GraphOp::Binary { left, right, .. } => {
                     check_operand(*left)?;
                     check_operand(*right)?;
+                }
+                GraphOp::New { callee, args, .. } => {
+                    check_operand(*callee)?;
+                    for arg in args {
+                        check_operand(*arg)?;
+                    }
+                }
+                GraphOp::NewObject { pairs, .. } => {
+                    for (key, value) in pairs {
+                        check_operand(*key)?;
+                        check_operand(*value)?;
+                    }
                 }
                 GraphOp::ToPropertyKey { object, key }
                 | GraphOp::GetComputed { object, key, .. }

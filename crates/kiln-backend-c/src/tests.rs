@@ -4928,6 +4928,8 @@ fn value_graph_lowers_to_c_without_stack_or_sp() {
         0,
         true,
         "scalar_loop",
+        &[4],
+        &[true],
     );
 
     // Invariants per Step 1.3:

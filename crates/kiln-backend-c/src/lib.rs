@@ -784,6 +784,244 @@ fn compute_tdz_analysis(code: &[Instruction]) -> TdzAnalysis {
 
 /// Emit one C function per compiled body, forward-declared so a closure made before a body is
 /// rendered can still point at it.
+/// How a builtin reaches the program: a value the runtime hands out by name, or an object the
+/// runtime has to build, which can fail. One table, both emitters.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum BuiltinLoad {
+    /// A C expression of type `kiln_value`.
+    Value(&'static str),
+    /// A C function `int f(kiln_value *out)`.
+    Build(&'static str),
+}
+
+pub(crate) fn builtin_load(builtin: kiln_ir::Builtin) -> BuiltinLoad {
+    match builtin {
+        // Built rather than named: real objects, because a program writes to them.
+        kiln_ir::Builtin::GlobalThis => BuiltinLoad::Build("kiln_c99_global_object"),
+        kiln_ir::Builtin::Process => BuiltinLoad::Build("kiln_c99_process_object"),
+        kiln_ir::Builtin::Atomics => BuiltinLoad::Build("kiln_c99_atomics_object"),
+        kiln_ir::Builtin::SetImmediate => {
+            BuiltinLoad::Value("kiln_c99_method(KILN_C99_METHOD_SET_IMMEDIATE)")
+        }
+        kiln_ir::Builtin::ClearImmediate => {
+            BuiltinLoad::Value("kiln_c99_method(KILN_C99_METHOD_CLEAR_IMMEDIATE)")
+        }
+        // `NaN` and `Infinity` are values rather than callables, but they reach the program
+        // the same way -- as a name the compiler resolves to something the runtime supplies.
+        kiln_ir::Builtin::String => BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_STRING)"),
+        kiln_ir::Builtin::Math => BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_MATH)"),
+        kiln_ir::Builtin::Number => BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_NUMBER)"),
+        kiln_ir::Builtin::Object => BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT)"),
+        kiln_ir::Builtin::Array => BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY)"),
+        kiln_ir::Builtin::Json => BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_JSON)"),
+        kiln_ir::Builtin::Date => BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_DATE)"),
+        kiln_ir::Builtin::Map => BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_MAP)"),
+        kiln_ir::Builtin::Set => BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_SET)"),
+        kiln_ir::Builtin::WeakMap => {
+            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_WEAK_MAP)")
+        }
+        kiln_ir::Builtin::WeakSet => {
+            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_WEAK_SET)")
+        }
+        kiln_ir::Builtin::Promise => {
+            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_PROMISE)")
+        }
+        kiln_ir::Builtin::Error => BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_ERROR)"),
+        kiln_ir::Builtin::TypeError => {
+            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_TYPE_ERROR)")
+        }
+        kiln_ir::Builtin::RangeError => {
+            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_RANGE_ERROR)")
+        }
+        kiln_ir::Builtin::ReferenceError => {
+            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_REFERENCE_ERROR)")
+        }
+        kiln_ir::Builtin::SyntaxError => {
+            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_SYNTAX_ERROR)")
+        }
+        kiln_ir::Builtin::UriError => {
+            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_URI_ERROR)")
+        }
+        kiln_ir::Builtin::EvalError => {
+            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_EVAL_ERROR)")
+        }
+        kiln_ir::Builtin::AggregateError => {
+            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_AGGREGATE_ERROR)")
+        }
+        kiln_ir::Builtin::Boolean => {
+            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_BOOLEAN)")
+        }
+        kiln_ir::Builtin::ParseInt => {
+            BuiltinLoad::Value("kiln_c99_method(KILN_C99_METHOD_PARSE_INT)")
+        }
+        kiln_ir::Builtin::ParseFloat => {
+            BuiltinLoad::Value("kiln_c99_method(KILN_C99_METHOD_PARSE_FLOAT)")
+        }
+        kiln_ir::Builtin::IsNaN => {
+            BuiltinLoad::Value("kiln_c99_method(KILN_C99_METHOD_GLOBAL_IS_NAN)")
+        }
+        kiln_ir::Builtin::IsFinite => {
+            BuiltinLoad::Value("kiln_c99_method(KILN_C99_METHOD_GLOBAL_IS_FINITE)")
+        }
+        kiln_ir::Builtin::Reflect => {
+            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_REFLECT)")
+        }
+        kiln_ir::Builtin::Proxy => BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_PROXY)"),
+        kiln_ir::Builtin::Symbol => BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_SYMBOL)"),
+        kiln_ir::Builtin::RegExp => BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_REGEXP)"),
+        kiln_ir::Builtin::Function => {
+            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_FUNCTION)")
+        }
+        kiln_ir::Builtin::BigInt => BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_BIGINT)"),
+        kiln_ir::Builtin::SetTimeout => {
+            BuiltinLoad::Value("kiln_c99_method(KILN_C99_METHOD_SET_TIMEOUT)")
+        }
+        kiln_ir::Builtin::SetInterval => {
+            BuiltinLoad::Value("kiln_c99_method(KILN_C99_METHOD_SET_INTERVAL)")
+        }
+        kiln_ir::Builtin::ClearTimeout => {
+            BuiltinLoad::Value("kiln_c99_method(KILN_C99_METHOD_CLEAR_TIMEOUT)")
+        }
+        kiln_ir::Builtin::ClearInterval => {
+            BuiltinLoad::Value("kiln_c99_method(KILN_C99_METHOD_CLEAR_INTERVAL)")
+        }
+        kiln_ir::Builtin::QueueMicrotask => {
+            BuiltinLoad::Value("kiln_c99_method(KILN_C99_METHOD_QUEUE_MICROTASK)")
+        }
+        kiln_ir::Builtin::Escape => BuiltinLoad::Value("kiln_c99_method(KILN_C99_METHOD_ESCAPE)"),
+        kiln_ir::Builtin::Unescape => {
+            BuiltinLoad::Value("kiln_c99_method(KILN_C99_METHOD_UNESCAPE)")
+        }
+        kiln_ir::Builtin::EncodeUri => {
+            BuiltinLoad::Value("kiln_c99_method(KILN_C99_METHOD_ENCODE_URI)")
+        }
+        kiln_ir::Builtin::EncodeUriComponent => {
+            BuiltinLoad::Value("kiln_c99_method(KILN_C99_METHOD_ENCODE_URI_COMPONENT)")
+        }
+        kiln_ir::Builtin::DecodeUri => {
+            BuiltinLoad::Value("kiln_c99_method(KILN_C99_METHOD_DECODE_URI)")
+        }
+        kiln_ir::Builtin::DecodeUriComponent => {
+            BuiltinLoad::Value("kiln_c99_method(KILN_C99_METHOD_DECODE_URI_COMPONENT)")
+        }
+        kiln_ir::Builtin::ArrayBuffer => {
+            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_BUFFER)")
+        }
+        kiln_ir::Builtin::Int8Array => {
+            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_INT8_ARRAY)")
+        }
+        kiln_ir::Builtin::Uint8Array => {
+            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_UINT8_ARRAY)")
+        }
+        kiln_ir::Builtin::Uint8ClampedArray => {
+            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_UINT8_CLAMPED_ARRAY)")
+        }
+        kiln_ir::Builtin::Int16Array => {
+            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_INT16_ARRAY)")
+        }
+        kiln_ir::Builtin::Uint16Array => {
+            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_UINT16_ARRAY)")
+        }
+        kiln_ir::Builtin::Int32Array => {
+            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_INT32_ARRAY)")
+        }
+        kiln_ir::Builtin::Uint32Array => {
+            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_UINT32_ARRAY)")
+        }
+        kiln_ir::Builtin::Float32Array => {
+            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_FLOAT32_ARRAY)")
+        }
+        kiln_ir::Builtin::Float64Array => {
+            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_FLOAT64_ARRAY)")
+        }
+        kiln_ir::Builtin::Url => BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_URL)"),
+        kiln_ir::Builtin::Buffer => BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_BUFFER)"),
+        kiln_ir::Builtin::NotANumber => BuiltinLoad::Value("kiln_c99_number(0.0 / 0.0)"),
+        kiln_ir::Builtin::Infinity => BuiltinLoad::Value("kiln_c99_number(1.0 / 0.0)"),
+        kiln_ir::Builtin::AbortController => {
+            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_ABORT_CONTROLLER)")
+        }
+        kiln_ir::Builtin::AbortSignal => {
+            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_ABORT_SIGNAL)")
+        }
+        kiln_ir::Builtin::TextEncoder => {
+            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_TEXT_ENCODER)")
+        }
+        kiln_ir::Builtin::TextDecoder => {
+            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_TEXT_DECODER)")
+        }
+        kiln_ir::Builtin::Performance => {
+            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_PERFORMANCE)")
+        }
+        #[allow(unreachable_patterns)]
+        _ => unreachable!("verification rejects every other builtin before emission"),
+    }
+}
+
+/// The one call that makes a closure, for both emitters.
+///
+/// Everything a closure carries is decided here, once: its name and source slice for
+/// `Function.prototype.toString`, its kind, its strictness (which decides the receiver a bare
+/// call gets), its `length`, the frame a generator needs, the seam where parameter binding
+/// stops, and the receiver an arrow snapshots. `captured` is the C expression for the upvalue
+/// array, or `NULL`. The result is the C expression that fills `built`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn closure_construction(
+    functions: &[FunctionProto],
+    source: &str,
+    frame_stacks: &[usize],
+    strict_functions: &[bool],
+    symbol: &str,
+    diagnostic_site: &str,
+    proto: u32,
+    defining_receiver: &str,
+    captured: &str,
+    capture_count: usize,
+) -> String {
+    let target = &functions[proto as usize];
+    let (name, name_len) = match &target.name {
+        Some(text) => (format!("{symbol}_name_{proto}"), text.len()),
+        None => ("NULL".to_owned(), 0),
+    };
+    let span = target.span;
+    let (source, source_len) =
+        if source.is_empty() || span.end as usize > source.len() || span.start > span.end {
+            ("NULL".to_owned(), 0usize)
+        } else {
+            (
+                format!("{symbol}_source + {}", span.start),
+                (span.end - span.start) as usize,
+            )
+        };
+    let generator = i32::from(target.generator || target.asynchronous);
+    let asynchronous = i32::from(target.asynchronous);
+    let arrow = i32::from(target.arrow);
+    let async_generator = i32::from(target.async_generator);
+    let strict = i32::from(
+        strict_functions
+            .get(proto as usize)
+            .copied()
+            .unwrap_or(true),
+    );
+    let arity = target.declared_length;
+    let frame_locals = target.local_count.max(1);
+    let frame_stack = frame_stacks
+        .get(proto as usize)
+        .copied()
+        .unwrap_or(1)
+        .max(1);
+    let frame_handlers = target.code.len().max(1);
+    let prologue_resume = if binds_at_call(target) {
+        target.code.len()
+    } else {
+        0
+    };
+    let diagnostic_source = c_string(diagnostic_site);
+    format!(
+        "kiln_c99_make_closure(&built, {symbol}_fn_{proto}, {name}, {name_len}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {strict}, {defining_receiver}, kiln_val_from_boundary(kiln_c99_new_target), UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), {captured}, UINT32_C({capture_count}))"
+    )
+}
+
 fn render_functions(
     output: &mut String,
     program: &Program,
@@ -1038,6 +1276,8 @@ fn render_function(
                 index,
                 scalar_proto,
                 diagnostic_site,
+                frame_stacks,
+                strict_functions,
             );
             return Ok(());
         }
@@ -2625,58 +2865,6 @@ fn emit_instruction(
         Instruction::MakeFunction(proto) => {
             let target = &functions[*proto as usize];
             let captures = &target.upvalues;
-            // A console prints `[Function: name]`, and an anonymous function is a distinct
-            // answer rather than a missing one.
-            let (name, name_len) = match &target.name {
-                Some(text) => (format!("{symbol}_name_{proto}"), text.len()),
-                None => ("NULL".to_owned(), 0),
-            };
-            // `Function.prototype.toString` answers with this slice of the unit's source. A span
-            // the text cannot hold is not narrowed to fit -- it is dropped, and the closure says
-            // it has no source, which is the same fallback the interpreter takes.
-            let span = target.span;
-            let (source, source_len) = if source.is_empty()
-                || span.end as usize > source.len()
-                || span.start > span.end
-            {
-                ("NULL".to_owned(), 0usize)
-            } else {
-                (
-                    format!("{symbol}_source + {}", span.start),
-                    (span.end - span.start) as usize,
-                )
-            };
-            // A generator's frame is sized here rather than at the call, because this is where
-            // the body's own counts are in scope.
-            let generator = i32::from(target.generator || target.asynchronous);
-            let asynchronous = i32::from(target.asynchronous);
-            let arrow = i32::from(target.arrow);
-            let async_generator = i32::from(target.async_generator);
-            // The one thing this backend does with strictness beyond the flags already baked
-            // into `SetPropertyStrict` and friends: it decides the receiver a bare call gets.
-            let strict = i32::from(
-                strict_functions
-                    .get(*proto as usize)
-                    .copied()
-                    .unwrap_or(true),
-            );
-            // `f.length` is how many arguments a caller *must* supply, which is the parameters
-            // before the first default and before a rest -- not how many slots the frame has.
-            // `(a, b = 1) => a` has two slots and a length of one, and reporting two said the
-            // second argument was required. `bind` subtracts the ones it fixed from this.
-            let arity = target.declared_length;
-            let frame_locals = target.local_count.max(1);
-            let frame_stack = frame_stacks[*proto as usize].max(1);
-            // One handler slot per instruction: a body cannot register more handlers than it has
-            // instructions, which is the same bound an automatic frame uses.
-            let frame_handlers = target.code.len().max(1);
-            // Non-zero only where the binding runs at the call; the runtime needs no other test,
-            // and the value is the resume position that seam leaves behind.
-            let prologue_resume = if binds_at_call(target) {
-                target.code.len()
-            } else {
-                0
-            };
             // Every function body receives its effective receiver. An arrow snapshots that
             // value now; an ordinary closure carries the same field but never consults it.
             // Module entry has no receiver and therefore captures `undefined` explicitly.
@@ -2685,14 +2873,9 @@ fn emit_instruction(
             } else {
                 "KILN_VAL_UNDEFINED"
             };
-            let diagnostic_source = c_string(diagnostic_site);
             output.push_str("    {\n        kiln_value built; int status;\n");
-            if captures.is_empty() {
-                writeln!(
-                    output,
-                    "        status = kiln_c99_make_closure(&built, {symbol}_fn_{proto}, {name}, {name_len}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {strict}, {defining_receiver}, kiln_val_from_boundary(kiln_c99_new_target), UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), NULL, 0);"
-                )
-                .unwrap();
+            let captured = if captures.is_empty() {
+                "NULL"
             } else {
                 writeln!(output, "        kiln_val captured[{}];", captures.len()).unwrap();
                 for (position, upvalue) in captures.iter().enumerate() {
@@ -2708,13 +2891,21 @@ fn emit_instruction(
                     }
                     .unwrap();
                 }
-                writeln!(
-                    output,
-                    "        status = kiln_c99_make_closure(&built, {symbol}_fn_{proto}, {name}, {name_len}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {strict}, {defining_receiver}, kiln_val_from_boundary(kiln_c99_new_target), UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), captured, UINT32_C({}));",
-                    captures.len()
-                )
-                .unwrap();
-            }
+                "captured"
+            };
+            let construction = closure_construction(
+                functions,
+                source,
+                frame_stacks,
+                strict_functions,
+                symbol,
+                diagnostic_site,
+                *proto,
+                defining_receiver,
+                captured,
+                captures.len(),
+            );
+            writeln!(output, "        status = {construction};").unwrap();
             if proto_publishes_frame(target) {
                 output.push_str("        if (status != KILN_C99_OK) return status;\n        stack[sp++] = kiln_val_from_boundary(built);\n    }\n");
             } else {
@@ -3716,134 +3907,18 @@ fn emit_instruction(
             )
             .unwrap();
         }
-        Instruction::LoadBuiltin(kiln_ir::Builtin::GlobalThis) => {
-            // The one builtin that is built rather than named: it is a real object, because a
-            // program writes to it.
-            output.push_str(
-                "    { kiln_value obj; int status = kiln_c99_global_object(&obj); if (status != KILN_C99_OK) return status; stack[sp++] = kiln_val_from_boundary(obj); }\n",
-            );
-        }
-        Instruction::LoadBuiltin(kiln_ir::Builtin::Process) => {
-            output.push_str(
-                "    { kiln_value obj; int status = kiln_c99_process_object(&obj); if (status != KILN_C99_OK) return status; stack[sp++] = kiln_val_from_boundary(obj); }\n",
-            );
-        }
-        Instruction::LoadBuiltin(kiln_ir::Builtin::Atomics) => {
-            output.push_str(
-                "    { kiln_value obj; int status = kiln_c99_atomics_object(&obj); if (status != KILN_C99_OK) return status; stack[sp++] = kiln_val_from_boundary(obj); }\n",
-            );
-        }
-        Instruction::LoadBuiltin(kiln_ir::Builtin::SetImmediate) => {
-            output.push_str(
-                "    stack[sp++] = kiln_val_from_boundary(kiln_c99_method(KILN_C99_METHOD_SET_IMMEDIATE));\n",
-            );
-        }
-        Instruction::LoadBuiltin(kiln_ir::Builtin::ClearImmediate) => {
-            output.push_str(
-                "    stack[sp++] = kiln_val_from_boundary(kiln_c99_method(KILN_C99_METHOD_CLEAR_IMMEDIATE));\n",
-            );
-        }
-        Instruction::LoadBuiltin(builtin) => {
-            // `NaN` and `Infinity` are values rather than callables, but they reach the program
-            // the same way -- as a name the compiler resolves to something the runtime supplies.
-            let pushed = match builtin {
-                kiln_ir::Builtin::String => "kiln_c99_builtin(KILN_C99_BUILTIN_STRING)",
-                kiln_ir::Builtin::Math => "kiln_c99_builtin(KILN_C99_BUILTIN_MATH)",
-                kiln_ir::Builtin::Number => "kiln_c99_builtin(KILN_C99_BUILTIN_NUMBER)",
-                kiln_ir::Builtin::Object => "kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT)",
-                kiln_ir::Builtin::Array => "kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY)",
-                kiln_ir::Builtin::Json => "kiln_c99_builtin(KILN_C99_BUILTIN_JSON)",
-                kiln_ir::Builtin::Date => "kiln_c99_builtin(KILN_C99_BUILTIN_DATE)",
-                kiln_ir::Builtin::Map => "kiln_c99_builtin(KILN_C99_BUILTIN_MAP)",
-                kiln_ir::Builtin::Set => "kiln_c99_builtin(KILN_C99_BUILTIN_SET)",
-                kiln_ir::Builtin::WeakMap => "kiln_c99_builtin(KILN_C99_BUILTIN_WEAK_MAP)",
-                kiln_ir::Builtin::WeakSet => "kiln_c99_builtin(KILN_C99_BUILTIN_WEAK_SET)",
-                kiln_ir::Builtin::Promise => "kiln_c99_builtin(KILN_C99_BUILTIN_PROMISE)",
-                kiln_ir::Builtin::Error => "kiln_c99_builtin(KILN_C99_BUILTIN_ERROR)",
-                kiln_ir::Builtin::TypeError => "kiln_c99_builtin(KILN_C99_BUILTIN_TYPE_ERROR)",
-                kiln_ir::Builtin::RangeError => "kiln_c99_builtin(KILN_C99_BUILTIN_RANGE_ERROR)",
-                kiln_ir::Builtin::ReferenceError => {
-                    "kiln_c99_builtin(KILN_C99_BUILTIN_REFERENCE_ERROR)"
-                }
-                kiln_ir::Builtin::SyntaxError => "kiln_c99_builtin(KILN_C99_BUILTIN_SYNTAX_ERROR)",
-                kiln_ir::Builtin::UriError => "kiln_c99_builtin(KILN_C99_BUILTIN_URI_ERROR)",
-                kiln_ir::Builtin::EvalError => "kiln_c99_builtin(KILN_C99_BUILTIN_EVAL_ERROR)",
-                kiln_ir::Builtin::AggregateError => {
-                    "kiln_c99_builtin(KILN_C99_BUILTIN_AGGREGATE_ERROR)"
-                }
-                kiln_ir::Builtin::Boolean => "kiln_c99_builtin(KILN_C99_BUILTIN_BOOLEAN)",
-                // A global function is a namespace method with no namespace: nothing is reached
-                // through to get at it, so the method value is what the name resolves to.
-                kiln_ir::Builtin::ParseInt => "kiln_c99_method(KILN_C99_METHOD_PARSE_INT)",
-                kiln_ir::Builtin::ParseFloat => "kiln_c99_method(KILN_C99_METHOD_PARSE_FLOAT)",
-                kiln_ir::Builtin::IsNaN => "kiln_c99_method(KILN_C99_METHOD_GLOBAL_IS_NAN)",
-                kiln_ir::Builtin::IsFinite => "kiln_c99_method(KILN_C99_METHOD_GLOBAL_IS_FINITE)",
-                kiln_ir::Builtin::Reflect => "kiln_c99_builtin(KILN_C99_BUILTIN_REFLECT)",
-                kiln_ir::Builtin::Proxy => "kiln_c99_builtin(KILN_C99_BUILTIN_PROXY)",
-                kiln_ir::Builtin::Symbol => "kiln_c99_builtin(KILN_C99_BUILTIN_SYMBOL)",
-                kiln_ir::Builtin::RegExp => "kiln_c99_builtin(KILN_C99_BUILTIN_REGEXP)",
-                kiln_ir::Builtin::Function => "kiln_c99_builtin(KILN_C99_BUILTIN_FUNCTION)",
-                kiln_ir::Builtin::BigInt => "kiln_c99_builtin(KILN_C99_BUILTIN_BIGINT)",
-                kiln_ir::Builtin::SetTimeout => "kiln_c99_method(KILN_C99_METHOD_SET_TIMEOUT)",
-                kiln_ir::Builtin::SetInterval => "kiln_c99_method(KILN_C99_METHOD_SET_INTERVAL)",
-                kiln_ir::Builtin::ClearTimeout => {
-                    "kiln_c99_method(KILN_C99_METHOD_CLEAR_TIMEOUT)"
-                }
-                kiln_ir::Builtin::ClearInterval => {
-                    "kiln_c99_method(KILN_C99_METHOD_CLEAR_INTERVAL)"
-                }
-                kiln_ir::Builtin::QueueMicrotask => {
-                    "kiln_c99_method(KILN_C99_METHOD_QUEUE_MICROTASK)"
-                }
-                kiln_ir::Builtin::Escape => "kiln_c99_method(KILN_C99_METHOD_ESCAPE)",
-                kiln_ir::Builtin::Unescape => "kiln_c99_method(KILN_C99_METHOD_UNESCAPE)",
-                kiln_ir::Builtin::EncodeUri => "kiln_c99_method(KILN_C99_METHOD_ENCODE_URI)",
-                kiln_ir::Builtin::EncodeUriComponent => {
-                    "kiln_c99_method(KILN_C99_METHOD_ENCODE_URI_COMPONENT)"
-                }
-                kiln_ir::Builtin::DecodeUri => "kiln_c99_method(KILN_C99_METHOD_DECODE_URI)",
-                kiln_ir::Builtin::DecodeUriComponent => {
-                    "kiln_c99_method(KILN_C99_METHOD_DECODE_URI_COMPONENT)"
-                }
-                kiln_ir::Builtin::ArrayBuffer => "kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_BUFFER)",
-                kiln_ir::Builtin::Int8Array => "kiln_c99_builtin(KILN_C99_BUILTIN_INT8_ARRAY)",
-                kiln_ir::Builtin::Uint8Array => "kiln_c99_builtin(KILN_C99_BUILTIN_UINT8_ARRAY)",
-                kiln_ir::Builtin::Uint8ClampedArray => {
-                    "kiln_c99_builtin(KILN_C99_BUILTIN_UINT8_CLAMPED_ARRAY)"
-                }
-                kiln_ir::Builtin::Int16Array => "kiln_c99_builtin(KILN_C99_BUILTIN_INT16_ARRAY)",
-                kiln_ir::Builtin::Uint16Array => "kiln_c99_builtin(KILN_C99_BUILTIN_UINT16_ARRAY)",
-                kiln_ir::Builtin::Int32Array => "kiln_c99_builtin(KILN_C99_BUILTIN_INT32_ARRAY)",
-                kiln_ir::Builtin::Uint32Array => "kiln_c99_builtin(KILN_C99_BUILTIN_UINT32_ARRAY)",
-                kiln_ir::Builtin::Float32Array => "kiln_c99_builtin(KILN_C99_BUILTIN_FLOAT32_ARRAY)",
-                kiln_ir::Builtin::Float64Array => "kiln_c99_builtin(KILN_C99_BUILTIN_FLOAT64_ARRAY)",
-                kiln_ir::Builtin::Url => "kiln_c99_builtin(KILN_C99_BUILTIN_URL)",
-                kiln_ir::Builtin::Buffer => "kiln_c99_builtin(KILN_C99_BUILTIN_BUFFER)",
-                kiln_ir::Builtin::NotANumber => "kiln_c99_number(0.0 / 0.0)",
-                kiln_ir::Builtin::Infinity => "kiln_c99_number(1.0 / 0.0)",
-                kiln_ir::Builtin::AbortController => {
-                    "kiln_c99_builtin(KILN_C99_BUILTIN_ABORT_CONTROLLER)"
-                }
-                kiln_ir::Builtin::AbortSignal => {
-                    "kiln_c99_builtin(KILN_C99_BUILTIN_ABORT_SIGNAL)"
-                }
-                kiln_ir::Builtin::TextEncoder => {
-                    "kiln_c99_builtin(KILN_C99_BUILTIN_TEXT_ENCODER)"
-                }
-                kiln_ir::Builtin::TextDecoder => {
-                    "kiln_c99_builtin(KILN_C99_BUILTIN_TEXT_DECODER)"
-                }
-                // Not built like `Atomics` and `process` are, which are real objects because a
-                // program writes to them. Nothing writes to `performance`, so it stays the
-                // built-in value it already was on `globalThis` -- and the two spellings reach
-                // the same value without a slot to keep in step.
-                kiln_ir::Builtin::Performance => {
-                    "kiln_c99_builtin(KILN_C99_BUILTIN_PERFORMANCE)"
-                }
-                _ => unreachable!("verification rejects every other builtin before emission"),
-            };
-            writeln!(output, "    stack[sp++] = kiln_val_from_boundary({pushed});").unwrap();
-        }
+        Instruction::LoadBuiltin(builtin) => match builtin_load(*builtin) {
+            BuiltinLoad::Value(expr) => {
+                writeln!(output, "    stack[sp++] = kiln_val_from_boundary({expr});").unwrap();
+            }
+            BuiltinLoad::Build(function) => {
+                writeln!(
+                    output,
+                    "    {{ kiln_value obj; int status = {function}(&obj); if (status != KILN_C99_OK) return status; stack[sp++] = kiln_val_from_boundary(obj); }}"
+                )
+                .unwrap();
+            }
+        },
         Instruction::Pop => output.push_str("    --sp;\n"),
         Instruction::Dup => output.push_str("    stack[sp] = stack[sp - 1]; ++sp;\n"),
         // A scalar program holds no reference to reduce, and has nowhere to put a thrown
@@ -4062,7 +4137,7 @@ fn emit_instruction(
     }
 }
 
-fn instruction_diagnostic(instruction: &Instruction, constants: &[Constant]) -> String {
+pub(crate) fn instruction_diagnostic(instruction: &Instruction, constants: &[Constant]) -> String {
     let debug = format!("{instruction:?}");
     let mut operation = debug
         .split([' ', '(', '{'])
