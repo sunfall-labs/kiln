@@ -453,7 +453,7 @@ typedef struct kiln_object {
     size_t slot_capacity;
     kiln_val inline_slots[KILN_C99_INLINE_SLOTS];
     /* Dense elements vector for integer keys (ADR 0050 Milestone 5) */
-    kiln_value *elements;
+    kiln_val *elements;
     size_t element_count;
     size_t element_capacity;
 } kiln_object;

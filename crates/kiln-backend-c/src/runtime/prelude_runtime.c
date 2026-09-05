@@ -2049,7 +2049,7 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
             }
         }
         if (object->elements != NULL) {
-            kiln_c99_gc_mark_values(heap, object->elements, object->element_count);
+            kiln_c99_gc_mark_vals(heap, object->elements, object->element_count);
         }
         for (index = 0; index < object->count; ++index) {
             const kiln_property *property = &object->properties[index];
@@ -2636,7 +2636,7 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
     }
     if (object->elements != NULL) {
         for (i = 0; i < object->element_count; ++i) {
-            if (object->elements[i].tag != KILN_VALUE_HOLE) {
+            if (object->elements[i] != KILN_VAL_HOLE) {
                 active_elements++;
             }
         }
@@ -2651,7 +2651,7 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
     }
     if (object->elements != NULL) {
         for (i = 0; i < object->element_count; ++i) {
-            if (object->elements[i].tag == KILN_VALUE_HOLE) continue;
+            if (object->elements[i] == KILN_VAL_HOLE) continue;
             char num_buf[32];
             int nlen = kiln_number_to_js_string((double)i, num_buf, sizeof num_buf);
             const char *ikey = kiln_c99_intern(num_buf, (size_t)nlen);
@@ -2663,7 +2663,7 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
             object->properties[pos].symbol_hidden = 0;
             object->properties[pos].accessor = 0;
             object->properties[pos].refused = 0;
-            object->properties[pos].value = object->elements[i];
+            object->properties[pos].value = kiln_val_to_boundary(object->elements[i]);
             object->properties[pos].getter = kiln_c99_undefined();
             object->properties[pos].setter = kiln_c99_undefined();
             pos++;
@@ -4187,8 +4187,8 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
             double index_num = kiln_c99_key_index(key, key_len);
             if (index_num >= 0.0 && index_num < 100000.0) {
                 size_t elem_idx = (size_t)index_num;
-                if (elem_idx < object->element_count && object->elements[elem_idx].tag != KILN_VALUE_HOLE) {
-                    object->elements[elem_idx] = value;
+                if (elem_idx < object->element_count && object->elements[elem_idx] != KILN_VAL_HOLE) {
+                    object->elements[elem_idx] = kiln_val_from_boundary(value);
                     return KILN_C99_OK;
                 }
             }
@@ -4239,17 +4239,17 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
                 size_t elem_idx = (size_t)index_num;
                 if (elem_idx >= object->element_capacity) {
                     size_t new_cap = object->element_capacity == 0 ? 8 : object->element_capacity * 2;
-                    kiln_value *new_elements;
+                    kiln_val *new_elements;
                     while (elem_idx >= new_cap) new_cap *= 2;
-                    new_elements = (kiln_value *)realloc(object->elements, new_cap * sizeof(kiln_value));
+                    new_elements = (kiln_val *)realloc(object->elements, new_cap * sizeof(kiln_val));
                     if (new_elements == NULL) return KILN_C99_OUT_OF_MEMORY;
                     for (size_t fill_i = object->element_capacity; fill_i < new_cap; ++fill_i) {
-                        new_elements[fill_i] = kiln_c99_value(KILN_VALUE_HOLE, 0, NULL, 0);
+                        new_elements[fill_i] = KILN_VAL_HOLE;
                     }
                     object->elements = new_elements;
                     object->element_capacity = new_cap;
                 }
-                object->elements[elem_idx] = value;
+                object->elements[elem_idx] = kiln_val_from_boundary(value);
                 if (elem_idx >= object->element_count) {
                     object->element_count = elem_idx + 1;
                 }
