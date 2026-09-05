@@ -5,7 +5,7 @@
 //! stack bytecode and lowers it into immutable SSA values, eliminating the runtime operand stack
 //! and resolving operand dependencies into direct value edges.
 
-use kiln_ir::{BinaryOp, Constant, FunctionProto, Instruction, Program, UnaryOp};
+use kiln_ir::{BinaryOp, Constant, FunctionProto, Instruction, Program, UnaryOp, Upvalue};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// Strongly typed identifier for an SSA value in the graph.
@@ -235,6 +235,21 @@ pub struct BasicBlock {
     pub exception_handler: Option<BlockId>,
 }
 
+/// A statically known, non-escaping object allocation eligible for scalar replacement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScalarObject {
+    /// The SSA value of the allocation (`GraphOp::NewObject`).
+    pub alloc_id: ValueId,
+    /// Property names in canonical sorted order, mapping name -> field index.
+    pub fields: BTreeMap<String, usize>,
+    /// Map from constant pool name index (`u32`) to field index.
+    pub field_by_name_index: HashMap<u32, usize>,
+    /// Initial values for each field in `fields` (from `NewObject.pairs`), mapping field index -> ValueId.
+    pub initial_values: HashMap<usize, ValueId>,
+    /// All ValueIds written to this field (initial values and SetProperty values).
+    pub field_written_values: HashMap<usize, Vec<ValueId>>,
+}
+
 /// The complete SSA Value Graph for a compiled function or module top-level.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionGraph {
@@ -255,6 +270,12 @@ pub struct FunctionGraph {
     /// The block where parameter binding ends in a body whose binding runs at the call (a
     /// generator): the call stops there and the first `next` resumes there.
     pub seam_block: Option<BlockId>,
+    /// Non-escaping object allocations identified by escape analysis.
+    pub non_escaping_objects: BTreeSet<ValueId>,
+    /// Metadata for each scalar-replaced object allocation.
+    pub scalar_objects: HashMap<ValueId, ScalarObject>,
+    /// Maps each alias ValueId (e.g. from StoreLocal, CheckTdz) to its root allocation ValueId.
+    pub scalar_alias_map: HashMap<ValueId, ValueId>,
 }
 
 /// The bytecode an operation was lowered from, for diagnostics.
@@ -277,7 +298,21 @@ impl FunctionGraph {
             initial_locals: Vec::new(),
             origins: HashMap::new(),
             seam_block: None,
+            non_escaping_objects: BTreeSet::new(),
+            scalar_objects: HashMap::new(),
+            scalar_alias_map: HashMap::new(),
         }
+    }
+
+    pub fn is_non_escaping(&self, vid: ValueId) -> bool {
+        self.non_escaping_objects.contains(&vid)
+    }
+
+    pub fn mark_non_escaping_objects(&mut self, program: &Program) {
+        let res = escape_analysis(self, program);
+        self.non_escaping_objects = res.non_escaping;
+        self.scalar_objects = res.scalar_objects;
+        self.scalar_alias_map = res.alias_map;
     }
 
     pub fn alloc_value(&mut self) -> ValueId {
@@ -854,6 +889,28 @@ pub fn proven_types_with(
                             continue;
                         } else {
                             agreed
+                        }
+                    }
+                    GraphOp::GetProperty { object, name, .. } => {
+                        if let Some(&root) = graph.scalar_alias_map.get(object)
+                            && let Some(scalar_obj) = graph.scalar_objects.get(&root)
+                            && let Some(&field_idx) = scalar_obj.field_by_name_index.get(name)
+                        {
+                            if let Some(written) = scalar_obj.field_written_values.get(&field_idx) {
+                                if !written.is_empty() && written.iter().all(|w| int(&state, w)) {
+                                    Some(Proven::Int)
+                                } else if !written.is_empty()
+                                    && written.iter().all(|w| number(&state, w))
+                                {
+                                    Some(Proven::Number)
+                                } else {
+                                    None
+                                }
+                            } else {
+                                Some(Proven::Undefined)
+                            }
+                        } else {
+                            None
                         }
                     }
                     _ => None,
@@ -2034,7 +2091,624 @@ pub fn build_function_graph(
     }
 
     graph.blocks = basic_blocks;
+    graph.mark_non_escaping_objects(program);
     Ok(graph)
+}
+
+/// The slots that must exist in `locals[]`: cells, and slots some block loads other than the
+/// entry block's definitions of the initial values.
+pub fn array_slots(graph: &FunctionGraph, program: &Program) -> HashSet<u32> {
+    let mut slots = HashSet::new();
+    if graph.blocks.iter().any(|b| b.exception_handler.is_some()) {
+        // A handler reads the locals as they were at the throw, which can be any point of the
+        // protected region: every slot lives in the array.
+        return (0..graph.local_count).collect();
+    }
+    for block in &graph.blocks {
+        for (_, op) in &block.operations {
+            match op {
+                GraphOp::LoadCell(slot)
+                | GraphOp::StoreCell { slot, .. }
+                | GraphOp::MakeCell(slot) => {
+                    slots.insert(*slot);
+                }
+                GraphOp::LoadLocal(slot) if block.id != graph.entry_block => {
+                    slots.insert(*slot);
+                }
+                GraphOp::MakeFunction { index, .. } => {
+                    // A closure copies its captured boxes out of the array.
+                    for upvalue in &program.functions[*index as usize].upvalues {
+                        if let Upvalue::ParentLocal(slot) = upvalue {
+                            slots.insert(*slot);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    slots
+}
+
+pub fn resolve_root_alias(mut vid: ValueId, defs: &HashMap<ValueId, &GraphOp>) -> ValueId {
+    while let Some(op) = defs.get(&vid) {
+        match op {
+            GraphOp::StoreLocal { value, .. } | GraphOp::CheckTdz { value, .. } => {
+                vid = *value;
+            }
+            _ => break,
+        }
+    }
+    vid
+}
+
+pub fn resolve_const_string<'a>(
+    vid: ValueId,
+    defs: &HashMap<ValueId, &'a GraphOp>,
+    _program: &'a Program,
+) -> Option<&'a str> {
+    let root = resolve_root_alias(vid, defs);
+    if let Some(GraphOp::Const {
+        constant: Constant::String(s),
+        ..
+    }) = defs.get(&root)
+    {
+        return Some(s.as_str());
+    }
+    None
+}
+
+/// Result of escape analysis on a function graph.
+#[derive(Debug, Clone, Default)]
+pub struct EscapeAnalysisResult {
+    pub non_escaping: BTreeSet<ValueId>,
+    pub scalar_objects: HashMap<ValueId, ScalarObject>,
+    pub alias_map: HashMap<ValueId, ValueId>,
+}
+
+const OBJECT_PROTOTYPE_PROPERTIES: &[&str] = &[
+    "constructor",
+    "hasOwnProperty",
+    "isPrototypeOf",
+    "propertyIsEnumerable",
+    "toLocaleString",
+    "toString",
+    "valueOf",
+    "__proto__",
+    "__defineGetter__",
+    "__defineSetter__",
+    "__lookupGetter__",
+    "__lookupSetter__",
+];
+
+pub fn escape_analysis(graph: &FunctionGraph, program: &Program) -> EscapeAnalysisResult {
+    let mut defs = HashMap::new();
+    for block in &graph.blocks {
+        for (vid, op) in &block.operations {
+            defs.insert(*vid, op);
+        }
+    }
+
+    // Step 1: Collect candidates (NewObject where all keys are known constant strings)
+    let mut candidates = HashSet::new();
+    for (vid, op) in &defs {
+        if let GraphOp::NewObject { pairs, .. } = op {
+            let all_keys_const = pairs
+                .iter()
+                .all(|(k, _)| resolve_const_string(*k, &defs, program).is_some());
+            if all_keys_const {
+                candidates.insert(*vid);
+            }
+        }
+    }
+
+    if candidates.is_empty() {
+        return EscapeAnalysisResult::default();
+    }
+
+    // Step 2: Build alias map (ValueId -> root candidate alloc_id)
+    let mut alias_to_root: HashMap<ValueId, ValueId> = HashMap::new();
+    for &alloc_id in &candidates {
+        alias_to_root.insert(alloc_id, alloc_id);
+    }
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (vid, op) in &defs {
+            if alias_to_root.contains_key(vid) {
+                continue;
+            }
+            match op {
+                GraphOp::StoreLocal { value, .. } | GraphOp::CheckTdz { value, .. } => {
+                    if let Some(&root) = alias_to_root.get(value) {
+                        alias_to_root.insert(*vid, root);
+                        changed = true;
+                    }
+                }
+                GraphOp::Phi { inputs } if !inputs.is_empty() => {
+                    let non_self: Vec<ValueId> = inputs
+                        .iter()
+                        .map(|(_, v)| *v)
+                        .filter(|v| v != vid)
+                        .collect();
+                    if let Some(&first_root) = non_self.first().and_then(|v| alias_to_root.get(v))
+                        && non_self
+                            .iter()
+                            .all(|v| alias_to_root.get(v) == Some(&first_root))
+                    {
+                        alias_to_root.insert(*vid, first_root);
+                        changed = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Step 3: Compute liveness of Phis
+    let mut live_values: HashSet<ValueId> = HashSet::new();
+    for block in &graph.blocks {
+        match &block.terminator {
+            Terminator::Return(Some(v))
+            | Terminator::Throw(v)
+            | Terminator::Branch { condition: v, .. } => {
+                live_values.insert(*v);
+            }
+            Terminator::Suspend { value, spilled, .. } => {
+                live_values.insert(*value);
+                live_values.extend(spilled);
+            }
+            _ => {}
+        }
+        for (_, op) in &block.operations {
+            if !matches!(op, GraphOp::Phi { .. }) {
+                match op {
+                    GraphOp::StoreLocal { value, .. }
+                    | GraphOp::StoreCell { value, .. }
+                    | GraphOp::StoreGlobal { value, .. }
+                    | GraphOp::StoreUpvalue { value, .. }
+                    | GraphOp::CheckTdz { value, .. }
+                    | GraphOp::Unary { value, .. } => {
+                        live_values.insert(*value);
+                    }
+                    GraphOp::Binary { left, right, .. } => {
+                        live_values.insert(*left);
+                        live_values.insert(*right);
+                    }
+                    GraphOp::GetProperty { object, .. } => {
+                        live_values.insert(*object);
+                    }
+                    GraphOp::SetProperty { object, value, .. }
+                    | GraphOp::SetPropertyStrict { object, value, .. } => {
+                        live_values.insert(*object);
+                        live_values.insert(*value);
+                    }
+                    GraphOp::GetComputed { object, key, .. } => {
+                        live_values.insert(*object);
+                        live_values.insert(*key);
+                    }
+                    GraphOp::SetComputed {
+                        object, key, value, ..
+                    }
+                    | GraphOp::SetComputedStrict {
+                        object, key, value, ..
+                    } => {
+                        live_values.insert(*object);
+                        live_values.insert(*key);
+                        live_values.insert(*value);
+                    }
+                    GraphOp::Call { callee, args, .. } => {
+                        live_values.insert(*callee);
+                        live_values.extend(args);
+                    }
+                    GraphOp::CallMethod { object, args, .. } => {
+                        live_values.insert(*object);
+                        live_values.extend(args);
+                    }
+                    GraphOp::New { callee, args, .. } => {
+                        live_values.insert(*callee);
+                        live_values.extend(args);
+                    }
+                    GraphOp::NewArray { elements, .. } => {
+                        live_values.extend(elements);
+                    }
+                    GraphOp::NewObject { pairs, .. } => {
+                        for (k, v) in pairs {
+                            live_values.insert(*k);
+                            live_values.insert(*v);
+                        }
+                    }
+                    GraphOp::Bridge { operands, .. } => {
+                        live_values.extend(operands);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let mut worklist: Vec<ValueId> = live_values.iter().copied().collect();
+    while let Some(v) = worklist.pop() {
+        if let Some(GraphOp::Phi { inputs }) = defs.get(&v) {
+            for (_, in_v) in inputs {
+                if live_values.insert(*in_v) {
+                    worklist.push(*in_v);
+                }
+            }
+        }
+    }
+
+    // Step 4: Check escapes
+    let mut escaped: HashSet<ValueId> = HashSet::new();
+    let slots_in_array = array_slots(graph, program);
+
+    for block in &graph.blocks {
+        match &block.terminator {
+            Terminator::Return(Some(v))
+            | Terminator::Throw(v)
+            | Terminator::Branch { condition: v, .. } => {
+                if let Some(&root) = alias_to_root.get(v) {
+                    escaped.insert(root);
+                }
+            }
+            Terminator::Suspend { value, spilled, .. } => {
+                if let Some(&root) = alias_to_root.get(value) {
+                    escaped.insert(root);
+                }
+                for s in spilled {
+                    if let Some(&root) = alias_to_root.get(s) {
+                        escaped.insert(root);
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        for (vid, op) in &block.operations {
+            match op {
+                GraphOp::StoreGlobal { value, .. }
+                | GraphOp::StoreCell { value, .. }
+                | GraphOp::StoreUpvalue { value, .. } => {
+                    if let Some(&root) = alias_to_root.get(value) {
+                        escaped.insert(root);
+                    }
+                }
+                GraphOp::StoreLocal { slot, value } => {
+                    if slots_in_array.contains(slot)
+                        && let Some(&root) = alias_to_root.get(value)
+                    {
+                        escaped.insert(root);
+                    }
+                }
+                GraphOp::Call { callee, args, .. } => {
+                    if let Some(&root) = alias_to_root.get(callee) {
+                        escaped.insert(root);
+                    }
+                    for a in args {
+                        if let Some(&root) = alias_to_root.get(a) {
+                            escaped.insert(root);
+                        }
+                    }
+                }
+                GraphOp::CallMethod { object, args, .. } => {
+                    if let Some(&root) = alias_to_root.get(object) {
+                        escaped.insert(root);
+                    }
+                    for a in args {
+                        if let Some(&root) = alias_to_root.get(a) {
+                            escaped.insert(root);
+                        }
+                    }
+                }
+                GraphOp::New { callee, args, .. } => {
+                    if let Some(&root) = alias_to_root.get(callee) {
+                        escaped.insert(root);
+                    }
+                    for a in args {
+                        if let Some(&root) = alias_to_root.get(a) {
+                            escaped.insert(root);
+                        }
+                    }
+                }
+                GraphOp::NewArray { elements, .. } => {
+                    for e in elements {
+                        if let Some(&root) = alias_to_root.get(e) {
+                            escaped.insert(root);
+                        }
+                    }
+                }
+                GraphOp::NewObject { pairs, .. } => {
+                    for (k, v) in pairs {
+                        if let Some(&root) = alias_to_root.get(k) {
+                            escaped.insert(root);
+                        }
+                        if let Some(&root) = alias_to_root.get(v) {
+                            escaped.insert(root);
+                        }
+                    }
+                }
+                GraphOp::Bridge { operands, .. } => {
+                    for o in operands {
+                        if let Some(&root) = alias_to_root.get(o) {
+                            escaped.insert(root);
+                        }
+                    }
+                }
+                GraphOp::Unary { value, .. } => {
+                    if let Some(&root) = alias_to_root.get(value) {
+                        escaped.insert(root);
+                    }
+                }
+                GraphOp::Binary { left, right, .. } => {
+                    if let Some(&root) = alias_to_root.get(left) {
+                        escaped.insert(root);
+                    }
+                    if let Some(&root) = alias_to_root.get(right) {
+                        escaped.insert(root);
+                    }
+                }
+                GraphOp::Phi { inputs } => {
+                    if live_values.contains(vid) {
+                        let non_self: Vec<ValueId> = inputs
+                            .iter()
+                            .map(|(_, in_v)| *in_v)
+                            .filter(|in_v| in_v != vid)
+                            .collect();
+                        let roots: HashSet<Option<ValueId>> = non_self
+                            .iter()
+                            .map(|in_v| alias_to_root.get(in_v).copied())
+                            .collect();
+                        if roots.len() > 1 || roots.contains(&None) {
+                            for in_v in non_self {
+                                if let Some(&root) = alias_to_root.get(&in_v) {
+                                    escaped.insert(root);
+                                }
+                            }
+                        }
+                    }
+                }
+                GraphOp::GetProperty { object, name, .. } => {
+                    if let Some(&root) = alias_to_root.get(object) {
+                        let prop_name = match program.constants.get(*name as usize) {
+                            Some(Constant::String(s)) => s.as_str(),
+                            _ => "",
+                        };
+                        if OBJECT_PROTOTYPE_PROPERTIES.contains(&prop_name) {
+                            let defined =
+                                if let Some(GraphOp::NewObject { pairs, .. }) = defs.get(&root) {
+                                    pairs.iter().any(|(k, _)| {
+                                        resolve_const_string(*k, &defs, program) == Some(prop_name)
+                                    })
+                                } else {
+                                    false
+                                };
+                            if !defined {
+                                escaped.insert(root);
+                            }
+                        }
+                    }
+                }
+                GraphOp::SetProperty {
+                    object,
+                    name,
+                    value,
+                    ..
+                }
+                | GraphOp::SetPropertyStrict {
+                    object,
+                    name,
+                    value,
+                    ..
+                } => {
+                    if let Some(&root) = alias_to_root.get(value) {
+                        escaped.insert(root);
+                    }
+                    if let Some(&root) = alias_to_root.get(object) {
+                        let prop_name = match program.constants.get(*name as usize) {
+                            Some(Constant::String(s)) => s.as_str(),
+                            _ => "",
+                        };
+                        if prop_name == "__proto__" {
+                            escaped.insert(root);
+                        }
+                    }
+                }
+                GraphOp::GetComputed { object, key, .. } => {
+                    if let Some(&root) = alias_to_root.get(key) {
+                        escaped.insert(root);
+                    }
+                    if let Some(&root) = alias_to_root.get(object) {
+                        if let Some(prop_name) = resolve_const_string(*key, &defs, program) {
+                            if OBJECT_PROTOTYPE_PROPERTIES.contains(&prop_name) {
+                                let defined = if let Some(GraphOp::NewObject { pairs, .. }) =
+                                    defs.get(&root)
+                                {
+                                    pairs.iter().any(|(k, _)| {
+                                        resolve_const_string(*k, &defs, program) == Some(prop_name)
+                                    })
+                                } else {
+                                    false
+                                };
+                                if !defined {
+                                    escaped.insert(root);
+                                }
+                            }
+                        } else {
+                            escaped.insert(root);
+                        }
+                    }
+                }
+                GraphOp::SetComputed {
+                    object, key, value, ..
+                }
+                | GraphOp::SetComputedStrict {
+                    object, key, value, ..
+                } => {
+                    if let Some(&root) = alias_to_root.get(value) {
+                        escaped.insert(root);
+                    }
+                    if let Some(&root) = alias_to_root.get(key) {
+                        escaped.insert(root);
+                    }
+                    if let Some(&root) = alias_to_root.get(object) {
+                        if let Some(prop_name) = resolve_const_string(*key, &defs, program) {
+                            if prop_name == "__proto__" {
+                                escaped.insert(root);
+                            }
+                        } else {
+                            escaped.insert(root);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Step 5: Construct ScalarObjects for non-escaping allocations
+    let mut non_escaping = BTreeSet::new();
+    let mut scalar_objects = HashMap::new();
+
+    for alloc_id in candidates {
+        if escaped.contains(&alloc_id) {
+            continue;
+        }
+
+        let mut field_names = BTreeSet::new();
+
+        // 1. From NewObject pairs
+        if let Some(GraphOp::NewObject { pairs, .. }) = defs.get(&alloc_id) {
+            for (k, _) in pairs {
+                if let Some(prop) = resolve_const_string(*k, &defs, program) {
+                    field_names.insert(prop.to_owned());
+                }
+            }
+        }
+
+        // 2. From SetProperty / GetProperty / SetComputed / GetComputed
+        for block in &graph.blocks {
+            for (_, op) in &block.operations {
+                match op {
+                    GraphOp::GetProperty { object, name, .. }
+                    | GraphOp::SetProperty { object, name, .. }
+                    | GraphOp::SetPropertyStrict { object, name, .. }
+                        if alias_to_root.get(object) == Some(&alloc_id) =>
+                    {
+                        if let Some(Constant::String(s)) = program.constants.get(*name as usize) {
+                            field_names.insert(s.clone());
+                        }
+                    }
+                    GraphOp::GetComputed { object, key, .. }
+                    | GraphOp::SetComputed { object, key, .. }
+                    | GraphOp::SetComputedStrict { object, key, .. }
+                        if alias_to_root.get(object) == Some(&alloc_id) =>
+                    {
+                        if let Some(prop) = resolve_const_string(*key, &defs, program) {
+                            field_names.insert(prop.to_owned());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let fields: BTreeMap<String, usize> = field_names
+            .into_iter()
+            .enumerate()
+            .map(|(idx, name)| (name, idx))
+            .collect();
+
+        let mut field_by_name_index = HashMap::new();
+        for (c_idx, c) in program.constants.iter().enumerate() {
+            if let Constant::String(s) = c
+                && let Some(&field_idx) = fields.get(s)
+            {
+                field_by_name_index.insert(c_idx as u32, field_idx);
+            }
+        }
+
+        let mut initial_values = HashMap::new();
+        let mut field_written_values: HashMap<usize, Vec<ValueId>> = HashMap::new();
+
+        if let Some(GraphOp::NewObject { pairs, .. }) = defs.get(&alloc_id) {
+            for (k, v) in pairs {
+                if let Some(prop) = resolve_const_string(*k, &defs, program)
+                    && let Some(&field_idx) = fields.get(prop)
+                {
+                    initial_values.insert(field_idx, *v);
+                    field_written_values.entry(field_idx).or_default().push(*v);
+                }
+            }
+        }
+
+        for block in &graph.blocks {
+            for (_, op) in &block.operations {
+                match op {
+                    GraphOp::SetProperty {
+                        object,
+                        name,
+                        value,
+                        ..
+                    }
+                    | GraphOp::SetPropertyStrict {
+                        object,
+                        name,
+                        value,
+                        ..
+                    } if alias_to_root.get(object) == Some(&alloc_id) => {
+                        if let Some(&field_idx) = field_by_name_index.get(name) {
+                            field_written_values
+                                .entry(field_idx)
+                                .or_default()
+                                .push(*value);
+                        }
+                    }
+                    GraphOp::SetComputed {
+                        object, key, value, ..
+                    }
+                    | GraphOp::SetComputedStrict {
+                        object, key, value, ..
+                    } if alias_to_root.get(object) == Some(&alloc_id) => {
+                        if let Some(prop) = resolve_const_string(*key, &defs, program)
+                            && let Some(&field_idx) = fields.get(prop)
+                        {
+                            field_written_values
+                                .entry(field_idx)
+                                .or_default()
+                                .push(*value);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        non_escaping.insert(alloc_id);
+        scalar_objects.insert(
+            alloc_id,
+            ScalarObject {
+                alloc_id,
+                fields,
+                field_by_name_index,
+                initial_values,
+                field_written_values,
+            },
+        );
+    }
+
+    let mut alias_map = HashMap::new();
+    for (vid, root) in alias_to_root {
+        if non_escaping.contains(&root) {
+            alias_map.insert(vid, root);
+        }
+    }
+
+    EscapeAnalysisResult {
+        non_escaping,
+        scalar_objects,
+        alias_map,
+    }
 }
 
 /// The phis a merge block owns: one per local slot, allocated before the walk, and one per stack
