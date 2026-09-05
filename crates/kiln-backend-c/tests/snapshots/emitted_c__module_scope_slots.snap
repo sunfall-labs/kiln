@@ -28,9 +28,7 @@ static inline int kiln_module_f4d3dbd71fb25e3e751b47bde606576f_fn_0(kiln_call_co
     (void)host; (void)upvalues; (void)depth; (void)receiver;
     for (slot = 0; slot < (size_t)1; ++slot) locals[slot] = KILN_VAL_UNDEFINED;
     (void)args; (void)argc;
-kiln_label_0:;
     stack[sp++] = kiln_module_f4d3dbd71fb25e3e751b47bde606576f_globals[0];
-kiln_label_1:;
     *result = sp == 0 ? KILN_VAL_UNDEFINED : stack[--sp]; return KILN_C99_OK;
     goto kiln_refusal;
 kiln_refusal:;
