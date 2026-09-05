@@ -1,86 +1,278 @@
 {
-  "schema": 1,
-  "probe": "conformance/server/s01-http-hello.mjs",
-  "iterations": 10,
-  "warmup": 2,
-  "platform": "darwin",
-  "rss_units": "bytes (ru_maxrss scaled by 1 for this platform)",
+  "schema": 2,
+  "clients": 16,
+  "duration_ms": 2000,
+  "threshold_pct": 15.0,
   "versions": {
-    "node": "v25.9.0",
-    "deno": "deno 2.9.5 (stable, release, aarch64-apple-darwin)",
+    "node": "v22.23.2",
     "bun": "1.4.0",
+    "deno": null,
     "kiln": "kiln 0.0.0"
   },
-  "targets": [
-    {
-      "target": "node",
-      "form": "script",
-      "available": true,
-      "runtime_path": "node",
-      "note": "no standalone form measured: Node's SEA is a multi-step postject flow rather than one command, and half-doing it would put a number in this table that nobody could reproduce from the line above it",
-      "startup_ms_median": 129.63,
-      "startup_ms_min": 124.65,
-      "peak_rss_bytes": 60940288
+  "scenarios": {
+    "hello": {
+      "node": {
+        "available": true,
+        "rps": 14228,
+        "p50_ms": 0.871,
+        "errors": 0
+      },
+      "bun": {
+        "available": true,
+        "rps": 13496,
+        "p50_ms": 0.898,
+        "errors": 0
+      },
+      "deno": {
+        "available": false,
+        "reason": "deno is not installed on PATH"
+      },
+      "kiln": {
+        "available": true,
+        "rps": 15053,
+        "p50_ms": 0.817,
+        "errors": 0
+      }
     },
-    {
-      "target": "deno",
-      "form": "script",
-      "available": true,
-      "runtime_path": "deno",
-      "note": "",
-      "startup_ms_median": 28.29,
-      "startup_ms_min": 26.35,
-      "peak_rss_bytes": 36552704
+    "mixed": {
+      "node": {
+        "available": true,
+        "rps": 9327,
+        "p50_ms": 1.292,
+        "errors": 0
+      },
+      "bun": {
+        "available": true,
+        "rps": 9858,
+        "p50_ms": 1.202,
+        "errors": 0
+      },
+      "deno": {
+        "available": false,
+        "reason": "deno is not installed on PATH"
+      },
+      "kiln": {
+        "available": true,
+        "rps": 13079,
+        "p50_ms": 0.967,
+        "errors": 0
+      }
     },
-    {
-      "target": "bun",
-      "form": "script",
-      "available": true,
-      "runtime_path": "bun",
-      "note": "",
-      "startup_ms_median": 23.39,
-      "startup_ms_min": 22.83,
-      "peak_rss_bytes": 26591232
+    "static-file": {
+      "node": {
+        "available": true,
+        "rps": 8352,
+        "p50_ms": 1.619,
+        "errors": 0
+      },
+      "bun": {
+        "available": true,
+        "rps": 10945,
+        "p50_ms": 1.246,
+        "errors": 0
+      },
+      "deno": {
+        "available": false,
+        "reason": "deno is not installed on PATH"
+      },
+      "kiln": {
+        "available": true,
+        "rps": 8707,
+        "p50_ms": 1.587,
+        "errors": 0
+      }
     },
-    {
-      "target": "deno",
-      "form": "standalone",
-      "available": true,
-      "artifact_bytes": 67463474,
-      "note": "the JavaScript engine is inside this file",
-      "startup_ms_median": 26.97,
-      "startup_ms_min": 25.98,
-      "peak_rss_bytes": 36397056
+    "json-echo-1k": {
+      "node": {
+        "available": true,
+        "rps": 12164,
+        "p50_ms": 1.014,
+        "errors": 0
+      },
+      "bun": {
+        "available": true,
+        "rps": 13228,
+        "p50_ms": 0.937,
+        "errors": 0
+      },
+      "deno": {
+        "available": false,
+        "reason": "deno is not installed on PATH"
+      },
+      "kiln": {
+        "available": true,
+        "rps": 14934,
+        "p50_ms": 0.819,
+        "errors": 0
+      }
     },
-    {
-      "target": "bun",
-      "form": "standalone",
-      "available": true,
-      "artifact_bytes": 63910514,
-      "note": "the JavaScript engine is inside this file",
-      "startup_ms_median": 24.39,
-      "startup_ms_min": 23.39,
-      "peak_rss_bytes": 25608192
+    "json-echo-64k": {
+      "node": {
+        "available": true,
+        "rps": 2301,
+        "p50_ms": 6.381,
+        "errors": 0
+      },
+      "bun": {
+        "available": true,
+        "rps": 4939,
+        "p50_ms": 2.908,
+        "errors": 0
+      },
+      "deno": {
+        "available": false,
+        "reason": "deno is not installed on PATH"
+      },
+      "kiln": {
+        "available": true,
+        "rps": 803,
+        "p50_ms": 19.554,
+        "errors": 0
+      }
     },
-    {
-      "target": "kiln",
-      "form": "script",
-      "available": true,
-      "runtime_path": "kiln",
-      "note": "explicit Node interpreter mode; Tokio owns both loopback I/O paths",
-      "startup_ms_median": 630.14,
-      "startup_ms_min": 623.94,
-      "peak_rss_bytes": 42663936
+    "chunked-stream": {
+      "node": {
+        "available": true,
+        "rps": 13556,
+        "p50_ms": 0.902,
+        "errors": 0
+      },
+      "bun": {
+        "available": true,
+        "rps": 12705,
+        "p50_ms": 0.975,
+        "errors": 0
+      },
+      "deno": {
+        "available": false,
+        "reason": "deno is not installed on PATH"
+      },
+      "kiln": {
+        "available": true,
+        "rps": 13981,
+        "p50_ms": 0.871,
+        "errors": 0
+      }
     },
-    {
-      "target": "kiln",
-      "form": "standalone",
-      "available": true,
-      "artifact_bytes": 4861752,
-      "note": "native Node artifact; Tokio/Hyper runtime linked without a JavaScript engine",
-      "startup_ms_median": 7.89,
-      "startup_ms_min": 7.52,
-      "peak_rss_bytes": 3506176
+    "large-upload": {
+      "node": {
+        "available": true,
+        "rps": 1962,
+        "p50_ms": 7.438,
+        "errors": 0
+      },
+      "bun": {
+        "available": true,
+        "rps": 1981,
+        "p50_ms": 7.566,
+        "errors": 0
+      },
+      "deno": {
+        "available": false,
+        "reason": "deno is not installed on PATH"
+      },
+      "kiln": {
+        "available": true,
+        "rps": 291,
+        "p50_ms": 52.649,
+        "errors": 0
+      }
+    },
+    "connection-churn": {
+      "node": {
+        "available": true,
+        "rps": 6550,
+        "p50_ms": 2.021,
+        "errors": 0
+      },
+      "bun": {
+        "available": true,
+        "rps": 5926,
+        "p50_ms": 2.523,
+        "errors": 0
+      },
+      "deno": {
+        "available": false,
+        "reason": "deno is not installed on PATH"
+      },
+      "kiln": {
+        "available": true,
+        "rps": 5586,
+        "p50_ms": 2.734,
+        "errors": 0
+      }
+    },
+    "fs-small-reads": {
+      "node": {
+        "available": true,
+        "rps": 962,
+        "p50_ms": 16.177,
+        "errors": 0
+      },
+      "bun": {
+        "available": true,
+        "rps": 9577,
+        "p50_ms": 1.482,
+        "errors": 0
+      },
+      "deno": {
+        "available": false,
+        "reason": "deno is not installed on PATH"
+      },
+      "kiln": {
+        "available": true,
+        "rps": 3926,
+        "p50_ms": 3.67,
+        "errors": 0
+      }
+    },
+    "fs-large-read": {
+      "node": {
+        "available": true,
+        "rps": 6093,
+        "p50_ms": 2.308,
+        "errors": 0
+      },
+      "bun": {
+        "available": true,
+        "rps": 5740,
+        "p50_ms": 2.714,
+        "errors": 0
+      },
+      "deno": {
+        "available": false,
+        "reason": "deno is not installed on PATH"
+      },
+      "kiln": {
+        "available": true,
+        "rps": 2863,
+        "p50_ms": 4.721,
+        "errors": 0
+      }
+    },
+    "fs-stat-storm": {
+      "node": {
+        "available": true,
+        "rps": 1599,
+        "p50_ms": 9.388,
+        "errors": 0
+      },
+      "bun": {
+        "available": true,
+        "rps": 5997,
+        "p50_ms": 2.47,
+        "errors": 0
+      },
+      "deno": {
+        "available": false,
+        "reason": "deno is not installed on PATH"
+      },
+      "kiln": {
+        "available": true,
+        "rps": 2116,
+        "p50_ms": 7.223,
+        "errors": 0
+      }
     }
-  ]
+  }
 }

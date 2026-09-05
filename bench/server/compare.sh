@@ -17,9 +17,11 @@ work="$(mktemp -d)"
 sed "s/18088/${PORT}/g" "$HERE/serve.mjs" > "$work/serve.mjs"
 sed "s/18088/${PORT}/g" "$HERE/app.mjs" > "$work/app.mjs"
 
+WORKLOADS="${WORKLOADS:-hello mixed static-file json-echo-1k json-echo-64k chunked-stream large-upload connection-churn fs-small-reads fs-large-read fs-stat-storm}"
+
 start() { # runtime workload
 	local js="$work/serve.mjs" bin="$kiln_hello"
-	[[ $2 == mixed ]] && js="$work/app.mjs" && bin="$kiln_app"
+	[[ $2 != hello ]] && js="$work/app.mjs" && bin="$kiln_app"
 	# exec so the background job *is* the server and killing $! kills it, not a wrapper shell.
 	case "$1" in
 	kiln) exec "$bin" ;;
@@ -31,15 +33,19 @@ start() { # runtime workload
 
 uptime | sed 's/.*load/load/'
 for pass in $(seq 1 "$PASSES"); do
-	for workload in hello mixed; do
+	for workload in $WORKLOADS; do
 		for runtime in $RUNTIMES; do
+			if [[ "$runtime" != "kiln" ]] && ! command -v "$runtime" >/dev/null 2>&1; then
+				printf 'pass=%s workload=%-18s runtime=%-4s skipped (not on PATH)\n' "$pass" "$workload" "$runtime"
+				continue
+			fi
 			if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
 				echo "compare.sh: port $PORT is busy" >&2; exit 2
 			fi
 			start "$runtime" "$workload" >/dev/null 2>&1 &
 			server=$!
 			for _ in $(seq 1 50); do curl -s -o /dev/null "http://127.0.0.1:$PORT/" && break; sleep 0.1; done
-			printf 'pass=%s workload=%-5s runtime=%-4s ' "$pass" "$workload" "$runtime"
+			printf 'pass=%s workload=%-18s runtime=%-4s ' "$pass" "$workload" "$runtime"
 			bash "$HERE/drive-multi.sh" "$PROCS" "$CONNS" "$DURATION_MS" "$PORT" "$workload"
 			echo "  rss_kib=$(ps -o rss= -p "$server" | tr -d ' ')"
 			kill "$server" 2>/dev/null || true; wait "$server" 2>/dev/null || true

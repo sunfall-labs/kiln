@@ -5,6 +5,7 @@
 // The port is a constant so the program stays inside the surface every runtime shares; pass a
 // different one by editing the copy you run.
 import http from "node:http";
+import { readFile, stat } from "node:fs/promises";
 
 const port = 18088;
 const big = "kiln ".repeat(1638) + "end"; // ~8 KiB
@@ -13,6 +14,19 @@ for (let id = 1; id <= 100; id += 1) {
   users.set(String(id), { id, name: `user-${id}`, tags: ["a", "b", "c"], score: id * 7 % 101 });
 }
 let served = 0;
+
+const fixturesDir = "bench/server/fixtures";
+const staticPath = `${fixturesDir}/static.txt`;
+const largeFilePath = `${fixturesDir}/large.bin`;
+const smallFilePaths = [];
+for (let i = 0; i < 20; i++) {
+  const pad = String(i).padStart(2, "0");
+  smallFilePaths.push(`${fixturesDir}/small/f${pad}.txt`);
+}
+const statPaths = [];
+for (let i = 0; i < 50; i++) {
+  statPaths.push(smallFilePaths[i % smallFilePaths.length]);
+}
 
 function json(res, status, value) {
   const body = JSON.stringify(value);
@@ -99,6 +113,75 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "GET" && path === "/async") {
     await new Promise((resolve) => setTimeout(resolve, 0));
     json(res, 200, { waited: true, served });
+    return;
+  }
+  if (req.method === "GET" && path === "/static") {
+    try {
+      const data = await readFile(staticPath, "utf8");
+      res.writeHead(200, {
+        "content-type": "text/plain",
+        "content-length": String(Buffer.byteLength(data)),
+      });
+      res.end(data);
+    } catch (err) {
+      json(res, 500, { error: String(err) });
+    }
+    return;
+  }
+  if (req.method === "GET" && path === "/stream") {
+    res.writeHead(200, { "content-type": "text/plain" });
+    res.write("kiln-stream-chunk-1\n");
+    res.write("kiln-stream-chunk-2\n");
+    res.write("kiln-stream-chunk-3\n");
+    res.end("kiln-stream-chunk-4\n");
+    return;
+  }
+  if (req.method === "POST" && path === "/upload") {
+    let received = 0;
+    req.on("data", (chunk) => { received += chunk.length; });
+    req.on("end", () => {
+      json(res, 200, { ok: true, received });
+    });
+    return;
+  }
+  if (req.method === "GET" && path === "/churn") {
+    res.writeHead(200, { "content-type": "text/plain", "connection": "close" });
+    res.end("churn ok");
+    return;
+  }
+  if (req.method === "GET" && path === "/fs/small-reads") {
+    try {
+      let totalBytes = 0;
+      for (let i = 0; i < smallFilePaths.length; i++) {
+        const c = await readFile(smallFilePaths[i], "utf8");
+        totalBytes += c.length;
+      }
+      json(res, 200, { ok: true, files: smallFilePaths.length, totalBytes });
+    } catch (err) {
+      json(res, 500, { error: String(err) });
+    }
+    return;
+  }
+  if (req.method === "GET" && path === "/fs/large-read") {
+    try {
+      const data = await readFile(largeFilePath);
+      json(res, 200, { ok: true, bytes: data.length });
+    } catch (err) {
+      json(res, 500, { error: String(err) });
+    }
+    return;
+  }
+  if (req.method === "GET" && path === "/fs/stat-storm") {
+    try {
+      let totalSize = 0;
+      for (let i = 0; i < statPaths.length; i++) {
+        const info = await stat(statPaths[i]);
+        totalSize += info.size;
+      }
+      json(res, 200, { ok: true, count: statPaths.length, totalSize });
+    } catch (err) {
+      json(res, 500, { error: String(err) });
+    }
     return;
   }
   json(res, 404, { error: "not found", path });
