@@ -1815,3 +1815,19 @@ fn method_inline_cache_prelude_surface() {
     // boundary, after the site's cache has answered the lookup.
     assert!(prelude.contains("kiln_c99_invoke_method(host, &bresult, bmethod.bits, bself"));
 }
+
+#[test]
+fn prelude_core_freeze_policy_enforced() {
+    // Step 5.1: Freeze prelude_core.c. New builtins are TypeScript with intrinsics (design.md §5).
+    // Policy in CLAUDE.md / AGENTS.md; a builtin added in C is a review refusal.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let agents_md = std::fs::read_to_string(root.join("AGENTS.md")).expect("AGENTS.md readable");
+    assert!(
+        agents_md.contains("Freeze `prelude_core.c`"),
+        "prelude_core.c freeze policy must be documented in AGENTS.md"
+    );
+    assert!(
+        agents_md.contains("review refusal"),
+        "review refusal policy must be explicit in AGENTS.md"
+    );
+}

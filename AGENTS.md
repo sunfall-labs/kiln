@@ -258,6 +258,13 @@ Reclaim **in this order**:
 worktrees. **Never delete build outputs you do not own.** An agent did that and destroyed two other
 worktrees' builds.
 
+## Freeze `prelude_core.c` (Phase 5.1)
+
+`prelude_core.c` is frozen for new built-in implementations.
+New built-ins must be written in TypeScript with intrinsics (design.md §5, ADR 0005).
+Adding a built-in method or function to `prelude_core.c` is a review refusal.
+Existing C built-ins are migrated to TypeScript in Phase 5.2.
+
 ## Agent skills
 
 ### Issue tracker
