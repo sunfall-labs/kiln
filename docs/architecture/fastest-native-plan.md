@@ -222,7 +222,8 @@ client processes: hello 169.6k rps against node 130.2k; mixed 123.4k against nod
 - Trust a TypeScript type. Guard it.
 - Add a `can_fuse_*`. Add a rule.
 - Add a third clone, a heap integer, or remove a bounds check. Reopen the invariants first.
-- Measure on the shared checkout, or report a number without its checksum.
+- Measure on the shared checkout, under load from other agents, or report a number without its
+  checksum. `measure.sh` refuses above a load average of 1.5 for this reason.
 - Land a speculative path without its off switch, its exit mode, and a differential run.
 - Put work on the request path into JavaScript that Rust could do with what the closed world knows.
 - Report a server number without its client count.
