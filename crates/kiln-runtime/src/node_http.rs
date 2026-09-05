@@ -122,6 +122,36 @@ impl HttpConnectionDriver {
         }
         Some(Ok((events, transport)))
     }
+
+    /// Apply multiple realm completions in a batch, returning all accumulated Node-facing
+    /// events and transport actions.
+    pub fn completed_batch(
+        &mut self,
+        completions: impl IntoIterator<Item = Completion>,
+    ) -> Option<HttpConnectionTransition> {
+        let mut all_events = Vec::new();
+        let mut all_transport = Vec::new();
+        for completion in completions {
+            let actions = self.stream.completed(completion)?;
+            for action in actions {
+                match action {
+                    StreamAction::Data(bytes) => match self.decoder.push_events(&bytes) {
+                        Ok(decoded) => {
+                            all_events.extend(decoded.into_iter().map(HttpConnectionEvent::Request))
+                        }
+                        Err(error) => {
+                            return Some(Err(HttpConnectionError { error }));
+                        }
+                    },
+                    StreamAction::Event(event) => {
+                        all_events.push(HttpConnectionEvent::Transport(event));
+                    }
+                    action => all_transport.push(action),
+                }
+            }
+        }
+        Some(Ok((all_events, all_transport)))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

@@ -464,6 +464,20 @@ pub trait RealmHostProvider: AsyncHostOps {
         None
     }
 
+    /// Return the number of completions ready without parking.
+    fn ready_completions_count(&self) -> usize {
+        0
+    }
+
+    /// Drain all completions currently ready without parking.
+    fn take_ready_completions(&mut self) -> Vec<Completion> {
+        let mut completions = Vec::new();
+        while let Some(completion) = self.next_completion() {
+            completions.push(completion);
+        }
+        completions
+    }
+
     /// Wait for the next completion in provider-defined infrastructure order.
     fn next_completion_async<'a>(
         &'a mut self,
@@ -922,7 +936,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         if !host_pending && !self.state.has_live_http_work() {
             return self.next_timer(realm).map(RuntimeTurn::Timer);
         }
-        if self.state.queued_http.take_signalled() {
+        if self.state.queued_http.take_signalled() || self.state.queued_http.has_events() {
             return Some(RuntimeTurn::Protocol);
         }
         // Three things can end the wait: a host completion (only while one is pending, since
@@ -1114,6 +1128,9 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         }
         if let Some(failure) = self.state.host.runtime_failure() {
             return Some(RuntimeTurn::Failure(failure.clone()));
+        }
+        if self.state.queued_http.has_events() || self.state.queued_http.take_signalled() {
+            return Some(RuntimeTurn::Protocol);
         }
         None
     }
@@ -1348,6 +1365,37 @@ impl<H: RealmHostProvider> RealmState<H> {
         events
     }
 
+    /// Drain the server events the queued adapter parked for all resources in a single batch.
+    pub fn take_all_queued_server_events(&mut self) -> Vec<(ResourceId, Vec<RuntimeHttpEvent>)> {
+        let all = self.queued_http.take_all_server();
+        for (resource, events) in &all {
+            if events.contains(&RuntimeHttpEvent::Closed) {
+                let _ = self.host.release_transport(*resource);
+            }
+        }
+        all
+    }
+
+    /// Whether any server or client protocol event is queued.
+    pub fn has_queued_http_events(&self) -> bool {
+        self.queued_http.has_events()
+    }
+
+    /// Drain all completions currently ready without parking.
+    pub fn take_ready_completions(&mut self) -> Vec<Completion> {
+        self.host.take_ready_completions()
+    }
+
+    /// Take the next completion currently ready without parking.
+    pub fn take_next_ready_completion(&mut self) -> Option<Completion> {
+        self.host.next_completion()
+    }
+
+    /// Return the number of completions ready without parking.
+    pub fn ready_completions_count(&self) -> usize {
+        self.host.ready_completions_count()
+    }
+
     /// Forget queued events for every resource not in `known`, returning how many were
     /// dropped. A loop that no longer tracks a connection cannot drain its queue, and an
     /// undrained queue would keep that loop waiting forever; the events of a connection the
@@ -1438,6 +1486,13 @@ impl QueuedHttp {
             .remove(&resource)
             .map(Vec::from)
             .unwrap_or_default()
+    }
+
+    fn take_all_server(&self) -> Vec<(ResourceId, Vec<RuntimeHttpEvent>)> {
+        std::mem::take(&mut *self.server.borrow_mut())
+            .into_iter()
+            .map(|(resource, events)| (resource, Vec::from(events)))
+            .collect()
     }
 
     fn take_client(&self, resource: ResourceId) -> Vec<RuntimeHttpClientEvent> {
@@ -2467,6 +2522,15 @@ impl TokioHost {
         self.pending.remove(&completion.request);
         Some(completion)
     }
+
+    fn take_ready_completions(&mut self) -> Vec<Completion> {
+        self.collect_ready_nonblocking();
+        let mut completions = Vec::with_capacity(self.ready.len());
+        while let Some(completion) = self.take_ready() {
+            completions.push(completion);
+        }
+        completions
+    }
 }
 
 impl AsyncHostOps for TokioHost {
@@ -2521,6 +2585,14 @@ impl RealmHostProvider for TokioHost {
 
     fn has_pending_work(&self) -> bool {
         !self.pending.is_empty()
+    }
+
+    fn ready_completions_count(&self) -> usize {
+        self.ready.len()
+    }
+
+    fn take_ready_completions(&mut self) -> Vec<Completion> {
+        TokioHost::take_ready_completions(self)
     }
 
     fn runtime_failure(&self) -> Option<&RuntimeFailure> {
@@ -2891,6 +2963,11 @@ impl<M, T> Realm<M, T> {
     /// timer runs.
     pub fn advance_to(&mut self, now: Duration) {
         self.now = self.now.max(now);
+    }
+
+    /// Whether any next-tick or microtask is queued.
+    pub fn has_queued_work(&self) -> bool {
+        !self.next_ticks.is_empty() || !self.microtasks.is_empty()
     }
 
     /// Visits every queued next-tick and microtask, in queue order, without running or

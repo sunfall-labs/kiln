@@ -1142,6 +1142,14 @@ mod realm {
                     if let Some(status) = route_completion(realm, completion) {
                         return status;
                     }
+                    while let Some(RuntimeTurn::Completion(next)) = {
+                        let mut runtime = realm.runtime.borrow_mut();
+                        runtime.ready_turn::<NativeWork, NativeWork>()
+                    } {
+                        if let Some(status) = route_completion(realm, next) {
+                            return status;
+                        }
+                    }
                     continue;
                 }
                 Some(RuntimeTurn::Failure(_)) => return RUNTIME_ERROR,
@@ -2431,11 +2439,6 @@ mod realm {
                 }
                 continue;
             }
-            // The queues are empty and no generated frame is on the stack: this is the turn
-            // boundary ADR 0041 collects at. With connections driven by their own tasks (ADR
-            // 0042) it is the boundary a server reaches once per callback, so it is offered here
-            // rather than only from the drive loop.
-            collect_if_due(realm);
             return 0;
         }
     }
@@ -2533,6 +2536,9 @@ mod realm {
             let Some(realm) = self.realm.upgrade() else {
                 return INVALID_ARGUMENT;
             };
+            if !realm.work.borrow().has_queued_work() {
+                return 0;
+            }
             drain_realm_queues(&realm)
         }
     }
