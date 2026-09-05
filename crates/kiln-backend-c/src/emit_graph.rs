@@ -998,21 +998,12 @@ fn emit_graph_op(
             // A NUL-free literal is a tagged pointer to
             // its static bytes; one with a NUL inside goes through the per-unit string cache; a
             // bigint is parsed once into a cached heap value.
-            Constant::String(value) => {
-                if value.contains('\0') {
-                    writeln!(
-                        output,
-                        "    v{v} = kiln_c99_string_constant(&{symbol}_string_{index}, {symbol}_constant_{index}, {});",
-                        value.len()
-                    )
-                    .unwrap();
-                } else {
-                    writeln!(
-                        output,
-                        "    v{v} = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, {symbol}_constant_{index});"
-                    )
-                    .unwrap();
-                }
+            Constant::String(_) => {
+                writeln!(
+                    output,
+                    "    v{v} = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &{symbol}_string_{index});"
+                )
+                .unwrap();
             }
             Constant::BigInt(digits) => {
                 writeln!(
@@ -1978,8 +1969,313 @@ fn emit_graph_op(
                 None
             };
 
+            let map_intrinsic = if closed_world && key_str == "map" && argc == 1 {
+                Some(format!(
+                    "if (!handled && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
+                         void *ptr = KILN_VAL_PTR(v{o}); \
+                         if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
+                             kiln_array *arr = (kiln_array *)ptr; \
+                             kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
+                             if (!plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                                 kiln_value built_val; \
+                                 int status = kiln_c99_new_array_with_capacity(&built_val, arr->count, arr->is_numeric); \
+                                 if (status != KILN_C99_OK) return status; \
+                                 kiln_array *built_arr = kiln_c99_array_of(built_val); \
+                                 kiln_val vrecv = plain->arrow ? plain->captured_this : v{o}; \
+                                 if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
+                                 for (size_t idx = 0; idx < arr->count; ++idx) {{ \
+                                     if (arr->elements[idx] == KILN_VAL_HOLE) {{ \
+                                         built_arr->elements[built_arr->count++] = KILN_VAL_HOLE; \
+                                         built_arr->is_numeric = 0; \
+                                         continue; \
+                                     }} \
+                                     kiln_val vargs[3] = {{ arr->elements[idx], kiln_c99_val_from_double((double)idx), v{o} }}; \
+                                     kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; \
+                                     kiln_val prod = KILN_VAL_UNDEFINED; \
+                                     status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)3); \
+                                     if (KILN_UNLIKELY(status != KILN_C99_OK)) {{ \
+                                         {check} \
+                                     }} \
+                                     if (built_arr->is_numeric && !KILN_VAL_IS_NUMBER(prod)) {{ \
+                                         built_arr->is_numeric = 0; \
+                                     }} \
+                                     built_arr->elements[built_arr->count++] = prod; \
+                                 }} \
+                                 v{v} = kiln_val_from_boundary(built_val); \
+                                 handled = 1; \
+                             }} \
+                         }} \
+                     }}",
+                    o = object.0,
+                    a0 = args[0].0,
+                    v = v,
+                    check = check
+                ))
+            } else {
+                None
+            };
+
+            let filter_intrinsic = if closed_world && key_str == "filter" && argc == 1 {
+                Some(format!(
+                    "if (!handled && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
+                         void *ptr = KILN_VAL_PTR(v{o}); \
+                         if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
+                             kiln_array *arr = (kiln_array *)ptr; \
+                             kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
+                             if (!plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                                 kiln_value built_val; \
+                                 int status = kiln_c99_new_array_with_capacity(&built_val, arr->count, arr->is_numeric); \
+                                 if (status != KILN_C99_OK) return status; \
+                                 kiln_array *built_arr = kiln_c99_array_of(built_val); \
+                                 kiln_val vrecv = plain->arrow ? plain->captured_this : v{o}; \
+                                 if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
+                                 for (size_t idx = 0; idx < arr->count; ++idx) {{ \
+                                     if (arr->elements[idx] == KILN_VAL_HOLE) continue; \
+                                     kiln_val elem = arr->elements[idx]; \
+                                     kiln_val vargs[3] = {{ elem, kiln_c99_val_from_double((double)idx), v{o} }}; \
+                                     kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; \
+                                     kiln_val prod = KILN_VAL_UNDEFINED; \
+                                     status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)3); \
+                                     if (KILN_UNLIKELY(status != KILN_C99_OK)) {{ \
+                                         {check} \
+                                     }} \
+                                     if (kiln_c99_val_truthy(prod)) {{ \
+                                         built_arr->elements[built_arr->count++] = elem; \
+                                     }} \
+                                 }} \
+                                 v{v} = kiln_val_from_boundary(built_val); \
+                                 handled = 1; \
+                             }} \
+                         }} \
+                     }}",
+                    o = object.0,
+                    a0 = args[0].0,
+                    v = v,
+                    check = check
+                ))
+            } else {
+                None
+            };
+
+            let reduce_intrinsic = if closed_world && key_str == "reduce" && argc == 2 {
+                Some(format!(
+                    "if (!handled && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
+                         void *ptr = KILN_VAL_PTR(v{o}); \
+                         if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
+                             kiln_array *arr = (kiln_array *)ptr; \
+                             kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
+                             if (!plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                                 kiln_val vacc = v{a1}; \
+                                 kiln_val vrecv = plain->arrow ? plain->captured_this : v{o}; \
+                                 if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
+                                 for (size_t idx = 0; idx < arr->count; ++idx) {{ \
+                                     if (arr->elements[idx] == KILN_VAL_HOLE) continue; \
+                                     kiln_val vargs[4] = {{ vacc, arr->elements[idx], kiln_c99_val_from_double((double)idx), v{o} }}; \
+                                     kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; \
+                                     kiln_val prod = KILN_VAL_UNDEFINED; \
+                                     int status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)4); \
+                                     if (KILN_UNLIKELY(status != KILN_C99_OK)) {{ \
+                                         {check} \
+                                     }} \
+                                     vacc = prod; \
+                                 }} \
+                                 v{v} = vacc; \
+                                 handled = 1; \
+                             }} \
+                         }} \
+                     }}",
+                    o = object.0,
+                    a0 = args[0].0,
+                    a1 = args[1].0,
+                    v = v,
+                    check = check
+                ))
+            } else {
+                None
+            };
+
+            let slice_intrinsic = if closed_world && key_str == "slice" && argc == 1 {
+                Some(format!(
+                    "if (!handled && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_NUMBER(v{a0})) {{ \
+                         void *ptr = KILN_VAL_PTR(v{o}); \
+                         if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
+                             kiln_array *arr = (kiln_array *)ptr; \
+                             double d0; memcpy(&d0, &v{a0}, sizeof(d0)); \
+                             if (d0 >= 0.0 && d0 == floor(d0)) {{ \
+                                 size_t start = (size_t)d0; \
+                                 size_t slice_len = start < arr->count ? arr->count - start : 0; \
+                                 kiln_value built_val; \
+                                 int status = kiln_c99_new_array_with_capacity(&built_val, slice_len, arr->is_numeric); \
+                                 if (status != KILN_C99_OK) return status; \
+                                 if (slice_len > 0) {{ \
+                                     kiln_array *b_arr = kiln_c99_array_of(built_val); \
+                                     memcpy(b_arr->elements, arr->elements + start, slice_len * sizeof(kiln_val)); \
+                                     b_arr->count = slice_len; \
+                                 }} \
+                                 v{v} = kiln_val_from_boundary(built_val); \
+                                 handled = 1; \
+                             }} \
+                         }} \
+                     }}",
+                    o = object.0,
+                    a0 = args[0].0,
+                    v = v
+                ))
+            } else {
+                None
+            };
+
+            let join_intrinsic = if closed_world && key_str == "join" && argc == 1 {
+                Some(format!(
+                    "if (!handled && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_STRING(v{a0})) {{ \
+                         void *ptr = KILN_VAL_PTR(v{o}); \
+                         if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
+                             kiln_array *arr = (kiln_array *)ptr; \
+                             const kiln_string *sep = (const kiln_string *)KILN_VAL_PTR(v{a0}); \
+                             size_t total_bytes = 0; \
+                             int can_fast = (sep != NULL); \
+                             for (size_t idx = 0; idx < arr->count && can_fast; ++idx) {{ \
+                                 kiln_val elem = arr->elements[idx]; \
+                                 if (KILN_VAL_IS_STRING(elem)) {{ \
+                                     const kiln_string *es = (const kiln_string *)KILN_VAL_PTR(elem); \
+                                     if (es) total_bytes += es->byte_len; \
+                                 }} else {{ can_fast = 0; }} \
+                             }} \
+                             if (can_fast) {{ \
+                                 if (arr->count > 1) total_bytes += (arr->count - 1) * sep->byte_len; \
+                                 char *buf = kiln_c99_gc_alloc_text(total_bytes); \
+                                 if (buf != NULL) {{ \
+                                     char *dst = buf; \
+                                     size_t total_len = 0; \
+                                     for (size_t idx = 0; idx < arr->count; ++idx) {{ \
+                                         if (idx > 0 && sep->byte_len > 0) {{ \
+                                             memcpy(dst, sep->bytes, sep->byte_len); \
+                                             dst += sep->byte_len; \
+                                             total_len += sep->length; \
+                                         }} \
+                                         const kiln_string *es = (const kiln_string *)KILN_VAL_PTR(arr->elements[idx]); \
+                                         if (es && es->byte_len > 0) {{ \
+                                             memcpy(dst, es->bytes, es->byte_len); \
+                                             dst += es->byte_len; \
+                                             total_len += es->length; \
+                                         }} \
+                                     }} \
+                                     kiln_string *s = ((kiln_string *)buf) - 1; \
+                                     s->length = total_len; \
+                                     s->byte_len = total_bytes; \
+                                     s->bytes = buf; \
+                                     v{v} = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, s); \
+                                     handled = 1; \
+                                 }} \
+                             }} \
+                         }} \
+                     }}",
+                    o = object.0,
+                    a0 = args[0].0,
+                    v = v
+                ))
+            } else {
+                None
+            };
+
+            let split_intrinsic = if closed_world && key_str == "split" && argc == 1 {
+                Some(format!(
+                    "if (!handled && KILN_VAL_IS_STRING(v{o}) && KILN_VAL_IS_STRING(v{a0})) {{ \
+                         const kiln_string *src = (const kiln_string *)KILN_VAL_PTR(v{o}); \
+                         const kiln_string *sep = (const kiln_string *)KILN_VAL_PTR(v{a0}); \
+                         if (src != NULL && sep != NULL && src->length == src->byte_len && sep->byte_len == 1) {{ \
+                             char ch = sep->bytes[0]; \
+                             size_t part_count = 1; \
+                             for (size_t i = 0; i < src->byte_len; ++i) {{ \
+                                 if (src->bytes[i] == ch) part_count++; \
+                             }} \
+                             kiln_value built_val; \
+                             int status = kiln_c99_new_array_with_capacity(&built_val, part_count, 0); \
+                             if (status == KILN_C99_OK) {{ \
+                                 kiln_array *arr = kiln_c99_array_of(built_val); \
+                                 const char *p = src->bytes; \
+                                 const char *end = src->bytes + src->byte_len; \
+                                 while (p <= end) {{ \
+                                     const char *next = (const char *)memchr(p, ch, (size_t)(end - p)); \
+                                     size_t piece_len = next ? (size_t)(next - p) : (size_t)(end - p); \
+                                     kiln_val piece_val = kiln_c99_val_from_ascii(p, piece_len); \
+                                     arr->elements[arr->count++] = piece_val; \
+                                     if (next == NULL) break; \
+                                     p = next + 1; \
+                                 }} \
+                                 v{v} = kiln_val_from_boundary(built_val); \
+                                 handled = 1; \
+                             }} \
+                         }} \
+                     }}",
+                    o = object.0,
+                    a0 = args[0].0,
+                    v = v
+                ))
+            } else {
+                None
+            };
+
+            let index_of_intrinsic = if closed_world && key_str == "indexOf" && argc == 1 {
+                Some(format!(
+                    "if (!handled && KILN_VAL_IS_STRING(v{o}) && KILN_VAL_IS_STRING(v{a0})) {{ \
+                         const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
+                         const kiln_string *s_ndl = (const kiln_string *)KILN_VAL_PTR(v{a0}); \
+                         if (s_recv != NULL && s_ndl != NULL && s_recv->length == s_recv->byte_len && s_ndl->length == s_ndl->byte_len) {{ \
+                             const char *found = kiln_c99_memmem(s_recv->bytes, s_recv->byte_len, s_ndl->bytes, s_ndl->byte_len); \
+                             v{v} = kiln_c99_val_from_double(found ? (double)(found - s_recv->bytes) : -1.0); \
+                             handled = 1; \
+                         }} \
+                     }}",
+                    o = object.0,
+                    a0 = args[0].0,
+                    v = v
+                ))
+            } else {
+                None
+            };
+
+            let substring_intrinsic = if closed_world && key_str == "substring" && argc == 2 {
+                Some(format!(
+                    "if (!handled && KILN_VAL_IS_STRING(v{o}) && KILN_VAL_IS_NUMBER(v{a0}) && KILN_VAL_IS_NUMBER(v{a1})) {{ \
+                         const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
+                         if (s_recv != NULL && s_recv->length == s_recv->byte_len) {{ \
+                             double d0, d1; memcpy(&d0, &v{a0}, sizeof(d0)); memcpy(&d1, &v{a1}, sizeof(d1)); \
+                             if (d0 == floor(d0) && d1 == floor(d1) && d0 >= 0.0 && d1 >= d0 && (size_t)d1 <= s_recv->byte_len) {{ \
+                                 size_t start = (size_t)d0; \
+                                 size_t len = (size_t)d1 - start; \
+                                 v{v} = kiln_c99_val_from_ascii(s_recv->bytes + start, len); \
+                                 handled = 1; \
+                             }} \
+                         }} \
+                     }}",
+                    o = object.0,
+                    a0 = args[0].0,
+                    a1 = args[1].0,
+                    v = v
+                ))
+            } else {
+                None
+            };
+
             let math_s = math_intrinsic.map(|s| format!(" {s}")).unwrap_or_default();
             let push_s = push_intrinsic.map(|s| format!(" {s}")).unwrap_or_default();
+            let map_s = map_intrinsic.map(|s| format!(" {s}")).unwrap_or_default();
+            let filter_s = filter_intrinsic
+                .map(|s| format!(" {s}"))
+                .unwrap_or_default();
+            let reduce_s = reduce_intrinsic
+                .map(|s| format!(" {s}"))
+                .unwrap_or_default();
+            let slice_s = slice_intrinsic.map(|s| format!(" {s}")).unwrap_or_default();
+            let join_s = join_intrinsic.map(|s| format!(" {s}")).unwrap_or_default();
+            let split_s = split_intrinsic.map(|s| format!(" {s}")).unwrap_or_default();
+            let index_of_s = index_of_intrinsic
+                .map(|s| format!(" {s}"))
+                .unwrap_or_default();
+            let substring_s = substring_intrinsic
+                .map(|s| format!(" {s}"))
+                .unwrap_or_default();
             let n = argc.max(1);
 
             writeln!(
@@ -1987,7 +2283,7 @@ fn emit_graph_op(
                 "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; \
                 kiln_val call_args[{n}] = {{ {init} }}; \
                 int handled = 0; \
-                {math_s}{push_s} \
+                {math_s}{push_s}{map_s}{filter_s}{reduce_s}{slice_s}{join_s}{split_s}{index_of_s}{substring_s} \
                 if (!handled && site.pic_count > 0 && KILN_VAL_IS_OBJECT(v{o})) {{ \
                     const kiln_object *obj = (const kiln_object *)KILN_VAL_PTR(v{o}); \
                     kiln_val cached_fn = 0; \
@@ -2133,18 +2429,26 @@ fn emit_graph_op(
             .unwrap();
         }
         GraphOp::NewArray { elements, .. } => {
-            let mut pushes = String::new();
-            for element in elements {
-                pushes.push_str(&format!(
-                    " status = kiln_c99_array_push(built, kiln_val_to_boundary(v{})); if (status != KILN_C99_OK) return status;",
-                    element.0
-                ));
+            let count = elements.len();
+            if count == 0 {
+                writeln!(
+                    output,
+                    "    {{ kiln_value built; int status = kiln_c99_new_array_with_capacity(&built, 0, 1); if (status != KILN_C99_OK) return status; v{v} = kiln_val_from_boundary(built); }}"
+                )
+                .unwrap();
+            } else {
+                let mut assigns = String::new();
+                let mut check_numeric = String::new();
+                for (i, elem) in elements.iter().enumerate() {
+                    assigns.push_str(&format!(" arr->elements[{i}] = v{};", elem.0));
+                    check_numeric.push_str(&format!(" && KILN_VAL_IS_NUMBER(v{})", elem.0));
+                }
+                writeln!(
+                    output,
+                    "    {{ kiln_value built; int status = kiln_c99_new_array_with_capacity(&built, {count}, 1{check_numeric}); if (status != KILN_C99_OK) return status; kiln_array *arr = kiln_c99_array_of(built);{assigns} arr->count = {count}; v{v} = kiln_val_from_boundary(built); }}"
+                )
+                .unwrap();
             }
-            writeln!(
-                output,
-                "    {{ kiln_value built; int status = kiln_c99_new_array(&built); if (status != KILN_C99_OK) return status;{pushes} v{v} = kiln_val_from_boundary(built); }}"
-            )
-            .unwrap();
         }
         // Property and element access call the value-shaped helpers directly: the same
         // functions the stack-shaped entry points wrap, without the one-element arrays.
@@ -2165,7 +2469,8 @@ fn emit_graph_op(
                              handled = 1; \
                          }} \
                      }} else if (KILN_VAL_IS_STRING(v{o})) {{ \
-                         v{v} = kiln_c99_val_from_double((double)kiln_c99_val_string_length(v{o})); \
+                         const kiln_string *str = (const kiln_string *)KILN_VAL_PTR(v{o}); \
+                         v{v} = kiln_c99_val_from_double((double)str->length); \
                          handled = 1; \
                      }} ",
                     o = object.0,
@@ -2269,6 +2574,15 @@ fn emit_graph_op(
                             handled = 1; \
                         }} \
                     }} \
+                }} else if (KILN_VAL_IS_STRING(v{o}) && KILN_VAL_IS_NUMBER(v{k})) {{ \
+                    double idx; \
+                    memcpy(&idx, &v{k}, sizeof(idx)); \
+                    size_t slot = (size_t)idx; \
+                    const kiln_string *str = (const kiln_string *)KILN_VAL_PTR(v{o}); \
+                    if (KILN_LIKELY(str != NULL && idx >= 0.0 && idx == (double)slot && slot < str->length && str->length == str->byte_len)) {{ \
+                        v{v} = kiln_c99_val_single_char((unsigned char)str->bytes[slot]); \
+                        handled = 1; \
+                    }} \
                 }} \
                 if (!handled) {{ \
                     int status = kiln_c99_val_read_element(host, v{o}, v{k}, depth, thrown, &v{v}); \
@@ -2303,6 +2617,7 @@ fn emit_graph_op(
                         size_t slot = (size_t)idx; \
                         kiln_array *arr = (kiln_array *)ptr; \
                         if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < arr->count && !arr->frozen)) {{ \
+                            if (arr->is_numeric && !KILN_VAL_IS_NUMBER(v{val})) arr->is_numeric = 0; \
                             arr->elements[slot] = v{val}; \
                             v{v} = v{val}; \
                             handled = 1; \

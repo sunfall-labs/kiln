@@ -15,6 +15,9 @@ extern void kiln_c99_gc_mark_values(struct kiln_gc_heap *heap, const kiln_value 
 typedef int (*kiln_native_entry)(void *heap, void *context, kiln_value *result, size_t depth, kiln_value *thrown);
 extern void kiln_c99_gc_release(void *ptr);
 extern void kiln_c99_gc_result_roots(void *opaque, void *context, int phase);
+extern char *kiln_c99_gc_alloc_text(size_t len);
+extern kiln_val kiln_c99_val_from_text(const char *bytes, size_t len);
+extern kiln_val kiln_c99_val_from_ascii(const char *bytes, size_t len);
 extern const char *kiln_c99_intern_static(const char *bytes, size_t len);
 extern const char *kiln_c99_intern(const char *bytes, size_t len);
 extern kiln_value kiln_c99_number_bits(uint64_t bits);
@@ -138,6 +141,8 @@ extern kiln_value kiln_c99_number_bits(uint64_t bits);
 extern double kiln_c99_as_number(kiln_value value);
 extern int kiln_c99_truthy(kiln_value value);
 extern kiln_value kiln_c99_copy_text(const char *text, size_t len);
+extern kiln_val kiln_c99_val_from_text(const char *bytes, size_t len);
+extern int kiln_c99_new_array_with_capacity(kiln_value *out, size_t capacity, int is_numeric);
 extern kiln_value kiln_c99_control_diagnostic(void);
 extern void kiln_c99_forget_handled_throw(void);
 extern void kiln_c99_note_refusal(const char *site, size_t instruction, const char *operation, size_t depth);

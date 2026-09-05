@@ -54,6 +54,60 @@ typedef uint64_t kiln_val;
 #define KILN_VAL_TAG_PTR(pfx, p) ((kiln_val)((pfx) | ((uint64_t)(uintptr_t)(p) & KILN_PAYLOAD_MASK)))
 #define KILN_VAL_IS_DOUBLE(v)    KILN_VAL_IS_NUMBER(v)
 
+typedef struct kiln_string {
+    size_t length;
+    size_t byte_len;
+    const char *bytes;
+} kiln_string;
+
+static const char kiln_c99_empty_chars[] = "";
+static const kiln_string kiln_c99_empty_string = { 0, 0, kiln_c99_empty_chars };
+
+static const char kiln_c99_single_char_bytes[256][2] = {
+#define ROW4(a)   { (char)(a), 0 }, { (char)((a)+1), 0 }, { (char)((a)+2), 0 }, { (char)((a)+3), 0 }
+#define ROW16(a)  ROW4(a), ROW4((a)+4), ROW4((a)+8), ROW4((a)+12)
+#define ROW64(a)  ROW16(a), ROW16((a)+16), ROW16((a)+32), ROW16((a)+48)
+    ROW64(0), ROW64(64), ROW64(128), ROW64(192)
+#undef ROW64
+#undef ROW16
+#undef ROW4
+};
+static const kiln_string kiln_c99_ascii_strings[256] = {
+#define S4(a)   { 1, 1, kiln_c99_single_char_bytes[a] }, { 1, 1, kiln_c99_single_char_bytes[(a)+1] }, { 1, 1, kiln_c99_single_char_bytes[(a)+2] }, { 1, 1, kiln_c99_single_char_bytes[(a)+3] }
+#define S16(a)  S4(a), S4((a)+4), S4((a)+8), S4((a)+12)
+#define S64(a)  S16(a), S16((a)+16), S16((a)+32), S16((a)+48)
+    S64(0), S64(64), S64(128), S64(192)
+#undef S64
+#undef S16
+#undef S4
+};
+
+static inline kiln_val kiln_c99_val_single_char(unsigned char ch) {
+    return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_c99_ascii_strings[ch]);
+}
+
+static inline const char *kiln_c99_memmem(const char *haystack, size_t haystack_len,
+                                          const char *needle, size_t needle_len) {
+    if (needle_len == 0) return haystack;
+    if (needle_len > haystack_len) return NULL;
+    if (needle_len == 1) return (const char *)memchr(haystack, needle[0], haystack_len);
+    const char *limit = haystack + haystack_len - needle_len;
+    for (const char *p = haystack; p <= limit; ) {
+        p = (const char *)memchr(p, needle[0], (size_t)(limit - p + 1));
+        if (!p) return NULL;
+        if (memcmp(p, needle, needle_len) == 0) return p;
+        p++;
+    }
+    return NULL;
+}
+
+#ifdef KILN_SEPARATE_PRELUDE
+extern kiln_val kiln_c99_val_from_text(const char *bytes, size_t len);
+#else
+static kiln_val kiln_c99_val_from_text(const char *bytes, size_t len);
+static kiln_value kiln_val_to_boundary(kiln_val v);
+#endif
+
 static inline kiln_val kiln_val_from_boundary(kiln_value v) {
     if (v.tag == KILN_VALUE_NUMBER) {
         /* Canonicalize any quiet-NaN to prevent collision with tagged pointer prefixes */
@@ -66,7 +120,15 @@ static inline kiln_val kiln_val_from_boundary(kiln_value v) {
         case KILN_VALUE_UNDEFINED:     return KILN_VAL_UNDEFINED;
         case KILN_VALUE_NULL:          return KILN_VAL_NULL;
         case KILN_VALUE_BOOLEAN:       return v.bits ? KILN_VAL_TRUE : KILN_VAL_FALSE;
-        case KILN_VALUE_STRING:        return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, v.ptr ? (const void *)v.ptr : (const void *)"");
+        case KILN_VALUE_STRING: {
+            if (v.ptr == NULL || v.len == 0) {
+                return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_c99_empty_string);
+            }
+            if (v.len == 1 && (unsigned char)v.ptr[0] < 128) {
+                return kiln_c99_val_single_char((unsigned char)v.ptr[0]);
+            }
+            return kiln_c99_val_from_text(v.ptr, v.len);
+        }
         case KILN_VALUE_FUNCTION:      return KILN_VAL_TAG_PTR(KILN_TAG_CLOSURE_PREFIX, (const void *)(uintptr_t)v.bits);
         case KILN_VALUE_OBJECT:        return KILN_VAL_TAG_PTR(KILN_TAG_OBJECT_PREFIX, (const void *)(uintptr_t)v.bits);
         case KILN_VALUE_ARRAY:         return KILN_VAL_TAG_PTR(KILN_TAG_BUFFER_PREFIX, (const void *)(uintptr_t)v.bits);
@@ -107,8 +169,8 @@ static inline int kiln_c99_val_truthy(kiln_val v) {
         return !kiln_bigint_is_zero(KILN_VAL_PTR(v));
     }
     if ((v & KILN_TAG_MASK) == KILN_TAG_STRING_PREFIX) {
-        const char *p = (const char *)KILN_VAL_PTR(v);
-        return p != NULL && p[0] != '\0';
+        const kiln_string *s = (const kiln_string *)KILN_VAL_PTR(v);
+        return s != NULL && s->length > 0;
     }
     return 1;
 }
@@ -149,8 +211,6 @@ static inline int kiln_c99_guard_should_exit(uint32_t *counter) {
     }
     return 0;
 }
-
-static kiln_value kiln_val_to_boundary(kiln_val v);
 
 typedef enum kiln_typed_kind {
     KILN_TYPED_INT8,
@@ -600,6 +660,8 @@ typedef struct kiln_array {
     int frozen;
     /* `Object.preventExtensions`. An existing index still takes a write; a new one does not. */
     int not_extensible;
+    /* Whether this array is proven to contain only numbers (dense double backing, no holes). */
+    int is_numeric;
 } kiln_array;
 
 /* A suspended body.
