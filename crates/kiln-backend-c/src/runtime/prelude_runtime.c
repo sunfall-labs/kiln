@@ -2169,6 +2169,7 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
         kiln_c99_gc_mark_block(heap, socket->server);
         kiln_c99_gc_mark_block(heap, socket->client_requests);
         kiln_c99_gc_mark_block(heap, socket->responses);
+        kiln_c99_gc_mark_block(heap, socket->recycled_response);
         break;
     }
     case KILN_GC_NODE_CLIENT_REQUEST: {
@@ -2293,9 +2294,14 @@ static void kiln_c99_gc_finalize(kiln_gc_block *block) {
     case KILN_GC_NODE_SERVER:
         free(((kiln_node_server *)payload)->address);
         break;
-    case KILN_GC_NODE_RESPONSE:
-        free(((kiln_node_response *)payload)->request_headers);
+    case KILN_GC_NODE_RESPONSE: {
+        kiln_node_response *response = (kiln_node_response *)payload;
+        if (response->request_headers_owned && response->request_headers != NULL) {
+            free(response->request_headers);
+            response->request_headers = NULL;
+        }
         break;
+    }
     case KILN_GC_NODE_CLIENT_REQUEST: {
         kiln_node_client_request *request = (kiln_node_client_request *)payload;
         free(request->host_name);

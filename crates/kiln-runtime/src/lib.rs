@@ -1513,7 +1513,7 @@ impl HttpDispatch for QueuedDispatch {
                             } else {
                                 node_http::HttpVersion::Http11
                             },
-                            headers: unflatten_headers(event.headers),
+                            headers: node_http::HttpHeaders::from_raw(event.headers.to_vec()),
                             body: Vec::new(),
                             keep_alive: event.keep_alive,
                         },

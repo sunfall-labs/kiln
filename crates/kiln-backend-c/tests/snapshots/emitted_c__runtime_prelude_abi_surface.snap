@@ -1,6 +1,5 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 800
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -1442,6 +1441,10 @@ static const kiln_builtin_member kiln_c99_builtin_members[] = {
 #define KILN_C99_SURFACE_MEMBER_COUNT \
 typedef struct {
 static const kiln_builtin_gap kiln_c99_builtin_backlog[] = {
+static void *kiln_c99_node_hidden_pointer(kiln_value object, const char *key, size_t key_len);
+static int kiln_c99_node_materialize_header(kiln_value headers_obj, const char *key, size_t key_len, kiln_value *out);
+static void kiln_c99_node_materialize_all_headers(kiln_value headers_obj);
+static int kiln_c99_node_has_lazy_header(kiln_value headers_obj, const char *key, size_t key_len);
 static int kiln_c99_backlog_names(const char *owner, const char *key, size_t key_len) {
 static int kiln_c99_has_surface(uint64_t builtin) {
 static const kiln_builtin_member *kiln_c99_builtin_member(uint64_t builtin, const char *key,
@@ -1578,6 +1581,10 @@ static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t cod
 static int kiln_c99_node_set_hidden_pointer(kiln_value object, const char *key, size_t key_len,
 static int kiln_c99_is_node_hidden_key(const char *key, size_t key_len) {
 static void *kiln_c99_node_hidden_pointer(kiln_value object, const char *key, size_t key_len) {
+static int kiln_c99_ascii_case_equal(const char *a, size_t a_len, const char *b, size_t b_len) {
+static int kiln_c99_node_materialize_header(kiln_value headers_obj, const char *key, size_t key_len, kiln_value *out) {
+static void kiln_c99_node_materialize_all_headers(kiln_value headers_obj) {
+static int kiln_c99_node_has_lazy_header(kiln_value headers_obj, const char *key, size_t key_len) {
 static int kiln_c99_node_client_try_start(kiln_node_client_request *request) {
 static int kiln_c99_node_emit(kiln_host *host, kiln_value object, const char *event,
 static int kiln_c99_node_server_maybe_emit_close(kiln_node_server *server,
@@ -1592,6 +1599,8 @@ static int kiln_c99_node_socket_ready_state(kiln_node_socket *socket,
 static const char kiln_c99_http_version_11[] = "1.1";
 static const char kiln_c99_http_version_10[] = "1.0";
 static const char kiln_c99_transfer_encoding_chunked[] = "chunked";
+static const char kiln_c99_slash[] = "/";
+static kiln_value kiln_c99_node_http_target_text(const char *bytes, size_t len) {
 static kiln_value kiln_c99_node_http_method_text(const char *bytes, size_t len) {
 static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *event,
 static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *completion,

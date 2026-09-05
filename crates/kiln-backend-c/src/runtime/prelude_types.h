@@ -785,6 +785,7 @@ struct kiln_node_socket {
     struct kiln_node_client_request *client_requests;
     uint64_t next_client_request_id;
     struct kiln_node_response *responses;
+    struct kiln_node_response *recycled_response;
     int close_after_write;
     int close_after_responses;
     int shutdown_after_write;
@@ -846,6 +847,7 @@ typedef struct kiln_node_response {
      * as soon as `req.headers` is read and the object it describes exists instead. */
     char *request_headers;
     size_t request_headers_len;
+    int request_headers_owned;
     uint16_t status;
     int started;
     int ended;
