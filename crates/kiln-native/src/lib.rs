@@ -5046,10 +5046,6 @@ static int {impl_symbol}(kiln_host *host, kiln_value *result, int preserve_resul
         status = kiln_realm_enter(realm, {wrapper_symbol}_realm_entry, &context);
     if (status == KILN_C99_OK)
         status = kiln_realm_drive(realm, &context.proxy_host, result);
-    if (realm != 0) {{
-        destroy_status = kiln_realm_destroy(realm);
-        if (status == KILN_C99_OK) status = destroy_status;
-    }}
     /* Public v1 results remain borrowed; private v2 calls preserve strings across cleanup. */
     if (preserve_result != 0 && result->tag == KILN_VALUE_STRING) {{
         if (result->len == (size_t)-1 || (result->len != 0 && result->ptr == NULL)) {{
@@ -5065,6 +5061,10 @@ static int {impl_symbol}(kiln_host *host, kiln_value *result, int preserve_resul
                 preserved[result->len] = '\0';
             }}
         }}
+    }}
+    if (realm != 0) {{
+        destroy_status = kiln_realm_destroy(realm);
+        if (status == KILN_C99_OK) status = destroy_status;
     }}
     kiln_proxy_arena_clear(&context.arena);
     if (preserved != NULL) result->ptr = preserved;
