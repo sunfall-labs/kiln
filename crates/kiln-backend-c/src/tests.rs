@@ -4567,6 +4567,91 @@ int main(void) {{
 }
 
 #[test]
+fn proven_numbers_reach_a_loop_carried_phi_and_stop_at_a_parameter() {
+    // function (n) { let sum = 0; let i = 0; while (i < n) { sum += i; i++; } return sum; }
+    //
+    // `sum` and `i` are numbers by construction: literal starts, arithmetic on numbers, and
+    // phis whose every input is one. `n` is a parameter and is never proven; the compare that
+    // reads it therefore stays untyped, while `sum += i` and `i++` are typed.
+    let proto = FunctionProto {
+        span: kiln_ir::Span::default(),
+        prologue_end: 0,
+        declared_length: 1,
+        name: Some("proven".into()),
+        parameter_count: 1,
+        local_count: 3,
+        code: vec![
+            Instruction::Const(0),
+            Instruction::StoreLocal(1),
+            Instruction::Const(0),
+            Instruction::StoreLocal(2),
+            Instruction::LoadLocal(2), // 4: header
+            Instruction::LoadLocal(0),
+            Instruction::Binary(BinaryOp::LessThan),
+            Instruction::JumpIfFalse(17),
+            Instruction::LoadLocal(1), // 8
+            Instruction::LoadLocal(2),
+            Instruction::Binary(BinaryOp::Add),
+            Instruction::StoreLocal(1),
+            Instruction::LoadLocal(2),
+            Instruction::Const(1),
+            Instruction::Binary(BinaryOp::Add),
+            Instruction::StoreLocal(2),
+            Instruction::Jump(4),
+            Instruction::LoadLocal(1), // 17
+            Instruction::Return,
+        ],
+        arrow: false,
+        generator: false,
+        asynchronous: false,
+        async_generator: false,
+        mapped_arguments: false,
+        upvalues: Vec::new(),
+    };
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants: vec![Constant::Number(0), Constant::Number(1)],
+        code: vec![Instruction::Return],
+        local_count: 0,
+        functions: vec![proto.clone()],
+    };
+    let graph = build_function_graph(&proto, &program);
+    verify_function_graph(&graph).unwrap();
+    let numbers = crate::graph::proven_numbers(&graph);
+
+    let header = graph.blocks.iter().find(|b| b.predecessors.len() == 2).unwrap();
+    let phis: Vec<ValueId> = header
+        .operations
+        .iter()
+        .filter(|(_, op, _)| matches!(op, GraphOp::Phi { .. }))
+        .map(|(v, _, _)| *v)
+        .collect();
+    // Slot 0 is the parameter: its phi is not proven. Slots 1 and 2 are.
+    assert!(!numbers.contains(&phis[0]), "a parameter's phi is never proven");
+    assert!(numbers.contains(&phis[1]), "sum is proven through its phi");
+    assert!(numbers.contains(&phis[2]), "i is proven through its phi");
+
+    // Every arithmetic result in the body is proven; the compare against `n` is not.
+    for block in &graph.blocks {
+        for (vid, op, _) in &block.operations {
+            if let GraphOp::Binary { op, left, .. } = op {
+                match op {
+                    BinaryOp::Add => assert!(numbers.contains(vid), "sum += i and i++ are typed"),
+                    BinaryOp::LessThan => {
+                        assert!(!numbers.contains(vid));
+                        assert!(numbers.contains(left), "i is proven even where n is not");
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    // The parameter itself is not a number.
+    assert!(!numbers.contains(&graph.initial_locals[0]));
+}
+
+#[test]
 fn value_graph_merges_locals_at_a_loop_header_with_phis() {
     // let sum = 0; let i = 0; while (i < 10) { sum += i; i++; } return sum;
     //

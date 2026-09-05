@@ -160,6 +160,53 @@ reasons** — that is the interpreter backlog, sorted by how many tests each unb
 
 ---
 
+## The loop benchmark at 29 ms, from 233, with nothing guessed (2026-09-05, Claude `kiln-fast`)
+
+`bench/cpu/loop.mjs`, warm median, same machine at load 5: node 25 ms, stack emitter 233, graph
+emitter untyped 179, graph emitter with proven-number twins **29**. The hand-emitted ceiling in
+`.scratch/fastest-native/loop.c` was 27.5. Checksums match throughout.
+
+What did it. `proven_numbers` in `graph.rs`: a value is a number when it is a number literal,
+arithmetic on two proven numbers, or a phi whose every input is proven. That is a greatest
+fixpoint -- admit every value, remove what the rules cannot keep, repeat -- and the order matters:
+the first version admitted nothing but literals and phis, evaluated each phi before its back-edge
+input had been reached, removed it, and could never get it back. A proven value gets a `double`
+twin the emitter computes directly and boxes into the `kiln_val` twin for whoever reads it
+untyped; clang deletes any box nothing reads. So the loop's `sum` and `i` are doubles from their
+literal starts through their own increments, and the body has no tag test at all.
+
+The other rows, same run, warm median in milliseconds, load between 5 and 9:
+
+| | node | typed graph | untyped graph | stack emitter |
+| --- | --- | --- | --- | --- |
+| `cpu/loop` | 27 | 30 | 164 | 181 |
+| `cpu/mandelbrot` | 11.1 | 15.0 | 72.5 | |
+| `cpu/nbody` | 378 | 384 | 1696 | |
+| `cpu/collatz` | 334 | 152 | 206 | |
+| `cpu/fib` | 23 | 63 | 64 | 61 |
+| `non-io/class-poly` | 0.5 | 60 | 60 | 59 |
+
+Wherever the numbers are provable from literals through phis the emitter is level with node or
+ahead; `collatz` is 2.2x ahead. `fib` and `class-poly` do not move because their values arrive
+from parameters and properties, which no proof reaches.
+
+None of it is speculation. No guard, no clone, no deopt. Parameters, property reads and call
+results are never proven, and for those the plan's guard-and-generic-clone is still the answer.
+
+What it took to get here today, in order: phis at every join; the initial locals defined in the
+entry block; string and bigint constants lowered the way the stack emitter lowers them; the
+binary and unary arms made one table each with the *checked* slow path wherever the body can hold
+a reference; cells, arrays and `typeof` through the prelude helpers that exist; calls on the
+direct `kiln_val` path; a static site per property and method site; the bitwise fast paths
+through the exported pure helper because the 32-bit conversions are `static` inside the prelude.
+Each was found by the native corpus under `KILN_GRAPH_STRICT=1`, which stops at the first
+failure, so each was one run.
+
+The differential corpus's one divergence, `proxy-descriptor-keys`, is `Array.prototype.push`
+refusing a proxy receiver in the prelude; the 04:59 pre-graph binary refuses it identically.
+
+---
+
 ## What it took to make the graph emitter correct on five probes, and what it still needs (2026-09-05, Claude `kiln-fast`)
 
 After the phis went in, the emitter compiled `loop.mjs` correctly at 158 ms (stack emitter 165 to

@@ -361,6 +361,88 @@ struct AbstractFrame {
     locals: HashMap<u32, ValueId>,
 }
 
+/// The values a function is *proven* to hold as numbers, with no guess anywhere.
+///
+/// A number literal is a number; arithmetic on two numbers is a number; a phi is a number when
+/// every input is. Nothing else is, so a parameter, a property read or a call result never
+/// qualifies, and no guard is needed for what this returns: the proof is by construction.
+/// This is the optimistic fixpoint over the phis -- assume every phi is a number and downgrade
+/// until nothing changes -- which is what lets a loop's induction variable be proven from its
+/// literal start through its own increment.
+///
+/// The graph builder's per-operation `GraphType` is not this: it marks `a - b` a number without
+/// looking at `a` or `b`, which is wrong for two bigints. Emission must use this set.
+pub fn proven_numbers(graph: &FunctionGraph) -> std::collections::HashSet<ValueId> {
+    use std::collections::HashSet;
+    // Greatest fixpoint: admit every value, then remove what the rules cannot keep, until
+    // stable. Starting from the full set is what makes a loop-carried phi survive: its
+    // back-edge input is defined later in block order, and a pass that had not yet admitted it
+    // would remove the phi first and never get it back.
+    let mut numbers: HashSet<ValueId> = graph
+        .blocks
+        .iter()
+        .flat_map(|b| b.operations.iter().map(|(vid, _, _)| *vid))
+        .collect();
+    loop {
+        let mut changed = false;
+        for block in &graph.blocks {
+            for (vid, op, _) in &block.operations {
+                let is_number = match op {
+                    GraphOp::Const { constant, .. } => matches!(constant, Constant::Number(_)),
+                    GraphOp::Binary { op, left, right } => {
+                        numbers.contains(left)
+                            && numbers.contains(right)
+                            && matches!(
+                                op,
+                                BinaryOp::Add
+                                    | BinaryOp::Subtract
+                                    | BinaryOp::Multiply
+                                    | BinaryOp::Divide
+                                    | BinaryOp::Remainder
+                                    | BinaryOp::Exponentiate
+                                    | BinaryOp::BitwiseAnd
+                                    | BinaryOp::BitwiseOr
+                                    | BinaryOp::BitwiseXor
+                                    | BinaryOp::ShiftLeft
+                                    | BinaryOp::ShiftRight
+                                    | BinaryOp::UnsignedShiftRight
+                            )
+                    }
+                    GraphOp::Unary { op, value } => {
+                        numbers.contains(value)
+                            && matches!(
+                                op,
+                                UnaryOp::Plus
+                                    | UnaryOp::Negate
+                                    | UnaryOp::ToNumeric
+                                    | UnaryOp::Increment
+                                    | UnaryOp::Decrement
+                                    | UnaryOp::BitwiseNot
+                            )
+                    }
+                    GraphOp::StoreLocal { value, .. }
+                    | GraphOp::StoreCell { value, .. }
+                    | GraphOp::StoreGlobal { value, .. }
+                    | GraphOp::CheckTdz { value, .. } => numbers.contains(value),
+                    GraphOp::Phi { inputs } => inputs.iter().all(|(_, v)| numbers.contains(v)),
+                    _ => false,
+                };
+                if is_number != numbers.contains(vid) {
+                    if is_number {
+                        numbers.insert(*vid);
+                    } else {
+                        numbers.remove(vid);
+                    }
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            return numbers;
+        }
+    }
+}
+
 /// Abstract-interpret stack bytecode into a verified SSA Value Graph.
 pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> FunctionGraph {
     let mut graph =
