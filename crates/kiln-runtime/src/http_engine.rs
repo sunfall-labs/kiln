@@ -411,11 +411,11 @@ impl ResponseSlot {
         true
     }
 
-    fn write(
+    fn write_bytes(
         &self,
         shared: &Rc<ConnectionShared>,
         id: u64,
-        data: &[u8],
+        data: Bytes,
     ) -> Option<WriteDisposition> {
         let mut inner = self.inner.borrow_mut();
         let head_request = inner.head_request;
@@ -431,7 +431,7 @@ impl ResponseSlot {
                 let carries_body = status_allows_body(status) && !head_request;
                 let bodyless = !carries_body;
                 let mut driver = body_driver(shared, id, high_water_mark);
-                let disposition = driver.write(data.to_vec());
+                let disposition = driver.write(data);
                 inner.state = SlotState::Ready {
                     status,
                     headers,
@@ -453,9 +453,9 @@ impl ResponseSlot {
                 if *ended {
                     return None;
                 }
-                Some(driver.write(data.to_vec()))
+                Some(driver.write(data))
             }
-            SlotState::Streaming { driver, .. } => Some(driver.write(data.to_vec())),
+            SlotState::Streaming { driver, .. } => Some(driver.write(data)),
             SlotState::Empty
             | SlotState::Ready {
                 body: ResponseBodyState::Complete(_),
@@ -463,6 +463,15 @@ impl ResponseSlot {
             }
             | SlotState::Finished => None,
         }
+    }
+
+    fn write(
+        &self,
+        shared: &Rc<ConnectionShared>,
+        id: u64,
+        data: &[u8],
+    ) -> Option<WriteDisposition> {
+        self.write_bytes(shared, id, Bytes::copy_from_slice(data))
     }
 
     fn end(&self, shared: &Rc<ConnectionShared>, id: u64, data: Bytes) -> Option<WriteDisposition> {
@@ -510,7 +519,7 @@ impl ResponseSlot {
                 if *ended {
                     return None;
                 }
-                let disposition = driver.end(data.to_vec());
+                let disposition = driver.end(data);
                 if *bodyless {
                     driver.finish_without_body();
                 }
@@ -518,7 +527,7 @@ impl ResponseSlot {
                 Some(disposition)
             }
             SlotState::Streaming { driver, bodyless } => {
-                let disposition = driver.end(data.to_vec());
+                let disposition = driver.end(data);
                 if *bodyless {
                     driver.finish_without_body();
                 }
@@ -683,6 +692,16 @@ impl HttpServerEngine {
         slot.write(&shared, id, data)
     }
 
+    pub fn write_response_bytes(
+        &mut self,
+        resource: ResourceId,
+        id: u64,
+        data: Bytes,
+    ) -> Option<WriteDisposition> {
+        let (shared, slot) = self.shared_and_slot(resource, id)?;
+        slot.write_bytes(&shared, id, data)
+    }
+
     pub fn end_response(
         &mut self,
         resource: ResourceId,
@@ -701,6 +720,39 @@ impl HttpServerEngine {
     ) -> Option<WriteDisposition> {
         let (shared, slot) = self.shared_and_slot(resource, id)?;
         slot.end(&shared, id, data)
+    }
+
+    /// Send a static response using direct `Bytes` without extra intermediate copies.
+    pub fn send_static_response(
+        &mut self,
+        resource: ResourceId,
+        id: u64,
+        status: u16,
+        headers: &[u8],
+        body: Bytes,
+    ) -> Option<WriteDisposition> {
+        let headers = parse_flattened_headers(headers)?;
+        let (shared, slot) = self.shared_and_slot(resource, id)?;
+        if !slot.start(status, headers, 1) {
+            return None;
+        }
+        slot.end(&shared, id, body)
+    }
+
+    /// Send a static response using pre-built HeaderMap and direct `Bytes`.
+    pub fn end_static_response(
+        &mut self,
+        resource: ResourceId,
+        id: u64,
+        status: u16,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> Option<WriteDisposition> {
+        let (shared, slot) = self.shared_and_slot(resource, id)?;
+        if !slot.start(status, headers, 1) {
+            return None;
+        }
+        slot.end(&shared, id, body)
     }
 
     /// Stop a connection. Graceful lets the response in flight finish; abort drops the
@@ -1182,6 +1234,47 @@ mod tests {
             assert!(text.contains("transfer-encoding: chunked\r\n"), "{text}");
             assert!(text.contains("x-k: v\r\n"), "{text}");
             assert!(text.ends_with("2\r\nab\r\n2\r\ncd\r\n0\r\n\r\n"), "{text}");
+        });
+    }
+
+    #[test]
+    fn static_response_serves_direct_bytes_with_content_length() {
+        let (runtime, local) = local();
+        local.block_on(&runtime, async {
+            let (mut client, server) = tokio::io::duplex(4096);
+            let engine = Rc::new(RefCell::new(HttpServerEngine::default()));
+            let recording = Rc::new(Recording {
+                events: RefCell::new(Vec::new()),
+                checkpoints: Cell::new(0),
+                answer: RefCell::new(None),
+            });
+            let resource = ResourceId::new(10);
+            let answer_engine = Rc::clone(&engine);
+            *recording.answer.borrow_mut() = Some(Box::new(move |id| {
+                let mut engine = answer_engine.borrow_mut();
+                let body = Bytes::from_static(b"static payload direct bytes");
+                let headers = b"content-type\0text/plain\0";
+                engine
+                    .send_static_response(resource, id, 200, headers, body)
+                    .expect("static response sends");
+            }));
+            assert!(engine.borrow_mut().attach(
+                resource,
+                HostTransport(Box::new(server)),
+                false,
+                recording.clone(),
+            ));
+            client
+                .write_all(b"GET /static HTTP/1.1\r\nhost: test\r\n\r\n")
+                .await
+                .expect("request writes");
+            let text = read_until_complete(&mut client, b"static payload direct bytes").await;
+            assert!(text.contains("content-length: 27\r\n"), "{text}");
+            assert!(text.contains("content-type: text/plain\r\n"), "{text}");
+            assert!(
+                text.ends_with("\r\n\r\nstatic payload direct bytes"),
+                "{text}"
+            );
         });
     }
 }
