@@ -9,9 +9,10 @@
 use crate::graph::{
     BasicBlock, BlockId, FunctionGraph, GraphOp, Terminator, ValueId, proven_numbers,
 };
+use crate::tail::{TailContext, emit_tail_instruction};
 use crate::{BuiltinLoad, builtin_load, closure_construction, proto_publishes_frame};
 use kiln_ir::Upvalue;
-use kiln_ir::{BinaryOp, Constant, FunctionProto, Program, UnaryOp};
+use kiln_ir::{BinaryOp, Constant, ExportBinding, FunctionProto, Program, UnaryOp};
 use std::collections::HashSet;
 use std::fmt::Write;
 
@@ -19,12 +20,6 @@ use std::fmt::Write;
 /// for the census. `None` when everything lowers.
 pub fn first_unlowerable(graph: &FunctionGraph) -> Option<String> {
     for block in &graph.blocks {
-        if matches!(
-            block.terminator,
-            Terminator::Yield { .. } | Terminator::Await { .. }
-        ) {
-            return Some("suspend".to_owned());
-        }
         for (_, op) in &block.operations {
             if !lowers(op) {
                 let name = format!("{op:?}");
@@ -47,6 +42,7 @@ fn lowers(op: &GraphOp) -> bool {
             | GraphOp::StoreUpvalue { .. }
             | GraphOp::LoadBuiltin(_)
             | GraphOp::CaughtValue
+            | GraphOp::Bridge { .. }
             | GraphOp::MakeCell(_)
             | GraphOp::LoadGlobal(_)
             | GraphOp::StoreGlobal { .. }
@@ -72,9 +68,21 @@ fn lowers(op: &GraphOp) -> bool {
     )
 }
 
+/// Which body a graph is emitted as: a function, called through a closure, or the unit's entry
+/// point, which the embedding calls once with the module's imports and takes the exports from.
+pub enum Site<'a> {
+    Function,
+    Entry {
+        /// The module's exports, read from `locals[]` at the return; `None` for a scalar unit.
+        exports: Option<&'a [ExportBinding]>,
+        /// A CommonJS unit: its one export is `module.exports`, read from the `module` slot.
+        commonjs: bool,
+    },
+}
+
 /// The slots that must exist in `locals[]`: cells, and slots some block loads other than the
 /// entry block's definitions of the initial values.
-fn array_slots(graph: &FunctionGraph, program: &Program) -> HashSet<u32> {
+pub(crate) fn array_slots(graph: &FunctionGraph, program: &Program) -> HashSet<u32> {
     let mut slots = HashSet::new();
     if graph.blocks.iter().any(|b| b.exception_handler.is_some()) {
         // A handler reads the locals as they were at the throw, which can be any point of the
@@ -108,7 +116,7 @@ fn array_slots(graph: &FunctionGraph, program: &Program) -> HashSet<u32> {
 }
 
 /// Whether every operation in `graph` has a lowering below. This is the one place that decides
-/// what the graph emitter takes; `render_function` asks it and otherwise uses the stack emitter.
+/// what the emitter takes; `graph_for` asks it and fails the unit's emission otherwise.
 pub fn can_lower(graph: &FunctionGraph) -> bool {
     first_unlowerable(graph).is_none()
 }
@@ -169,9 +177,43 @@ pub fn emit_function_from_graph(
     // the box, and closures read the box), or a slot some block loads because no SSA value
     // reaches it. Every other slot lives in SSA values and phis, and the array is not declared
     // at all when no slot needs it. The entry block reads a parameter from `args` directly.
-    let array_slots = array_slots(graph, program);
+    let suspends = proto.generator || proto.asynchronous;
+    let array_slots = if suspends {
+        (0..proto.local_count).collect::<HashSet<u32>>()
+    } else {
+        array_slots(graph, program)
+    };
     let locals = usize::try_from(proto.local_count).unwrap().max(1);
-    if !array_slots.is_empty() {
+    if suspends {
+        // The frame outlives this call: its locals are the generator's, bound by the runtime
+        // before the first entry, and its stack holds what a suspend spilled.
+        output.push_str("    kiln_val *locals = frame->locals;\n    (void)args; (void)argc;\n");
+        if !graph
+            .blocks
+            .iter()
+            .any(|b| matches!(b.terminator, Terminator::Suspend { .. }))
+            && graph.seam_block.is_none()
+        {
+            output.push_str("    (void)frame;\n");
+        } else {
+            output.push_str("    if (frame->started) {\n        switch (frame->resume) {\n");
+            for block in &graph.blocks {
+                if let Terminator::Suspend { pc, .. } = block.terminator {
+                    writeln!(output, "        case {pc}: goto kiln_resume_{pc};").unwrap();
+                }
+            }
+            if let Some(seam) = graph.seam_block {
+                writeln!(
+                    output,
+                    "        case {}: goto kiln_block_{};",
+                    proto.code.len(),
+                    seam.0
+                )
+                .unwrap();
+            }
+            output.push_str("        default: return KILN_C99_CONTROL_ERROR;\n        }\n    }\n");
+        }
+    } else if !array_slots.is_empty() {
         writeln!(output, "    kiln_val locals[{locals}];").unwrap();
         writeln!(
             output,
@@ -187,10 +229,77 @@ pub fn emit_function_from_graph(
             .unwrap();
         }
     }
-    if proto.parameter_count == 0 {
+    if proto.parameter_count == 0 && !suspends {
         output.push_str("    (void)args; (void)argc;\n");
     }
 
+    emit_blocks(
+        output,
+        graph,
+        proto,
+        program,
+        symbol,
+        scalar_proto,
+        diagnostic_site,
+        frame_stacks,
+        strict_functions,
+        &array_slots,
+        &Site::Function,
+    );
+    output.push_str("}\n");
+}
+
+/// Emits the unit's entry point body from its graph. The caller has opened the function,
+/// declared `locals[]` (the unit's globals, or an automatic array), bound the imports into it,
+/// and declared `depth` and `thrown` when the unit has callables; this emits the blocks, the
+/// return that hands the exports over, and the tail an uncaught throw or a refusal leaves by.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_entry_from_graph(
+    output: &mut String,
+    graph: &FunctionGraph,
+    proto: &FunctionProto,
+    program: &Program,
+    symbol: &str,
+    scalar_proto: bool,
+    diagnostic_site: &str,
+    frame_stacks: &[usize],
+    strict_functions: &[bool],
+    array_slots: &HashSet<u32>,
+    exports: Option<&[ExportBinding]>,
+    commonjs: bool,
+) {
+    emit_blocks(
+        output,
+        graph,
+        proto,
+        program,
+        symbol,
+        scalar_proto,
+        diagnostic_site,
+        frame_stacks,
+        strict_functions,
+        array_slots,
+        &Site::Entry { exports, commonjs },
+    );
+}
+
+/// The SSA value declarations, every block with its terminator, and the tail: what a function
+/// body and the entry point share once their prologues are written.
+#[allow(clippy::too_many_arguments)]
+fn emit_blocks(
+    output: &mut String,
+    graph: &FunctionGraph,
+    proto: &FunctionProto,
+    program: &Program,
+    symbol: &str,
+    scalar_proto: bool,
+    diagnostic_site: &str,
+    frame_stacks: &[usize],
+    strict_functions: &[bool],
+    array_slots: &HashSet<u32>,
+    site: &Site<'_>,
+) {
+    let body_start = output.len();
     // 4. Declare SSA value locals. A value proven to be a number also gets a `double` twin:
     // typed operations compute the double directly, with no tag test and no memcpy, and box it
     // into the `kiln_val` twin for whoever reads the value untyped. Clang deletes a box nothing
@@ -226,7 +335,51 @@ pub fn emit_function_from_graph(
 
     // 5. Basic blocks emission
     for block in &graph.blocks {
+        // A resume target's landing, reached only from the dispatch switch: it hands what the
+        // suspend spilled and what the caller sent to the block's stack phis and falls into the
+        // block. A rejection or a `throw()` arrives as a throw into the block's handler instead.
+        for from in &graph.blocks {
+            if let Terminator::Suspend {
+                resume,
+                pc,
+                spilled,
+                ..
+            } = &from.terminator
+                && *resume == block.id
+            {
+                let landing_unwind = match block.exception_handler {
+                    Some(handler) => format!("goto kiln_block_{};", handler.0),
+                    None => "goto kiln_unwind;".to_owned(),
+                };
+                let phis: Vec<u32> = block
+                    .operations
+                    .iter()
+                    .filter(|(_, op)| matches!(op, GraphOp::Phi { .. }))
+                    .map(|(v, _)| v.0)
+                    .collect();
+                writeln!(output, "kiln_resume_{pc}:;").unwrap();
+                writeln!(
+                    output,
+                    "    if (frame->raising) {{ *thrown = frame->sent; {landing_unwind} }}"
+                )
+                .unwrap();
+                for (i, phi) in phis.iter().enumerate() {
+                    if i < spilled.len() {
+                        writeln!(output, "    v{phi} = frame->stack[{i}];").unwrap();
+                    } else {
+                        writeln!(output, "    v{phi} = kiln_val_from_boundary(frame->sent);")
+                            .unwrap();
+                    }
+                }
+            }
+        }
         writeln!(output, "kiln_block_{}:;", block.id.0).unwrap();
+        if graph.seam_block == Some(block.id) {
+            // The seam between parameter binding and the body: the binding run by the call
+            // stops here, and the first `next` starts here.
+            output
+                .push_str("    if (frame->binding) { frame->sp = 0; return KILN_C99_YIELDED; }\n");
+        }
         // Where a throw in this block goes: its innermost handler, or out of the body.
         let unwind = match block.exception_handler {
             Some(handler) => format!("goto kiln_block_{};", handler.0),
@@ -243,7 +396,7 @@ pub fn emit_function_from_graph(
                 diagnostic_site,
                 scalar_proto,
                 &numbers,
-                &array_slots,
+                array_slots,
                 proto,
                 frame_stacks,
                 strict_functions,
@@ -260,23 +413,51 @@ pub fn emit_function_from_graph(
             &numbers,
             &defs,
             &unwind,
+            site,
+            scalar_proto,
         );
     }
 
     // 6. Unwind and refusal handlers
-    output.push_str("kiln_unwind:;\n");
-    output.push_str("    return KILN_C99_THROWN;\n");
-    if !scalar_proto {
-        output.push_str("kiln_refusal:;\n");
-        output.push_str("    *result = kiln_val_from_boundary(kiln_c99_control_diagnostic());\n");
-        output.push_str("    return KILN_C99_CONTROL_ERROR;\n");
+    match site {
+        Site::Function => {
+            output.push_str("kiln_unwind:;\n");
+            output.push_str("    return KILN_C99_THROWN;\n");
+            if !scalar_proto {
+                output.push_str("kiln_refusal:;\n");
+                output.push_str(
+                    "    *result = kiln_val_from_boundary(kiln_c99_control_diagnostic());\n",
+                );
+                output.push_str("    return KILN_C99_CONTROL_ERROR;\n");
+            }
+        }
+        Site::Entry { .. } => {
+            // Nothing above the entry point catches, so a throw that reaches here is uncaught:
+            // it leaves as text in `*result`, the site it was refused at appended when there is
+            // one. A label nothing jumps to is a warning, so each exists only when used.
+            let unwinds = output[body_start..].contains("goto kiln_unwind;");
+            let refuses = output[body_start..].contains("goto kiln_refusal;");
+            if unwinds {
+                output.push_str("kiln_unwind:;\n");
+                if scalar_proto {
+                    output.push_str("    return KILN_C99_THROWN;\n");
+                } else {
+                    output.push_str("    { kiln_value message = kiln_c99_text(*thrown); kiln_value site = kiln_c99_control_diagnostic(); if (message.tag == KILN_VALUE_STRING && site.tag == KILN_VALUE_STRING && site.len != 0) { kiln_value separator = kiln_c99_copy_text(\" at \" , 4); *result = kiln_c99_concat(kiln_c99_concat(message, separator), site); } else { *result = message; } }\n");
+                    output.push_str("    return KILN_C99_THROWN;\n");
+                }
+            }
+            if refuses {
+                output.push_str("kiln_refusal:;\n");
+                output.push_str("    *result = kiln_c99_control_diagnostic();\n");
+                output.push_str("    return KILN_C99_CONTROL_ERROR;\n");
+            }
+        }
     }
-    output.push_str("}\n");
 }
 
 /// One status check after a runtime call. A throw unwinds; a refusal is attributed to this site
-/// and reported through `kiln_refusal`, which carries the diagnostic in the result the way the
-/// stack emitter does; anything else returns as it is.
+/// and reported through `kiln_refusal`, which carries the diagnostic in the result; anything
+/// else returns as it is.
 fn status_check(diagnostic_site: &str, pc: u32, operation: &str, unwind: &str) -> String {
     format!(
         "if (status == KILN_C99_THROWN) {unwind} if (status == KILN_C99_CONTROL_ERROR) {{ kiln_c99_note_refusal(\"{diagnostic_site}\", (size_t){pc}, \"{operation}\", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; }} if (status != KILN_C99_OK) return status;"
@@ -420,7 +601,7 @@ fn emit_graph_op(
                 };
                 writeln!(output, "    v{v} = {val_str};").unwrap();
             }
-            // The same lowering the stack emitter uses: a NUL-free literal is a tagged pointer to
+            // A NUL-free literal is a tagged pointer to
             // its static bytes; one with a NUL inside goes through the per-unit string cache; a
             // bigint is parsed once into a cached heap value.
             Constant::String(value) => {
@@ -470,13 +651,16 @@ fn emit_graph_op(
                 writeln!(output, "    d{v} = d{};", value.0).unwrap();
             }
         }
-        // A cell is a shared box, the same one the stack emitter makes and reads through the
-        // same helpers: the load checks the temporal dead zone, the store writes the box.
+        // A cell is a shared box, made and read through the prelude's helpers: the load checks
+        // the temporal dead zone, the store writes the box.
         GraphOp::LoadCell(slot) => {
+            // A body that cannot hold a reference has no `thrown` slot; a dead-zone read there
+            // is refused by the helper, loudly, rather than crashing or answering `undefined`.
+            let thrown = if scalar_proto { "NULL" } else { "thrown" };
             let check = status_check(diagnostic_site, pc, &label, unwind);
             writeln!(
                 output,
-                "    {{ kiln_val cell_stack[1]; size_t cell_sp = 0; int status = kiln_c99_op_val_load_cell(locals[{slot}], cell_stack, &cell_sp, thrown); {check} v{v} = cell_stack[0]; }}"
+                "    {{ kiln_val cell_stack[1]; size_t cell_sp = 0; int status = kiln_c99_op_val_load_cell(locals[{slot}], cell_stack, &cell_sp, {thrown}); {check} v{v} = cell_stack[0]; }}"
             )
             .unwrap();
         }
@@ -531,6 +715,41 @@ fn emit_graph_op(
             )
             .unwrap();
         }
+        GraphOp::Bridge {
+            instruction,
+            operands,
+            pushes,
+        } => {
+            // The operands go onto a local stack of exactly the depth the instruction wants,
+            // the tail's lowering (`tail.rs`) runs on it, and the results come back off the top.
+            let depth = operands.len() + usize::from(*pushes) + 2;
+            let mut push = String::new();
+            for operand in operands {
+                push.push_str(&format!(" stack[sp++] = v{};", operand.0));
+            }
+            writeln!(
+                output,
+                "    {{ kiln_val stack[{depth}]; size_t sp = 0;{push}"
+            )
+            .unwrap();
+            emit_tail_instruction(
+                output,
+                instruction,
+                pc,
+                &TailContext {
+                    constants: &program.constants,
+                    symbol,
+                    diagnostic_site,
+                    callables: !scalar_proto,
+                },
+                unwind,
+            );
+            if *pushes > 0 {
+                writeln!(output, "    v{v} = stack[sp - 1]; }}").unwrap();
+            } else {
+                writeln!(output, "    v{v} = KILN_VAL_UNDEFINED; }}").unwrap();
+            }
+        }
         GraphOp::MakeCell(slot) => {
             writeln!(
                 output,
@@ -566,8 +785,7 @@ fn emit_graph_op(
         GraphOp::MarkUninitialized(slot) => {
             // A slot that holds a cell is marked through the cell: the binding is captured, and
             // its closures read the box, not the slot. Overwriting the slot would drop the cell
-            // pointer and the next write through it would dereference the sentinel. The same
-            // two lines the stack emitter emits.
+            // pointer and the next write through it would dereference the sentinel.
             writeln!(
                 output,
                 "    if ((locals[{slot}] & KILN_TAG_MASK) == KILN_TAG_CELL_PREFIX) {{ *(kiln_val *)KILN_VAL_PTR(locals[{slot}]) = KILN_VAL_UNINITIALIZED; }} else {{ locals[{slot}] = KILN_VAL_UNINITIALIZED; }}"
@@ -576,9 +794,10 @@ fn emit_graph_op(
             writeln!(output, "    v{v} = KILN_VAL_UNINITIALIZED;").unwrap();
         }
         GraphOp::CheckTdz { slot: _, value } => {
+            let thrown = if scalar_proto { "NULL" } else { "thrown" };
             writeln!(
                 output,
-                "    {{ int status = kiln_c99_val_check_tdz(v{}, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
+                "    {{ int status = kiln_c99_val_check_tdz(v{}, {thrown}); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
                 value.0
             )
             .unwrap();
@@ -631,7 +850,7 @@ fn emit_graph_op(
                         .replace("value", &format!("v{x}"));
                     // The slow path converts on the machine: an object operand's `valueOf` runs
                     // and may throw. A body that cannot produce a reference never gets there,
-                    // and takes the pure helper the way the stack emitter does.
+                    // and takes the pure helper.
                     let slow = if scalar_proto {
                         format!("v{v} = kiln_c99_val_unary_fast({code}, v{x});")
                     } else {
@@ -674,9 +893,9 @@ fn emit_graph_op(
                 BinaryOp::In | BinaryOp::InstanceOf => unreachable!("`in` and `instanceof` are never proven numeric"),
             }
         }
-        // `in` and `instanceof` are not arithmetic: the stack emitter lowers them inline against
-        // their own prelude entry points and never hands them to the binary helper, which
-        // answers something else for their codes. The same lowering, verbatim.
+        // `in` and `instanceof` are not arithmetic: they go inline against their own prelude
+        // entry points and never to the binary helper, which answers something else for their
+        // codes.
         GraphOp::Binary {
             op: BinaryOp::In,
             left,
@@ -707,7 +926,7 @@ fn emit_graph_op(
             let (l, r) = (left.0, right.0);
             let code = binary_code(*op);
             // The slow path runs the program's own conversions and can throw; the pure helper
-            // is only for a body that cannot hold a reference (the stack emitter's `callables`).
+            // is only for a body that cannot hold a reference (`scalar_proto`).
             let slow = if scalar_proto {
                 format!("v{v} = kiln_c99_val_binary_fast({code}, v{l}, v{r});")
             } else {
@@ -729,7 +948,7 @@ fn emit_graph_op(
                 None => writeln!(output, "    {{ {slow} }}").unwrap(),
             }
         }
-        // A call is the stack emitter's direct path on `kiln_val`: a plain closure that
+        // A call is the direct path on `kiln_val`: a plain closure that
         // publishes no frame is entered directly, a body this unit compiled is called by name so
         // the C compiler may inline it, and everything else goes through the runtime.
         GraphOp::Call { callee, args, .. } => {
@@ -810,8 +1029,7 @@ fn emit_graph_op(
             .unwrap();
         }
         GraphOp::NewObject { pairs, .. } => {
-            // Sized once for its pairs, then each pair defined in source order; the same two
-            // prelude calls the stack emitter makes.
+            // Sized once for its pairs, then each pair defined in source order.
             let count = pairs.len();
             let alloc = if count > 0 {
                 format!("kiln_c99_new_object_with_capacity(&built, (size_t){count})")
@@ -960,13 +1178,8 @@ fn emit_graph_op(
             .unwrap();
         }
         GraphOp::Phi { .. } => {
-            // Phis are resolved by incoming jumps/branches in predecessor blocks.
-        }
-        other => {
-            // Every operation `can_emit_from_graph` admits has an arm above. Reaching here is a
-            // compiler bug, and the one answer it must never produce is a silent `undefined`:
-            // that is the failure this backend refuses by construction (`KILN_C99_ABSENT`).
-            unreachable!("graph emitter has no lowering for {other:?}");
+            // A phi is assigned on the edge into its block, by the predecessor's jump or
+            // branch, or by the landing that comes in from the dispatch switch.
         }
     }
 }
@@ -979,14 +1192,60 @@ fn emit_terminator(
     numbers: &HashSet<ValueId>,
     defs: &std::collections::HashMap<ValueId, &GraphOp>,
     unwind: &str,
+    site: &Site<'_>,
+    scalar_proto: bool,
 ) {
     match terminator {
-        Terminator::Return(Some(val)) => {
-            writeln!(output, "    *result = v{}; return KILN_C99_OK;", val.0).unwrap();
-        }
-        Terminator::Return(None) => {
-            output.push_str("    *result = KILN_VAL_UNDEFINED; return KILN_C99_OK;\n");
-        }
+        Terminator::Return(value) => match site {
+            Site::Function => match value {
+                Some(val) => {
+                    writeln!(output, "    *result = v{}; return KILN_C99_OK;", val.0).unwrap();
+                }
+                None => output.push_str("    *result = KILN_VAL_UNDEFINED; return KILN_C99_OK;\n"),
+            },
+            Site::Entry { exports, commonjs } => {
+                // The entry's result crosses the embedding boundary, and a reference must not:
+                // a callable leaving here becomes its text.
+                match value {
+                    Some(val) => {
+                        writeln!(output, "    *result = kiln_val_to_boundary(v{});", val.0)
+                            .unwrap();
+                    }
+                    None => output.push_str("    *result = kiln_c99_undefined();\n"),
+                }
+                if !scalar_proto {
+                    output.push_str(
+                        "    if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);\n",
+                    );
+                }
+                if *commonjs {
+                    // `depth` and `thrown` exist only when the unit has callables. With none
+                    // there is no getter that could have been installed on `module`, so this
+                    // read cannot re-enter or throw and carries neither.
+                    let (depth, thrown) = if scalar_proto {
+                        ("0", "NULL")
+                    } else {
+                        ("depth", "thrown")
+                    };
+                    writeln!(
+                        output,
+                        "    {{ kiln_val mod_val = locals[2]; kiln_val module_val = (mod_val & KILN_TAG_MASK) == KILN_TAG_CELL_PREFIX ? *(kiln_val *)KILN_VAL_PTR(mod_val) : mod_val; int export_status = kiln_c99_get(host, kiln_val_to_boundary(module_val), \"exports\", 7, &exports[0], {depth}, {thrown}); if (export_status != KILN_C99_OK) return export_status; }}"
+                    )
+                    .unwrap();
+                }
+                // The slot is handed over exactly as it stands, box included: a mutable export
+                // *is* its cell, which is what makes an import a live view of the binding.
+                for (index, binding) in exports.iter().flat_map(|e| e.iter()).enumerate() {
+                    writeln!(
+                        output,
+                        "    exports[{index}] = kiln_val_to_boundary(locals[{}]);",
+                        binding.local_slot
+                    )
+                    .unwrap();
+                }
+                output.push_str("    return KILN_C99_OK;\n");
+            }
+        },
         Terminator::Throw(val) => {
             writeln!(
                 output,
@@ -1032,8 +1291,29 @@ fn emit_terminator(
             writeln!(output, "        goto kiln_block_{};", false_block.0).unwrap();
             output.push_str("    }\n");
         }
-        Terminator::Yield { resume, .. } | Terminator::Await { resume, .. } => {
-            writeln!(output, "    goto kiln_block_{};", resume.0).unwrap();
+        Terminator::Suspend {
+            value,
+            spilled,
+            pc,
+            awaiting,
+            ..
+        } => {
+            let mut spill = String::new();
+            for (i, v) in spilled.iter().enumerate() {
+                spill.push_str(&format!(" frame->stack[{i}] = v{};", v.0));
+            }
+            // Whether a handler covers this suspension. The handlers themselves are static
+            // here, but the runtime's `return()` and `throw()` read this to decide whether the
+            // body has a `finally` or `catch` to run, and so whether to re-enter it at all.
+            let covered = i32::from(current_block.exception_handler.is_some());
+            writeln!(
+                output,
+                "   {spill} frame->sp = {}; frame->resume = {pc}; frame->awaiting = {}; frame->handler_top = {covered}; *result = v{}; return KILN_C99_YIELDED;",
+                spilled.len(),
+                i32::from(*awaiting),
+                value.0
+            )
+            .unwrap();
         }
         Terminator::Unreachable => {
             output.push_str("    goto kiln_refusal;\n");

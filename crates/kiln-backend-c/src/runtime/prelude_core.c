@@ -10878,6 +10878,27 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
     return status;
 }
 
+/* One iteration result. A step is an object, not a pair: `{ value, done }` is what the iteration
+ * protocol is written against. */
+static int kiln_c99_generator_step(kiln_host *host, kiln_value produced, int done, kiln_value *result,
+                                   int depth, kiln_value *thrown) {
+    kiln_value step;
+    int status = kiln_c99_new_object(&step);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    status = kiln_c99_put(host, step, "value", 5, produced, depth, thrown);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    status = kiln_c99_put(host, step, "done", 4, kiln_c99_boolean(done), depth, thrown);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    *result = step;
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, uint64_t code,
                                            kiln_value receiver, const kiln_value *args,
                                            size_t argc, int depth, kiln_value *thrown) {
@@ -14103,6 +14124,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             return KILN_C99_OK;
         case KILN_C99_METHOD_GENERATOR_THROW: {
             kiln_generator *frame;
+            kiln_closure *closure;
             if (receiver.tag != KILN_VALUE_GENERATOR) {
                 KILN_C99_REFUSE("a generator method on a receiver that is not a generator");
             }
@@ -14110,6 +14132,29 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             if (frame->running) {
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                             "Generator is already running");
+            }
+            /* A suspended body with a handler over the suspension gets the value thrown *at*
+             * the `yield`, so its `catch` or `finally` runs; it may yield again, finish, or
+             * let the throw out. A body that has not started, is done, or has nothing to
+             * catch with, is finished and the throw goes straight to the caller. */
+            if (frame->started && !frame->done && frame->handler_top != 0 && !frame->async_generator) {
+                kiln_val vproduced = KILN_VAL_UNDEFINED;
+                frame->raising = 1;
+                frame->sent = argc > 0 ? args[0] : kiln_c99_undefined();
+                closure = kiln_c99_closure_of(frame->function);
+                frame->running = 1;
+                status = kiln_c99_invoke_closure_body(
+                    host, &vproduced, closure, kiln_val_from_boundary(frame->receiver), NULL, 0, depth, thrown, frame, 0);
+                frame->running = 0;
+                frame->raising = 0;
+                if (status == KILN_C99_YIELDED) {
+                    return kiln_c99_generator_step(host, kiln_val_to_boundary(vproduced), 0, result, depth, thrown);
+                }
+                frame->done = 1;
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                return kiln_c99_generator_step(host, kiln_val_to_boundary(vproduced), 1, result, depth, thrown);
             }
             frame->done = 1;
             if (thrown != NULL) {
@@ -14195,6 +14240,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 produced = argc > 0 ? args[0] : kiln_c99_undefined();
             } else if (!frame->done) {
                 frame->sent = argc > 0 ? args[0] : kiln_c99_undefined();
+                frame->raising = 0;
                 closure = kiln_c99_closure_of(frame->function);
                 frame->running = 1;
                 kiln_val vproduced = KILN_VAL_UNDEFINED;
@@ -14212,26 +14258,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     frame->done = 1;
                 }
             }
-            {
-                /* A step is an object, not a pair: `{ value, done }` is what the iteration
-                 * protocol is written against. */
-                kiln_value step;
-                status = kiln_c99_new_object(&step);
-                if (status != KILN_C99_OK) {
-                    return status;
-                }
-                status = kiln_c99_put(host, step, "value", 5, produced, depth, thrown);
-                if (status != KILN_C99_OK) {
-                    return status;
-                }
-                status = kiln_c99_put(host, step, "done", 4,
-                                      kiln_c99_boolean(finished || frame->done), depth, thrown);
-                if (status != KILN_C99_OK) {
-                    return status;
-                }
-                *result = step;
-                return KILN_C99_OK;
-            }
+            return kiln_c99_generator_step(host, produced, finished || frame->done, result, depth, thrown);
         }
         case KILN_C99_METHOD_JSON_STRINGIFY: {
             kiln_text text = {NULL, 0, 0};

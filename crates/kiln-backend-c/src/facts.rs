@@ -284,31 +284,10 @@ fn extract_function_facts(graph: &FunctionGraph, program: &Program) -> FunctionF
                         detail: Some(format_constant_name(program, *name)),
                     });
                 }
-                GraphOp::CallComputed { site, .. } => {
-                    sites.push(SiteFact {
-                        id: site.0,
-                        kind: "CallComputed".to_string(),
-                        detail: None,
-                    });
-                }
-                GraphOp::HostCall { op, site, .. } => {
-                    sites.push(SiteFact {
-                        id: site.0,
-                        kind: "HostCall".to_string(),
-                        detail: Some(format!("{op:?}")),
-                    });
-                }
                 GraphOp::NewArray { site, .. } => {
                     sites.push(SiteFact {
                         id: site.0,
                         kind: "NewArray".to_string(),
-                        detail: None,
-                    });
-                }
-                GraphOp::DirectEval { site_idx, .. } => {
-                    sites.push(SiteFact {
-                        id: *site_idx,
-                        kind: "DirectEval".to_string(),
                         detail: None,
                     });
                 }

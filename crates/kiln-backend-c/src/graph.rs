@@ -5,7 +5,7 @@
 //! stack bytecode and lowers it into immutable SSA values, eliminating the runtime operand stack
 //! and resolving operand dependencies into direct value edges.
 
-use kiln_ir::{BinaryOp, Constant, FunctionProto, HostOp, Instruction, Program, UnaryOp};
+use kiln_ir::{BinaryOp, Constant, FunctionProto, Instruction, Program, UnaryOp};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// Strongly typed identifier for an SSA value in the graph.
@@ -57,6 +57,15 @@ pub enum GraphOp {
     /// The value a handler block starts with: what was thrown into it. Only ever the first
     /// operation of a handler block.
     CaughtValue,
+    /// An instruction lowered by its own body in `tail.rs`, on a small local stack holding
+    /// `operands`. The tail of the instruction set: each of these has one correct lowering on
+    /// `stack[sp]`, and this op runs it there rather than carrying a second copy. `pushes` is how many results it leaves; the op's value is the top one, and
+    /// `ToPropertyKey`, the one instruction leaving two, keeps its object beneath.
+    Bridge {
+        instruction: Instruction,
+        operands: Vec<ValueId>,
+        pushes: u8,
+    },
     MakeCell(u32),
     LoadGlobal(u32),
     StoreGlobal {
@@ -65,8 +74,6 @@ pub enum GraphOp {
     },
     LoadThis,
     LoadNewTarget,
-    LoadArguments,
-    RestArguments(u32),
     MarkUninitialized(u32),
     CheckTdz {
         slot: u32,
@@ -82,10 +89,6 @@ pub enum GraphOp {
         op: BinaryOp,
         left: ValueId,
         right: ValueId,
-    },
-    ToPropertyKey {
-        object: ValueId,
-        key: ValueId,
     },
 
     // Property and Element Access
@@ -142,21 +145,6 @@ pub enum GraphOp {
         args: Vec<ValueId>,
         site: SiteId,
     },
-    CallComputed {
-        object: ValueId,
-        key: ValueId,
-        args: Vec<ValueId>,
-        site: SiteId,
-    },
-    HostCall {
-        op: HostOp,
-        args: Vec<ValueId>,
-        site: SiteId,
-    },
-    DirectEval {
-        site_idx: u32,
-        args: Vec<ValueId>,
-    },
     NewArray {
         elements: Vec<ValueId>,
         site: SiteId,
@@ -172,37 +160,10 @@ pub enum GraphOp {
         args: Vec<ValueId>,
         site: SiteId,
     },
-    IterableToArray(ValueId),
-    SpreadInto {
-        target: ValueId,
-        iterable: ValueId,
-    },
-    SetPrototype {
-        object: ValueId,
-        prototype: ValueId,
-    },
 
     // Super and Private Members
-    SuperGet {
-        prototype: ValueId,
-        name: u32,
-    },
-    SuperCall {
-        constructor: ValueId,
-        args: Vec<ValueId>,
-    },
-    PrivateGet {
-        object: ValueId,
-        slot: u32,
-    },
-    PrivateSet {
-        object: ValueId,
-        slot: u32,
-        value: ValueId,
-    },
 
     // Modules
-    ImportDynamic(ValueId),
 
     // SSA Phi
     Phi {
@@ -249,13 +210,16 @@ pub enum Terminator {
     },
     Return(Option<ValueId>),
     Throw(ValueId),
-    Yield {
+    /// A `yield` or an `await`: hand `value` out, keep `spilled` -- the operand stack beneath
+    /// it -- in the frame, and come back at `resume` with what the caller sends. The locals are
+    /// already in the frame's array; nothing else can be live across a suspend, because the
+    /// bytecode has no other state.
+    Suspend {
         value: ValueId,
         resume: BlockId,
-    },
-    Await {
-        promise: ValueId,
-        resume: BlockId,
+        spilled: Vec<ValueId>,
+        pc: u32,
+        awaiting: bool,
     },
     Unreachable,
 }
@@ -286,8 +250,11 @@ pub struct FunctionGraph {
     /// through the graph was `undefined`.
     pub initial_locals: Vec<ValueId>,
     /// Where each value came from: the bytecode index and the label a refusal note names, the
-    /// same label the stack emitter gives the instruction. Recorded once, at the walk.
+    /// same label `instruction_diagnostic` gives the instruction. Recorded once, at the walk.
     pub origins: HashMap<ValueId, Origin>,
+    /// The block where parameter binding ends in a body whose binding runs at the call (a
+    /// generator): the call stops there and the first `next` resumes there.
+    pub seam_block: Option<BlockId>,
 }
 
 /// The bytecode an operation was lowered from, for diagnostics.
@@ -309,6 +276,7 @@ impl FunctionGraph {
             next_site_id: 0,
             initial_locals: Vec::new(),
             origins: HashMap::new(),
+            seam_block: None,
         }
     }
 
@@ -372,6 +340,16 @@ pub enum Proven {
 }
 
 pub fn proven_types(graph: &FunctionGraph) -> HashMap<ValueId, Proven> {
+    // A resume target's stack phis also take what a suspend spilled and what the caller sent,
+    // neither of which is an input here, so they prove nothing.
+    let resume_targets: std::collections::HashSet<BlockId> = graph
+        .blocks
+        .iter()
+        .filter_map(|b| match b.terminator {
+            Terminator::Suspend { resume, .. } => Some(resume),
+            _ => None,
+        })
+        .collect();
     // `None` in `state` is "unconstrained so far"; an absent key is "proven nothing".
     let mut state: HashMap<ValueId, Option<Proven>> = graph
         .blocks
@@ -425,6 +403,7 @@ pub fn proven_types(graph: &FunctionGraph) -> HashMap<ValueId, Proven> {
                     | GraphOp::StoreCell { value, .. }
                     | GraphOp::StoreGlobal { value, .. }
                     | GraphOp::CheckTdz { value, .. } => state.get(value).copied().flatten(),
+                    GraphOp::Phi { .. } if resume_targets.contains(&block.id) => None,
                     GraphOp::Phi { inputs } => {
                         let mut agreed: Option<Proven> = None;
                         let mut disagree = false;
@@ -507,8 +486,52 @@ pub fn proven_numbers(graph: &FunctionGraph) -> std::collections::HashSet<ValueI
         .collect()
 }
 
-/// An instruction the graph builder does not lower. The emitter falls back to the stack machine
-/// for the function, loudly under `KILN_GRAPH_STRICT`; nothing is silently skipped.
+/// The operand-stack effect of an instruction the graph lowers through `tail.rs`: how many
+/// values it consumes and how many it leaves. The numbers are
+/// the validator's (`stack_effect` in `validation.rs`), written as pops and pushes.
+pub fn bridge_effect(instruction: &Instruction) -> Option<(usize, u8)> {
+    Some(match instruction {
+        Instruction::HostCall { argc, .. } => (usize::from(*argc), 1),
+        Instruction::LoadArguments
+        | Instruction::RestArguments(_)
+        | Instruction::NewRegExp { .. }
+        | Instruction::PushHole
+        | Instruction::ThrowReference(_)
+        | Instruction::LoadGlobalBindingOrUndefined(_)
+        | Instruction::DeleteGlobalBinding(_) => (0, 1),
+        Instruction::RequireGlobalBinding(_) | Instruction::DeclareGlobalBinding { .. } => (0, 0),
+        Instruction::StoreGlobalBinding(_) | Instruction::StoreGlobalBindingStrict(_) => (1, 0),
+        Instruction::Apply
+        | Instruction::DefineMethod
+        | Instruction::DefineAccessor { .. }
+        | Instruction::DefineNamedProperty
+        | Instruction::SetPrivate(_) => (3, 1),
+        Instruction::SuperApply
+        | Instruction::SpreadObject
+        | Instruction::SpreadInto
+        | Instruction::SetPrototype
+        | Instruction::DefinePrivate { .. }
+        | Instruction::GetPrivate(_)
+        | Instruction::LoadSuperElement
+        | Instruction::DeleteComputed
+        | Instruction::DeleteComputedStrict { .. }
+        | Instruction::ConstructSpread => (2, 1),
+        Instruction::EnumerateKeys
+        | Instruction::LoadPrototype
+        | Instruction::SuperForward
+        | Instruction::IterableToArray
+        | Instruction::LoadSuperProperty(_)
+        | Instruction::DeleteProperty(_)
+        | Instruction::DeletePropertyStrict { .. } => (1, 1),
+        Instruction::SuperCall { argc } => (usize::from(*argc) + 1, 1),
+        Instruction::CallComputed { argc } => (usize::from(*argc) + 2, 1),
+        Instruction::ToPropertyKey => (2, 2),
+        _ => return None,
+    })
+}
+
+/// An instruction the graph builder does not lower. There is no other emitter, so the unit's
+/// emission fails naming it; nothing is silently skipped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnsupportedInstruction {
     pub pc: usize,
@@ -601,6 +624,12 @@ pub fn build_function_graph(
         }
     }
 
+    let suspends = proto.generator || proto.asynchronous;
+    let binds_at_call =
+        suspends && proto.prologue_end > 0 && (proto.prologue_end as usize) < code.len();
+    if binds_at_call {
+        block_starts.insert(proto.prologue_end as usize);
+    }
     let block_starts_vec: Vec<usize> = block_starts.into_iter().collect();
     let pc_to_block: BTreeMap<usize, BlockId> = block_starts_vec
         .iter()
@@ -698,7 +727,11 @@ pub fn build_function_graph(
                 succs.push(pc_to_containing_block(*target as usize));
                 succs.extend(next);
             }
-            Some(Instruction::Return | Instruction::Throw) => {}
+            // A suspend is not an edge: the body returns, and a later call re-enters at the
+            // resume target through the dispatch switch.
+            Some(
+                Instruction::Return | Instruction::Throw | Instruction::Yield | Instruction::Await,
+            ) => {}
             _ => succs.extend(next),
         }
         // A protected block can leave through its handler from any throwing operation.
@@ -710,17 +743,62 @@ pub fn build_function_graph(
             }
         }
     }
+    // A suspending body keeps its locals in the frame, where the runtime and every later call
+    // find them, and reads them back at the start of every block: no local crosses a block in
+    // SSA, so it has no local phis. Its operand stack does cross a suspend, spilled into the
+    // frame, and comes back through the resume target's stack phis, which are known before the
+    // walk: the depth at the yield, with the sent value on top. A pass over the verified
+    // bytecode in order gives that depth, carrying a jump target's height from the first jump
+    // to it and a handler's from its push.
+    let mut resume_depths: HashMap<BlockId, usize> = HashMap::new();
+    if suspends {
+        let mut height_at: HashMap<usize, usize> = HashMap::new();
+        let mut height = 0usize;
+        let after = |inst: &Instruction, height: usize, pc: usize| {
+            crate::validation::stack_effect(inst, height, pc)
+                .map(|(h, _)| h)
+                .unwrap_or(height)
+        };
+        for (pc, inst) in code.iter().enumerate() {
+            if let Some(&known) = height_at.get(&pc) {
+                height = known;
+            }
+            match inst {
+                Instruction::Jump(target)
+                | Instruction::JumpIfFalse(target)
+                | Instruction::JumpIfTruthy(target)
+                | Instruction::JumpIfNotNullish(target) => {
+                    height = after(inst, height, pc);
+                    height_at.entry(*target as usize).or_insert(height);
+                }
+                Instruction::PushHandler(target) => {
+                    height_at.entry(*target as usize).or_insert(height + 1);
+                }
+                Instruction::Yield | Instruction::Await => {
+                    // The yielded value leaves and the sent value arrives: the same height.
+                    resume_depths.insert(pc_to_containing_block(pc + 1), height);
+                }
+                other => height = after(other, height, pc),
+            }
+        }
+    }
     let mut merges: MergeState = MergeState::default();
     for (b_idx, preds) in static_preds.iter().enumerate() {
         // A handler block merges nothing: a throw can happen mid-block, when the locals are
         // half stored, so its locals come from the array and its stack is fixed at the push.
-        if preds.len() < 2 || handler_targets.contains(&BlockId(b_idx as u32)) {
+        let this = BlockId(b_idx as u32);
+        let resume_depth = resume_depths.get(&this).copied();
+        if handler_targets.contains(&this) || (preds.len() < 2 && resume_depth.is_none()) {
             continue;
         }
         let block_id = BlockId(b_idx as u32);
-        let locals: Vec<ValueId> = (0..proto.local_count)
-            .map(|_| graph.alloc_value())
-            .collect();
+        let locals: Vec<ValueId> = if suspends {
+            Vec::new()
+        } else {
+            (0..proto.local_count)
+                .map(|_| graph.alloc_value())
+                .collect()
+        };
         for &phi in &locals {
             merges.inputs.insert(phi, Vec::new());
         }
@@ -729,23 +807,29 @@ pub fn build_function_graph(
             .enumerate()
             .map(|(slot, &v)| (slot as u32, v))
             .collect();
+        let stack: Option<Vec<ValueId>> = resume_depth.map(|depth| {
+            let phis: Vec<ValueId> = (0..depth).map(|_| graph.alloc_value()).collect();
+            for &phi in &phis {
+                merges.inputs.insert(phi, Vec::new());
+            }
+            phis
+        });
         block_entry_frames.insert(
             block_id,
             AbstractFrame {
-                stack: Vec::new(),
+                stack: stack.clone().unwrap_or_default(),
                 locals: frame_locals,
             },
         );
-        merges.phis.insert(
-            block_id,
-            PhiSet {
-                locals,
-                stack: None,
-            },
-        );
+        merges.phis.insert(block_id, PhiSet { locals, stack });
     }
 
     let mut handler_caught: HashMap<BlockId, ValueId> = HashMap::new();
+    if binds_at_call {
+        // Reached by falling out of the binding, which stops there, and by the first `next`,
+        // which starts there: both with an empty operand stack and the locals in the frame.
+        graph.seam_block = Some(pc_to_containing_block(proto.prologue_end as usize));
+    }
     for (b_idx, &(start, end)) in block_ranges.iter().enumerate() {
         let block_id = BlockId(b_idx as u32);
         let mut frame = block_entry_frames
@@ -755,6 +839,9 @@ pub fn build_function_graph(
                 stack: Vec::new(),
                 locals: HashMap::new(),
             });
+        if suspends && b_idx != 0 {
+            frame.locals.clear();
+        }
 
         let mut operations = Vec::new();
         let mut terminator = Terminator::Unreachable;
@@ -831,18 +918,18 @@ pub fn build_function_graph(
                 Instruction::Pop => {
                     frame.stack.pop();
                 }
+                Instruction::Dup2 => {
+                    let n = frame.stack.len();
+                    if n >= 2 {
+                        let a = frame.stack[n - 2];
+                        let b = frame.stack[n - 1];
+                        frame.stack.push(a);
+                        frame.stack.push(b);
+                    }
+                }
                 Instruction::Dup => {
                     if let Some(&top) = frame.stack.last() {
                         frame.stack.push(top);
-                    }
-                }
-                Instruction::Dup2 => {
-                    let len = frame.stack.len();
-                    if len >= 2 {
-                        let a = frame.stack[len - 2];
-                        let b = frame.stack[len - 1];
-                        frame.stack.push(a);
-                        frame.stack.push(b);
                     }
                 }
                 Instruction::Unary(op) => {
@@ -1015,45 +1102,6 @@ pub fn build_function_graph(
                     ));
                     frame.stack.push(result);
                 }
-                Instruction::CallComputed { argc } => {
-                    let mut args = Vec::with_capacity(*argc as usize);
-                    for _ in 0..*argc {
-                        args.push(frame.stack.pop().unwrap_or_else(|| graph.alloc_value()));
-                    }
-                    args.reverse();
-                    let key = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
-                    let object = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
-                    let site = graph.alloc_site();
-                    let result = graph.alloc_value();
-                    operations.push((
-                        result,
-                        GraphOp::CallComputed {
-                            object,
-                            key,
-                            args,
-                            site,
-                        },
-                    ));
-                    frame.stack.push(result);
-                }
-                Instruction::HostCall { op, argc } => {
-                    let mut args = Vec::with_capacity(*argc as usize);
-                    for _ in 0..*argc {
-                        args.push(frame.stack.pop().unwrap_or_else(|| graph.alloc_value()));
-                    }
-                    args.reverse();
-                    let site = graph.alloc_site();
-                    let result = graph.alloc_value();
-                    operations.push((
-                        result,
-                        GraphOp::HostCall {
-                            op: *op,
-                            args,
-                            site,
-                        },
-                    ));
-                    frame.stack.push(result);
-                }
                 Instruction::GetProperty(name) => {
                     let object = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
                     let site = graph.alloc_site();
@@ -1167,32 +1215,6 @@ pub fn build_function_graph(
                     operations.push((result, GraphOp::NewArray { elements, site }));
                     frame.stack.push(result);
                 }
-                Instruction::IterableToArray => {
-                    let iter = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
-                    let result = graph.alloc_value();
-                    operations.push((result, GraphOp::IterableToArray(iter)));
-                    frame.stack.push(result);
-                }
-                Instruction::SpreadInto => {
-                    let iter = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
-                    let target = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
-                    let result = graph.alloc_value();
-                    operations.push((
-                        result,
-                        GraphOp::SpreadInto {
-                            target,
-                            iterable: iter,
-                        },
-                    ));
-                    frame.stack.push(result);
-                }
-                Instruction::ToPropertyKey => {
-                    let key = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
-                    let object = *frame.stack.last().unwrap_or(&key);
-                    let result = graph.alloc_value();
-                    operations.push((result, GraphOp::ToPropertyKey { object, key }));
-                    frame.stack.push(result);
-                }
                 Instruction::LoadThis => {
                     let result = graph.alloc_value();
                     operations.push((result, GraphOp::LoadThis));
@@ -1201,16 +1223,6 @@ pub fn build_function_graph(
                 Instruction::LoadNewTarget => {
                     let result = graph.alloc_value();
                     operations.push((result, GraphOp::LoadNewTarget));
-                    frame.stack.push(result);
-                }
-                Instruction::LoadArguments => {
-                    let result = graph.alloc_value();
-                    operations.push((result, GraphOp::LoadArguments));
-                    frame.stack.push(result);
-                }
-                Instruction::RestArguments(offset) => {
-                    let result = graph.alloc_value();
-                    operations.push((result, GraphOp::RestArguments(*offset)));
                     frame.stack.push(result);
                 }
                 Instruction::LoadUpvalue(index) => {
@@ -1304,133 +1316,17 @@ pub fn build_function_graph(
                     operations.push((res, GraphOp::MarkUninitialized(*slot)));
                     frame.locals.insert(*slot, res);
                 }
-                Instruction::Yield => {
-                    let val = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
-                    let resume_block = pc_to_containing_block(pc + 1);
-                    terminator = Terminator::Yield {
-                        value: val,
-                        resume: resume_block,
-                    };
-                    successors.push(resume_block);
-                    propagate_frame(
-                        &mut block_entry_frames,
-                        &mut merges,
-                        block_id,
-                        resume_block,
-                        &frame,
-                        &mut graph,
-                        &mut operations,
-                    );
-                }
-                Instruction::Await => {
-                    let promise = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
-                    let resume_block = pc_to_containing_block(pc + 1);
-                    terminator = Terminator::Await {
-                        promise,
-                        resume: resume_block,
-                    };
-                    successors.push(resume_block);
-                    propagate_frame(
-                        &mut block_entry_frames,
-                        &mut merges,
-                        block_id,
-                        resume_block,
-                        &frame,
-                        &mut graph,
-                        &mut operations,
-                    );
-                }
-                Instruction::SetPrototype => {
-                    let prototype = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
-                    let object = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
-                    let res = graph.alloc_value();
-                    operations.push((res, GraphOp::SetPrototype { object, prototype }));
-                    frame.stack.push(res);
-                }
-                Instruction::LoadSuperProperty(name) => {
-                    let proto_val = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
-                    let res = graph.alloc_value();
-                    operations.push((
-                        res,
-                        GraphOp::SuperGet {
-                            prototype: proto_val,
-                            name: *name,
-                        },
-                    ));
-                    frame.stack.push(res);
-                }
-                Instruction::LoadSuperElement => {
-                    let proto_val = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
-                    let key = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
-                    let site = graph.alloc_site();
-                    let res = graph.alloc_value();
-                    operations.push((
-                        res,
-                        GraphOp::GetComputed {
-                            object: proto_val,
-                            key,
-                            site,
-                        },
-                    ));
-                    frame.stack.push(res);
-                }
-                Instruction::SuperCall { argc } => {
-                    let mut args = Vec::with_capacity(*argc as usize);
-                    for _ in 0..*argc {
-                        args.push(frame.stack.pop().unwrap_or_else(|| graph.alloc_value()));
-                    }
-                    args.reverse();
-                    let ctor = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
-                    let res = graph.alloc_value();
-                    operations.push((
-                        res,
-                        GraphOp::SuperCall {
-                            constructor: ctor,
-                            args,
-                        },
-                    ));
-                    frame.stack.push(res);
-                }
-                Instruction::GetPrivate(slot) => {
-                    let object = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
-                    let res = graph.alloc_value();
-                    operations.push((
-                        res,
-                        GraphOp::PrivateGet {
-                            object,
-                            slot: *slot,
-                        },
-                    ));
-                    frame.stack.push(res);
-                }
-                Instruction::SetPrivate(slot) => {
+                Instruction::Yield | Instruction::Await => {
                     let value = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
-                    let object = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
-                    let res = graph.alloc_value();
-                    operations.push((
-                        res,
-                        GraphOp::PrivateSet {
-                            object,
-                            slot: *slot,
-                            value,
-                        },
-                    ));
-                    frame.stack.push(res);
-                }
-                Instruction::DirectEval(_) => {
-                    let mut args = Vec::new();
-                    if let Some(arg) = frame.stack.pop() {
-                        args.push(arg);
-                    }
-                    let res = graph.alloc_value();
-                    operations.push((res, GraphOp::DirectEval { site_idx: 0, args }));
-                    frame.stack.push(res);
-                }
-                Instruction::DynamicImport => {
-                    let specifier = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
-                    let res = graph.alloc_value();
-                    operations.push((res, GraphOp::ImportDynamic(specifier)));
-                    frame.stack.push(res);
+                    let spilled = frame.stack.clone();
+                    let resume_block = pc_to_containing_block(pc + 1);
+                    terminator = Terminator::Suspend {
+                        value,
+                        resume: resume_block,
+                        spilled,
+                        pc: pc as u32,
+                        awaiting: matches!(inst, Instruction::Await),
+                    };
                 }
                 Instruction::PushHandler(target) => {
                     // The handler starts with the operand stack as it is here, plus the thrown
@@ -1448,10 +1344,33 @@ pub fn build_function_graph(
                 }
                 Instruction::PopHandler => {}
                 other => {
-                    return Err(UnsupportedInstruction {
-                        pc,
-                        instruction: format!("{other:?}"),
-                    });
+                    let Some((pops, pushes)) = bridge_effect(other) else {
+                        return Err(UnsupportedInstruction {
+                            pc,
+                            instruction: format!("{other:?}"),
+                        });
+                    };
+                    let mut operands = Vec::with_capacity(pops);
+                    for _ in 0..pops {
+                        operands.push(frame.stack.pop().unwrap_or_else(|| graph.alloc_value()));
+                    }
+                    operands.reverse();
+                    let res = graph.alloc_value();
+                    if pushes == 2 {
+                        // `ToPropertyKey` leaves its object where it was and a converted key.
+                        frame.stack.push(operands[0]);
+                    }
+                    operations.push((
+                        res,
+                        GraphOp::Bridge {
+                            instruction: other.clone(),
+                            operands,
+                            pushes,
+                        },
+                    ));
+                    if pushes > 0 {
+                        frame.stack.push(res);
+                    }
                 }
             }
             if operations.len() > ops_before {

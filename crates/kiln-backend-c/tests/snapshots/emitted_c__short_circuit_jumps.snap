@@ -7,30 +7,33 @@ static void kiln_module_8ca772a3fa0fe49e5a5163ad33b17013_gc_roots(void *heap, vo
     kiln_c99_gc_unit_roots(heap, context, phase);
 }
 int kiln_module_8ca772a3fa0fe49e5a5163ad33b17013(kiln_host *host, kiln_value *result) {
-    size_t sp = 0;
     (void)kiln_realm_gc_register_roots(kiln_module_8ca772a3fa0fe49e5a5163ad33b17013_gc_roots, NULL, 0);
-    kiln_val stack[2];
+    kiln_val receiver = KILN_VAL_UNDEFINED; (void)receiver;
     kiln_val locals[1];
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     kiln_c99_reset_diagnostics();
-kiln_label_0:;
-    stack[sp++] = KILN_VAL_NULL;
-kiln_label_1:;
-    stack[sp] = stack[sp - 1]; ++sp;
-kiln_label_2:;
-    if (kiln_c99_val_truthy(stack[--sp])) goto kiln_label_5;
-kiln_label_3:;
-    stack[sp] = stack[sp - 1]; ++sp;
-kiln_label_4:;
-    { kiln_val value = stack[--sp]; if (!KILN_VAL_IS_NULLISH(value)) goto kiln_label_5; }
-kiln_label_5:;
-    --sp;
-kiln_label_6:;
-    stack[sp++] = UINT64_C(4607182418800017408);
-kiln_label_7:;
-    *result = sp == 0 ? kiln_c99_undefined() : kiln_val_to_boundary(stack[--sp]); return KILN_C99_OK;
-    goto kiln_refusal;
-kiln_refusal:;
-    *result = kiln_c99_control_diagnostic();
-    return KILN_C99_CONTROL_ERROR;
+    for (size_t slot = 0; slot < (size_t)1; ++slot) locals[slot] = KILN_VAL_UNDEFINED;
+    double d2 = 0.0;
+    kiln_val v0 = KILN_VAL_UNDEFINED, v1 = KILN_VAL_UNDEFINED, v2 = KILN_VAL_UNDEFINED;
+kiln_block_0:;
+    v0 = KILN_VAL_NULL;
+    if (kiln_c99_val_truthy(v0)) {
+        { kiln_val phi_t0 = v0; v1 = phi_t0; }
+        goto kiln_block_2;
+    } else {
+        goto kiln_block_1;
+    }
+kiln_block_1:;
+    if (kiln_c99_val_truthy(v0)) {
+        { kiln_val phi_t0 = v0; v1 = phi_t0; }
+        goto kiln_block_2;
+    } else {
+        { kiln_val phi_t0 = v0; v1 = phi_t0; }
+        goto kiln_block_2;
+    }
+kiln_block_2:;
+    v2 = UINT64_C(4607182418800017408);
+    memcpy(&d2, &v2, sizeof(d2));
+    *result = kiln_val_to_boundary(v2);
+    return KILN_C99_OK;
 }

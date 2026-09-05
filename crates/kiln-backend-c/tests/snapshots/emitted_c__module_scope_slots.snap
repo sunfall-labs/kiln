@@ -32,41 +32,31 @@ kiln_refusal:;
     return KILN_C99_CONTROL_ERROR;
 }
 static int kiln_module_f4d3dbd71fb25e3e751b47bde606576f_body(kiln_host *host, kiln_value *result) {
-    size_t sp = 0;
     (void)kiln_realm_gc_register_roots(kiln_module_f4d3dbd71fb25e3e751b47bde606576f_gc_roots, NULL, 0);
+    kiln_val receiver = KILN_VAL_UNDEFINED; (void)receiver;
     int depth = 0;
     kiln_value thrown_value = kiln_c99_undefined();
     kiln_value *thrown = &thrown_value;
-    kiln_val stack[1];
     kiln_val *locals = kiln_module_f4d3dbd71fb25e3e751b47bde606576f_globals;
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     kiln_c99_reset_diagnostics();
-    locals[0] = KILN_VAL_UNDEFINED;
-    locals[1] = KILN_VAL_UNDEFINED;
-kiln_label_0:;
-    stack[sp++] = UINT64_C(4613937818241073152);
-kiln_label_1:;
-    kiln_module_f4d3dbd71fb25e3e751b47bde606576f_globals[0] = stack[--sp];
-kiln_label_2:;
-    {
-        kiln_value built; int status;
-        status = kiln_c99_make_closure(&built, kiln_module_f4d3dbd71fb25e3e751b47bde606576f_fn_0, kiln_module_f4d3dbd71fb25e3e751b47bde606576f_name_0, 4, NULL, 0, "kiln_module_f4d3dbd71fb25e3e751b47bde606576f", UINT32_C(0), UINT32_C(0), 0, 0, 0, 0, 1, KILN_VAL_UNDEFINED, kiln_val_from_boundary(kiln_c99_new_target), UINT32_C(1), UINT32_C(1), UINT32_C(2), UINT32_C(0), NULL, UINT32_C(0));
-        if (status == KILN_C99_CONTROL_ERROR || status == KILN_C99_THROWN) { kiln_c99_note_refusal("kiln_module_f4d3dbd71fb25e3e751b47bde606576f", (size_t)2, "MakeFunction", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status;
-        kiln_c99_closure_of(built)->publishes_frame = 0;
-        stack[sp++] = kiln_val_from_boundary(built);
-    }
-kiln_label_3:;
-    locals[1] = stack[--sp];
-kiln_label_4:;
-    stack[sp++] = locals[1];
-kiln_label_5:;
-    *result = sp == 0 ? kiln_c99_undefined() : kiln_val_to_boundary(stack[--sp]);
+    for (size_t slot = 0; slot < (size_t)2; ++slot) locals[slot] = KILN_VAL_UNDEFINED;
+    double d2 = 0.0, d3 = 0.0;
+    kiln_val v0 = KILN_VAL_UNDEFINED, v1 = KILN_VAL_UNDEFINED, v2 = KILN_VAL_UNDEFINED, v3 = KILN_VAL_UNDEFINED, v4 = KILN_VAL_UNDEFINED, v5 = KILN_VAL_UNDEFINED;
+kiln_block_0:;
+    v0 = locals[0];
+    v1 = locals[1];
+    v2 = UINT64_C(4613937818241073152);
+    memcpy(&d2, &v2, sizeof(d2));
+    kiln_module_f4d3dbd71fb25e3e751b47bde606576f_globals[0] = v2;
+    v3 = v2;
+    d3 = d2;
+    { kiln_value built; int status = kiln_c99_make_closure(&built, kiln_module_f4d3dbd71fb25e3e751b47bde606576f_fn_0, kiln_module_f4d3dbd71fb25e3e751b47bde606576f_name_0, 4, NULL, 0, "kiln_module_f4d3dbd71fb25e3e751b47bde606576f", UINT32_C(0), UINT32_C(0), 0, 0, 0, 0, 1, KILN_VAL_UNDEFINED, kiln_val_from_boundary(kiln_c99_new_target), UINT32_C(1), UINT32_C(1), UINT32_C(2), UINT32_C(0), NULL, UINT32_C(0)); if (status != KILN_C99_OK) return status; kiln_c99_closure_of(built)->publishes_frame = 0; v4 = kiln_val_from_boundary(built); }
+    locals[1] = v4;
+    v5 = v4;
+    *result = kiln_val_to_boundary(v4);
     if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);
     return KILN_C99_OK;
-    goto kiln_refusal;
-kiln_refusal:;
-    *result = kiln_c99_control_diagnostic();
-    return KILN_C99_CONTROL_ERROR;
 }
 
 typedef struct kiln_module_f4d3dbd71fb25e3e751b47bde606576f_realm_context {

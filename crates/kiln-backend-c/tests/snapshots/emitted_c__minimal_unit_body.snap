@@ -7,18 +7,15 @@ static void kiln_module_6f821f3641b87c4fcf58a3af90bd2540_gc_roots(void *heap, vo
     kiln_c99_gc_unit_roots(heap, context, phase);
 }
 int kiln_module_6f821f3641b87c4fcf58a3af90bd2540(kiln_host *host, kiln_value *result) {
-    size_t sp = 0;
     (void)kiln_realm_gc_register_roots(kiln_module_6f821f3641b87c4fcf58a3af90bd2540_gc_roots, NULL, 0);
-    kiln_val stack[1];
+    kiln_val receiver = KILN_VAL_UNDEFINED; (void)receiver;
     kiln_val locals[1];
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     kiln_c99_reset_diagnostics();
-kiln_label_0:;
-    stack[sp++] = KILN_VAL_UNDEFINED;
-kiln_label_1:;
-    *result = sp == 0 ? kiln_c99_undefined() : kiln_val_to_boundary(stack[--sp]); return KILN_C99_OK;
-    goto kiln_refusal;
-kiln_refusal:;
-    *result = kiln_c99_control_diagnostic();
-    return KILN_C99_CONTROL_ERROR;
+    for (size_t slot = 0; slot < (size_t)1; ++slot) locals[slot] = KILN_VAL_UNDEFINED;
+    kiln_val v0 = KILN_VAL_UNDEFINED;
+kiln_block_0:;
+    v0 = KILN_VAL_UNDEFINED;
+    *result = kiln_val_to_boundary(v0);
+    return KILN_C99_OK;
 }
