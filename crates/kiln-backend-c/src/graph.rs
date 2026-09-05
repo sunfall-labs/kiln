@@ -330,6 +330,7 @@ struct AbstractFrame {
 /// there marked `a - b` a number without looking at `a` or `b`, which is wrong for bigints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Proven {
+    Int,
     Number,
     Boolean,
     String,
@@ -337,6 +338,285 @@ pub enum Proven {
     Callable,
     Undefined,
     Null,
+}
+
+impl Proven {
+    pub fn is_number(&self) -> bool {
+        matches!(self, Proven::Int | Proven::Number)
+    }
+
+    pub fn is_int(&self) -> bool {
+        matches!(self, Proven::Int)
+    }
+}
+
+/// An induction variable proven to govern a loop.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InductionVariable {
+    pub phi: ValueId,
+    pub init: ValueId,
+    pub step_op: ValueId,
+    pub step: i64,
+    pub bound: ValueId,
+    pub bound_val: Option<i64>,
+    pub min: i64,
+    pub max: i64,
+    pub non_negative: bool,
+}
+
+/// Helper to identify constant integers within safe integer range [-2^53 + 1, 2^53 - 1].
+pub fn as_safe_integer(constant: &Constant) -> Option<i64> {
+    if let Constant::Number(bits) = constant {
+        let val = f64::from_bits(*bits);
+        if val.is_finite()
+            && val.floor() == val
+            && (-9007199254740991.0..=9007199254740991.0).contains(&val)
+            && (val != 0.0 || *bits == 0)
+        {
+            return Some(val as i64);
+        }
+    }
+    None
+}
+
+/// Find loop induction variables in `graph`.
+///
+/// An induction variable starts at an integer `init`, is stepped in each iteration by an integer
+/// `step`, and is bounded by `bound` within safe integer range `[-2^53 + 1, 2^53 - 1]`.
+pub fn find_induction_variables(graph: &FunctionGraph) -> HashMap<ValueId, InductionVariable> {
+    let mut result = HashMap::new();
+    let defs: HashMap<ValueId, (BlockId, &GraphOp)> = graph
+        .blocks
+        .iter()
+        .flat_map(|b| b.operations.iter().map(move |(v, op)| (*v, (b.id, op))))
+        .collect();
+
+    let resolve_alias = |mut v: ValueId| -> ValueId {
+        for _ in 0..10 {
+            match defs.get(&v) {
+                Some((
+                    _,
+                    GraphOp::Unary {
+                        op: UnaryOp::ToNumeric | UnaryOp::Plus,
+                        value,
+                    },
+                )) => {
+                    v = *value;
+                }
+                Some((_, GraphOp::StoreLocal { value, .. })) => {
+                    v = *value;
+                }
+                Some((_, GraphOp::CheckTdz { value, .. })) => {
+                    v = *value;
+                }
+                _ => break,
+            }
+        }
+        v
+    };
+
+    let int_const = |vid: ValueId| -> Option<i64> {
+        let resolved = resolve_alias(vid);
+        if let Some((_, GraphOp::Const { constant, .. })) = defs.get(&resolved) {
+            as_safe_integer(constant)
+        } else {
+            None
+        }
+    };
+
+    for block in &graph.blocks {
+        if block.predecessors.len() < 2 {
+            continue;
+        }
+        let condition_vid = match block.terminator {
+            Terminator::Branch { condition, .. } => condition,
+            _ => continue,
+        };
+        let (cmp_op, cmp_left, cmp_right) = match defs.get(&resolve_alias(condition_vid)) {
+            Some((_, GraphOp::Binary { op, left, right })) => (*op, *left, *right),
+            _ => continue,
+        };
+
+        for &(phi_vid, ref op) in &block.operations {
+            let inputs = match op {
+                GraphOp::Phi { inputs } if inputs.len() == 2 => inputs,
+                _ => continue,
+            };
+
+            // One input from entry (predecessor id < block.id), one from back-edge (predecessor id >= block.id)
+            let (init_vid, step_vid) = if inputs[0].0.0 < block.id.0 && inputs[1].0.0 >= block.id.0
+            {
+                (inputs[0].1, inputs[1].1)
+            } else if inputs[1].0.0 < block.id.0 && inputs[0].0.0 >= block.id.0 {
+                (inputs[1].1, inputs[0].1)
+            } else {
+                continue;
+            };
+
+            let init_val = match int_const(init_vid) {
+                Some(v) => v,
+                None => continue,
+            };
+
+            let resolved_step = resolve_alias(step_vid);
+            let mut step_sources = Vec::new();
+            let step = match defs.get(&resolved_step) {
+                Some((_, GraphOp::Binary { op, left, right })) => {
+                    let s_left = resolve_alias(*left);
+                    let s_right = resolve_alias(*right);
+                    if s_left == phi_vid && matches!(op, BinaryOp::Add | BinaryOp::Subtract) {
+                        let s_val = match int_const(*right) {
+                            Some(v) => v,
+                            None => continue,
+                        };
+                        step_sources.push(*left);
+                        if *op == BinaryOp::Add { s_val } else { -s_val }
+                    } else if s_right == phi_vid && *op == BinaryOp::Add {
+                        let s_val = match int_const(*left) {
+                            Some(v) => v,
+                            None => continue,
+                        };
+                        step_sources.push(*right);
+                        s_val
+                    } else {
+                        continue;
+                    }
+                }
+                Some((_, GraphOp::Unary { op, value })) => {
+                    let s_val = resolve_alias(*value);
+                    if s_val == phi_vid {
+                        step_sources.push(*value);
+                        match op {
+                            UnaryOp::Increment => 1,
+                            UnaryOp::Decrement => -1,
+                            _ => continue,
+                        }
+                    } else {
+                        continue;
+                    }
+                }
+                _ => continue,
+            };
+
+            if step == 0 {
+                continue;
+            }
+
+            let (is_phi_left, bound_vid) = if resolve_alias(cmp_left) == phi_vid {
+                (true, cmp_right)
+            } else if resolve_alias(cmp_right) == phi_vid {
+                (false, cmp_left)
+            } else {
+                continue;
+            };
+
+            let bound_val = int_const(bound_vid);
+            let mut valid = false;
+            let mut min = init_val;
+            let mut max = init_val;
+            let mut non_neg = init_val >= 0;
+
+            if let Some(b_val) = bound_val {
+                if step > 0 {
+                    let continues_on_less = (is_phi_left
+                        && matches!(cmp_op, BinaryOp::LessThan | BinaryOp::LessThanOrEqual))
+                        || (!is_phi_left
+                            && matches!(
+                                cmp_op,
+                                BinaryOp::GreaterThan | BinaryOp::GreaterThanOrEqual
+                            ));
+                    if continues_on_less && init_val <= b_val {
+                        min = init_val;
+                        max = (b_val + step).max(init_val);
+                        valid = min >= -9007199254740991 && max <= 9007199254740991;
+                        non_neg = min >= 0;
+                    }
+                } else {
+                    let continues_on_greater = (is_phi_left
+                        && matches!(cmp_op, BinaryOp::GreaterThan | BinaryOp::GreaterThanOrEqual))
+                        || (!is_phi_left
+                            && matches!(cmp_op, BinaryOp::LessThan | BinaryOp::LessThanOrEqual));
+                    if continues_on_greater && init_val >= b_val {
+                        max = init_val;
+                        min = (b_val + step).min(init_val);
+                        valid = min >= -9007199254740991 && max <= 9007199254740991;
+                        non_neg = min >= 0;
+                    }
+                }
+            }
+
+            if valid {
+                let iv = InductionVariable {
+                    phi: phi_vid,
+                    init: init_vid,
+                    step_op: step_vid,
+                    step,
+                    bound: bound_vid,
+                    bound_val,
+                    min,
+                    max,
+                    non_negative: non_neg,
+                };
+                result.insert(phi_vid, iv.clone());
+                result.insert(step_vid, iv.clone());
+                result.insert(resolved_step, iv.clone());
+
+                let mut cur = step_vid;
+                while cur != resolved_step {
+                    result.insert(cur, iv.clone());
+                    match defs.get(&cur) {
+                        Some((
+                            _,
+                            GraphOp::Unary {
+                                op: UnaryOp::ToNumeric | UnaryOp::Plus,
+                                value: next,
+                            },
+                        )) => cur = *next,
+                        Some((_, GraphOp::StoreLocal { value: next, .. })) => cur = *next,
+                        Some((_, GraphOp::CheckTdz { value: next, .. })) => cur = *next,
+                        _ => break,
+                    }
+                }
+
+                for s in step_sources {
+                    let mut cur = s;
+                    while cur != phi_vid {
+                        result.insert(cur, iv.clone());
+                        match defs.get(&cur) {
+                            Some((
+                                _,
+                                GraphOp::Unary {
+                                    op: UnaryOp::ToNumeric | UnaryOp::Plus,
+                                    value: next,
+                                },
+                            )) => cur = *next,
+                            Some((_, GraphOp::StoreLocal { value: next, .. })) => cur = *next,
+                            Some((_, GraphOp::CheckTdz { value: next, .. })) => cur = *next,
+                            _ => break,
+                        }
+                    }
+                }
+
+                let mut cur = if is_phi_left { cmp_left } else { cmp_right };
+                while cur != phi_vid {
+                    result.insert(cur, iv.clone());
+                    match defs.get(&cur) {
+                        Some((
+                            _,
+                            GraphOp::Unary {
+                                op: UnaryOp::ToNumeric | UnaryOp::Plus,
+                                value: next,
+                            },
+                        )) => cur = *next,
+                        Some((_, GraphOp::StoreLocal { value: next, .. })) => cur = *next,
+                        Some((_, GraphOp::CheckTdz { value: next, .. })) => cur = *next,
+                        _ => break,
+                    }
+                }
+            }
+        }
+    }
+    result
 }
 
 pub fn proven_types(graph: &FunctionGraph) -> HashMap<ValueId, Proven> {
@@ -350,6 +630,7 @@ pub fn proven_types_with(
     graph: &FunctionGraph,
     assumptions: &HashMap<ValueId, Proven>,
 ) -> HashMap<ValueId, Proven> {
+    let ivs = find_induction_variables(graph);
     // A resume target's stack phis also take what a suspend spilled and what the caller sent,
     // neither of which is an input here, so they prove nothing.
     let resume_targets: std::collections::HashSet<BlockId> = graph
@@ -370,7 +651,29 @@ pub fn proven_types_with(
         state.insert(vid, Some(kind));
     }
     let number = |state: &HashMap<ValueId, Option<Proven>>, v: &ValueId| {
-        matches!(state.get(v), Some(None) | Some(Some(Proven::Number)))
+        matches!(
+            state.get(v),
+            Some(None) | Some(Some(Proven::Number | Proven::Int))
+        )
+    };
+    let int = |state: &HashMap<ValueId, Option<Proven>>, v: &ValueId| {
+        matches!(state.get(v), Some(None) | Some(Some(Proven::Int)))
+    };
+    let is_non_zero = |v: &ValueId| -> bool {
+        for b in &graph.blocks {
+            for (vid, op) in &b.operations {
+                if vid == v
+                    && let GraphOp::Const { constant, .. } = op
+                    && let Some(n) = as_safe_integer(constant)
+                {
+                    return n != 0;
+                }
+            }
+        }
+        if let Some(iv) = ivs.get(v) {
+            return (iv.non_negative && iv.min > 0) || iv.max < 0;
+        }
+        false
     };
     loop {
         let mut changed = false;
@@ -380,9 +683,19 @@ pub fn proven_types_with(
                     finish(&mut state, vid, Some(assumed), &mut changed);
                     continue;
                 }
+                if ivs.contains_key(vid) {
+                    finish(&mut state, vid, Some(Proven::Int), &mut changed);
+                    continue;
+                }
                 let verdict: Option<Proven> = match op {
                     GraphOp::Const { constant, .. } => Some(match constant {
-                        Constant::Number(_) => Proven::Number,
+                        Constant::Number(_) => {
+                            if as_safe_integer(constant).is_some() {
+                                Proven::Int
+                            } else {
+                                Proven::Number
+                            }
+                        }
                         Constant::String(_) => Proven::String,
                         Constant::Boolean(_) => Proven::Boolean,
                         Constant::Undefined => Proven::Undefined,
@@ -403,6 +716,32 @@ pub fn proven_types_with(
                         | BinaryOp::GreaterThanOrEqual
                         | BinaryOp::In
                         | BinaryOp::InstanceOf => Some(Proven::Boolean),
+                        BinaryOp::BitwiseAnd
+                        | BinaryOp::BitwiseOr
+                        | BinaryOp::BitwiseXor
+                        | BinaryOp::ShiftLeft
+                        | BinaryOp::ShiftRight
+                        | BinaryOp::UnsignedShiftRight => {
+                            (number(&state, left) && number(&state, right)).then_some(Proven::Int)
+                        }
+                        BinaryOp::Remainder => {
+                            if int(&state, left) && int(&state, right) && is_non_zero(right) {
+                                Some(Proven::Int)
+                            } else if number(&state, left) && number(&state, right) {
+                                Some(Proven::Number)
+                            } else {
+                                None
+                            }
+                        }
+                        BinaryOp::Add | BinaryOp::Subtract => {
+                            if int(&state, left) && int(&state, right) {
+                                Some(Proven::Int)
+                            } else if number(&state, left) && number(&state, right) {
+                                Some(Proven::Number)
+                            } else {
+                                None
+                            }
+                        }
                         _ => (number(&state, left) && number(&state, right))
                             .then_some(Proven::Number),
                     },
@@ -410,6 +749,19 @@ pub fn proven_types_with(
                         UnaryOp::Not => Some(Proven::Boolean),
                         UnaryOp::TypeOf => Some(Proven::String),
                         UnaryOp::Void => Some(Proven::Undefined),
+                        UnaryOp::BitwiseNot => number(&state, value).then_some(Proven::Int),
+                        UnaryOp::Increment
+                        | UnaryOp::Decrement
+                        | UnaryOp::ToNumeric
+                        | UnaryOp::Plus => {
+                            if int(&state, value) {
+                                Some(Proven::Int)
+                            } else if number(&state, value) {
+                                Some(Proven::Number)
+                            } else {
+                                None
+                            }
+                        }
                         _ => number(&state, value).then_some(Proven::Number),
                     },
                     GraphOp::NewArray { .. } => Some(Proven::Object),
@@ -432,6 +784,9 @@ pub fn proven_types_with(
                                 Some(kind) => match agreed {
                                     None => agreed = Some(kind),
                                     Some(prior) if prior == kind => {}
+                                    Some(prior) if prior.is_number() && kind.is_number() => {
+                                        agreed = Some(Proven::Number);
+                                    }
                                     Some(_) => {
                                         disagree = true;
                                         break;
@@ -485,6 +840,13 @@ fn finish(
                 }
             }
         }
+        Some(Some(Proven::Int)) if verdict == Some(Proven::Number) => {
+            state.insert(*vid, Some(Proven::Number));
+            *changed = true;
+        }
+        Some(Some(Proven::Number)) if verdict == Some(Proven::Int) => {
+            // Already widened to Number; stay at Number.
+        }
         Some(Some(prior)) if verdict != Some(prior) => {
             state.remove(vid);
             *changed = true;
@@ -505,7 +867,23 @@ pub fn proven_numbers_with_assumptions(
 ) -> std::collections::HashSet<ValueId> {
     proven_types_with(graph, assumptions)
         .into_iter()
-        .filter_map(|(vid, kind)| (kind == Proven::Number).then_some(vid))
+        .filter_map(|(vid, kind)| kind.is_number().then_some(vid))
+        .collect()
+}
+
+/// The values proven to be integers; what the emitter can type as `int64_t`.
+pub fn proven_ints(graph: &FunctionGraph) -> std::collections::HashSet<ValueId> {
+    proven_ints_with_assumptions(graph, &HashMap::new())
+}
+
+/// The values proven to be integers given speculative assumptions about initial values/parameters.
+pub fn proven_ints_with_assumptions(
+    graph: &FunctionGraph,
+    assumptions: &HashMap<ValueId, Proven>,
+) -> std::collections::HashSet<ValueId> {
+    proven_types_with(graph, assumptions)
+        .into_iter()
+        .filter_map(|(vid, kind)| (kind == Proven::Int).then_some(vid))
         .collect()
 }
 

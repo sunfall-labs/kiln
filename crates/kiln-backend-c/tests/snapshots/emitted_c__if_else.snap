@@ -13,6 +13,7 @@ int kiln_module_c70bd423efb3360c37fc005bdc12d30d(kiln_host *host, kiln_value *re
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     kiln_c99_reset_diagnostics();
     for (size_t slot = 0; slot < (size_t)1; ++slot) locals[slot] = KILN_VAL_UNDEFINED;
+    int64_t i3 = 0, i4 = 0, i5 = 0, i6 = 0;
     double d3 = 0.0, d4 = 0.0, d5 = 0.0, d6 = 0.0;
     kiln_val v0 = KILN_VAL_UNDEFINED, v1 = KILN_VAL_UNDEFINED, v2 = KILN_VAL_UNDEFINED, v3 = KILN_VAL_UNDEFINED, v4 = KILN_VAL_UNDEFINED, v5 = KILN_VAL_UNDEFINED, v6 = KILN_VAL_UNDEFINED;
 kiln_block_0:;
@@ -26,16 +27,19 @@ kiln_block_0:;
 kiln_block_1:;
     v3 = UINT64_C(4607182418800017408);
     memcpy(&d3, &v3, sizeof(d3));
-        { kiln_val phi_t0 = v0; kiln_val phi_t1 = v3; v1 = phi_t0; v4 = phi_t1; d4 = d3; }
+    i3 = 1LL;
+        { kiln_val phi_t0 = v0; kiln_val phi_t1 = v3; double phi_td1 = d3; int64_t phi_ti1 = i3; v1 = phi_t0; v4 = phi_t1; d4 = phi_td1; i4 = phi_ti1; }
     goto kiln_block_3;
 kiln_block_2:;
     v5 = UINT64_C(4611686018427387904);
     memcpy(&d5, &v5, sizeof(d5));
-        { kiln_val phi_t0 = v0; kiln_val phi_t1 = v5; v1 = phi_t0; v4 = phi_t1; d4 = d5; }
+    i5 = 2LL;
+        { kiln_val phi_t0 = v0; kiln_val phi_t1 = v5; double phi_td1 = d5; int64_t phi_ti1 = i5; v1 = phi_t0; v4 = phi_t1; d4 = phi_td1; i4 = phi_ti1; }
     goto kiln_block_3;
 kiln_block_3:;
     v6 = v4;
     d6 = d4;
+    i6 = i4;
     *result = kiln_val_to_boundary(v4);
     return KILN_C99_OK;
 }

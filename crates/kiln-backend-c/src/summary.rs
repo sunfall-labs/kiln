@@ -124,7 +124,7 @@ pub fn summarize_graph(graph: &FunctionGraph) -> FunctionSummary {
     for block in &graph.blocks {
         for (vid, op) in &block.operations {
             let guess = match proven.get(vid) {
-                Some(Proven::Number) => TypeGuess::Number,
+                Some(Proven::Int | Proven::Number) => TypeGuess::Number,
                 Some(Proven::Boolean) => TypeGuess::Boolean,
                 Some(Proven::String) => TypeGuess::String,
                 Some(Proven::Object) => TypeGuess::Object,
