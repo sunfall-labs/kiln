@@ -62,6 +62,7 @@ pub enum Command {
         steps: StepBudget,
         /// Number of concurrent worker realms / threads sharing the listening socket.
         workers: usize,
+        march_native: bool,
     },
     Build {
         path: PathBuf,
@@ -69,6 +70,7 @@ pub enum Command {
         profile: NativeProfile,
         shared: bool,
         node: bool,
+        march_native: bool,
     },
     Test {
         path: PathBuf,
@@ -124,6 +126,7 @@ where
     let mut max_steps: Option<u64> = None;
     let mut workers: Option<usize> = None;
     let mut shared = false;
+    let mut march_native = false;
     let mut dry_run = false;
     let mut only_positional = false;
 
@@ -185,6 +188,16 @@ where
             "--profile" => {
                 let raw = value_for(&flag, inline, &mut args)?;
                 profile = Some(parse_profile(&raw)?);
+            }
+            "--march" => {
+                let raw = value_for(&flag, inline, &mut args)?;
+                if raw == "native" {
+                    march_native = true;
+                } else {
+                    return Err(Error::usage(format!(
+                        "--march expects `native`, got `{raw}`"
+                    )));
+                }
             }
             "--max-steps" => {
                 let raw = value_for(&flag, inline, &mut args)?;
@@ -258,6 +271,11 @@ where
             "--profile only applies to native `kiln run` or `kiln build`",
         ));
     }
+    if march_native && name != "build" && !native {
+        return Err(Error::usage(
+            "--march=native only applies to native `kiln run` or `kiln build`",
+        ));
+    }
     if max_steps.is_some() && name != "run" {
         return Err(Error::usage("--max-steps only applies to `kiln run`"));
     }
@@ -283,6 +301,7 @@ where
             profile: profile.unwrap_or_default(),
             steps: max_steps.map_or(StepBudget::Unmetered, StepBudget::Limited),
             workers: workers.unwrap_or(1),
+            march_native,
         },
         "build" => Command::Build {
             path: PathBuf::from(one_operand(&name, &mut positional)?),
@@ -290,6 +309,7 @@ where
             profile: profile.unwrap_or_default(),
             shared,
             node,
+            march_native,
         },
         "test" => Command::Test {
             path: PathBuf::from(one_operand(&name, &mut positional)?),
@@ -487,6 +507,8 @@ options:
     --profile <name>   native-dev, native-check, native-release, or native-profile
                        (native-profile is native-release plus gprof instrumentation;
                         see scripts/profile-native.sh)
+    --march=native     with `build` or native `run`, generate host-specific CPU
+                       instructions rather than a portable baseline
     --max-steps <n>    with `run`, refuse after n interpreter steps. Unbounded by
                        default: a program you are running yourself is not one this
                        tool needs protecting from. The conformance corpus keeps its
@@ -556,6 +578,7 @@ mod tests {
                 profile: NativeProfile::Release,
                 shared: false,
                 node: false,
+                march_native: false,
             }
         );
         assert!(matches!(
@@ -582,6 +605,7 @@ mod tests {
                 profile: NativeProfile::Check,
                 steps: StepBudget::Unmetered,
                 workers: 1,
+                march_native: false,
             }
         );
     }
@@ -837,5 +861,46 @@ mod tests {
         assert!(usage_error(&["run", "a.js", "--profile=native-dev"]).contains("only applies"));
         assert!(usage_error(&["check", "a.js", "--native"]).contains("only applies"));
         assert!(usage_error(&["build", "a.js", "--profile=debug"]).contains("expects"));
+        assert!(usage_error(&["run", "a.js", "--march=native"]).contains("only applies"));
+        assert!(usage_error(&["check", "a.js", "--march=native"]).contains("only applies"));
+        assert!(usage_error(&["build", "a.js", "--march=x86-64"]).contains("expects `native`"));
+    }
+
+    #[test]
+    fn march_native_option_parses_for_build_and_native_run() {
+        assert_eq!(
+            run(&["build", "src/main.ts", "--march=native"]).command,
+            Command::Build {
+                path: PathBuf::from("src/main.ts"),
+                output: None,
+                profile: NativeProfile::Dev,
+                shared: false,
+                node: false,
+                march_native: true,
+            }
+        );
+        assert_eq!(
+            run(&["build", "src/main.ts", "--march", "native"]).command,
+            Command::Build {
+                path: PathBuf::from("src/main.ts"),
+                output: None,
+                profile: NativeProfile::Dev,
+                shared: false,
+                node: false,
+                march_native: true,
+            }
+        );
+        assert_eq!(
+            run(&["run", "src/main.ts", "--native", "--march=native"]).command,
+            Command::Run {
+                path: PathBuf::from("src/main.ts"),
+                node: false,
+                native: true,
+                profile: NativeProfile::Dev,
+                steps: StepBudget::Unmetered,
+                workers: 1,
+                march_native: true,
+            }
+        );
     }
 }

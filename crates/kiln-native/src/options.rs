@@ -44,12 +44,23 @@ impl NativeProfile {
     }
 }
 
-/// Inputs controlled by a native-build caller.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeBuildOptions {
     pub output: PathBuf,
     pub profile: NativeProfile,
     pub realm: NativeRealmPolicy,
+    pub march_native: bool,
+}
+
+impl Default for NativeBuildOptions {
+    fn default() -> Self {
+        Self {
+            output: PathBuf::new(),
+            profile: NativeProfile::default(),
+            realm: NativeRealmPolicy::default(),
+            march_native: false,
+        }
+    }
 }
 
 impl NativeBuildOptions {
@@ -58,11 +69,17 @@ impl NativeBuildOptions {
             output: output.into(),
             profile,
             realm: NativeRealmPolicy::default(),
+            march_native: false,
         }
     }
 
     pub fn with_realm_policy(mut self, realm: NativeRealmPolicy) -> Self {
         self.realm = realm;
+        self
+    }
+
+    pub fn with_march_native(mut self, march_native: bool) -> Self {
+        self.march_native = march_native;
         self
     }
 }

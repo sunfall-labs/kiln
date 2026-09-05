@@ -935,6 +935,7 @@ fn timed_native_graph(
                 output,
                 profile: NativeProfile::Dev,
                 realm: kiln_native::NativeRealmPolicy::default(),
+                march_native: false,
             },
         )
         .map_err(|error| format!("native linked graph build: {error}"))?;

@@ -1449,6 +1449,7 @@ pub(crate) fn native_build_program(
             output,
             profile: native_profile(profile),
             realm: kiln_native::NativeRealmPolicy::host_clock(),
+            march_native: false,
         },
     ) {
         Ok(report) => native_built(&project_root, &builder, report),
@@ -1568,6 +1569,7 @@ fn prepare_native_shared_build(
             output,
             profile: native_profile(profile),
             realm: kiln_native::NativeRealmPolicy::default(),
+            march_native: false,
         },
     ))
 }
@@ -1609,6 +1611,7 @@ pub(crate) fn native_build_graph(
             output,
             profile: native_profile(profile),
             realm: kiln_native::NativeRealmPolicy::host_clock(),
+            march_native: false,
         },
     ) {
         Ok(report) => native_built(&project_root, &builder, report),
@@ -1640,6 +1643,7 @@ pub(crate) fn native_run_program(
             output,
             profile: native_profile(profile),
             realm: kiln_native::NativeRealmPolicy::default(),
+            march_native: false,
         },
     ) {
         Ok(report) => native_ran(&project_root, &builder, report),
@@ -1671,6 +1675,7 @@ pub(crate) fn native_run_graph(
             output,
             profile: native_profile(profile),
             realm: kiln_native::NativeRealmPolicy::default(),
+            march_native: false,
         },
     ) {
         Ok(report) => native_ran(&project_root, &builder, report),

@@ -413,8 +413,8 @@ impl BuildProfile {
         match self {
             Self::NativeDev => &["-O0"],
             Self::NativeCheck => &["-O0", "-g", "-fsanitize=undefined"],
-            Self::NativeRelease => &["-O3", "-ffp-contract=fast", "-march=native"],
-            Self::NativeProfile => &["-O3", "-ffp-contract=fast", "-march=native", "-pg"],
+            Self::NativeRelease => &["-O3", "-ffp-contract=off"],
+            Self::NativeProfile => &["-O3", "-ffp-contract=off", "-pg"],
         }
     }
 
@@ -437,6 +437,8 @@ pub struct CompileOptions {
     pub current_dir: Option<PathBuf>,
     /// Emit position-independent code for objects that will be linked into a shared library.
     pub position_independent: bool,
+    /// Target the host processor's instruction set (`-march=native`).
+    pub march_native: bool,
 }
 
 impl Default for CompileOptions {
@@ -447,6 +449,7 @@ impl Default for CompileOptions {
             extra_args: Vec::new(),
             current_dir: None,
             position_independent: false,
+            march_native: false,
         }
     }
 }
@@ -1074,6 +1077,9 @@ impl Toolchain {
         args.push(OsString::from("-c"));
         for flag in options.profile.compile_flags() {
             args.push(OsString::from(flag));
+        }
+        if options.march_native {
+            args.push(OsString::from("-march=native"));
         }
         if options.position_independent {
             args.push(OsString::from("-fPIC"));
@@ -2167,6 +2173,66 @@ mod tests {
                 std::slice::from_ref(&directory),
             ),
             LinkerKind::Default
+        );
+
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn release_profile_uses_fp_contract_off_and_portable_baseline() {
+        assert_eq!(
+            BuildProfile::NativeRelease.compile_flags(),
+            &["-O3", "-ffp-contract=off"]
+        );
+        assert_eq!(
+            BuildProfile::NativeProfile.compile_flags(),
+            &["-O3", "-ffp-contract=off", "-pg"]
+        );
+    }
+
+    #[test]
+    fn march_native_opt_in_passes_flag() {
+        let directory = temp_dir("march-native");
+        let source = directory.join("main.c");
+        let object = directory.join("main.o");
+        fs::write(&source, "int main(void) { return 0; }\n").expect("source");
+        let runner_impl = Arc::new(FakeRunner::new(
+            [
+                ProcessOutput::success("clang version 18.1\n", ""),
+                ProcessOutput::success("arm64-apple-darwin24.0.0\n", ""),
+                ProcessOutput::success("compile ok\n", ""),
+            ],
+            true,
+        ));
+        let runner: Arc<dyn ProcessRunner> = runner_impl.clone();
+        let toolchain =
+            Toolchain::from_compiler_with_runner("/opt/clang", runner).expect("compiler probe");
+        toolchain
+            .compile_c(
+                &source,
+                &object,
+                &CompileOptions {
+                    profile: BuildProfile::NativeRelease,
+                    march_native: true,
+                    ..CompileOptions::default()
+                },
+            )
+            .expect("compile");
+
+        let commands = runner_impl.commands();
+        assert_eq!(commands.len(), 3);
+        assert!(
+            commands[2]
+                .args
+                .iter()
+                .any(|arg| arg == "-ffp-contract=off")
+        );
+        assert!(commands[2].args.iter().any(|arg| arg == "-march=native"));
+        assert!(
+            !commands[2]
+                .args
+                .iter()
+                .any(|arg| arg == "-ffp-contract=fast")
         );
 
         fs::remove_dir_all(directory).expect("cleanup");

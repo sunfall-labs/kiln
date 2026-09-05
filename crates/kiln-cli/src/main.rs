@@ -222,6 +222,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             // Refused by the parser: the native backend does not count steps.
             steps: _,
             workers,
+            march_native: _,
         } => {
             let node = auto_node(node);
             if workers > 1 {
@@ -266,6 +267,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             profile,
             shared,
             node,
+            march_native: _,
         } => {
             let node = if shared { false } else { auto_node(node) };
             let mut backend = open(one_shot, &socket)?;
@@ -431,6 +433,7 @@ mod tests {
             "--interval",
             "--out",
             "--dry-run",
+            "--march=native",
             "--help",
             "--version",
             "exit status",
