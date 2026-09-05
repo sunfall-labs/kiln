@@ -1978,8 +1978,28 @@ fn emit_graph_op(
                 None
             };
 
+            // 3. RegExp test and exec intrinsics
+            let regex_intrinsic = if argc == 1 && (key_str == "test" || key_str == "exec") {
+                let func = if key_str == "test" {
+                    "kiln_c99_val_regexp_test_fast"
+                } else {
+                    "kiln_c99_val_regexp_exec_fast"
+                };
+                Some(format!(
+                    "if (!handled && {func}(v{o}, v{a0}, &v{v}) == KILN_C99_OK) {{ \
+                         handled = 1; \
+                     }}",
+                    o = object.0,
+                    a0 = args[0].0,
+                    v = v
+                ))
+            } else {
+                None
+            };
+
             let math_s = math_intrinsic.map(|s| format!(" {s}")).unwrap_or_default();
             let push_s = push_intrinsic.map(|s| format!(" {s}")).unwrap_or_default();
+            let regex_s = regex_intrinsic.map(|s| format!(" {s}")).unwrap_or_default();
             let n = argc.max(1);
 
             writeln!(
@@ -1987,7 +2007,7 @@ fn emit_graph_op(
                 "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; \
                 kiln_val call_args[{n}] = {{ {init} }}; \
                 int handled = 0; \
-                {math_s}{push_s} \
+                {math_s}{push_s}{regex_s} \
                 if (!handled && site.pic_count > 0 && KILN_VAL_IS_OBJECT(v{o})) {{ \
                     const kiln_object *obj = (const kiln_object *)KILN_VAL_PTR(v{o}); \
                     kiln_val cached_fn = 0; \

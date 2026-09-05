@@ -999,6 +999,7 @@ dependencies = [
  "kiln-native-number",
  "kiln-native-number-abi",
  "memchr",
+ "regress",
  "serde",
  "serde_json",
 ]
