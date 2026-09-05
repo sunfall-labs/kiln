@@ -721,6 +721,7 @@ typedef struct kiln_c99_site {
 #define KILN_C99_SITE_NONE 0xFFFFFFFFu
 #define KILN_C99_SITE_GIVE_UP 8u
 typedef struct kiln_proxy {
+typedef enum kiln_gc_kind {
 typedef struct kiln_array {
 typedef struct kiln_generator {
 typedef struct kiln_date_parts {
@@ -1151,7 +1152,6 @@ static kiln_array *kiln_c99_array_of(kiln_value value) {
 static kiln_typed_buffer *kiln_c99_typed_buffer_of(kiln_value value) {
 static kiln_typed_array *kiln_c99_typed_array_of(kiln_value value) {
 static kiln_data_view *kiln_c99_data_view_of(kiln_value value) {
-typedef enum kiln_gc_kind {
 #define KILN_GC_PHASE_MARK 0
 #define KILN_GC_PHASE_TEARDOWN 1
 #define KILN_GC_PHASE_RESET 2
@@ -1877,12 +1877,18 @@ static int kiln_c99_unary_checked(uint16_t operation, kiln_host *host, kiln_valu
 static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_value left,
 static kiln_val kiln_c99_string_constant(void **cached, const char *bytes, size_t len) {
 static kiln_value kiln_val_to_boundary(kiln_val v) {
+static size_t kiln_c99_val_string_length(kiln_val v) {
+static int kiln_c99_val_array_push_fast(kiln_val receiver, kiln_val arg, kiln_val *out) {
 static int kiln_c99_val_compare(uint16_t operation, kiln_val left, kiln_val right, int *result) {
 static kiln_val kiln_c99_val_binary_fast(uint16_t operation, kiln_val left, kiln_val right) {
 static kiln_val kiln_c99_val_binary(uint16_t operation, kiln_host *host, kiln_val left, kiln_val right, int *status, int depth, kiln_value *thrown) {
 static kiln_val kiln_c99_val_unary_fast(uint16_t operation, kiln_val value) {
 static int kiln_c99_read_property(kiln_host *host, kiln_value target,
 static int kiln_c99_write_property(kiln_host *host, kiln_value target,
+#ifndef KILN_C99_CACHED_METHOD_MATCHES_DEFINED
+#define KILN_C99_CACHED_METHOD_MATCHES_DEFINED
+static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln_val target) {
+#endif
 static int kiln_c99_val_read_property(kiln_host *host, kiln_val target,
 static int kiln_c99_val_write_property(kiln_host *host, kiln_val target,
 static void kiln_c99_note_get_property_refusal(kiln_value target) {
