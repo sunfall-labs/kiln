@@ -1,0 +1,67 @@
+{
+  "bundles": {
+    "acorn": {
+      "median_ms": 19.41,
+      "min_ms": 19.16
+    },
+    "chalk": {
+      "median_ms": 3.31,
+      "min_ms": 3.14
+    },
+    "datefns": {
+      "median_ms": 2.62,
+      "min_ms": 2.51
+    },
+    "dayjs": {
+      "median_ms": 2.39,
+      "min_ms": 2.32
+    },
+    "immer": {
+      "median_ms": 2.16,
+      "min_ms": 2.03
+    },
+    "marked": {
+      "median_ms": 9.68,
+      "min_ms": 9.6
+    },
+    "ms": {
+      "median_ms": 2.0,
+      "min_ms": 1.89
+    },
+    "mustache": {
+      "median_ms": 1.83,
+      "min_ms": 1.71
+    },
+    "postcss": {
+      "median_ms": 7.58,
+      "min_ms": 7.31
+    },
+    "rxjs": {
+      "median_ms": 16.48,
+      "min_ms": 16.31
+    },
+    "semver": {
+      "median_ms": 6.36,
+      "min_ms": 6.19
+    },
+    "uuid": {
+      "median_ms": 2.0,
+      "min_ms": 1.9
+    },
+    "vue-reactivity": {
+      "median_ms": 3.26,
+      "min_ms": 3.07
+    },
+    "yaml": {
+      "median_ms": 5.08,
+      "min_ms": 4.85
+    },
+    "zod": {
+      "median_ms": 15.52,
+      "min_ms": 15.09
+    }
+  },
+  "profile": "native-release",
+  "schema": 1,
+  "threshold_pct": 25.0
+}
