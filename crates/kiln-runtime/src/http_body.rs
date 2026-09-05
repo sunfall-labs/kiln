@@ -165,6 +165,16 @@ impl ResponseBodyDriver {
     }
 }
 
+impl crate::node_stream::PipeTarget for ResponseBodyDriver {
+    fn write_chunk(&mut self, data: &[u8]) -> WriteDisposition {
+        self.write(bytes::Bytes::copy_from_slice(data))
+    }
+
+    fn end_pipe(&mut self) -> WriteDisposition {
+        self.end(bytes::Bytes::new())
+    }
+}
+
 pub(crate) struct ResponseBody {
     shared: Rc<RefCell<Shared>>,
 }
@@ -364,5 +374,29 @@ mod tests {
         });
         assert_eq!(events.try_recv(), Ok(BodyEvent::Finish));
         assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn response_body_pipe_target() {
+        use crate::node_stream::PipeTarget;
+        let mut body = ResponseBodyDriver::new(16);
+        let (mut frames, mut events) = body_with_events(&body);
+        let disp = body.write_chunk(b"hello from pipe");
+        assert!(disp.ready);
+        let disp_end = body.end_pipe();
+        assert!(!disp_end.ready); // buffered bytes not drained yet
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime builds");
+        runtime.block_on(async {
+            let frame1 = frames.frame().await.unwrap().unwrap();
+            assert_eq!(
+                frame1.into_data().unwrap(),
+                bytes::Bytes::from_static(b"hello from pipe")
+            );
+            assert!(frames.frame().await.is_none());
+        });
+        assert_eq!(events.try_recv(), Ok(BodyEvent::Finish));
     }
 }
