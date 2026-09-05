@@ -13,43 +13,82 @@ use kiln_ir::{BinaryOp, Constant, FunctionProto, Program, UnaryOp};
 use std::collections::HashSet;
 use std::fmt::Write;
 
+/// The first operation or terminator in `graph` that has no lowering below, as a short name,
+/// for the census. `None` when everything lowers.
+pub fn first_unlowerable(graph: &FunctionGraph) -> Option<String> {
+    for block in &graph.blocks {
+        if matches!(
+            block.terminator,
+            Terminator::Yield { .. } | Terminator::Await { .. }
+        ) {
+            return Some("suspend".to_owned());
+        }
+        for (_, op) in &block.operations {
+            if !lowers(op) {
+                let name = format!("{op:?}");
+                return Some(name.split([' ', '(', '{']).next().unwrap_or("?").to_owned());
+            }
+        }
+    }
+    None
+}
+
+fn lowers(op: &GraphOp) -> bool {
+    matches!(
+        op,
+        GraphOp::Const { .. }
+            | GraphOp::LoadLocal(_)
+            | GraphOp::StoreLocal { .. }
+            | GraphOp::LoadCell(_)
+            | GraphOp::StoreCell { .. }
+            | GraphOp::MakeCell(_)
+            | GraphOp::LoadGlobal(_)
+            | GraphOp::StoreGlobal { .. }
+            | GraphOp::LoadThis
+            | GraphOp::LoadNewTarget
+            | GraphOp::MarkUninitialized(_)
+            | GraphOp::CheckTdz { .. }
+            | GraphOp::Unary { .. }
+            | GraphOp::Binary { .. }
+            | GraphOp::Call { .. }
+            | GraphOp::CallMethod { .. }
+            | GraphOp::NewArray { .. }
+            | GraphOp::GetProperty { .. }
+            | GraphOp::SetProperty { .. }
+            | GraphOp::SetPropertyStrict { .. }
+            | GraphOp::GetComputed { .. }
+            | GraphOp::SetComputed { .. }
+            | GraphOp::SetComputedStrict { .. }
+            | GraphOp::Phi { .. }
+    )
+}
+
+/// The slots that must exist in `locals[]`: cells, and slots some block loads other than the
+/// entry block's definitions of the initial values.
+fn array_slots(graph: &FunctionGraph) -> HashSet<u32> {
+    let mut slots = HashSet::new();
+    for block in &graph.blocks {
+        for (_, op) in &block.operations {
+            match op {
+                GraphOp::LoadCell(slot)
+                | GraphOp::StoreCell { slot, .. }
+                | GraphOp::MakeCell(slot) => {
+                    slots.insert(*slot);
+                }
+                GraphOp::LoadLocal(slot) if block.id != graph.entry_block => {
+                    slots.insert(*slot);
+                }
+                _ => {}
+            }
+        }
+    }
+    slots
+}
+
 /// Whether every operation in `graph` has a lowering below. This is the one place that decides
 /// what the graph emitter takes; `render_function` asks it and otherwise uses the stack emitter.
 pub fn can_lower(graph: &FunctionGraph) -> bool {
-    graph.blocks.iter().all(|block| {
-        !matches!(
-            block.terminator,
-            Terminator::Yield { .. } | Terminator::Await { .. }
-        ) && block.operations.iter().all(|(_, op)| {
-            matches!(
-                op,
-                GraphOp::Const { .. }
-                    | GraphOp::LoadLocal(_)
-                    | GraphOp::StoreLocal { .. }
-                    | GraphOp::LoadCell(_)
-                    | GraphOp::StoreCell { .. }
-                    | GraphOp::MakeCell(_)
-                    | GraphOp::LoadGlobal(_)
-                    | GraphOp::StoreGlobal { .. }
-                    | GraphOp::LoadThis
-                    | GraphOp::LoadNewTarget
-                    | GraphOp::MarkUninitialized(_)
-                    | GraphOp::CheckTdz { .. }
-                    | GraphOp::Unary { .. }
-                    | GraphOp::Binary { .. }
-                    | GraphOp::Call { .. }
-                    | GraphOp::CallMethod { .. }
-                    | GraphOp::NewArray { .. }
-                    | GraphOp::GetProperty { .. }
-                    | GraphOp::SetProperty { .. }
-                    | GraphOp::SetPropertyStrict { .. }
-                    | GraphOp::GetComputed { .. }
-                    | GraphOp::SetComputed { .. }
-                    | GraphOp::SetComputedStrict { .. }
-                    | GraphOp::Phi { .. }
-            )
-        })
-    })
+    first_unlowerable(graph).is_none()
 }
 
 /// Emits the C99 function body for a function proto using its SSA Value Graph.
@@ -102,23 +141,30 @@ pub fn emit_function_from_graph(
     }
     output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
 
+    // `locals[]` exists only for slots that are read through the array: a cell (the slot holds
+    // the box, and closures read the box), or a slot some block loads because no SSA value
+    // reaches it. Every other slot lives in SSA values and phis, and the array is not declared
+    // at all when no slot needs it. The entry block reads a parameter from `args` directly.
+    let array_slots = array_slots(graph);
     let locals = usize::try_from(proto.local_count).unwrap().max(1);
-    writeln!(output, "    kiln_val locals[{locals}];").unwrap();
-    writeln!(
-        output,
-        "    for (size_t slot = 0; slot < (size_t){locals}; ++slot) locals[slot] = KILN_VAL_UNDEFINED;"
-    )
-    .unwrap();
-
-    if proto.parameter_count == 0 {
-        output.push_str("    (void)args; (void)argc;\n");
-    } else {
+    if !array_slots.is_empty() {
+        writeln!(output, "    kiln_val locals[{locals}];").unwrap();
         writeln!(
             output,
-            "    for (size_t slot = 0; slot < (size_t){} && slot < argc; ++slot) locals[slot] = args[slot];",
-            proto.parameter_count
+            "    for (size_t slot = 0; slot < (size_t){locals}; ++slot) locals[slot] = KILN_VAL_UNDEFINED;"
         )
         .unwrap();
+        if proto.parameter_count > 0 {
+            writeln!(
+                output,
+                "    for (size_t slot = 0; slot < (size_t){} && slot < argc; ++slot) locals[slot] = args[slot];",
+                proto.parameter_count
+            )
+            .unwrap();
+        }
+    }
+    if proto.parameter_count == 0 {
+        output.push_str("    (void)args; (void)argc;\n");
     }
 
     // 4. Declare SSA value locals. A value proven to be a number also gets a `double` twin:
@@ -168,6 +214,8 @@ pub fn emit_function_from_graph(
                 diagnostic_site,
                 scalar_proto,
                 &numbers,
+                &array_slots,
+                proto,
             );
         }
 
@@ -295,9 +343,12 @@ fn emit_graph_op(
     diagnostic_site: &str,
     scalar_proto: bool,
     numbers: &HashSet<ValueId>,
+    array_slots: &HashSet<u32>,
+    proto: &FunctionProto,
 ) {
     let v = vid.0;
     let typed = numbers.contains(&vid);
+    let in_array = |slot: &u32| array_slots.contains(slot);
     match op {
         GraphOp::Const { index, constant } => match constant {
             Constant::Number(bits) => {
@@ -349,10 +400,22 @@ fn emit_graph_op(
             }
         },
         GraphOp::LoadLocal(slot) => {
-            writeln!(output, "    v{v} = locals[{slot}];").unwrap();
+            if in_array(slot) {
+                writeln!(output, "    v{v} = locals[{slot}];").unwrap();
+            } else if *slot < proto.parameter_count {
+                writeln!(
+                    output,
+                    "    v{v} = (size_t){slot} < argc ? args[{slot}] : KILN_VAL_UNDEFINED;"
+                )
+                .unwrap();
+            } else {
+                writeln!(output, "    v{v} = KILN_VAL_UNDEFINED;").unwrap();
+            }
         }
         GraphOp::StoreLocal { slot, value } => {
-            writeln!(output, "    locals[{slot}] = v{};", value.0).unwrap();
+            if in_array(slot) {
+                writeln!(output, "    locals[{slot}] = v{};", value.0).unwrap();
+            }
             writeln!(output, "    v{v} = v{};", value.0).unwrap();
             if typed {
                 writeln!(output, "    d{v} = d{};", value.0).unwrap();
@@ -407,6 +470,10 @@ fn emit_graph_op(
                 "    v{v} = kiln_val_from_boundary(kiln_c99_new_target);"
             )
             .unwrap();
+        }
+        GraphOp::MarkUninitialized(slot) if !in_array(slot) => {
+            // No array behind this slot: the mark is the SSA value alone.
+            writeln!(output, "    v{v} = KILN_VAL_UNINITIALIZED;").unwrap();
         }
         GraphOp::MarkUninitialized(slot) => {
             // A slot that holds a cell is marked through the cell: the binding is captured, and
@@ -619,20 +686,28 @@ fn emit_graph_op(
         GraphOp::CallMethod {
             object, name, args, ..
         } => {
+            // One property read through the site's inline cache, a direct entry for a plain
+            // closure, and the boundary representation only for a built-in method: all inside
+            // `kiln_c99_val_call_method`, with the arguments handed over as machine values.
             let argc = args.len();
             let key_len = match program.constants.get(*name as usize) {
                 Some(Constant::String(s)) => s.len(),
                 _ => 0,
             };
-            let mut init = format!("v{}", object.0);
-            for arg in args {
-                init.push_str(&format!(", v{}", arg.0));
-            }
+            let init = if args.is_empty() {
+                "KILN_VAL_UNDEFINED".to_owned()
+            } else {
+                args.iter()
+                    .map(|a| format!("v{}", a.0))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
             let check = status_check(diagnostic_site, "CallMethod");
             writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_val call_stack[{n}] = {{ {init} }}; size_t call_sp = {n}; int status = kiln_c99_op_val_call_method(host, call_stack, &call_sp, {symbol}_key_{name}, {key_len}, (size_t){argc}, depth, thrown, &site, \"{diagnostic_site}\", (size_t)0, \"CallMethod\"); {check} v{v} = call_stack[0]; }}",
-                n = argc + 1
+                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_val call_args[{n}] = {{ {init} }}; int status = kiln_c99_val_call_method(host, v{}, call_args, (size_t){argc}, {symbol}_key_{name}, {key_len}, depth, thrown, &site, \"{diagnostic_site}\", (size_t)0, \"CallMethod\", &v{v}); {check} }}",
+                object.0,
+                n = argc.max(1)
             )
             .unwrap();
         }
@@ -650,6 +725,8 @@ fn emit_graph_op(
             )
             .unwrap();
         }
+        // Property and element access call the value-shaped helpers directly: the same
+        // functions the stack-shaped entry points wrap, without the one-element arrays.
         GraphOp::GetProperty { object, name, .. } => {
             let key_len = match program.constants.get(*name as usize) {
                 Some(Constant::String(s)) => s.len(),
@@ -658,8 +735,8 @@ fn emit_graph_op(
             let check = status_check(diagnostic_site, "GetProperty");
             writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_val site_stack[1] = {{ v{} }}; size_t site_sp = 1; int status = kiln_c99_op_val_get_property(host, site_stack, &site_sp, {symbol}_key_{name}, {key_len}, depth, thrown, &site); {check} v{v} = site_stack[0]; }}",
-                object.0
+                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_val_read_property(host, v{o}, {symbol}_key_{name}, {key_len}, depth, thrown, &site, &v{v}); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(v{o})); {check} }}",
+                o = object.0
             )
             .unwrap();
         }
@@ -683,7 +760,7 @@ fn emit_graph_op(
             let check = status_check(diagnostic_site, "SetProperty");
             writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_val site_stack[2] = {{ v{}, v{} }}; size_t site_sp = 2; int status = kiln_c99_op_val_set_property(host, site_stack, &site_sp, {symbol}_key_{name}, {key_len}, {strict}, depth, thrown, &site); {check} v{v} = v{}; }}",
+                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_val_write_property(host, v{}, {symbol}_key_{name}, {key_len}, v{}, {strict}, depth, thrown, &site); {check} v{v} = v{}; }}",
                 object.0, value.0, value.0
             )
             .unwrap();
@@ -692,8 +769,9 @@ fn emit_graph_op(
             let check = status_check(diagnostic_site, "GetComputed");
             writeln!(
                 output,
-                "    {{ kiln_val site_stack[2] = {{ v{}, v{} }}; size_t site_sp = 2; int status = kiln_c99_op_val_get_computed(host, site_stack, &site_sp, depth, thrown); {check} v{v} = site_stack[0]; }}",
-                object.0, key.0
+                "    {{ int status = kiln_c99_val_read_element(host, v{o}, v{k}, depth, thrown, &v{v}); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(kiln_val_to_boundary(v{o}), kiln_val_to_boundary(v{k})); {check} }}",
+                o = object.0,
+                k = key.0
             )
             .unwrap();
         }
@@ -707,7 +785,7 @@ fn emit_graph_op(
             let check = status_check(diagnostic_site, "SetComputed");
             writeln!(
                 output,
-                "    {{ kiln_val site_stack[3] = {{ v{}, v{}, v{} }}; size_t site_sp = 3; int status = kiln_c99_op_val_set_computed(host, site_stack, &site_sp, {strict}, depth, thrown); {check} v{v} = v{}; }}",
+                "    {{ int status = kiln_c99_val_write_element(host, v{}, v{}, v{}, {strict}, depth, thrown); {check} v{v} = v{}; }}",
                 object.0, key.0, value.0, value.0
             )
             .unwrap();
