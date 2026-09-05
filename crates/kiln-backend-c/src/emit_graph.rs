@@ -8,8 +8,9 @@
 
 use crate::direct::{CallPlan, direct_callable};
 use crate::graph::{
-    BasicBlock, BlockId, FunctionGraph, GraphOp, Proven, Terminator, ValueId,
-    candidate_number_parameters, proven_numbers_with_assumptions,
+    BasicBlock, BlockId, FunctionGraph, GraphOp, InductionVariable, Proven, Terminator, ValueId,
+    as_safe_integer, candidate_number_parameters, find_induction_variables,
+    proven_ints_with_assumptions, proven_numbers_with_assumptions,
 };
 use crate::prelude::lookup_speculation_invariant;
 use crate::tail::{TailContext, emit_tail_instruction};
@@ -361,7 +362,24 @@ pub fn emit_entry_from_graph(
     );
 }
 
-fn emit_ssa_declarations(output: &mut String, graph: &FunctionGraph, numbers: &HashSet<ValueId>) {
+fn emit_ssa_declarations(
+    output: &mut String,
+    graph: &FunctionGraph,
+    numbers: &HashSet<ValueId>,
+    ints: &HashSet<ValueId>,
+) {
+    if !ints.is_empty() {
+        let mut ids: Vec<u32> = ints.iter().map(|v| v.0).collect();
+        ids.sort_unstable();
+        output.push_str("    int64_t ");
+        for (i, vid) in ids.iter().enumerate() {
+            if i > 0 {
+                output.push_str(", ");
+            }
+            write!(output, "i{vid} = 0").unwrap();
+        }
+        output.push_str(";\n");
+    }
     if !numbers.is_empty() {
         let mut ids: Vec<u32> = numbers.iter().map(|v| v.0).collect();
         ids.sort_unstable();
@@ -402,7 +420,9 @@ fn emit_block_sequence(
     plan: &CallPlan,
     kind: EntryKind,
     numbers: &HashSet<ValueId>,
+    ints: &HashSet<ValueId>,
     defs: &std::collections::HashMap<ValueId, &GraphOp>,
+    ivs: &std::collections::HashMap<ValueId, InductionVariable>,
     block_prefix: &str,
     is_fast_clone: bool,
 ) {
@@ -488,6 +508,9 @@ fn emit_block_sequence(
                 diagnostic_site,
                 scalar_proto,
                 numbers,
+                ints,
+                defs,
+                ivs,
                 array_slots,
                 proto,
                 frame_stacks,
@@ -506,6 +529,7 @@ fn emit_block_sequence(
             block,
             &block.terminator,
             numbers,
+            ints,
             defs,
             &unwind,
             site,
@@ -546,11 +570,13 @@ fn emit_blocks(
         speculate_enabled && !candidate_params.is_empty() && !suspends && kind == EntryKind::Boxed;
 
     let baseline_numbers = &plan.numbers;
+    let baseline_ints = &plan.ints;
     let defs: std::collections::HashMap<ValueId, &GraphOp> = graph
         .blocks
         .iter()
         .flat_map(|b| b.operations.iter().map(|(v, op)| (*v, op)))
         .collect();
+    let ivs = find_induction_variables(graph);
 
     if versioning {
         let candidate_assumptions: std::collections::HashMap<ValueId, Proven> = candidate_params
@@ -566,7 +592,11 @@ fn emit_blocks(
         let mut all_numbers = baseline_numbers.clone();
         all_numbers.extend(&speculative_numbers);
 
-        emit_ssa_declarations(output, graph, &all_numbers);
+        let speculative_ints = proven_ints_with_assumptions(graph, &candidate_assumptions);
+        let mut all_ints = baseline_ints.clone();
+        all_ints.extend(&speculative_ints);
+
+        emit_ssa_declarations(output, graph, &all_numbers, &all_ints);
 
         let index = match site {
             Site::Function { index } => *index,
@@ -612,7 +642,9 @@ fn emit_blocks(
             plan,
             kind,
             &all_numbers,
+            &all_ints,
             &defs,
+            &ivs,
             "kiln_fast_block_",
             true,
         );
@@ -633,12 +665,14 @@ fn emit_blocks(
             plan,
             kind,
             baseline_numbers,
+            baseline_ints,
             &defs,
+            &ivs,
             "kiln_generic_block_",
             false,
         );
     } else {
-        emit_ssa_declarations(output, graph, baseline_numbers);
+        emit_ssa_declarations(output, graph, baseline_numbers, baseline_ints);
         emit_block_sequence(
             output,
             graph,
@@ -654,7 +688,9 @@ fn emit_blocks(
             plan,
             kind,
             baseline_numbers,
+            baseline_ints,
             &defs,
+            &ivs,
             "kiln_block_",
             false,
         );
@@ -816,6 +852,9 @@ fn emit_graph_op(
     diagnostic_site: &str,
     scalar_proto: bool,
     numbers: &HashSet<ValueId>,
+    ints: &HashSet<ValueId>,
+    defs: &std::collections::HashMap<ValueId, &GraphOp>,
+    ivs: &std::collections::HashMap<ValueId, InductionVariable>,
     array_slots: &HashSet<u32>,
     proto: &FunctionProto,
     frame_stacks: &[usize],
@@ -828,6 +867,7 @@ fn emit_graph_op(
 ) {
     let v = vid.0;
     let typed = numbers.contains(&vid);
+    let typed_int = ints.contains(&vid);
     let in_array = |slot: &u32| array_slots.contains(slot);
     let (pc, label) = origins
         .get(&vid)
@@ -839,6 +879,9 @@ fn emit_graph_op(
                 writeln!(output, "    v{v} = UINT64_C({bits});").unwrap();
                 if typed {
                     writeln!(output, "    memcpy(&d{v}, &v{v}, sizeof(d{v}));").unwrap();
+                }
+                if typed_int && let Some(ival) = as_safe_integer(constant) {
+                    writeln!(output, "    i{v} = {ival}LL;").unwrap();
                 }
             }
             Constant::Undefined => {
@@ -908,6 +951,9 @@ fn emit_graph_op(
             {
                 writeln!(output, "    memcpy(&d{v}, &v{v}, sizeof(d{v}));").unwrap();
             }
+            if typed_int {
+                writeln!(output, "    i{v} = (int64_t)d{v};").unwrap();
+            }
         }
         GraphOp::StoreLocal { slot, value } => {
             if in_array(slot) {
@@ -916,6 +962,9 @@ fn emit_graph_op(
             writeln!(output, "    v{v} = v{};", value.0).unwrap();
             if typed {
                 writeln!(output, "    d{v} = d{};", value.0).unwrap();
+            }
+            if typed_int {
+                writeln!(output, "    i{v} = i{};", value.0).unwrap();
             }
         }
         // A cell is a shared box: the load checks the temporal dead zone and reads through it,
@@ -957,6 +1006,9 @@ fn emit_graph_op(
             writeln!(output, "    v{v} = v{};", value.0).unwrap();
             if typed {
                 writeln!(output, "    d{v} = d{};", value.0).unwrap();
+            }
+            if typed_int {
+                writeln!(output, "    i{v} = i{};", value.0).unwrap();
             }
         }
         // An upvalue is a box the closure was handed; the load checks the temporal dead zone
@@ -1050,6 +1102,9 @@ fn emit_graph_op(
             if typed {
                 writeln!(output, "    d{v} = d{};", value.0).unwrap();
             }
+            if typed_int {
+                writeln!(output, "    i{v} = i{};", value.0).unwrap();
+            }
         }
         GraphOp::LoadThis => {
             writeln!(output, "    v{v} = receiver;").unwrap();
@@ -1087,6 +1142,94 @@ fn emit_graph_op(
             writeln!(output, "    v{v} = v{};", value.0).unwrap();
             if typed {
                 writeln!(output, "    d{v} = d{};", value.0).unwrap();
+            }
+            if typed_int {
+                writeln!(output, "    i{v} = i{};", value.0).unwrap();
+            }
+        }
+        GraphOp::Unary { op, value } if typed_int => {
+            let x = value.0;
+            match op {
+                UnaryOp::Plus | UnaryOp::ToNumeric => {
+                    if ints.contains(value) {
+                        writeln!(output, "    i{v} = i{x}; d{v} = d{x}; v{v} = v{x};").unwrap();
+                    } else {
+                        writeln!(
+                            output,
+                            "    d{v} = d{x}; i{v} = (int64_t)d{v}; v{v} = v{x};"
+                        )
+                        .unwrap();
+                    }
+                }
+                UnaryOp::Increment => {
+                    if ivs.contains_key(&vid) {
+                        writeln!(
+                            output,
+                            "    i{v} = i{x} + 1LL; d{v} = (double)i{v}; v{v} = kiln_c99_val_from_double(d{v});"
+                        )
+                        .unwrap();
+                    } else if ints.contains(value) {
+                        writeln!(
+                            output,
+                            "    {{ int64_t res; if (KILN_LIKELY(!__builtin_add_overflow(i{x}, 1LL, &res) && res >= -9007199254740991LL && res <= 9007199254740991LL)) {{ i{v} = res; d{v} = (double)res; }} else {{ d{v} = (double)i{x} + 1.0; i{v} = (int64_t)d{v}; }} v{v} = kiln_c99_val_from_double(d{v}); }}"
+                        )
+                        .unwrap();
+                    } else {
+                        writeln!(
+                            output,
+                            "    d{v} = d{x} + 1.0; i{v} = (int64_t)d{v}; v{v} = kiln_c99_val_from_double(d{v});"
+                        )
+                        .unwrap();
+                    }
+                }
+                UnaryOp::Decrement => {
+                    if ivs.contains_key(&vid) {
+                        writeln!(
+                            output,
+                            "    i{v} = i{x} - 1LL; d{v} = (double)i{v}; v{v} = kiln_c99_val_from_double(d{v});"
+                        )
+                        .unwrap();
+                    } else if ints.contains(value) {
+                        writeln!(
+                            output,
+                            "    {{ int64_t res; if (KILN_LIKELY(!__builtin_sub_overflow(i{x}, 1LL, &res) && res >= -9007199254740991LL && res <= 9007199254740991LL)) {{ i{v} = res; d{v} = (double)res; }} else {{ d{v} = (double)i{x} - 1.0; i{v} = (int64_t)d{v}; }} v{v} = kiln_c99_val_from_double(d{v}); }}"
+                        )
+                        .unwrap();
+                    } else {
+                        writeln!(
+                            output,
+                            "    d{v} = d{x} - 1.0; i{v} = (int64_t)d{v}; v{v} = kiln_c99_val_from_double(d{v});"
+                        )
+                        .unwrap();
+                    }
+                }
+                UnaryOp::BitwiseNot => {
+                    if ints.contains(value) {
+                        writeln!(
+                            output,
+                            "    i{v} = (int64_t)(~(int32_t)i{x}); d{v} = (double)i{v}; v{v} = kiln_c99_val_from_double(d{v});"
+                        )
+                        .unwrap();
+                    } else {
+                        writeln!(
+                            output,
+                            "    v{v} = kiln_c99_val_unary_fast(5, v{x}); memcpy(&d{v}, &v{v}, sizeof(d{v})); i{v} = (int64_t)d{v};"
+                        )
+                        .unwrap();
+                    }
+                }
+                _ => {
+                    let fast = unary_fast_body(*op)
+                        .expect("a proven-int unary has a numeric body")
+                        .replace("value", &format!("v{x}"))
+                        .replace("kiln_c99_val_from_double(", "(");
+                    let expr = fast.replace('a', &format!("d{x}"));
+                    writeln!(
+                        output,
+                        "    d{v} = {expr}; i{v} = (int64_t)d{v}; v{v} = kiln_c99_val_from_double(d{v});"
+                    )
+                    .unwrap();
+                }
             }
         }
         GraphOp::Unary { op, value } if typed => {
@@ -1151,6 +1294,138 @@ fn emit_graph_op(
             }
         }
         GraphOp::Binary { op, left, right }
+            if ints.contains(left)
+                && ints.contains(right)
+                && !matches!(op, BinaryOp::In | BinaryOp::InstanceOf) =>
+        {
+            let (l, r) = (left.0, right.0);
+            match op {
+                BinaryOp::StrictEqual | BinaryOp::LooseEqual => {
+                    writeln!(
+                        output,
+                        "    v{v} = (i{l} == i{r}) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
+                    )
+                    .unwrap();
+                }
+                BinaryOp::StrictNotEqual | BinaryOp::LooseNotEqual => {
+                    writeln!(
+                        output,
+                        "    v{v} = (i{l} != i{r}) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
+                    )
+                    .unwrap();
+                }
+                BinaryOp::LessThan => {
+                    writeln!(
+                        output,
+                        "    v{v} = (i{l} < i{r}) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
+                    )
+                    .unwrap();
+                }
+                BinaryOp::LessThanOrEqual => {
+                    writeln!(
+                        output,
+                        "    v{v} = (i{l} <= i{r}) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
+                    )
+                    .unwrap();
+                }
+                BinaryOp::GreaterThan => {
+                    writeln!(
+                        output,
+                        "    v{v} = (i{l} > i{r}) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
+                    )
+                    .unwrap();
+                }
+                BinaryOp::GreaterThanOrEqual => {
+                    writeln!(
+                        output,
+                        "    v{v} = (i{l} >= i{r}) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
+                    )
+                    .unwrap();
+                }
+                BinaryOp::BitwiseAnd => {
+                    writeln!(output, "    i{v} = (int64_t)((int32_t)i{l} & (int32_t)i{r}); d{v} = (double)i{v}; v{v} = kiln_c99_val_from_double(d{v});").unwrap();
+                }
+                BinaryOp::BitwiseOr => {
+                    writeln!(output, "    i{v} = (int64_t)((int32_t)i{l} | (int32_t)i{r}); d{v} = (double)i{v}; v{v} = kiln_c99_val_from_double(d{v});").unwrap();
+                }
+                BinaryOp::BitwiseXor => {
+                    writeln!(output, "    i{v} = (int64_t)((int32_t)i{l} ^ (int32_t)i{r}); d{v} = (double)i{v}; v{v} = kiln_c99_val_from_double(d{v});").unwrap();
+                }
+                BinaryOp::ShiftLeft => {
+                    writeln!(output, "    i{v} = (int64_t)((int32_t)i{l} << ((uint32_t)i{r} & 31)); d{v} = (double)i{v}; v{v} = kiln_c99_val_from_double(d{v});").unwrap();
+                }
+                BinaryOp::ShiftRight => {
+                    writeln!(output, "    i{v} = (int64_t)((int32_t)i{l} >> ((uint32_t)i{r} & 31)); d{v} = (double)i{v}; v{v} = kiln_c99_val_from_double(d{v});").unwrap();
+                }
+                BinaryOp::UnsignedShiftRight => {
+                    writeln!(output, "    i{v} = (int64_t)((uint32_t)i{l} >> ((uint32_t)i{r} & 31)); d{v} = (double)i{v}; v{v} = kiln_c99_val_from_double(d{v});").unwrap();
+                }
+                BinaryOp::Remainder => {
+                    let is_const_nonzero = defs.get(right).is_some_and(|op| match op {
+                        GraphOp::Const { constant, .. } => {
+                            as_safe_integer(constant).is_some_and(|k| k != 0)
+                        }
+                        _ => false,
+                    });
+                    let non_negative = ivs.get(left).is_some_and(|iv| iv.non_negative);
+                    if is_const_nonzero {
+                        if non_negative {
+                            writeln!(output, "    i{v} = i{l} % i{r}; d{v} = (double)i{v}; v{v} = kiln_c99_val_from_double(d{v});").unwrap();
+                        } else {
+                            writeln!(output, "    i{v} = i{l} % i{r}; d{v} = (i{v} == 0 && i{l} < 0) ? -0.0 : (double)i{v}; v{v} = kiln_c99_val_from_double(d{v});").unwrap();
+                        }
+                    } else {
+                        writeln!(output, "    if (KILN_LIKELY(i{r} != 0)) {{ i{v} = i{l} % i{r}; d{v} = (i{v} == 0 && i{l} < 0) ? -0.0 : (double)i{v}; }} else {{ d{v} = NAN; i{v} = 0; }} v{v} = kiln_c99_val_from_double(d{v});").unwrap();
+                    }
+                }
+                BinaryOp::Add => {
+                    if ivs.contains_key(&vid) {
+                        writeln!(output, "    i{v} = i{l} + i{r}; d{v} = (double)i{v}; v{v} = kiln_c99_val_from_double(d{v});").unwrap();
+                    } else if typed_int {
+                        writeln!(
+                            output,
+                            "    {{ int64_t res; if (KILN_LIKELY(!__builtin_add_overflow(i{l}, i{r}, &res) && res >= -9007199254740991LL && res <= 9007199254740991LL)) {{ i{v} = res; d{v} = (double)res; }} else {{ d{v} = (double)i{l} + (double)i{r}; i{v} = (int64_t)d{v}; }} v{v} = kiln_c99_val_from_double(d{v}); }}"
+                        ).unwrap();
+                    } else {
+                        writeln!(output, "    d{v} = (double)i{l} + (double)i{r}; v{v} = kiln_c99_val_from_double(d{v});").unwrap();
+                    }
+                }
+                BinaryOp::Subtract => {
+                    if ivs.contains_key(&vid) {
+                        writeln!(output, "    i{v} = i{l} - i{r}; d{v} = (double)i{v}; v{v} = kiln_c99_val_from_double(d{v});").unwrap();
+                    } else if typed_int {
+                        writeln!(
+                            output,
+                            "    {{ int64_t res; if (KILN_LIKELY(!__builtin_sub_overflow(i{l}, i{r}, &res) && res >= -9007199254740991LL && res <= 9007199254740991LL)) {{ i{v} = res; d{v} = (double)res; }} else {{ d{v} = (double)i{l} - (double)i{r}; i{v} = (int64_t)d{v}; }} v{v} = kiln_c99_val_from_double(d{v}); }}"
+                        ).unwrap();
+                    } else {
+                        writeln!(output, "    d{v} = (double)i{l} - (double)i{r}; v{v} = kiln_c99_val_from_double(d{v});").unwrap();
+                    }
+                }
+                BinaryOp::Multiply => {
+                    writeln!(output, "    d{v} = (double)i{l} * (double)i{r}; v{v} = kiln_c99_val_from_double(d{v});").unwrap();
+                    if typed_int {
+                        writeln!(output, "    i{v} = (int64_t)d{v};").unwrap();
+                    }
+                }
+                BinaryOp::Divide => {
+                    writeln!(output, "    d{v} = (double)i{l} / (double)i{r}; v{v} = kiln_c99_val_from_double(d{v});").unwrap();
+                    if typed_int {
+                        writeln!(output, "    i{v} = (int64_t)d{v};").unwrap();
+                    }
+                }
+                BinaryOp::Exponentiate => {
+                    writeln!(output, "    d{v} = pow((double)i{l}, (double)i{r}); v{v} = kiln_c99_val_from_double(d{v});").unwrap();
+                    if typed_int {
+                        writeln!(output, "    i{v} = (int64_t)d{v};").unwrap();
+                    }
+                }
+                BinaryOp::In | BinaryOp::InstanceOf => {
+                    unreachable!("`in` and `instanceof` take the generic lowering")
+                }
+            }
+        }
+        GraphOp::Binary { op, left, right }
             if numbers.contains(left)
                 && numbers.contains(right)
                 && !matches!(op, BinaryOp::In | BinaryOp::InstanceOf) =>
@@ -1161,22 +1436,106 @@ fn emit_graph_op(
             let (l, r) = (left.0, right.0);
             let (a, b) = (format!("d{l}"), format!("d{r}"));
             match op {
-                BinaryOp::StrictEqual | BinaryOp::LooseEqual => writeln!(output, "    v{v} = ({a} == {b}) ? KILN_VAL_TRUE : KILN_VAL_FALSE;").unwrap(),
-                BinaryOp::StrictNotEqual | BinaryOp::LooseNotEqual => writeln!(output, "    v{v} = ({a} != {b}) ? KILN_VAL_TRUE : KILN_VAL_FALSE;").unwrap(),
-                BinaryOp::LessThan => writeln!(output, "    v{v} = ({a} < {b}) ? KILN_VAL_TRUE : KILN_VAL_FALSE;").unwrap(),
-                BinaryOp::LessThanOrEqual => writeln!(output, "    v{v} = ({a} <= {b}) ? KILN_VAL_TRUE : KILN_VAL_FALSE;").unwrap(),
-                BinaryOp::GreaterThan => writeln!(output, "    v{v} = ({a} > {b}) ? KILN_VAL_TRUE : KILN_VAL_FALSE;").unwrap(),
-                BinaryOp::GreaterThanOrEqual => writeln!(output, "    v{v} = ({a} >= {b}) ? KILN_VAL_TRUE : KILN_VAL_FALSE;").unwrap(),
-                BinaryOp::Add => writeln!(output, "    d{v} = {a} + {b}; v{v} = kiln_c99_val_from_double(d{v});").unwrap(),
-                BinaryOp::Subtract => writeln!(output, "    d{v} = {a} - {b}; v{v} = kiln_c99_val_from_double(d{v});").unwrap(),
-                BinaryOp::Multiply => writeln!(output, "    d{v} = {a} * {b}; v{v} = kiln_c99_val_from_double(d{v});").unwrap(),
-                BinaryOp::Divide => writeln!(output, "    d{v} = {a} / {b}; v{v} = kiln_c99_val_from_double(d{v});").unwrap(),
-                BinaryOp::Exponentiate => writeln!(output, "    d{v} = pow({a}, {b}); v{v} = kiln_c99_val_from_double(d{v});").unwrap(),
-                BinaryOp::Remainder => writeln!(output, "    d{v} = ({b} > 0.0 && {b} <= 9007199254740992.0 && {a} >= 0.0 && {a} <= 9007199254740992.0 && {a} == (double)(int64_t){a} && {b} == (double)(int64_t){b}) ? (double)((int64_t){a} % (int64_t){b}) : fmod({a}, {b}); v{v} = kiln_c99_val_from_double(d{v});").unwrap(),
-                BinaryOp::BitwiseAnd | BinaryOp::BitwiseOr | BinaryOp::BitwiseXor | BinaryOp::ShiftLeft | BinaryOp::ShiftRight | BinaryOp::UnsignedShiftRight => {
-                    writeln!(output, "    v{v} = kiln_c99_val_binary_fast({}, v{l}, v{r}); memcpy(&d{v}, &v{v}, sizeof(d{v}));", binary_code(*op)).unwrap()
+                BinaryOp::StrictEqual | BinaryOp::LooseEqual => writeln!(
+                    output,
+                    "    v{v} = ({a} == {b}) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
+                )
+                .unwrap(),
+                BinaryOp::StrictNotEqual | BinaryOp::LooseNotEqual => writeln!(
+                    output,
+                    "    v{v} = ({a} != {b}) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
+                )
+                .unwrap(),
+                BinaryOp::LessThan => writeln!(
+                    output,
+                    "    v{v} = ({a} < {b}) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
+                )
+                .unwrap(),
+                BinaryOp::LessThanOrEqual => writeln!(
+                    output,
+                    "    v{v} = ({a} <= {b}) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
+                )
+                .unwrap(),
+                BinaryOp::GreaterThan => writeln!(
+                    output,
+                    "    v{v} = ({a} > {b}) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
+                )
+                .unwrap(),
+                BinaryOp::GreaterThanOrEqual => writeln!(
+                    output,
+                    "    v{v} = ({a} >= {b}) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
+                )
+                .unwrap(),
+                BinaryOp::Add => {
+                    writeln!(
+                        output,
+                        "    d{v} = {a} + {b}; v{v} = kiln_c99_val_from_double(d{v});"
+                    )
+                    .unwrap();
+                    if typed_int {
+                        writeln!(output, "    i{v} = (int64_t)d{v};").unwrap();
+                    }
                 }
-                BinaryOp::In | BinaryOp::InstanceOf => unreachable!("`in` and `instanceof` take the generic lowering"),
+                BinaryOp::Subtract => {
+                    writeln!(
+                        output,
+                        "    d{v} = {a} - {b}; v{v} = kiln_c99_val_from_double(d{v});"
+                    )
+                    .unwrap();
+                    if typed_int {
+                        writeln!(output, "    i{v} = (int64_t)d{v};").unwrap();
+                    }
+                }
+                BinaryOp::Multiply => {
+                    writeln!(
+                        output,
+                        "    d{v} = {a} * {b}; v{v} = kiln_c99_val_from_double(d{v});"
+                    )
+                    .unwrap();
+                    if typed_int {
+                        writeln!(output, "    i{v} = (int64_t)d{v};").unwrap();
+                    }
+                }
+                BinaryOp::Divide => {
+                    writeln!(
+                        output,
+                        "    d{v} = {a} / {b}; v{v} = kiln_c99_val_from_double(d{v});"
+                    )
+                    .unwrap();
+                    if typed_int {
+                        writeln!(output, "    i{v} = (int64_t)d{v};").unwrap();
+                    }
+                }
+                BinaryOp::Exponentiate => {
+                    writeln!(
+                        output,
+                        "    d{v} = pow({a}, {b}); v{v} = kiln_c99_val_from_double(d{v});"
+                    )
+                    .unwrap();
+                    if typed_int {
+                        writeln!(output, "    i{v} = (int64_t)d{v};").unwrap();
+                    }
+                }
+                BinaryOp::Remainder => {
+                    writeln!(output, "    d{v} = ({b} > 0.0 && {b} <= 9007199254740992.0 && {a} >= 0.0 && {a} <= 9007199254740992.0 && {a} == (double)(int64_t){a} && {b} == (double)(int64_t){b}) ? (double)((int64_t){a} % (int64_t){b}) : fmod({a}, {b}); v{v} = kiln_c99_val_from_double(d{v});").unwrap();
+                    if typed_int {
+                        writeln!(output, "    i{v} = (int64_t)d{v};").unwrap();
+                    }
+                }
+                BinaryOp::BitwiseAnd
+                | BinaryOp::BitwiseOr
+                | BinaryOp::BitwiseXor
+                | BinaryOp::ShiftLeft
+                | BinaryOp::ShiftRight
+                | BinaryOp::UnsignedShiftRight => {
+                    writeln!(output, "    v{v} = kiln_c99_val_binary_fast({}, v{l}, v{r}); memcpy(&d{v}, &v{v}, sizeof(d{v}));", binary_code(*op)).unwrap();
+                    if typed_int {
+                        writeln!(output, "    i{v} = (int64_t)d{v};").unwrap();
+                    }
+                }
+                BinaryOp::In | BinaryOp::InstanceOf => {
+                    unreachable!("`in` and `instanceof` take the generic lowering")
+                }
             }
         }
         // `in` and `instanceof` are not arithmetic: they go inline against their own prelude
@@ -1232,6 +1591,9 @@ fn emit_graph_op(
                 )
                 .unwrap(),
                 None => writeln!(output, "    {{ {slow} }}").unwrap(),
+            }
+            if typed_int {
+                writeln!(output, "    if (KILN_VAL_IS_NUMBER(v{v})) {{ memcpy(&d{v}, &v{v}, sizeof(d{v})); i{v} = (int64_t)d{v}; }}").unwrap();
             }
         }
         // A call is the direct path on `kiln_val`: a plain closure that
@@ -1877,6 +2239,7 @@ fn emit_terminator(
     current_block: &BasicBlock,
     terminator: &Terminator,
     numbers: &HashSet<ValueId>,
+    ints: &HashSet<ValueId>,
     defs: &std::collections::HashMap<ValueId, &GraphOp>,
     unwind: &str,
     site: &Site<'_>,
@@ -1961,7 +2324,7 @@ fn emit_terminator(
             .unwrap();
         }
         Terminator::Jump(target) => {
-            emit_phi_assignments(output, graph, current_block.id, *target, numbers);
+            emit_phi_assignments(output, graph, current_block.id, *target, numbers, ints);
             writeln!(output, "    goto {block_prefix}{};", target.0).unwrap();
         }
         Terminator::Branch {
@@ -1969,9 +2332,24 @@ fn emit_terminator(
             true_block,
             false_block,
         } => {
-            // A comparison of two proven numbers branches on the doubles directly; anything
-            // else asks the value for its truthiness.
+            // A comparison of two proven ints branches on ints directly;
+            // a comparison of two proven numbers branches on doubles directly;
+            // anything else asks the value for its truthiness.
             let test = match defs.get(condition) {
+                Some(GraphOp::Binary { op, left, right })
+                    if ints.contains(left) && ints.contains(right) =>
+                {
+                    let sym = match op {
+                        BinaryOp::LessThan => Some("<"),
+                        BinaryOp::LessThanOrEqual => Some("<="),
+                        BinaryOp::GreaterThan => Some(">"),
+                        BinaryOp::GreaterThanOrEqual => Some(">="),
+                        BinaryOp::StrictEqual | BinaryOp::LooseEqual => Some("=="),
+                        BinaryOp::StrictNotEqual | BinaryOp::LooseNotEqual => Some("!="),
+                        _ => None,
+                    };
+                    sym.map(|sym| format!("i{} {sym} i{}", left.0, right.0))
+                }
                 Some(GraphOp::Binary { op, left, right })
                     if numbers.contains(left) && numbers.contains(right) =>
                 {
@@ -1990,10 +2368,10 @@ fn emit_terminator(
             }
             .unwrap_or_else(|| format!("kiln_c99_val_truthy(v{})", condition.0));
             writeln!(output, "    if ({test}) {{").unwrap();
-            emit_phi_assignments(output, graph, current_block.id, *true_block, numbers);
+            emit_phi_assignments(output, graph, current_block.id, *true_block, numbers, ints);
             writeln!(output, "        goto {block_prefix}{};", true_block.0).unwrap();
             output.push_str("    } else {\n");
-            emit_phi_assignments(output, graph, current_block.id, *false_block, numbers);
+            emit_phi_assignments(output, graph, current_block.id, *false_block, numbers, ints);
             writeln!(output, "        goto {block_prefix}{};", false_block.0).unwrap();
             output.push_str("    }\n");
         }
@@ -2033,6 +2411,7 @@ fn emit_phi_assignments(
     from: BlockId,
     target: BlockId,
     numbers: &HashSet<ValueId>,
+    ints: &HashSet<ValueId>,
 ) {
     // A parallel move: every input is read before any phi is written, so two phis that swap
     // values (`[a, b] = [b, a]` across a back edge) do not clobber each other.
@@ -2053,14 +2432,22 @@ fn emit_phi_assignments(
         return;
     }
     output.push_str("        {");
-    for (i, &(_, from_v)) in moves.iter().enumerate() {
-        write!(output, " kiln_val phi_t{i} = v{from_v};").unwrap();
-    }
     for (i, &(phi_v, from_v)) in moves.iter().enumerate() {
+        write!(output, " kiln_val phi_t{i} = v{from_v};").unwrap();
+        if numbers.contains(&ValueId(phi_v)) {
+            write!(output, " double phi_td{i} = d{from_v};").unwrap();
+        }
+        if ints.contains(&ValueId(phi_v)) {
+            write!(output, " int64_t phi_ti{i} = i{from_v};").unwrap();
+        }
+    }
+    for (i, &(phi_v, _)) in moves.iter().enumerate() {
         write!(output, " v{phi_v} = phi_t{i};").unwrap();
         if numbers.contains(&ValueId(phi_v)) {
-            // A proven-number phi carries its double twin across the edge too.
-            write!(output, " d{phi_v} = d{from_v};").unwrap();
+            write!(output, " d{phi_v} = phi_td{i};").unwrap();
+        }
+        if ints.contains(&ValueId(phi_v)) {
+            write!(output, " i{phi_v} = phi_ti{i};").unwrap();
         }
     }
     output.push_str(" }\n");

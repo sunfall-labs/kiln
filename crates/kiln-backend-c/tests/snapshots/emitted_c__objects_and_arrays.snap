@@ -29,6 +29,7 @@ static int kiln_module_88ce3ff6b3d54e3e703d5b2d403ec65f_body(kiln_host *host, ki
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     kiln_c99_reset_diagnostics();
     for (size_t slot = 0; slot < (size_t)2; ++slot) locals[slot] = KILN_VAL_UNDEFINED;
+    int64_t i3 = 0, i5 = 0, i8 = 0, i9 = 0, i13 = 0, i15 = 0, i16 = 0, i18 = 0;
     double d3 = 0.0, d5 = 0.0, d8 = 0.0, d9 = 0.0, d13 = 0.0, d15 = 0.0, d16 = 0.0, d18 = 0.0;
     kiln_val v0 = KILN_VAL_UNDEFINED, v1 = KILN_VAL_UNDEFINED, v2 = KILN_VAL_UNDEFINED, v3 = KILN_VAL_UNDEFINED, v4 = KILN_VAL_UNDEFINED, v5 = KILN_VAL_UNDEFINED, v6 = KILN_VAL_UNDEFINED, v7 = KILN_VAL_UNDEFINED, v8 = KILN_VAL_UNDEFINED, v9 = KILN_VAL_UNDEFINED, v10 = KILN_VAL_UNDEFINED, v11 = KILN_VAL_UNDEFINED, v12 = KILN_VAL_UNDEFINED, v13 = KILN_VAL_UNDEFINED, v14 = KILN_VAL_UNDEFINED, v15 = KILN_VAL_UNDEFINED, v16 = KILN_VAL_UNDEFINED, v17 = KILN_VAL_UNDEFINED, v18 = KILN_VAL_UNDEFINED, v19 = KILN_VAL_UNDEFINED;
 kiln_block_0:;
@@ -37,28 +38,36 @@ kiln_block_0:;
     v2 = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, kiln_module_88ce3ff6b3d54e3e703d5b2d403ec65f_constant_0);
     v3 = UINT64_C(4607182418800017408);
     memcpy(&d3, &v3, sizeof(d3));
+    i3 = 1LL;
     v4 = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, kiln_module_88ce3ff6b3d54e3e703d5b2d403ec65f_constant_2);
     v5 = UINT64_C(4611686018427387904);
     memcpy(&d5, &v5, sizeof(d5));
+    i5 = 2LL;
     { kiln_value built; int status = kiln_c99_new_object_with_capacity(&built, (size_t)2); if (status != KILN_C99_OK) return status; status = kiln_c99_define_computed(built, kiln_val_to_boundary(v2), kiln_val_to_boundary(v3)); if (status == KILN_C99_THROWN) goto kiln_unwind; if (status == KILN_C99_CONTROL_ERROR) { kiln_c99_note_refusal("kiln_module_88ce3ff6b3d54e3e703d5b2d403ec65f", (size_t)4, "NewObject", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; status = kiln_c99_define_computed(built, kiln_val_to_boundary(v4), kiln_val_to_boundary(v5)); if (status == KILN_C99_THROWN) goto kiln_unwind; if (status == KILN_C99_CONTROL_ERROR) { kiln_c99_note_refusal("kiln_module_88ce3ff6b3d54e3e703d5b2d403ec65f", (size_t)4, "NewObject", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; v6 = kiln_val_from_boundary(built); }
     v7 = v6;
     v8 = UINT64_C(4607182418800017408);
     memcpy(&d8, &v8, sizeof(d8));
+    i8 = 1LL;
     v9 = UINT64_C(4611686018427387904);
     memcpy(&d9, &v9, sizeof(d9));
+    i9 = 2LL;
     { kiln_value built; int status = kiln_c99_new_array(&built); if (status != KILN_C99_OK) return status; status = kiln_c99_array_push(built, kiln_val_to_boundary(v8)); if (status != KILN_C99_OK) return status; status = kiln_c99_array_push(built, kiln_val_to_boundary(v9)); if (status != KILN_C99_OK) return status; v10 = kiln_val_from_boundary(built); }
     v11 = v10;
     { static kiln_c99_site site = {KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}; int handled = 0; if (!handled && site.pic_count > 0 && KILN_VAL_IS_OBJECT(v6)) { const kiln_object *obj = (const kiln_object *)KILN_VAL_PTR(v6); uint32_t slot = UINT32_MAX; if (site.pic_count >= 1 && obj->shape == site.entries[0].shape) slot = site.entries[0].slot; else if (site.pic_count >= 2 && obj->shape == site.entries[1].shape) slot = site.entries[1].slot; else if (site.pic_count >= 3 && obj->shape == site.entries[2].shape) slot = site.entries[2].slot; else if (site.pic_count >= 4 && obj->shape == site.entries[3].shape) slot = site.entries[3].slot; if (slot != UINT32_MAX && KILN_LIKELY(slot < obj->slot_capacity)) { v12 = obj->slots[slot]; handled = 1; } } if (!handled) { int status = kiln_c99_val_read_property(host, v6, kiln_module_88ce3ff6b3d54e3e703d5b2d403ec65f_key_0, 1, depth, thrown, &site, &v12); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(v6)); if (status == KILN_C99_THROWN) goto kiln_unwind; if (status == KILN_C99_CONTROL_ERROR) { kiln_c99_note_refusal("kiln_module_88ce3ff6b3d54e3e703d5b2d403ec65f", (size_t)11, "GetProperty(a)", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; } }
     v13 = UINT64_C(4607182418800017408);
     memcpy(&d13, &v13, sizeof(d13));
+    i13 = 1LL;
     { static kiln_c99_site site = {KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}; int handled = 0; if (KILN_LIKELY((v10 & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_NUMBER(v13))) { void *ptr = KILN_VAL_PTR(v10); if (site.has_cached_method == 1 || kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) { site.has_cached_method = 1; double idx; memcpy(&idx, &v13, sizeof(idx)); size_t slot = (size_t)idx; const kiln_array *arr = (const kiln_array *)ptr; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < arr->count && arr->elements[slot] != KILN_VAL_HOLE)) { v14 = arr->elements[slot]; handled = 1; } } } if (!handled) { int status = kiln_c99_val_read_element(host, v10, v13, depth, thrown, &v14); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(kiln_val_to_boundary(v10), kiln_val_to_boundary(v13)); if (status == KILN_C99_THROWN) goto kiln_unwind; if (status == KILN_C99_CONTROL_ERROR) { kiln_c99_note_refusal("kiln_module_88ce3ff6b3d54e3e703d5b2d403ec65f", (size_t)15, "GetComputed", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; } }
     v15 = UINT64_C(4607182418800017408);
     memcpy(&d15, &v15, sizeof(d15));
+    i15 = 1LL;
     v16 = UINT64_C(4611686018427387904);
     memcpy(&d16, &v16, sizeof(d16));
+    i16 = 2LL;
     { static kiln_c99_site site = {KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}; int handled = 0; if (KILN_LIKELY((v10 & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_NUMBER(v15))) { void *ptr = KILN_VAL_PTR(v10); if (site.has_cached_method == 1 || kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) { site.has_cached_method = 1; double idx; memcpy(&idx, &v15, sizeof(idx)); size_t slot = (size_t)idx; kiln_array *arr = (kiln_array *)ptr; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < arr->count && !arr->frozen)) { arr->elements[slot] = v16; v17 = v16; handled = 1; } } } if (!handled) { int status = kiln_c99_val_write_element(host, v10, v15, v16, 0, depth, thrown); if (status == KILN_C99_THROWN) goto kiln_unwind; if (status == KILN_C99_CONTROL_ERROR) { kiln_c99_note_refusal("kiln_module_88ce3ff6b3d54e3e703d5b2d403ec65f", (size_t)20, "SetComputed", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; v17 = v16; } }
     v18 = UINT64_C(4611686018427387904);
     memcpy(&d18, &v18, sizeof(d18));
+    i18 = 2LL;
     { static kiln_c99_site site = {KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}; int handled = 0; if (site.pic_count > 0 && KILN_VAL_IS_OBJECT(v6)) { kiln_object *obj = (kiln_object *)KILN_VAL_PTR(v6); uint32_t slot = UINT32_MAX; if (site.pic_count >= 1 && obj->shape == site.entries[0].shape && site.entries[0].transition_to == NULL) slot = site.entries[0].slot; else if (site.pic_count >= 2 && obj->shape == site.entries[1].shape && site.entries[1].transition_to == NULL) slot = site.entries[1].slot; else if (site.pic_count >= 3 && obj->shape == site.entries[2].shape && site.entries[2].transition_to == NULL) slot = site.entries[2].slot; else if (site.pic_count >= 4 && obj->shape == site.entries[3].shape && site.entries[3].transition_to == NULL) slot = site.entries[3].slot; if (slot != UINT32_MAX && KILN_LIKELY(slot < obj->slot_capacity && !obj->frozen)) { obj->slots[slot] = v18; v19 = v18; handled = 1; } } if (!handled) { int status = kiln_c99_val_write_property(host, v6, kiln_module_88ce3ff6b3d54e3e703d5b2d403ec65f_key_2, 1, v18, 0, depth, thrown, &site); if (status == KILN_C99_THROWN) goto kiln_unwind; if (status == KILN_C99_CONTROL_ERROR) { kiln_c99_note_refusal("kiln_module_88ce3ff6b3d54e3e703d5b2d403ec65f", (size_t)24, "SetProperty(b)", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; v19 = v18; } }
     *result = kiln_val_to_boundary(v19);
     if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);

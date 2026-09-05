@@ -13,6 +13,7 @@ int kiln_module_8ca772a3fa0fe49e5a5163ad33b17013(kiln_host *host, kiln_value *re
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     kiln_c99_reset_diagnostics();
     for (size_t slot = 0; slot < (size_t)1; ++slot) locals[slot] = KILN_VAL_UNDEFINED;
+    int64_t i2 = 0;
     double d2 = 0.0;
     kiln_val v0 = KILN_VAL_UNDEFINED, v1 = KILN_VAL_UNDEFINED, v2 = KILN_VAL_UNDEFINED;
 kiln_block_0:;
@@ -34,6 +35,7 @@ kiln_block_1:;
 kiln_block_2:;
     v2 = UINT64_C(4607182418800017408);
     memcpy(&d2, &v2, sizeof(d2));
+    i2 = 1LL;
     *result = kiln_val_to_boundary(v2);
     return KILN_C99_OK;
 }
