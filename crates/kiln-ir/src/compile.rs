@@ -360,6 +360,13 @@ pub fn compile_module(module: &Module) -> Result<ModuleProgram, Vec<CompileDiagn
         }
     }
 
+    let link_facts = ModuleLinkFacts {
+        immutable_bindings: immutable_module_bindings(module),
+        direct_eval: body_contains_direct_eval(&module.body),
+        new_function: body_contains_new_function(&module.body),
+        dynamic_imports: collect_dynamic_imports(&module.body),
+    };
+
     compiler
         .finish_with_strictness()
         .map(|(program, strictness)| ModuleProgram {
@@ -368,6 +375,7 @@ pub fn compile_module(module: &Module) -> Result<ModuleProgram, Vec<CompileDiagn
             imports,
             exports,
             strictness,
+            link_facts,
         })
 }
 
@@ -432,6 +440,12 @@ pub fn compile_commonjs(module: &Module) -> Result<ModuleProgram, Vec<CompileDia
         });
     }
     compiler.compile_body(module);
+    let link_facts = ModuleLinkFacts {
+        immutable_bindings: immutable_module_bindings(module),
+        direct_eval: body_contains_direct_eval(&module.body),
+        new_function: body_contains_new_function(&module.body),
+        dynamic_imports: collect_dynamic_imports(&module.body),
+    };
     compiler
         .finish_with_strictness()
         .map(|(program, strictness)| ModuleProgram {
@@ -440,6 +454,7 @@ pub fn compile_commonjs(module: &Module) -> Result<ModuleProgram, Vec<CompileDia
             imports,
             exports: Vec::new(),
             strictness,
+            link_facts,
         })
 }
 
@@ -7311,7 +7326,7 @@ fn resource_declarations(list: &[Statement]) -> Vec<bool> {
     resources
 }
 
-fn mutable_module_bindings(body: &[Statement]) -> HashSet<String> {
+pub fn mutable_module_bindings(body: &[Statement]) -> HashSet<String> {
     let mut names = HashSet::new();
     for statement in body {
         if let StatementKind::Variable { kind, declarations } = &statement.kind
@@ -7324,6 +7339,46 @@ fn mutable_module_bindings(body: &[Statement]) -> HashSet<String> {
         collect_assigned_names(statement, &mut names);
     }
     names
+}
+
+/// Identify exported and top-level module bindings that are never mutated.
+pub fn immutable_module_bindings(module: &Module) -> Vec<String> {
+    let mutable = mutable_module_bindings(&module.body);
+    let mut names = HashSet::new();
+    for statement in &module.body {
+        match &statement.kind {
+            StatementKind::Variable { declarations, .. } => {
+                for declaration in declarations {
+                    collect_pattern_names(&declaration.pattern, &mut names);
+                }
+            }
+            StatementKind::Function(function) => {
+                if let Some(name) = &function.name {
+                    names.insert(name.clone());
+                }
+            }
+            StatementKind::Class(class) => {
+                if let Some(name) = &class.name {
+                    names.insert(name.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    for import in &module.imports {
+        names.insert(import.local.clone());
+    }
+    for export in &module.exports {
+        if let ExportOrigin::Local { local } = &export.origin {
+            names.insert(local.clone());
+        }
+    }
+    let mut immutable: Vec<String> = names
+        .into_iter()
+        .filter(|name| !mutable.contains(name))
+        .collect();
+    immutable.sort();
+    immutable
 }
 
 /// Every name assigned or updated anywhere in `statement`, however deeply nested.
@@ -7466,11 +7521,11 @@ fn names_captured_by_this_function(function: &Function) -> HashSet<String> {
 /// a binding owned by any enclosing function, so every enclosing level has to box its bindings as
 /// well. Shadowing is left to normal resolution when the call itself is compiled; treating a
 /// shadowed `eval` as direct here merely boxes a few extra locals and cannot change their values.
-fn body_contains_direct_eval(body: &[Statement]) -> bool {
+pub fn body_contains_direct_eval(body: &[Statement]) -> bool {
     body.iter().any(statement_contains_direct_eval)
 }
 
-fn function_contains_direct_eval(function: &Function) -> bool {
+pub fn function_contains_direct_eval(function: &Function) -> bool {
     function
         .parameters
         .iter()
@@ -7480,6 +7535,10 @@ fn function_contains_direct_eval(function: &Function) -> bool {
             .as_ref()
             .is_some_and(pattern_contains_direct_eval)
         || body_contains_direct_eval(&function.body)
+}
+
+pub fn module_contains_direct_eval(module: &Module) -> bool {
+    body_contains_direct_eval(&module.body)
 }
 
 fn statement_contains_direct_eval(statement: &Statement) -> bool {
@@ -7752,6 +7811,692 @@ fn list_element_contains_direct_eval(element: &ListElement) -> bool {
             expression_contains_direct_eval(value)
         }
         ListElement::Hole => false,
+    }
+}
+
+/// Whether `body` contains `new Function(...)` or dynamic `Function(...)`.
+pub fn body_contains_new_function(body: &[Statement]) -> bool {
+    body.iter().any(statement_contains_new_function)
+}
+
+pub fn function_contains_new_function(function: &Function) -> bool {
+    function
+        .parameters
+        .iter()
+        .any(|parameter| pattern_contains_new_function(&parameter.pattern))
+        || function
+            .rest
+            .as_ref()
+            .is_some_and(pattern_contains_new_function)
+        || body_contains_new_function(&function.body)
+}
+
+pub fn module_contains_new_function(module: &Module) -> bool {
+    body_contains_new_function(&module.body)
+}
+
+fn statement_contains_new_function(statement: &Statement) -> bool {
+    match &statement.kind {
+        StatementKind::Variable { declarations, .. } => declarations.iter().any(|declaration| {
+            pattern_contains_new_function(&declaration.pattern)
+                || declaration
+                    .initializer
+                    .as_ref()
+                    .is_some_and(expression_contains_new_function)
+        }),
+        StatementKind::Function(function) => function_contains_new_function(function),
+        StatementKind::Class(class) => class_contains_new_function(class),
+        StatementKind::Expression(expression)
+        | StatementKind::Throw(expression)
+        | StatementKind::ExportDefault(expression) => expression_contains_new_function(expression),
+        StatementKind::Return(value) => {
+            value.as_ref().is_some_and(expression_contains_new_function)
+        }
+        StatementKind::Block(body) => body_contains_new_function(body),
+        StatementKind::If {
+            test,
+            consequent,
+            alternate,
+        } => {
+            expression_contains_new_function(test)
+                || statement_contains_new_function(consequent)
+                || alternate
+                    .as_deref()
+                    .is_some_and(statement_contains_new_function)
+        }
+        StatementKind::While { test, body } | StatementKind::DoWhile { test, body } => {
+            expression_contains_new_function(test) || statement_contains_new_function(body)
+        }
+        StatementKind::For {
+            init,
+            test,
+            update,
+            body,
+        } => {
+            init.as_deref().is_some_and(statement_contains_new_function)
+                || test.as_ref().is_some_and(expression_contains_new_function)
+                || update
+                    .as_ref()
+                    .is_some_and(expression_contains_new_function)
+                || statement_contains_new_function(body)
+        }
+        StatementKind::ForOf { iterable, body, .. } => {
+            expression_contains_new_function(iterable) || statement_contains_new_function(body)
+        }
+        StatementKind::ForIn { object, body, .. } => {
+            expression_contains_new_function(object) || statement_contains_new_function(body)
+        }
+        StatementKind::Labelled { body, .. } => statement_contains_new_function(body),
+        StatementKind::With { object, body } => {
+            expression_contains_new_function(object) || statement_contains_new_function(body)
+        }
+        StatementKind::Switch {
+            discriminant,
+            cases,
+        } => {
+            expression_contains_new_function(discriminant)
+                || cases.iter().any(|case| {
+                    case.test
+                        .as_ref()
+                        .is_some_and(expression_contains_new_function)
+                        || body_contains_new_function(&case.body)
+                })
+        }
+        StatementKind::Try {
+            block,
+            handler,
+            finalizer,
+        } => {
+            body_contains_new_function(block)
+                || handler
+                    .as_ref()
+                    .is_some_and(|handler| body_contains_new_function(&handler.body))
+                || body_contains_new_function(finalizer)
+        }
+        StatementKind::Break { .. }
+        | StatementKind::Continue { .. }
+        | StatementKind::Empty
+        | StatementKind::Unsupported { .. } => false,
+    }
+}
+
+fn class_contains_new_function(class: &Class) -> bool {
+    class
+        .superclass
+        .as_ref()
+        .is_some_and(expression_contains_new_function)
+        || class
+            .constructor
+            .as_ref()
+            .is_some_and(function_contains_new_function)
+        || class
+            .methods
+            .iter()
+            .any(|method| function_contains_new_function(&method.function))
+        || class.initialisers.iter().any(|initialiser| match initialiser {
+            ClassInitialiser::Field(field) => {
+                matches!(&field.key, ObjectKey::Computed(key) if expression_contains_new_function(key))
+                    || field
+                        .value
+                        .as_ref()
+                        .is_some_and(expression_contains_new_function)
+            }
+            ClassInitialiser::StaticBlock(body) => function_contains_new_function(body),
+        })
+}
+
+fn pattern_contains_new_function(pattern: &Pattern) -> bool {
+    match pattern {
+        Pattern::Identifier(_) => false,
+        Pattern::Member { object, .. } | Pattern::PrivateMember { object, .. } => {
+            expression_contains_new_function(object)
+        }
+        Pattern::Computed { object, property } => {
+            expression_contains_new_function(object) || expression_contains_new_function(property)
+        }
+        Pattern::WithDefault { inner, default } => {
+            pattern_contains_new_function(inner) || expression_contains_new_function(default)
+        }
+        Pattern::Object { properties, rest } => {
+            properties.iter().any(|property| {
+                matches!(&property.key, PatternKey::Computed(key) if expression_contains_new_function(key))
+                    || pattern_contains_new_function(&property.value)
+            }) || rest
+                .as_deref()
+                .is_some_and(pattern_contains_new_function)
+        }
+        Pattern::Array { elements, rest } => {
+            elements
+                .iter()
+                .flatten()
+                .any(pattern_contains_new_function)
+                || rest
+                    .as_deref()
+                    .is_some_and(pattern_contains_new_function)
+        }
+    }
+}
+
+fn expression_contains_new_function(expression: &Expression) -> bool {
+    match &expression.kind {
+        ExpressionKind::Call {
+            callee,
+            arguments,
+            ..
+        } => {
+            matches!(&callee.kind, ExpressionKind::Identifier(name) if name == "Function")
+                || expression_contains_new_function(callee)
+                || arguments.iter().any(list_element_contains_new_function)
+        }
+        ExpressionKind::New { callee, arguments } => {
+            matches!(&callee.kind, ExpressionKind::Identifier(name) if name == "Function")
+                || expression_contains_new_function(callee)
+                || arguments.iter().any(list_element_contains_new_function)
+        }
+        ExpressionKind::Function(function) => function_contains_new_function(function),
+        ExpressionKind::Class(class) => class_contains_new_function(class),
+        ExpressionKind::ImportCall { specifier, options } => {
+            expression_contains_new_function(specifier)
+                || options
+                    .as_deref()
+                    .is_some_and(expression_contains_new_function)
+        }
+        ExpressionKind::Unary { argument, .. }
+        | ExpressionKind::Chain {
+            expression: argument,
+        }
+        | ExpressionKind::Await(argument)
+        | ExpressionKind::PrivateIn {
+            object: argument, ..
+        }
+        | ExpressionKind::PrivateMember {
+            object: argument, ..
+        }
+        | ExpressionKind::StaticMember {
+            object: argument, ..
+        } => expression_contains_new_function(argument),
+        ExpressionKind::Binary { left, right, .. }
+        | ExpressionKind::Logical { left, right, .. } => {
+            expression_contains_new_function(left) || expression_contains_new_function(right)
+        }
+        ExpressionKind::Assignment { value, .. } => expression_contains_new_function(value),
+        ExpressionKind::PatternAssignment { pattern, value } => {
+            pattern_contains_new_function(pattern) || expression_contains_new_function(value)
+        }
+        ExpressionKind::Conditional {
+            test,
+            consequent,
+            alternate,
+        } => {
+            expression_contains_new_function(test)
+                || expression_contains_new_function(consequent)
+                || expression_contains_new_function(alternate)
+        }
+        ExpressionKind::SuperCall { arguments } => {
+            arguments.iter().any(list_element_contains_new_function)
+        }
+        ExpressionKind::Array { elements } => {
+            elements.iter().any(list_element_contains_new_function)
+        }
+        ExpressionKind::Sequence { operands } => {
+            operands.iter().any(expression_contains_new_function)
+        }
+        ExpressionKind::Yield { value, .. } => value
+            .as_ref()
+            .is_some_and(|value| expression_contains_new_function(value)),
+        ExpressionKind::ComputedMember {
+            object, property, ..
+        } => {
+            expression_contains_new_function(object) || expression_contains_new_function(property)
+        }
+        ExpressionKind::ComputedAssignment {
+            object,
+            property,
+            value,
+            ..
+        } => {
+            expression_contains_new_function(object)
+                || expression_contains_new_function(property)
+                || expression_contains_new_function(value)
+        }
+        ExpressionKind::MemberAssignment { object, value, .. }
+        | ExpressionKind::PrivateAssignment { object, value, .. } => {
+            expression_contains_new_function(object) || expression_contains_new_function(value)
+        }
+        ExpressionKind::UpdateMember {
+            object, property, ..
+        }
+        | ExpressionKind::Delete { object, property } => {
+            expression_contains_new_function(object)
+                || matches!(property.as_ref(), ObjectKey::Computed(key) if expression_contains_new_function(key))
+        }
+        ExpressionKind::DeleteValue { argument } => expression_contains_new_function(argument),
+        ExpressionKind::DeleteBinding { .. } => false,
+        ExpressionKind::Template { expressions, .. } => {
+            expressions.iter().any(expression_contains_new_function)
+        }
+        ExpressionKind::Object { members } => members.iter().any(|member| match member {
+            ObjectMember::Property(property) => {
+                matches!(&property.key, ObjectKey::Computed(key) if expression_contains_new_function(key))
+                    || expression_contains_new_function(&property.value)
+            }
+            ObjectMember::Spread(source) => expression_contains_new_function(source),
+            ObjectMember::Accessor { key, function, .. } => {
+                matches!(key, ObjectKey::Computed(key) if expression_contains_new_function(key))
+                    || function_contains_new_function(function)
+            }
+        }),
+        ExpressionKind::SuperComputedMember { property } => {
+            expression_contains_new_function(property)
+        }
+        ExpressionKind::Identifier(_)
+        | ExpressionKind::Update { .. }
+        | ExpressionKind::Literal(_)
+        | ExpressionKind::This
+        | ExpressionKind::NewTarget
+        | ExpressionKind::SuperMember { .. }
+        | ExpressionKind::RegExp { .. }
+        | ExpressionKind::TemplateStrings { .. }
+        | ExpressionKind::Unsupported { .. } => false,
+    }
+}
+
+fn list_element_contains_new_function(element: &ListElement) -> bool {
+    match element {
+        ListElement::Item(value) | ListElement::Spread(value) => {
+            expression_contains_new_function(value)
+        }
+        ListElement::Hole => false,
+    }
+}
+
+/// Collect all dynamic imports from `body`.
+pub fn collect_dynamic_imports(body: &[Statement]) -> Vec<DynamicImportTarget> {
+    let mut imports = Vec::new();
+    for statement in body {
+        collect_dynamic_imports_from_statement(statement, &mut imports);
+    }
+    imports
+}
+
+fn collect_dynamic_imports_from_statement(
+    statement: &Statement,
+    imports: &mut Vec<DynamicImportTarget>,
+) {
+    match &statement.kind {
+        StatementKind::Variable { declarations, .. } => {
+            for declaration in declarations {
+                collect_dynamic_imports_from_pattern(&declaration.pattern, imports);
+                if let Some(init) = &declaration.initializer {
+                    collect_dynamic_imports_from_expression(init, imports);
+                }
+            }
+        }
+        StatementKind::Function(function) => {
+            collect_dynamic_imports_from_function(function, imports)
+        }
+        StatementKind::Class(class) => collect_dynamic_imports_from_class(class, imports),
+        StatementKind::Expression(expression)
+        | StatementKind::Throw(expression)
+        | StatementKind::ExportDefault(expression) => {
+            collect_dynamic_imports_from_expression(expression, imports);
+        }
+        StatementKind::Return(value) => {
+            if let Some(v) = value {
+                collect_dynamic_imports_from_expression(v, imports);
+            }
+        }
+        StatementKind::Block(body) => {
+            for s in body {
+                collect_dynamic_imports_from_statement(s, imports);
+            }
+        }
+        StatementKind::If {
+            test,
+            consequent,
+            alternate,
+        } => {
+            collect_dynamic_imports_from_expression(test, imports);
+            collect_dynamic_imports_from_statement(consequent, imports);
+            if let Some(alt) = alternate {
+                collect_dynamic_imports_from_statement(alt, imports);
+            }
+        }
+        StatementKind::While { test, body } | StatementKind::DoWhile { test, body } => {
+            collect_dynamic_imports_from_expression(test, imports);
+            collect_dynamic_imports_from_statement(body, imports);
+        }
+        StatementKind::For {
+            init,
+            test,
+            update,
+            body,
+        } => {
+            if let Some(i) = init {
+                collect_dynamic_imports_from_statement(i, imports);
+            }
+            if let Some(t) = test {
+                collect_dynamic_imports_from_expression(t, imports);
+            }
+            if let Some(u) = update {
+                collect_dynamic_imports_from_expression(u, imports);
+            }
+            collect_dynamic_imports_from_statement(body, imports);
+        }
+        StatementKind::ForOf { iterable, body, .. } => {
+            collect_dynamic_imports_from_expression(iterable, imports);
+            collect_dynamic_imports_from_statement(body, imports);
+        }
+        StatementKind::ForIn { object, body, .. } => {
+            collect_dynamic_imports_from_expression(object, imports);
+            collect_dynamic_imports_from_statement(body, imports);
+        }
+        StatementKind::Labelled { body, .. } => {
+            collect_dynamic_imports_from_statement(body, imports)
+        }
+        StatementKind::With { object, body } => {
+            collect_dynamic_imports_from_expression(object, imports);
+            collect_dynamic_imports_from_statement(body, imports);
+        }
+        StatementKind::Switch {
+            discriminant,
+            cases,
+        } => {
+            collect_dynamic_imports_from_expression(discriminant, imports);
+            for case in cases {
+                if let Some(test) = &case.test {
+                    collect_dynamic_imports_from_expression(test, imports);
+                }
+                for s in &case.body {
+                    collect_dynamic_imports_from_statement(s, imports);
+                }
+            }
+        }
+        StatementKind::Try {
+            block,
+            handler,
+            finalizer,
+        } => {
+            for s in block {
+                collect_dynamic_imports_from_statement(s, imports);
+            }
+            if let Some(h) = handler {
+                for s in &h.body {
+                    collect_dynamic_imports_from_statement(s, imports);
+                }
+            }
+            for s in finalizer {
+                collect_dynamic_imports_from_statement(s, imports);
+            }
+        }
+        StatementKind::Break { .. }
+        | StatementKind::Continue { .. }
+        | StatementKind::Empty
+        | StatementKind::Unsupported { .. } => {}
+    }
+}
+
+fn collect_dynamic_imports_from_function(
+    function: &Function,
+    imports: &mut Vec<DynamicImportTarget>,
+) {
+    for param in &function.parameters {
+        collect_dynamic_imports_from_pattern(&param.pattern, imports);
+    }
+    if let Some(rest) = &function.rest {
+        collect_dynamic_imports_from_pattern(rest, imports);
+    }
+    for s in &function.body {
+        collect_dynamic_imports_from_statement(s, imports);
+    }
+}
+
+fn collect_dynamic_imports_from_class(class: &Class, imports: &mut Vec<DynamicImportTarget>) {
+    if let Some(superclass) = &class.superclass {
+        collect_dynamic_imports_from_expression(superclass, imports);
+    }
+    if let Some(ctor) = &class.constructor {
+        collect_dynamic_imports_from_function(ctor, imports);
+    }
+    for method in &class.methods {
+        collect_dynamic_imports_from_function(&method.function, imports);
+    }
+    for initialiser in &class.initialisers {
+        match initialiser {
+            ClassInitialiser::Field(field) => {
+                if let ObjectKey::Computed(key) = &field.key {
+                    collect_dynamic_imports_from_expression(key, imports);
+                }
+                if let Some(value) = &field.value {
+                    collect_dynamic_imports_from_expression(value, imports);
+                }
+            }
+            ClassInitialiser::StaticBlock(body) => {
+                collect_dynamic_imports_from_function(body, imports);
+            }
+        }
+    }
+}
+
+fn collect_dynamic_imports_from_pattern(pattern: &Pattern, imports: &mut Vec<DynamicImportTarget>) {
+    match pattern {
+        Pattern::Identifier(_) => {}
+        Pattern::Member { object, .. } | Pattern::PrivateMember { object, .. } => {
+            collect_dynamic_imports_from_expression(object, imports);
+        }
+        Pattern::Computed { object, property } => {
+            collect_dynamic_imports_from_expression(object, imports);
+            collect_dynamic_imports_from_expression(property, imports);
+        }
+        Pattern::WithDefault { inner, default } => {
+            collect_dynamic_imports_from_pattern(inner, imports);
+            collect_dynamic_imports_from_expression(default, imports);
+        }
+        Pattern::Object { properties, rest } => {
+            for property in properties {
+                if let PatternKey::Computed(key) = &property.key {
+                    collect_dynamic_imports_from_expression(key, imports);
+                }
+                collect_dynamic_imports_from_pattern(&property.value, imports);
+            }
+            if let Some(r) = rest {
+                collect_dynamic_imports_from_pattern(r, imports);
+            }
+        }
+        Pattern::Array { elements, rest } => {
+            for el in elements.iter().flatten() {
+                collect_dynamic_imports_from_pattern(el, imports);
+            }
+            if let Some(r) = rest {
+                collect_dynamic_imports_from_pattern(r, imports);
+            }
+        }
+    }
+}
+
+fn collect_dynamic_imports_from_expression(
+    expression: &Expression,
+    imports: &mut Vec<DynamicImportTarget>,
+) {
+    match &expression.kind {
+        ExpressionKind::ImportCall { specifier, options } => {
+            let target = match &specifier.kind {
+                ExpressionKind::Literal(Literal::String(s)) => {
+                    DynamicImportTarget::Static(s.clone())
+                }
+                ExpressionKind::Template {
+                    quasis,
+                    expressions,
+                } if expressions.is_empty() && quasis.len() == 1 => {
+                    DynamicImportTarget::Static(quasis[0].clone())
+                }
+                _ => DynamicImportTarget::Dynamic,
+            };
+            imports.push(target);
+            collect_dynamic_imports_from_expression(specifier, imports);
+            if let Some(opts) = options {
+                collect_dynamic_imports_from_expression(opts, imports);
+            }
+        }
+        ExpressionKind::Call {
+            callee, arguments, ..
+        } => {
+            collect_dynamic_imports_from_expression(callee, imports);
+            for arg in arguments {
+                collect_dynamic_imports_from_list_element(arg, imports);
+            }
+        }
+        ExpressionKind::New { callee, arguments } => {
+            collect_dynamic_imports_from_expression(callee, imports);
+            for arg in arguments {
+                collect_dynamic_imports_from_list_element(arg, imports);
+            }
+        }
+        ExpressionKind::Function(function) => {
+            collect_dynamic_imports_from_function(function, imports)
+        }
+        ExpressionKind::Class(class) => collect_dynamic_imports_from_class(class, imports),
+        ExpressionKind::Unary { argument, .. }
+        | ExpressionKind::Chain {
+            expression: argument,
+        }
+        | ExpressionKind::Await(argument)
+        | ExpressionKind::PrivateIn {
+            object: argument, ..
+        }
+        | ExpressionKind::PrivateMember {
+            object: argument, ..
+        }
+        | ExpressionKind::StaticMember {
+            object: argument, ..
+        } => {
+            collect_dynamic_imports_from_expression(argument, imports);
+        }
+        ExpressionKind::Binary { left, right, .. }
+        | ExpressionKind::Logical { left, right, .. } => {
+            collect_dynamic_imports_from_expression(left, imports);
+            collect_dynamic_imports_from_expression(right, imports);
+        }
+        ExpressionKind::Assignment { value, .. } => {
+            collect_dynamic_imports_from_expression(value, imports);
+        }
+        ExpressionKind::PatternAssignment { pattern, value } => {
+            collect_dynamic_imports_from_pattern(pattern, imports);
+            collect_dynamic_imports_from_expression(value, imports);
+        }
+        ExpressionKind::Conditional {
+            test,
+            consequent,
+            alternate,
+        } => {
+            collect_dynamic_imports_from_expression(test, imports);
+            collect_dynamic_imports_from_expression(consequent, imports);
+            collect_dynamic_imports_from_expression(alternate, imports);
+        }
+        ExpressionKind::SuperCall { arguments } => {
+            for arg in arguments {
+                collect_dynamic_imports_from_list_element(arg, imports);
+            }
+        }
+        ExpressionKind::Array { elements } => {
+            for el in elements {
+                collect_dynamic_imports_from_list_element(el, imports);
+            }
+        }
+        ExpressionKind::Sequence { operands } => {
+            for op in operands {
+                collect_dynamic_imports_from_expression(op, imports);
+            }
+        }
+        ExpressionKind::Yield { value, .. } => {
+            if let Some(v) = value {
+                collect_dynamic_imports_from_expression(v, imports);
+            }
+        }
+        ExpressionKind::ComputedMember {
+            object, property, ..
+        } => {
+            collect_dynamic_imports_from_expression(object, imports);
+            collect_dynamic_imports_from_expression(property, imports);
+        }
+        ExpressionKind::ComputedAssignment {
+            object,
+            property,
+            value,
+            ..
+        } => {
+            collect_dynamic_imports_from_expression(object, imports);
+            collect_dynamic_imports_from_expression(property, imports);
+            collect_dynamic_imports_from_expression(value, imports);
+        }
+        ExpressionKind::MemberAssignment { object, value, .. }
+        | ExpressionKind::PrivateAssignment { object, value, .. } => {
+            collect_dynamic_imports_from_expression(object, imports);
+            collect_dynamic_imports_from_expression(value, imports);
+        }
+        ExpressionKind::UpdateMember {
+            object, property, ..
+        }
+        | ExpressionKind::Delete { object, property } => {
+            collect_dynamic_imports_from_expression(object, imports);
+            if let ObjectKey::Computed(key) = property.as_ref() {
+                collect_dynamic_imports_from_expression(key, imports);
+            }
+        }
+        ExpressionKind::DeleteValue { argument } => {
+            collect_dynamic_imports_from_expression(argument, imports);
+        }
+        ExpressionKind::DeleteBinding { .. } => {}
+        ExpressionKind::Template { expressions, .. } => {
+            for expr in expressions {
+                collect_dynamic_imports_from_expression(expr, imports);
+            }
+        }
+        ExpressionKind::Object { members } => {
+            for member in members {
+                match member {
+                    ObjectMember::Property(prop) => {
+                        if let ObjectKey::Computed(key) = &prop.key {
+                            collect_dynamic_imports_from_expression(key, imports);
+                        }
+                        collect_dynamic_imports_from_expression(&prop.value, imports);
+                    }
+                    ObjectMember::Spread(source) => {
+                        collect_dynamic_imports_from_expression(source, imports);
+                    }
+                    ObjectMember::Accessor { key, function, .. } => {
+                        if let ObjectKey::Computed(key) = key {
+                            collect_dynamic_imports_from_expression(key, imports);
+                        }
+                        collect_dynamic_imports_from_function(function, imports);
+                    }
+                }
+            }
+        }
+        ExpressionKind::SuperComputedMember { property } => {
+            collect_dynamic_imports_from_expression(property, imports);
+        }
+        ExpressionKind::Identifier(_)
+        | ExpressionKind::Update { .. }
+        | ExpressionKind::Literal(_)
+        | ExpressionKind::This
+        | ExpressionKind::NewTarget
+        | ExpressionKind::SuperMember { .. }
+        | ExpressionKind::RegExp { .. }
+        | ExpressionKind::TemplateStrings { .. }
+        | ExpressionKind::Unsupported { .. } => {}
+    }
+}
+
+fn collect_dynamic_imports_from_list_element(
+    element: &ListElement,
+    imports: &mut Vec<DynamicImportTarget>,
+) {
+    match element {
+        ListElement::Item(value) | ListElement::Spread(value) => {
+            collect_dynamic_imports_from_expression(value, imports);
+        }
+        ListElement::Hole => {}
     }
 }
 

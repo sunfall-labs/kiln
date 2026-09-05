@@ -2749,6 +2749,7 @@ fn deep_linear_graph_is_stack_safe() {
             imports: Vec::new(),
             exports: Vec::new(),
             strictness: kiln_ir::Strictness::default(),
+            ..Default::default()
         }
     })
     .expect("deep graph builds without recursion");
@@ -2786,6 +2787,7 @@ fn step_limit_diagnostic_reports_total_graph_steps() {
             imports: Vec::new(),
             exports: Vec::new(),
             strictness: kiln_ir::Strictness::default(),
+            ..Default::default()
         }
     })
     .expect("build graph");

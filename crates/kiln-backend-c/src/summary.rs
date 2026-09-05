@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 
 use kiln_digest::Digest;
 use kiln_ir::{FunctionProto, Program};
+use serde::{Deserialize, Serialize};
 
 use crate::graph::{
     BasicBlock, BlockId, Effect, FunctionGraph, GraphOp, Proven, Terminator, ValueId,
@@ -17,7 +18,9 @@ use crate::graph::{
 };
 
 /// Coarse lattice type representing a speculative or inferred type guess.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, PartialOrd, Ord, Serialize, Deserialize,
+)]
 pub enum TypeGuess {
     #[default]
     Unknown,
@@ -35,7 +38,7 @@ pub enum TypeGuess {
 ///
 /// Functions with identical summaries do not invalidate callers or alter interface identity,
 /// enabling early cutoff for function body edits.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct FunctionSummary {
     /// Inferred or guessed parameter types.
     pub parameter_types: Vec<TypeGuess>,

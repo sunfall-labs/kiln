@@ -2642,6 +2642,7 @@ fn module_execution_initializes_import_slots_and_publishes_exports() {
             body: true,
             functions: Vec::new(),
         },
+        ..Default::default()
     };
     let mut host = TestHost {
         calls: Vec::new(),

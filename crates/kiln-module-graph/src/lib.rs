@@ -11,6 +11,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 use kiln_hir::Module;
 use kiln_host_abi::HostOps;
 use kiln_interpreter::{
@@ -144,6 +146,7 @@ pub enum ModuleSource {
 
 /// The typed result supplied by a module provider.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum ModulePayload {
     Program(ModuleProgram),
     JsonText(String),
@@ -174,6 +177,26 @@ pub enum ResolvedExport {
     Local { module: PathBuf, local_slot: u32 },
     Namespace { module: PathBuf },
     Ambiguous,
+}
+
+/// Closed-world analysis verdict for a module graph.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClosedWorldVerdict {
+    Closed,
+    Open { reasons: Vec<String> },
+}
+
+impl ClosedWorldVerdict {
+    pub fn is_closed(&self) -> bool {
+        matches!(self, Self::Closed)
+    }
+
+    pub fn reasons(&self) -> &[String] {
+        match self {
+            Self::Closed => &[],
+            Self::Open { reasons } => reasons,
+        }
+    }
 }
 
 /// User-facing failures produced while constructing or executing a graph.
@@ -717,6 +740,92 @@ impl ModuleGraph {
                     .and_then(|canonical| self.export_resolutions.get(&canonical))
             })?
             .get(name)
+    }
+
+    /// Determine whether the module graph satisfies the closed-world invariants:
+    /// - No direct `eval`
+    /// - No `new Function` / `Function(...)`
+    /// - No out-of-graph dynamic imports
+    pub fn closed_world_verdict(&self) -> ClosedWorldVerdict {
+        let mut reasons = Vec::new();
+        for node in self.modules() {
+            if node.program.link_facts.direct_eval {
+                reasons.push(format!("{}: contains direct eval", node.path.display()));
+            }
+            if node.program.link_facts.new_function {
+                reasons.push(format!(
+                    "{}: contains Function constructor call",
+                    node.path.display()
+                ));
+            }
+            for dynamic_import in &node.program.link_facts.dynamic_imports {
+                match dynamic_import {
+                    kiln_ir::DynamicImportTarget::Dynamic => {
+                        reasons.push(format!(
+                            "{}: dynamic import has non-static specifier",
+                            node.path.display()
+                        ));
+                    }
+                    kiln_ir::DynamicImportTarget::Static(specifier) => {
+                        let target_in_graph =
+                            node.dependencies.iter().any(|d| {
+                                d.specifier == *specifier && self.module(&d.target).is_some()
+                            }) || self.module(specifier).is_some()
+                                || node.path.parent().is_some_and(|dir| {
+                                    let candidate = dir.join(specifier);
+                                    self.module(&candidate).is_some()
+                                        || fs::canonicalize(&candidate)
+                                            .ok()
+                                            .and_then(|canon| self.module(&canon))
+                                            .is_some()
+                                        || [".js", ".mjs", ".cjs", ".json"].iter().any(|ext| {
+                                            let with_ext = dir.join(format!("{specifier}{ext}"));
+                                            self.module(&with_ext).is_some()
+                                                || fs::canonicalize(&with_ext)
+                                                    .ok()
+                                                    .and_then(|canon| self.module(&canon))
+                                                    .is_some()
+                                        })
+                                });
+                        if !target_in_graph {
+                            reasons.push(format!(
+                                "{}: dynamic import \"{}\" targets module outside graph",
+                                node.path.display(),
+                                specifier
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        if reasons.is_empty() {
+            ClosedWorldVerdict::Closed
+        } else {
+            ClosedWorldVerdict::Open { reasons }
+        }
+    }
+
+    /// Convenience predicate for closed-world status.
+    pub fn is_closed_world(&self) -> bool {
+        self.closed_world_verdict().is_closed()
+    }
+
+    /// Return the immutable bindings declared/exported by a specific module.
+    pub fn immutable_bindings(&self, module_path: impl AsRef<Path>) -> Option<&[String]> {
+        self.module(module_path)
+            .map(|node| node.program.link_facts.immutable_bindings.as_slice())
+    }
+
+    /// Return all immutable module bindings across the graph, keyed by module path.
+    pub fn all_immutable_bindings(&self) -> BTreeMap<PathBuf, Vec<String>> {
+        self.modules()
+            .map(|node| {
+                (
+                    node.path.clone(),
+                    node.program.link_facts.immutable_bindings.clone(),
+                )
+            })
+            .collect()
     }
 
     /// Bind one import a module makes from its own specifier, or `None` if it cannot be bound.
@@ -1899,6 +2008,12 @@ fn builtin_module_program(builtin: NodeBuiltin) -> ModuleProgram {
             body: true,
             functions: vec![],
         },
+        link_facts: kiln_ir::ModuleLinkFacts {
+            immutable_bindings: names.iter().map(|s| (*s).to_owned()).collect(),
+            direct_eval: false,
+            new_function: false,
+            dynamic_imports: vec![],
+        },
     }
 }
 
@@ -1925,6 +2040,12 @@ fn json_module_program() -> ModuleProgram {
         strictness: kiln_ir::Strictness {
             body: true,
             functions: vec![],
+        },
+        link_facts: kiln_ir::ModuleLinkFacts {
+            immutable_bindings: vec!["default".to_owned()],
+            direct_eval: false,
+            new_function: false,
+            dynamic_imports: vec![],
         },
     }
 }

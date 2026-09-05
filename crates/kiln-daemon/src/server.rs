@@ -766,6 +766,7 @@ fn handle<E: QueryEngine>(
             output,
             profile,
             source_view,
+            explain,
         } => {
             let prepared = match prepare_native_snapshot(
                 state,
@@ -780,10 +781,10 @@ fn handle<E: QueryEngine>(
             };
             match prepared {
                 PreparedNative::Graph(graph) => run_without_engine_lock(|| {
-                    native_build_graph(&graph, path, project_root, output, profile)
+                    native_build_graph(&graph, path, project_root, output, profile, explain)
                 }),
                 PreparedNative::Program(program) => run_without_engine_lock(|| {
-                    native_build_program(program, path, project_root, output, profile)
+                    native_build_program(program, path, project_root, output, profile, explain)
                 }),
             }
         }
@@ -1041,6 +1042,7 @@ fn handle_native_build_at_revision<E: QueryEngine>(
         profile,
         source_view,
         expected_revision,
+        explain,
     } = request
     else {
         unreachable!("native revision build handler received another request")
@@ -1143,6 +1145,7 @@ fn handle_native_build_at_revision<E: QueryEngine>(
             project_root.clone(),
             Some(temp_output.to_string_lossy().into_owned()),
             profile,
+            explain,
         ),
         PreparedNative::Program(program) => native_build_program(
             program,
@@ -1150,6 +1153,7 @@ fn handle_native_build_at_revision<E: QueryEngine>(
             project_root.clone(),
             Some(temp_output.to_string_lossy().into_owned()),
             profile,
+            explain,
         ),
     })
     .0;

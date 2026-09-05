@@ -293,6 +293,7 @@ fn finish_run_summary(
 /// Build one source file into a native executable. The entry is read before project
 /// synchronization and substituted into that walk, so daemon and one-shot backends observe the
 /// same command-entry snapshot even when an editor saves again during synchronization.
+#[allow(clippy::too_many_arguments)]
 pub fn build(
     backend: &mut dyn Backend,
     path: &Path,
@@ -301,6 +302,7 @@ pub fn build(
     profile: NativeProfile,
     shared: bool,
     node: bool,
+    explain: bool,
 ) -> Result<Output> {
     let display = path.display().to_string();
     let canonical = canonical_path(path)?;
@@ -378,6 +380,7 @@ pub fn build(
         output.clone(),
         profile,
         node,
+        explain,
         source_view,
     )? {
         SourceResponse::Ready(summary) => summary,
@@ -392,6 +395,7 @@ pub fn build(
                 output,
                 profile,
                 node,
+                explain,
                 source_view,
             )? {
                 SourceResponse::Ready(summary) => summary,
@@ -1334,7 +1338,9 @@ mod tests {
                     instructions: 4,
                     diagnostics: self.diagnostics.clone(),
                 }),
-                Request::NativeBuild { output, .. } => Response::NativeBuilt(NativeBuildSummary {
+                Request::NativeBuild {
+                    output, explain, ..
+                } => Response::NativeBuilt(NativeBuildSummary {
                     module_symbol: "kiln_module_test".to_owned(),
                     output_path: output.unwrap_or_default(),
                     compiler_identity: "test-cc".to_owned(),
@@ -1352,6 +1358,7 @@ mod tests {
                     compile_millis: 1,
                     link_millis: 1,
                     total_millis: 3,
+                    explanation: explain.then(|| "facts:\n  closed world: closed\n".to_string()),
                 }),
                 Request::NativeBuildAtRevision {
                     expected_revision, ..
@@ -1410,6 +1417,7 @@ mod tests {
                         compile_millis: 1,
                         link_millis: 1,
                         total_millis: 3,
+                        explanation: None,
                     },
                 }),
                 Request::CacheGc { dry_run, .. } => {
@@ -1734,6 +1742,7 @@ mod tests {
             NativeProfile::Dev,
             true,
             false,
+            false,
         )
         .expect("shared build");
         assert!(
@@ -1778,6 +1787,7 @@ mod tests {
             NativeProfile::Dev,
             false,
             false,
+            false,
         )
         .expect("native build keeps its captured entry snapshot");
 
@@ -1800,6 +1810,39 @@ mod tests {
             panic!("third request must build the captured snapshot");
         };
         assert_eq!(path, &canonical);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn native_build_passes_explain_flag_and_renders_explanation() {
+        let root = std::env::temp_dir().join(format!(
+            "kiln-cli-native-build-explain-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create native build fixture");
+        let entry = root.join("main.ts");
+        std::fs::write(&entry, "export const x = 1;\n").expect("write entry");
+
+        let mut backend = Fake::new();
+        let output = build(
+            &mut backend,
+            &entry,
+            &root,
+            None,
+            NativeProfile::Dev,
+            false,
+            false,
+            true,
+        )
+        .expect("native build with explain");
+
+        let Request::NativeBuild { explain, .. } = backend.seen.last().expect("request") else {
+            panic!("last request must be NativeBuild");
+        };
+        assert!(*explain);
+        assert!(output.text.contains("facts:\n  closed world: closed"));
 
         let _ = std::fs::remove_dir_all(&root);
     }

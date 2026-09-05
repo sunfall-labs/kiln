@@ -1303,6 +1303,7 @@ fn revision_pinned_native_build_rejects_stale_source_before_publication() {
             output: Some(output.to_string_lossy().into_owned()),
             profile: NativeProfile::Dev,
             expected_revision: first.revision,
+            explain: false,
         })
         .expect("stale native build response");
     assert!(
@@ -1325,6 +1326,7 @@ fn revision_pinned_native_build_rejects_stale_source_before_publication() {
             output: Some(output.to_string_lossy().into_owned()),
             profile: NativeProfile::Dev,
             expected_revision: second.revision,
+            explain: false,
         })
         .expect("current native build response");
     let Response::NativeBuilt(summary) = response else {
@@ -3023,6 +3025,7 @@ fn revision_pinned_native_build_accepts_relative_alias_reconciliation() {
             ),
             profile: NativeProfile::Dev,
             expected_revision: before.revision,
+            explain: false,
         })
         .expect("revision-pinned relative build");
     match response {

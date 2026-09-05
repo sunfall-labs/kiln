@@ -995,9 +995,11 @@ dependencies = [
  "kiln-digest",
  "kiln-host-abi",
  "kiln-ir",
+ "kiln-module-graph",
  "kiln-native-number",
  "kiln-native-number-abi",
  "memchr",
+ "serde",
 ]
 
 [[package]]
@@ -1066,6 +1068,7 @@ version = "0.0.0"
 dependencies = [
  "frontend-oxc",
  "kiln-artifact-cache",
+ "kiln-backend-c",
  "kiln-conformance",
  "kiln-db",
  "kiln-digest",
@@ -1169,6 +1172,7 @@ dependencies = [
  "kiln-ir",
  "kiln-module-resolver",
  "kiln-runtime",
+ "serde",
 ]
 
 [[package]]

@@ -268,6 +268,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             shared,
             node,
             march_native: _,
+            explain,
         } => {
             let node = if shared { false } else { auto_node(node) };
             let mut backend = open(one_shot, &socket)?;
@@ -279,6 +280,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                 profile,
                 shared,
                 node,
+                explain,
             )?)
         }
         Command::Check { path } => {

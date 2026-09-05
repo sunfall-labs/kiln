@@ -381,6 +381,7 @@ fn typed_node_querystring_has_a_native_materializer() {
             local_slot: 0,
         }],
         strictness: kiln_ir::Strictness::default(),
+        ..Default::default()
     };
     let provider_entry = fs::canonicalize(&entry).expect("canonical entry");
     let graph = ModuleGraph::build_with_typed_policy(
@@ -490,6 +491,7 @@ fn node_events_has_a_native_runtime_module_materializer() {
             },
         ],
         strictness: kiln_ir::Strictness::default(),
+        ..Default::default()
     };
     let node = kiln_module_graph::ModuleNode {
         path: PathBuf::from("/.kiln/builtins/events.builtin"),
@@ -2248,6 +2250,7 @@ fn one_module_graph(project: &Path, value: f64, export: &str) -> ModuleGraph {
             local_slot: 0,
         }],
         strictness: kiln_ir::Strictness::default(),
+        ..Default::default()
     };
     ModuleGraph::build_with_modules(project.join("main.js"), project, move |_| module.clone())
         .expect("construct one-module graph")
@@ -2333,6 +2336,7 @@ fn realm_scheduling_graph(project: &Path) -> ModuleGraph {
         imports: Vec::new(),
         exports: Vec::new(),
         strictness: kiln_ir::Strictness::default(),
+        ..Default::default()
     };
     let entry = ModuleProgram {
         program: Program {
@@ -2359,6 +2363,7 @@ fn realm_scheduling_graph(project: &Path) -> ModuleGraph {
         imports: Vec::new(),
         exports: Vec::new(),
         strictness: kiln_ir::Strictness::default(),
+        ..Default::default()
     };
     let dependency_path = fs::canonicalize(project.join("dep.js")).expect("canonical dependency");
     ModuleGraph::build_with_modules(project.join("main.js"), project, move |path| {
@@ -2650,6 +2655,7 @@ fn star_reexport_graph(project: &Path) -> ModuleGraph {
             local_slot: 0,
         }],
         strictness: kiln_ir::Strictness::default(),
+        ..Default::default()
     };
     let barrel = ModuleProgram {
         program: Program {
@@ -2672,6 +2678,7 @@ fn star_reexport_graph(project: &Path) -> ModuleGraph {
             local_slot: 0,
         }],
         strictness: kiln_ir::Strictness::default(),
+        ..Default::default()
     };
     let entry = ModuleProgram {
         program: Program {
@@ -2700,6 +2707,7 @@ fn star_reexport_graph(project: &Path) -> ModuleGraph {
         }],
         exports: Vec::new(),
         strictness: kiln_ir::Strictness::default(),
+        ..Default::default()
     };
     let origin_path = fs::canonicalize(project.join("origin.js")).expect("canonical origin");
     let barrel_path = fs::canonicalize(project.join("barrel.js")).expect("canonical barrel");
@@ -2741,6 +2749,7 @@ fn namespace_import_graph(project: &Path) -> ModuleGraph {
             local_slot: 0,
         }],
         strictness: kiln_ir::Strictness::default(),
+        ..Default::default()
     };
     let entry = ModuleProgram {
         program: Program {
@@ -2768,6 +2777,7 @@ fn namespace_import_graph(project: &Path) -> ModuleGraph {
         }],
         exports: Vec::new(),
         strictness: kiln_ir::Strictness::default(),
+        ..Default::default()
     };
     let origin_path = fs::canonicalize(project.join("origin.js")).expect("canonical origin");
     ModuleGraph::build_with_modules(project.join("main.js"), project, move |path| {
@@ -4345,6 +4355,7 @@ fn owned_result_graph_api_preserves_uncaught_thrown_scalars() {
         imports: Vec::new(),
         exports: Vec::new(),
         strictness: kiln_ir::Strictness::default(),
+        ..Default::default()
     };
     let graph =
         ModuleGraph::build_with_modules(project.join("main.js"), &project, move |_| thrown.clone())
@@ -4672,6 +4683,7 @@ fn graph_build_reuses_sibling_objects_across_different_roots() {
             local_slot: 0,
         }],
         strictness: kiln_ir::Strictness::default(),
+        ..Default::default()
     };
     let entry = ModuleProgram {
         program: Program {
@@ -4700,6 +4712,7 @@ fn graph_build_reuses_sibling_objects_across_different_roots() {
         }],
         exports: Vec::new(),
         strictness: kiln_ir::Strictness::default(),
+        ..Default::default()
     };
     let make_graph = |project: &Path| {
         let entry_path = project.join("main.js");
@@ -4804,6 +4817,7 @@ fn graph_build_reuses_sibling_objects_across_different_roots() {
             local_slot: 0,
         }],
         strictness: kiln_ir::Strictness::default(),
+        ..Default::default()
     };
     let edited_graph = {
         let entry_path = first_project.join("main.js");
@@ -4967,6 +4981,7 @@ fn shared_graph_wrapper_emits_and_links_without_static_value_arrays() {
             local_slot: 0,
         }],
         strictness: kiln_ir::Strictness::default(),
+        ..Default::default()
     };
     let entry = ModuleProgram {
         program: Program {
@@ -4986,6 +5001,7 @@ fn shared_graph_wrapper_emits_and_links_without_static_value_arrays() {
         }],
         exports: Vec::new(),
         strictness: kiln_ir::Strictness::default(),
+        ..Default::default()
     };
     let dependency_path = fs::canonicalize(project.join("dep.js")).expect("canonical dep");
     let graph = ModuleGraph::build_with_modules(project.join("main.js"), &project, move |path| {
@@ -5203,6 +5219,7 @@ fn shared_graph_proxy_preserves_host_strings_across_module_boundaries() {
             local_slot: 0,
         }],
         strictness: kiln_ir::Strictness::default(),
+        ..Default::default()
     };
     let entry = ModuleProgram {
         program: Program {
@@ -5229,6 +5246,7 @@ fn shared_graph_proxy_preserves_host_strings_across_module_boundaries() {
         }],
         exports: Vec::new(),
         strictness: kiln_ir::Strictness::default(),
+        ..Default::default()
     };
     let dependency_path = fs::canonicalize(project.join("dep.js")).expect("canonical dep");
     let graph = ModuleGraph::build_with_modules(project.join("main.js"), &project, move |path| {
