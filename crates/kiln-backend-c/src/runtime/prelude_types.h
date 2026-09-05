@@ -852,6 +852,18 @@ typedef struct kiln_node_response {
     int started;
     int ended;
     struct kiln_node_response *next;
+    /* Step B.3: Specialized URL construction and request target tracking */
+    kiln_value url_object;
+    kiln_value search_params_object;
+    int url_used;
+    const char *target_ptr;
+    size_t target_len;
+    kiln_value pathname_val;
+    size_t pathname_cap;
+    kiln_value query_val;
+    size_t query_cap;
+    kiln_value param_val;
+    size_t param_cap;
 } kiln_node_response;
 
 static void kiln_c99_node_unlink_response(kiln_node_response *response) {
