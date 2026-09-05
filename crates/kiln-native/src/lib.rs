@@ -104,6 +104,41 @@ fn cache_with_optional_shared(cache_root: impl Into<PathBuf>) -> ArtifactCache {
     }
 }
 
+fn resolve_type_profile(
+    options: &NativeBuildOptions,
+    entry_path: Option<&std::path::Path>,
+) -> Option<kiln_backend_c::TypeProfile> {
+    let candidate = if let Some(path) = &options.realm.type_profile_path {
+        Some(path.clone())
+    } else if let Some(entry) = entry_path {
+        let p = entry.with_extension("typeprofile");
+        if p.is_file() {
+            Some(p)
+        } else {
+            let out_p = options.output.with_extension("typeprofile");
+            if out_p.is_file() {
+                Some(out_p)
+            } else {
+                std::env::var_os("KILN_TYPE_PROFILE_FILE").map(PathBuf::from)
+            }
+        }
+    } else {
+        let out_p = options.output.with_extension("typeprofile");
+        if out_p.is_file() {
+            Some(out_p)
+        } else {
+            std::env::var_os("KILN_TYPE_PROFILE_FILE").map(PathBuf::from)
+        }
+    };
+    if let Some(path) = candidate
+        && let Ok(content) = std::fs::read_to_string(&path)
+        && let Ok(prof) = kiln_backend_c::TypeProfile::parse_json(&content)
+    {
+        return Some(prof);
+    }
+    None
+}
+
 impl NativeBuilder {
     pub fn discover(cache_root: impl Into<PathBuf>) -> Result<Self, NativeError> {
         Ok(Self::new(
@@ -216,6 +251,7 @@ impl NativeBuilder {
             NativeProfile::Dev,
             NativeProfile::Check,
             NativeProfile::Release,
+            NativeProfile::Profile,
         ] {
             let profile = profile.cache();
             for (backend, abi) in [
@@ -316,7 +352,13 @@ impl NativeBuilder {
     ) -> Result<NativeBuildReport, NativeError> {
         let total_started = Instant::now();
         let emit_started = Instant::now();
-        let emission = options.realm.emission_executable();
+        let mut emission = options.realm.emission_executable();
+        if options.profile == NativeProfile::Profile {
+            emission.type_profile_record = true;
+        }
+        if let Some(profile) = resolve_type_profile(options, None) {
+            emission.type_profile = Some(std::sync::Arc::new(profile));
+        }
         let module = emit_with_policy(program, emission.clone())?;
         let launcher = launcher_source(&module.symbol)?;
         let emit_elapsed = emit_started.elapsed();
@@ -1500,7 +1542,14 @@ impl NativeBuilder {
         validate_native_node_builtins(graph)?;
         let total_started = Instant::now();
         let emit_started = Instant::now();
-        let emission = options.realm.emission_executable();
+        let mut emission = options.realm.emission_executable();
+        if options.profile == NativeProfile::Profile {
+            emission.type_profile_record = true;
+        }
+        let entry_module_path = graph.modules().next().map(|m| m.path.as_path());
+        if let Some(profile) = resolve_type_profile(options, entry_module_path) {
+            emission.type_profile = Some(std::sync::Arc::new(profile));
+        }
         let mut modules = Vec::with_capacity(graph.module_count());
         let mut logical_paths = Vec::with_capacity(graph.module_count());
         let mut symbols = std::collections::HashSet::with_capacity(graph.module_count());

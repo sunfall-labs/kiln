@@ -350,6 +350,59 @@ impl Proven {
     }
 }
 
+fn default_profile_version() -> u32 {
+    1
+}
+
+/// Recorded type profile from a `--profile native-profile` execution (Step 3.2).
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct TypeProfile {
+    #[serde(default = "default_profile_version")]
+    pub version: u32,
+    #[serde(default)]
+    pub functions: Vec<FunctionTypeProfile>,
+    #[serde(default)]
+    pub sites: Vec<SiteTypeProfile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct FunctionTypeProfile {
+    pub index: usize,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub parameters: Vec<String>,
+    #[serde(default)]
+    pub return_type: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct SiteTypeProfile {
+    pub id: u32,
+    pub tag: String,
+}
+
+impl TypeProfile {
+    pub fn parse_json(s: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(s)
+    }
+
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+
+    pub fn function(&self, index: usize) -> Option<&FunctionTypeProfile> {
+        self.functions.iter().find(|f| f.index == index)
+    }
+
+    pub fn site_tag(&self, id: u32) -> Option<&str> {
+        self.sites
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| s.tag.as_str())
+    }
+}
+
 /// An induction variable proven to govern a loop.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InductionVariable {
@@ -893,6 +946,16 @@ pub fn proven_ints_with_assumptions(
 /// fallback clone for regions where parameter inputs arrive untyped but are consumed in
 /// arithmetic, comparisons, or numeric phis.
 pub fn candidate_number_parameters(graph: &FunctionGraph, proto: &FunctionProto) -> Vec<usize> {
+    candidate_number_parameters_with_profile(graph, proto, None)
+}
+
+/// Parameter slots (0..proto.parameter_count) that can be speculatively assumed to be numbers,
+/// informed by TypeScript annotations (Step 3.1) and Type Profiles (Step 3.2).
+pub fn candidate_number_parameters_with_profile(
+    graph: &FunctionGraph,
+    proto: &FunctionProto,
+    profile: Option<&FunctionTypeProfile>,
+) -> Vec<usize> {
     if proto.parameter_count == 0 || proto.generator || proto.asynchronous || proto.mapped_arguments
     {
         return Vec::new();
@@ -906,6 +969,18 @@ pub fn candidate_number_parameters(graph: &FunctionGraph, proto: &FunctionProto)
             && graph.initial_locals.get(slot).is_some()
         {
             annotated_candidates.push(slot);
+        }
+    }
+    // Step 3.2: treat parameters observed as numbers in type profile as candidate numbers for guarded speculation
+    if let Some(prof) = profile {
+        for (slot, tag) in prof.parameters.iter().enumerate() {
+            if (tag == "number" || tag == "int")
+                && (slot < proto.parameter_count as usize)
+                && graph.initial_locals.get(slot).is_some()
+                && !annotated_candidates.contains(&slot)
+            {
+                annotated_candidates.push(slot);
+            }
         }
     }
     let baseline = proven_numbers(graph);

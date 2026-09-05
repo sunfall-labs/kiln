@@ -5267,3 +5267,108 @@ fn type_annotations_drive_candidate_speculation_without_prior_inferred_uses() {
     );
     assert!(typed_c.source.contains("KILN_VAL_IS_DOUBLE(args[0])"));
 }
+
+#[test]
+fn type_profile_serialization_and_deserialization() {
+    let profile = TypeProfile {
+        version: 1,
+        functions: vec![FunctionTypeProfile {
+            index: 0,
+            name: Some("fib".into()),
+            parameters: vec!["int".into()],
+            return_type: Some("number".into()),
+        }],
+        sites: vec![SiteTypeProfile {
+            id: 42,
+            tag: "number".into(),
+        }],
+    };
+
+    let json = profile.to_json().unwrap();
+    let parsed = TypeProfile::parse_json(&json).unwrap();
+    assert_eq!(profile, parsed);
+    assert_eq!(parsed.function(0).unwrap().parameters, vec!["int"]);
+    assert_eq!(parsed.site_tag(42), Some("number"));
+}
+
+#[test]
+fn type_profile_drives_candidate_speculation_and_recording() {
+    let make_proto = || FunctionProto {
+        span: kiln_ir::Span::default(),
+        prologue_end: 0,
+        declared_length: 1,
+        name: Some("passthrough".into()),
+        parameter_count: 1,
+        local_count: 1,
+        code: vec![Instruction::LoadLocal(0), Instruction::Return],
+        arrow: false,
+        generator: false,
+        asynchronous: false,
+        async_generator: false,
+        mapped_arguments: false,
+        upvalues: Vec::new(),
+        type_annotations: None,
+    };
+
+    let proto = make_proto();
+    let prog = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants: Vec::new(),
+        code: vec![Instruction::Return],
+        local_count: 0,
+        functions: vec![proto.clone()],
+    };
+
+    let graph = build_function_graph(&proto, &prog).unwrap();
+
+    // Without profile: no speculation
+    let no_prof_candidates =
+        crate::graph::candidate_number_parameters_with_profile(&graph, &proto, None);
+    assert_eq!(no_prof_candidates, Vec::<usize>::new());
+
+    // With profile indicating parameter 0 is a number:
+    let func_prof = FunctionTypeProfile {
+        index: 0,
+        name: Some("passthrough".into()),
+        parameters: vec!["number".into()],
+        return_type: Some("number".into()),
+    };
+    let prof_candidates =
+        crate::graph::candidate_number_parameters_with_profile(&graph, &proto, Some(&func_prof));
+    assert_eq!(prof_candidates, vec![0]);
+
+    // Emit with policy.type_profile:
+    let profile_policy = EmissionPolicy {
+        type_profile: Some(std::sync::Arc::new(TypeProfile {
+            version: 1,
+            functions: vec![func_prof],
+            sites: Vec::new(),
+        })),
+        ..Default::default()
+    };
+
+    let c_with_profile = emit_with_policy(&prog, profile_policy).unwrap();
+    assert!(
+        c_with_profile
+            .source
+            .contains("/* Clone A: guarded fast path */")
+    );
+    assert!(
+        c_with_profile
+            .source
+            .contains("KILN_VAL_IS_DOUBLE(args[0])")
+    );
+
+    // Emit with policy.type_profile_record:
+    let record_policy = EmissionPolicy {
+        type_profile_record: true,
+        ..Default::default()
+    };
+
+    let c_with_record = emit_with_policy(&prog, record_policy).unwrap();
+    assert!(c_with_record.source.contains("kiln_profile_tag_of"));
+    assert!(c_with_record.source.contains("_dump_type_profile"));
+    assert!(c_with_record.source.contains("_fn_0_param_tags[1]"));
+    assert!(c_with_record.source.contains("atexit("));
+}

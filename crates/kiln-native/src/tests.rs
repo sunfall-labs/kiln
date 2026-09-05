@@ -6464,6 +6464,82 @@ fn native_build_with_march_native_opt_in_succeeds() {
 }
 
 #[test]
+fn native_build_with_type_profile_records_and_optimizes() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let toolchain = match Toolchain::discover() {
+        Ok(toolchain) => toolchain,
+        Err(ToolchainError::NoCompiler { .. }) => return,
+        Err(error) => panic!("compiler probe failed: {error}"),
+    };
+    let project = TestDirectory::new("kiln-native-type-profile");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        r#"
+function add(a, b) {
+    return a + b;
+}
+console.log(add(10, 20));
+"#,
+    )
+    .expect("write fixture");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("source graph compiles");
+
+    let output = project.path.join("program_profiled");
+    let options = NativeBuildOptions::new(output.clone(), NativeProfile::Profile);
+    let report = project
+        .builder(toolchain.clone())
+        .build_graph(&graph, &options)
+        .unwrap_or_else(|e| panic!("native profile build failed: {e:?}"));
+
+    let profile_file = project.path.join("main.typeprofile");
+    let run_output = Command::new(&report.output)
+        .env("KILN_TYPE_PROFILE_FILE", &profile_file)
+        .output_when_launchable()
+        .expect("run native executable");
+    assert_eq!(String::from_utf8_lossy(&run_output.stdout).trim(), "30");
+
+    assert!(profile_file.is_file(), "type profile file must be written");
+    let prof_content = fs::read_to_string(&profile_file).expect("read profile");
+    let prof: kiln_backend_c::TypeProfile =
+        kiln_backend_c::TypeProfile::parse_json(&prof_content).expect("parse profile JSON");
+    let add_fn = prof
+        .functions
+        .iter()
+        .find(|f| f.name.as_deref() == Some("add"))
+        .expect("found add fn");
+    assert_eq!(add_fn.parameters, vec!["number", "number"]);
+
+    // Next build: Release with profile passed in via options.with_type_profile_path
+    let output2 = project.path.join("program_optimized");
+    let options2 = NativeBuildOptions::new(output2.clone(), NativeProfile::Release)
+        .with_type_profile_path(&profile_file);
+    let report2 = project
+        .builder(toolchain)
+        .build_graph(&graph, &options2)
+        .expect("optimized build succeeds");
+
+    let run_output2 = Command::new(&report2.output)
+        .output_when_launchable()
+        .expect("run optimized native executable");
+    assert_eq!(String::from_utf8_lossy(&run_output2.stdout).trim(), "30");
+
+    // Also test under KILN_SPECULATE=exit:
+    let run_spec_exit = Command::new(&report2.output)
+        .env("KILN_SPECULATE", "exit")
+        .output_when_launchable()
+        .expect("run optimized native executable under KILN_SPECULATE=exit");
+    assert_eq!(String::from_utf8_lossy(&run_spec_exit.stdout).trim(), "30");
+}
+
+#[test]
 fn parse_worker_count_semantics() {
     assert_eq!(parse_worker_count(None), 1);
     assert_eq!(parse_worker_count(Some("")), 1);

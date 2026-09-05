@@ -82,6 +82,11 @@ impl NativeBuildOptions {
         self.march_native = march_native;
         self
     }
+
+    pub fn with_type_profile_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.realm.type_profile_path = Some(path.into());
+        self
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -90,6 +95,7 @@ pub struct NativeRealmPolicy {
     pub entropy: NativeEntropyPolicy,
     pub timezone: NativeStringPolicy,
     pub locale: NativeStringPolicy,
+    pub type_profile_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -115,6 +121,7 @@ impl NativeRealmPolicy {
             entropy: NativeEntropyPolicy::Deterministic,
             timezone: NativeStringPolicy::Deterministic,
             locale: NativeStringPolicy::Deterministic,
+            type_profile_path: None,
         }
     }
 
@@ -158,6 +165,8 @@ impl NativeRealmPolicy {
                 NativeStringPolicy::Host => EmissionStringPolicy::Host,
             },
             decoupled_prelude: true,
+            type_profile_record: false,
+            type_profile: None,
         }
     }
 
