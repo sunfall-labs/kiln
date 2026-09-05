@@ -4666,3 +4666,83 @@ fn value_graph_builds_and_verifies_try_catch() {
     let graph = build_function_graph(&proto, &program);
     assert!(verify_function_graph(&graph).is_ok());
 }
+
+#[test]
+fn value_graph_lowers_to_c_without_stack_or_sp() {
+    let proto = FunctionProto {
+        span: kiln_ir::Span::default(),
+        prologue_end: 0,
+        declared_length: 0,
+        name: Some("scalar_loop".into()),
+        parameter_count: 0,
+        local_count: 2,
+        code: vec![
+            Instruction::Const(0),      // 0
+            Instruction::StoreLocal(0), // sum = 0
+            Instruction::Const(0),      // 0
+            Instruction::StoreLocal(1), // i = 0
+            Instruction::LoadLocal(1),  // pc = 4
+            Instruction::Const(1),      // 10
+            Instruction::Binary(BinaryOp::LessThan),
+            Instruction::JumpIfFalse(15),
+            Instruction::LoadLocal(0), // pc = 8
+            Instruction::LoadLocal(1),
+            Instruction::Binary(BinaryOp::Add),
+            Instruction::StoreLocal(0),
+            Instruction::LoadLocal(1),
+            Instruction::Const(2), // 1
+            Instruction::Binary(BinaryOp::Add),
+            Instruction::StoreLocal(1),
+            Instruction::Jump(4),
+            Instruction::LoadLocal(0), // pc = 17
+            Instruction::Return,
+        ],
+        arrow: false,
+        generator: false,
+        asynchronous: false,
+        async_generator: false,
+        mapped_arguments: false,
+        upvalues: Vec::new(),
+    };
+
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants: vec![
+            Constant::Number(0),
+            Constant::Number(10),
+            Constant::Number(1),
+        ],
+        code: vec![Instruction::Return],
+        local_count: 0,
+        functions: vec![proto.clone()],
+    };
+
+    let graph = build_function_graph(&proto, &program);
+    assert!(verify_function_graph(&graph).is_ok());
+
+    let mut output = String::new();
+    emit_function_from_graph(
+        &mut output,
+        &graph,
+        &proto,
+        &program,
+        "test_mod",
+        0,
+        true,
+        "scalar_loop",
+    );
+
+    // Invariants per Step 1.3:
+    // 1. No stack[] array is allocated
+    assert!(!output.contains("stack["));
+    // 2. No sp stack pointer exists
+    assert!(!output.contains("sp =") && !output.contains("sp;"));
+    // 3. Values are C locals
+    assert!(output.contains("kiln_val v0 = KILN_VAL_UNDEFINED"));
+    // 4. Basic block labels exist
+    assert!(output.contains("kiln_block_0:;"));
+    assert!(output.contains("kiln_block_1:;"));
+    // 5. Clean C99 return
+    assert!(output.contains("return KILN_C99_OK;"));
+}
