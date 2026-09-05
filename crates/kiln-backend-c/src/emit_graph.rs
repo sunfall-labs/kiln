@@ -1352,14 +1352,12 @@ fn emit_graph_op(
         GraphOp::CallMethod {
             object, name, args, ..
         } => {
-            // One property read through the site's inline cache, a direct entry for a plain
-            // closure, and the boundary representation only for a built-in method: all inside
-            // `kiln_c99_val_call_method`, with the arguments handed over as machine values.
             let argc = args.len();
-            let key_len = match program.constants.get(*name as usize) {
-                Some(Constant::String(s)) => s.len(),
-                _ => 0,
+            let key_str = match program.constants.get(*name as usize) {
+                Some(Constant::String(s)) => s.as_str(),
+                _ => "",
             };
+            let key_len = key_str.len();
             let init = if args.is_empty() {
                 "KILN_VAL_UNDEFINED".to_owned()
             } else {
@@ -1369,11 +1367,225 @@ fn emit_graph_op(
                     .join(", ")
             };
             let check = status_check(diagnostic_site, pc, label, unwind);
+            let closed_world = !program.has_direct_eval() && !program.has_dynamic_import();
+
+            // 1. Math.* intrinsic if closed_world
+            let math_intrinsic = if closed_world {
+                match (key_str, argc) {
+                    ("sqrt", 1) => Some(format!(
+                        "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
+                             if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}))) {{ \
+                                 double d; memcpy(&d, &v{a0}, sizeof(d)); \
+                                 v{v} = kiln_c99_val_from_double(sqrt(d)); \
+                                 handled = 1; \
+                             }} \
+                         }}",
+                        o = object.0,
+                        a0 = args[0].0,
+                        v = v
+                    )),
+                    ("floor", 1) => Some(format!(
+                        "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
+                             if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}))) {{ \
+                                 double d; memcpy(&d, &v{a0}, sizeof(d)); \
+                                 v{v} = kiln_c99_val_from_double(floor(d)); \
+                                 handled = 1; \
+                             }} \
+                         }}",
+                        o = object.0,
+                        a0 = args[0].0,
+                        v = v
+                    )),
+                    ("ceil", 1) => Some(format!(
+                        "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
+                             if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}))) {{ \
+                                 double d; memcpy(&d, &v{a0}, sizeof(d)); \
+                                 v{v} = kiln_c99_val_from_double(ceil(d)); \
+                                 handled = 1; \
+                             }} \
+                         }}",
+                        o = object.0,
+                        a0 = args[0].0,
+                        v = v
+                    )),
+                    ("round", 1) => Some(format!(
+                        "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
+                             if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}))) {{ \
+                                 double d; memcpy(&d, &v{a0}, sizeof(d)); \
+                                 double r = isfinite(d) ? floor(d + 0.5) : d; \
+                                 if (r == 0.0 && signbit(d)) r = -0.0; \
+                                 v{v} = kiln_c99_val_from_double(r); \
+                                 handled = 1; \
+                             }} \
+                         }}",
+                        o = object.0,
+                        a0 = args[0].0,
+                        v = v
+                    )),
+                    ("trunc", 1) => Some(format!(
+                        "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
+                             if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}))) {{ \
+                                 double d; memcpy(&d, &v{a0}, sizeof(d)); \
+                                 v{v} = kiln_c99_val_from_double(trunc(d)); \
+                                 handled = 1; \
+                             }} \
+                         }}",
+                        o = object.0,
+                        a0 = args[0].0,
+                        v = v
+                    )),
+                    ("abs", 1) => Some(format!(
+                        "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
+                             if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}))) {{ \
+                                 double d; memcpy(&d, &v{a0}, sizeof(d)); \
+                                 v{v} = kiln_c99_val_from_double(fabs(d)); \
+                                 handled = 1; \
+                             }} \
+                         }}",
+                        o = object.0,
+                        a0 = args[0].0,
+                        v = v
+                    )),
+                    ("sign", 1) => Some(format!(
+                        "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
+                             if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}))) {{ \
+                                 double d; memcpy(&d, &v{a0}, sizeof(d)); \
+                                 v{v} = kiln_c99_val_from_double(isnan(d) || d == 0.0 ? d : (d < 0.0 ? -1.0 : 1.0)); \
+                                 handled = 1; \
+                             }} \
+                         }}",
+                        o = object.0,
+                        a0 = args[0].0,
+                        v = v
+                    )),
+                    ("pow", 2) => Some(format!(
+                        "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
+                             if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}) && KILN_VAL_IS_NUMBER(v{a1}))) {{ \
+                                 double d0, d1; memcpy(&d0, &v{a0}, sizeof(d0)); memcpy(&d1, &v{a1}, sizeof(d1)); \
+                                 v{v} = kiln_c99_val_from_double(pow(d0, d1)); \
+                                 handled = 1; \
+                             }} \
+                         }}",
+                        o = object.0,
+                        a0 = args[0].0,
+                        a1 = args[1].0,
+                        v = v
+                    )),
+                    ("min", 2) => Some(format!(
+                        "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
+                             if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}) && KILN_VAL_IS_NUMBER(v{a1}))) {{ \
+                                 double d0, d1; memcpy(&d0, &v{a0}, sizeof(d0)); memcpy(&d1, &v{a1}, sizeof(d1)); \
+                                 double res = (isnan(d0) || isnan(d1)) ? NAN : ((d0 < d1 || (d0 == 0.0 && d1 == 0.0 && signbit(d0))) ? d0 : d1); \
+                                 v{v} = kiln_c99_val_from_double(res); \
+                                 handled = 1; \
+                             }} \
+                         }}",
+                        o = object.0,
+                        a0 = args[0].0,
+                        a1 = args[1].0,
+                        v = v
+                    )),
+                    ("max", 2) => Some(format!(
+                        "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
+                             if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}) && KILN_VAL_IS_NUMBER(v{a1}))) {{ \
+                                 double d0, d1; memcpy(&d0, &v{a0}, sizeof(d0)); memcpy(&d1, &v{a1}, sizeof(d1)); \
+                                 double res = (isnan(d0) || isnan(d1)) ? NAN : ((d0 > d1 || (d0 == 0.0 && d1 == 0.0 && !signbit(d0))) ? d0 : d1); \
+                                 v{v} = kiln_c99_val_from_double(res); \
+                                 handled = 1; \
+                             }} \
+                         }}",
+                        o = object.0,
+                        a0 = args[0].0,
+                        a1 = args[1].0,
+                        v = v
+                    )),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            // 2. Array push intrinsic
+            let push_intrinsic = if key_str == "push" && argc == 1 {
+                Some(format!(
+                    "if (!handled && kiln_c99_val_array_push_fast(v{o}, v{a0}, &v{v}) == KILN_C99_OK) {{ \
+                         handled = 1; \
+                     }}",
+                    o = object.0,
+                    a0 = args[0].0,
+                    v = v
+                ))
+            } else {
+                None
+            };
+
+            let math_s = math_intrinsic.map(|s| format!(" {s}")).unwrap_or_default();
+            let push_s = push_intrinsic.map(|s| format!(" {s}")).unwrap_or_default();
+            let n = argc.max(1);
+
             writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_val call_args[{n}] = {{ {init} }}; int status = kiln_c99_val_call_method(host, v{}, call_args, (size_t){argc}, {symbol}_key_{name}, {key_len}, depth, thrown, &site, \"{diagnostic_site}\", (size_t){pc}, \"{label}\", &v{v}); {check} }}",
-                object.0,
-                n = argc.max(1)
+                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; \
+                kiln_val call_args[{n}] = {{ {init} }}; \
+                int handled = 0; \
+                {math_s}{push_s} \
+                if (!handled && site.pic_count > 0 && KILN_VAL_IS_OBJECT(v{o})) {{ \
+                    const kiln_object *obj = (const kiln_object *)KILN_VAL_PTR(v{o}); \
+                    kiln_val cached_fn = 0; \
+                    if (site.pic_count >= 1 && obj->shape == site.entries[0].shape) cached_fn = site.entries[0].method; \
+                    else if (site.pic_count >= 2 && obj->shape == site.entries[1].shape) cached_fn = site.entries[1].method; \
+                    else if (site.pic_count >= 3 && obj->shape == site.entries[2].shape) cached_fn = site.entries[2].method; \
+                    else if (site.pic_count >= 4 && obj->shape == site.entries[3].shape) cached_fn = site.entries[3].method; \
+                    if (cached_fn != 0 && KILN_VAL_IS_CLOSURE(cached_fn)) {{ \
+                        kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(cached_fn); \
+                        if (!plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                            kiln_val vreceiver = plain->arrow ? plain->captured_this : v{o}; \
+                            if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vreceiver); \
+                            kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; \
+                            v{v} = KILN_VAL_UNDEFINED; \
+                            int status = plain->body(&ctx_call, &v{v}, plain->upvalues, &vreceiver, call_args, (size_t){argc}); \
+                            if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) {{ \
+                                if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = kiln_val_to_boundary(v{o}).tag; \
+                                if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod invocation refused\"; \
+                                kiln_c99_note_refusal(\"{diagnostic_site}\", (size_t){pc}, \"{label}\", (size_t)kiln_c99_diagnostic_active_depth); \
+                            }} else if (KILN_UNLIKELY(status == KILN_C99_THROWN)) {{ \
+                                if (kiln_c99_diagnostic_detail == NULL) {{ \
+                                    kiln_c99_diagnostic_receiver_tag = kiln_val_to_boundary(v{o}).tag; \
+                                    kiln_c99_diagnostic_detail = \"CallMethod invocation threw\"; \
+                                }} \
+                                kiln_c99_note_refusal(\"{diagnostic_site}\", (size_t){pc}, \"{label}\", (size_t)kiln_c99_diagnostic_active_depth); \
+                            }} \
+                            {check} \
+                            handled = 1; \
+                        }} \
+                    }} else if (cached_fn != 0 && KILN_VAL_IS_METHOD(cached_fn) && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                        kiln_value bself = kiln_val_to_boundary(v{o}); \
+                        kiln_value bargs[{n}]; \
+                        for (size_t bi = 0; bi < {argc}; ++bi) bargs[bi] = kiln_val_to_boundary(call_args[bi]); \
+                        kiln_value bresult = kiln_c99_undefined(); \
+                        int status = kiln_c99_invoke_method(host, &bresult, KILN_VAL_METHOD_ID(cached_fn), bself, {argc} > 0 ? bargs : NULL, (size_t){argc}, depth, thrown); \
+                        {check} \
+                        v{v} = kiln_val_from_boundary(bresult); \
+                        handled = 1; \
+                    }} \
+                }} \
+                if (!handled && kiln_c99_cached_method_matches(&site, v{o}) && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                    kiln_value bself = kiln_val_to_boundary(v{o}); \
+                    kiln_value bargs[{n}]; \
+                    for (size_t bi = 0; bi < {argc}; ++bi) bargs[bi] = kiln_val_to_boundary(call_args[bi]); \
+                    kiln_value bresult = kiln_c99_undefined(); \
+                    int status = kiln_c99_invoke_method(host, &bresult, site.cached_method, bself, {argc} > 0 ? bargs : NULL, (size_t){argc}, depth, thrown); \
+                    {check} \
+                    v{v} = kiln_val_from_boundary(bresult); \
+                    handled = 1; \
+                }} \
+                if (!handled) {{ \
+                    int status = kiln_c99_val_call_method(host, v{o}, call_args, (size_t){argc}, {symbol}_key_{name}, {key_len}, depth, thrown, &site, \"{diagnostic_site}\", (size_t){pc}, \"{label}\", &v{v}); \
+                    {check} \
+                }} }}\
+                {typed_sync}",
+                o = object.0,
+                typed_sync = if typed { format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));") } else { String::new() }
             )
             .unwrap();
         }
@@ -1478,15 +1690,56 @@ fn emit_graph_op(
         // Property and element access call the value-shaped helpers directly: the same
         // functions the stack-shaped entry points wrap, without the one-element arrays.
         GraphOp::GetProperty { object, name, .. } => {
-            let key_len = match program.constants.get(*name as usize) {
-                Some(Constant::String(s)) => s.len(),
-                _ => 0,
+            let key_str = match program.constants.get(*name as usize) {
+                Some(Constant::String(s)) => s.as_str(),
+                _ => "",
             };
+            let key_len = key_str.len();
             let check = status_check(diagnostic_site, pc, label, unwind);
+            let length_check = if key_str == "length" {
+                format!(
+                    "if (KILN_LIKELY((v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX)) {{ \
+                         void *ptr = KILN_VAL_PTR(v{o}); \
+                         if (KILN_LIKELY(site.has_cached_method == 1 || kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY)) {{ \
+                             site.has_cached_method = 1; \
+                             v{v} = kiln_c99_val_from_double((double)((const kiln_array *)ptr)->count); \
+                             handled = 1; \
+                         }} \
+                     }} else if (KILN_VAL_IS_STRING(v{o})) {{ \
+                         v{v} = kiln_c99_val_from_double((double)kiln_c99_val_string_length(v{o})); \
+                         handled = 1; \
+                     }} ",
+                    o = object.0,
+                    v = v
+                )
+            } else {
+                String::new()
+            };
             writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_val_read_property(host, v{o}, {symbol}_key_{name}, {key_len}, depth, thrown, &site, &v{v}); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(v{o})); {check} }}",
-                o = object.0
+                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; \
+                int handled = 0; \
+                {length_check}\
+                if (!handled && site.pic_count > 0 && KILN_VAL_IS_OBJECT(v{o})) {{ \
+                    const kiln_object *obj = (const kiln_object *)KILN_VAL_PTR(v{o}); \
+                    uint32_t slot = UINT32_MAX; \
+                    if (site.pic_count >= 1 && obj->shape == site.entries[0].shape) slot = site.entries[0].slot; \
+                    else if (site.pic_count >= 2 && obj->shape == site.entries[1].shape) slot = site.entries[1].slot; \
+                    else if (site.pic_count >= 3 && obj->shape == site.entries[2].shape) slot = site.entries[2].slot; \
+                    else if (site.pic_count >= 4 && obj->shape == site.entries[3].shape) slot = site.entries[3].slot; \
+                    if (slot != UINT32_MAX && KILN_LIKELY(slot < obj->slot_capacity)) {{ \
+                        v{v} = obj->slots[slot]; \
+                        handled = 1; \
+                    }} \
+                }} \
+                if (!handled) {{ \
+                    int status = kiln_c99_val_read_property(host, v{o}, {symbol}_key_{name}, {key_len}, depth, thrown, &site, &v{v}); \
+                    if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(v{o})); \
+                    {check} \
+                }} }}\
+                {typed_sync}",
+                o = object.0,
+                typed_sync = if typed { format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));") } else { String::new() }
             )
             .unwrap();
         }
@@ -1502,16 +1755,39 @@ fn emit_graph_op(
             value,
             ..
         } => {
-            let key_len = match program.constants.get(*name as usize) {
-                Some(Constant::String(s)) => s.len(),
-                _ => 0,
+            let key_str = match program.constants.get(*name as usize) {
+                Some(Constant::String(s)) => s.as_str(),
+                _ => "",
             };
+            let key_len = key_str.len();
             let strict = matches!(op, GraphOp::SetPropertyStrict { strict: true, .. }) as u8;
             let check = status_check(diagnostic_site, pc, label, unwind);
             writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_val_write_property(host, v{}, {symbol}_key_{name}, {key_len}, v{}, {strict}, depth, thrown, &site); {check} v{v} = v{}; }}",
-                object.0, value.0, value.0
+                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; \
+                int handled = 0; \
+                if (site.pic_count > 0 && KILN_VAL_IS_OBJECT(v{o})) {{ \
+                    kiln_object *obj = (kiln_object *)KILN_VAL_PTR(v{o}); \
+                    uint32_t slot = UINT32_MAX; \
+                    if (site.pic_count >= 1 && obj->shape == site.entries[0].shape && site.entries[0].transition_to == NULL) slot = site.entries[0].slot; \
+                    else if (site.pic_count >= 2 && obj->shape == site.entries[1].shape && site.entries[1].transition_to == NULL) slot = site.entries[1].slot; \
+                    else if (site.pic_count >= 3 && obj->shape == site.entries[2].shape && site.entries[2].transition_to == NULL) slot = site.entries[2].slot; \
+                    else if (site.pic_count >= 4 && obj->shape == site.entries[3].shape && site.entries[3].transition_to == NULL) slot = site.entries[3].slot; \
+                    if (slot != UINT32_MAX && KILN_LIKELY(slot < obj->slot_capacity && !obj->frozen)) {{ \
+                        obj->slots[slot] = v{val}; \
+                        v{v} = v{val}; \
+                        handled = 1; \
+                    }} \
+                }} \
+                if (!handled) {{ \
+                    int status = kiln_c99_val_write_property(host, v{o}, {symbol}_key_{name}, {key_len}, v{val}, {strict}, depth, thrown, &site); \
+                    {check} \
+                    v{v} = v{val}; \
+                }} }}\
+                {typed_sync}",
+                o = object.0,
+                val = value.0,
+                typed_sync = if typed { format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));") } else { String::new() }
             )
             .unwrap();
         }
@@ -1519,9 +1795,31 @@ fn emit_graph_op(
             let check = status_check(diagnostic_site, pc, label, unwind);
             writeln!(
                 output,
-                "    {{ int status = kiln_c99_val_read_element(host, v{o}, v{k}, depth, thrown, &v{v}); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(kiln_val_to_boundary(v{o}), kiln_val_to_boundary(v{k})); {check} }}",
+                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; \
+                int handled = 0; \
+                if (KILN_LIKELY((v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_NUMBER(v{k}))) {{ \
+                    void *ptr = KILN_VAL_PTR(v{o}); \
+                    if (site.has_cached_method == 1 || kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
+                        site.has_cached_method = 1; \
+                        double idx; \
+                        memcpy(&idx, &v{k}, sizeof(idx)); \
+                        size_t slot = (size_t)idx; \
+                        const kiln_array *arr = (const kiln_array *)ptr; \
+                        if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < arr->count && arr->elements[slot] != KILN_VAL_HOLE)) {{ \
+                            v{v} = arr->elements[slot]; \
+                            handled = 1; \
+                        }} \
+                    }} \
+                }} \
+                if (!handled) {{ \
+                    int status = kiln_c99_val_read_element(host, v{o}, v{k}, depth, thrown, &v{v}); \
+                    if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(kiln_val_to_boundary(v{o}), kiln_val_to_boundary(v{k})); \
+                    {check} \
+                }} }}\
+                {typed_sync}",
                 o = object.0,
-                k = key.0
+                k = key.0,
+                typed_sync = if typed { format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));") } else { String::new() }
             )
             .unwrap();
         }
@@ -1535,8 +1833,33 @@ fn emit_graph_op(
             let check = status_check(diagnostic_site, pc, label, unwind);
             writeln!(
                 output,
-                "    {{ int status = kiln_c99_val_write_element(host, v{}, v{}, v{}, {strict}, depth, thrown); {check} v{v} = v{}; }}",
-                object.0, key.0, value.0, value.0
+                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; \
+                int handled = 0; \
+                if (KILN_LIKELY((v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_NUMBER(v{k}))) {{ \
+                    void *ptr = KILN_VAL_PTR(v{o}); \
+                    if (site.has_cached_method == 1 || kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
+                        site.has_cached_method = 1; \
+                        double idx; \
+                        memcpy(&idx, &v{k}, sizeof(idx)); \
+                        size_t slot = (size_t)idx; \
+                        kiln_array *arr = (kiln_array *)ptr; \
+                        if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < arr->count && !arr->frozen)) {{ \
+                            arr->elements[slot] = v{val}; \
+                            v{v} = v{val}; \
+                            handled = 1; \
+                        }} \
+                    }} \
+                }} \
+                if (!handled) {{ \
+                    int status = kiln_c99_val_write_element(host, v{o}, v{k}, v{val}, {strict}, depth, thrown); \
+                    {check} \
+                    v{v} = v{val}; \
+                }} }}\
+                {typed_sync}",
+                o = object.0,
+                k = key.0,
+                val = value.0,
+                typed_sync = if typed { format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));") } else { String::new() }
             )
             .unwrap();
         }

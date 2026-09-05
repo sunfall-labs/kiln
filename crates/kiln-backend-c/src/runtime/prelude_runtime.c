@@ -896,43 +896,6 @@ static kiln_data_view *kiln_c99_data_view_of(kiln_value value) {
  * launcher) can mark through `kiln_realm_gc_mark_value`.
  * ------------------------------------------------------------------------------------------- */
 
-typedef enum kiln_gc_kind {
-    KILN_GC_NONE = 0,
-    KILN_GC_STRING,
-    KILN_GC_BYTES,
-    KILN_GC_OBJECT,
-    KILN_GC_CLOSURE,
-    KILN_GC_CELL,
-    KILN_GC_ARRAY,
-    KILN_GC_GENERATOR,
-    KILN_GC_PROMISE,
-    KILN_GC_SETTLER,
-    KILN_GC_BOUND,
-    KILN_GC_COLLECTION,
-    KILN_GC_PROXY,
-    KILN_GC_DATE,
-    KILN_GC_REGEXP,
-    KILN_GC_SYMBOL,
-    KILN_GC_TYPED_BUFFER,
-    KILN_GC_TYPED_ARRAY,
-    /* A DataView holds one edge -- the buffer it borrows -- and owns no growth buffer of its own,
-     * so it is traced and never finalised. The bytes belong to KILN_GC_TYPED_BUFFER, which is the
-     * one place they are released. */
-    KILN_GC_DATA_VIEW,
-    KILN_GC_COMMONJS_REQUIRE,
-    KILN_GC_METHOD_STORE,
-    KILN_GC_NODE_SERVER,
-    KILN_GC_NODE_SOCKET,
-    KILN_GC_NODE_CLIENT_REQUEST,
-    KILN_GC_NODE_RESPONSE,
-    KILN_GC_NODE_COMPLETION,
-    KILN_GC_NODE_FS_COMPLETION,
-    KILN_GC_MICROTASK,
-    KILN_GC_NEXT_TICK,
-    KILN_GC_TIMER,
-    KILN_GC_KIND_COUNT
-} kiln_gc_kind;
-
 #define KILN_GC_PHASE_MARK 0
 #define KILN_GC_PHASE_TEARDOWN 1
 #define KILN_GC_PHASE_RESET 2

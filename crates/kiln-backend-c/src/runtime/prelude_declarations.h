@@ -206,6 +206,34 @@ extern int kiln_c99_read_element(kiln_host *host, kiln_value target, kiln_value 
 extern int kiln_c99_write_element(kiln_host *host, kiln_value target, kiln_value key, kiln_value value, int strict, int depth, kiln_value *thrown);
 extern uint32_t kiln_c99_gc_kind_of_ptr(const void *ptr);
 extern kiln_value kiln_val_to_boundary(kiln_val v);
+
+#ifndef KILN_C99_CACHED_METHOD_MATCHES_DEFINED
+#define KILN_C99_CACHED_METHOD_MATCHES_DEFINED
+static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln_val target) {
+    if (site == NULL || !site->has_cached_method) return 0;
+    uint8_t ctag = site->cached_tag;
+    if (ctag == KILN_VALUE_COLLECTION && (KILN_VAL_IS_OBJECT(target) || ((target & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX))) {
+        void *ptr = KILN_VAL_PTR(target);
+        return kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_COLLECTION;
+    } else if (ctag == KILN_VALUE_STRING && KILN_VAL_IS_STRING(target)) {
+        return 1;
+    } else if (ctag == KILN_VALUE_NUMBER && KILN_VAL_IS_NUMBER(target)) {
+        return 1;
+    } else if (ctag == KILN_VALUE_BOOLEAN && KILN_VAL_IS_BOOLEAN(target)) {
+        return 1;
+    } else if (ctag == KILN_VALUE_ARRAY && ((target & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX)) {
+        void *ptr = KILN_VAL_PTR(target);
+        if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {
+            const kiln_array *arr = (const kiln_array *)ptr;
+            return arr->properties.tag == KILN_VALUE_UNDEFINED;
+        }
+    } else if (ctag == KILN_VALUE_TYPED_ARRAY && ((target & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX)) {
+        void *ptr = KILN_VAL_PTR(target);
+        return kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_TYPED_ARRAY;
+    }
+    return 0;
+}
+#endif
 extern int kiln_c99_val_compare(uint16_t operation, kiln_val left, kiln_val right, int *result);
 extern kiln_val kiln_c99_val_binary(uint16_t operation, kiln_host *host, kiln_val left, kiln_val right, int *status, int depth, kiln_value *thrown);
 extern kiln_val kiln_c99_val_binary_fast(uint16_t operation, kiln_val left, kiln_val right);
@@ -221,6 +249,8 @@ extern int kiln_c99_val_to_property_key(kiln_host *host, kiln_val target, kiln_v
 extern int kiln_c99_val_check_tdz(kiln_val val, kiln_value *thrown);
 extern int kiln_c99_val_make_cell(kiln_val *slot);
 extern kiln_val kiln_c99_val_from_double(double d);
+extern size_t kiln_c99_val_string_length(kiln_val v);
+extern int kiln_c99_val_array_push_fast(kiln_val receiver, kiln_val arg, kiln_val *out);
 extern kiln_val kiln_c99_string_constant(void **cached, const char *bytes, size_t len);
 extern void kiln_c99_gc_mark_vals(struct kiln_gc_heap *heap, const kiln_val *values, size_t count);
 
