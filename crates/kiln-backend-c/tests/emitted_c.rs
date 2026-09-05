@@ -76,6 +76,7 @@ fn function(
         local_count,
         code,
         upvalues,
+        type_annotations: None,
     }
 }
 

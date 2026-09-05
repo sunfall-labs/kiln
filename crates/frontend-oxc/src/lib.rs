@@ -13,8 +13,9 @@ use kiln_hir::{
     ItemKind, ListElement, Literal as HirLiteral, LogicalOperator as HirLogicalOperator, Module,
     ModuleRequestKind, ModuleRequestOccurrence, Parameter as HirParameter, RequestedModule,
     SourceGoal, SourceKind, Span as HirSpan, Statement as HirStatement,
-    StatementKind as HirStatementKind, UnaryOperator as HirUnaryOperator,
-    VariableDeclarator as HirVariableDeclarator, VariableKind as HirVariableKind,
+    StatementKind as HirStatementKind, TypeAnnotation as HirTypeAnnotation,
+    UnaryOperator as HirUnaryOperator, VariableDeclarator as HirVariableDeclarator,
+    VariableKind as HirVariableKind,
 };
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
@@ -345,6 +346,41 @@ fn opens_strict(directives: &[Directive<'_>]) -> bool {
     directives
         .iter()
         .any(|directive| directive.directive.as_str() == "use strict")
+}
+
+/// Lower a TypeScript type annotation into a coarse HIR type annotation.
+///
+/// Order of trusted annotations follows Static Hermes's published results:
+/// (number, int, boolean, string).
+fn lower_type_annotation(
+    annotation: &oxc_ast::ast::TSTypeAnnotation<'_>,
+) -> Option<HirTypeAnnotation> {
+    lower_ts_type(&annotation.type_annotation)
+}
+
+fn lower_ts_type(ts_type: &oxc_ast::ast::TSType<'_>) -> Option<HirTypeAnnotation> {
+    use oxc_ast::ast::{TSType, TSTypeName};
+    match ts_type {
+        TSType::TSNumberKeyword(_) => Some(HirTypeAnnotation::Number),
+        TSType::TSBooleanKeyword(_) => Some(HirTypeAnnotation::Boolean),
+        TSType::TSStringKeyword(_) => Some(HirTypeAnnotation::String),
+        TSType::TSVoidKeyword(_) => Some(HirTypeAnnotation::Void),
+        TSType::TSAnyKeyword(_) | TSType::TSUnknownKeyword(_) => Some(HirTypeAnnotation::Any),
+        TSType::TSTypeReference(ref_type) => match &ref_type.type_name {
+            TSTypeName::IdentifierReference(ident) => match ident.name.as_str() {
+                "number" => Some(HirTypeAnnotation::Number),
+                "int" | "int32" => Some(HirTypeAnnotation::Int),
+                "boolean" | "bool" => Some(HirTypeAnnotation::Boolean),
+                "string" => Some(HirTypeAnnotation::String),
+                "void" => Some(HirTypeAnnotation::Void),
+                "any" => Some(HirTypeAnnotation::Any),
+                _ => Some(HirTypeAnnotation::Other),
+            },
+            _ => Some(HirTypeAnnotation::Other),
+        },
+        TSType::TSParenthesizedType(paren) => lower_ts_type(&paren.type_annotation),
+        _ => Some(HirTypeAnnotation::Other),
+    }
 }
 
 /// Lower one Oxc diagnostic into HIR, preferring the span Oxc marked primary.
@@ -1848,6 +1884,7 @@ impl Lowerer<'_> {
                         asynchronous: false,
                         parameters: Vec::new(),
                         rest: None,
+                        return_type: None,
                         body: self.statements(&block.body),
                         // A class body is strict whatever encloses it, and the block is part of
                         // the body.
@@ -1925,6 +1962,7 @@ impl Lowerer<'_> {
                                 asynchronous: false,
                                 parameters,
                                 rest: None,
+                                return_type: None,
                                 body,
                                 // A class body is strict whatever encloses it.
                                 strict: true,
@@ -1957,6 +1995,7 @@ impl Lowerer<'_> {
                         function: accessor_function(
                             vec![kiln_hir::Parameter {
                                 pattern: kiln_hir::Pattern::Identifier("%value".to_owned()),
+                                type_annotation: None,
                                 span: member_span,
                             }],
                             vec![HirStatement {
@@ -2033,6 +2072,10 @@ impl Lowerer<'_> {
             .map(|item| {
                 let item_span = span(item.span);
                 let pattern = self.pattern(&item.pattern, item_span);
+                let type_annotation = item
+                    .type_annotation
+                    .as_ref()
+                    .and_then(|t| lower_type_annotation(t));
                 HirParameter {
                     pattern: match &item.initializer {
                         Some(default) => {
@@ -2045,6 +2088,7 @@ impl Lowerer<'_> {
                         }
                         None => pattern,
                     },
+                    type_annotation,
                     span: item_span,
                 }
             })
@@ -2067,6 +2111,10 @@ impl Lowerer<'_> {
         expression_span: HirSpan,
     ) -> Option<HirFunction> {
         let (parameters, rest) = self.parameters(&arrow.params);
+        let return_type = arrow
+            .return_type
+            .as_ref()
+            .and_then(|t| lower_type_annotation(t));
 
         let body = match &arrow.body {
             ArrowFunctionBody::FunctionBody(block) => self.statements(&block.statements),
@@ -2093,6 +2141,7 @@ impl Lowerer<'_> {
             asynchronous: arrow.r#async,
             parameters,
             rest,
+            return_type,
             body,
             // A concise body has no prologue to open with, so only the braced form can say so.
             strict: match &arrow.body {
@@ -2110,6 +2159,10 @@ impl Lowerer<'_> {
         statement_span: HirSpan,
     ) -> Option<HirFunction> {
         let (parameters, rest) = self.parameters(&declaration.params);
+        let return_type = declaration
+            .return_type
+            .as_ref()
+            .and_then(|t| lower_type_annotation(t));
 
         let body = declaration.body.as_ref()?;
         let statements = self.statements(&body.statements);
@@ -2122,6 +2175,7 @@ impl Lowerer<'_> {
             asynchronous: declaration.r#async,
             parameters,
             rest,
+            return_type,
             body: statements,
             strict: opens_strict(&body.directives),
             span: statement_span,
@@ -3401,5 +3455,92 @@ mod tests {
                 .diagnostics
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn typescript_parameter_and_return_annotations_are_extracted() {
+        use kiln_hir::TypeAnnotation;
+
+        let module = parse(
+            "dist.ts",
+            "function dist(x: number, y: number): number { return x + y; }",
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let Some(kiln_hir::StatementKind::Function(dist_fn)) = module.body.first().map(|s| &s.kind)
+        else {
+            panic!("expected function statement");
+        };
+        assert_eq!(dist_fn.parameters.len(), 2);
+        assert_eq!(
+            dist_fn.parameters[0].type_annotation,
+            Some(TypeAnnotation::Number)
+        );
+        assert_eq!(
+            dist_fn.parameters[1].type_annotation,
+            Some(TypeAnnotation::Number)
+        );
+        assert_eq!(dist_fn.return_type, Some(TypeAnnotation::Number));
+
+        let module2 = parse(
+            "arrow.ts",
+            "const f = (a: boolean, b: string, c: int): void => {};",
+        );
+        assert!(module2.diagnostics.is_empty(), "{:?}", module2.diagnostics);
+        let Some(kiln_hir::StatementKind::Variable { declarations, .. }) =
+            module2.body.first().map(|s| &s.kind)
+        else {
+            panic!("expected variable statement");
+        };
+        let Some(kiln_hir::ExpressionKind::Function(arrow_fn)) =
+            declarations[0].initializer.as_ref().map(|i| &i.kind)
+        else {
+            panic!("expected arrow function");
+        };
+        assert!(arrow_fn.arrow);
+        assert_eq!(arrow_fn.parameters.len(), 3);
+        assert_eq!(
+            arrow_fn.parameters[0].type_annotation,
+            Some(TypeAnnotation::Boolean)
+        );
+        assert_eq!(
+            arrow_fn.parameters[1].type_annotation,
+            Some(TypeAnnotation::String)
+        );
+        assert_eq!(
+            arrow_fn.parameters[2].type_annotation,
+            Some(TypeAnnotation::Int)
+        );
+        assert_eq!(arrow_fn.return_type, Some(TypeAnnotation::Void));
+
+        let module3 = parse("untyped.ts", "function untyped(a, b) {}");
+        assert!(module3.diagnostics.is_empty(), "{:?}", module3.diagnostics);
+        let Some(kiln_hir::StatementKind::Function(untyped_fn)) =
+            module3.body.first().map(|s| &s.kind)
+        else {
+            panic!("expected function statement");
+        };
+        assert_eq!(untyped_fn.parameters[0].type_annotation, None);
+        assert_eq!(untyped_fn.parameters[1].type_annotation, None);
+        assert_eq!(untyped_fn.return_type, None);
+
+        let module4 = parse(
+            "custom.ts",
+            "function custom(x: MyType, y: any): CustomReturn {}",
+        );
+        assert!(module4.diagnostics.is_empty(), "{:?}", module4.diagnostics);
+        let Some(kiln_hir::StatementKind::Function(custom_fn)) =
+            module4.body.first().map(|s| &s.kind)
+        else {
+            panic!("expected function statement");
+        };
+        assert_eq!(
+            custom_fn.parameters[0].type_annotation,
+            Some(TypeAnnotation::Other)
+        );
+        assert_eq!(
+            custom_fn.parameters[1].type_annotation,
+            Some(TypeAnnotation::Any)
+        );
+        assert_eq!(custom_fn.return_type, Some(TypeAnnotation::Other));
     }
 }

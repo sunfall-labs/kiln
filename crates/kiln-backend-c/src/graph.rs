@@ -897,6 +897,17 @@ pub fn candidate_number_parameters(graph: &FunctionGraph, proto: &FunctionProto)
     {
         return Vec::new();
     }
+    // Step 3.1: treat parameters annotated with `: number` as candidate numbers for guarded speculation
+    let mut annotated_candidates = Vec::new();
+    for slot in 0..proto.parameter_count as usize {
+        if proto
+            .parameter_type(slot)
+            .is_some_and(|ann| ann.is_number())
+            && graph.initial_locals.get(slot).is_some()
+        {
+            annotated_candidates.push(slot);
+        }
+    }
     let baseline = proven_numbers(graph);
     let mut all_assumptions = HashMap::new();
     for slot in 0..proto.parameter_count as usize {
@@ -905,7 +916,7 @@ pub fn candidate_number_parameters(graph: &FunctionGraph, proto: &FunctionProto)
         }
     }
     if all_assumptions.is_empty() {
-        return Vec::new();
+        return annotated_candidates;
     }
     let speculative = proven_numbers_with_assumptions(graph, &all_assumptions);
     let mut useful = Vec::new();
@@ -939,51 +950,55 @@ pub fn candidate_number_parameters(graph: &FunctionGraph, proto: &FunctionProto)
             }
         }
     }
-    if useful.is_empty() {
-        return Vec::new();
-    }
-    // Verify that the useful parameters unlock numbers beyond the baseline and assumed params
-    let useful_assumptions: HashMap<ValueId, Proven> = useful
-        .iter()
-        .filter_map(|&slot| {
-            graph
-                .initial_locals
-                .get(slot)
-                .map(|&vid| (vid, Proven::Number))
-        })
-        .collect();
-    let verified_spec = proven_numbers_with_assumptions(graph, &useful_assumptions);
-    let has_body_numbers = verified_spec
-        .iter()
-        .any(|vid| !baseline.contains(vid) && !useful_assumptions.contains_key(vid));
-    let has_numeric_comparison = graph.blocks.iter().any(|b| {
-        b.operations.iter().any(|(_, op)| match op {
-            GraphOp::Binary {
-                op:
-                    BinaryOp::LessThan
-                    | BinaryOp::LessThanOrEqual
-                    | BinaryOp::GreaterThan
-                    | BinaryOp::GreaterThanOrEqual
-                    | BinaryOp::StrictEqual
-                    | BinaryOp::StrictNotEqual
-                    | BinaryOp::LooseEqual
-                    | BinaryOp::LooseNotEqual,
-                left,
-                right,
-            } => {
-                useful_assumptions.contains_key(left)
-                    && (verified_spec.contains(right) || baseline.contains(right))
-                    || useful_assumptions.contains_key(right)
-                        && (verified_spec.contains(left) || baseline.contains(left))
+    let mut result = annotated_candidates;
+    if !useful.is_empty() {
+        // Verify that the useful parameters unlock numbers beyond the baseline and assumed params
+        let useful_assumptions: HashMap<ValueId, Proven> = useful
+            .iter()
+            .filter_map(|&slot| {
+                graph
+                    .initial_locals
+                    .get(slot)
+                    .map(|&vid| (vid, Proven::Number))
+            })
+            .collect();
+        let verified_spec = proven_numbers_with_assumptions(graph, &useful_assumptions);
+        let has_body_numbers = verified_spec
+            .iter()
+            .any(|vid| !baseline.contains(vid) && !useful_assumptions.contains_key(vid));
+        let has_numeric_comparison = graph.blocks.iter().any(|b| {
+            b.operations.iter().any(|(_, op)| match op {
+                GraphOp::Binary {
+                    op:
+                        BinaryOp::LessThan
+                        | BinaryOp::LessThanOrEqual
+                        | BinaryOp::GreaterThan
+                        | BinaryOp::GreaterThanOrEqual
+                        | BinaryOp::StrictEqual
+                        | BinaryOp::StrictNotEqual
+                        | BinaryOp::LooseEqual
+                        | BinaryOp::LooseNotEqual,
+                    left,
+                    right,
+                } => {
+                    useful_assumptions.contains_key(left)
+                        && (verified_spec.contains(right) || baseline.contains(right))
+                        || useful_assumptions.contains_key(right)
+                            && (verified_spec.contains(left) || baseline.contains(left))
+                }
+                _ => false,
+            })
+        });
+        if has_body_numbers || has_numeric_comparison {
+            for slot in useful {
+                if !result.contains(&slot) {
+                    result.push(slot);
+                }
             }
-            _ => false,
-        })
-    });
-    if has_body_numbers || has_numeric_comparison {
-        useful
-    } else {
-        Vec::new()
+        }
     }
+    result.sort_unstable();
+    result
 }
 
 /// The operand-stack effect of an instruction the graph lowers through `tail.rs`: how many

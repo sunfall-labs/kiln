@@ -872,6 +872,7 @@ fn analyze_program_functions(program: &Program) -> Vec<FunctionFacts> {
             code: program.code.clone(),
             upvalues: Vec::new(),
             span: kiln_ir::Span::default(),
+            type_annotations: None,
         };
         if let Ok(graph) = build_function_graph(&top_level_proto, program) {
             functions.push(extract_function_facts(&graph, program));
@@ -1143,6 +1144,7 @@ mod tests {
             ],
             upvalues: Vec::new(),
             span: kiln_ir::Span::default(),
+            type_annotations: None,
         };
 
         let program = Program {

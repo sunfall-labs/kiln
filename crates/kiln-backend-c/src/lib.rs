@@ -972,6 +972,7 @@ fn entry_proto(program: &Program) -> FunctionProto {
         code: program.code.clone(),
         upvalues: Vec::new(),
         span: kiln_ir::Span::default(),
+        type_annotations: None,
     }
 }
 
