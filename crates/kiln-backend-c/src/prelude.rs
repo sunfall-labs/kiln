@@ -2258,6 +2258,7 @@ static int kiln_c99_internal_status(const char *converted_by) {
 macro_rules! header_extern_diagnostics {
     () => {
         r#"/* Refusals are runtime/compiler diagnostics, not JavaScript exceptions. */
+#define KILN_SEPARATE_PRELUDE 1
 extern const char *kiln_c99_diagnostic_site;
 extern const char *kiln_c99_diagnostic_operation;
 extern size_t kiln_c99_diagnostic_instruction;

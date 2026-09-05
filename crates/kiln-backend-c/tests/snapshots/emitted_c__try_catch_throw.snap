@@ -3,7 +3,8 @@ source: crates/kiln-backend-c/tests/emitted_c.rs
 expression: body(&unit)
 ---
 /* Program hash: 8b7a743292a34fdb; bytecode version: 2. */
-static const char kiln_module_8b7a743292a34fdbc7105dc34a2551c2_constant_1[] = "boom";
+static const struct { kiln_string header; char bytes[5]; } kiln_module_8b7a743292a34fdbc7105dc34a2551c2_string_1 = { { 4, 4, kiln_module_8b7a743292a34fdbc7105dc34a2551c2_string_1.bytes }, "boom" };
+#define kiln_module_8b7a743292a34fdbc7105dc34a2551c2_constant_1 (kiln_module_8b7a743292a34fdbc7105dc34a2551c2_string_1.bytes)
 static void kiln_module_8b7a743292a34fdbc7105dc34a2551c2_gc_roots(void *heap, void *context, int phase) {
     kiln_c99_gc_unit_roots(heap, context, phase);
 }
@@ -31,7 +32,7 @@ kiln_block_1:;
         goto kiln_block_3;
     }
 kiln_block_2:;
-    v4 = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, kiln_module_8b7a743292a34fdbc7105dc34a2551c2_constant_1);
+    v4 = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_module_8b7a743292a34fdbc7105dc34a2551c2_string_1);
     *thrown = kiln_val_to_boundary(v4); goto kiln_block_6;
 kiln_block_3:;
     v5 = UINT64_C(4619567317775286272);

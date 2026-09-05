@@ -1940,6 +1940,10 @@ static void kiln_c99_gc_release(void *payload) {
     heap = kiln_c99_gc_heap();
     if (heap == NULL) return;
     block = kiln_c99_gc_lookup_slab(heap, payload, &slab);
+    if (block == NULL && ((uintptr_t)payload % sizeof(void*) == 0) && (uintptr_t)payload >= sizeof(kiln_string)) {
+        block = kiln_c99_gc_lookup_slab(heap, (char *)payload - sizeof(kiln_string), &slab);
+        if (block != NULL) payload = (char *)payload - sizeof(kiln_string);
+    }
     if (block == NULL) return;
     if ((block->kind & KILN_GC_KIND_MASK) == KILN_GC_STRING)
         kiln_c99_key_forget(heap, (const char *)payload, block->size);
@@ -2485,7 +2489,14 @@ static void kiln_c99_gc_result_roots(void *opaque, void *context, int phase) {
 
 /* Allocation helpers for the kinds whose bytes are the value: strings and raw byte payloads. */
 static char *kiln_c99_gc_alloc_text(size_t len) {
-    return (char *)kiln_c99_gc_alloc(KILN_GC_STRING, len);
+    kiln_string *s = (kiln_string *)kiln_c99_gc_alloc(KILN_GC_STRING, sizeof(kiln_string) + len + 1);
+    if (s == NULL) return NULL;
+    s->length = len;
+    s->byte_len = len;
+    s->bytes = (const char *)(s + 1);
+    char *bytes = (char *)(s + 1);
+    bytes[len] = '\0';
+    return bytes;
 }
 
 static kiln_shape kiln_c99_root_shape = {
@@ -3300,6 +3311,27 @@ static int kiln_c99_new_array(kiln_value *out) {
     array->properties = kiln_c99_undefined();
     array->frozen = 0;
     array->not_extensible = 0;
+    array->is_numeric = 1;
+    *out = kiln_c99_value(KILN_VALUE_ARRAY, (uint64_t)(uintptr_t)array, NULL, 0);
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_new_array_with_capacity(kiln_value *out, size_t capacity, int is_numeric) {
+    kiln_array *array = (kiln_array *)kiln_c99_gc_alloc(KILN_GC_ARRAY, sizeof *array);
+    if (array == NULL) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    array->elements = NULL;
+    array->count = 0;
+    array->capacity = 0;
+    array->properties = kiln_c99_undefined();
+    array->frozen = 0;
+    array->not_extensible = 0;
+    array->is_numeric = is_numeric;
+    if (capacity > 0) {
+        int status = kiln_c99_reserve((void **)&array->elements, &array->capacity, capacity, sizeof *array->elements);
+        if (status != KILN_C99_OK) return status;
+    }
     *out = kiln_c99_value(KILN_VALUE_ARRAY, (uint64_t)(uintptr_t)array, NULL, 0);
     return KILN_C99_OK;
 }
