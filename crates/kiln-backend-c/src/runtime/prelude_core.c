@@ -8536,20 +8536,32 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
                 kiln_c99_ensure_dictionary(headers_obj);
             }
         }
-        if (response->status != 204 && response->status != 304 &&
-            !(response->status >= 100 && response->status < 200) &&
-            !kiln_c99_node_response_is_framed(kiln_c99_object_of(response->headers))) {
-            status = kiln_c99_put(NULL, response->headers, "transfer-encoding", 17,
-                                  kiln_c99_static_text(kiln_c99_transfer_encoding_chunked, 7),
-                                  0, NULL);
-            if (status != KILN_C99_OK) return status;
-        }
         *result = receiver;
         return KILN_C99_OK;
     }
     if (code == KILN_C99_METHOD_NODE_RESPONSE_WRITE) {
-        kiln_value text = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
+        const uint8_t *data_bytes = NULL;
+        size_t data_len = 0;
+        kiln_value text_val;
+        kiln_value arg = argc > 0 ? args[0] : kiln_c99_undefined();
         int status;
+        if (arg.tag == KILN_VALUE_STRING) {
+            data_bytes = (const uint8_t *)arg.ptr;
+            data_len = arg.len;
+        } else if (arg.tag == KILN_VALUE_TYPED_ARRAY) {
+            kiln_typed_array *view = kiln_c99_typed_array_of(arg);
+            size_t width = kiln_c99_typed_width(view->kind);
+            if (view->length > SIZE_MAX / width) return KILN_C99_OUT_OF_MEMORY;
+            data_bytes = view->buffer->bytes + view->byte_offset;
+            data_len = view->length * width;
+        } else if (arg.tag == KILN_VALUE_UNDEFINED) {
+            data_bytes = (const uint8_t *)"";
+            data_len = 0;
+        } else {
+            text_val = kiln_c99_text(arg);
+            data_bytes = (const uint8_t *)text_val.ptr;
+            data_len = text_val.len;
+        }
         if (response->ended)
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_ERROR,
                                         "write after end");
@@ -8574,7 +8586,7 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
         }
         status = kiln_realm_http_response_write_active(response->socket->resource,
                                                        response->request_id,
-                                                       (const uint8_t *)text.ptr, text.len);
+                                                       data_bytes, data_len);
         if (status < KILN_C99_OK) return status;
         *result = kiln_c99_boolean(status == KILN_C99_OK);
         return KILN_C99_OK;
@@ -8603,12 +8615,30 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
             if (status != KILN_C99_OK) return status;
         }
         {
-            kiln_value text = argc > 0 && args[0].tag != KILN_VALUE_UNDEFINED
-                                  ? kiln_c99_text(args[0])
-                                  : kiln_c99_copy_text(NULL, 0);
-        status = kiln_realm_http_response_end_active(response->socket->resource,
-                                                     response->request_id,
-                                                     (const uint8_t *)text.ptr, text.len);
+            const uint8_t *data_bytes = NULL;
+            size_t data_len = 0;
+            kiln_value text_val;
+            kiln_value arg = argc > 0 ? args[0] : kiln_c99_undefined();
+            if (arg.tag == KILN_VALUE_STRING) {
+                data_bytes = (const uint8_t *)arg.ptr;
+                data_len = arg.len;
+            } else if (arg.tag == KILN_VALUE_TYPED_ARRAY) {
+                kiln_typed_array *view = kiln_c99_typed_array_of(arg);
+                size_t width = kiln_c99_typed_width(view->kind);
+                if (view->length > SIZE_MAX / width) return KILN_C99_OUT_OF_MEMORY;
+                data_bytes = view->buffer->bytes + view->byte_offset;
+                data_len = view->length * width;
+            } else if (arg.tag == KILN_VALUE_UNDEFINED) {
+                data_bytes = (const uint8_t *)"";
+                data_len = 0;
+            } else {
+                text_val = kiln_c99_text(arg);
+                data_bytes = (const uint8_t *)text_val.ptr;
+                data_len = text_val.len;
+            }
+            status = kiln_realm_http_response_end_active(response->socket->resource,
+                                                         response->request_id,
+                                                         data_bytes, data_len);
         }
         if (status < KILN_C99_OK) return status;
         response->ended = 1;

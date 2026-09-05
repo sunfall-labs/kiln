@@ -1686,7 +1686,9 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
         id: u64,
         data: Vec<u8>,
     ) -> Option<node_stream::WriteDisposition> {
-        self.state.http_server.end_response(resource, id, &data)
+        self.state
+            .http_server
+            .end_response_bytes(resource, id, bytes::Bytes::from(data))
     }
 
     fn start_client_connection(&mut self, resource: ResourceId) -> bool {

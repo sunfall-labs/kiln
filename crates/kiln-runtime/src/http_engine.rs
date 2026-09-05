@@ -465,7 +465,7 @@ impl ResponseSlot {
         }
     }
 
-    fn end(&self, shared: &Rc<ConnectionShared>, id: u64, data: &[u8]) -> Option<WriteDisposition> {
+    fn end(&self, shared: &Rc<ConnectionShared>, id: u64, data: Bytes) -> Option<WriteDisposition> {
         let mut inner = self.inner.borrow_mut();
         let head_request = inner.head_request;
         match &mut inner.state {
@@ -485,7 +485,7 @@ impl ResponseSlot {
                 let bytes = if bodyless || data.is_empty() {
                     Bytes::new()
                 } else {
-                    Bytes::copy_from_slice(data)
+                    data
                 };
                 inner.state = SlotState::Ready {
                     status,
@@ -688,6 +688,16 @@ impl HttpServerEngine {
         resource: ResourceId,
         id: u64,
         data: &[u8],
+    ) -> Option<WriteDisposition> {
+        let (shared, slot) = self.shared_and_slot(resource, id)?;
+        slot.end(&shared, id, Bytes::copy_from_slice(data))
+    }
+
+    pub fn end_response_bytes(
+        &mut self,
+        resource: ResourceId,
+        id: u64,
+        data: Bytes,
     ) -> Option<WriteDisposition> {
         let (shared, slot) = self.shared_and_slot(resource, id)?;
         slot.end(&shared, id, data)
