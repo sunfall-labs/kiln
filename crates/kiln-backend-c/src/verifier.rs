@@ -385,6 +385,21 @@ pub fn verify_function_graph(graph: &FunctionGraph) -> Result<(), VerifierError>
                     }
                 }
                 GraphOp::Phi { inputs } => {
+                    if inputs.len() != block.predecessors.len()
+                        || block
+                            .predecessors
+                            .iter()
+                            .any(|p| inputs.iter().filter(|(b, _)| b == p).count() != 1)
+                    {
+                        return Err(VerifierError::InvalidPhi {
+                            block: block.id,
+                            detail: format!(
+                                "Phi has {} inputs for {} predecessors",
+                                inputs.len(),
+                                block.predecessors.len()
+                            ),
+                        });
+                    }
                     for (pred_block, val) in inputs {
                         if !block.predecessors.contains(pred_block) {
                             return Err(VerifierError::InvalidPhi {

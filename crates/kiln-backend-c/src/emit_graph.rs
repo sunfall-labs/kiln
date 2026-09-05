@@ -149,11 +149,32 @@ fn emit_graph_op(
                 };
                 writeln!(output, "    v{v} = {val_str};").unwrap();
             }
-            Constant::String(_) => {
-                writeln!(output, "    v{v} = {symbol}_constant_{index};").unwrap();
+            // The same lowering the stack emitter uses: a NUL-free literal is a tagged pointer to
+            // its static bytes; one with a NUL inside goes through the per-unit string cache; a
+            // bigint is parsed once into a cached heap value.
+            Constant::String(value) => {
+                if value.contains('\0') {
+                    writeln!(
+                        output,
+                        "    v{v} = kiln_c99_string_constant(&{symbol}_string_{index}, {symbol}_constant_{index}, {});",
+                        value.len()
+                    )
+                    .unwrap();
+                } else {
+                    writeln!(
+                        output,
+                        "    v{v} = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, {symbol}_constant_{index});"
+                    )
+                    .unwrap();
+                }
             }
-            Constant::BigInt(_) => {
-                writeln!(output, "    v{v} = {symbol}_constant_{index};").unwrap();
+            Constant::BigInt(digits) => {
+                writeln!(
+                    output,
+                    "    {{ kiln_value tmp; int status = kiln_c99_bigint_constant(&{symbol}_bigint_{index}, {symbol}_constant_{index}, {}, &tmp); if (status != KILN_C99_OK) return status; v{v} = kiln_val_from_boundary(tmp); }}",
+                    digits.len()
+                )
+                .unwrap();
             }
         },
         GraphOp::LoadLocal(slot) => {
@@ -705,9 +726,11 @@ fn emit_graph_op(
         GraphOp::Phi { .. } => {
             // Phis are resolved by incoming jumps/branches in predecessor blocks.
         }
-        _ => {
-            // Default fallback for remaining operations
-            writeln!(output, "    v{v} = KILN_VAL_UNDEFINED;").unwrap();
+        other => {
+            // Every operation `can_emit_from_graph` admits has an arm above. Reaching here is a
+            // compiler bug, and the one answer it must never produce is a silent `undefined`:
+            // that is the failure this backend refuses by construction (`KILN_C99_ABSENT`).
+            unreachable!("graph emitter has no lowering for {other:?}");
         }
     }
 }
@@ -765,15 +788,30 @@ fn emit_phi_assignments(
     from: BlockId,
     target: BlockId,
 ) {
-    if let Some(target_block) = graph.block(target) {
-        for &(phi_vid, ref op, _) in &target_block.operations {
-            if let GraphOp::Phi { inputs } = op {
-                for &(pred, in_vid) in inputs {
-                    if pred == from {
-                        writeln!(output, "        v{} = v{};", phi_vid.0, in_vid.0).unwrap();
-                    }
+    // A parallel move: every input is read before any phi is written, so two phis that swap
+    // values (`[a, b] = [b, a]` across a back edge) do not clobber each other.
+    let Some(target_block) = graph.block(target) else {
+        return;
+    };
+    let mut moves: Vec<(u32, u32)> = Vec::new();
+    for &(phi_vid, ref op, _) in &target_block.operations {
+        if let GraphOp::Phi { inputs } = op {
+            for &(pred, in_vid) in inputs {
+                if pred == from && in_vid != phi_vid {
+                    moves.push((phi_vid.0, in_vid.0));
                 }
             }
         }
     }
+    if moves.is_empty() {
+        return;
+    }
+    output.push_str("        {");
+    for (i, &(_, from_v)) in moves.iter().enumerate() {
+        write!(output, " kiln_val phi_t{i} = v{from_v};").unwrap();
+    }
+    for (i, &(phi_v, _)) in moves.iter().enumerate() {
+        write!(output, " v{phi_v} = phi_t{i};").unwrap();
+    }
+    output.push_str(" }\n");
 }

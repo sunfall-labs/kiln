@@ -309,6 +309,10 @@ pub struct FunctionGraph {
     pub entry_block: BlockId,
     pub next_value_id: u32,
     pub next_site_id: u32,
+    /// The SSA value each local slot holds on entry, in slot order. The emitter defines these
+    /// from `locals[]` after the parameters are bound; without that definition a parameter read
+    /// through the graph was `undefined`.
+    pub initial_locals: Vec<ValueId>,
 }
 
 impl FunctionGraph {
@@ -321,6 +325,7 @@ impl FunctionGraph {
             entry_block: BlockId(0),
             next_value_id: 0,
             next_site_id: 0,
+            initial_locals: Vec::new(),
         }
     }
 
@@ -477,6 +482,7 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
     for slot in 0..proto.local_count {
         let val = graph.alloc_value();
         initial_locals.insert(slot, val);
+        graph.initial_locals.push(val);
     }
     block_entry_frames.insert(
         BlockId(0),
@@ -485,6 +491,71 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
             locals: initial_locals,
         },
     );
+
+    // Phase 2b: static predecessor counts, from each block's last instruction. A block with two
+    // or more predecessors merges state, and a merge is a phi per local: without one, the first
+    // frame to arrive was kept and every later predecessor was ignored, so a loop header compared
+    // the pre-loop value forever and a local assigned in one branch of an `if` read its
+    // pre-branch value after the join. Stack merges (`c ? a : b`) get their phis when the first
+    // frame arrives, because only then is the depth known.
+    let mut static_preds: Vec<Vec<BlockId>> = vec![Vec::new(); num_blocks];
+    for (b_idx, &(start, end)) in block_ranges.iter().enumerate() {
+        let this = BlockId(b_idx as u32);
+        let next = (b_idx + 1 < num_blocks).then(|| BlockId((b_idx + 1) as u32));
+        let mut succs: Vec<BlockId> = Vec::new();
+        let last = if end > start { code.get(end - 1) } else { None };
+        match last {
+            Some(Instruction::Jump(target)) => succs.push(pc_to_containing_block(*target as usize)),
+            Some(
+                Instruction::JumpIfFalse(target)
+                | Instruction::JumpIfTruthy(target)
+                | Instruction::JumpIfNotNullish(target),
+            ) => {
+                succs.push(pc_to_containing_block(*target as usize));
+                succs.extend(next);
+            }
+            Some(Instruction::Return | Instruction::Throw) => {}
+            _ => succs.extend(next),
+        }
+        for succ in succs {
+            let list = &mut static_preds[succ.0 as usize];
+            if !list.contains(&this) {
+                list.push(this);
+            }
+        }
+    }
+    let mut merges: MergeState = MergeState::default();
+    for (b_idx, preds) in static_preds.iter().enumerate() {
+        if preds.len() < 2 {
+            continue;
+        }
+        let block_id = BlockId(b_idx as u32);
+        let locals: Vec<ValueId> = (0..proto.local_count)
+            .map(|_| graph.alloc_value())
+            .collect();
+        for &phi in &locals {
+            merges.inputs.insert(phi, Vec::new());
+        }
+        let frame_locals: HashMap<u32, ValueId> = locals
+            .iter()
+            .enumerate()
+            .map(|(slot, &v)| (slot as u32, v))
+            .collect();
+        block_entry_frames.insert(
+            block_id,
+            AbstractFrame {
+                stack: Vec::new(),
+                locals: frame_locals,
+            },
+        );
+        merges.phis.insert(
+            block_id,
+            PhiSet {
+                locals,
+                stack: None,
+            },
+        );
+    }
 
     for (b_idx, &(start, end)) in block_ranges.iter().enumerate() {
         let block_id = BlockId(b_idx as u32);
@@ -499,6 +570,20 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
         let mut operations = Vec::new();
         let mut terminator = Terminator::Unreachable;
         let mut successors = Vec::new();
+
+        if b_idx == 0 {
+            // The entry block defines what every slot holds on entry: the prologue's `locals[]`,
+            // which is the bound parameters and `undefined`. A phi or a use elsewhere then has a
+            // definition to point at; before this, a parameter read through the graph had none.
+            for (slot, &vid) in graph.initial_locals.clone().iter().enumerate() {
+                operations.push((vid, GraphOp::LoadLocal(slot as u32), GraphType::Val));
+            }
+        }
+        if let Some(set) = merges.phis.get(&block_id) {
+            for &phi in set.locals.iter().chain(set.stack.iter().flatten()) {
+                operations.push((phi, GraphOp::Phi { inputs: Vec::new() }, GraphType::Val));
+            }
+        }
 
         for (offset, inst) in code[start..end].iter().enumerate() {
             let pc = start + offset;
@@ -625,7 +710,15 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                     let target_block = *pc_to_block.get(&(*target as usize)).unwrap();
                     terminator = Terminator::Jump(target_block);
                     successors.push(target_block);
-                    propagate_frame(&mut block_entry_frames, target_block, &frame);
+                    propagate_frame(
+                        &mut block_entry_frames,
+                        &mut merges,
+                        block_id,
+                        target_block,
+                        &frame,
+                        &mut graph,
+                        &mut operations,
+                    );
                 }
                 Instruction::JumpIfFalse(target) => {
                     let cond = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
@@ -638,8 +731,24 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                     };
                     successors.push(fallthrough_block);
                     successors.push(target_block);
-                    propagate_frame(&mut block_entry_frames, fallthrough_block, &frame);
-                    propagate_frame(&mut block_entry_frames, target_block, &frame);
+                    propagate_frame(
+                        &mut block_entry_frames,
+                        &mut merges,
+                        block_id,
+                        fallthrough_block,
+                        &frame,
+                        &mut graph,
+                        &mut operations,
+                    );
+                    propagate_frame(
+                        &mut block_entry_frames,
+                        &mut merges,
+                        block_id,
+                        target_block,
+                        &frame,
+                        &mut graph,
+                        &mut operations,
+                    );
                 }
                 Instruction::JumpIfTruthy(target) => {
                     let cond = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
@@ -652,8 +761,24 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                     };
                     successors.push(target_block);
                     successors.push(fallthrough_block);
-                    propagate_frame(&mut block_entry_frames, target_block, &frame);
-                    propagate_frame(&mut block_entry_frames, fallthrough_block, &frame);
+                    propagate_frame(
+                        &mut block_entry_frames,
+                        &mut merges,
+                        block_id,
+                        target_block,
+                        &frame,
+                        &mut graph,
+                        &mut operations,
+                    );
+                    propagate_frame(
+                        &mut block_entry_frames,
+                        &mut merges,
+                        block_id,
+                        fallthrough_block,
+                        &frame,
+                        &mut graph,
+                        &mut operations,
+                    );
                 }
                 Instruction::JumpIfNotNullish(target) => {
                     let cond = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
@@ -666,8 +791,24 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                     };
                     successors.push(target_block);
                     successors.push(fallthrough_block);
-                    propagate_frame(&mut block_entry_frames, target_block, &frame);
-                    propagate_frame(&mut block_entry_frames, fallthrough_block, &frame);
+                    propagate_frame(
+                        &mut block_entry_frames,
+                        &mut merges,
+                        block_id,
+                        target_block,
+                        &frame,
+                        &mut graph,
+                        &mut operations,
+                    );
+                    propagate_frame(
+                        &mut block_entry_frames,
+                        &mut merges,
+                        block_id,
+                        fallthrough_block,
+                        &frame,
+                        &mut graph,
+                        &mut operations,
+                    );
                 }
                 Instruction::Return => {
                     let ret_val = frame.stack.pop();
@@ -972,6 +1113,7 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                 Instruction::MarkUninitialized(slot) => {
                     let res = graph.alloc_value();
                     operations.push((res, GraphOp::MarkUninitialized(*slot), GraphType::Val));
+                    frame.locals.insert(*slot, res);
                 }
                 Instruction::Yield => {
                     let val = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
@@ -981,7 +1123,15 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                         resume: resume_block,
                     };
                     successors.push(resume_block);
-                    propagate_frame(&mut block_entry_frames, resume_block, &frame);
+                    propagate_frame(
+                        &mut block_entry_frames,
+                        &mut merges,
+                        block_id,
+                        resume_block,
+                        &frame,
+                        &mut graph,
+                        &mut operations,
+                    );
                 }
                 Instruction::Await => {
                     let promise = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
@@ -991,7 +1141,15 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
                         resume: resume_block,
                     };
                     successors.push(resume_block);
-                    propagate_frame(&mut block_entry_frames, resume_block, &frame);
+                    propagate_frame(
+                        &mut block_entry_frames,
+                        &mut merges,
+                        block_id,
+                        resume_block,
+                        &frame,
+                        &mut graph,
+                        &mut operations,
+                    );
                 }
                 Instruction::SetPrototype => {
                     let prototype = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
@@ -1107,7 +1265,15 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
             let next_block = BlockId((b_idx + 1) as u32);
             terminator = Terminator::Jump(next_block);
             successors.push(next_block);
-            propagate_frame(&mut block_entry_frames, next_block, &frame);
+            propagate_frame(
+                &mut block_entry_frames,
+                &mut merges,
+                block_id,
+                next_block,
+                &frame,
+                &mut graph,
+                &mut operations,
+            );
         }
 
         basic_blocks.push(BasicBlock {
@@ -1118,6 +1284,17 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
             successors,
             exception_handler: block_handlers[b_idx],
         });
+    }
+
+    // Phase 3b: fill the phi inputs collected while the predecessors were walked.
+    for block in &mut basic_blocks {
+        for (vid, op, _) in &mut block.operations {
+            if let GraphOp::Phi { inputs } = op {
+                if let Some(collected) = merges.inputs.get(vid) {
+                    *inputs = collected.clone();
+                }
+            }
+        }
     }
 
     // Phase 4: Compute predecessor lists from successors
@@ -1138,10 +1315,72 @@ pub fn build_function_graph(proto: &FunctionProto, program: &Program) -> Functio
     graph
 }
 
+/// The phis a merge block owns: one per local slot, allocated before the walk, and one per stack
+/// slot, allocated when the first frame arrives and the depth is known.
+struct PhiSet {
+    locals: Vec<ValueId>,
+    stack: Option<Vec<ValueId>>,
+}
+
+#[derive(Default)]
+struct MergeState {
+    phis: HashMap<BlockId, PhiSet>,
+    inputs: HashMap<ValueId, Vec<(BlockId, ValueId)>>,
+}
+
+/// Hand `outgoing` to `target` along the edge from `from`.
+///
+/// A block with one predecessor takes the frame as it is. A merge block already holds phis for
+/// its locals; this records `outgoing`'s value for each as that phi's input from `from`, and does
+/// the same for the stack once its depth is known. A local the outgoing frame never touched is
+/// read from `locals[]` in the predecessor, so the phi has a defined input on every edge; the
+/// verifier then checks that each phi has exactly one input per predecessor.
 fn propagate_frame(
     frames: &mut HashMap<BlockId, AbstractFrame>,
+    merges: &mut MergeState,
+    from: BlockId,
     target: BlockId,
     outgoing: &AbstractFrame,
+    graph: &mut FunctionGraph,
+    operations: &mut Vec<(ValueId, GraphOp, GraphType)>,
 ) {
-    frames.entry(target).or_insert_with(|| outgoing.clone());
+    let Some(set) = merges.phis.get_mut(&target) else {
+        frames.entry(target).or_insert_with(|| outgoing.clone());
+        return;
+    };
+    for (slot, &phi) in set.locals.iter().enumerate() {
+        let value = match outgoing.locals.get(&(slot as u32)) {
+            Some(&v) => v,
+            None => {
+                let v = graph.alloc_value();
+                operations.push((v, GraphOp::LoadLocal(slot as u32), GraphType::Val));
+                v
+            }
+        };
+        if let Some(list) = merges.inputs.get_mut(&phi) {
+            if !list.iter().any(|(b, _)| *b == from) {
+                list.push((from, value));
+            }
+        }
+    }
+    if set.stack.is_none() {
+        let stack: Vec<ValueId> = outgoing.stack.iter().map(|_| graph.alloc_value()).collect();
+        for &phi in &stack {
+            merges.inputs.insert(phi, Vec::new());
+        }
+        if let Some(frame) = frames.get_mut(&target) {
+            frame.stack = stack.clone();
+        }
+        set.stack = Some(stack);
+    }
+    if let Some(stack) = &set.stack {
+        // A depth mismatch leaves a phi short of an input, which the verifier rejects.
+        for (phi, value) in stack.iter().zip(outgoing.stack.iter()) {
+            if let Some(list) = merges.inputs.get_mut(phi) {
+                if !list.iter().any(|(b, _)| *b == from) {
+                    list.push((from, *value));
+                }
+            }
+        }
+    }
 }
