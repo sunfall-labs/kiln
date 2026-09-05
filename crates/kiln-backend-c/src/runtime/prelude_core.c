@@ -4279,7 +4279,7 @@ static int kiln_c99_site_learn(kiln_c99_site *site, const kiln_object *object, c
 static int kiln_c99_get_site(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                              kiln_value *out, int depth, kiln_value *thrown, kiln_c99_site *site) {
     int status;
-    if (target.tag != KILN_VALUE_OBJECT) {
+    if (site == NULL || target.tag != KILN_VALUE_OBJECT) {
         return kiln_c99_get(host, target, key, key_len, out, depth, thrown);
     }
     {
@@ -4371,7 +4371,7 @@ static int kiln_c99_put_site(kiln_host *host, kiln_value target, const char *key
                              kiln_value value, int strict, int depth, kiln_value *thrown,
                              kiln_c99_site *site) {
     int status;
-    if (target.tag != KILN_VALUE_OBJECT) {
+    if (site == NULL || target.tag != KILN_VALUE_OBJECT) {
         return kiln_c99_put_mode(host, target, key, key_len, value, strict, depth, thrown);
     }
     {
@@ -25125,6 +25125,34 @@ static kiln_value kiln_val_to_boundary(kiln_val v) {
     }
 }
 
+static size_t kiln_c99_val_string_length(kiln_val v) {
+    return kiln_c99_string_length(kiln_val_to_boundary(v));
+}
+
+static int kiln_c99_val_array_push_fast(kiln_val receiver, kiln_val arg, kiln_val *out) {
+    if (KILN_LIKELY((receiver & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX)) {
+        void *ptr = KILN_VAL_PTR(receiver);
+        if (KILN_LIKELY(kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY)) {
+            kiln_array *arr = (kiln_array *)ptr;
+            if (KILN_LIKELY(!arr->frozen && !arr->not_extensible)) {
+                if (KILN_LIKELY(arr->count < arr->capacity)) {
+                    arr->elements[arr->count] = arg;
+                    arr->count += 1;
+                    *out = kiln_c99_val_from_double((double)arr->count);
+                    return KILN_C99_OK;
+                }
+                int status = kiln_c99_reserve((void **)&arr->elements, &arr->capacity, arr->count + 1, sizeof *arr->elements);
+                if (KILN_UNLIKELY(status != KILN_C99_OK)) return status;
+                arr->elements[arr->count] = arg;
+                arr->count += 1;
+                *out = kiln_c99_val_from_double((double)arr->count);
+                return KILN_C99_OK;
+            }
+        }
+    }
+    return -1;
+}
+
 static int kiln_c99_val_compare(uint16_t operation, kiln_val left, kiln_val right, int *result) {
     if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left) && KILN_VAL_IS_NUMBER(right))) {
         double a, b;
@@ -25228,21 +25256,23 @@ static int kiln_c99_read_property(kiln_host *host, kiln_value target,
                                   const char *key, size_t key_len,
                                   int depth, kiln_value *thrown,
                                   kiln_c99_site *site, kiln_value *out) {
-    if (KILN_LIKELY(site->pic_count > 0 && target.tag == KILN_VALUE_OBJECT)) {
-        const kiln_object *object = kiln_c99_object_of(target);
-        size_t p;
-        for (p = 0; p < site->pic_count; ++p) {
-            if (object->shape == site->entries[p].shape &&
-                site->entries[p].slot < object->slot_capacity) {
-                *out = kiln_val_to_boundary(object->slots[site->entries[p].slot]);
-                return KILN_C99_OK;
+    if (site != NULL) {
+        if (KILN_LIKELY(site->pic_count > 0 && target.tag == KILN_VALUE_OBJECT)) {
+            const kiln_object *object = kiln_c99_object_of(target);
+            size_t p;
+            for (p = 0; p < site->pic_count; ++p) {
+                if (object->shape == site->entries[p].shape &&
+                    site->entries[p].slot < object->slot_capacity) {
+                    *out = kiln_val_to_boundary(object->slots[site->entries[p].slot]);
+                    return KILN_C99_OK;
+                }
             }
         }
-    }
-    if (KILN_LIKELY(site->has_cached_method && target.tag == site->cached_tag)) {
-        if (target.tag != KILN_VALUE_ARRAY || kiln_c99_array_of(target)->properties.tag == KILN_VALUE_UNDEFINED) {
-            *out = kiln_c99_method(site->cached_method);
-            return KILN_C99_OK;
+        if (KILN_LIKELY(site->has_cached_method && target.tag == site->cached_tag)) {
+            if (target.tag != KILN_VALUE_ARRAY || kiln_c99_array_of(target)->properties.tag == KILN_VALUE_UNDEFINED) {
+                *out = kiln_c99_method(site->cached_method);
+                return KILN_C99_OK;
+            }
         }
     }
     if (KILN_UNLIKELY(key_len == 6 && key[0] == 'l' && memcmp(key, "length", 6) == 0)) {
@@ -25260,12 +25290,13 @@ static int kiln_c99_read_property(kiln_host *host, kiln_value target,
         }
     }
     int status = kiln_c99_get_site(host, target, key, key_len, out, depth, thrown, site);
-    if (status == KILN_C99_OK && out->tag == KILN_VALUE_METHOD && !site->has_cached_method) {
+    if (site != NULL && status == KILN_C99_OK && out->tag == KILN_VALUE_METHOD && !site->has_cached_method) {
         if (target.tag == KILN_VALUE_STRING ||
             target.tag == KILN_VALUE_NUMBER ||
             target.tag == KILN_VALUE_BOOLEAN ||
             (target.tag == KILN_VALUE_ARRAY && kiln_c99_array_of(target)->properties.tag == KILN_VALUE_UNDEFINED) ||
-            target.tag == KILN_VALUE_TYPED_ARRAY) {
+            target.tag == KILN_VALUE_TYPED_ARRAY ||
+            target.tag == KILN_VALUE_COLLECTION) {
             site->cached_tag = (uint8_t)target.tag;
             site->cached_method = out->bits;
             site->has_cached_method = 1;
@@ -25279,30 +25310,60 @@ static int kiln_c99_write_property(kiln_host *host, kiln_value target,
                                    kiln_value value, int strict,
                                    int depth, kiln_value *thrown,
                                    kiln_c99_site *site) {
-    if (KILN_LIKELY(site->pic_count > 0 && target.tag == KILN_VALUE_OBJECT)) {
-        kiln_object *object = kiln_c99_object_of(target);
-        size_t p;
-        for (p = 0; p < site->pic_count; ++p) {
-            if (object->shape == site->entries[p].shape) {
-                if (site->entries[p].transition_to == NULL) {
-                    if (KILN_LIKELY(site->entries[p].slot < object->slot_capacity && !object->frozen)) {
+    if (site != NULL) {
+        if (KILN_LIKELY(site->pic_count > 0 && target.tag == KILN_VALUE_OBJECT)) {
+            kiln_object *object = kiln_c99_object_of(target);
+            size_t p;
+            for (p = 0; p < site->pic_count; ++p) {
+                if (object->shape == site->entries[p].shape) {
+                    if (site->entries[p].transition_to == NULL) {
+                        if (KILN_LIKELY(site->entries[p].slot < object->slot_capacity && !object->frozen)) {
+                            object->slots[site->entries[p].slot] = kiln_val_from_boundary(value);
+                            return KILN_C99_OK;
+                        }
+                    } else if (!object->not_extensible &&
+                               site->entries[p].slot < object->slot_capacity &&
+                               (object->prototype.tag == KILN_VALUE_UNDEFINED ||
+                                !kiln_c99_has_inherited_setter_or_readonly(object->prototype))) {
                         object->slots[site->entries[p].slot] = kiln_val_from_boundary(value);
+                        object->shape = (kiln_shape *)site->entries[p].transition_to;
                         return KILN_C99_OK;
                     }
-                } else if (!object->not_extensible &&
-                           site->entries[p].slot < object->slot_capacity &&
-                           (object->prototype.tag == KILN_VALUE_UNDEFINED ||
-                            !kiln_c99_has_inherited_setter_or_readonly(object->prototype))) {
-                    object->slots[site->entries[p].slot] = kiln_val_from_boundary(value);
-                    object->shape = (kiln_shape *)site->entries[p].transition_to;
-                    return KILN_C99_OK;
+                    break;
                 }
-                break;
             }
         }
     }
     return kiln_c99_put_site(host, target, key, key_len, value, strict, depth, thrown, site);
 }
+
+#ifndef KILN_C99_CACHED_METHOD_MATCHES_DEFINED
+#define KILN_C99_CACHED_METHOD_MATCHES_DEFINED
+static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln_val target) {
+    if (site == NULL || !site->has_cached_method) return 0;
+    uint8_t ctag = site->cached_tag;
+    if (ctag == KILN_VALUE_COLLECTION && (KILN_VAL_IS_OBJECT(target) || ((target & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX))) {
+        void *ptr = KILN_VAL_PTR(target);
+        return kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_COLLECTION;
+    } else if (ctag == KILN_VALUE_STRING && KILN_VAL_IS_STRING(target)) {
+        return 1;
+    } else if (ctag == KILN_VALUE_NUMBER && KILN_VAL_IS_NUMBER(target)) {
+        return 1;
+    } else if (ctag == KILN_VALUE_BOOLEAN && KILN_VAL_IS_BOOLEAN(target)) {
+        return 1;
+    } else if (ctag == KILN_VALUE_ARRAY && ((target & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX)) {
+        void *ptr = KILN_VAL_PTR(target);
+        if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {
+            const kiln_array *arr = (const kiln_array *)ptr;
+            return arr->properties.tag == KILN_VALUE_UNDEFINED;
+        }
+    } else if (ctag == KILN_VALUE_TYPED_ARRAY && ((target & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX)) {
+        void *ptr = KILN_VAL_PTR(target);
+        return kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_TYPED_ARRAY;
+    }
+    return 0;
+}
+#endif
 
 static int kiln_c99_val_read_property(kiln_host *host, kiln_val target,
                                       const char *key, size_t key_len,
@@ -25318,6 +25379,10 @@ static int kiln_c99_val_read_property(kiln_host *host, kiln_val target,
                 return KILN_C99_OK;
             }
         }
+    }
+    if (KILN_LIKELY(kiln_c99_cached_method_matches(site, target))) {
+        *out = KILN_VAL_METHOD(site->cached_method);
+        return KILN_C99_OK;
     }
     kiln_value t = kiln_val_to_boundary(target);
     kiln_value o = kiln_c99_undefined();
@@ -25481,6 +25546,49 @@ static int kiln_c99_val_read_element(kiln_host *host, kiln_val target, kiln_val 
             }
         }
     }
+    if (KILN_VAL_IS_STRING(target) && KILN_VAL_IS_NUMBER(key)) {
+        double idx;
+        memcpy(&idx, &key, sizeof(idx));
+        if (idx >= 0.0 && idx <= 4294967294.0 && floor(idx) == idx) {
+            size_t slot = (size_t)idx;
+            const char *p = (const char *)KILN_VAL_PTR(target);
+            size_t len = 0;
+            kiln_gc_heap *heap = kiln_c99_gc_heap();
+            kiln_gc_block *block = heap != NULL ? kiln_c99_gc_lookup(heap, p) : NULL;
+            if (block != NULL && (block->kind & KILN_GC_KIND_MASK) == KILN_GC_STRING) {
+                len = block->size;
+            } else if (p != NULL) {
+                len = strlen(p);
+            }
+            if (slot < len) {
+                unsigned char ch = (unsigned char)p[slot];
+                if (ch < 0x80) {
+                    size_t i;
+                    int all_ascii = 1;
+                    for (i = 0; i <= slot; ++i) {
+                        if ((unsigned char)p[i] >= 0x80) { all_ascii = 0; break; }
+                    }
+                    if (all_ascii) {
+                        uint16_t unit = (uint16_t)ch;
+                        kiln_value s = kiln_c99_from_units(&unit, 1);
+                        *out = kiln_val_from_boundary(s);
+                        return KILN_C99_OK;
+                    }
+                }
+                kiln_c99_utf16_iter iterator = {p, len, 0, 0, 0};
+                size_t position = 0;
+                uint16_t unit;
+                while (kiln_c99_utf16_next(&iterator, &unit)) {
+                    if (position == slot) {
+                        kiln_value s = kiln_c99_from_units(&unit, 1);
+                        *out = kiln_val_from_boundary(s);
+                        return KILN_C99_OK;
+                    }
+                    position += 1;
+                }
+            }
+        }
+    }
     kiln_value t = kiln_val_to_boundary(target);
     kiln_value k = kiln_val_to_boundary(key);
     kiln_value o;
@@ -25531,17 +25639,61 @@ static int kiln_c99_val_call_method(kiln_host *host, kiln_val receiver, const ki
                                     kiln_value *thrown, kiln_c99_site *site,
                                     const char *inst_site, size_t inst_idx, const char *inst_op,
                                     kiln_val *out) {
-    kiln_val method;
-    int status = kiln_c99_val_read_property(host, receiver, key, key_len, depth, thrown, site, &method);
-    if (status == KILN_C99_CONTROL_ERROR) {
-        if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = kiln_val_to_boundary(receiver).tag;
-        if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = "CallMethod property lookup refused";
-        kiln_c99_note_refusal(inst_site, inst_idx, inst_op, (size_t)kiln_c99_diagnostic_active_depth);
-    } else if (status == KILN_C99_THROWN) {
-        if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = "CallMethod property lookup threw";
-        kiln_c99_note_refusal(inst_site, inst_idx, inst_op, (size_t)kiln_c99_diagnostic_active_depth);
+    kiln_val method = 0;
+    int from_cache = 0;
+    if (KILN_LIKELY(kiln_c99_cached_method_matches(site, receiver))) {
+        method = KILN_VAL_METHOD(site->cached_method);
+        from_cache = 1;
+    } else if (KILN_LIKELY(site != NULL && site->pic_count > 0 && KILN_VAL_IS_OBJECT(receiver))) {
+        const kiln_object *object = (const kiln_object *)KILN_VAL_PTR(receiver);
+        size_t p;
+        for (p = 0; p < site->pic_count; ++p) {
+            if (site->entries[p].shape == object->shape && site->entries[p].method != 0) {
+                method = site->entries[p].method;
+                from_cache = 1;
+                break;
+            }
+        }
     }
-    if (status != KILN_C99_OK) return status;
+    int status = KILN_C99_OK;
+    if (!from_cache) {
+        status = kiln_c99_val_read_property(host, receiver, key, key_len, depth, thrown, NULL, &method);
+        if (status == KILN_C99_CONTROL_ERROR) {
+            if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = kiln_val_to_boundary(receiver).tag;
+            if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = "CallMethod property lookup refused";
+            kiln_c99_note_refusal(inst_site, inst_idx, inst_op, (size_t)kiln_c99_diagnostic_active_depth);
+        } else if (status == KILN_C99_THROWN) {
+            if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = "CallMethod property lookup threw";
+            kiln_c99_note_refusal(inst_site, inst_idx, inst_op, (size_t)kiln_c99_diagnostic_active_depth);
+        }
+        if (status != KILN_C99_OK) return status;
+
+        if (site != NULL && KILN_VAL_IS_METHOD(method)) {
+            site->cached_tag = (uint8_t)kiln_val_to_boundary(receiver).tag;
+            site->cached_method = KILN_VAL_METHOD_ID(method);
+            site->has_cached_method = 1;
+        } else if (site != NULL && KILN_VAL_IS_OBJECT(receiver)) {
+            const kiln_object *object = (const kiln_object *)KILN_VAL_PTR(receiver);
+            if (object->shape != NULL) {
+                size_t p;
+                int found = 0;
+                for (p = 0; p < site->pic_count; ++p) {
+                    if (site->entries[p].shape == object->shape) {
+                        site->entries[p].method = method;
+                        found = 1;
+                        break;
+                    }
+                }
+                if (!found && site->pic_count < KILN_C99_PIC_SIZE) {
+                    site->entries[site->pic_count].shape = object->shape;
+                    site->entries[site->pic_count].transition_to = NULL;
+                    site->entries[site->pic_count].slot = 0;
+                    site->entries[site->pic_count].method = method;
+                    site->pic_count += 1;
+                }
+            }
+        }
+    }
 
     if (KILN_VAL_IS_CLOSURE(method)) {
         kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(method);
