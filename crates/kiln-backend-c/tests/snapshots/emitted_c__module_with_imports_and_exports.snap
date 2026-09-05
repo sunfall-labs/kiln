@@ -7,41 +7,39 @@ static void kiln_module_659cb65dc1a991aa4093bd7539036ba1_gc_roots(void *heap, vo
     kiln_c99_gc_unit_roots(heap, context, phase);
 }
 static int kiln_module_659cb65dc1a991aa4093bd7539036ba1_body(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count) {
-    size_t sp = 0;
     (void)kiln_realm_gc_register_roots(kiln_module_659cb65dc1a991aa4093bd7539036ba1_gc_roots, NULL, 0);
+    kiln_val receiver = KILN_VAL_UNDEFINED; (void)receiver;
     int depth = 0;
     kiln_value thrown_value = kiln_c99_undefined();
     kiln_value *thrown = &thrown_value;
-    kiln_val stack[3];
     kiln_val locals[3];
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     if (import_count != (size_t)1 || (import_count != 0 && imports == NULL)) return KILN_C99_INVALID_ARGUMENT;
     if (export_count != (size_t)1 || (export_count != 0 && exports == NULL)) return KILN_C99_INVALID_ARGUMENT;
-    locals[0] = KILN_VAL_UNDEFINED;
-    locals[1] = KILN_VAL_UNDEFINED;
-    locals[2] = KILN_VAL_UNDEFINED;
+    for (size_t slot = 0; slot < (size_t)3; ++slot) locals[slot] = KILN_VAL_UNDEFINED;
     locals[0] = kiln_val_from_boundary(imports[0]);
     if ((locals[0] & KILN_TAG_MASK) != KILN_TAG_CELL_PREFIX && kiln_c99_val_make_cell(&locals[0]) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;
-kiln_label_0:;
-    stack[sp++] = *(kiln_val *)KILN_VAL_PTR(locals[0]);
-kiln_label_1:;
-    stack[sp++] = UINT64_C(4607182418800017408);
-kiln_label_2:;
-    stack[sp++] = UINT64_C(4607182418800017408);
-kiln_label_3:;
-    { kiln_val callee_val = stack[sp - (size_t)2 - 1]; kiln_closure *plain = KILN_VAL_IS_CLOSURE(callee_val) ? (kiln_closure *)KILN_VAL_PTR(callee_val) : NULL; int status = kiln_c99_op_val_call(host, stack, &sp, (size_t)2, depth, thrown, "kiln_module_659cb65dc1a991aa4093bd7539036ba1", (size_t)3, "Call"); if (status == KILN_C99_THROWN) goto kiln_uncaught; if (status == KILN_C99_CONTROL_ERROR || status == KILN_C99_THROWN) { kiln_c99_note_refusal("kiln_module_659cb65dc1a991aa4093bd7539036ba1", (size_t)3, "Call", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; locals[2] = stack[--sp]; }
-kiln_label_4:;
-kiln_label_5:;
-    stack[sp++] = locals[2];
-kiln_label_6:;
-    *result = sp == 0 ? kiln_c99_undefined() : kiln_val_to_boundary(stack[--sp]);
+    double d4 = 0.0, d5 = 0.0;
+    kiln_val v0 = KILN_VAL_UNDEFINED, v1 = KILN_VAL_UNDEFINED, v2 = KILN_VAL_UNDEFINED, v3 = KILN_VAL_UNDEFINED, v4 = KILN_VAL_UNDEFINED, v5 = KILN_VAL_UNDEFINED, v6 = KILN_VAL_UNDEFINED, v7 = KILN_VAL_UNDEFINED;
+kiln_block_0:;
+    v0 = locals[0];
+    v1 = KILN_VAL_UNDEFINED;
+    v2 = locals[2];
+    { kiln_val cell_stack[1]; size_t cell_sp = 0; int status = kiln_c99_op_val_load_cell(locals[0], cell_stack, &cell_sp, thrown); if (status == KILN_C99_THROWN) goto kiln_unwind; if (status == KILN_C99_CONTROL_ERROR) { kiln_c99_note_refusal("kiln_module_659cb65dc1a991aa4093bd7539036ba1", (size_t)0, "LoadCell", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; v3 = cell_stack[0]; }
+    v4 = UINT64_C(4607182418800017408);
+    memcpy(&d4, &v4, sizeof(d4));
+    v5 = UINT64_C(4607182418800017408);
+    memcpy(&d5, &v5, sizeof(d5));
+    { kiln_val call_stack[3] = { v3, v4, v5 }; size_t call_sp = 3; kiln_closure *plain = KILN_VAL_IS_CLOSURE(call_stack[0]) ? (kiln_closure *)KILN_VAL_PTR(call_stack[0]) : NULL; if (KILN_LIKELY(plain != NULL && !plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) { kiln_val call_result = KILN_VAL_UNDEFINED; const kiln_val *call_args = 2 > 0 ? &call_stack[1] : NULL; kiln_val recv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&recv); kiln_call_context ctx_call = { host, thrown, NULL, depth + 1 }; int status; status = plain->body(&ctx_call, &call_result, plain->upvalues, &recv, call_args, (size_t)2); if (status == KILN_C99_THROWN) goto kiln_unwind; if (status != KILN_C99_OK) return status; v6 = call_result; } else { int status = kiln_c99_op_val_call(host, call_stack, &call_sp, (size_t)2, depth, thrown, "kiln_module_659cb65dc1a991aa4093bd7539036ba1", (size_t)3, "Call"); if (status == KILN_C99_THROWN) goto kiln_unwind; if (status == KILN_C99_CONTROL_ERROR) { kiln_c99_note_refusal("kiln_module_659cb65dc1a991aa4093bd7539036ba1", (size_t)3, "Call", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; v6 = call_stack[0]; } }
+    locals[2] = v6;
+    v7 = v6;
+    *result = kiln_val_to_boundary(v6);
     if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);
     exports[0] = kiln_val_to_boundary(locals[2]);
     return KILN_C99_OK;
-kiln_uncaught:;
+kiln_unwind:;
     { kiln_value message = kiln_c99_text(*thrown); kiln_value site = kiln_c99_control_diagnostic(); if (message.tag == KILN_VALUE_STRING && site.tag == KILN_VALUE_STRING && site.len != 0) { kiln_value separator = kiln_c99_copy_text(" at " , 4); *result = kiln_c99_concat(kiln_c99_concat(message, separator), site); } else { *result = message; } }
     return KILN_C99_THROWN;
-    goto kiln_refusal;
 kiln_refusal:;
     *result = kiln_c99_control_diagnostic();
     return KILN_C99_CONTROL_ERROR;

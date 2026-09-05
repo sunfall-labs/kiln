@@ -1660,14 +1660,14 @@ fn fused_property_read_and_write_emission() {
     );
     let unit = emit(&p).expect("fused property program emits");
     let b = body(&unit);
-    // Verified: No intermediate stack traffic for fused property read
-    assert!(b.contains("kiln_c99_val_read_property(host, locals[0]"));
-    assert!(b.contains("locals[1] = read;"));
-    // Verified: No stack pushes for fused local property write
-    assert!(b.contains("kiln_c99_val_write_property(host, locals[0],"));
-    assert!(b.contains("locals[1], 0,"));
-    // Verified: No stack pushes for fused const property write
-    assert!(b.contains("UINT64_C(4631107791820423168), 1,"));
+    // The graph carries the object and the value as SSA locals straight into the helpers: no
+    // operand stack exists in the body for a read or a write to go through.
+    assert!(b.contains("kiln_c99_val_read_property(host, v"));
+    assert!(b.contains("kiln_c99_val_write_property(host, v"));
+    assert!(
+        !b.contains("stack["),
+        "a graph body has no operand stack:\n{b}"
+    );
 }
 
 #[test]
@@ -1696,12 +1696,17 @@ fn fused_call_method_statement_and_assignment() {
     );
     let unit = emit(&p).expect("fused call_method program emits");
     let b = body(&unit);
-    // CallMethod + Pop emits inline drop --sp
-    assert!(b.contains("kiln_c99_op_val_call_method(host, stack, &sp,") && b.contains("--sp; }"));
-    // CallMethod + StoreLocal emits direct local write
-    assert!(b.contains("locals[1] = stack[--sp]; }"));
-    // CallMethod + Dup + StoreLocal + Pop fuses out Dup and Pop
-    assert!(b.contains("locals[2] = stack[--sp]; }"));
+    // Three method calls, each on its receiver value, and no operand stack between them: the
+    // result a statement discards is simply never read, and one assigned is the local's value.
+    assert_eq!(
+        b.matches("kiln_c99_val_call_method(host, v").count(),
+        3,
+        "{b}"
+    );
+    assert!(
+        !b.contains("stack["),
+        "a graph body has no operand stack:\n{b}"
+    );
 }
 
 #[test]
@@ -1728,9 +1733,15 @@ fn in_place_induction_variable_loop_emission() {
     );
     let unit = emit(&p).expect("induction variable program emits");
     let b = body(&unit);
-    // In-place bit update without locals[0] whole struct re-creation
-    assert!(b.contains("if (KILN_LIKELY(KILN_VAL_IS_NUMBER(locals[0]))) { double a; memcpy(&a, &locals[0], sizeof(a)); locals[0] = kiln_c99_val_from_double(a + 1.0); }"));
-    assert!(b.contains("if (KILN_LIKELY(KILN_VAL_IS_NUMBER(locals[0]))) { double a; memcpy(&a, &locals[0], sizeof(a)); locals[0] = kiln_c99_val_from_double(a - 2.0); }"));
+    // Each step is one guarded double operation between SSA values; nothing is stored to and
+    // re-read from a local between the two steps.
+    assert!(b.contains("kiln_c99_val_from_double(a + b)"), "{b}");
+    assert!(b.contains("kiln_c99_val_from_double(a - b)"), "{b}");
+    assert!(!b.contains("locals[0] ="), "{b}");
+    assert!(
+        !b.contains("stack["),
+        "a graph body has no operand stack:\n{b}"
+    );
 }
 
 #[test]
@@ -1783,15 +1794,12 @@ fn fused_computed_read_and_write_emission() {
     );
     let unit = emit(&p).expect("fused computed program emits");
     let b = body(&unit);
-    // Verified: No intermediate stack traffic for fused computed read
-    assert!(b.contains("kiln_c99_val_read_element(host, locals[0], locals[1]"));
-    assert!(b.contains("locals[2] = read;"));
-    // Verified: No stack pushes for fused local computed write
-    assert!(b.contains("kiln_c99_val_write_element(host, locals[0], locals[1], locals[2], 0,"));
-    // Verified: No stack pushes for fused const computed write
-    assert!(b.contains(
-        "kiln_c99_val_write_element(host, locals[0], locals[1], UINT64_C(4631107791820423168), 1,"
-    ));
+    assert!(b.contains("kiln_c99_val_read_element(host, v"));
+    assert!(b.contains("kiln_c99_val_write_element(host, v"));
+    assert!(
+        !b.contains("stack["),
+        "a graph body has no operand stack:\n{b}"
+    );
 }
 
 #[test]

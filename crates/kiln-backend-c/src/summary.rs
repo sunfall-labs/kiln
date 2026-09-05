@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet};
 
 use kiln_digest::Digest;
-use kiln_ir::{FunctionProto, Program};
+use kiln_ir::{FunctionProto, Instruction, Program};
 use serde::{Deserialize, Serialize};
 
 use crate::graph::{
@@ -179,9 +179,15 @@ pub fn summarize_graph(graph: &FunctionGraph) -> FunctionSummary {
         .iter()
         .filter(|b| reachable.contains(&b.id))
         .any(|b| {
-            b.operations
-                .iter()
-                .any(|(_, op)| matches!(op, GraphOp::LoadArguments))
+            b.operations.iter().any(|(_, op)| {
+                matches!(
+                    op,
+                    GraphOp::Bridge {
+                        instruction: Instruction::LoadArguments,
+                        ..
+                    }
+                )
+            })
         });
 
     let mut can_throw = false;
@@ -272,8 +278,6 @@ fn collect_sites(
             | GraphOp::MakeFunction { site, .. }
             | GraphOp::Call { site, .. }
             | GraphOp::CallMethod { site, .. }
-            | GraphOp::CallComputed { site, .. }
-            | GraphOp::HostCall { site, .. }
             | GraphOp::GetProperty { site, .. }
             | GraphOp::GetComputed { site, .. }
             | GraphOp::SetProperty { site, .. }

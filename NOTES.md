@@ -4649,3 +4649,52 @@ works and the first direct look at how `SO_REUSEPORT` is splitting traffic. And 
 dump came back behind 352 NUL bytes -- not a formatter bug, but `: > serve.err` truncating a file
 the server still held an fd into, so the next `write` landed at the old offset and left a hole. A
 `write(2)` diagnostic writes at the file offset like anything else.
+
+## The stack emitter is gone (2026-09-05, Claude `work/fastest-native`)
+
+Every body the C backend emits now comes from the value graph (ADR 0056): functions, generators,
+async bodies, handlers, and the module entry point. `lib.rs` went from 5,151 lines to 2,500, and
+`rules.rs`, the 1,426-line fused-pattern table that had landed the same morning, is deleted with
+the emitter it rewrote. What is left of per-instruction C is `tail.rs`: one body each for the
+thirty-seven instructions the graph still lowers through a `Bridge`, on a local operand stack the
+bridge sets up for that one instruction. Four things from the last leg are worth keeping.
+
+**A resume target is a join, not a fresh frame.** The first generator lowering seeded the block
+after a `yield` with a frame of its own -- the spilled stack reloaded from the frame, the sent
+value on top -- and excluded it from merging. `for await` over an async generator then printed
+`[object Object]`: the resume target was also the target of a jump, and the jump's stack value had
+nowhere to go. The model that works treats a suspend as no edge at all -- the body returns, and a
+later call re-enters through the dispatch switch with nothing of this activation alive -- and gives
+the resume target stack phis of the yield's depth, allocated before the walk from a height pass
+over the bytecode. A jump into it fills them like any predecessor; the dispatch switch jumps to a
+landing that fills them from `frame->stack[i]` and `frame->sent` and falls into the block. Locals
+in a suspending body live in the frame and are read back at every block, so they need no phis
+and no reloads. The verifier stopped requiring the resume target among the successors, and the
+type lattice proves nothing about a resume target's phis, since two of their inputs are not edges.
+
+**The runtime keys `return()` and `throw()` on `frame->handler_top`.** The graph's handlers are
+static, so nothing wrote it, and `asyncgen-finally` in the async-concurrency bundle stopped
+printing `cleanup`: `return()` saw no handler and never re-entered the body to run the `finally`.
+Each suspend now writes whether a handler covers it. The same read is how `throw()` was fixed --
+it had never re-entered a body at all, on either emitter (`.scratch/generator-throw-never-resumes`,
+now closed): with a handler over the suspension it now throws the value in at the `yield` and
+builds the step from what the body does next, and `next()` clears `raising` so a body that caught
+once is not thrown into again.
+
+**The module body is a function with no parameters.** `entry_proto` wraps the top-level code in a
+`FunctionProto` and the same builder, verifier and block emitter run; the entry's prologue (roots,
+keys, imports bound into `locals[]`) and its return (exports read from `locals[]`, the result
+converted at the boundary, a callable reduced to its text) are the only differences, chosen by a
+`Site`. The one surprise was `receiver`: an arrow made at module level snapshots it, so the entry
+declares it whether or not the body reads `this`.
+
+**A `tail -8` cost two corpus runs.** The gate ran in the background with each script's output cut
+to eight lines; `native.sh` prints its refusal backlog last, so the summary line was above the
+cut, and `thirdparty.sh` printed the verdict and cut the name of the bundle that diverged. Both had
+to run again to read what they had already said once. `AGENTS.md` now says to keep the whole log.
+
+Gate at the end, once: native 106 matched / 6 refused / 0 diverged, thirdparty 17 and 17 matched,
+differential 106 matched with the one pre-existing `proxy-descriptor-keys` row, crate tests green
+with snapshots regenerated. Still open: `finally` skipped when its `catch` throws
+(`.scratch/finally-after-throw-in-catch`), which is in `kiln-ir`'s lowering and shows on both
+engines.

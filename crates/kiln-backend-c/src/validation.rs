@@ -490,7 +490,7 @@ pub(crate) fn invalid(index: usize, message: impl Into<String>) -> EmitError {
     }
 }
 
-fn stack_effect(
+pub(crate) fn stack_effect(
     instruction: &Instruction,
     height: usize,
     index: usize,

@@ -1081,19 +1081,15 @@ fn structural_instruction_refusals_always_name_their_owner() {
         generated.source.contains("kiln_c99_note_refusal"),
         "runtime must include the refusal provenance boundary"
     );
-    let emitter = include_str!("lib.rs");
-    let instruction_emitter = emitter
-        .split("fn emit_instruction(")
+    let emitter = include_str!("tail.rs");
+    let templates = emitter
+        .split("fn emit_tail_instruction(")
         .nth(1)
-        .expect("instruction emitter")
-        .split("fn instruction_diagnostic(")
-        .next()
-        .expect("instruction emitter end");
-    let templates = instruction_emitter
+        .expect("tail emitter")
         .split("match instruction {")
         .nth(1)
         .expect("instruction match")
-        .split("let refusal_target =")
+        .split("let refusal = format!(")
         .next()
         .expect("instruction templates");
     assert!(

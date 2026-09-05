@@ -5,11 +5,7 @@
 //! using the numeric [`kiln_host_abi::HostOp`] value.  In particular, it never writes stdout (or
 //! otherwise bakes CLI policy into an object file).
 
-use std::{
-    collections::{HashSet, VecDeque},
-    fmt::Write as _,
-    sync::Arc,
-};
+use std::{collections::HashSet, fmt::Write as _, sync::Arc};
 
 use kiln_host_abi::{HOST_ABI_VERSION, HostOp};
 use kiln_ir::{
@@ -417,8 +413,8 @@ pub(crate) use validation::*;
 pub mod emit_graph;
 pub mod facts;
 pub mod graph;
-pub mod rules;
 pub mod summary;
+mod tail;
 pub mod verifier;
 pub use emit_graph::emit_function_from_graph;
 pub use facts::{
@@ -426,9 +422,6 @@ pub use facts::{
 };
 pub use graph::{
     BasicBlock, BlockId, FunctionGraph, GraphOp, SiteId, Terminator, ValueId, build_function_graph,
-};
-pub use rules::{
-    FusedPattern, is_fused_with_previous, is_fusible_binary, match_rule, relational_op_symbol,
 };
 pub use summary::{
     FunctionSummary, TypeGuess, summarize_function, summarize_graph, summarize_program,
@@ -543,16 +536,6 @@ fn uses_module_scope(program: &Program) -> bool {
     reaches(&program.code) || program.functions.iter().any(|proto| reaches(&proto.code))
 }
 
-/// Whether a body reads `this`.
-///
-/// The module entry point has no receiver parameter, so it declares one only when the body asks
-/// for it -- and a module's `this` is undefined, because a module is strict and strict mode does
-/// not substitute the global object.
-fn uses_this(code: &[Instruction]) -> bool {
-    code.iter()
-        .any(|instruction| matches!(instruction, Instruction::LoadThis))
-}
-
 /// Local slots this body treats as cells without ever creating one.
 ///
 /// For an import, whose cell belongs to the exporter and arrives through the linker. The
@@ -585,205 +568,6 @@ fn slots_read_as_cells(code: &[Instruction], functions: &[FunctionProto]) -> Has
     }
     needed.retain(|slot| !created.contains(slot));
     needed
-}
-
-/// What a call site does when the callee threw: jump to this body's handler, or hand it on.
-/// Where a thrown status goes from the site that produced it.
-///
-/// A body with a handler jumps to its own unwind. A body without one propagates, except at the
-/// entry point, where there is nothing left to propagate to: the throw is uncaught, and the only
-/// thing that can still be done with it is say so. That is what `kiln_uncaught` is for, and why
-/// the entry is the one place a bare `return status;` would lose the program's own error.
-fn unwind_or_return(handlers: &[u32], site: &ReturnSite<'_>) -> &'static str {
-    if !handlers.is_empty() {
-        "goto kiln_unwind;"
-    } else if matches!(site, ReturnSite::Entry { .. }) {
-        "goto kiln_uncaught;"
-    } else {
-        "return status;"
-    }
-}
-
-/// The entry point's last word on a throw nothing caught.
-///
-/// The thrown value is converted here rather than handed over, because the embedding signature
-/// carries one `kiln_value` and a reference must not cross it. Text is what survives, and text is
-/// what a launcher can print.
-fn render_uncaught(output: &mut String) {
-    if !output.contains("goto kiln_uncaught;") {
-        // No site can reach it, and an unused label is a warning in every compiler worth using.
-        return;
-    }
-    output.push_str("kiln_uncaught:;\n");
-    output.push_str("    { kiln_value message = kiln_c99_text(*thrown); kiln_value site = kiln_c99_control_diagnostic(); if (message.tag == KILN_VALUE_STRING && site.tag == KILN_VALUE_STRING && site.len != 0) { kiln_value separator = kiln_c99_copy_text(\" at \" , 4); *result = kiln_c99_concat(kiln_c99_concat(message, separator), site); } else { *result = message; } }\n");
-    output.push_str("    return KILN_C99_THROWN;\n");
-}
-
-fn render_refusal(output: &mut String, is_val: bool) {
-    output.push_str("kiln_refusal:;\n");
-    if is_val {
-        output.push_str("    *result = kiln_val_from_boundary(kiln_c99_control_diagnostic());\n");
-    } else {
-        output.push_str("    *result = kiln_c99_control_diagnostic();\n");
-    }
-    output.push_str("    return KILN_C99_CONTROL_ERROR;\n");
-}
-
-/// The instruction indices a body registers as exception handlers.
-///
-/// The set, not the count: an unwind has to jump to one of them, and C has no computed goto, so
-/// the emitted dispatch is a switch over exactly these labels.
-fn handler_targets(code: &[Instruction]) -> Vec<u32> {
-    let mut targets: Vec<u32> = code
-        .iter()
-        .filter_map(|instruction| match instruction {
-            Instruction::PushHandler(target) => Some(*target),
-            _ => None,
-        })
-        .collect();
-    targets.sort_unstable();
-    targets.dedup();
-    targets
-}
-
-/// Definite-assignment TDZ analysis over a sequence of instructions.
-/// Tracks which local/global slots can be uninitialized (in TDZ) immediately before each instruction.
-#[derive(Debug, Clone)]
-struct TdzAnalysis {
-    all_marked: HashSet<u32>,
-    uninitialized_at: Vec<HashSet<u32>>,
-}
-
-impl TdzAnalysis {
-    fn is_guarded(&self, index: usize, slot: u32) -> bool {
-        if !self.all_marked.contains(&slot) {
-            return false;
-        }
-        self.uninitialized_at
-            .get(index)
-            .is_some_and(|set| set.contains(&slot))
-    }
-}
-
-fn compute_tdz_analysis(code: &[Instruction]) -> TdzAnalysis {
-    let all_marked: HashSet<u32> = code
-        .iter()
-        .filter_map(|instruction| match instruction {
-            Instruction::MarkUninitialized(local) => Some(*local),
-            _ => None,
-        })
-        .collect();
-
-    if all_marked.is_empty() || code.is_empty() {
-        return TdzAnalysis {
-            all_marked,
-            uninitialized_at: Vec::new(),
-        };
-    }
-
-    let n = code.len();
-    let mut successors = vec![Vec::new(); n];
-    let mut handler_stack = Vec::new();
-
-    for (index, inst) in code.iter().enumerate() {
-        match inst {
-            Instruction::PushHandler(target) => {
-                handler_stack.push(*target as usize);
-                if index + 1 < n {
-                    successors[index].push(index + 1);
-                }
-            }
-            Instruction::PopHandler => {
-                handler_stack.pop();
-                if index + 1 < n {
-                    successors[index].push(index + 1);
-                }
-            }
-            Instruction::Jump(target) => {
-                let target = *target as usize;
-                if target < n {
-                    successors[index].push(target);
-                }
-            }
-            Instruction::JumpIfFalse(target)
-            | Instruction::JumpIfTruthy(target)
-            | Instruction::JumpIfNotNullish(target) => {
-                let target = *target as usize;
-                if target < n {
-                    successors[index].push(target);
-                }
-                if index + 1 < n {
-                    successors[index].push(index + 1);
-                }
-            }
-            Instruction::Return | Instruction::Throw => {
-                // Terminating instructions; no normal fallthrough
-            }
-            _ => {
-                if index + 1 < n {
-                    successors[index].push(index + 1);
-                }
-            }
-        }
-        if let Some(&handler_target) = handler_stack
-            .last()
-            .filter(|&&target| target < n && !successors[index].contains(&target))
-        {
-            successors[index].push(handler_target);
-        }
-    }
-
-    let mut in_set: Vec<HashSet<u32>> = vec![HashSet::new(); n];
-    let mut out_set: Vec<HashSet<u32>> = vec![HashSet::new(); n];
-    let mut in_worklist = vec![false; n];
-    let mut visited = vec![false; n];
-    let mut worklist = VecDeque::new();
-
-    worklist.push_back(0);
-    in_worklist[0] = true;
-    visited[0] = true;
-
-    while let Some(u) = worklist.pop_front() {
-        in_worklist[u] = false;
-
-        let mut new_out = in_set[u].clone();
-        match &code[u] {
-            Instruction::MarkUninitialized(slot) => {
-                new_out.insert(*slot);
-            }
-            Instruction::StoreLocal(slot)
-            | Instruction::StoreCell(slot)
-            | Instruction::StoreGlobal(slot) => {
-                new_out.remove(slot);
-            }
-            _ => {}
-        }
-
-        let out_changed = new_out != out_set[u];
-        out_set[u] = new_out;
-
-        for &v in &successors[u] {
-            let mut changed = false;
-            if !visited[v] {
-                visited[v] = true;
-                changed = true;
-            }
-            for &slot in &out_set[u] {
-                if in_set[v].insert(slot) {
-                    changed = true;
-                }
-            }
-            if (changed || out_changed) && !in_worklist[v] {
-                worklist.push_back(v);
-                in_worklist[v] = true;
-            }
-        }
-    }
-
-    TdzAnalysis {
-        all_marked,
-        uninitialized_at: in_set,
-    }
 }
 
 /// Emit one C function per compiled body, forward-declared so a closure made before a body is
@@ -1092,93 +876,6 @@ fn binds_at_call(proto: &FunctionProto) -> bool {
         && (proto.prologue_end as usize) < proto.code.len()
 }
 
-/// Declare the handler stack a body needs, or nothing when it catches nothing.
-fn render_handler_prologue(output: &mut String, handlers: &[u32], depth: usize, suspends: bool) {
-    if handlers.is_empty() {
-        return;
-    }
-    if suspends {
-        // A generator's handler stack is in its frame rather than automatic, for exactly the
-        // reason its operand stack is: a `try` has to still be catching after the `yield` inside
-        // it returns. The macro is how the shared emission below reaches it without every site
-        // learning which kind of body it is in.
-        output.push_str("    size_t *kiln_handlers = frame->handlers;\n");
-        output.push_str("    size_t *kiln_handler_stack = frame->handler_stack;\n");
-        output.push_str("#define kiln_handler_top frame->handler_top\n");
-        return;
-    }
-    writeln!(output, "    size_t kiln_handlers[{depth}];").unwrap();
-    writeln!(output, "    size_t kiln_handler_stack[{depth}];").unwrap();
-    output.push_str("    size_t kiln_handler_top = 0;\n");
-}
-
-/// The label a throw jumps to: take the innermost handler, restore the stack as the `try` left
-/// it, push what was thrown, and enter the catch.
-///
-/// A body whose handler stack is empty has nothing to catch with, so the throw keeps travelling
-/// -- which is the same path a body with no handlers at all takes.
-fn render_unwind(output: &mut String, handlers: &[u32], suspends: bool, uncaught: bool) {
-    if handlers.is_empty() {
-        return;
-    }
-    output.push_str("kiln_unwind:;\n");
-    output.push_str(if uncaught {
-        "    if (kiln_handler_top == 0) goto kiln_uncaught;\n"
-    } else {
-        "    if (kiln_handler_top == 0) return KILN_C99_THROWN;\n"
-    });
-    output.push_str("    --kiln_handler_top;\n");
-    output.push_str("    kiln_c99_forget_handled_throw();\n");
-    output.push_str("    sp = kiln_handler_stack[kiln_handler_top];\n");
-    output.push_str("    stack[sp++] = kiln_val_from_boundary(*thrown);\n");
-    output.push_str("    switch (kiln_handlers[kiln_handler_top]) {\n");
-    for target in handlers {
-        writeln!(output, "    case {target}: goto kiln_label_{target};").unwrap();
-    }
-    output.push_str("    default: return KILN_C99_CONTROL_ERROR;\n    }\n");
-    if suspends {
-        // The macro stood in for a local that a suspending body does not have; it ends with the
-        // body rather than leaking into the next one.
-        output.push_str("#undef kiln_handler_top\n");
-    }
-}
-
-fn all_jump_targets(code: &[Instruction]) -> HashSet<u32> {
-    code.iter()
-        .filter_map(|inst| match inst {
-            Instruction::Jump(target)
-            | Instruction::JumpIfFalse(target)
-            | Instruction::JumpIfTruthy(target)
-            | Instruction::JumpIfNotNullish(target)
-            | Instruction::PushHandler(target) => Some(*target),
-            _ => None,
-        })
-        .collect()
-}
-
-fn render_constant_value(symbol: &str, constant_idx: u32, constant: &Constant) -> Option<String> {
-    match constant {
-        Constant::Undefined => Some("KILN_VAL_UNDEFINED".to_string()),
-        Constant::Null => Some("KILN_VAL_NULL".to_string()),
-        Constant::Boolean(val) => Some(if *val {
-            "KILN_VAL_TRUE".to_string()
-        } else {
-            "KILN_VAL_FALSE".to_string()
-        }),
-        Constant::Number(bits) => Some(format!("UINT64_C({bits})")),
-        Constant::String(value) => {
-            if value.contains('\0') {
-                None
-            } else {
-                Some(format!(
-                    "KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, {symbol}_constant_{constant_idx})"
-                ))
-            }
-        }
-        Constant::BigInt(_) => None,
-    }
-}
-
 /// Whether `render_function` may lower a body through the SSA value graph (ADR 0056).
 ///
 /// Off until the graph merges locals at control-flow joins. Today `build_function_graph` reuses
@@ -1189,15 +886,6 @@ fn render_constant_value(symbol: &str, constant_idx: u32, constant: &Constant) -
 /// options; emission that varied with the environment under one key would poison the cache.
 /// The unit tests drive `build_function_graph` and `emit_function_from_graph` directly and do
 /// not go through this switch.
-const GRAPH_EMITTER_ENABLED: bool = true;
-
-fn can_emit_from_graph(proto: &FunctionProto) -> bool {
-    // Generators need a frame across a suspend that the graph emitter does not have yet; beyond
-    // that, the builder says what it lowers and `emit_graph::can_lower` says what it emits.
-    // There is no third list.
-    GRAPH_EMITTER_ENABLED && !proto.generator && !proto.asynchronous
-}
-
 #[allow(clippy::too_many_arguments)]
 fn render_function(
     output: &mut String,
@@ -1210,244 +898,217 @@ fn render_function(
     strict_functions: &[bool],
 ) -> Result<(), EmitError> {
     let scalar_proto = !proto_produces_references(proto, program);
-    // `KILN_GRAPH_CENSUS=1` prints one line per function that does not take the graph emitter,
-    // naming why. Diagnostics only; it changes nothing emitted, so it cannot affect the cache.
-    let census = std::env::var_os("KILN_GRAPH_CENSUS").is_some();
-    let census_line = |reason: String| {
-        if census {
-            eprintln!("graph-census\t{diagnostic_site}\t{index}\t{reason}");
-        }
-    };
-    if !can_emit_from_graph(proto) {
-        census_line(if proto.generator || proto.asynchronous {
-            "generator-or-async".to_owned()
-        } else {
-            "switched-off".to_owned()
+    let graph = graph_for(
+        proto,
+        program,
+        &format!("function {index}"),
+        diagnostic_site,
+    )?;
+    emit_function_from_graph(
+        output,
+        &graph,
+        proto,
+        program,
+        symbol,
+        index,
+        scalar_proto,
+        diagnostic_site,
+        frame_stacks,
+        strict_functions,
+    );
+    Ok(())
+}
+
+/// The value graph a body is emitted from: built from its bytecode, checked to lower whole, and
+/// verified. There is no other emitter, so each failure is the unit's: an instruction the builder
+/// has no lowering for is `Unsupported`, and a graph the verifier rejects is a bytecode this
+/// backend cannot represent safely, which is what `InvalidProgram` names. Errors rather than
+/// panics, so a daemon fails one build and not itself.
+fn graph_for(
+    proto: &FunctionProto,
+    program: &Program,
+    what: &str,
+    diagnostic_site: &str,
+) -> Result<FunctionGraph, EmitError> {
+    let graph =
+        build_function_graph(proto, program).map_err(|unsupported| EmitError::Unsupported {
+            feature: format!(
+                "{} at instruction {} of {what} in {diagnostic_site}",
+                unsupported.instruction, unsupported.pc
+            ),
+        })?;
+    if let Some(operation) = emit_graph::first_unlowerable(&graph) {
+        return Err(EmitError::Unsupported {
+            feature: format!("{operation} in {what} in {diagnostic_site}"),
         });
     }
-    let built = if can_emit_from_graph(proto) {
-        match build_function_graph(proto, program) {
-            Ok(graph) => {
-                if emit_graph::can_lower(&graph) {
-                    Some(graph)
-                } else {
-                    census_line(format!(
-                        "cannot-lower {}",
-                        emit_graph::first_unlowerable(&graph).unwrap_or_default()
-                    ));
-                    None
-                }
-            }
-            Err(unsupported) => {
-                census_line(format!("builder {}", unsupported.instruction));
-                None
-            }
-        }
-    } else {
-        None
-    };
-    if let Some(graph) = built {
-        // A graph the verifier rejects is a compiler bug, not a reason to use the other emitter
-        // quietly. Under `KILN_GRAPH_STRICT` it aborts the build naming the function; the gate
-        // sets it. It changes only whether the build fails, never what is emitted, so it cannot
-        // put two different outputs under one cache key.
-        let verdict = verifier::verify_function_graph(&graph);
-        if let Err(error) = &verdict
-            && std::env::var_os("KILN_GRAPH_STRICT").is_some()
-        {
-            // The graph is built from the bytecode; a graph the verifier rejects is a bytecode
-            // this backend cannot represent safely, which is what `InvalidProgram` names. An
-            // error rather than a panic, so a daemon fails one build and not itself.
-            return Err(EmitError::InvalidProgram {
-                message: format!(
-                    "value graph rejected by the verifier for function {index} ({}) in {diagnostic_site}: {error}",
-                    proto.name.as_deref().unwrap_or("<anonymous>")
-                ),
-            });
-        }
-        if verdict.is_ok() {
-            emit_function_from_graph(
-                output,
-                &graph,
-                proto,
-                program,
-                symbol,
-                index,
-                scalar_proto,
-                diagnostic_site,
-                frame_stacks,
-                strict_functions,
-            );
-            return Ok(());
-        }
+    verifier::verify_function_graph(&graph).map_err(|error| EmitError::InvalidProgram {
+        message: format!(
+            "value graph rejected by the verifier for {what} ({}) in {diagnostic_site}: {error}",
+            proto.name.as_deref().unwrap_or("<anonymous>")
+        ),
+    })?;
+    Ok(graph)
+}
+
+/// The unit's top-level code as a body the graph builder takes: no parameters, every slot
+/// starting undefined, and nothing captured.
+fn entry_proto(program: &Program) -> FunctionProto {
+    FunctionProto {
+        asynchronous: false,
+        name: None,
+        arrow: false,
+        generator: false,
+        async_generator: false,
+        parameter_count: 0,
+        mapped_arguments: false,
+        declared_length: 0,
+        local_count: program.local_count,
+        prologue_end: 0,
+        code: program.code.clone(),
+        upvalues: Vec::new(),
+        span: kiln_ir::Span::default(),
     }
-    let max_stack = frame_stacks[index];
-    let locals = usize::try_from(proto.local_count).unwrap().max(1);
-    // Only when the name is already a C identifier: it goes into a comment, and a name is
-    // program text that could otherwise close one.
-    if let Some(name) = proto.name.as_deref().filter(|name| {
-        !name.is_empty()
-            && name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$')
-    }) {
-        writeln!(output, "/* function {index}: {name} */").unwrap();
+}
+
+/// The unit's entry point: opened with the embedding signature, its locals declared and the
+/// imports bound into them, then the body from its graph.
+///
+/// The locals are the unit's globals -- named rather than automatic -- whenever a function reads
+/// module scope, because an exported closure reads it after the entry point has returned, and a
+/// frame that has returned is not somewhere to read from. Every slot then lives in the array.
+/// Otherwise only the slots read through the array do: an import, bound here before the body
+/// runs; an export, read from its slot at the return; and what the body's own graph needs.
+#[allow(clippy::too_many_arguments)]
+fn render_entry(
+    output: &mut String,
+    program: &Program,
+    plan: &StackPlan,
+    symbol: &str,
+    diagnostic_site: &str,
+    strict_functions: &[bool],
+    keyed: bool,
+    module: Option<(&ModuleProgram, bool)>,
+) -> Result<(), EmitError> {
+    let callables = produces_references(program);
+    let entry_symbol = if callables {
+        format!("{symbol}_body")
+    } else {
+        symbol.to_owned()
+    };
+    let module_scope = uses_module_scope(program);
+    let body = entry_proto(program);
+    let graph = graph_for(&body, program, "the module body", diagnostic_site)?;
+    let linkage = if callables { "static " } else { "" };
+    match module {
+        None => writeln!(
+            output,
+            "{linkage}int {entry_symbol}(kiln_host *host, kiln_value *result) {{"
+        )
+        .unwrap(),
+        Some(_) => writeln!(
+            output,
+            "{linkage}int {entry_symbol}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count) {{"
+        )
+        .unwrap(),
     }
     writeln!(
         output,
-        "static inline int {symbol}_fn_{index}(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc) {{"
+        "    (void)kiln_realm_gc_register_roots({symbol}_gc_roots, NULL, 0);"
     )
     .unwrap();
-    output.push_str("    size_t sp = 0;\n    size_t slot;\n");
-    if scalar_proto {
-        output.push_str("    (void)ctx; (void)receiver_ptr; (void)upvalues;\n");
-    } else {
-        output.push_str("    kiln_host *host = ctx ? ctx->host : NULL;\n");
-        output.push_str("    kiln_value *thrown = ctx ? ctx->thrown : NULL;\n");
-        output.push_str("    kiln_generator *frame = ctx ? ctx->frame : NULL;\n");
-        output.push_str("    int depth = ctx ? ctx->depth : 0;\n");
-        output.push_str(
-            "    kiln_val receiver = receiver_ptr ? *receiver_ptr : KILN_VAL_UNDEFINED;\n",
-        );
-        output.push_str("    (void)receiver_ptr;\n");
-        // Which of the two `arguments` objects a mention in this body would build. Set on every
-        // entry, a generator's resumptions included, because the frame global it writes is shared
-        // by whatever else is running and is only restored at the call boundary.
-        writeln!(
-            output,
-            "    kiln_c99_frame_mapped_arguments = {};",
-            i32::from(proto.mapped_arguments)
-        )
-        .unwrap();
+    render_key_prologue(output, symbol, keyed);
+    // A module's `this` is undefined: a module is strict, and strict mode does not substitute
+    // the global object. An arrow made here snapshots it, so it is declared for that read too.
+    output.push_str("    kiln_val receiver = KILN_VAL_UNDEFINED; (void)receiver;\n");
+    // The entry point owns the depth counter and the thrown value every body writes into. Both
+    // are locals rather than parameters because the embedding signature is fixed and a reference
+    // must not cross it: an uncaught throw leaves as text in `*result`.
+    if callables {
+        output.push_str("    int depth = 0;\n");
+        output.push_str("    kiln_value thrown_value = kiln_c99_undefined();\n");
+        output.push_str("    kiln_value *thrown = &thrown_value;\n");
     }
-    let handlers = handler_targets(&proto.code);
-    // A generator and an async function both suspend, and every part of their state has to
-    // outlive the call that stopped in the middle of them.
-    let suspends = proto.generator || proto.asynchronous;
-    let yields: Vec<usize> = proto
-        .code
-        .iter()
-        .enumerate()
-        .filter(|(_, instruction)| matches!(instruction, Instruction::Yield | Instruction::Await))
-        .map(|(position, _)| position)
-        .collect();
-    if proto.generator || proto.asynchronous {
-        // The frame outlives this call, so neither array can be automatic: both belong to the
-        // generator, and every `locals[i]` and `stack[sp]` below reads through them unchanged.
-        output.push_str("    kiln_val *stack = frame->stack;\n");
-        output.push_str("    kiln_val *locals = frame->locals;\n");
-        render_handler_prologue(output, &handlers, proto.code.len(), suspends);
-        output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
-        output.push_str("    (void)thrown;\n");
-        output.push_str("    (void)host; (void)upvalues; (void)depth; (void)receiver;\n");
-        output.push_str("    (void)args; (void)argc; (void)slot;\n");
-        // Re-entry. A generator that has not started begins at its first instruction; one that
-        // has jumps back to just after the `Yield` that suspended it, with the operand stack
-        // restored to the height it had there.
-        //
-        // A body whose parameters were bound at the call re-enters too, even with no `yield` in
-        // it at all: the seam is a resume target like any other, and without one `g([{x}])` with
-        // an empty body would run its destructuring twice.
-        if !yields.is_empty() || binds_at_call(proto) {
-            output.push_str("    if (frame->started) {\n        sp = frame->sp;\n");
-            // A rejected `await` arrives as a throw at the suspension point rather than as a
-            // value, so it goes to the handler stack instead of to the resume label.
-            if handlers.is_empty() {
-                output.push_str(
-                    "        if (frame->raising) { *thrown = frame->sent; return KILN_C99_THROWN; }\n",
-                );
-            } else {
-                output.push_str(
-                    "        if (frame->raising) { *thrown = frame->sent; goto kiln_unwind; }\n",
-                );
-            }
-            output.push_str("        switch (frame->resume) {\n");
-            for position in &yields {
-                writeln!(
-                    output,
-                    "        case {position}: goto kiln_resume_{position};"
-                )
-                .unwrap();
-            }
-            if binds_at_call(proto) {
-                // One past the last instruction, so it cannot collide with a `Yield`'s position
-                // however the body was compiled -- and unlike a suspension it resumes *at* the
-                // instruction rather than after it, because nothing was sent in.
-                writeln!(
-                    output,
-                    "        case {}: goto kiln_label_{};",
-                    proto.code.len(),
-                    proto.prologue_end
-                )
-                .unwrap();
-            }
-            output.push_str("        default: return KILN_C99_CONTROL_ERROR;\n        }\n    }\n");
-        }
+    let locals = usize::try_from(program.local_count).unwrap().max(1);
+    if module_scope {
+        writeln!(output, "    kiln_val *locals = {symbol}_globals;").unwrap();
     } else {
-        writeln!(output, "    kiln_val stack[{}];", max_stack.max(1)).unwrap();
         writeln!(output, "    kiln_val locals[{locals}];").unwrap();
-        render_handler_prologue(output, &handlers, proto.code.len(), suspends);
-        output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
-        if !scalar_proto {
-            output.push_str("    (void)thrown; (void)frame;\n");
-            output.push_str("    (void)host; (void)upvalues; (void)depth; (void)receiver;\n");
-        }
-        writeln!(
-            output,
-            "    for (slot = 0; slot < (size_t){locals}; ++slot) locals[slot] = KILN_VAL_UNDEFINED;"
-        )
-        .unwrap();
-        if proto.parameter_count == 0 {
-            output.push_str("    (void)args; (void)argc;\n");
-        } else {
-            // Parameters occupy the first slots in declaration order. An argument that was not
-            // passed leaves its slot undefined, which is what a missing argument is.
+    }
+    output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
+    let mut array_slots: HashSet<u32> = if module_scope {
+        (0..program.local_count).collect()
+    } else {
+        emit_graph::array_slots(&graph, program)
+    };
+    let mut exports: Option<&[kiln_ir::ExportBinding]> = None;
+    let mut commonjs = false;
+    match module {
+        None => output.push_str("    kiln_c99_reset_diagnostics();\n"),
+        Some((module, is_commonjs)) => {
+            commonjs = is_commonjs;
+            exports = Some(&module.exports);
+            let export_count = if is_commonjs { 1 } else { module.exports.len() };
             writeln!(
                 output,
-                "    for (slot = 0; slot < (size_t){} && slot < argc; ++slot) locals[slot] = args[slot];",
-                proto.parameter_count
+                "    if (import_count != (size_t){} || (import_count != 0 && imports == NULL)) return KILN_C99_INVALID_ARGUMENT;",
+                module.imports.len()
             )
             .unwrap();
+            writeln!(
+                output,
+                "    if (export_count != (size_t){export_count} || (export_count != 0 && exports == NULL)) return KILN_C99_INVALID_ARGUMENT;"
+            )
+            .unwrap();
+            array_slots.extend(module.imports.iter().map(|binding| binding.local_slot));
+            array_slots.extend(module.exports.iter().map(|binding| binding.local_slot));
+            if is_commonjs {
+                // `module`, whose `exports` is the unit's one export.
+                array_slots.insert(2);
+            }
         }
     }
-    let jump_targets = all_jump_targets(&proto.code);
-    let emitter = Emitter {
-        constants: &program.constants,
-        frame_stacks,
-        functions: &program.functions,
-        strict_functions,
-        source: &program.source,
+    writeln!(
+        output,
+        "    for (size_t slot = 0; slot < (size_t){locals}; ++slot) locals[slot] = KILN_VAL_UNDEFINED;"
+    )
+    .unwrap();
+    if let Some((module, _)) = module {
+        let boxed_imports = slots_read_as_cells(&program.code, &program.functions);
+        for (index, binding) in module.imports.iter().enumerate() {
+            let slot = binding.local_slot;
+            writeln!(
+                output,
+                "    locals[{slot}] = kiln_val_from_boundary(imports[{index}]);"
+            )
+            .unwrap();
+            // The exporter boxes only what can change, so an immutable export arrives as a plain
+            // value where the body expects a cell. Wrapping it here is the same thing
+            // `execute_module` does on the interpreter side, and for the same reason: the body
+            // has one way to read an import and the linker has two ways to deliver one.
+            if boxed_imports.contains(&slot) {
+                writeln!(
+                    output,
+                    "    if ((locals[{slot}] & KILN_TAG_MASK) != KILN_TAG_CELL_PREFIX && kiln_c99_val_make_cell(&locals[{slot}]) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;"
+                )
+                .unwrap();
+            }
+        }
+    }
+    emit_graph::emit_entry_from_graph(
+        output,
+        &graph,
+        &body,
+        program,
         symbol,
+        !callables,
         diagnostic_site,
-        callables: !scalar_proto,
-        handlers,
-        site: ReturnSite::Body,
-        tdz: compute_tdz_analysis(&proto.code),
-        code: &proto.code,
-        jump_targets,
-    };
-    for position in 0..proto.code.len() {
-        if emitter.jump_targets.contains(&(position as u32))
-            || (binds_at_call(proto) && position == proto.prologue_end as usize)
-        {
-            writeln!(output, "kiln_label_{position}:;").unwrap();
-        }
-        // The seam between FunctionDeclarationInstantiation and the body. Reached twice: once
-        // by falling out of the binding the *call* ran, which stops here, and once from the
-        // resume switch above, where `binding` is clear and the body carries on.
-        if binds_at_call(proto) && position == proto.prologue_end as usize {
-            output
-                .push_str("    if (frame->binding) { frame->sp = sp; return KILN_C99_YIELDED; }\n");
-        }
-        emit_instruction(output, &proto.code[position], position, &emitter);
-    }
-    render_unwind(output, &emitter.handlers, suspends, false);
-    if !scalar_proto {
-        // A body whose control reaches the end without a `Return` is a compiler bug, not a program
-        // error: the lowering always ends a body with one.
-        output.push_str("    goto kiln_refusal;\n");
-        render_refusal(output, true);
-    }
+        &plan.functions,
+        strict_functions,
+        &array_slots,
+        exports,
+        commonjs,
+    );
     output.push_str("}\n");
     Ok(())
 }
@@ -1900,12 +1561,6 @@ fn render(
     // emitted bytes exactly what they were.
     let strict_functions = vec![true; program.functions.len()];
     let callables = produces_references(program);
-    let entry_symbol = if callables {
-        format!("{symbol}_body")
-    } else {
-        symbol.to_owned()
-    };
-    let max_stack = plan.body;
     let header_len = if policy.decoupled_prelude {
         PRELUDE_HEADER.len()
     } else {
@@ -1953,82 +1608,16 @@ fn render(
         symbol,
         &strict_functions,
     )?;
-    writeln!(
-        output,
-        "{}int {entry_symbol}(kiln_host *host, kiln_value *result) {{",
-        if callables { "static " } else { "" }
-    )
-    .unwrap();
-    output.push_str("    size_t sp = 0;\n");
-    writeln!(
-        output,
-        "    (void)kiln_realm_gc_register_roots({symbol}_gc_roots, NULL, 0);"
-    )
-    .unwrap();
-    render_key_prologue(&mut output, symbol, !keys.is_empty());
-    if uses_this(&program.code) {
-        output.push_str("    kiln_val receiver = KILN_VAL_UNDEFINED;\n");
-    }
-    // The entry point owns the depth counter and the thrown value every body writes into. Both
-    // are locals rather than parameters because the embedding signature is fixed and a reference
-    // must not cross it: an uncaught throw leaves as text in `*result`.
-    if callables {
-        output.push_str("    int depth = 0;\n");
-        output.push_str("    kiln_value thrown_value = kiln_c99_undefined();\n");
-        output.push_str("    kiln_value *thrown = &thrown_value;\n");
-    }
-    writeln!(output, "    kiln_val stack[{}];", max_stack.max(1)).unwrap();
-    if uses_module_scope(program) {
-        // Named rather than automatic: an exported closure reads module scope after the entry
-        // point has returned, and a frame that has returned is not somewhere to read from.
-        writeln!(output, "    kiln_val *locals = {symbol}_globals;").unwrap();
-    } else {
-        writeln!(
-            output,
-            "    kiln_val locals[{}];",
-            usize::try_from(program.local_count).unwrap().max(1)
-        )
-        .unwrap();
-    }
-    render_handler_prologue(
+    render_entry(
         &mut output,
-        &handler_targets(&program.code),
-        program.code.len(),
-        false,
-    );
-    output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
-    output.push_str("    kiln_c99_reset_diagnostics();\n");
-    for local in 0..program.local_count {
-        writeln!(output, "    locals[{local}] = KILN_VAL_UNDEFINED;").unwrap();
-    }
-    let jump_targets = all_jump_targets(&program.code);
-    let emitter = Emitter {
-        constants: &program.constants,
-        frame_stacks: &plan.functions,
-        functions: &program.functions,
-        strict_functions: &strict_functions,
-        source: &program.source,
+        program,
+        &plan,
         symbol,
-        diagnostic_site: symbol,
-        callables,
-        handlers: handler_targets(&program.code),
-        site: ReturnSite::Entry {
-            exports: None,
-            commonjs: false,
-        },
-        tdz: compute_tdz_analysis(&program.code),
-        code: &program.code,
-        jump_targets,
-    };
-    for index in 0..program.code.len() {
-        writeln!(output, "kiln_label_{index}:;").unwrap();
-        emit_instruction(&mut output, &program.code[index], index, &emitter);
-    }
-    render_unwind(&mut output, &emitter.handlers, false, true);
-    render_uncaught(&mut output);
-    output.push_str("    goto kiln_refusal;\n");
-    render_refusal(&mut output, false);
-    output.push_str("}\n");
+        symbol,
+        &strict_functions,
+        !keys.is_empty(),
+        None,
+    )?;
     if callables {
         render_scalar_realm_wrapper(&mut output, symbol);
     }
@@ -2059,12 +1648,6 @@ fn render_module(
                 .unwrap_or(true)
         })
         .collect();
-    let entry_symbol = if callables {
-        format!("{symbol}_body")
-    } else {
-        symbol.to_owned()
-    };
-    let max_stack = plan.body;
     let header_len = if policy.decoupled_prelude {
         PRELUDE_HEADER.len()
     } else {
@@ -2114,113 +1697,16 @@ fn render_module(
         diagnostic_site,
         &strict_functions,
     )?;
-    writeln!(
-        output,
-        "{}int {entry_symbol}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count) {{",
-        if callables { "static " } else { "" }
-    )
-    .unwrap();
-    output.push_str("    size_t sp = 0;\n");
-    writeln!(
-        output,
-        "    (void)kiln_realm_gc_register_roots({symbol}_gc_roots, NULL, 0);"
-    )
-    .unwrap();
-    render_key_prologue(&mut output, symbol, !keys.is_empty());
-    if uses_this(&program.code) {
-        output.push_str("    kiln_val receiver = KILN_VAL_UNDEFINED;\n");
-    }
-    // The entry point owns the depth counter and the thrown value every body writes into. Both
-    // are locals rather than parameters because the embedding signature is fixed and a reference
-    // must not cross it: an uncaught throw leaves as text in `*result`.
-    if callables {
-        output.push_str("    int depth = 0;\n");
-        output.push_str("    kiln_value thrown_value = kiln_c99_undefined();\n");
-        output.push_str("    kiln_value *thrown = &thrown_value;\n");
-    }
-    writeln!(output, "    kiln_val stack[{}];", max_stack.max(1)).unwrap();
-    if uses_module_scope(program) {
-        // Named rather than automatic: an exported closure reads module scope after the entry
-        // point has returned, and a frame that has returned is not somewhere to read from.
-        writeln!(output, "    kiln_val *locals = {symbol}_globals;").unwrap();
-    } else {
-        writeln!(
-            output,
-            "    kiln_val locals[{}];",
-            usize::try_from(program.local_count).unwrap().max(1)
-        )
-        .unwrap();
-    }
-    render_handler_prologue(
+    render_entry(
         &mut output,
-        &handler_targets(&program.code),
-        program.code.len(),
-        false,
-    );
-    output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
-    writeln!(
-        output,
-        "    if (import_count != (size_t){} || (import_count != 0 && imports == NULL)) return KILN_C99_INVALID_ARGUMENT;",
-        module.imports.len()
-    )
-    .unwrap();
-    writeln!(
-        output,
-        "    if (export_count != (size_t){} || (export_count != 0 && exports == NULL)) return KILN_C99_INVALID_ARGUMENT;",
-        if commonjs { 1 } else { module.exports.len() }
-    )
-    .unwrap();
-    for local in 0..program.local_count {
-        writeln!(output, "    locals[{local}] = KILN_VAL_UNDEFINED;").unwrap();
-    }
-    let boxed_imports = slots_read_as_cells(&program.code, &program.functions);
-    for (index, binding) in module.imports.iter().enumerate() {
-        let slot = binding.local_slot;
-        writeln!(
-            output,
-            "    locals[{slot}] = kiln_val_from_boundary(imports[{index}]);"
-        )
-        .unwrap();
-        // The exporter boxes only what can change, so an immutable export arrives as a plain
-        // value where the body expects a cell. Wrapping it here is the same thing
-        // `execute_module` does on the interpreter side, and for the same reason: the body has
-        // one way to read an import and the linker has two ways to deliver one.
-        if boxed_imports.contains(&slot) {
-            writeln!(
-                output,
-                "    if ((locals[{slot}] & KILN_TAG_MASK) != KILN_TAG_CELL_PREFIX && kiln_c99_val_make_cell(&locals[{slot}]) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;"
-            )
-            .unwrap();
-        }
-    }
-    let jump_targets = all_jump_targets(&program.code);
-    let emitter = Emitter {
-        constants: &program.constants,
-        frame_stacks: &plan.functions,
-        functions: &program.functions,
-        strict_functions: &strict_functions,
-        source: &program.source,
+        program,
+        &plan,
         symbol,
         diagnostic_site,
-        callables,
-        handlers: handler_targets(&program.code),
-        site: ReturnSite::Entry {
-            exports: Some(&module.exports),
-            commonjs,
-        },
-        tdz: compute_tdz_analysis(&program.code),
-        code: &program.code,
-        jump_targets,
-    };
-    for index in 0..program.code.len() {
-        writeln!(output, "kiln_label_{index}:;").unwrap();
-        emit_instruction(&mut output, &program.code[index], index, &emitter);
-    }
-    render_unwind(&mut output, &emitter.handlers, false, true);
-    render_uncaught(&mut output);
-    output.push_str("    goto kiln_refusal;\n");
-    render_refusal(&mut output, false);
-    output.push_str("}\n");
+        &strict_functions,
+        !keys.is_empty(),
+        Some((module, commonjs)),
+    )?;
     if commonjs {
         /* The launcher cannot manufacture native objects without coupling itself to this private
          * value layout. Let the translation unit that owns the layout construct the wrapper
@@ -2288,1854 +1774,6 @@ fn render_runtime_module(
     output
 }
 
-/// Where a `Return` lands.
-///
-/// The entry point's value crosses the embedding boundary and a function body's does not, which
-/// is the difference between converting a returned function to text and handing back the closure
-/// so the caller can call it.
-struct Emitter<'a> {
-    constants: &'a [Constant],
-    /// How deep each compiled body's operand stack can get, so a generator over it can allocate
-    /// one that never overflows.
-    frame_stacks: &'a [usize],
-    /// The handler labels this body can unwind to, empty when it catches nothing. A body that
-    /// catches nothing propagates a throw by returning it, which needs no machinery at all.
-    handlers: Vec<u32>,
-    functions: &'a [FunctionProto],
-    /// Whether `functions[i]` is strict code, in the same order.
-    ///
-    /// The native backend needs this for exactly one rule: `OrdinaryCallBindThis`, where a
-    /// sloppy body called with no receiver gets the global object and a strict one gets what it
-    /// was passed. The interpreter reads the same answer off its `Strictness` table; a closure
-    /// this backend builds carries the bit instead, because a C function has no table to consult.
-    /// A short table -- a fixture with no strictness of its own -- reads strict, which is the
-    /// answer every ESM unit has and so leaves the emitted bytes of one unchanged.
-    strict_functions: &'a [bool],
-    /// The unit's source text, which each proto's span slices to give a function its `toString`.
-    source: &'a str,
-    symbol: &'a str,
-    diagnostic_site: &'a str,
-    /// Whether a value reaching the embedding boundary could be a callable and so has to be
-    /// converted first. False for a scalar program, whose emitted bytes must not change.
-    callables: bool,
-    site: ReturnSite<'a>,
-    /// Definite-assignment TDZ analysis for this body.
-    tdz: TdzAnalysis,
-    code: &'a [Instruction],
-    jump_targets: HashSet<u32>,
-}
-
-impl<'a> Emitter<'a> {
-    fn is_guarded(&self, index: usize, slot: u32) -> bool {
-        self.tdz.is_guarded(index, slot)
-    }
-}
-
-enum ReturnSite<'a> {
-    Entry {
-        exports: Option<&'a [kiln_ir::ExportBinding]>,
-        commonjs: bool,
-    },
-    Body,
-}
-
-fn instruction_can_refuse(
-    instruction: &Instruction,
-    code: &[Instruction],
-    constants: &[Constant],
-    index: usize,
-    jump_targets: &HashSet<u32>,
-) -> bool {
-    match instruction {
-        Instruction::Const(_)
-        | Instruction::StoreLocal(_)
-        | Instruction::LoadGlobal(_)
-        | Instruction::StoreGlobal(_)
-        | Instruction::LoadCell(_)
-        | Instruction::StoreCell(_)
-        | Instruction::NewCell(_)
-        | Instruction::Pop
-        | Instruction::Dup
-        | Instruction::Dup2
-        | Instruction::Unary(_)
-        | Instruction::Jump(_)
-        | Instruction::JumpIfFalse(_)
-        | Instruction::JumpIfTruthy(_)
-        | Instruction::JumpIfNotNullish(_)
-        | Instruction::HostCall { .. }
-        | Instruction::Return
-        | Instruction::PushHandler(_)
-        | Instruction::PopHandler
-        | Instruction::Throw
-        | Instruction::MarkUninitialized(_) => false,
-        Instruction::Binary(op) => matches!(op, BinaryOp::In | BinaryOp::InstanceOf),
-        Instruction::LoadLocal(_) => match_rule(code, constants, index, jump_targets)
-            .is_some_and(|pattern| pattern.is_property_or_element_access()),
-        _ => true,
-    }
-}
-
-fn emit_instruction(
-    output: &mut String,
-    instruction: &Instruction,
-    index: usize,
-    emitter: &Emitter<'_>,
-) {
-    if is_fused_with_previous(
-        emitter.code,
-        emitter.constants,
-        index,
-        &emitter.jump_targets,
-    ) {
-        return;
-    }
-    let Emitter {
-        constants,
-        frame_stacks,
-        functions,
-        strict_functions,
-        source,
-        symbol,
-        diagnostic_site,
-        callables,
-        handlers,
-        site,
-        tdz: _,
-        code: _,
-        jump_targets: _,
-    } = emitter;
-    let before = output.len();
-    let instruction_site = c_string(diagnostic_site);
-    let instruction_operation = c_string(&instruction_diagnostic(instruction, constants));
-    let direct_refusal = format!(
-        "kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); return KILN_C99_CONTROL_ERROR;"
-    );
-    let control_refusal = format!(
-        "if (status == KILN_C99_CONTROL_ERROR || status == KILN_C99_THROWN) {{ kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth);"
-    );
-    match instruction {
-        // Rejected by `verify` before emission begins, so reaching here means the two passes
-        // disagree about the instruction set -- a compiler bug, not a program error.
-        Instruction::LoadNewTarget => {
-            output.push_str("    stack[sp++] = kiln_val_from_boundary(kiln_c99_new_target);\n");
-        }
-        // `validate_supported_instruction` refuses this, so reaching here means verification and
-        // emission disagree about the instruction set -- a compiler bug rather than a program
-        // one, which is the same reading the arms above take.
-        Instruction::DirectEval(_) => {
-            unreachable!("verification rejects a direct `eval` before emission")
-        }
-        Instruction::DynamicImport => {
-            unreachable!("verification rejects a dynamic `import()` before emission")
-        }
-        Instruction::ToObject | Instruction::WithHas(_) => {
-            unreachable!("verification rejects a `with` statement before emission")
-        }
-        Instruction::NewRegExp { pattern, flags } => {
-            let (Constant::String(source), Constant::String(letters)) =
-                (&constants[*pattern as usize], &constants[*flags as usize])
-            else {
-                unreachable!("verification rejects a non-string pattern before emission")
-            };
-            // A fresh object every time the literal is evaluated, because `lastIndex` is mutable
-            // and program-visible: two evaluations of one literal must not share a cursor.
-            let unwind = unwind_or_return(handlers, site);
-            writeln!(
-                output,
-                "    {{ kiln_value built; int status = kiln_c99_new_regexp(&built, {symbol}_constant_{pattern}, {}, {symbol}_constant_{flags}, {}, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = kiln_val_from_boundary(built); }}",
-                source.len(),
-                letters.len()
-            )
-            .unwrap();
-        }
-        // The object and the key are read once and used twice, which two `Dup`s cannot do
-        // because they would reverse them.
-        Instruction::Dup2 => output
-            .push_str("    stack[sp] = stack[sp - 2]; stack[sp + 1] = stack[sp - 1]; sp += 2;\n"),
-        Instruction::CallComputed { argc } => {
-            // Not a `GetComputed` followed by a `Call`: that would discard the receiver, and
-            // `obj[name]()` has to run the method against `obj`. The same reason `CallMethod`
-            // is one instruction rather than two.
-            let argc = usize::from(*argc);
-            let unwind = unwind_or_return(handlers, site);
-            writeln!(
-                output,
-                "    {{ kiln_value method; kiln_value call_result; int status; kiln_value key = kiln_val_to_boundary(stack[sp - {argc} - 1]); kiln_value self_value = kiln_val_to_boundary(stack[sp - {argc} - 2]); kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = kiln_val_to_boundary(stack[sp - {argc} + i]); }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; status = kiln_c99_get_computed(host, self_value, key, &method, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = kiln_val_from_boundary(call_result); }}",
-                argc + 2
-            )
-            .unwrap();
-        }
-        Instruction::ConstructSpread => {
-            // `new f(...args)` is the same construction the fixed-arity `New` performs, so it
-            // goes through the same path rather than repeating the allocate-run-override
-            // sequence.
-            let unwind = unwind_or_return(handlers, site);
-            writeln!(
-                output,
-                "    {{ kiln_value list = kiln_val_to_boundary(stack[--sp]); kiln_val callee = stack[--sp]; kiln_val built = KILN_VAL_UNDEFINED; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) {{ {direct_refusal} }} given = kiln_c99_array_of(list); status = kiln_c99_construct_val(host, &built, callee, given->count == 0 ? NULL : given->elements, given->count, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = built; }}"
-            )
-            .unwrap();
-        }
-        Instruction::GetPrivate(name) => {
-            let Constant::String(text) = &constants[*name as usize] else {
-                unreachable!("verification rejects a non-string private name before emission")
-            };
-            let unwind = unwind_or_return(handlers, site);
-            writeln!(
-                output,
-                "    {{ kiln_value brand = kiln_val_to_boundary(stack[--sp]); kiln_value receiver = kiln_val_to_boundary(stack[sp - 1]); if (brand.tag != KILN_VALUE_UNDEFINED) {{ kiln_property *brand_slot = kiln_c99_own_private(receiver, \"{brand_key}\", {brand_len}); if (brand_slot == NULL || brand_slot->accessor || !kiln_c99_strict_equal(brand_slot->value, brand)) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 0); {unwind} }} }} kiln_property *slot = kiln_c99_own_private(receiver, {symbol}_constant_{name}, {len}); if (slot == NULL) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 0); {unwind} }} if (slot->accessor) {{ kiln_value getter = slot->getter; kiln_value produced; int status; if (getter.tag == KILN_VALUE_UNDEFINED) {{ status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 2); {unwind} }} status = kiln_c99_call(host, &produced, getter, receiver, NULL, 0, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_val_from_boundary(produced); }} else {{ stack[sp - 1] = kiln_val_from_boundary(slot->value); }} }}",
-                len = text.len(),
-                brand_key = private_brand_key_of(text),
-                brand_len = private_brand_key_of(text).len()
-            )
-            .unwrap();
-        }
-        Instruction::SetPrivate(name) => {
-            let Constant::String(text) = &constants[*name as usize] else {
-                unreachable!("verification rejects a non-string private name before emission")
-            };
-            let unwind = unwind_or_return(handlers, site);
-            writeln!(
-                output,
-                "    {{ kiln_value brand = kiln_val_to_boundary(stack[--sp]); kiln_value member = kiln_val_to_boundary(stack[--sp]); kiln_value receiver = kiln_val_to_boundary(stack[sp - 1]); if (brand.tag != KILN_VALUE_UNDEFINED) {{ kiln_property *brand_slot = kiln_c99_own_private(receiver, \"{brand_key}\", {brand_len}); if (brand_slot == NULL || brand_slot->accessor || !kiln_c99_strict_equal(brand_slot->value, brand)) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 1); {unwind} }} }} kiln_property *slot = kiln_c99_own_private(receiver, {symbol}_constant_{name}, {len}); if (slot == NULL) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 1); {unwind} }} if (slot->accessor) {{ kiln_value setter = slot->setter; kiln_value produced; int status; if (setter.tag == KILN_VALUE_UNDEFINED) {{ status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 3); {unwind} }} status = kiln_c99_call(host, &produced, setter, receiver, &member, 1, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }} else if (!slot->writable) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 4); {unwind} }} else {{ slot->value = member; }} stack[sp - 1] = kiln_val_from_boundary(member); }}",
-                len = text.len(),
-                brand_key = private_brand_key_of(text),
-                brand_len = private_brand_key_of(text).len()
-            )
-            .unwrap();
-        }
-        Instruction::ThrowReference(name) => {
-            // A name that is not there. Emitted rather than refused, because a reference in a
-            // branch that never runs is not an error in JavaScript and real bundles are full of
-            // them -- feature detection mentions globals the host may not have.
-            //
-            // "Not there" is decided at *run* time, though, not here. The compiler reaches this
-            // instruction for every name outside `kiln_ir::Builtin`, and the realm's global object
-            // holds intrinsics that table does not name -- `Temporal` is one. The interpreter has
-            // always looked there before throwing (see its `ThrowReference` arm); this backend did
-            // not, which is why a fully implemented `Temporal` was still a ReferenceError under
-            // `--native`. The lookup is a no-op for every name the table *does* carry, because
-            // those never reach this instruction at all.
-            let Constant::String(text) = &constants[*name as usize] else {
-                unreachable!("verification rejects a non-string reference name before emission")
-            };
-            writeln!(
-                output,
-                "    {{ static const char kiln_missing_name_{index}[] = {}; static const char kiln_missing_{index}[] = {}; int found = 0; kiln_value val; int status = kiln_c99_global_binding(&val, kiln_missing_name_{index}, {}, &found); if (status != KILN_C99_OK) return status; if (found) {{ stack[sp++] = kiln_val_from_boundary(val); }} else {{ status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, kiln_missing_{index}); {} }} }}",
-                c_string(text),
-                c_string(&format!("{text} is not defined")),
-                text.len(),
-                unwind_or_return(handlers, site)
-            )
-            .unwrap();
-        }
-        Instruction::DeclareGlobalBinding { name, configurable } => {
-            let Constant::String(text) = &constants[*name as usize] else {
-                unreachable!("verification rejects a non-string binding name before emission")
-            };
-            writeln!(
-                output,
-                "    {{ int status = kiln_c99_declare_global({symbol}_constant_{name}, {}, {}); if (status != KILN_C99_OK) return status; }}",
-                text.len(),
-                i32::from(*configurable)
-            )
-            .unwrap();
-        }
-        Instruction::DeleteGlobalBinding(name) => {
-            // The mirror of `StoreGlobalBinding`: an unqualified `delete` in sloppy code is the
-            // global object environment record's `DeleteBinding`, which is that object's
-            // `[[Delete]]`. Both engines have to answer it the same way, because
-            // `x = 1; delete x; x` throws in one and reads `1` in the other otherwise.
-            let unwind = unwind_or_return(handlers, site);
-            let Constant::String(text) = &constants[*name as usize] else {
-                unreachable!("verification rejects a non-string binding name before emission")
-            };
-            writeln!(
-                output,
-                "    {{ kiln_value globals; int status = kiln_c99_global_object(&globals); if (status != KILN_C99_OK) return status; int answer; status = kiln_c99_delete(host, globals, {symbol}_constant_{name}, {}, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = answer ? KILN_VAL_TRUE : KILN_VAL_FALSE; }}",
-                text.len()
-            )
-            .unwrap();
-        }
-        Instruction::LoadGlobalBindingOrUndefined(name) => {
-            let Constant::String(text) = &constants[*name as usize] else {
-                unreachable!("verification rejects a non-string binding name before emission")
-            };
-            writeln!(
-                output,
-                "    {{ kiln_value existing; int found = 0; int status = kiln_c99_global_binding(&existing, {symbol}_constant_{name}, {}, &found); if (status != KILN_C99_OK) return status; stack[sp++] = found ? kiln_val_from_boundary(existing) : KILN_VAL_UNDEFINED; }}",
-                text.len()
-            )
-            .unwrap();
-        }
-        Instruction::RequireGlobalBinding(name) => {
-            let unwind = unwind_or_return(handlers, site);
-            let Constant::String(text) = &constants[*name as usize] else {
-                unreachable!("verification rejects a non-string binding name before emission")
-            };
-            writeln!(
-                output,
-                "    {{ kiln_value existing; int found = 0; int status = kiln_c99_global_binding(&existing, {symbol}_constant_{name}, {}, &found); if (status != KILN_C99_OK) return status; if (!found) {{ static const char kiln_unbound_{index}[] = {}; status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, kiln_unbound_{index}); {unwind} }} }}",
-                text.len(),
-                c_string(&format!("{text} is not defined"))
-            )
-            .unwrap();
-        }
-        Instruction::StoreGlobalBindingStrict(name) => {
-            // The strict form: an existing global is written, and a name the realm does not have
-            // is the unresolvable reference strict mode refuses. Both engines must decide it the
-            // same way and at the same moment, which is run time.
-            let unwind = unwind_or_return(handlers, site);
-            let Constant::String(text) = &constants[*name as usize] else {
-                unreachable!("verification rejects a non-string binding name before emission")
-            };
-            writeln!(
-                output,
-                "    {{ kiln_value member = kiln_val_to_boundary(stack[--sp]); kiln_value existing; int found = 0; int status = kiln_c99_global_binding(&existing, {symbol}_constant_{name}, {len}, &found); if (status != KILN_C99_OK) return status; if (!found) {{ static const char kiln_unbound_{index}[] = {}; status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, kiln_unbound_{index}); {unwind} }} {{ kiln_value globals; status = kiln_c99_global_object(&globals); if (status != KILN_C99_OK) return status; status = kiln_c99_put_mode(host, globals, {symbol}_constant_{name}, {len}, member, 1, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }} }}",
-                c_string(&format!("{text} is not defined")),
-                len = text.len()
-            )
-            .unwrap();
-        }
-        Instruction::StoreGlobalBinding(name) => {
-            // Sloppy code settles an unresolvable assignment against the global object, which
-            // creates the property. The interpreter does the same thing through its own global
-            // object; both engines have to, or a UMD header installs itself under one and throws
-            // under the other -- a divergence worse than the shared refusal it replaced.
-            let unwind = unwind_or_return(handlers, site);
-            let Constant::String(text) = &constants[*name as usize] else {
-                unreachable!("verification rejects a non-string binding name before emission")
-            };
-            writeln!(
-                output,
-                "    {{ kiln_value member = kiln_val_to_boundary(stack[--sp]); kiln_value globals; int status = kiln_c99_global_object(&globals); if (status != KILN_C99_OK) return status; status = kiln_c99_put_mode(host, globals, {symbol}_constant_{name}, {}, member, 0, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
-                text.len()
-            )
-            .unwrap();
-        }
-        Instruction::Const(constant) => {
-            if let Some(pattern) = match_rule(emitter.code, emitter.constants, index, &emitter.jump_targets) {
-                match pattern {
-                    FusedPattern::ConstLoadCompareJump {
-                        bits,
-                        slot,
-                        op,
-                        is_jump_if_false,
-                        target,
-                    } => {
-                        let unwind = unwind_or_return(handlers, site);
-                        if emitter.is_guarded(index + 1, slot) {
-                            writeln!(
-                                output,
-                                "    {{ int status = kiln_c99_val_check_tdz(locals[{slot}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
-                            )
-                            .unwrap();
-                        }
-                        let sym = relational_op_symbol(op).unwrap();
-                        let cond = if is_jump_if_false {
-                            format!("!({} {sym} {})", "a", "b")
-                        } else {
-                            format!("{} {sym} {}", "a", "b")
-                        };
-                        let fallback_cond = if is_jump_if_false {
-                            "!kiln_c99_val_truthy(answer)"
-                        } else {
-                            "kiln_c99_val_truthy(answer)"
-                        };
-                        let fallback_eval = if !*callables {
-                            format!("kiln_val answer = kiln_c99_val_binary_fast({}, left, right);", binary_code(op))
-                        } else {
-                            format!("int status = KILN_C99_OK; kiln_val answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status;", binary_code(op))
-                        };
-                        writeln!(
-                            output,
-                            "    {{ kiln_val right = locals[{slot}]; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(right))) {{ double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right, sizeof(b)); if ({cond}) goto kiln_label_{target}; }} else {{ kiln_val left = UINT64_C({bits}); {fallback_eval} if ({fallback_cond}) goto kiln_label_{target}; }} }}"
-                        )
-                        .unwrap();
-                    }
-                    FusedPattern::ConstLoadBinaryStore {
-                        bits,
-                        src,
-                        op,
-                        dst,
-                    } => {
-                        let unwind = unwind_or_return(handlers, site);
-                        if emitter.is_guarded(index + 1, src) {
-                            writeln!(
-                                output,
-                                "    {{ int status = kiln_c99_val_check_tdz(locals[{src}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
-                            )
-                            .unwrap();
-                        }
-                        let op_body = match const_left_numeric_fast_body(op, bits) {
-                            Some(fast) => {
-                                if !*callables {
-                                    format!("{{ {fast} }} else {{ kiln_val left = UINT64_C({bits}); answer = kiln_c99_val_binary_fast({}, left, right); }}", binary_code(op))
-                                } else {
-                                    format!("{{ {fast} }} else {{ kiln_val left = UINT64_C({bits}); int status = KILN_C99_OK; answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
-                                }
-                            }
-                            None => {
-                                if !*callables {
-                                    format!("{{ kiln_val left = UINT64_C({bits}); answer = kiln_c99_val_binary_fast({}, left, right); }}", binary_code(op))
-                                } else {
-                                    format!("{{ kiln_val left = UINT64_C({bits}); int status = KILN_C99_OK; answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
-                                }
-                            }
-                        };
-                        if const_left_numeric_fast_body(op, bits).is_some() {
-                            writeln!(
-                                output,
-                                "    {{ kiln_val right = locals[{src}]; kiln_val answer; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(right))) {op_body} locals[{dst}] = answer; }}"
-                            )
-                            .unwrap();
-                        } else {
-                            writeln!(
-                                output,
-                                "    {{ kiln_val right = locals[{src}]; kiln_val answer; {op_body} locals[{dst}] = answer; }}"
-                            )
-                            .unwrap();
-                        }
-                    }
-                    FusedPattern::ConstLoadBinary { bits, src, op } => {
-                        let unwind = unwind_or_return(handlers, site);
-                        if emitter.is_guarded(index + 1, src) {
-                            writeln!(
-                                output,
-                                "    {{ int status = kiln_c99_val_check_tdz(locals[{src}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
-                            )
-                            .unwrap();
-                        }
-                        let op_body = match const_left_numeric_fast_body(op, bits) {
-                            Some(fast) => {
-                                if !*callables {
-                                    format!("{{ {fast} }} else {{ kiln_val left = UINT64_C({bits}); answer = kiln_c99_val_binary_fast({}, left, right); }}", binary_code(op))
-                                } else {
-                                    format!("{{ {fast} }} else {{ kiln_val left = UINT64_C({bits}); int status = KILN_C99_OK; answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
-                                }
-                            }
-                            None => {
-                                if !*callables {
-                                    format!("{{ kiln_val left = UINT64_C({bits}); answer = kiln_c99_val_binary_fast({}, left, right); }}", binary_code(op))
-                                } else {
-                                    format!("{{ kiln_val left = UINT64_C({bits}); int status = KILN_C99_OK; answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
-                                }
-                            }
-                        };
-                        if const_left_numeric_fast_body(op, bits).is_some() {
-                            writeln!(
-                                output,
-                                "    {{ kiln_val right = locals[{src}]; kiln_val answer; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(right))) {op_body} stack[sp++] = answer; }}"
-                            )
-                            .unwrap();
-                        } else {
-                            writeln!(
-                                output,
-                                "    {{ kiln_val right = locals[{src}]; kiln_val answer; {op_body} stack[sp++] = answer; }}"
-                            )
-                            .unwrap();
-                        }
-                    }
-                    FusedPattern::ConstStore { slot, .. } => {
-                        match &constants[*constant as usize] {
-                            Constant::Undefined => writeln!(output, "    locals[{slot}] = KILN_VAL_UNDEFINED;").unwrap(),
-                            Constant::Null => writeln!(output, "    locals[{slot}] = KILN_VAL_NULL;").unwrap(),
-                            Constant::Boolean(value) => {
-                                writeln!(output, "    locals[{slot}] = {};", if *value { "KILN_VAL_TRUE" } else { "KILN_VAL_FALSE" }).unwrap()
-                            }
-                            Constant::Number(bits) => {
-                                writeln!(output, "    locals[{slot}] = UINT64_C({bits});").unwrap()
-                            }
-                            Constant::String(value) => {
-                                if value.contains('\0') {
-                                    writeln!(
-                                        output,
-                                        "    locals[{slot}] = kiln_c99_string_constant(&{symbol}_string_{constant}, {symbol}_constant_{constant}, {});",
-                                        value.len()
-                                    )
-                                    .unwrap()
-                                } else {
-                                    writeln!(
-                                        output,
-                                        "    locals[{slot}] = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, {symbol}_constant_{constant});"
-                                    )
-                                    .unwrap()
-                                }
-                            }
-                            Constant::BigInt(digits) => writeln!(
-                                output,
-                                "    {{ kiln_value tmp; int status = kiln_c99_bigint_constant(&{symbol}_bigint_{constant}, {symbol}_constant_{constant}, {}, &tmp); if (status != KILN_C99_OK) return status; locals[{slot}] = kiln_val_from_boundary(tmp); }}",
-                                digits.len()
-                            )
-                            .unwrap(),
-                        }
-                    }
-                    _ => unreachable!("unexpected pattern for Const instruction"),
-                }
-            } else {
-                match &constants[*constant as usize] {
-                    Constant::Undefined => output.push_str("    stack[sp++] = KILN_VAL_UNDEFINED;\n"),
-                    Constant::Null => output.push_str("    stack[sp++] = KILN_VAL_NULL;\n"),
-                    Constant::Boolean(value) => {
-                        writeln!(output, "    stack[sp++] = {};", if *value { "KILN_VAL_TRUE" } else { "KILN_VAL_FALSE" }).unwrap()
-                    }
-                    Constant::Number(bits) => {
-                        writeln!(output, "    stack[sp++] = UINT64_C({bits});").unwrap()
-                    }
-                    Constant::String(value) => {
-                        if value.contains('\0') {
-                            writeln!(
-                                output,
-                                "    stack[sp++] = kiln_c99_string_constant(&{symbol}_string_{constant}, {symbol}_constant_{constant}, {});",
-                                value.len()
-                            )
-                            .unwrap()
-                        } else {
-                            writeln!(
-                                output,
-                                "    stack[sp++] = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, {symbol}_constant_{constant});"
-                            )
-                            .unwrap()
-                        }
-                    }
-                    Constant::BigInt(digits) => writeln!(
-                        output,
-                        "    {{ kiln_value tmp; int status = kiln_c99_bigint_constant(&{symbol}_bigint_{constant}, {symbol}_constant_{constant}, {}, &tmp); if (status != KILN_C99_OK) return status; stack[sp++] = kiln_val_from_boundary(tmp); }}",
-                        digits.len()
-                    )
-                    .unwrap(),
-                }
-            }
-        }
-        // A cell is a shared box: the slot stops holding the value and starts holding a
-        // pointer to it, so that a closure over the variable and the frame that declared it are
-        // writing to the same place. Until closures existed here this was emitted as plain slot
-        // access, which was sound only because nothing could capture.
-        Instruction::NewCell(local) => {
-            writeln!(
-                output,
-                "    {{ int status = kiln_c99_val_make_cell(&locals[{local}]); if (status != KILN_C99_OK) return status; }}"
-            )
-            .unwrap();
-        }
-        Instruction::LoadCell(local) => {
-            if emitter.is_guarded(index, *local) {
-                let unwind = unwind_or_return(handlers, site);
-                writeln!(
-                    output,
-                    "    {{ int status = kiln_c99_op_val_load_cell(locals[{local}], stack, &sp, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
-                )
-                .unwrap();
-            } else {
-                writeln!(output, "    stack[sp++] = *(kiln_val *)KILN_VAL_PTR(locals[{local}]);").unwrap();
-            }
-        }
-        Instruction::StoreCell(local) => {
-            writeln!(output, "    *(kiln_val *)KILN_VAL_PTR(locals[{local}]) = stack[--sp];").unwrap();
-        }
-        // A `let` or `const` slot is in the temporal dead zone until its declaration runs.
-        // Reading one is an error rather than `undefined`, and only the slots a program marks
-        // are ever tested -- the check would otherwise be a branch on every local read for a
-        // state almost no program reaches.
-        Instruction::MarkUninitialized(local) => {
-            // Inlined rather than `kiln_c99_mark_uninitialized(&locals[N])`. Taking the address
-            // of a slot and passing it to an opaque function makes the whole `locals[]` array
-            // address-escaped, and an escaped array cannot be promoted to registers *anywhere in
-            // the function* -- so one TDZ mark in the prologue costs every loop in the body. The
-            // body it replaces is two lines and is kept verbatim.
-            writeln!(output, "    if ((locals[{local}] & KILN_TAG_MASK) == KILN_TAG_CELL_PREFIX) {{ *(kiln_val *)KILN_VAL_PTR(locals[{local}]) = KILN_VAL_UNINITIALIZED; }} else {{ locals[{local}] = KILN_VAL_UNINITIALIZED; }}").unwrap();
-        }
-        // An upvalue slot always holds a cell -- that is what capturing means -- but the cell can
-        // still be in its owner's temporal dead zone. The owner may be a module or an enclosing
-        // function, so this body cannot use its own `MarkUninitialized` set to decide whether to
-        // check. Reading the marker is cheap compared with the pointer chase and keeps captured
-        // bindings in parity with `LoadCell` and the interpreter.
-        Instruction::LoadUpvalue(upvalue) => {
-            let unwind = unwind_or_return(handlers, site);
-            writeln!(
-                output,
-                "    {{ int status = kiln_c99_op_val_load_cell(upvalues[{upvalue}], stack, &sp, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
-            )
-            .unwrap();
-        }
-        Instruction::StoreUpvalue(upvalue) => {
-            writeln!(output, "    *(kiln_val *)KILN_VAL_PTR(upvalues[{upvalue}]) = stack[--sp];").unwrap();
-        }
-        Instruction::MakeFunction(proto) => {
-            let target = &functions[*proto as usize];
-            let captures = &target.upvalues;
-            // Every function body receives its effective receiver. An arrow snapshots that
-            // value now; an ordinary closure carries the same field but never consults it.
-            // Module entry has no receiver and therefore captures `undefined` explicitly.
-            let defining_receiver = if target.arrow && matches!(site, ReturnSite::Body) {
-                "receiver"
-            } else {
-                "KILN_VAL_UNDEFINED"
-            };
-            output.push_str("    {\n        kiln_value built; int status;\n");
-            let captured = if captures.is_empty() {
-                "NULL"
-            } else {
-                writeln!(output, "        kiln_val captured[{}];", captures.len()).unwrap();
-                for (position, upvalue) in captures.iter().enumerate() {
-                    // The box is copied by pointer, which is the point: two closures over one
-                    // variable have to observe each other's writes.
-                    match upvalue {
-                        Upvalue::ParentLocal(slot) => {
-                            writeln!(output, "        captured[{position}] = locals[{slot}];")
-                        }
-                        Upvalue::ParentUpvalue(slot) => {
-                            writeln!(output, "        captured[{position}] = upvalues[{slot}];")
-                        }
-                    }
-                    .unwrap();
-                }
-                "captured"
-            };
-            let construction = closure_construction(
-                functions,
-                source,
-                frame_stacks,
-                strict_functions,
-                symbol,
-                diagnostic_site,
-                *proto,
-                defining_receiver,
-                captured,
-                captures.len(),
-            );
-            writeln!(output, "        status = {construction};").unwrap();
-            if proto_publishes_frame(target) {
-                output.push_str("        if (status != KILN_C99_OK) return status;\n        stack[sp++] = kiln_val_from_boundary(built);\n    }\n");
-            } else {
-                output.push_str("        if (status != KILN_C99_OK) return status;\n        kiln_c99_closure_of(built)->publishes_frame = 0;\n        stack[sp++] = kiln_val_from_boundary(built);\n    }\n");
-            }
-        }
-        Instruction::Call { argc } => {
-            let argc = usize::from(*argc);
-            let unwind = unwind_or_return(handlers, site);
-            let mut static_branches = String::new();
-            if emitter.functions.len() <= 32 {
-                for (i, _) in emitter.functions.iter().enumerate() {
-                    let fn_name = format!("{}_fn_{i}", emitter.symbol);
-                    if static_branches.is_empty() {
-                        static_branches.push_str(&format!(
-                            "if (plain->body == (kiln_body_fn){fn_name}) {{ status = {fn_name}(&ctx_call, &call_result, plain->upvalues, &recv, call_args, (size_t){argc}); }}"
-                        ));
-                    } else {
-                        static_branches.push_str(&format!(
-                            " else if (plain->body == (kiln_body_fn){fn_name}) {{ status = {fn_name}(&ctx_call, &call_result, plain->upvalues, &recv, call_args, (size_t){argc}); }}"
-                        ));
-                    }
-                }
-            }
-            let (success_action, fallback_action) = match match_rule(
-                emitter.code,
-                emitter.constants,
-                index,
-                &emitter.jump_targets,
-            ) {
-                Some(FusedPattern::CallDupStorePop { dst } | FusedPattern::CallStore { dst }) => (
-                    format!("sp -= ((size_t){argc} + 1); locals[{dst}] = call_result;"),
-                    format!("locals[{dst}] = stack[--sp];"),
-                ),
-                Some(FusedPattern::CallPop) => (
-                    format!("sp -= ((size_t){argc} + 1);"),
-                    "--sp;".to_string(),
-                ),
-                _ => (
-                    format!("sp -= ((size_t){argc} + 1); stack[sp++] = call_result;"),
-                    String::new(),
-                ),
-            };
-            let direct_call = if static_branches.is_empty() {
-                format!(
-                    "int status = kiln_c99_op_val_call(host, stack, &sp, (size_t){argc}, depth, thrown, {instruction_site}, (size_t){index}, {instruction_operation}); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; {fallback_action}"
-                )
-            } else {
-                format!(
-                    "if (KILN_LIKELY(plain != NULL && !plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ kiln_val call_result = KILN_VAL_UNDEFINED; const kiln_val *call_args = {argc} > 0 ? &stack[sp - {argc}] : NULL; kiln_val recv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&recv); kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status; {static_branches} else {{ status = plain->body(&ctx_call, &call_result, plain->upvalues, &recv, call_args, (size_t){argc}); }} if (KILN_LIKELY(status == KILN_C99_OK)) {{ {success_action} }} else {{ if (status == KILN_C99_THROWN) {unwind} return status; }} }} else {{ int status = kiln_c99_op_val_call(host, stack, &sp, (size_t){argc}, depth, thrown, {instruction_site}, (size_t){index}, {instruction_operation}); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; {fallback_action} }}"
-                )
-            };
-            writeln!(
-                output,
-                "    {{ kiln_val callee_val = stack[sp - (size_t){argc} - 1]; kiln_closure *plain = KILN_VAL_IS_CLOSURE(callee_val) ? (kiln_closure *)KILN_VAL_PTR(callee_val) : NULL; {direct_call} }}"
-            )
-            .unwrap();
-        }
-        Instruction::LoadLocal(local) => {
-            if emitter.is_guarded(index, *local) {
-                let unwind = unwind_or_return(handlers, site);
-                writeln!(
-                    output,
-                    "    {{ int status = kiln_c99_val_check_tdz(locals[{local}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
-                )
-                .unwrap();
-            }
-            if let Some(pattern) = match_rule(
-                emitter.code,
-                emitter.constants,
-                index,
-                &emitter.jump_targets,
-            ) {
-                match pattern {
-                    FusedPattern::LoadConstCompareJump {
-                        slot,
-                        bits,
-                        op,
-                        is_jump_if_false,
-                        target,
-                    } => {
-                        let sym = relational_op_symbol(op).unwrap();
-                        let cond = if is_jump_if_false {
-                            format!("!({} {sym} {})", "a", "b")
-                        } else {
-                            format!("{} {sym} {}", "a", "b")
-                        };
-                        let fallback_cond = if is_jump_if_false {
-                            "!kiln_c99_val_truthy(answer)"
-                        } else {
-                            "kiln_c99_val_truthy(answer)"
-                        };
-                        let unwind = unwind_or_return(handlers, site);
-                        let fallback_eval = if !*callables {
-                            format!("kiln_val answer = kiln_c99_val_binary_fast({}, left, right);", binary_code(op))
-                        } else {
-                            format!("int status = KILN_C99_OK; kiln_val answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status;", binary_code(op))
-                        };
-                        writeln!(
-                            output,
-                            "    {{ kiln_val left = locals[{slot}]; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left))) {{ double a; memcpy(&a, &left, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; if ({cond}) goto kiln_label_{target}; }} else {{ kiln_val right = UINT64_C({bits}); {fallback_eval} if ({fallback_cond}) goto kiln_label_{target}; }} }}"
-                        )
-                        .unwrap();
-                    }
-                    FusedPattern::LoadLoadCompareJump {
-                        slot1,
-                        slot2,
-                        op,
-                        is_jump_if_false,
-                        target,
-                    } => {
-                        let unwind = unwind_or_return(handlers, site);
-                        if emitter.is_guarded(index + 1, slot2) {
-                            writeln!(
-                                output,
-                                "    {{ int status = kiln_c99_val_check_tdz(locals[{slot2}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
-                            )
-                            .unwrap();
-                        }
-                        let sym = relational_op_symbol(op).unwrap();
-                        let cond = if is_jump_if_false {
-                            format!("!({} {sym} {})", "a", "b")
-                        } else {
-                            format!("{} {sym} {}", "a", "b")
-                        };
-                        let fallback_cond = if is_jump_if_false {
-                            "!kiln_c99_val_truthy(answer)"
-                        } else {
-                            "kiln_c99_val_truthy(answer)"
-                        };
-                        let fallback_eval = if !*callables {
-                            format!("kiln_val answer = kiln_c99_val_binary_fast({}, left, right);", binary_code(op))
-                        } else {
-                            format!("int status = KILN_C99_OK; kiln_val answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status;", binary_code(op))
-                        };
-                        writeln!(
-                            output,
-                            "    {{ kiln_val left = locals[{slot1}]; kiln_val right = locals[{slot2}]; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left) && KILN_VAL_IS_NUMBER(right))) {{ double a; double b; memcpy(&a, &left, sizeof(a)); memcpy(&b, &right, sizeof(b)); if ({cond}) goto kiln_label_{target}; }} else {{ {fallback_eval} if ({fallback_cond}) goto kiln_label_{target}; }} }}"
-                        )
-                        .unwrap();
-                    }
-                    FusedPattern::LoadConstBinaryStore {
-                        src,
-                        bits,
-                        op,
-                        dst,
-                    } => {
-                        let unwind = unwind_or_return(handlers, site);
-                        if src == dst && const_numeric_fast_body_in_place(op, bits, dst).is_some() {
-                            let in_place = const_numeric_fast_body_in_place(op, bits, dst).unwrap();
-                            let fallback = if !*callables {
-                                format!("{{ kiln_val left = locals[{src}]; kiln_val right = UINT64_C({bits}); locals[{dst}] = kiln_c99_val_binary_fast({}, left, right); }}", binary_code(op))
-                            } else {
-                                format!("{{ kiln_val left = locals[{src}]; kiln_val right = UINT64_C({bits}); int status = KILN_C99_OK; kiln_val answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; locals[{dst}] = answer; }}", binary_code(op))
-                            };
-                            writeln!(
-                                output,
-                                "    if (KILN_LIKELY(KILN_VAL_IS_NUMBER(locals[{dst}]))) {{ {in_place} }} else {fallback}"
-                            )
-                            .unwrap();
-                        } else {
-                            let op_body = match const_numeric_fast_body(op, bits) {
-                                Some(fast) => {
-                                    if !*callables {
-                                        format!("{{ {fast} }} else {{ kiln_val right = UINT64_C({bits}); answer = kiln_c99_val_binary_fast({}, left, right); }}", binary_code(op))
-                                    } else {
-                                        format!("{{ {fast} }} else {{ kiln_val right = UINT64_C({bits}); int status = KILN_C99_OK; answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
-                                    }
-                                }
-                                None => {
-                                    if !*callables {
-                                        format!("{{ kiln_val right = UINT64_C({bits}); answer = kiln_c99_val_binary_fast({}, left, right); }}", binary_code(op))
-                                    } else {
-                                        format!("{{ kiln_val right = UINT64_C({bits}); int status = KILN_C99_OK; answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
-                                    }
-                                }
-                            };
-                            if const_numeric_fast_body(op, bits).is_some() {
-                                writeln!(
-                                    output,
-                                    "    {{ kiln_val left = locals[{src}]; kiln_val answer; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left))) {op_body} locals[{dst}] = answer; }}"
-                                )
-                                .unwrap();
-                            } else {
-                                writeln!(
-                                    output,
-                                    "    {{ kiln_val left = locals[{src}]; kiln_val answer; {op_body} locals[{dst}] = answer; }}"
-                                )
-                                .unwrap();
-                            }
-                        }
-                    }
-                    FusedPattern::LoadLoadBinaryStore {
-                        src1,
-                        src2,
-                        op,
-                        dst,
-                    } => {
-                        let unwind = unwind_or_return(handlers, site);
-                        if emitter.is_guarded(index + 1, src2) {
-                            writeln!(
-                                output,
-                                "    {{ int status = kiln_c99_val_check_tdz(locals[{src2}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
-                            )
-                            .unwrap();
-                        }
-                        let op_body = match numeric_fast_body(op) {
-                            Some(fast) => {
-                                if !*callables {
-                                    format!("{{ double a; double b; memcpy(&a, &left, sizeof(a)); memcpy(&b, &right, sizeof(b)); {fast} }} else {{ answer = kiln_c99_val_binary_fast({}, left, right); }}", binary_code(op))
-                                } else {
-                                    format!("{{ double a; double b; memcpy(&a, &left, sizeof(a)); memcpy(&b, &right, sizeof(b)); {fast} }} else {{ int status = KILN_C99_OK; answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
-                                }
-                            }
-                            None => {
-                                if !*callables {
-                                    format!("{{ answer = kiln_c99_val_binary_fast({}, left, right); }}", binary_code(op))
-                                } else {
-                                    format!("{{ int status = KILN_C99_OK; answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
-                                }
-                            }
-                        };
-                        if numeric_fast_body(op).is_some() {
-                            writeln!(
-                                output,
-                                "    {{ kiln_val left = locals[{src1}]; kiln_val right = locals[{src2}]; kiln_val answer; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left) && KILN_VAL_IS_NUMBER(right))) {op_body} locals[{dst}] = answer; }}"
-                            )
-                            .unwrap();
-                        } else {
-                            writeln!(
-                                output,
-                                "    {{ kiln_val left = locals[{src1}]; kiln_val right = locals[{src2}]; kiln_val answer; {op_body} locals[{dst}] = answer; }}"
-                            )
-                            .unwrap();
-                        }
-                    }
-                    FusedPattern::LoadConstBinary { src, bits, op } => {
-                        let unwind = unwind_or_return(handlers, site);
-                        let op_body = match const_numeric_fast_body(op, bits) {
-                            Some(fast) => {
-                                if !*callables {
-                                    format!("{{ {fast} }} else {{ kiln_val right = UINT64_C({bits}); answer = kiln_c99_val_binary_fast({}, left, right); }}", binary_code(op))
-                                } else {
-                                    format!("{{ {fast} }} else {{ kiln_val right = UINT64_C({bits}); int status = KILN_C99_OK; answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
-                                }
-                            }
-                            None => {
-                                if !*callables {
-                                    format!("{{ kiln_val right = UINT64_C({bits}); answer = kiln_c99_val_binary_fast({}, left, right); }}", binary_code(op))
-                                } else {
-                                    format!("{{ kiln_val right = UINT64_C({bits}); int status = KILN_C99_OK; answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
-                                }
-                            }
-                        };
-                        if const_numeric_fast_body(op, bits).is_some() {
-                            writeln!(
-                                output,
-                                "    {{ kiln_val left = locals[{src}]; kiln_val answer; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left))) {op_body} stack[sp++] = answer; }}"
-                            )
-                            .unwrap();
-                        } else {
-                            writeln!(
-                                output,
-                                "    {{ kiln_val left = locals[{src}]; kiln_val answer; {op_body} stack[sp++] = answer; }}"
-                            )
-                            .unwrap();
-                        }
-                    }
-                    FusedPattern::LoadLoadBinary { src1, src2, op } => {
-                        let unwind = unwind_or_return(handlers, site);
-                        if emitter.is_guarded(index + 1, src2) {
-                            writeln!(
-                                output,
-                                "    {{ int status = kiln_c99_val_check_tdz(locals[{src2}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
-                            )
-                            .unwrap();
-                        }
-                        let op_body = match numeric_fast_body(op) {
-                            Some(fast) => {
-                                if !*callables {
-                                    format!("{{ double a; double b; memcpy(&a, &left, sizeof(a)); memcpy(&b, &right, sizeof(b)); {fast} }} else {{ answer = kiln_c99_val_binary_fast({}, left, right); }}", binary_code(op))
-                                } else {
-                                    format!("{{ double a; double b; memcpy(&a, &left, sizeof(a)); memcpy(&b, &right, sizeof(b)); {fast} }} else {{ int status = KILN_C99_OK; answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
-                                }
-                            }
-                            None => {
-                                if !*callables {
-                                    format!("{{ answer = kiln_c99_val_binary_fast({}, left, right); }}", binary_code(op))
-                                } else {
-                                    format!("{{ int status = KILN_C99_OK; answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
-                                }
-                            }
-                        };
-                        if numeric_fast_body(op).is_some() {
-                            writeln!(
-                                output,
-                                "    {{ kiln_val left = locals[{src1}]; kiln_val right = locals[{src2}]; kiln_val answer; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left) && KILN_VAL_IS_NUMBER(right))) {op_body} stack[sp++] = answer; }}"
-                            )
-                            .unwrap();
-                        } else {
-                            writeln!(
-                                output,
-                                "    {{ kiln_val left = locals[{src1}]; kiln_val right = locals[{src2}]; kiln_val answer; {op_body} stack[sp++] = answer; }}"
-                            )
-                            .unwrap();
-                        }
-                    }
-                    FusedPattern::LoadStore { dst, .. } => {
-                        if *local != dst {
-                            writeln!(output, "    locals[{dst}] = locals[{local}];").unwrap();
-                        }
-                    }
-                    FusedPattern::LoadLoadSetPropertyPop {
-                        obj,
-                        val,
-                        name,
-                        strict,
-                    } => {
-                        let Constant::String(text) = &constants[name as usize] else {
-                            unreachable!("verification rejects a non-string property name before emission")
-                        };
-                        let unwind = unwind_or_return(handlers, site);
-                        if emitter.is_guarded(index + 1, val) {
-                            writeln!(
-                                output,
-                                "    {{ int status = kiln_c99_val_check_tdz(locals[{val}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
-                            )
-                            .unwrap();
-                        }
-                        writeln!(
-                            output,
-                            "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_val_write_property(host, locals[{obj}], {symbol}_key_{name}, {}, locals[{val}], {}, depth, thrown, &site); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
-                            text.len(),
-                            i32::from(strict)
-                        )
-                        .unwrap();
-                    }
-                    FusedPattern::LoadConstSetPropertyPop {
-                        obj,
-                        c_idx,
-                        name,
-                        strict,
-                    } => {
-                        let Constant::String(text) = &constants[name as usize] else {
-                            unreachable!("verification rejects a non-string property name before emission")
-                        };
-                        let const_val = render_constant_value(symbol, c_idx, &constants[c_idx as usize])
-                            .expect("BigInt excluded by rule_load_const_set_property_pop");
-                        let unwind = unwind_or_return(handlers, site);
-                        writeln!(
-                            output,
-                            "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_val_write_property(host, locals[{obj}], {symbol}_key_{name}, {}, {const_val}, {}, depth, thrown, &site); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
-                            text.len(),
-                            i32::from(strict)
-                        )
-                        .unwrap();
-                    }
-                    FusedPattern::LoadGetPropertyDupStorePop { src, name, dst } => {
-                        let Constant::String(text) = &constants[name as usize] else {
-                            unreachable!("verification rejects a non-string property name before emission")
-                        };
-                        let unwind = unwind_or_return(handlers, site);
-                        writeln!(
-                            output,
-                            "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_val read; int status = kiln_c99_val_read_property(host, locals[{src}], {symbol}_key_{name}, {}, depth, thrown, &site, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(locals[{src}])); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; locals[{dst}] = read; }}",
-                            text.len()
-                        )
-                        .unwrap();
-                    }
-                    FusedPattern::LoadGetPropertyStore { src, name, dst } => {
-                        let Constant::String(text) = &constants[name as usize] else {
-                            unreachable!("verification rejects a non-string property name before emission")
-                        };
-                        let unwind = unwind_or_return(handlers, site);
-                        writeln!(
-                            output,
-                            "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_val read; int status = kiln_c99_val_read_property(host, locals[{src}], {symbol}_key_{name}, {}, depth, thrown, &site, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(locals[{src}])); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; locals[{dst}] = read; }}",
-                            text.len()
-                        )
-                        .unwrap();
-                    }
-                    FusedPattern::LoadGetPropertyPop { src, name } => {
-                        let Constant::String(text) = &constants[name as usize] else {
-                            unreachable!("verification rejects a non-string property name before emission")
-                        };
-                        let unwind = unwind_or_return(handlers, site);
-                        writeln!(
-                            output,
-                            "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_val read; int status = kiln_c99_val_read_property(host, locals[{src}], {symbol}_key_{name}, {}, depth, thrown, &site, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(locals[{src}])); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
-                            text.len()
-                        )
-                        .unwrap();
-                    }
-                    FusedPattern::LoadGetProperty { src, name } => {
-                        let Constant::String(text) = &constants[name as usize] else {
-                            unreachable!("verification rejects a non-string property name before emission")
-                        };
-                        let unwind = unwind_or_return(handlers, site);
-                        writeln!(
-                            output,
-                            "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_val read; int status = kiln_c99_val_read_property(host, locals[{src}], {symbol}_key_{name}, {}, depth, thrown, &site, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(locals[{src}])); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = read; }}",
-                            text.len()
-                        )
-                        .unwrap();
-                    }
-                    FusedPattern::LoadLoadGetComputedDupStorePop {
-                        src1,
-                        src2,
-                        dst,
-                    } => {
-                        let unwind = unwind_or_return(handlers, site);
-                        if emitter.is_guarded(index + 1, src2) {
-                            writeln!(
-                                output,
-                                "    {{ int status = kiln_c99_val_check_tdz(locals[{src2}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
-                            )
-                            .unwrap();
-                        }
-                        writeln!(
-                            output,
-                            "    {{ kiln_val read; int status = kiln_c99_val_read_element(host, locals[{src1}], locals[{src2}], depth, thrown, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(kiln_val_to_boundary(locals[{src1}]), kiln_val_to_boundary(locals[{src2}])); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; locals[{dst}] = read; }}"
-                        )
-                        .unwrap();
-                    }
-                    FusedPattern::LoadLoadGetComputedStore {
-                        src1,
-                        src2,
-                        dst,
-                    } => {
-                        let unwind = unwind_or_return(handlers, site);
-                        if emitter.is_guarded(index + 1, src2) {
-                            writeln!(
-                                output,
-                                "    {{ int status = kiln_c99_val_check_tdz(locals[{src2}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
-                            )
-                            .unwrap();
-                        }
-                        writeln!(
-                            output,
-                            "    {{ kiln_val read; int status = kiln_c99_val_read_element(host, locals[{src1}], locals[{src2}], depth, thrown, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(kiln_val_to_boundary(locals[{src1}]), kiln_val_to_boundary(locals[{src2}])); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; locals[{dst}] = read; }}"
-                        )
-                        .unwrap();
-                    }
-                    FusedPattern::LoadLoadGetComputedPop { src1, src2 } => {
-                        let unwind = unwind_or_return(handlers, site);
-                        if emitter.is_guarded(index + 1, src2) {
-                            writeln!(
-                                output,
-                                "    {{ int status = kiln_c99_val_check_tdz(locals[{src2}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
-                            )
-                            .unwrap();
-                        }
-                        writeln!(
-                            output,
-                            "    {{ kiln_val read; int status = kiln_c99_val_read_element(host, locals[{src1}], locals[{src2}], depth, thrown, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(kiln_val_to_boundary(locals[{src1}]), kiln_val_to_boundary(locals[{src2}])); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
-                        )
-                        .unwrap();
-                    }
-                    FusedPattern::LoadLoadGetComputed { src1, src2 } => {
-                        let unwind = unwind_or_return(handlers, site);
-                        if emitter.is_guarded(index + 1, src2) {
-                            writeln!(
-                                output,
-                                "    {{ int status = kiln_c99_val_check_tdz(locals[{src2}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
-                            )
-                            .unwrap();
-                        }
-                        writeln!(
-                            output,
-                            "    {{ kiln_val read; int status = kiln_c99_val_read_element(host, locals[{src1}], locals[{src2}], depth, thrown, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(kiln_val_to_boundary(locals[{src1}]), kiln_val_to_boundary(locals[{src2}])); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = read; }}"
-                        )
-                        .unwrap();
-                    }
-                    FusedPattern::LoadLoadLoadSetComputedPop {
-                        obj,
-                        key,
-                        val,
-                        strict,
-                    } => {
-                        let unwind = unwind_or_return(handlers, site);
-                        if emitter.is_guarded(index + 1, key) {
-                            writeln!(
-                                output,
-                                "    {{ int status = kiln_c99_val_check_tdz(locals[{key}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
-                            )
-                            .unwrap();
-                        }
-                        if emitter.is_guarded(index + 2, val) {
-                            writeln!(
-                                output,
-                                "    {{ int status = kiln_c99_val_check_tdz(locals[{val}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
-                            )
-                            .unwrap();
-                        }
-                        writeln!(
-                            output,
-                            "    {{ int status = kiln_c99_val_write_element(host, locals[{obj}], locals[{key}], locals[{val}], {}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
-                            i32::from(strict)
-                        )
-                        .unwrap();
-                    }
-                    FusedPattern::LoadLoadConstSetComputedPop {
-                        obj,
-                        key,
-                        c_idx,
-                        strict,
-                    } => {
-                        let const_val = render_constant_value(symbol, c_idx, &constants[c_idx as usize])
-                            .expect("BigInt excluded by rule_load_load_const_set_computed_pop");
-                        let unwind = unwind_or_return(handlers, site);
-                        if emitter.is_guarded(index + 1, key) {
-                            writeln!(
-                                output,
-                                "    {{ int status = kiln_c99_val_check_tdz(locals[{key}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
-                            )
-                            .unwrap();
-                        }
-                        writeln!(
-                            output,
-                            "    {{ int status = kiln_c99_val_write_element(host, locals[{obj}], locals[{key}], {const_val}, {}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
-                            i32::from(strict)
-                        )
-                        .unwrap();
-                    }
-                    _ => unreachable!("unexpected pattern for LoadLocal instruction"),
-                }
-            } else {
-                writeln!(output, "    stack[sp++] = locals[{local}];").unwrap();
-            }
-        }
-        Instruction::StoreLocal(local) => writeln!(output, "    locals[{local}] = stack[--sp];").unwrap(),
-        // The keys are on the stack with their values, so the object is filled from the stack
-        // and only then replaces it -- a key that failed to convert must not leave a half-built
-        // object where the program can see it.
-        Instruction::NewObject { count } => {
-            let unwind = unwind_or_return(handlers, site);
-            let count = usize::try_from(*count).unwrap();
-            output.push_str("    {\n        kiln_value built; size_t pair; int status;\n");
-            if count > 0 {
-                // `count` is pairs, not final properties -- a literal with a duplicate key
-                // (`{ a: 1, a: 2 }`) asks for one more slot than it ends up filling, which
-                // `kiln_c99_new_object_with_capacity` already documents as a hint rather than a
-                // promise. Sizing once here is what a template-filling caller (this loop is
-                // exactly that: a fixed member count known before the first store) should do
-                // instead of paying `kiln_c99_reserve`'s 4 -> 8 -> ... walk one `define_computed`
-                // at a time.
-                writeln!(
-                    output,
-                    "        status = kiln_c99_new_object_with_capacity(&built, (size_t){count});"
-                )
-                .unwrap();
-            } else {
-                output.push_str("        status = kiln_c99_new_object(&built);\n");
-            }
-            output.push_str("        if (status != KILN_C99_OK) return status;\n");
-            if count > 0 {
-                writeln!(
-                    output,
-                    "        for (pair = 0; pair < (size_t){count}; ++pair) {{ kiln_value key = kiln_val_to_boundary(stack[sp - (size_t){count} * 2 + pair * 2]); kiln_value member = kiln_val_to_boundary(stack[sp - (size_t){count} * 2 + pair * 2 + 1]); status = kiln_c99_define_computed(built, key, member); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
-                )
-                .unwrap();
-                writeln!(output, "        sp -= (size_t){count} * 2;").unwrap();
-            } else {
-                output.push_str("        (void)pair;\n");
-            }
-            output.push_str("        stack[sp++] = kiln_val_from_boundary(built);\n    }\n");
-        }
-        Instruction::NewArray { count } => {
-            let count = usize::try_from(*count).unwrap();
-            output.push_str("    {\n        kiln_value built; size_t element; int status;\n");
-            output.push_str("        status = kiln_c99_new_array(&built);\n");
-            output.push_str("        if (status != KILN_C99_OK) return status;\n");
-            if count > 0 {
-                writeln!(
-                    output,
-                    "        for (element = 0; element < (size_t){count}; ++element) {{ status = kiln_c99_array_push(built, kiln_val_to_boundary(stack[sp - (size_t){count} + element])); if (status != KILN_C99_OK) return status; }}"
-                )
-                .unwrap();
-                writeln!(output, "        sp -= (size_t){count};").unwrap();
-            } else {
-                output.push_str("        (void)element;\n");
-            }
-            output.push_str("        stack[sp++] = kiln_val_from_boundary(built);\n    }\n");
-        }
-        Instruction::GetProperty(name) => {
-            let unwind = unwind_or_return(handlers, site);
-            let Constant::String(text) = &constants[*name as usize] else {
-                unreachable!("verification rejects a non-string property name before emission")
-            };
-            writeln!(
-                output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_op_val_get_property(host, stack, &sp, {symbol}_key_{name}, {}, depth, thrown, &site); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}" ,
-                text.len()
-            )
-            .unwrap();
-        }
-        Instruction::SetProperty(name) => {
-            let unwind = unwind_or_return(handlers, site);
-            let Constant::String(text) = &constants[*name as usize] else {
-                unreachable!("verification rejects a non-string property name before emission")
-            };
-            writeln!(
-                output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_op_val_set_property(host, stack, &sp, {symbol}_key_{name}, {}, 0, depth, thrown, &site); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
-                text.len()
-            )
-            .unwrap();
-        }
-        Instruction::SetPropertyStrict { name, strict } => {
-            let unwind = unwind_or_return(handlers, site);
-            let Constant::String(text) = &constants[*name as usize] else {
-                unreachable!("verification rejects a non-string property name before emission")
-            };
-            writeln!(
-                output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_op_val_set_property(host, stack, &sp, {symbol}_key_{name}, {}, {}, depth, thrown, &site); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
-                text.len(),
-                i32::from(*strict)
-            )
-            .unwrap();
-        }
-        Instruction::ToPropertyKey => {
-            let unwind = unwind_or_return(handlers, site);
-            writeln!(
-                output,
-                "    {{ int status = kiln_c99_op_val_to_property_key(host, stack, &sp, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
-            )
-            .unwrap();
-        }
-        Instruction::GetComputed => {
-            let unwind = unwind_or_return(handlers, site);
-            writeln!(
-                output,
-                "    {{ int status = kiln_c99_op_val_get_computed(host, stack, &sp, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
-            )
-            .unwrap();
-        }
-        Instruction::SetComputed => {
-            let unwind = unwind_or_return(handlers, site);
-            writeln!(
-                output,
-                "    {{ int status = kiln_c99_op_val_set_computed(host, stack, &sp, 0, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
-            )
-            .unwrap();
-        }
-        Instruction::SetComputedStrict { strict } => {
-            let unwind = unwind_or_return(handlers, site);
-            writeln!(
-                output,
-                "    {{ int status = kiln_c99_op_val_set_computed(host, stack, &sp, {}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
-                i32::from(*strict)
-            )
-            .unwrap();
-        }
-        Instruction::LoadThis => output.push_str("    stack[sp++] = receiver;\n"),
-        // Module scope is one array for the whole module, so a read from a function body names
-        // it directly rather than reaching for a frame that may no longer exist.
-        Instruction::LoadGlobal(slot) => {
-            if emitter.is_guarded(index, *slot) {
-                let unwind = unwind_or_return(handlers, site);
-                writeln!(
-                    output,
-                    "    if ({symbol}_globals[{slot}] == KILN_VAL_UNINITIALIZED) {{ int status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, \"cannot access a binding before its declaration\"); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
-                )
-                .unwrap();
-            }
-            writeln!(output, "    stack[sp++] = {symbol}_globals[{slot}];").unwrap();
-        }
-        Instruction::StoreGlobal(slot) => {
-            writeln!(output, "    {symbol}_globals[{slot}] = stack[--sp];").unwrap();
-        }
-        Instruction::Binary(BinaryOp::InstanceOf) => {
-            output.push_str(
-                "    { kiln_value constructor = kiln_val_to_boundary(stack[--sp]); int answer; int status = kiln_c99_instance_of(kiln_val_to_boundary(stack[sp - 1]), constructor, &answer); if (status != KILN_C99_OK) return status; stack[sp - 1] = answer ? KILN_VAL_TRUE : KILN_VAL_FALSE; }\n",
-            );
-        }
-        // Both halves of `super` are an ordinary call with `this` threaded through: the parent
-        // initialises the instance that already exists rather than building one, which is the
-        // whole difference between `super()` and `new Parent()`.
-        Instruction::SuperCall { argc } => {
-            let argc = usize::from(*argc);
-            let unwind = unwind_or_return(handlers, site);
-            writeln!(
-                output,
-                "    {{ kiln_val produced = KILN_VAL_UNDEFINED; const kiln_val *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; int status = kiln_c99_super_call_val(host, &produced, stack[sp - {argc} - 1], receiver, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super_val(&receiver, produced); if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = produced; }}",
-                argc + 1
-            )
-            .unwrap();
-        }
-        // A derived class with no constructor behaves as `constructor(...args) { super(...args) }`.
-        // Its arity is not known where it is synthesized, so the forwarding happens here from
-        // whatever the frame was actually given.
-        Instruction::SuperForward => {
-            let unwind = unwind_or_return(handlers, site);
-            writeln!(
-                output,
-                "    {{ kiln_val produced = KILN_VAL_UNDEFINED; int status = kiln_c99_super_call_val(host, &produced, stack[sp - 1], receiver, argc == 0 ? NULL : args, argc, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super_val(&receiver, produced); if (status != KILN_C99_OK) return status; stack[sp - 1] = produced; }}"
-            )
-            .unwrap();
-        }
-        Instruction::New { argc } => {
-            let argc = usize::from(*argc);
-            let unwind = unwind_or_return(handlers, site);
-            writeln!(
-                output,
-                "    {{ int status = kiln_c99_op_val_new(host, stack, &sp, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
-            )
-            .unwrap();
-        }
-        Instruction::DefineAccessor {
-            setter,
-            enumerable,
-        } => {
-            let half = if *setter { "setter" } else { "getter" };
-            let other = if *setter { "getter" } else { "setter" };
-            let prefix = if *setter { "set" } else { "get" };
-            let enumerable = i32::from(*enumerable);
-            writeln!(
-                output,
-                "    {{ kiln_value {half} = kiln_val_to_boundary(stack[--sp]); kiln_value key = kiln_val_to_boundary(stack[--sp]); kiln_value {other} = kiln_c99_undefined(); kiln_value name = kiln_c99_property_key(key); int status; if (name.tag != KILN_VALUE_STRING) {{ {direct_refusal} }} status = kiln_c99_set_function_name({half}, key, \"{prefix}\"); if (status != KILN_C99_OK) return status; status = kiln_c99_define_accessor(kiln_val_to_boundary(stack[sp - 1]), name.ptr, name.len, getter, setter, {enumerable}); if (status != KILN_C99_OK) return status; }}"
-            )
-            .unwrap();
-        }
-        // A private element is installed with its kind rather than as a slot holding a function,
-        // and on the *object* rather than on a prototype: the presence of the name is the brand,
-        // so an instance element belongs to each instance.
-        Instruction::DefinePrivate { name, kind } => {
-            let Constant::String(text) = &constants[*name as usize] else {
-                unreachable!("verification rejects a non-string private name before emission")
-            };
-            let (tag, prefix) = match kind {
-                kiln_ir::PrivateKind::Method => (0, "NULL"),
-                kiln_ir::PrivateKind::Getter => (1, "\"get\""),
-                kiln_ir::PrivateKind::Setter => (2, "\"set\""),
-            };
-            writeln!(
-                output,
-                "    {{ kiln_value function = kiln_val_to_boundary(stack[--sp]); kiln_value key = kiln_c99_value(KILN_VALUE_STRING, 0, {symbol}_constant_{name}, {len}); if (kiln_c99_set_function_name(function, key, {prefix}) != KILN_C99_OK) {{ {direct_refusal} }} if (kiln_c99_define_private(kiln_val_to_boundary(stack[sp - 1]), {symbol}_constant_{name}, {len}, function, {tag}) != KILN_C99_OK) {{ {direct_refusal} }} }}",
-                len = text.len()
-            )
-            .unwrap();
-        }
-        // A class's methods are not enumerated, which is the whole difference from the
-        // `SetProperty` an object literal's methods lower to.
-        // The enumerated sibling of `DefineMethod`: an object literal's members are listed,
-        // a class's methods are not.
-        Instruction::DefineNamedProperty => {
-            writeln!(
-                output,
-                "    {{ kiln_value method = kiln_val_to_boundary(stack[--sp]); kiln_value key = kiln_val_to_boundary(stack[--sp]); kiln_value name = kiln_c99_property_key(key); if (name.tag != KILN_VALUE_STRING) {{ {direct_refusal} }} if (kiln_c99_set_function_name(method, key, NULL) != KILN_C99_OK) {{ {direct_refusal} }} if (kiln_c99_put(host, kiln_val_to_boundary(stack[sp - 1]), name.ptr, name.len, method, depth, thrown) != KILN_C99_OK) {{ {direct_refusal} }} }}"
-            )
-            .unwrap();
-        }
-        Instruction::DefineMethod => {
-            writeln!(
-                output,
-                "    {{ kiln_value method = kiln_val_to_boundary(stack[--sp]); kiln_value key = kiln_val_to_boundary(stack[--sp]); kiln_value name = kiln_c99_property_key(key); if (name.tag != KILN_VALUE_STRING) {{ {direct_refusal} }} if (kiln_c99_set_function_name(method, key, NULL) != KILN_C99_OK) {{ {direct_refusal} }} if (kiln_c99_define_method(kiln_val_to_boundary(stack[sp - 1]), name.ptr, name.len, method) != KILN_C99_OK) {{ {direct_refusal} }} }}"
-            )
-            .unwrap();
-        }
-        // `in` asks whether the property exists, not what it produces, so unlike a read it does
-        // not call an accessor.
-        //
-        // The key is resolved the way a *read* resolves one, not by converting to text: a symbol
-        // keys its reserved slot, so `Symbol.iterator in x` has to ask about `@@iterator` rather
-        // than about the property literally spelled "Symbol(Symbol.iterator)", which nothing has.
-        Instruction::Binary(BinaryOp::In) => {
-            let unwind = unwind_or_return(handlers, site);
-            writeln!(
-                output,
-                "    {{ kiln_value container = kiln_val_to_boundary(stack[--sp]); int answer; if (!kiln_c99_is_reference(container) && container.tag != KILN_VALUE_DATE) {{ int status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, \"Cannot use 'in' to search for a property in a non-object\"); {unwind} }} int status = kiln_c99_has_computed(host, container, kiln_val_to_boundary(stack[sp - 1]), &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = answer ? KILN_VAL_TRUE : KILN_VAL_FALSE; }}"
-            )
-            .unwrap();
-        }
-        Instruction::DeleteProperty(name) => {
-            let Constant::String(text) = &constants[*name as usize] else {
-                unreachable!("verification rejects a non-string property name before emission")
-            };
-            let unwind = unwind_or_return(handlers, site);
-            writeln!(
-                output,
-                "    {{ int answer; int status = kiln_c99_delete(host, kiln_val_to_boundary(stack[sp - 1]), {symbol}_key_{name}, {}, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = answer ? KILN_VAL_TRUE : KILN_VAL_FALSE; }}",
-                text.len()
-            )
-            .unwrap();
-        }
-        Instruction::DeletePropertyStrict { name, strict } => {
-            let Constant::String(text) = &constants[*name as usize] else {
-                unreachable!("verification rejects a non-string property name before emission")
-            };
-            let unwind = unwind_or_return(handlers, site);
-            writeln!(
-                output,
-                "    {{ int answer; int status = kiln_c99_delete_or_throw(host, kiln_val_to_boundary(stack[sp - 1]), {symbol}_key_{name}, {}, {}, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = answer ? KILN_VAL_TRUE : KILN_VAL_FALSE; }}",
-                text.len(),
-                i32::from(*strict)
-            )
-            .unwrap();
-        }
-        Instruction::DeleteComputed => {
-            let unwind = unwind_or_return(handlers, site);
-            writeln!(
-                output,
-                "    {{ kiln_value key = kiln_val_to_boundary(stack[--sp]); int answer; int status = kiln_c99_delete_computed(host, kiln_val_to_boundary(stack[sp - 1]), key, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = answer ? KILN_VAL_TRUE : KILN_VAL_FALSE; }}"
-            )
-            .unwrap();
-        }
-        Instruction::DeleteComputedStrict { strict } => {
-            let unwind = unwind_or_return(handlers, site);
-            writeln!(
-                output,
-                "    {{ kiln_value key = kiln_val_to_boundary(stack[--sp]); int answer; int status = kiln_c99_delete_computed_or_throw(host, kiln_val_to_boundary(stack[sp - 1]), key, {}, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = answer ? KILN_VAL_TRUE : KILN_VAL_FALSE; }}",
-                i32::from(*strict)
-            )
-            .unwrap();
-        }
-        // `arguments` is every argument this frame was given, as an array. A real one is an
-        // exotic object that aliases the parameters; a copy is what almost every use of it wants,
-        // and the aliasing was removed from the language in strict mode anyway.
-        // Not `args` and `argc`: inside an arrow those are the arrow's own, and `arguments`
-        // there is the enclosing function's -- a different list entirely.
-        Instruction::LoadArguments => {
-            output.push_str(
-                "    { kiln_value given; int status = kiln_c99_visible_arguments(&given); if (status != KILN_C99_OK) return status; stack[sp++] = kiln_val_from_boundary(given); }\n",
-            );
-        }
-        // `...rest` is every argument past the named parameters, as an array. A generator's
-        // arguments were copied into its frame when it was built, so there are none here.
-        Instruction::RestArguments(from) => {
-            writeln!(
-                output,
-                "    {{ kiln_value rest; size_t extra; int status = kiln_c99_new_array(&rest); if (status != KILN_C99_OK) return status; for (extra = (size_t){from}; extra < argc; ++extra) {{ status = kiln_c99_array_push(rest, kiln_val_to_boundary(args[extra])); if (status != KILN_C99_OK) return status; }} stack[sp++] = kiln_val_from_boundary(rest); }}"
-            )
-            .unwrap();
-        }
-        // The marker for an element a literal left out. It never escapes into an expression:
-        // `NewArray` is the only thing that consumes it.
-        Instruction::PushHole => output.push_str("    stack[sp++] = KILN_VAL_HOLE;\n"),
-        Instruction::EnumerateKeys => {
-            let unwind = unwind_or_return(handlers, site);
-            writeln!(
-                output,
-                "    {{ kiln_value keys; int status = kiln_c99_enumerate_keys(host, kiln_val_to_boundary(stack[sp - 1]), &keys, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_val_from_boundary(keys); }}"
-            )
-            .unwrap();
-        }
-        // The arity comes from an array the program built, so the arguments are read out of it
-        // rather than off the stack.
-        Instruction::Apply => {
-            let unwind = unwind_or_return(handlers, site);
-            writeln!(
-                output,
-                "    {{ kiln_value list = kiln_val_to_boundary(stack[--sp]); kiln_val callee = stack[--sp]; kiln_val self_value = stack[sp - 1]; kiln_val call_result = KILN_VAL_UNDEFINED; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) {{ {direct_refusal} }} given = kiln_c99_array_of(list); status = kiln_c99_call_val(host, &call_result, callee, self_value, given->count == 0 ? NULL : given->elements, given->count, depth, thrown); if (status == KILN_C99_THROWN) {{ {unwind} }} if (status != KILN_C99_OK) return status; stack[sp - 1] = call_result; }}"
-            )
-            .unwrap();
-        }
-        // `Apply`'s runtime argument list, but against the instance being built and keeping the
-        // `new.target` of the call that is building it -- the two things `super()` adds.
-        Instruction::SuperApply => {
-            let unwind = unwind_or_return(handlers, site);
-            writeln!(
-                output,
-                "    {{ kiln_value list = kiln_val_to_boundary(stack[--sp]); kiln_val parent = stack[--sp]; kiln_val call_result = KILN_VAL_UNDEFINED; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) {{ {direct_refusal} }} given = kiln_c99_array_of(list); status = kiln_c99_super_call_val(host, &call_result, parent, receiver, given->count == 0 ? NULL : given->elements, given->count, depth, thrown); if (status == KILN_C99_THROWN) {{ {unwind} }} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super_val(&receiver, call_result); if (status != KILN_C99_OK) return status; stack[sp++] = call_result; }}"
-            )
-            .unwrap();
-        }
-        Instruction::SpreadInto => {
-            let unwind = unwind_or_return(handlers, site);
-            writeln!(
-                output,
-                "    {{ kiln_value source = kiln_val_to_boundary(stack[--sp]); int status = kiln_c99_iterate(host, kiln_val_to_boundary(stack[sp - 1]), source, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
-            )
-            .unwrap();
-        }
-        Instruction::IterableToArray => {
-            let unwind = unwind_or_return(handlers, site);
-            writeln!(
-                output,
-                "    {{ kiln_value built; int status = kiln_c99_new_array(&built); if (status != KILN_C99_OK) return status; status = kiln_c99_iterate(host, built, kiln_val_to_boundary(stack[sp - 1]), depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_val_from_boundary(built); }}"
-            )
-            .unwrap();
-        }
-        Instruction::SpreadObject => {
-            let unwind = unwind_or_return(handlers, site);
-            writeln!(
-                output,
-                "    {{ kiln_value source = kiln_val_to_boundary(stack[--sp]); int status = kiln_c99_spread_object(host, kiln_val_to_boundary(stack[sp - 1]), source, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
-            )
-            .unwrap();
-        }
-        // `class D extends C` links the two prototype objects, which is what makes an instance
-        // of `D` find a method of `C`.
-        Instruction::SetPrototype => {
-            output.push_str(
-                "    { kiln_value prototype = kiln_val_to_boundary(stack[--sp]); int status = kiln_c99_set_prototype(kiln_val_to_boundary(stack[sp - 1]), prototype); if (status != KILN_C99_OK) return status; }\n",
-            );
-        }
-        // `super.x` reads the link the method's home object carries *now*, which is the same
-        // question `Object.getPrototypeOf` answers -- so it is asked through the same
-        // implementation rather than a second one that could drift from it.
-        // The receiver is the frame's own, not the prototype the name was found on -- which is
-        // the one thing that separates `super.x` from an ordinary read of the same name.
-        Instruction::LoadSuperProperty(name) => {
-            let unwind = unwind_or_return(handlers, site);
-            let Constant::String(text) = &constants[*name as usize] else {
-                unreachable!("verification rejects a non-string property name before emission")
-            };
-            writeln!(
-                output,
-                "    {{ kiln_value read; int status = kiln_c99_get_with_receiver(host, kiln_val_to_boundary(stack[sp - 1]), kiln_c99_value(KILN_VALUE_STRING, 0, {symbol}_key_{name}, {}), kiln_val_to_boundary(receiver), &read, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_val_from_boundary(read); }}",
-                text.len()
-            )
-            .unwrap();
-        }
-        // The computed spelling. The key was pushed first, so it is the value the read leaves
-        // its answer in place of.
-        Instruction::LoadSuperElement => {
-            let unwind = unwind_or_return(handlers, site);
-            writeln!(
-                output,
-                "    {{ kiln_value prototype = kiln_val_to_boundary(stack[--sp]); kiln_value read; int status = kiln_c99_get_with_receiver(host, prototype, kiln_val_to_boundary(stack[sp - 1]), kiln_val_to_boundary(receiver), &read, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_val_from_boundary(read); }}"
-            )
-            .unwrap();
-        }
-        Instruction::LoadPrototype => {
-            let unwind = unwind_or_return(handlers, site);
-            writeln!(
-                output,
-                "    {{ kiln_value subject = kiln_val_to_boundary(stack[sp - 1]); kiln_value proto_out; int status = kiln_c99_invoke_method(host, &proto_out, KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF, kiln_c99_undefined(), &subject, 1, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_val_from_boundary(proto_out); }}"
-            )
-            .unwrap();
-        }
-        // The stack height is recorded with the handler, because a `catch` starts from the
-        // height the `try` began at however deep the expression that threw had got.
-        Instruction::PushHandler(target) => {
-            writeln!(
-                output,
-                "    kiln_handlers[kiln_handler_top] = {target}; kiln_handler_stack[kiln_handler_top] = sp; ++kiln_handler_top;"
-            )
-            .unwrap();
-        }
-        Instruction::PopHandler => output.push_str("    --kiln_handler_top;\n"),
-        Instruction::Yield | Instruction::Await => {
-            let result_expr = if matches!(site, ReturnSite::Body) {
-                "sp == 0 ? KILN_VAL_UNDEFINED : stack[sp - 1]"
-            } else {
-                "sp == 0 ? kiln_c99_undefined() : kiln_val_to_boundary(stack[sp - 1])"
-            };
-            writeln!(
-                output,
-                "    frame->sp = sp - 1; frame->resume = {index}; frame->awaiting = {}; *result = {result_expr}; return KILN_C99_YIELDED;",
-                i32::from(matches!(instruction, Instruction::Await))
-            )
-            .unwrap();
-            // Where `next` comes back to. What the caller sent becomes the value of the `yield`
-            // expression, which is why the height here is one more than it was at the suspension.
-            writeln!(output, "kiln_resume_{index}:;").unwrap();
-            output.push_str("    stack[sp++] = kiln_val_from_boundary(frame->sent);\n");
-        }
-        Instruction::Throw => {
-            output.push_str("    *thrown = kiln_val_to_boundary(stack[--sp]);\n");
-            // Nothing here can catch it, so it leaves immediately -- as a status from a body,
-            // and as text through the uncaught epilogue from the entry point. Spelled out rather
-            // than shared with `unwind_or_return`, whose propagating arm returns the `status` a
-            // failed call left behind and there is no call here to have left one.
-            output.push_str(if !handlers.is_empty() {
-                "    goto kiln_unwind;\n"
-            } else if matches!(site, ReturnSite::Entry { .. }) {
-                "    goto kiln_uncaught;\n"
-            } else {
-                "    return KILN_C99_THROWN;\n"
-            });
-        }
-        // Not a `GetProperty` followed by a `Call`: that would discard the receiver, and the
-        // read has to yield the *unbound* function so `a.f === a.f` holds. The receiver stays on
-        // the stack until the call, which is what lets both be true at once.
-        Instruction::CallMethod { name, argc } => {
-            let Constant::String(text) = &constants[*name as usize] else {
-                unreachable!("verification rejects a non-string method name before emission")
-            };
-            let argc = usize::from(*argc);
-            let unwind = unwind_or_return(handlers, site);
-            let action = match match_rule(
-                emitter.code,
-                emitter.constants,
-                index,
-                &emitter.jump_targets,
-            ) {
-                Some(FusedPattern::CallDupStorePop { dst } | FusedPattern::CallStore { dst }) => {
-                    format!(" locals[{dst}] = stack[--sp];")
-                }
-                Some(FusedPattern::CallPop) => " --sp;".to_string(),
-                _ => String::new(),
-            };
-            writeln!(
-                output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_op_val_call_method(host, stack, &sp, {symbol}_key_{name}, {}, (size_t){argc}, depth, thrown, &site, {instruction_site}, (size_t){index}, {instruction_operation}); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status;{action} }}",
-                text.len()
-            )
-            .unwrap();
-        }
-        Instruction::LoadBuiltin(builtin) => match builtin_load(*builtin) {
-            BuiltinLoad::Value(expr) => {
-                writeln!(output, "    stack[sp++] = kiln_val_from_boundary({expr});").unwrap();
-            }
-            BuiltinLoad::Build(function) => {
-                writeln!(
-                    output,
-                    "    {{ kiln_value obj; int status = {function}(&obj); if (status != KILN_C99_OK) return status; stack[sp++] = kiln_val_from_boundary(obj); }}"
-                )
-                .unwrap();
-            }
-        },
-        Instruction::Pop => output.push_str("    --sp;\n"),
-        Instruction::Dup => output.push_str("    stack[sp] = stack[sp - 1]; ++sp;\n"),
-        // A scalar program holds no reference to reduce, and has nowhere to put a thrown
-        // value either, so its emitted bytes stay what they were.
-        Instruction::Unary(operator) if !*callables => {
-            match numeric_fast_unary_body(*operator) {
-                Some(fast) => writeln!(output, "    {{ kiln_val operand = stack[sp - 1]; kiln_val answer; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(operand))) {{ double a; memcpy(&a, &operand, sizeof(a)); {fast} }} else {{ answer = kiln_c99_val_unary_fast({}, operand); }} stack[sp - 1] = answer; }}", unary_code(*operator)).unwrap(),
-                None => writeln!(output, "    stack[sp - 1] = kiln_c99_val_unary_fast({}, stack[sp - 1]);", unary_code(*operator)).unwrap(),
-            }
-        }
-        Instruction::Unary(operator) => {
-            let unwind = unwind_or_return(handlers, site);
-            match numeric_fast_unary_body(*operator) {
-                Some(fast) => writeln!(output, "    {{ kiln_val operand = stack[sp - 1]; kiln_val answer; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(operand))) {{ double a; memcpy(&a, &operand, sizeof(a)); {fast} }} else {{ kiln_value ans; int status = kiln_c99_unary_checked({}, host, kiln_val_to_boundary(operand), &ans, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; answer = kiln_val_from_boundary(ans); }} stack[sp - 1] = answer; }}", unary_code(*operator)).unwrap(),
-                None => writeln!(output, "    {{ kiln_value ans; int status = kiln_c99_unary_checked({}, host, kiln_val_to_boundary(stack[sp - 1]), &ans, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_val_from_boundary(ans); }}", unary_code(*operator)).unwrap(),
-            }
-        }
-        Instruction::Binary(operator) if !*callables => {
-            // A scalar program has no BigInt in it and so no operator in it can throw. It also
-            // has nowhere to put a thrown value -- the entry point declares that slot only when
-            // something can reach it -- so this is the form that program has to keep.
-            match match_rule(emitter.code, emitter.constants, index, &emitter.jump_targets) {
-                Some(FusedPattern::CompareJump {
-                    op,
-                    is_jump_if_false,
-                    target,
-                }) => {
-                    let sym = relational_op_symbol(op).unwrap();
-                    let cond = if is_jump_if_false {
-                        format!("!({} {sym} {})", "a", "b")
-                    } else {
-                        format!("{} {sym} {}", "a", "b")
-                    };
-                    let fallback_cond = if is_jump_if_false {
-                        "!kiln_c99_val_truthy(answer)"
-                    } else {
-                        "kiln_c99_val_truthy(answer)"
-                    };
-                    writeln!(
-                        output,
-                        "    {{ kiln_val right = stack[--sp]; kiln_val left = stack[--sp]; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left) && KILN_VAL_IS_NUMBER(right))) {{ double a; double b; memcpy(&a, &left, sizeof(a)); memcpy(&b, &right, sizeof(b)); if ({cond}) goto kiln_label_{target}; }} else {{ kiln_val answer = kiln_c99_val_binary_fast({}, left, right); if ({fallback_cond}) goto kiln_label_{target}; }} }}",
-                        binary_code(op)
-                    )
-                    .unwrap();
-                }
-                Some(FusedPattern::BinaryStore { op, slot }) => {
-                    let slot = slot as usize;
-                    match numeric_fast_body(op) {
-                        Some(fast) => writeln!(output, "    {{ kiln_val right = stack[--sp]; kiln_val left = stack[--sp]; kiln_val answer; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left) && KILN_VAL_IS_NUMBER(right))) {{ double a; double b; memcpy(&a, &left, sizeof(a)); memcpy(&b, &right, sizeof(b)); {fast} }} else {{ answer = kiln_c99_val_binary_fast({}, left, right); }} locals[{slot}] = answer; }}", binary_code(op)).unwrap(),
-                        None => writeln!(output, "    {{ kiln_val right = stack[--sp]; kiln_val left = stack[--sp]; locals[{slot}] = kiln_c99_val_binary_fast({}, left, right); }}", binary_code(op)).unwrap(),
-                    }
-                }
-                _ => {
-                    match numeric_fast_body(*operator) {
-                        Some(fast) => writeln!(output, "    {{ kiln_val right = stack[--sp]; kiln_val left = stack[--sp]; kiln_val answer; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left) && KILN_VAL_IS_NUMBER(right))) {{ double a; double b; memcpy(&a, &left, sizeof(a)); memcpy(&b, &right, sizeof(b)); {fast} }} else {{ answer = kiln_c99_val_binary_fast({}, left, right); }} stack[sp++] = answer; }}", binary_code(*operator)).unwrap(),
-                        None => writeln!(output, "    {{ kiln_val right = stack[--sp]; kiln_val left = stack[--sp]; stack[sp++] = kiln_c99_val_binary_fast({}, left, right); }}", binary_code(*operator)).unwrap(),
-                    }
-                }
-            }
-        }
-        Instruction::Binary(operator) => {
-            // An operator throws only when a BigInt is involved, and `kiln_c99_binary_checked`
-            // hands every other case straight back to `kiln_c99_binary`.
-            let unwind = unwind_or_return(handlers, site);
-            match match_rule(emitter.code, emitter.constants, index, &emitter.jump_targets) {
-                Some(FusedPattern::CompareJump {
-                    op,
-                    is_jump_if_false,
-                    target,
-                }) => {
-                    let sym = relational_op_symbol(op).unwrap();
-                    let cond = if is_jump_if_false {
-                        format!("!({} {sym} {})", "a", "b")
-                    } else {
-                        format!("{} {sym} {}", "a", "b")
-                    };
-                    let fallback_cond = if is_jump_if_false {
-                        "!kiln_c99_val_truthy(answer)"
-                    } else {
-                        "kiln_c99_val_truthy(answer)"
-                    };
-                    writeln!(
-                        output,
-                        "    {{ kiln_val right = stack[--sp]; kiln_val left = stack[--sp]; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left) && KILN_VAL_IS_NUMBER(right))) {{ double a; double b; memcpy(&a, &left, sizeof(a)); memcpy(&b, &right, sizeof(b)); if ({cond}) goto kiln_label_{target}; }} else {{ int status; kiln_val answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; if ({fallback_cond}) goto kiln_label_{target}; }} }}",
-                        binary_code(op)
-                    )
-                    .unwrap();
-                }
-                Some(FusedPattern::BinaryStore { op, slot }) => {
-                    let slot = slot as usize;
-                    match numeric_fast_body(op) {
-                        Some(fast) => writeln!(output, "    {{ kiln_val right = stack[--sp]; kiln_val left = stack[--sp]; kiln_val answer; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left) && KILN_VAL_IS_NUMBER(right))) {{ double a; double b; memcpy(&a, &left, sizeof(a)); memcpy(&b, &right, sizeof(b)); {fast} }} else {{ int status; answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }} locals[{slot}] = answer; }}", binary_code(op)).unwrap(),
-                        None => writeln!(output, "    {{ kiln_val right = stack[--sp]; kiln_val left = stack[--sp]; int status; kiln_val answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; locals[{slot}] = answer; }}", binary_code(op)).unwrap(),
-                    }
-                }
-                _ => {
-                    match numeric_fast_body(*operator) {
-                        Some(fast) => writeln!(output, "    {{ kiln_val right = stack[--sp]; kiln_val left = stack[--sp]; kiln_val answer; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left) && KILN_VAL_IS_NUMBER(right))) {{ double a; double b; memcpy(&a, &left, sizeof(a)); memcpy(&b, &right, sizeof(b)); {fast} }} else {{ int status; answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }} stack[sp++] = answer; }}", binary_code(*operator)).unwrap(),
-                        None => writeln!(output, "    {{ kiln_val right = stack[--sp]; kiln_val left = stack[--sp]; int status; kiln_val answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = answer; }}", binary_code(*operator)).unwrap(),
-                    }
-                }
-            }
-        }
-        Instruction::Jump(target) => writeln!(output, "    goto kiln_label_{target};").unwrap(),
-        Instruction::JumpIfFalse(target) => {
-            writeln!(output, "    if (!kiln_c99_val_truthy(stack[--sp])) goto kiln_label_{target};").unwrap()
-        }
-        Instruction::JumpIfTruthy(target) => {
-            writeln!(output, "    if (kiln_c99_val_truthy(stack[--sp])) goto kiln_label_{target};").unwrap()
-        }
-        Instruction::JumpIfNotNullish(target) => {
-            writeln!(output, "    {{ kiln_val value = stack[--sp]; if (!KILN_VAL_IS_NULLISH(value)) goto kiln_label_{target}; }}").unwrap()
-        }
-        Instruction::HostCall { op, argc } => {
-            // The embedding boundary carries only the five scalar tags, so a function argument
-            // is reduced to its text before the host sees it -- which is also what the
-            // interpreter prints for one.
-            // The arguments are copied into a fresh buffer rather than passed as `&stack[sp - n]`.
-            // Pointing into `stack[]` and handing that pointer to the host makes the stack array
-            // address-escaped for the entire function, which defeats the promotion the numeric
-            // fast paths exist to enable: a single `console.log` at the end of a program was
-            // enough to keep a fifty-million-iteration loop's values in memory. The buffer is a
-            // local whose address escaping costs nothing, because nothing else reads it.
-            if *argc == 0 {
-                writeln!(output, "    {{ kiln_value host_result; if (host == NULL || host->call == NULL || host->call(host->context, UINT16_C({}), UINT16_C(0), NULL, &host_result) != 0) return KILN_C99_HOST_ERROR; stack[sp++] = kiln_val_from_boundary(host_result); }}", host_op_code(*op)).unwrap()
-            } else if *callables {
-                writeln!(output, "    {{ kiln_value host_result; kiln_value host_args[{argc}]; for (size_t i = 0; i < (size_t){argc}; i++) {{ kiln_value arg_val = kiln_val_to_boundary(stack[sp - {argc} + i]); if (kiln_c99_crosses_boundary(arg_val)) arg_val = kiln_c99_inspect(arg_val); host_args[i] = arg_val; }} if (host == NULL || host->call == NULL || host->call(host->context, UINT16_C({}), UINT16_C({argc}), host_args, &host_result) != 0) return KILN_C99_HOST_ERROR; sp -= {argc}; stack[sp++] = kiln_val_from_boundary(host_result); }}", host_op_code(*op)).unwrap()
-            } else {
-                writeln!(output, "    {{ kiln_value host_result; kiln_value host_args[{argc}]; for (size_t i = 0; i < (size_t){argc}; i++) {{ host_args[i] = kiln_val_to_boundary(stack[sp - {argc} + i]); }} if (host == NULL || host->call == NULL || host->call(host->context, UINT16_C({}), UINT16_C({argc}), host_args, &host_result) != 0) return KILN_C99_HOST_ERROR; sp -= {argc}; stack[sp++] = kiln_val_from_boundary(host_result); }}", host_op_code(*op)).unwrap()
-            }
-        }
-        Instruction::Return => match site {
-            ReturnSite::Body => output.push_str(
-                "    *result = sp == 0 ? KILN_VAL_UNDEFINED : stack[--sp]; return KILN_C99_OK;\n",
-            ),
-            ReturnSite::Entry {
-                exports: None, ..
-            } if !callables => output.push_str(
-                "    *result = sp == 0 ? kiln_c99_undefined() : kiln_val_to_boundary(stack[--sp]); return KILN_C99_OK;\n",
-            ),
-            ReturnSite::Entry {
-                exports: None, ..
-            } => output.push_str(
-                "    *result = sp == 0 ? kiln_c99_undefined() : kiln_val_to_boundary(stack[--sp]);\n    if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);\n    return KILN_C99_OK;\n",
-            ),
-            ReturnSite::Entry {
-                exports: Some(exports),
-                commonjs,
-            } => {
-                output.push_str(
-                    "    *result = sp == 0 ? kiln_c99_undefined() : kiln_val_to_boundary(stack[--sp]);\n",
-                );
-                if *callables {
-                    output.push_str(
-                        "    if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);\n",
-                    );
-                }
-                if *commonjs {
-                    // `depth` and `thrown` are declared by the entry point only when the module
-                    // has callables in it, so a CommonJS module that declares no function at all
-                    // -- `console.log("ok")` in a `.cjs` is the whole of one -- named two
-                    // identifiers that were not there, and the C would not compile. It is the
-                    // read that has to bend rather than the declaration: with no callable
-                    // anywhere in the module there is no getter that could have been installed on
-                    // `module`, so this read provably cannot re-enter or throw and the depth
-                    // counter and the thrown slot have nothing to carry.
-                    let (depth, thrown) = if *callables {
-                        ("depth", "thrown")
-                    } else {
-                        ("0", "NULL")
-                    };
-                    writeln!(
-                        output,
-                        "    {{ kiln_val mod_val = locals[2]; kiln_val module_val = (mod_val & KILN_TAG_MASK) == KILN_TAG_CELL_PREFIX ? *(kiln_val *)KILN_VAL_PTR(mod_val) : mod_val; int export_status = kiln_c99_get(host, kiln_val_to_boundary(module_val), \"exports\", 7, &exports[0], {depth}, {thrown}); if (export_status != KILN_C99_OK) return export_status; }}"
-                    )
-                    .unwrap();
-                }
-                for (index, binding) in exports.iter().enumerate() {
-                    // The slot is handed over exactly as it stands, box included. A mutable
-                    // export *is* its cell: that is what makes an import a live view of the
-                    // exporter's binding rather than a copy of the value it happened to hold
-                    // when the exporter finished. Only an export that can change is boxed, so
-                    // an immutable one arrives here as a plain value and stays one.
-                    writeln!(
-                        output,
-                        "    exports[{index}] = kiln_val_to_boundary(locals[{}]);",
-                        binding.local_slot
-                    )
-                    .unwrap();
-                }
-                output.push_str("    return KILN_C99_OK;\n");
-            }
-        },
-    }
-    {
-        let emitted = &mut output[before..];
-        /* Every generated body owns a refusal label and its result slot. Routing through it is
-         * what materializes the diagnostic while this translation unit's private state is still
-         * visible. Returning directly from a closure loses that state when an imported function
-         * crosses back to its caller. */
-        let refusal_target = "goto kiln_refusal;";
-        if instruction_can_refuse(
-            instruction,
-            emitter.code,
-            emitter.constants,
-            index,
-            &emitter.jump_targets,
-        ) {
-            let refusal = format!(
-                "{control_refusal} {refusal_target} }} if (status != KILN_C99_OK) return status;"
-            );
-            let replaced = emitted.replace("if (status != KILN_C99_OK) return status;", &refusal);
-            output.truncate(before);
-            output.push_str(&replaced);
-        }
-    }
-}
-
 pub(crate) fn instruction_diagnostic(instruction: &Instruction, constants: &[Constant]) -> String {
     let debug = format!("{instruction:?}");
     let mut operation = debug
@@ -4184,295 +1822,6 @@ fn unary_code(operator: UnaryOp) -> u16 {
         UnaryOp::Increment => 8,
         UnaryOp::Decrement => 9,
     }
-}
-
-/// The C statement that answers a binary operator when both operands are already numbers.
-///
-/// The operator is known here, at emission time. The first version of this fast path passed it to
-/// a shared runtime helper as a `uint16_t` and let that helper switch on it — which took static
-/// information and made it dynamic, the same mistake ADR 0016 diagnoses in the generic dispatcher,
-/// one layer down. The disassembly was unambiguous: `mov w0, #0x9` followed by `bl
-/// kiln_c99_binary_fast`, with both operands passed by address and the result read back through
-/// memory, because a function holding a 22-way switch and a fallback call is not inlinable however
-/// it is annotated.
-///
-/// Emitting the operation itself removes three costs at once: the call, the switch, and — the one
-/// that matters most — the opacity. With no out-of-line call left in a numeric loop body, nothing
-/// forces `stack[]` and `locals[]` to memory, so SROA can promote them. That is the promotion
-/// ADR 0016 predicted would happen "if the operations were visible"; this is what makes them
-/// visible.
-///
-/// `None` means there is no cheap numeric answer and the site keeps the generic call: `**` needs
-/// `pow`, and the bitwise operators and shifts need ToInt32, which is a separate decision.
-fn numeric_fast_body(operator: BinaryOp) -> Option<&'static str> {
-    Some(match operator {
-        BinaryOp::Add => "answer = kiln_c99_val_from_double(a + b);",
-        BinaryOp::Subtract => "answer = kiln_c99_val_from_double(a - b);",
-        BinaryOp::Multiply => "answer = kiln_c99_val_from_double(a * b);",
-        BinaryOp::Divide => "answer = kiln_c99_val_from_double(a / b);",
-        // `%` is `fmod` by specification, and `fmod` is a call into libm that measured at 41% of a
-        // Collatz benchmark's entire runtime. Two integral operands take the machine instruction
-        // instead, which agrees exactly: C truncates toward zero and takes the sign of the
-        // dividend, as ECMAScript specifies. The guard stays conservative — outside +/-2^53 a
-        // double is not exactly an integer, a zero divisor must reach `fmod` for NaN, and a zero
-        // dividend must too, because `-0 % 3` is `-0` and integer division would answer `+0`.
-        BinaryOp::Remainder => {
-            "if (a != 0.0 && b != 0.0 && a >= -9007199254740992.0 && a <= 9007199254740992.0 &&              b >= -9007199254740992.0 && b <= 9007199254740992.0 && a == (double)(int64_t)a &&              b == (double)(int64_t)b) { answer = kiln_c99_val_from_double((double)((int64_t)a % (int64_t)b)); }              else { answer = kiln_c99_val_from_double(fmod(a, b)); }"
-        }
-        BinaryOp::StrictEqual => "answer = (a == b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;",
-        BinaryOp::StrictNotEqual => "answer = (a != b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;",
-        BinaryOp::LessThan => "answer = (a < b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;",
-        BinaryOp::LessThanOrEqual => "answer = (a <= b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;",
-        BinaryOp::GreaterThan => "answer = (a > b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;",
-        BinaryOp::GreaterThanOrEqual => "answer = (a >= b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;",
-        _ => return None,
-    })
-}
-
-fn const_numeric_fast_body_in_place(operator: BinaryOp, bits: u64, dst: u32) -> Option<String> {
-    let two_bits = 2.0f64.to_bits();
-    let one_bits = 1.0f64.to_bits();
-    let val = f64::from_bits(bits);
-
-    match operator {
-        BinaryOp::Add => {
-            if bits == one_bits {
-                Some(format!(
-                    "double a; memcpy(&a, &locals[{dst}], sizeof(a)); locals[{dst}] = kiln_c99_val_from_double(a + 1.0);"
-                ))
-            } else if bits == two_bits {
-                Some(format!(
-                    "double a; memcpy(&a, &locals[{dst}], sizeof(a)); locals[{dst}] = kiln_c99_val_from_double(a + 2.0);"
-                ))
-            } else {
-                Some(format!(
-                    "double a; memcpy(&a, &locals[{dst}], sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; locals[{dst}] = kiln_c99_val_from_double(a + b);"
-                ))
-            }
-        }
-        BinaryOp::Subtract => {
-            if bits == one_bits {
-                Some(format!(
-                    "double a; memcpy(&a, &locals[{dst}], sizeof(a)); locals[{dst}] = kiln_c99_val_from_double(a - 1.0);"
-                ))
-            } else if bits == two_bits {
-                Some(format!(
-                    "double a; memcpy(&a, &locals[{dst}], sizeof(a)); locals[{dst}] = kiln_c99_val_from_double(a - 2.0);"
-                ))
-            } else {
-                Some(format!(
-                    "double a; memcpy(&a, &locals[{dst}], sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; locals[{dst}] = kiln_c99_val_from_double(a - b);"
-                ))
-            }
-        }
-        BinaryOp::Multiply => {
-            if bits == two_bits {
-                Some(format!(
-                    "double a; memcpy(&a, &locals[{dst}], sizeof(a)); locals[{dst}] = kiln_c99_val_from_double(a * 2.0);"
-                ))
-            } else if bits == one_bits {
-                Some(format!(
-                    "double a; memcpy(&a, &locals[{dst}], sizeof(a)); locals[{dst}] = kiln_c99_val_from_double(a * 1.0);"
-                ))
-            } else {
-                Some(format!(
-                    "double a; memcpy(&a, &locals[{dst}], sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; locals[{dst}] = kiln_c99_val_from_double(a * b);"
-                ))
-            }
-        }
-        BinaryOp::Divide => {
-            if bits == two_bits {
-                Some(format!(
-                    "double a; memcpy(&a, &locals[{dst}], sizeof(a)); locals[{dst}] = kiln_c99_val_from_double(a * 0.5);"
-                ))
-            } else if val > 0.0
-                && val.is_finite()
-                && val.fract() == 0.0
-                && (val as u64).is_power_of_two()
-            {
-                let inv = 1.0 / val;
-                let inv_bits = inv.to_bits();
-                Some(format!(
-                    "double a; memcpy(&a, &locals[{dst}], sizeof(a)); double inv_b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({inv_bits}) }}).d; locals[{dst}] = kiln_c99_val_from_double(a * inv_b);"
-                ))
-            } else {
-                Some(format!(
-                    "double a; memcpy(&a, &locals[{dst}], sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; locals[{dst}] = kiln_c99_val_from_double(a / b);"
-                ))
-            }
-        }
-        _ => None,
-    }
-}
-
-fn const_numeric_fast_body(operator: BinaryOp, bits: u64) -> Option<String> {
-    let two_bits = 2.0f64.to_bits();
-    let one_bits = 1.0f64.to_bits();
-    let val = f64::from_bits(bits);
-
-    match operator {
-        BinaryOp::Add => {
-            if bits == one_bits {
-                Some("double a; memcpy(&a, &left, sizeof(a)); answer = kiln_c99_val_from_double(a + 1.0);".to_string())
-            } else if bits == two_bits {
-                Some("double a; memcpy(&a, &left, sizeof(a)); answer = kiln_c99_val_from_double(a + 2.0);".to_string())
-            } else {
-                Some(format!(
-                    "double a; memcpy(&a, &left, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; answer = kiln_c99_val_from_double(a + b);"
-                ))
-            }
-        }
-        BinaryOp::Subtract => {
-            if bits == one_bits {
-                Some("double a; memcpy(&a, &left, sizeof(a)); answer = kiln_c99_val_from_double(a - 1.0);".to_string())
-            } else if bits == two_bits {
-                Some("double a; memcpy(&a, &left, sizeof(a)); answer = kiln_c99_val_from_double(a - 2.0);".to_string())
-            } else {
-                Some(format!(
-                    "double a; memcpy(&a, &left, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; answer = kiln_c99_val_from_double(a - b);"
-                ))
-            }
-        }
-        BinaryOp::Multiply => {
-            if bits == two_bits {
-                Some("double a; memcpy(&a, &left, sizeof(a)); answer = kiln_c99_val_from_double(a * 2.0);".to_string())
-            } else if bits == one_bits {
-                Some("double a; memcpy(&a, &left, sizeof(a)); answer = kiln_c99_val_from_double(a * 1.0);".to_string())
-            } else {
-                Some(format!(
-                    "double a; memcpy(&a, &left, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; answer = kiln_c99_val_from_double(a * b);"
-                ))
-            }
-        }
-        BinaryOp::Divide => {
-            if bits == two_bits {
-                Some("double a; memcpy(&a, &left, sizeof(a)); answer = kiln_c99_val_from_double(a * 0.5);".to_string())
-            } else if val > 0.0
-                && val.is_finite()
-                && val.fract() == 0.0
-                && (val as u64).is_power_of_two()
-            {
-                let inv = 1.0 / val;
-                let inv_bits = inv.to_bits();
-                Some(format!(
-                    "double a; memcpy(&a, &left, sizeof(a)); double inv_b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({inv_bits}) }}).d; answer = kiln_c99_val_from_double(a * inv_b);"
-                ))
-            } else {
-                Some(format!(
-                    "double a; memcpy(&a, &left, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; answer = kiln_c99_val_from_double(a / b);"
-                ))
-            }
-        }
-        BinaryOp::Remainder => {
-            if val > 0.0
-                && val.is_finite()
-                && val.fract() == 0.0
-                && (val as u64).is_power_of_two()
-                && (val as u64) <= (1u64 << 30)
-            {
-                let mask = (val as u64) - 1;
-                Some(format!(
-                    "double a; memcpy(&a, &left, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; if (KILN_LIKELY(a > 0.0 && a <= 9007199254740992.0 && a == (double)(int64_t)a)) {{ answer = kiln_c99_val_from_double((double)((int64_t)a & {mask})); }} else {{ answer = kiln_c99_val_from_double(fmod(a, b)); }}"
-                ))
-            } else {
-                Some(format!(
-                    "double a; memcpy(&a, &left, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; if (a != 0.0 && b != 0.0 && a >= -9007199254740992.0 && a <= 9007199254740992.0 && b >= -9007199254740992.0 && b <= 9007199254740992.0 && a == (double)(int64_t)a && b == (double)(int64_t)b) {{ answer = kiln_c99_val_from_double((double)((int64_t)a % (int64_t)b)); }} else {{ answer = kiln_c99_val_from_double(fmod(a, b)); }}"
-                ))
-            }
-        }
-        BinaryOp::StrictEqual => Some(format!(
-            "double a; memcpy(&a, &left, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; answer = (a == b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
-        )),
-        BinaryOp::StrictNotEqual => Some(format!(
-            "double a; memcpy(&a, &left, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; answer = (a != b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
-        )),
-        BinaryOp::LessThan => Some(format!(
-            "double a; memcpy(&a, &left, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; answer = (a < b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
-        )),
-        BinaryOp::LessThanOrEqual => Some(format!(
-            "double a; memcpy(&a, &left, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; answer = (a <= b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
-        )),
-        BinaryOp::GreaterThan => Some(format!(
-            "double a; memcpy(&a, &left, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; answer = (a > b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
-        )),
-        BinaryOp::GreaterThanOrEqual => Some(format!(
-            "double a; memcpy(&a, &left, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; answer = (a >= b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
-        )),
-        _ => None,
-    }
-}
-
-fn const_left_numeric_fast_body(operator: BinaryOp, bits: u64) -> Option<String> {
-    let two_bits = 2.0f64.to_bits();
-    let one_bits = 1.0f64.to_bits();
-
-    match operator {
-        BinaryOp::Add => {
-            if bits == one_bits {
-                Some("double b; memcpy(&b, &right, sizeof(b)); answer = kiln_c99_val_from_double(1.0 + b);".to_string())
-            } else if bits == two_bits {
-                Some("double b; memcpy(&b, &right, sizeof(b)); answer = kiln_c99_val_from_double(2.0 + b);".to_string())
-            } else {
-                Some(format!(
-                    "double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right, sizeof(b)); answer = kiln_c99_val_from_double(a + b);"
-                ))
-            }
-        }
-        BinaryOp::Subtract => Some(format!(
-            "double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right, sizeof(b)); answer = kiln_c99_val_from_double(a - b);"
-        )),
-        BinaryOp::Multiply => {
-            if bits == two_bits {
-                Some("double b; memcpy(&b, &right, sizeof(b)); answer = kiln_c99_val_from_double(2.0 * b);".to_string())
-            } else if bits == one_bits {
-                Some("double b; memcpy(&b, &right, sizeof(b)); answer = kiln_c99_val_from_double(1.0 * b);".to_string())
-            } else {
-                Some(format!(
-                    "double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right, sizeof(b)); answer = kiln_c99_val_from_double(a * b);"
-                ))
-            }
-        }
-        BinaryOp::Divide => Some(format!(
-            "double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right, sizeof(b)); answer = kiln_c99_val_from_double(a / b);"
-        )),
-        BinaryOp::Remainder => Some(format!(
-            "double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right, sizeof(b)); if (a != 0.0 && b != 0.0 && a >= -9007199254740992.0 && a <= 9007199254740992.0 && b >= -9007199254740992.0 && b <= 9007199254740992.0 && a == (double)(int64_t)a && b == (double)(int64_t)b) {{ answer = kiln_c99_val_from_double((double)((int64_t)a % (int64_t)b)); }} else {{ answer = kiln_c99_val_from_double(fmod(a, b)); }}"
-        )),
-        BinaryOp::StrictEqual => Some(format!(
-            "double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right, sizeof(b)); answer = (a == b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
-        )),
-        BinaryOp::StrictNotEqual => Some(format!(
-            "double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right, sizeof(b)); answer = (a != b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
-        )),
-        BinaryOp::LessThan => Some(format!(
-            "double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right, sizeof(b)); answer = (a < b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
-        )),
-        BinaryOp::LessThanOrEqual => Some(format!(
-            "double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right, sizeof(b)); answer = (a <= b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
-        )),
-        BinaryOp::GreaterThan => Some(format!(
-            "double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right, sizeof(b)); answer = (a > b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
-        )),
-        BinaryOp::GreaterThanOrEqual => Some(format!(
-            "double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right, sizeof(b)); answer = (a >= b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
-        )),
-        _ => None,
-    }
-}
-
-/// The unary counterpart of [`numeric_fast_body`], answering in terms of `a`.
-///
-/// `typeof` and `void` do not touch the value and `~` needs ToInt32, so they keep the generic call.
-fn numeric_fast_unary_body(operator: UnaryOp) -> Option<&'static str> {
-    Some(match operator {
-        UnaryOp::Plus | UnaryOp::ToNumeric => "answer = kiln_c99_val_from_double(a);",
-        UnaryOp::Negate => "answer = kiln_c99_val_from_double(-a);",
-        // `!x` on a number is false unless the number is zero or NaN.
-        UnaryOp::Not => "answer = (a == 0.0 || a != a) ? KILN_VAL_TRUE : KILN_VAL_FALSE;",
-        UnaryOp::Increment => "answer = kiln_c99_val_from_double(a + 1.0);",
-        UnaryOp::Decrement => "answer = kiln_c99_val_from_double(a - 1.0);",
-        _ => return None,
-    })
 }
 
 /// Whether a call into this function must publish the per-frame context.

@@ -182,15 +182,12 @@ pub fn verify_function_graph(graph: &FunctionGraph) -> Result<(), VerifierError>
                     });
                 }
             }
-            Terminator::Yield { resume, .. } | Terminator::Await { resume, .. } => {
+            Terminator::Suspend { resume, .. } => {
+                // Not an edge: the body returns, and a later call re-enters at the target
+                // through the dispatch switch with nothing of this activation alive. What
+                // crosses is spilled into the frame and comes back through the target's phis.
                 if !block_map.contains_key(resume) {
                     return Err(VerifierError::UnknownBlock(*resume));
-                }
-                if !block.successors.contains(resume) {
-                    return Err(VerifierError::InvalidTerminator {
-                        block: block.id,
-                        detail: format!("Resume target {resume:?} not in successors"),
-                    });
                 }
             }
             Terminator::Return(_) | Terminator::Throw(_) | Terminator::Unreachable => {}
@@ -282,14 +279,17 @@ pub fn verify_function_graph(graph: &FunctionGraph) -> Result<(), VerifierError>
                 | GraphOp::StoreUpvalue { value, .. }
                 | GraphOp::StoreGlobal { value, .. }
                 | GraphOp::CheckTdz { value, .. }
-                | GraphOp::Unary { value, .. }
-                | GraphOp::IterableToArray(value)
-                | GraphOp::ImportDynamic(value) => {
+                | GraphOp::Unary { value, .. } => {
                     check_operand(*value)?;
                 }
                 GraphOp::Binary { left, right, .. } => {
                     check_operand(*left)?;
                     check_operand(*right)?;
+                }
+                GraphOp::Bridge { operands, .. } => {
+                    for operand in operands {
+                        check_operand(*operand)?;
+                    }
                 }
                 GraphOp::New { callee, args, .. } => {
                     check_operand(*callee)?;
@@ -303,16 +303,7 @@ pub fn verify_function_graph(graph: &FunctionGraph) -> Result<(), VerifierError>
                         check_operand(*value)?;
                     }
                 }
-                GraphOp::ToPropertyKey { object, key }
-                | GraphOp::GetComputed { object, key, .. }
-                | GraphOp::SpreadInto {
-                    target: object,
-                    iterable: key,
-                }
-                | GraphOp::SetPrototype {
-                    object,
-                    prototype: key,
-                } => {
+                GraphOp::GetComputed { object, key, .. } => {
                     check_operand(*object)?;
                     check_operand(*key)?;
                 }
@@ -346,32 +337,10 @@ pub fn verify_function_graph(graph: &FunctionGraph) -> Result<(), VerifierError>
                         check_operand(*arg)?;
                     }
                 }
-                GraphOp::CallComputed {
-                    object, key, args, ..
-                } => {
-                    check_operand(*object)?;
-                    check_operand(*key)?;
+                GraphOp::NewArray { elements: args, .. } => {
                     for arg in args {
                         check_operand(*arg)?;
                     }
-                }
-                GraphOp::HostCall { args, .. }
-                | GraphOp::DirectEval { args, .. }
-                | GraphOp::NewArray { elements: args, .. }
-                | GraphOp::SuperCall { args, .. } => {
-                    for arg in args {
-                        check_operand(*arg)?;
-                    }
-                }
-                GraphOp::SuperGet { prototype, .. } => {
-                    check_operand(*prototype)?;
-                }
-                GraphOp::PrivateGet { object, .. } => {
-                    check_operand(*object)?;
-                }
-                GraphOp::PrivateSet { object, value, .. } => {
-                    check_operand(*object)?;
-                    check_operand(*value)?;
                 }
                 GraphOp::Phi { inputs } => {
                     if inputs.len() != block.predecessors.len()
@@ -443,30 +412,20 @@ pub fn verify_function_graph(graph: &FunctionGraph) -> Result<(), VerifierError>
                     });
                 }
             }
-            Terminator::Yield { value, .. } => {
-                let &(def_block, _) = def_site.get(value).ok_or(VerifierError::UseBeforeDef {
-                    value: *value,
-                    user_block: block.id,
-                })?;
-                if def_block != block.id && !dominates(def_block, block.id) {
-                    return Err(VerifierError::DominanceViolation {
-                        value: *value,
-                        def_block,
-                        use_block: block.id,
-                    });
-                }
-            }
-            Terminator::Await { promise, .. } => {
-                let &(def_block, _) = def_site.get(promise).ok_or(VerifierError::UseBeforeDef {
-                    value: *promise,
-                    user_block: block.id,
-                })?;
-                if def_block != block.id && !dominates(def_block, block.id) {
-                    return Err(VerifierError::DominanceViolation {
-                        value: *promise,
-                        def_block,
-                        use_block: block.id,
-                    });
+            Terminator::Suspend { value, spilled, .. } => {
+                for used in std::iter::once(value).chain(spilled.iter()) {
+                    let &(def_block, _) =
+                        def_site.get(used).ok_or(VerifierError::UseBeforeDef {
+                            value: *used,
+                            user_block: block.id,
+                        })?;
+                    if def_block != block.id && !dominates(def_block, block.id) {
+                        return Err(VerifierError::DominanceViolation {
+                            value: *used,
+                            def_block,
+                            use_block: block.id,
+                        });
+                    }
                 }
             }
             _ => {}

@@ -80,6 +80,11 @@ that can answer the question you actually have: the one crate's tests, `scripts/
 prelude change, `kiln test` on the one corpus directory the change touches, or the single probe
 that failed. `gate-quick` is the widest loop worth running mid-change, and even that is minutes.
 
+Keep the whole log when the gate runs in the background. A `tail -8` on `native.sh` kept the
+refusal backlog and cut the one summary line above it, and the same on `thirdparty.sh` kept the
+verdict and cut the name of the bundle that diverged; both corpora had to run again to read what
+they had already printed. Redirect each script to its own file and grep that.
+
 Two habits that waste the most. Rebuilding and re-measuring on every commit that lands on `main`
 -- a rebase costs a release build plus a cache-cold native compile of the prelude, and the number
 you get is a clock reading unless the change under test is yours. And running the whole Test262

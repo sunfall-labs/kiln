@@ -7,34 +7,40 @@ static void kiln_module_645b1d197416f0dd0e92043524369908_gc_roots(void *heap, vo
     kiln_c99_gc_unit_roots(heap, context, phase);
 }
 int kiln_module_645b1d197416f0dd0e92043524369908(kiln_host *host, kiln_value *result) {
-    size_t sp = 0;
     (void)kiln_realm_gc_register_roots(kiln_module_645b1d197416f0dd0e92043524369908_gc_roots, NULL, 0);
-    kiln_val stack[2];
+    kiln_val receiver = KILN_VAL_UNDEFINED; (void)receiver;
     kiln_val locals[1];
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     kiln_c99_reset_diagnostics();
-    locals[0] = KILN_VAL_UNDEFINED;
-kiln_label_0:;
-    locals[0] = UINT64_C(0);
-kiln_label_1:;
-kiln_label_2:;
-    { kiln_val left = locals[0]; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left))) { double a; memcpy(&a, &left, sizeof(a)); double b = ((union { uint64_t u; double d; }){ .u = UINT64_C(4613937818241073152) }).d; if (!(a < b)) goto kiln_label_11; } else { kiln_val right = UINT64_C(4613937818241073152); kiln_val answer = kiln_c99_val_binary_fast(9, left, right); if (!kiln_c99_val_truthy(answer)) goto kiln_label_11; } }
-kiln_label_3:;
-kiln_label_4:;
-kiln_label_5:;
-kiln_label_6:;
-    if (KILN_LIKELY(KILN_VAL_IS_NUMBER(locals[0]))) { double a; memcpy(&a, &locals[0], sizeof(a)); locals[0] = kiln_c99_val_from_double(a + 1.0); } else { kiln_val left = locals[0]; kiln_val right = UINT64_C(4607182418800017408); locals[0] = kiln_c99_val_binary_fast(1, left, right); }
-kiln_label_7:;
-kiln_label_8:;
-kiln_label_9:;
-kiln_label_10:;
-    goto kiln_label_2;
-kiln_label_11:;
-    stack[sp++] = locals[0];
-kiln_label_12:;
-    *result = sp == 0 ? kiln_c99_undefined() : kiln_val_to_boundary(stack[--sp]); return KILN_C99_OK;
-    goto kiln_refusal;
-kiln_refusal:;
-    *result = kiln_c99_control_diagnostic();
-    return KILN_C99_CONTROL_ERROR;
+    for (size_t slot = 0; slot < (size_t)1; ++slot) locals[slot] = KILN_VAL_UNDEFINED;
+    double d1 = 0.0, d2 = 0.0, d3 = 0.0, d4 = 0.0, d6 = 0.0, d7 = 0.0, d8 = 0.0;
+    kiln_val v0 = KILN_VAL_UNDEFINED, v1 = KILN_VAL_UNDEFINED, v2 = KILN_VAL_UNDEFINED, v3 = KILN_VAL_UNDEFINED, v4 = KILN_VAL_UNDEFINED, v5 = KILN_VAL_UNDEFINED, v6 = KILN_VAL_UNDEFINED, v7 = KILN_VAL_UNDEFINED, v8 = KILN_VAL_UNDEFINED;
+kiln_block_0:;
+    v0 = KILN_VAL_UNDEFINED;
+    v2 = UINT64_C(0);
+    memcpy(&d2, &v2, sizeof(d2));
+    v3 = v2;
+    d3 = d2;
+        { kiln_val phi_t0 = v2; v1 = phi_t0; d1 = d2; }
+    goto kiln_block_1;
+kiln_block_1:;
+    v4 = UINT64_C(4613937818241073152);
+    memcpy(&d4, &v4, sizeof(d4));
+    v5 = (d1 < d4) ? KILN_VAL_TRUE : KILN_VAL_FALSE;
+    if (d1 < d4) {
+        goto kiln_block_2;
+    } else {
+        goto kiln_block_3;
+    }
+kiln_block_2:;
+    v6 = UINT64_C(4607182418800017408);
+    memcpy(&d6, &v6, sizeof(d6));
+    d7 = d1 + d6; v7 = kiln_c99_val_from_double(d7);
+    v8 = v7;
+    d8 = d7;
+        { kiln_val phi_t0 = v7; v1 = phi_t0; d1 = d7; }
+    goto kiln_block_1;
+kiln_block_3:;
+    *result = kiln_val_to_boundary(v1);
+    return KILN_C99_OK;
 }

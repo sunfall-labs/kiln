@@ -7,63 +7,49 @@ static void kiln_module_cdf58079a736c0362f04ade879223b63_gc_roots(void *heap, vo
     kiln_c99_gc_unit_roots(heap, context, phase);
 }
 int kiln_module_cdf58079a736c0362f04ade879223b63(kiln_host *host, kiln_value *result) {
-    size_t sp = 0;
     (void)kiln_realm_gc_register_roots(kiln_module_cdf58079a736c0362f04ade879223b63_gc_roots, NULL, 0);
-    kiln_val stack[2];
+    kiln_val receiver = KILN_VAL_UNDEFINED; (void)receiver;
     kiln_val locals[2];
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     kiln_c99_reset_diagnostics();
-    locals[0] = KILN_VAL_UNDEFINED;
-    locals[1] = KILN_VAL_UNDEFINED;
-kiln_label_0:;
-    stack[sp++] = UINT64_C(4611686018427387904);
-kiln_label_1:;
-    stack[sp++] = UINT64_C(4615063718147915776);
-kiln_label_2:;
-    { kiln_val right = stack[--sp]; kiln_val left = stack[--sp]; kiln_val answer; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left) && KILN_VAL_IS_NUMBER(right))) { double a; double b; memcpy(&a, &left, sizeof(a)); memcpy(&b, &right, sizeof(b)); answer = kiln_c99_val_from_double(a + b); } else { answer = kiln_c99_val_binary_fast(1, left, right); } stack[sp++] = answer; }
-kiln_label_3:;
-    stack[sp++] = UINT64_C(4921056587992461136);
-kiln_label_4:;
-    { kiln_val right = stack[--sp]; kiln_val left = stack[--sp]; kiln_val answer; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left) && KILN_VAL_IS_NUMBER(right))) { double a; double b; memcpy(&a, &left, sizeof(a)); memcpy(&b, &right, sizeof(b)); answer = kiln_c99_val_from_double(a * b); } else { answer = kiln_c99_val_binary_fast(3, left, right); } locals[0] = answer; }
-kiln_label_5:;
-kiln_label_6:;
-    stack[sp++] = locals[0];
-kiln_label_7:;
-    { kiln_val operand = stack[sp - 1]; kiln_val answer; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(operand))) { double a; memcpy(&a, &operand, sizeof(a)); answer = kiln_c99_val_from_double(-a); } else { answer = kiln_c99_val_unary_fast(2, operand); } stack[sp - 1] = answer; }
-kiln_label_8:;
-    stack[sp++] = UINT64_C(9223372036854775808);
-kiln_label_9:;
-    { kiln_val right = stack[--sp]; kiln_val left = stack[--sp]; kiln_val answer; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left) && KILN_VAL_IS_NUMBER(right))) { double a; double b; memcpy(&a, &left, sizeof(a)); memcpy(&b, &right, sizeof(b)); answer = kiln_c99_val_from_double(a - b); } else { answer = kiln_c99_val_binary_fast(2, left, right); } stack[sp++] = answer; }
-kiln_label_10:;
-    stack[sp++] = UINT64_C(9221120237041090560);
-kiln_label_11:;
-    { kiln_val right = stack[--sp]; kiln_val left = stack[--sp]; kiln_val answer; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left) && KILN_VAL_IS_NUMBER(right))) { double a; double b; memcpy(&a, &left, sizeof(a)); memcpy(&b, &right, sizeof(b)); answer = (a == b) ? KILN_VAL_TRUE : KILN_VAL_FALSE; } else { answer = kiln_c99_val_binary_fast(7, left, right); } stack[sp++] = answer; }
-kiln_label_12:;
-    { kiln_val operand = stack[sp - 1]; kiln_val answer; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(operand))) { double a; memcpy(&a, &operand, sizeof(a)); answer = (a == 0.0 || a != a) ? KILN_VAL_TRUE : KILN_VAL_FALSE; } else { answer = kiln_c99_val_unary_fast(3, operand); } stack[sp - 1] = answer; }
-kiln_label_13:;
-    locals[1] = stack[--sp];
-kiln_label_14:;
-    { kiln_val left = locals[0]; kiln_val answer; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left))) { double a; memcpy(&a, &left, sizeof(a)); double b = ((union { uint64_t u; double d; }){ .u = UINT64_C(4611686018427387904) }).d; if (KILN_LIKELY(a > 0.0 && a <= 9007199254740992.0 && a == (double)(int64_t)a)) { answer = kiln_c99_val_from_double((double)((int64_t)a & 1)); } else { answer = kiln_c99_val_from_double(fmod(a, b)); } } else { kiln_val right = UINT64_C(4611686018427387904); answer = kiln_c99_val_binary_fast(5, left, right); } stack[sp++] = answer; }
-kiln_label_15:;
-kiln_label_16:;
-kiln_label_17:;
-    stack[sp++] = UINT64_C(4611686018427387904);
-kiln_label_18:;
-    { kiln_val right = stack[--sp]; kiln_val left = stack[--sp]; stack[sp++] = kiln_c99_val_binary_fast(6, left, right); }
-kiln_label_19:;
-    stack[sp++] = UINT64_C(4611686018427387904);
-kiln_label_20:;
-    { kiln_val right = stack[--sp]; kiln_val left = stack[--sp]; stack[sp++] = kiln_c99_val_binary_fast(19, left, right); }
-kiln_label_21:;
-    stack[sp++] = UINT64_C(4611686018427387904);
-kiln_label_22:;
-    { kiln_val right = stack[--sp]; kiln_val left = stack[--sp]; stack[sp++] = kiln_c99_val_binary_fast(22, left, right); }
-kiln_label_23:;
-    stack[sp - 1] = kiln_c99_val_unary_fast(4, stack[sp - 1]);
-kiln_label_24:;
-    *result = sp == 0 ? kiln_c99_undefined() : kiln_val_to_boundary(stack[--sp]); return KILN_C99_OK;
-    goto kiln_refusal;
-kiln_refusal:;
-    *result = kiln_c99_control_diagnostic();
-    return KILN_C99_CONTROL_ERROR;
+    for (size_t slot = 0; slot < (size_t)2; ++slot) locals[slot] = KILN_VAL_UNDEFINED;
+    double d2 = 0.0, d3 = 0.0, d4 = 0.0, d5 = 0.0, d6 = 0.0, d7 = 0.0, d8 = 0.0, d9 = 0.0, d10 = 0.0, d11 = 0.0, d15 = 0.0, d16 = 0.0, d17 = 0.0, d18 = 0.0, d19 = 0.0, d20 = 0.0, d21 = 0.0, d22 = 0.0;
+    kiln_val v0 = KILN_VAL_UNDEFINED, v1 = KILN_VAL_UNDEFINED, v2 = KILN_VAL_UNDEFINED, v3 = KILN_VAL_UNDEFINED, v4 = KILN_VAL_UNDEFINED, v5 = KILN_VAL_UNDEFINED, v6 = KILN_VAL_UNDEFINED, v7 = KILN_VAL_UNDEFINED, v8 = KILN_VAL_UNDEFINED, v9 = KILN_VAL_UNDEFINED, v10 = KILN_VAL_UNDEFINED, v11 = KILN_VAL_UNDEFINED, v12 = KILN_VAL_UNDEFINED, v13 = KILN_VAL_UNDEFINED, v14 = KILN_VAL_UNDEFINED, v15 = KILN_VAL_UNDEFINED, v16 = KILN_VAL_UNDEFINED, v17 = KILN_VAL_UNDEFINED, v18 = KILN_VAL_UNDEFINED, v19 = KILN_VAL_UNDEFINED, v20 = KILN_VAL_UNDEFINED, v21 = KILN_VAL_UNDEFINED, v22 = KILN_VAL_UNDEFINED, v23 = KILN_VAL_UNDEFINED;
+kiln_block_0:;
+    v0 = KILN_VAL_UNDEFINED;
+    v1 = KILN_VAL_UNDEFINED;
+    v2 = UINT64_C(4611686018427387904);
+    memcpy(&d2, &v2, sizeof(d2));
+    v3 = UINT64_C(4615063718147915776);
+    memcpy(&d3, &v3, sizeof(d3));
+    d4 = d2 + d3; v4 = kiln_c99_val_from_double(d4);
+    v5 = UINT64_C(4921056587992461136);
+    memcpy(&d5, &v5, sizeof(d5));
+    d6 = d4 * d5; v6 = kiln_c99_val_from_double(d6);
+    v7 = v6;
+    d7 = d6;
+    d8 = (-d6); v8 = kiln_c99_val_from_double(d8);
+    v9 = UINT64_C(9223372036854775808);
+    memcpy(&d9, &v9, sizeof(d9));
+    d10 = d8 - d9; v10 = kiln_c99_val_from_double(d10);
+    v11 = UINT64_C(9221120237041090560);
+    memcpy(&d11, &v11, sizeof(d11));
+    v12 = (d10 == d11) ? KILN_VAL_TRUE : KILN_VAL_FALSE;
+    v13 = kiln_c99_val_truthy(v12) ? KILN_VAL_FALSE : KILN_VAL_TRUE;
+    v14 = v13;
+    v15 = UINT64_C(4611686018427387904);
+    memcpy(&d15, &v15, sizeof(d15));
+    d16 = (d15 > 0.0 && d15 <= 9007199254740992.0 && d6 >= 0.0 && d6 <= 9007199254740992.0 && d6 == (double)(int64_t)d6 && d15 == (double)(int64_t)d15) ? (double)((int64_t)d6 % (int64_t)d15) : fmod(d6, d15); v16 = kiln_c99_val_from_double(d16);
+    v17 = UINT64_C(4611686018427387904);
+    memcpy(&d17, &v17, sizeof(d17));
+    d18 = pow(d16, d17); v18 = kiln_c99_val_from_double(d18);
+    v19 = UINT64_C(4611686018427387904);
+    memcpy(&d19, &v19, sizeof(d19));
+    v20 = kiln_c99_val_binary_fast(19, v18, v19); memcpy(&d20, &v20, sizeof(d20));
+    v21 = UINT64_C(4611686018427387904);
+    memcpy(&d21, &v21, sizeof(d21));
+    v22 = kiln_c99_val_binary_fast(22, v20, v21); memcpy(&d22, &v22, sizeof(d22));
+    v23 = kiln_c99_val_unary_fast(4, v22);
+    *result = kiln_val_to_boundary(v23);
+    return KILN_C99_OK;
 }
