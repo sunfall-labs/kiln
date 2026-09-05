@@ -933,7 +933,22 @@ fn render_constant_value(symbol: &str, constant_idx: u32, constant: &Constant) -
     }
 }
 
+/// Whether `render_function` may lower a body through the SSA value graph (ADR 0056).
+///
+/// Off until the graph merges locals at control-flow joins. Today `build_function_graph` reuses
+/// the SSA value it last knew for a local across a back edge without a phi, so a loop header
+/// compares the pre-loop value forever: `const run = () => { for (let i = 0; i < 5; i++) {} }`
+/// compiled to an infinite loop on 2026-09-05 (`conformance/native/for-loop-in-arrow.js`).
+/// A constant rather than an environment variable because emitted C is cached by source and
+/// options; emission that varied with the environment under one key would poison the cache.
+/// The unit tests drive `build_function_graph` and `emit_function_from_graph` directly and do
+/// not go through this switch.
+const GRAPH_EMITTER_ENABLED: bool = false;
+
 fn can_emit_from_graph(proto: &FunctionProto) -> bool {
+    if !GRAPH_EMITTER_ENABLED {
+        return false;
+    }
     if proto.generator || proto.asynchronous {
         return false;
     }
