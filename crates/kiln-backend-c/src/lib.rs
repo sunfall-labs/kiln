@@ -947,7 +947,7 @@ fn render_constant_value(symbol: &str, constant_idx: u32, constant: &Constant) -
 /// options; emission that varied with the environment under one key would poison the cache.
 /// The unit tests drive `build_function_graph` and `emit_function_from_graph` directly and do
 /// not go through this switch.
-const GRAPH_EMITTER_ENABLED: bool = false;
+const GRAPH_EMITTER_ENABLED: bool = true;
 
 fn can_emit_from_graph(proto: &FunctionProto) -> bool {
     // Generators and handlers need frame and unwind support the graph emitter does not have

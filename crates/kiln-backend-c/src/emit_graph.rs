@@ -409,7 +409,15 @@ fn emit_graph_op(
             .unwrap();
         }
         GraphOp::MarkUninitialized(slot) => {
-            writeln!(output, "    locals[{slot}] = KILN_VAL_UNINITIALIZED;").unwrap();
+            // A slot that holds a cell is marked through the cell: the binding is captured, and
+            // its closures read the box, not the slot. Overwriting the slot would drop the cell
+            // pointer and the next write through it would dereference the sentinel. The same
+            // two lines the stack emitter emits.
+            writeln!(
+                output,
+                "    if ((locals[{slot}] & KILN_TAG_MASK) == KILN_TAG_CELL_PREFIX) {{ *(kiln_val *)KILN_VAL_PTR(locals[{slot}]) = KILN_VAL_UNINITIALIZED; }} else {{ locals[{slot}] = KILN_VAL_UNINITIALIZED; }}"
+            )
+            .unwrap();
             writeln!(output, "    v{v} = KILN_VAL_UNINITIALIZED;").unwrap();
         }
         GraphOp::CheckTdz { slot: _, value } => {
@@ -514,6 +522,35 @@ fn emit_graph_op(
                 }
                 BinaryOp::In | BinaryOp::InstanceOf => unreachable!("`in` and `instanceof` are never proven numeric"),
             }
+        }
+        // `in` and `instanceof` are not arithmetic: the stack emitter lowers them inline against
+        // their own prelude entry points and never hands them to the binary helper, which
+        // answers something else for their codes. The same lowering, verbatim.
+        GraphOp::Binary {
+            op: BinaryOp::In,
+            left,
+            right,
+        } => {
+            writeln!(
+                output,
+                "    {{ kiln_value container = kiln_val_to_boundary(v{r}); int answer; if (!kiln_c99_is_reference(container) && container.tag != KILN_VALUE_DATE) {{ (void)kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, \"Cannot use 'in' to search for a property in a non-object\"); goto kiln_unwind; }} int status = kiln_c99_has_computed(host, container, kiln_val_to_boundary(v{l}), &answer, depth, thrown); if (status == KILN_C99_THROWN) goto kiln_unwind; if (status != KILN_C99_OK) return status; v{v} = answer ? KILN_VAL_TRUE : KILN_VAL_FALSE; }}",
+                l = left.0,
+                r = right.0
+            )
+            .unwrap();
+        }
+        GraphOp::Binary {
+            op: BinaryOp::InstanceOf,
+            left,
+            right,
+        } => {
+            writeln!(
+                output,
+                "    {{ kiln_value constructor = kiln_val_to_boundary(v{r}); int answer; int status = kiln_c99_instance_of(kiln_val_to_boundary(v{l}), constructor, &answer); if (status != KILN_C99_OK) return status; v{v} = answer ? KILN_VAL_TRUE : KILN_VAL_FALSE; }}",
+                l = left.0,
+                r = right.0
+            )
+            .unwrap();
         }
         GraphOp::Binary { op, left, right } => {
             let (l, r) = (left.0, right.0);
