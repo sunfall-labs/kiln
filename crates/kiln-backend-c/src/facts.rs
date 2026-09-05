@@ -6,11 +6,11 @@
 //! - Per-function summaries with inferred parameter and return types
 //! - Allocation, call, and property access sites
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Write;
 use std::path::Path;
 
-use kiln_ir::{Constant, FunctionProto, Program};
+use kiln_ir::{Constant, FunctionProto, Instruction, Program};
 use kiln_module_graph::{ClosedWorldVerdict, ModuleGraph};
 use serde::{Deserialize, Serialize};
 
@@ -52,11 +52,30 @@ pub struct ModuleFactsReport {
     pub functions: Vec<FunctionFacts>,
 }
 
+/// Inferred facts for an HTTP request handler within a closed-world program.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandlerFacts {
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub function_name: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub request_members_read: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub request_members_omitted: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub response_members_read: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub response_members_omitted: Vec<String>,
+    pub url_specialized: bool,
+    pub instructions_per_request: usize,
+}
+
 /// Whole-program fixpoint facts over a linked graph or standalone program.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProgramFacts {
     pub world: ClosedWorldVerdict,
     pub modules: Vec<ModuleFactsReport>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub handlers: Vec<HandlerFacts>,
 }
 
 impl ProgramFacts {
@@ -134,6 +153,41 @@ impl ProgramFacts {
             }
         }
 
+        if !self.handlers.is_empty() {
+            out.push('\n');
+            out.push_str("Handler Specialization:\n");
+            for handler in &self.handlers {
+                let name = handler.function_name.as_deref().unwrap_or("<anonymous>");
+                let _ = writeln!(out, "  Handler {name}:");
+                let _ = writeln!(
+                    out,
+                    "    Request members read: [{}]",
+                    handler.request_members_read.join(", ")
+                );
+                let _ = writeln!(
+                    out,
+                    "    Request members omitted: [{}]",
+                    handler.request_members_omitted.join(", ")
+                );
+                let _ = writeln!(
+                    out,
+                    "    Response members read: [{}]",
+                    handler.response_members_read.join(", ")
+                );
+                let _ = writeln!(
+                    out,
+                    "    Response members omitted: [{}]",
+                    handler.response_members_omitted.join(", ")
+                );
+                let _ = writeln!(out, "    URL specialized: {}", handler.url_specialized);
+                let _ = writeln!(
+                    out,
+                    "    JS instructions per request: {}",
+                    handler.instructions_per_request
+                );
+            }
+        }
+
         out
     }
 
@@ -163,6 +217,16 @@ impl ProgramFacts {
     /// Also sorts modules and immutable bindings deterministically.
     pub fn normalize_paths(&mut self, repo_root: &Path) {
         let root_str = repo_root.to_str().unwrap_or("");
+        if let ClosedWorldVerdict::Open { ref mut reasons } = self.world {
+            for reason in reasons {
+                if !root_str.is_empty() && reason.contains(root_str) {
+                    *reason = reason
+                        .replace(root_str, "")
+                        .trim_start_matches('/')
+                        .to_string();
+                }
+            }
+        }
         for module in &mut self.modules {
             if let Ok(rel) = Path::new(&module.path).strip_prefix(repo_root) {
                 module.path = rel.to_string_lossy().into_owned();
@@ -195,6 +259,13 @@ impl ProgramFacts {
             diffs.push(format!(
                 "world verdict changed: was {:?}, now {:?}",
                 expected.world, self.world
+            ));
+        }
+
+        if self.handlers != expected.handlers {
+            diffs.push(format!(
+                "handlers changed: was {:?}, now {:?}",
+                expected.handlers, self.handlers
             ));
         }
 
@@ -411,8 +482,13 @@ pub fn analyze_graph(graph: &ModuleGraph) -> ProgramFacts {
     }
 
     modules.sort_by(|a, b| a.path.cmp(&b.path));
+    let handlers = extract_handlers_from_graph(graph);
 
-    ProgramFacts { world, modules }
+    ProgramFacts {
+        world,
+        modules,
+        handlers,
+    }
 }
 
 /// Analyze a standalone `Program` and extract facts.
@@ -438,11 +514,322 @@ pub fn analyze_program(program: &Program, path: Option<&str>) -> ProgramFacts {
         immutable_bindings: Vec::new(),
         functions,
     };
+    let handlers = extract_handlers_from_program(program);
 
     ProgramFacts {
         world,
         modules: vec![module],
+        handlers,
     }
+}
+
+pub const KNOWN_REQUEST_MEMBERS: &[&str] = &[
+    "aborted",
+    "complete",
+    "connection",
+    "destroyed",
+    "headers",
+    "httpVersion",
+    "httpVersionMajor",
+    "httpVersionMinor",
+    "method",
+    "on",
+    "once",
+    "rawHeaders",
+    "socket",
+    "statusCode",
+    "statusMessage",
+    "url",
+];
+
+pub const KNOWN_RESPONSE_MEMBERS: &[&str] = &[
+    "connection",
+    "destroyed",
+    "end",
+    "finished",
+    "getHeader",
+    "hasHeader",
+    "headersSent",
+    "removeHeader",
+    "setHeader",
+    "socket",
+    "statusCode",
+    "statusMessage",
+    "write",
+    "writeHead",
+    "writableEnded",
+];
+
+pub fn extract_handlers_from_graph(graph: &ModuleGraph) -> Vec<HandlerFacts> {
+    let mut handlers = Vec::new();
+    for node in graph.modules() {
+        handlers.extend(extract_handlers_from_program(&node.program.program));
+    }
+    handlers
+}
+
+pub fn extract_handlers_from_program(program: &Program) -> Vec<HandlerFacts> {
+    let mut handlers = Vec::new();
+    for proto in &program.functions {
+        if proto.parameter_count < 2 {
+            continue;
+        }
+
+        let mut req_members_read = BTreeSet::new();
+        let mut res_members_read = BTreeSet::new();
+        let mut url_specialized = false;
+
+        // Try analyzing via SSA graph first
+        if let Ok(graph) = build_function_graph(proto, program) {
+            let mut req_values = HashSet::new();
+            let mut res_values = HashSet::new();
+            if let Some(&vid) = graph.initial_locals.first() {
+                req_values.insert(vid);
+            }
+            if let Some(&vid) = graph.initial_locals.get(1) {
+                res_values.insert(vid);
+            }
+
+            // Propagate aliases through loads and phis
+            let mut changed = true;
+            while changed {
+                changed = false;
+                for block in &graph.blocks {
+                    for (vid, op) in &block.operations {
+                        match op {
+                            GraphOp::LoadLocal(0) | GraphOp::LoadCell(0) => {
+                                if req_values.insert(*vid) {
+                                    changed = true;
+                                }
+                            }
+                            GraphOp::LoadLocal(1) | GraphOp::LoadCell(1) => {
+                                if res_values.insert(*vid) {
+                                    changed = true;
+                                }
+                            }
+                            GraphOp::Phi { inputs } => {
+                                if inputs.iter().any(|(_, v)| req_values.contains(v))
+                                    && req_values.insert(*vid)
+                                {
+                                    changed = true;
+                                }
+                                if inputs.iter().any(|(_, v)| res_values.contains(v))
+                                    && res_values.insert(*vid)
+                                {
+                                    changed = true;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+
+            let mut req_url_values = HashSet::new();
+            let mut url_values = HashSet::new();
+            let mut search_params_values = HashSet::new();
+
+            for block in &graph.blocks {
+                for (vid, op) in &block.operations {
+                    match op {
+                        GraphOp::GetProperty { object, name, .. } => {
+                            let prop_name = program.constants.get(*name as usize).and_then(|c| {
+                                if let Constant::String(s) = c {
+                                    Some(s.as_str())
+                                } else {
+                                    None
+                                }
+                            });
+                            if let Some(prop_name) = prop_name {
+                                if req_values.contains(object) {
+                                    req_members_read.insert(prop_name.to_string());
+                                    if prop_name == "url" {
+                                        req_url_values.insert(*vid);
+                                    }
+                                }
+                                if res_values.contains(object) {
+                                    res_members_read.insert(prop_name.to_string());
+                                }
+                                if url_values.contains(object) {
+                                    if prop_name == "pathname" {
+                                        url_specialized = true;
+                                    } else if prop_name == "searchParams" {
+                                        search_params_values.insert(*vid);
+                                    }
+                                }
+                            }
+                        }
+                        GraphOp::CallMethod { object, name, .. } => {
+                            let prop_name = program.constants.get(*name as usize).and_then(|c| {
+                                if let Constant::String(s) = c {
+                                    Some(s.as_str())
+                                } else {
+                                    None
+                                }
+                            });
+                            if let Some(prop_name) = prop_name {
+                                if req_values.contains(object) {
+                                    req_members_read.insert(prop_name.to_string());
+                                }
+                                if res_values.contains(object) {
+                                    res_members_read.insert(prop_name.to_string());
+                                }
+                                if url_values.contains(object) && prop_name == "pathname" {
+                                    url_specialized = true;
+                                }
+                                if search_params_values.contains(object) && prop_name == "get" {
+                                    url_specialized = true;
+                                }
+                            }
+                        }
+                        GraphOp::SetProperty { object, name, .. }
+                        | GraphOp::SetPropertyStrict { object, name, .. } => {
+                            let prop_name = program.constants.get(*name as usize).and_then(|c| {
+                                if let Constant::String(s) = c {
+                                    Some(s.as_str())
+                                } else {
+                                    None
+                                }
+                            });
+                            if let Some(prop_name) = prop_name
+                                && res_values.contains(object)
+                            {
+                                res_members_read.insert(prop_name.to_string());
+                            }
+                        }
+                        GraphOp::New { args, .. }
+                            if !args.is_empty() && req_url_values.contains(&args[0]) =>
+                        {
+                            url_values.insert(*vid);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // Also check bytecode directly to ensure complete coverage (e.g. if graph was not built
+        // or for property accesses like pathname/searchParams on aliased URL values)
+        let mut eval_stack: Vec<Option<u32>> = Vec::new();
+        let mut has_pathname = false;
+        let mut has_search_params = false;
+
+        for inst in &proto.code {
+            match inst {
+                Instruction::LoadLocal(slot) | Instruction::LoadCell(slot) => {
+                    eval_stack.push(Some(*slot));
+                }
+                Instruction::GetProperty(name) => {
+                    let obj = eval_stack.pop().flatten();
+                    if let Some(Constant::String(prop)) = program.constants.get(*name as usize) {
+                        if obj == Some(0) {
+                            req_members_read.insert(prop.clone());
+                        } else if obj == Some(1) {
+                            res_members_read.insert(prop.clone());
+                        }
+                        if prop == "pathname" {
+                            has_pathname = true;
+                        } else if prop == "searchParams" {
+                            has_search_params = true;
+                        }
+                    }
+                    eval_stack.push(None);
+                }
+                Instruction::CallMethod { name, argc } => {
+                    let argc = *argc as usize;
+                    let receiver = if eval_stack.len() > argc {
+                        eval_stack[eval_stack.len() - 1 - argc]
+                    } else {
+                        None
+                    };
+                    if let Some(Constant::String(prop)) = program.constants.get(*name as usize) {
+                        if receiver == Some(0) {
+                            req_members_read.insert(prop.clone());
+                        } else if receiver == Some(1) {
+                            res_members_read.insert(prop.clone());
+                        }
+                    }
+                    if eval_stack.len() > argc {
+                        eval_stack.truncate(eval_stack.len() - 1 - argc);
+                    } else {
+                        eval_stack.clear();
+                    }
+                    eval_stack.push(None);
+                }
+                Instruction::SetProperty(name) | Instruction::SetPropertyStrict { name, .. } => {
+                    eval_stack.pop();
+                    let obj = eval_stack.pop().flatten();
+                    if obj == Some(1)
+                        && let Some(Constant::String(prop)) = program.constants.get(*name as usize)
+                    {
+                        res_members_read.insert(prop.clone());
+                    }
+                    eval_stack.push(None);
+                }
+                Instruction::Pop => {
+                    eval_stack.pop();
+                }
+                Instruction::Dup => {
+                    let top = eval_stack.last().copied().flatten();
+                    eval_stack.push(top);
+                }
+                Instruction::Call { argc } | Instruction::New { argc } => {
+                    let total = 1 + *argc as usize;
+                    if eval_stack.len() >= total {
+                        eval_stack.truncate(eval_stack.len() - total);
+                    } else {
+                        eval_stack.clear();
+                    }
+                    eval_stack.push(None);
+                }
+                _ => {
+                    eval_stack.push(None);
+                }
+            }
+        }
+
+        if req_members_read.contains("url") && (has_pathname || has_search_params) {
+            url_specialized = true;
+        }
+
+        let has_req_member = req_members_read
+            .iter()
+            .any(|m| KNOWN_REQUEST_MEMBERS.contains(&m.as_str()));
+        let has_res_member = res_members_read
+            .iter()
+            .any(|m| KNOWN_RESPONSE_MEMBERS.contains(&m.as_str()));
+        let param0_has_res_only = req_members_read.iter().any(|m| {
+            KNOWN_RESPONSE_MEMBERS.contains(&m.as_str())
+                && !KNOWN_REQUEST_MEMBERS.contains(&m.as_str())
+        });
+
+        // It is an HTTP handler if param 0 reads request members or param 1 reads response members,
+        // and param 0 does not exclusively read response members.
+        if (has_req_member || has_res_member) && !param0_has_res_only {
+            let request_members_omitted = KNOWN_REQUEST_MEMBERS
+                .iter()
+                .filter(|&&m| !req_members_read.contains(m))
+                .map(|&m| m.to_string())
+                .collect();
+            let response_members_omitted = KNOWN_RESPONSE_MEMBERS
+                .iter()
+                .filter(|&&m| !res_members_read.contains(m))
+                .map(|&m| m.to_string())
+                .collect();
+
+            handlers.push(HandlerFacts {
+                function_name: proto.name.clone(),
+                request_members_read: req_members_read.into_iter().collect(),
+                request_members_omitted,
+                response_members_read: res_members_read.into_iter().collect(),
+                response_members_omitted,
+                url_specialized,
+                instructions_per_request: proto.code.len(),
+            });
+        }
+    }
+
+    handlers
 }
 
 fn analyze_program_functions(program: &Program) -> Vec<FunctionFacts> {
@@ -613,6 +1000,7 @@ mod tests {
                     }],
                 }],
             }],
+            handlers: vec![],
         };
         baseline
             .benchmarks
@@ -647,6 +1035,7 @@ mod tests {
                     functions: vec![],
                 },
             ],
+            handlers: vec![],
         };
 
         facts.normalize_paths(&root);
@@ -676,6 +1065,7 @@ mod tests {
                     sites: vec![],
                 }],
             }],
+            handlers: vec![],
         };
 
         let mut modified = base.clone();
@@ -688,5 +1078,81 @@ mod tests {
         assert_eq!(diffs.len(), 2);
         assert!(diffs[0].contains("world verdict changed"));
         assert!(diffs[1].contains("return type changed"));
+    }
+
+    #[test]
+    fn handler_facts_extraction_and_explain() {
+        let constants = vec![
+            Constant::String("url".to_string()),
+            Constant::String("method".to_string()),
+            Constant::String("pathname".to_string()),
+            Constant::String("writeHead".to_string()),
+            Constant::String("end".to_string()),
+            Constant::Number(200.0f64.to_bits()),
+            Constant::String("ok".to_string()),
+        ];
+
+        let handler_proto = FunctionProto {
+            asynchronous: false,
+            name: Some("http_handler".to_string()),
+            arrow: true,
+            generator: false,
+            async_generator: false,
+            parameter_count: 2,
+            mapped_arguments: false,
+            declared_length: 2,
+            local_count: 4,
+            prologue_end: 0,
+            code: vec![
+                Instruction::LoadLocal(0),   // req
+                Instruction::GetProperty(0), // .url
+                Instruction::GetProperty(2), // .pathname
+                Instruction::Pop,
+                Instruction::LoadLocal(0),   // req
+                Instruction::GetProperty(1), // .method
+                Instruction::Pop,
+                Instruction::LoadLocal(1),                    // res
+                Instruction::Const(5),                        // 200
+                Instruction::CallMethod { name: 3, argc: 1 }, // .writeHead(200)
+                Instruction::Pop,
+                Instruction::LoadLocal(1),                    // res
+                Instruction::Const(6),                        // "ok"
+                Instruction::CallMethod { name: 4, argc: 1 }, // .end("ok")
+                Instruction::Pop,
+            ],
+            upvalues: Vec::new(),
+            span: kiln_ir::Span::default(),
+        };
+
+        let program = Program {
+            source: "".into(),
+            version: kiln_ir::BYTECODE_VERSION,
+            constants,
+            code: vec![],
+            local_count: 0,
+            functions: vec![handler_proto],
+        };
+
+        let facts = analyze_program(&program, Some("server.mjs"));
+        assert_eq!(facts.handlers.len(), 1);
+        let h = &facts.handlers[0];
+        assert_eq!(h.function_name.as_deref(), Some("http_handler"));
+        assert_eq!(h.request_members_read, vec!["method", "url"]);
+        assert!(h.request_members_omitted.contains(&"headers".to_string()));
+        assert_eq!(h.response_members_read, vec!["end", "writeHead"]);
+        assert!(
+            h.response_members_omitted
+                .contains(&"statusCode".to_string())
+        );
+        assert!(h.url_specialized);
+        assert_eq!(h.instructions_per_request, 15);
+
+        let explain = facts.format_explain();
+        assert!(explain.contains("Handler Specialization:"));
+        assert!(explain.contains("Handler http_handler:"));
+        assert!(explain.contains("Request members read: [method, url]"));
+        assert!(explain.contains("Response members read: [end, writeHead]"));
+        assert!(explain.contains("URL specialized: true"));
+        assert!(explain.contains("JS instructions per request: 15"));
     }
 }

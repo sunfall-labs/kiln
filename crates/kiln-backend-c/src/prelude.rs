@@ -3943,6 +3943,7 @@ pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_diagnostic_function_len", C99StateOwner::Realm),
     ("kiln_c99_diagnostic_compose", C99StateOwner::Realm),
     ("kiln_c99_diagnostic_active_depth", C99StateOwner::Frame),
+    ("kiln_c99_active_http_response", C99StateOwner::Frame),
     ("kiln_c99_new_target", C99StateOwner::Frame),
     ("kiln_c99_inheriting_new_target", C99StateOwner::Frame),
     ("kiln_c99_adopted_this", C99StateOwner::Frame),

@@ -6434,8 +6434,19 @@ static int kiln_c99_install_server_response_methods(kiln_value target) {
         status = kiln_c99_define_method(target, methods[index].name, methods[index].length,
                                         kiln_c99_method(methods[index].code));
     }
+    if (status == KILN_C99_OK)
+        status = kiln_c99_own_data_hot_key(target, KILN_C99_HOT_KEY_STATUS_CODE, kiln_c99_number(200.0));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_own_data(target, "headersSent", 11, kiln_c99_boolean(0));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_own_data(target, "writableEnded", 13, kiln_c99_boolean(0));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_own_data_hot_key(target, KILN_C99_HOT_KEY_DESTROYED, kiln_c99_boolean(0));
     return status;
 }
+
+static const char kiln_c99_http_version_11[] = "1.1";
+static const char kiln_c99_http_version_10[] = "1.0";
 
 /* The prototype a `node:http` request links to.
  *
@@ -6467,6 +6478,24 @@ static int kiln_c99_node_incoming_message_prototype(kiln_value *out) {
         status = kiln_c99_define_method(
             *slot, "setEncoding", 11,
             kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_SET_ENCODING));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_own_data_hot_key(*slot, KILN_C99_HOT_KEY_HTTP_VERSION,
+                                           kiln_c99_static_text(kiln_c99_http_version_11, 3));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_own_data_hot_key(*slot, KILN_C99_HOT_KEY_HTTP_VERSION_MAJOR, kiln_c99_number(1.0));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_own_data_hot_key(*slot, KILN_C99_HOT_KEY_HTTP_VERSION_MINOR, kiln_c99_number(1.0));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_own_data_hot_key(*slot, KILN_C99_HOT_KEY_ABORTED, kiln_c99_boolean(0));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_own_data_hot_key(*slot, KILN_C99_HOT_KEY_COMPLETE, kiln_c99_boolean(0));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_own_data_hot_key(*slot, KILN_C99_HOT_KEY_DESTROYED, kiln_c99_boolean(0));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_accessor(
+            *slot, "headers", 7,
+            kiln_c99_method(KILN_C99_METHOD_NODE_REQUEST_HEADERS_GET),
+            kiln_c99_method(KILN_C99_METHOD_NODE_REQUEST_HEADERS_SET), 1);
     if (status != KILN_C99_OK) {
         /* A half-built prototype must not be handed out or cached: leave the slot empty so the
          * next request builds it again rather than inheriting a surface with holes in it. */
@@ -6749,7 +6778,8 @@ static int kiln_c99_ascii_case_equal(const char *a, size_t a_len, const char *b,
 static int kiln_c99_node_materialize_header(kiln_value headers_obj, const char *key, size_t key_len, kiln_value *out) {
     if (headers_obj.tag != KILN_VALUE_OBJECT) return 0;
     kiln_object *obj = kiln_c99_object_of(headers_obj);
-    if (obj->shape != NULL || obj->properties == NULL) return 0;
+    if (obj->shape != NULL) kiln_c99_ensure_dictionary(obj);
+    if (obj->properties == NULL) return 0;
     kiln_node_response *resp = (kiln_node_response *)kiln_c99_node_hidden_pointer(headers_obj, "@@node:lazy-headers", 19);
     size_t at = 0;
     if (resp == NULL || resp->request_headers == NULL) return 0;
@@ -6781,7 +6811,8 @@ static int kiln_c99_node_materialize_header(kiln_value headers_obj, const char *
 static void kiln_c99_node_materialize_all_headers(kiln_value headers_obj) {
     if (headers_obj.tag != KILN_VALUE_OBJECT) return;
     kiln_object *obj = kiln_c99_object_of(headers_obj);
-    if (obj->shape != NULL || obj->properties == NULL) return;
+    if (obj->shape != NULL) kiln_c99_ensure_dictionary(obj);
+    if (obj->properties == NULL) return;
     kiln_node_response *resp = (kiln_node_response *)kiln_c99_node_hidden_pointer(headers_obj, "@@node:lazy-headers", 19);
     size_t at = 0;
     int dummy;
@@ -6812,7 +6843,8 @@ static void kiln_c99_node_materialize_all_headers(kiln_value headers_obj) {
 static int kiln_c99_node_has_lazy_header(kiln_value headers_obj, const char *key, size_t key_len) {
     if (headers_obj.tag != KILN_VALUE_OBJECT) return 0;
     kiln_object *obj = kiln_c99_object_of(headers_obj);
-    if (obj->shape != NULL || obj->properties == NULL) return 0;
+    if (obj->shape != NULL) kiln_c99_ensure_dictionary(obj);
+    if (obj->properties == NULL) return 0;
     kiln_node_response *resp = (kiln_node_response *)kiln_c99_node_hidden_pointer(headers_obj, "@@node:lazy-headers", 19);
     size_t at = 0;
     if (resp == NULL || resp->request_headers == NULL) return 0;
@@ -7009,8 +7041,6 @@ static int kiln_c99_node_socket_ready_state(kiln_node_socket *socket,
                         kiln_c99_copy_text(state, state_len), 0, NULL);
 }
 
-static const char kiln_c99_http_version_11[] = "1.1";
-static const char kiln_c99_http_version_10[] = "1.0";
 static const char kiln_c99_transfer_encoding_chunked[] = "chunked";
 
 static const char kiln_c99_slash[] = "/";
@@ -7074,6 +7104,9 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
             response->status = 200;
             response->started = 0;
             response->ended = 0;
+            response->url_used = 0;
+            response->target_ptr = (const char *)event->target;
+            response->target_len = (size_t)event->target_len;
             request = response->request;
 
             response->request_headers = (char *)event->headers;
@@ -7089,44 +7122,23 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
                                            kiln_c99_node_http_target_text(
                                                (const char *)event->target,
                                                (size_t)event->target_len));
-            if (status == KILN_C99_OK)
+            if (status == KILN_C99_OK && !event->version_minor) {
                 status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_HTTP_VERSION,
-                                           event->version_minor
-                                               ? kiln_c99_static_text(kiln_c99_http_version_11, 3)
-                                               : kiln_c99_static_text(kiln_c99_http_version_10, 3));
-            if (status == KILN_C99_OK)
-                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_HTTP_VERSION_MAJOR, kiln_c99_number(1.0));
-            if (status == KILN_C99_OK)
-                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_HTTP_VERSION_MINOR,
-                                           kiln_c99_number(event->version_minor ? 1.0 : 0.0));
-            if (status == KILN_C99_OK)
-                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_ABORTED, kiln_c99_boolean(0));
-            if (status == KILN_C99_OK)
-                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_COMPLETE, kiln_c99_boolean(0));
-            if (status == KILN_C99_OK)
-                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_DESTROYED, kiln_c99_boolean(0));
-            if (status == KILN_C99_OK)
-                status = kiln_c99_define_accessor(
-                    request, "headers", 7,
-                    kiln_c99_method(KILN_C99_METHOD_NODE_REQUEST_HEADERS_GET),
-                    kiln_c99_method(KILN_C99_METHOD_NODE_REQUEST_HEADERS_SET), 1);
-            if (status == KILN_C99_OK) {
-                int dummy;
-                kiln_c99_delete(NULL, request, "@@node:events", 13, &dummy, 0, NULL);
+                                                   kiln_c99_static_text(kiln_c99_http_version_10, 3));
+                if (status == KILN_C99_OK)
+                    status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_HTTP_VERSION_MINOR,
+                                                       kiln_c99_number(0.0));
             }
-
-            if (status == KILN_C99_OK)
-                status = kiln_c99_own_data_hot_key(response->object, KILN_C99_HOT_KEY_STATUS_CODE,
-                                           kiln_c99_number(200.0));
-            if (status == KILN_C99_OK)
-                status = kiln_c99_own_data(response->object, "headersSent", 11, kiln_c99_boolean(0));
-            if (status == KILN_C99_OK)
-                status = kiln_c99_own_data(response->object, "writableEnded", 13,
-                                           kiln_c99_boolean(0));
-            if (status == KILN_C99_OK)
-                status = kiln_c99_own_data_hot_key(response->object, KILN_C99_HOT_KEY_DESTROYED, kiln_c99_boolean(0));
             if (status == KILN_C99_OK) {
                 int dummy;
+                kiln_c99_delete(NULL, request, "headers", 7, &dummy, 0, NULL);
+                kiln_c99_delete(NULL, request, "complete", 8, &dummy, 0, NULL);
+                kiln_c99_delete(NULL, request, "httpVersion", 11, &dummy, 0, NULL);
+                kiln_c99_delete(NULL, request, "httpVersionMinor", 16, &dummy, 0, NULL);
+                kiln_c99_delete(NULL, request, "@@node:events", 13, &dummy, 0, NULL);
+                kiln_c99_delete(NULL, response->object, "statusCode", 10, &dummy, 0, NULL);
+                kiln_c99_delete(NULL, response->object, "headersSent", 11, &dummy, 0, NULL);
+                kiln_c99_delete(NULL, response->object, "writableEnded", 13, &dummy, 0, NULL);
                 kiln_c99_delete(NULL, response->object, "@@node:events", 13, &dummy, 0, NULL);
             }
 
@@ -7144,7 +7156,10 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
             response->socket = socket;
             response->request_id = event->id;
             response->status = 200;
-            status = kiln_c99_new_object_with_capacity(&request, 12);
+            response->url_used = 0;
+            response->target_ptr = (const char *)event->target;
+            response->target_len = (size_t)event->target_len;
+            status = kiln_c99_new_object_with_capacity(&request, 6);
             if (status == KILN_C99_OK) {
                 kiln_value prototype;
                 status = kiln_c99_node_incoming_message_prototype(&prototype);
@@ -7162,22 +7177,13 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
                                            kiln_c99_node_http_target_text(
                                                (const char *)event->target,
                                                (size_t)event->target_len));
-            if (status == KILN_C99_OK)
+            if (status == KILN_C99_OK && !event->version_minor) {
                 status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_HTTP_VERSION,
-                                           event->version_minor
-                                               ? kiln_c99_static_text(kiln_c99_http_version_11, 3)
-                                               : kiln_c99_static_text(kiln_c99_http_version_10, 3));
-            if (status == KILN_C99_OK)
-                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_HTTP_VERSION_MAJOR, kiln_c99_number(1.0));
-            if (status == KILN_C99_OK)
-                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_HTTP_VERSION_MINOR,
-                                           kiln_c99_number(event->version_minor ? 1.0 : 0.0));
-            if (status == KILN_C99_OK)
-                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_ABORTED, kiln_c99_boolean(0));
-            if (status == KILN_C99_OK)
-                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_COMPLETE, kiln_c99_boolean(0));
-            if (status == KILN_C99_OK)
-                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_DESTROYED, kiln_c99_boolean(0));
+                                                   kiln_c99_static_text(kiln_c99_http_version_10, 3));
+                if (status == KILN_C99_OK)
+                    status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_HTTP_VERSION_MINOR,
+                                                       kiln_c99_number(0.0));
+            }
             if (status == KILN_C99_OK)
                 status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_SOCKET, socket->object);
             if (status == KILN_C99_OK)
@@ -7188,12 +7194,7 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
                 response->request_headers_owned = 0;
             }
             if (status == KILN_C99_OK)
-                status = kiln_c99_define_accessor(
-                    request, "headers", 7,
-                    kiln_c99_method(KILN_C99_METHOD_NODE_REQUEST_HEADERS_GET),
-                    kiln_c99_method(KILN_C99_METHOD_NODE_REQUEST_HEADERS_SET), 1);
-            if (status == KILN_C99_OK)
-                status = kiln_c99_new_object_with_capacity(&response->object, 8);
+                status = kiln_c99_new_object_with_capacity(&response->object, 6);
             if (status == KILN_C99_OK) status = kiln_c99_new_object(&response->headers);
             if (status == KILN_C99_OK) {
                 kiln_value prototype;
@@ -7211,16 +7212,17 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
                 status = kiln_c99_own_data_hot_key(response->object, KILN_C99_HOT_KEY_SOCKET, socket->object);
             if (status == KILN_C99_OK)
                 status = kiln_c99_own_data_hot_key(response->object, KILN_C99_HOT_KEY_CONNECTION, socket->object);
-            if (status == KILN_C99_OK)
-                status = kiln_c99_own_data_hot_key(response->object, KILN_C99_HOT_KEY_STATUS_CODE,
-                                           kiln_c99_number(200.0));
-            if (status == KILN_C99_OK)
-                status = kiln_c99_own_data(response->object, "headersSent", 11, kiln_c99_boolean(0));
-            if (status == KILN_C99_OK)
-                status = kiln_c99_own_data(response->object, "writableEnded", 13,
-                                           kiln_c99_boolean(0));
-            if (status == KILN_C99_OK)
-                status = kiln_c99_own_data_hot_key(response->object, KILN_C99_HOT_KEY_DESTROYED, kiln_c99_boolean(0));
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_new_object_with_capacity(&response->url_object, 4);
+                if (status == KILN_C99_OK)
+                    status = kiln_c99_new_object_with_capacity(&response->search_params_object, 4);
+                if (status == KILN_C99_OK)
+                    status = kiln_c99_put_hot_key(NULL, response->search_params_object, KILN_C99_HOT_KEY_GET,
+                                                  kiln_c99_method(KILN_C99_METHOD_URL_SEARCH_PARAMS_GET), 0, NULL);
+                if (status == KILN_C99_OK)
+                    status = kiln_c99_put_hot_key(NULL, response->url_object, KILN_C99_HOT_KEY_SEARCH_PARAMS,
+                                                  response->search_params_object, 0, NULL);
+            }
         }
         if (status != KILN_C99_OK) return status;
         response->request = request;
@@ -7230,8 +7232,11 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
             kiln_value arguments[2] = {request, response->object};
             if (!kiln_c99_is_callable(socket->server->connection_listener))
                 return KILN_C99_OK;
-            return kiln_c99_call(socket->host, &ignored, socket->server->connection_listener,
-                                 socket->server->object, arguments, 2, 0, exception);
+            kiln_c99_active_http_response = response;
+            status = kiln_c99_call(socket->host, &ignored, socket->server->connection_listener,
+                                  socket->server->object, arguments, 2, 0, exception);
+            kiln_c99_active_http_response = NULL;
+            return status;
         }
     }
     if (event->kind == 2 || event->kind == 3) {
@@ -8400,6 +8405,7 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
                 status = kiln_c99_node_set_hidden_pointer(built, "@@node:lazy-headers", 19,
                                                           response);
                 if (status != KILN_C99_OK) return status;
+                kiln_c99_node_materialize_all_headers(built);
             }
         }
         status = kiln_c99_own_slot(receiver, "headers", 7, &slot);
@@ -8417,11 +8423,6 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
         slot->configurable = 1;
         slot->enumerable = 1;
         slot->value = built;
-        if (response != NULL) {
-            free(response->request_headers);
-            response->request_headers = NULL;
-            response->request_headers_len = 0;
-        }
         *result = built;
         return KILN_C99_OK;
     }

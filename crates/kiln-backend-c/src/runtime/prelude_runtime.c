@@ -2186,6 +2186,11 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
         kiln_c99_gc_mark_value(heap, &response->request);
         kiln_c99_gc_mark_value(heap, &response->object);
         kiln_c99_gc_mark_value(heap, &response->headers);
+        kiln_c99_gc_mark_value(heap, &response->url_object);
+        kiln_c99_gc_mark_value(heap, &response->search_params_object);
+        kiln_c99_gc_mark_value(heap, &response->pathname_val);
+        kiln_c99_gc_mark_value(heap, &response->query_val);
+        kiln_c99_gc_mark_value(heap, &response->param_val);
         kiln_c99_gc_mark_block(heap, response->socket);
         kiln_c99_gc_mark_block(heap, response->next);
         break;
@@ -5137,6 +5142,8 @@ static int kiln_c99_valid_utf8(const char *bytes, size_t len) {
     return 1;
 }
 
+static kiln_node_response *kiln_c99_active_http_response = NULL;
+
 /* The URL subset shared with the interpreter today: absolute HTTP-like input, or a path against
  * an absolute base; pathname and query lookup are the public state. Keeping that advertised
  * subset identical is better than a broader native parser that disagrees in corners. */
@@ -5194,6 +5201,76 @@ static int kiln_c99_url_construct(kiln_value *out, const kiln_value *args, size_
     query = memchr(start, '?', (size_t)(end - start));
     fragment = memchr(start, '#', (size_t)(end - start));
     if (fragment != NULL && (query == NULL || fragment < query)) query = NULL;
+
+    if (kiln_c99_active_http_response != NULL && !kiln_c99_active_http_response->url_used) {
+        kiln_node_response *resp = kiln_c99_active_http_response;
+        if (resp->target_ptr != NULL && resp->target_len == input.len &&
+            memcmp(resp->target_ptr, input.ptr, input.len) == 0) {
+            resp->url_used = 1;
+            if (resp->url_object.tag != KILN_VALUE_OBJECT) {
+                status = kiln_c99_new_object_with_capacity(&resp->url_object, 4);
+                if (status != KILN_C99_OK) return status;
+                status = kiln_c99_new_object_with_capacity(&resp->search_params_object, 4);
+                if (status != KILN_C99_OK) return status;
+                status = kiln_c99_put_hot_key(NULL, resp->search_params_object, KILN_C99_HOT_KEY_GET,
+                                              kiln_c99_method(KILN_C99_METHOD_URL_SEARCH_PARAMS_GET), 0, NULL);
+                if (status != KILN_C99_OK) return status;
+                status = kiln_c99_put_hot_key(NULL, resp->url_object, KILN_C99_HOT_KEY_SEARCH_PARAMS,
+                                              resp->search_params_object, 0, NULL);
+                if (status != KILN_C99_OK) return status;
+            }
+            size_t path_len = (size_t)((query != NULL ? query :
+                                (fragment != NULL ? fragment : end)) - start);
+            if (resp->pathname_val.tag != KILN_VALUE_STRING || resp->pathname_val.ptr == NULL ||
+                path_len + 1 > resp->pathname_cap) {
+                size_t cap = path_len < 128 ? 128 : path_len + 128;
+                char *buf = kiln_c99_gc_alloc_text(cap);
+                if (buf == NULL) return KILN_C99_OUT_OF_MEMORY;
+                resp->pathname_val = kiln_c99_value(KILN_VALUE_STRING, 0, buf, (uint32_t)path_len);
+                resp->pathname_cap = cap;
+            }
+            char *pbuf = (char *)resp->pathname_val.ptr;
+            memcpy(pbuf, start, path_len);
+            pbuf[path_len] = '\0';
+            kiln_gc_heap *heap = kiln_c99_gc_heap();
+            kiln_gc_block *block = heap != NULL ? kiln_c99_gc_lookup(heap, pbuf) : NULL;
+            if (block != NULL) {
+                block->size = path_len;
+            }
+            resp->pathname_val.len = (uint32_t)path_len;
+            status = kiln_c99_put_hot_key(NULL, resp->url_object, KILN_C99_HOT_KEY_PATHNAME,
+                                          resp->pathname_val, 0, NULL);
+            if (status != KILN_C99_OK) return status;
+            size_t q_len = query != NULL ? (size_t)((fragment != NULL ? fragment : end) - query - 1) : 0;
+            if (query == NULL || q_len == 0) {
+                status = kiln_c99_put(NULL, resp->search_params_object, "@@url:query", 11,
+                                      kiln_c99_static_text("", 0), 0, NULL);
+            } else {
+                if (resp->query_val.tag != KILN_VALUE_STRING || resp->query_val.ptr == NULL ||
+                    q_len + 1 > resp->query_cap) {
+                    size_t cap = q_len < 64 ? 64 : q_len + 64;
+                    char *buf = kiln_c99_gc_alloc_text(cap);
+                    if (buf == NULL) return KILN_C99_OUT_OF_MEMORY;
+                    resp->query_val = kiln_c99_value(KILN_VALUE_STRING, 0, buf, (uint32_t)q_len);
+                    resp->query_cap = cap;
+                }
+                char *qbuf = (char *)resp->query_val.ptr;
+                memcpy(qbuf, query + 1, q_len);
+                qbuf[q_len] = '\0';
+                kiln_gc_block *qblock = heap != NULL ? kiln_c99_gc_lookup(heap, qbuf) : NULL;
+                if (qblock != NULL) {
+                    qblock->size = q_len;
+                }
+                resp->query_val.len = (uint32_t)q_len;
+                status = kiln_c99_put(NULL, resp->search_params_object, "@@url:query", 11,
+                                      resp->query_val, 0, NULL);
+            }
+            if (status != KILN_C99_OK) return status;
+            *out = resp->url_object;
+            return KILN_C99_OK;
+        }
+    }
+
     status = kiln_c99_new_object(out);
     if (status != KILN_C99_OK) return status;
     status = kiln_c99_put_hot_key(NULL, *out, KILN_C99_HOT_KEY_PATHNAME,
@@ -5234,9 +5311,39 @@ static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,
         equal = at;
         while (equal < pair_end && query.ptr[equal] != '=') ++equal;
         if (equal - at == name.len && memcmp(query.ptr + at, name.ptr, name.len) == 0) {
-            kiln_value encoded = kiln_c99_copy_text(
-                equal < pair_end ? query.ptr + equal + 1 : "",
-                equal < pair_end ? pair_end - equal - 1 : 0);
+            const char *val_ptr = equal < pair_end ? query.ptr + equal + 1 : "";
+            size_t val_len = equal < pair_end ? pair_end - equal - 1 : 0;
+            if (val_len == 0) {
+                *out = kiln_c99_static_text("", 0);
+                return KILN_C99_OK;
+            }
+            if (memchr(val_ptr, '%', val_len) == NULL) {
+                kiln_node_response *resp = kiln_c99_active_http_response;
+                if (resp != NULL) {
+                    if (resp->param_val.tag != KILN_VALUE_STRING || resp->param_val.ptr == NULL ||
+                        val_len + 1 > resp->param_cap) {
+                        size_t cap = val_len < 64 ? 64 : val_len + 64;
+                        char *buf = kiln_c99_gc_alloc_text(cap);
+                        if (buf == NULL) return KILN_C99_OUT_OF_MEMORY;
+                        resp->param_val = kiln_c99_value(KILN_VALUE_STRING, 0, buf, (uint32_t)val_len);
+                        resp->param_cap = cap;
+                    }
+                    char *pbuf = (char *)resp->param_val.ptr;
+                    memcpy(pbuf, val_ptr, val_len);
+                    pbuf[val_len] = '\0';
+                    kiln_gc_heap *heap = kiln_c99_gc_heap();
+                    kiln_gc_block *block = heap != NULL ? kiln_c99_gc_lookup(heap, pbuf) : NULL;
+                    if (block != NULL) {
+                        block->size = val_len;
+                    }
+                    resp->param_val.len = (uint32_t)val_len;
+                    *out = resp->param_val;
+                    return KILN_C99_OK;
+                }
+                *out = kiln_c99_copy_text(val_ptr, val_len);
+                return KILN_C99_OK;
+            }
+            kiln_value encoded = kiln_c99_copy_text(val_ptr, val_len);
             const kiln_value decode_args[1] = {encoded};
             return kiln_c99_invoke_method(NULL, out, KILN_C99_METHOD_DECODE_URI_COMPONENT,
                                           kiln_c99_undefined(), decode_args, 1, 0, thrown);
