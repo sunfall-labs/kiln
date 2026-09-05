@@ -10922,6 +10922,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 RuntimeTurn::Protocol => {}
                 RuntimeTurn::Completion(completion) => {
                     runtime.enter(|| self.settle_host_completion(completion))?;
+                    while let Some(next) = runtime.take_next_ready_completion() {
+                        runtime.enter(|| self.settle_host_completion(next))?;
+                    }
                 }
                 RuntimeTurn::Failure(failure) => {
                     return Err(ExecutionError::Host {
@@ -10978,14 +10981,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             .map(|(_, resource)| *resource)
             .collect::<Vec<_>>();
         runtime.discard_queued_http_events_except(&known);
+        let mut dispatched_any = false;
         for (server, resource) in connections {
-            let _ = runtime.enter(|| {
+            let count = runtime.enter(|| {
                 if server.borrow().protocol == ServerProtocol::HttpClient {
                     self.dispatch_runtime_http_client_events(&server, resource, self.instruction)
                 } else {
                     self.dispatch_runtime_http_events(&server, resource, self.instruction)
                 }
             })?;
+            if count > 0 {
+                dispatched_any = true;
+            }
+        }
+        if dispatched_any {
+            self.drain_microtasks(runtime)?;
         }
         Ok(())
     }
