@@ -26603,25 +26603,88 @@ static int kiln_c99_val_call_method(kiln_host *host, kiln_val receiver, const ki
                    kiln_c99_gc_kind_of_ptr(KILN_VAL_PTR(receiver)) == KILN_GC_OBJECT) {
             const kiln_object *object = (const kiln_object *)KILN_VAL_PTR(receiver);
             if (object->shape != NULL) {
-                /* An own property is remembered by its slot; a prototype's by value. */
+                /* An own property is remembered by its slot. A prototype's is remembered by
+                 * where it lives, one or two steps up the chain, when the holder is a shaped
+                 * object and the slot there holds exactly the callee just resolved -- a data
+                 * property, not an accessor. Anything else is not remembered, and the site
+                 * resolves it again next time. */
                 uint32_t own_slot = UINT32_MAX;
                 int own = kiln_c99_shape_find_slot(object->shape, key, &own_slot);
-                kiln_val remembered = own ? 0 : method;
+                kiln_c99_pic_entry remembered;
                 size_t p;
                 int found = 0;
+                memset(&remembered, 0, sizeof remembered);
+                remembered.shape = object->shape;
+                remembered.slot = own ? own_slot : UINT32_MAX;
+                if (!own) {
+                    const kiln_object *via = NULL;
+                    const kiln_object *step = NULL;
+                    uint32_t slot = UINT32_MAX;
+                    int steps;
+                    kiln_value link = object->prototype;
+                    const char *holder_key = NULL;
+                    for (steps = 0; steps < 2 && link.tag == KILN_VALUE_OBJECT; ++steps) {
+                        const kiln_object *candidate = (const kiln_object *)(uintptr_t)link.bits;
+                        if (kiln_c99_gc_kind_of_ptr((void *)candidate) != KILN_GC_OBJECT) {
+                            break;
+                        }
+                        if (candidate->shape != NULL) {
+                            if (kiln_c99_shape_find_slot(candidate->shape, key, &slot)) {
+                                if (slot < candidate->slot_capacity && candidate->slots[slot] == method) {
+                                    step = candidate;
+                                }
+                                break;
+                            }
+                        } else {
+                            /* A list-mode holder: the record is valid while it carries this
+                             * key pointer, so only a record keyed by the interned pointer the
+                             * site resolved with is remembered. An intermediate in list mode
+                             * cannot promise it has not gained the key, so the walk stops. */
+                            size_t i;
+                            int seen = 0;
+                            for (i = 0; i < candidate->count; ++i) {
+                                const kiln_property *property = &candidate->properties[i];
+                                if (property->key_len == key_len &&
+                                    memcmp(property->key, key, key_len) == 0) {
+                                    seen = 1;
+                                    if (property->key == key && !property->accessor &&
+                                        !property->refused &&
+                                        kiln_val_from_boundary(property->value) == method) {
+                                        step = candidate;
+                                        slot = (uint32_t)i;
+                                        holder_key = property->key;
+                                        remembered.holder_value = property->value;
+                                        remembered.holder_val = method;
+                                    }
+                                    break;
+                                }
+                            }
+                            (void)seen;
+                            break;
+                        }
+                        via = candidate;
+                        link = candidate->prototype;
+                    }
+                    if (step != NULL) {
+                        remembered.holder = step;
+                        remembered.holder_shape = step->shape;
+                        remembered.holder_key = holder_key;
+                        remembered.holder_slot = slot;
+                        if (via != NULL) {
+                            remembered.via = via;
+                            remembered.via_shape = via->shape;
+                        }
+                    }
+                }
                 for (p = 0; p < site->pic_count; ++p) {
                     if (site->entries[p].shape == object->shape) {
-                        site->entries[p].slot = own ? own_slot : UINT32_MAX;
-                        site->entries[p].method = remembered;
+                        site->entries[p] = remembered;
                         found = 1;
                         break;
                     }
                 }
                 if (!found && site->pic_count < KILN_C99_PIC_SIZE) {
-                    site->entries[site->pic_count].shape = object->shape;
-                    site->entries[site->pic_count].transition_to = NULL;
-                    site->entries[site->pic_count].slot = own ? own_slot : UINT32_MAX;
-                    site->entries[site->pic_count].method = remembered;
+                    site->entries[site->pic_count] = remembered;
                     site->pic_count += 1;
                 }
             }

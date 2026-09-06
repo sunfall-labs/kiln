@@ -184,6 +184,9 @@ pub fn typed_signature(
     if needs.receiver {
         params.push_str(", kiln_val receiver");
     }
+    if needs.row {
+        params.push_str(", const uint32_t *recv_row_in");
+    }
     if needs.runtime {
         params.push_str(", kiln_host *host, kiln_value *thrown");
     }
@@ -606,9 +609,9 @@ fn share_sites(body: &str, prefix: &str) -> (String, usize) {
 /// cache: one column per property name, in first-read order -- the same order in every
 /// clone. Two reads of one name share a column because for one receiver of one shape they
 /// are one slot, and the C compiler then reads it once.
-fn this_columns(graph: &FunctionGraph) -> std::collections::HashMap<ValueId, usize> {
+fn this_columns(graph: &FunctionGraph) -> (std::collections::HashMap<ValueId, usize>, Vec<u32>) {
     let mut names: Vec<u32> = Vec::new();
-    graph
+    let columns = graph
         .blocks
         .iter()
         .flat_map(|b| b.operations.iter())
@@ -628,32 +631,34 @@ fn this_columns(graph: &FunctionGraph) -> std::collections::HashMap<ValueId, usi
             }
             _ => None,
         })
-        .collect()
+        .collect();
+    (columns, names)
 }
 
 /// How many columns the receiver-shape cache of a body has.
-fn this_site_count(graph: &FunctionGraph) -> usize {
-    this_columns(graph)
-        .values()
-        .map(|c| c + 1)
-        .max()
-        .unwrap_or(0)
+pub(crate) fn this_site_count(graph: &FunctionGraph) -> usize {
+    this_columns(graph).1.len()
 }
 
-/// The receiver-shape cache's match at entry: the row whose shape is the receiver's, or -1.
-/// The boxed clone, whose slow path learns, also claims a free row for a shape it has not
-/// seen. Emitted right after `receiver` is defined and before any dispatch that could jump
-/// past it: a resumed generator lands at its landing with this already run.
-fn receiver_prologue(symbol: &str, index: usize, kind: EntryKind) -> String {
-    let claim = if kind == EntryKind::Boxed {
-        format!(
-            " else {{ int j; for (j = 0; j < 4; ++j) if ({symbol}_fn_{index}_recv_shape[j] == NULL) {{ {symbol}_fn_{index}_recv_shape[j] = recv_shape; recv_k = j; break; }} }}"
-        )
+/// The receiver-shape cache's row for the receiver, found or claimed at entry, before any
+/// dispatch that could jump past it: a resumed generator lands at its landing with this
+/// already run. NULL when the receiver is not an object, or its shape has no row.
+fn receiver_prologue(symbol: &str, index: usize, columns: &[u32], kind: EntryKind) -> String {
+    let keys: Vec<String> = columns
+        .iter()
+        .map(|name| format!("{symbol}_key_{name}"))
+        .collect();
+    let count = columns.len();
+    // A typed entry takes the row from a caller that has it, and looks one up only when the
+    // caller had none: the site remembers the callee's row for the receiver's shape.
+    let (init, lookup) = if matches!(kind, EntryKind::Typed { .. }) {
+        ("recv_row_in", "if (recv_row == NULL) ")
     } else {
-        String::new()
+        ("NULL", "")
     };
     format!(
-        "    int recv_k = -1; const kiln_object *recv_obj = NULL; if (KILN_VAL_IS_OBJECT(receiver)) {{ recv_obj = (const kiln_object *)KILN_VAL_PTR(receiver); const kiln_shape *recv_shape = recv_obj->shape; if (recv_shape != NULL) {{ if (recv_shape == {symbol}_fn_{index}_recv_shape[0]) recv_k = 0; else if (recv_shape == {symbol}_fn_{index}_recv_shape[1]) recv_k = 1; else if (recv_shape == {symbol}_fn_{index}_recv_shape[2]) recv_k = 2; else if (recv_shape == {symbol}_fn_{index}_recv_shape[3]) recv_k = 3;{claim} }} }} const uint32_t *recv_row = recv_k >= 0 ? {symbol}_fn_{index}_recv_slot[recv_k] : NULL; (void)recv_row;\n"
+        "    const uint32_t *recv_row = {init}; const kiln_object *recv_obj = NULL; if (KILN_VAL_IS_OBJECT(receiver)) {{ recv_obj = (const kiln_object *)KILN_VAL_PTR(receiver); {lookup}{{ recv_row = kiln_c99_recv_row({symbol}_fn_{index}_recv_shape, &{symbol}_fn_{index}_recv_slot[0][0], {count}, recv_obj->shape); if (recv_row == NULL && !kiln_c99_recv_refused({symbol}_fn_{index}_recv_refused, recv_obj->shape) && kiln_c99_gc_kind_of_ptr(recv_obj) == KILN_GC_OBJECT) {{ const char *const recv_keys[{count}] = {{ {} }}; recv_row = kiln_c99_recv_claim({symbol}_fn_{index}_recv_shape, {symbol}_fn_{index}_recv_refused, &{symbol}_fn_{index}_recv_slot[0][0], {count}, recv_keys, recv_obj); }} }} }} (void)recv_row; (void)recv_obj;\n",
+        keys.join(", ")
     )
 }
 
@@ -821,7 +826,7 @@ pub fn emit_function_from_graph_with_profile(
     // 3. Context & arguments setup. `ctx` is never null: every caller, the runtime's and the
     // emitted direct path alike, passes its own.
     let receiver_cache = if this_site_count(graph) > 0 {
-        receiver_prologue(symbol, index, kind)
+        receiver_prologue(symbol, index, &this_columns(graph).1, kind)
     } else {
         String::new()
     };
@@ -978,7 +983,7 @@ pub fn emit_function_from_graph_with_profile(
             let row = vec!["UINT32_MAX"; this_sites].join(", ");
             writeln!(
                 declarations,
-                "static const kiln_shape *{symbol}_fn_{index}_recv_shape[4];\nstatic uint32_t {symbol}_fn_{index}_recv_slot[4][{this_sites}] = {{ {{{row}}}, {{{row}}}, {{{row}}}, {{{row}}} }};"
+                "static const kiln_shape *{symbol}_fn_{index}_recv_shape[4];\nstatic const kiln_shape *{symbol}_fn_{index}_recv_refused[4];\nstatic uint32_t {symbol}_fn_{index}_recv_slot[4][{this_sites}] = {{ {{{row}}}, {{{row}}}, {{{row}}}, {{{row}}} }};"
             )
             .unwrap();
         }
@@ -1354,7 +1359,7 @@ fn emit_blocks(
     let body_start = output.len();
     // The reads of `this`, each with its column in the function's receiver-shape cache: one
     // row per shape seen, one column per property name.
-    let this_sites = this_columns(graph);
+    let this_sites = this_columns(graph).0;
     let candidate_params = candidate_number_parameters_with_profile(graph, proto, func_profile);
     let speculate_enabled = std::env::var("KILN_SPECULATE").as_deref() != Ok("0");
     let suspends = graph
@@ -2653,6 +2658,9 @@ fn emit_graph_op(
                 if needs.receiver {
                     call_args.push_str(", recv");
                 }
+                if needs.row {
+                    call_args.push_str(", NULL");
+                }
                 if needs.runtime {
                     call_args.push_str(", host, thrown");
                 }
@@ -2792,6 +2800,21 @@ fn emit_graph_op(
                     if needs.receiver {
                         call_args.push_str(&format!(", v{}", object.0));
                     }
+                    // The callee's row for this receiver's shape, remembered here from the
+                    // callee's own table after the first call, so the callee does no lookup.
+                    let (row_arg, row_learn) = if needs.row {
+                        let columns = plan.receiver_columns.get(i as usize).copied().unwrap_or(0);
+                        call_args.push_str(&format!(", obj->shape == kiln_typed_shape_{i} ? kiln_typed_row_{i} : NULL"));
+                        (
+                            String::new(),
+                            format!(
+                                " if (obj->shape != kiln_typed_shape_{i}) {{ kiln_typed_shape_{i} = obj->shape; kiln_typed_row_{i} = kiln_c99_recv_row({symbol}_fn_{i}_recv_shape, &{symbol}_fn_{i}_recv_slot[0][0], {columns}, obj->shape); }}"
+                            ),
+                        )
+                    } else {
+                        (String::new(), String::new())
+                    };
+                    let _ = row_arg;
                     if needs.runtime {
                         call_args.push_str(", host, thrown");
                     }
@@ -2801,15 +2824,31 @@ fn emit_graph_op(
                     let failed = format!(
                         "{{ int status = kiln_c99_typed_status; if (status == KILN_C99_THROWN) *thrown = kiln_c99_typed_thrown; {diag} {typed_check} }}"
                     );
+                    // The closure that last entered this candidate here is remembered, and a
+                    // cached callee equal to it is that closure: the site just read it live
+                    // from where the method lives. Its body is then known without a load.
+                    let matched = format!(
+                        "(cached_fn == kiln_typed_fn_{i} || (plain->body == (kiln_body_fn){symbol}_fn_{i} && (kiln_typed_fn_{i} = cached_fn) != 0)) && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH"
+                    );
                     if plan.typed_returns[i as usize] {
                         let twin = if typed { format!(" d{v} = kiln_typed_d;") } else { String::new() };
                         format!(
-                            "if (plain->body == (kiln_body_fn){symbol}_fn_{i} && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ double kiln_typed_d = {symbol}_fn_{i}_t({call_args}); if (KILN_UNLIKELY(kiln_c99_typed_failed(kiln_typed_d))) {failed} else {{ v{v} = kiln_c99_val_from_double(kiln_typed_d);{twin} }} handled = 1; }} else "
+                            "if ({matched}) {{ double kiln_typed_d = {symbol}_fn_{i}_t({call_args}); if (KILN_UNLIKELY(kiln_c99_typed_failed(kiln_typed_d))) {failed} else {{ v{v} = kiln_c99_val_from_double(kiln_typed_d);{twin}{row_learn} }} handled = 1; }} else "
                         )
                     } else {
                         format!(
-                            "if (plain->body == (kiln_body_fn){symbol}_fn_{i} && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ kiln_val kiln_typed_r = {symbol}_fn_{i}_t({call_args}); if (KILN_UNLIKELY(kiln_typed_r == KILN_VAL_TYPED_FAIL)) {failed} else {{ v{v} = kiln_typed_r; }} handled = 1; }} else "
+                            "if ({matched}) {{ kiln_val kiln_typed_r = {symbol}_fn_{i}_t({call_args}); if (KILN_UNLIKELY(kiln_typed_r == KILN_VAL_TYPED_FAIL)) {failed} else {{ v{v} = kiln_typed_r;{row_learn} }} handled = 1; }} else "
                         )
+                    }
+                })
+                .collect();
+            let typed_remembered: String = typed_candidates
+                .iter()
+                .map(|i| {
+                    if plan.typed_needs[*i as usize].row {
+                        format!("static kiln_val kiln_typed_fn_{i} = 0; static const kiln_shape *kiln_typed_shape_{i} = NULL; static const uint32_t *kiln_typed_row_{i} = NULL; ")
+                    } else {
+                        format!("static kiln_val kiln_typed_fn_{i} = 0; ")
                     }
                 })
                 .collect();
@@ -3716,7 +3755,7 @@ fn emit_graph_op(
                 output,
                 "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; \
                 kiln_val call_args[{n}] = {{ {init} }}; \
-                int handled = 0; int kiln_twin = 0; (void)kiln_twin; \
+                int handled = 0; int kiln_twin = 0; (void)kiln_twin; {typed_remembered}\
                 {math_s}{push_s}{regex_s}{map_s}{filter_s}{reduce_s}{slice_s}{join_s}{split_s}{index_of_s}{substring_s}{collection_s}{json_s}{sort_s}{array_extra_s}{string_extra_s}{iterator_s} \
                 if (!handled && site.pic_count > 0 && KILN_VAL_IS_OBJECT(v{o})) {{ \
                     const kiln_object *obj = (const kiln_object *)KILN_VAL_PTR(v{o}); \
@@ -4026,18 +4065,14 @@ fn emit_graph_op(
             // A read of `this`: the function's receiver-shape cache answers first, one indexed
             // load and no compare, because the shape was matched once at entry. The boxed
             // clone, whose slow path is the one that learns, fills the row afterwards.
+            // A read of `this`: the function's receiver-shape cache answers with one indexed
+            // load when the receiver's shape has a row, which was filled whole from the shape.
             let (receiver_tier, receiver_learn) = match (this_site, self_index) {
-                (Some(i), Some(index)) => (
+                (Some(i), Some(_)) => (
                     format!(
-                        "if (recv_row != NULL) {{ uint32_t rs = recv_row[{i}]; if (rs != UINT32_MAX && KILN_LIKELY(rs < recv_obj->slot_capacity)) {{ v{v} = recv_obj->slots[rs]; handled = 1; }} }} "
+                        "if (recv_row != NULL) {{ v{v} = recv_obj->slots[recv_row[{i}]]; handled = 1; }} "
                     ),
-                    if kind == EntryKind::Boxed {
-                        format!(
-                            " if (recv_k >= 0 && {symbol}_fn_{index}_recv_slot[recv_k][{i}] == UINT32_MAX && recv_obj->shape == {symbol}_fn_{index}_recv_shape[recv_k]) {symbol}_fn_{index}_recv_slot[recv_k][{i}] = kiln_c99_site_slot_for(&site, recv_obj->shape);"
-                        )
-                    } else {
-                        String::new()
-                    },
+                    String::new(),
                 ),
                 _ => (String::new(), String::new()),
             };

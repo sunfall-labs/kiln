@@ -753,6 +753,9 @@ static inline kiln_val kiln_c99_site_cached_callee(const kiln_c99_site *site, co
 #define KILN_C99_SITE_GIVE_UP 8u
 typedef struct kiln_proxy {
 typedef enum kiln_gc_kind {
+static inline const uint32_t *kiln_c99_recv_row(const kiln_shape **shapes, const uint32_t *slots,
+static inline int kiln_c99_recv_refused(const kiln_shape *const *refused, const kiln_shape *shape) {
+static inline const uint32_t *kiln_c99_recv_claim(const kiln_shape **shapes,
 typedef struct kiln_array {
 typedef struct kiln_generator {
 typedef struct kiln_date_parts {
