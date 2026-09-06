@@ -1905,6 +1905,14 @@ pub const SPECULATION_INVARIANTS: &[SpeculationInvariant] = &[
         name: "loop_speculation_exit",
         language_rule: "ECMA-262 §14.7.5: Loop header state deoptimizes cleanly to generic locals",
     },
+    SpeculationInvariant {
+        name: "upvalue_array",
+        language_rule: "ECMA-262 §9.1.1.1 declarative environment records: a binding stored once holds that value at every later read, so an Array exotic object read from it at entry is the object read in the body",
+    },
+    SpeculationInvariant {
+        name: "method_call_number",
+        language_rule: "ECMA-262 §13.15.3 ApplyStringOrNumericBinaryOperator: an operand that is a Number takes the numeric branch; one that is not leaves for the generic clone after the call that answered it",
+    },
 ];
 
 pub const fn assert_speculation_invariants(rows: &[SpeculationInvariant]) -> usize {
@@ -1946,6 +1954,8 @@ pub const fn lookup_speculation_invariant(name: &str) -> &'static SpeculationInv
 const _: usize = assert_speculation_invariants(SPECULATION_INVARIANTS);
 const _: &SpeculationInvariant = lookup_speculation_invariant("parameter_number");
 const _: &SpeculationInvariant = lookup_speculation_invariant("loop_speculation_exit");
+const _: &SpeculationInvariant = lookup_speculation_invariant("upvalue_array");
+const _: &SpeculationInvariant = lookup_speculation_invariant("method_call_number");
 
 /// A refusal in the emitted prelude names what it lacked, and an `undefined` answer names what
 /// proves the name absent.

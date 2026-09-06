@@ -867,33 +867,95 @@ fn render_functions(
             .unwrap();
         }
     }
+    // A typed entry over a restartable body is emitted as one: decided by emitting it, which
+    // depends on the plan and not on what the entry turns out to need.
+    let typed_restartable: Vec<bool> = program
+        .functions
+        .iter()
+        .enumerate()
+        .map(|(index, proto)| {
+            direct.typed[index].as_ref().is_some_and(|typed| {
+                emit_graph::emit_restartable(
+                    &graphs[index],
+                    proto,
+                    program,
+                    symbol,
+                    index,
+                    !proto_produces_references(proto, program),
+                    diagnostic_site,
+                    &plan.functions,
+                    strict_functions,
+                    typed,
+                    emit_graph::EntryKind::Typed {
+                        returns_number: typed.typed_returns[index],
+                        restartable: true,
+                    },
+                    false,
+                )
+                .is_some()
+            })
+        })
+        .collect();
+    let emit_typed =
+        |output: &mut String, index: usize, typed: &direct::CallPlan, profiled: bool| {
+            let proto = &program.functions[index];
+            let kind = emit_graph::EntryKind::Typed {
+                returns_number: typed.typed_returns[index],
+                restartable: typed_restartable[index],
+            };
+            if typed_restartable[index] {
+                let text = emit_graph::emit_restartable(
+                    &graphs[index],
+                    proto,
+                    program,
+                    symbol,
+                    index,
+                    !proto_produces_references(proto, program),
+                    diagnostic_site,
+                    &plan.functions,
+                    strict_functions,
+                    typed,
+                    kind,
+                    profiled && policy.type_profile_record,
+                )
+                .expect("a restartable body stays restartable");
+                output.push_str(&text);
+            } else {
+                let func_profile = if profiled {
+                    policy.type_profile.as_ref().and_then(|p| p.function(index))
+                } else {
+                    None
+                };
+                emit_graph::emit_function_from_graph_with_profile(
+                    output,
+                    &graphs[index],
+                    proto,
+                    program,
+                    symbol,
+                    index,
+                    !proto_produces_references(proto, program),
+                    diagnostic_site,
+                    &plan.functions,
+                    strict_functions,
+                    typed,
+                    kind,
+                    func_profile,
+                    profiled && policy.type_profile_record,
+                );
+            }
+        };
     // What each typed entry needs is what its emitted body names, and what its typed callees
     // need. Emit the typed bodies to find out, until nothing more is needed.
     let mut needs = vec![direct::TypedNeeds::default(); program.functions.len()];
     loop {
         direct.set_typed_needs(&needs);
         let mut changed = false;
-        for (index, proto) in program.functions.iter().enumerate() {
-            let Some(typed) = &direct.typed[index] else {
+        for (index, typed) in direct.typed.iter().enumerate() {
+            let Some(typed) = typed else {
                 continue;
             };
             let mut scratch = String::new();
-            emit_function_from_graph(
-                &mut scratch,
-                &graphs[index],
-                proto,
-                program,
-                symbol,
-                index,
-                !proto_produces_references(proto, program),
-                diagnostic_site,
-                &plan.functions,
-                strict_functions,
-                typed,
-                emit_graph::EntryKind::Typed {
-                    returns_number: typed.typed_returns[index],
-                },
-            );
+            emit_typed(&mut scratch, index, typed, false);
             let body = scratch
                 .find("kiln_block_0:;")
                 .map_or("", |at| &scratch[at..]);
@@ -938,13 +1000,13 @@ fn render_functions(
         })
         .collect();
     direct.set_fast(&fast);
-    for index in 0..program.functions.len() {
+    for (index, &has_fast) in fast.iter().enumerate() {
         writeln!(
             output,
             "static inline int {symbol}_fn_{index}(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc);"
         )
         .unwrap();
-        if fast[index] {
+        if has_fast {
             writeln!(
                 output,
                 "static inline int {symbol}_fn_{index}_f(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc);"
@@ -1006,24 +1068,7 @@ fn render_functions(
             policy.type_profile_record,
         );
         if let Some(typed) = &direct.typed[index] {
-            emit_graph::emit_function_from_graph_with_profile(
-                output,
-                &graphs[index],
-                proto,
-                program,
-                symbol,
-                index,
-                scalar_proto,
-                diagnostic_site,
-                &plan.functions,
-                strict_functions,
-                typed,
-                emit_graph::EntryKind::Typed {
-                    returns_number: typed.typed_returns[index],
-                },
-                func_profile,
-                policy.type_profile_record,
-            );
+            emit_typed(output, index, typed, true);
         }
         // Emitted again now that every plan knows the fast set: a fast clone calls other fast
         // clones by name.
