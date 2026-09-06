@@ -48,8 +48,11 @@ use oxc_syntax::operator::{AssignmentOperator, BinaryOperator, LogicalOperator, 
 /// clean parse. An unknown extension falls back to module-mode JavaScript; CLI source discovery
 /// already restricts ordinary project files to known JS/TS extensions.
 pub fn parse(path: &str, source: &str) -> Module {
-    let source_type = SourceType::from_path(Path::new(path))
+    let mut source_type = SourceType::from_path(Path::new(path))
         .unwrap_or_else(|_| SourceType::default().with_module(true));
+    if !path.ends_with(".cjs") {
+        source_type = source_type.with_module(true);
+    }
     parse_source(source, source_type)
 }
 
@@ -2640,6 +2643,29 @@ mod tests {
             "module.exports = function () { return require('./dep.cjs'); };",
         );
         assert_eq!(requires, ["./dep.cjs"]);
+    }
+
+    #[test]
+    fn js_and_mjs_parse_with_module_goal() {
+        let module_js = parse("foo.js", "export const x = 1;");
+        assert_eq!(module_js.source_goal, SourceGoal::Module);
+        assert!(
+            module_js.diagnostics.is_empty(),
+            "{:?}",
+            module_js.diagnostics
+        );
+
+        let with_js = parse("foo.js", "with ({}) {}");
+        assert!(
+            !with_js.diagnostics.is_empty(),
+            "Module goal must reject 'with' statements"
+        );
+
+        let module_ts = parse("foo.ts", "export const x: number = 1;");
+        assert_eq!(module_ts.source_goal, SourceGoal::Module);
+
+        let cjs = parse("foo.cjs", "var x = 1;");
+        assert_eq!(cjs.source_goal, SourceGoal::Script);
     }
 
     #[test]
