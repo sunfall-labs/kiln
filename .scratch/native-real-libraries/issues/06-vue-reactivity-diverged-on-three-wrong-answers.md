@@ -1,6 +1,8 @@
 # `vue-reactivity` diverged natively: three wrong answers, two fixed, one blocked on a method id
 
-Status: array reactivity fixed; collection reactivity blocked on `Reflect.getPrototypeOf`
+Status: resolved
+
+All three issues resolved. `Reflect.getPrototypeOf` is implemented natively via ADR 0043. `vue-reactivity` bundle matches node natively and in the interpreter.
 
 The second of the two bundles that ran and printed different bytes.
 
