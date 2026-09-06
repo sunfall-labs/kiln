@@ -3,6 +3,7 @@
 // method call whose cache remembers this method enters it by name with the closure's flags
 // decided by the proto. Every way out is a restart through the boxed body: a slot that is not
 // a number, a getter, a getter that throws, a receiver whose shape the cache has not seen.
+class Caller { run(p) { return p.dist(); } }                       // a site compiled before its callees
 class P { constructor(x, y) { this.x = x; this.y = y; } dist() { return Math.sqrt(this.x * this.x + this.y * this.y); } }
 class Q extends P { constructor(x, y, z) { super(x, y); this.z = z; } dist() { return Math.sqrt(this.x * this.x + this.y * this.y + this.z * this.z); } }
 class S { constructor(x) { this.x = x; } dist() { return this.x + this.x; } }
@@ -24,4 +25,6 @@ const n = new P(2, 2); n.extra = 1; out.push(n.dist());
 // A sloppy-mode method, and a method that reads one name of `this` twice.
 const sloppy = { x: 2, dist() { return this.x * this.x + this.x; } };
 out.push(sloppy.dist());
+const caller = new Caller();
+for (const p of pts) out.push(caller.run(p));
 console.log(out.join("|"));

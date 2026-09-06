@@ -598,7 +598,29 @@ typedef struct kiln_c99_pic_entry {
     const kiln_shape *shape;
     const kiln_shape *transition_to;
     uint32_t slot;
-    kiln_val method;
+    /* A method found on the prototype chain is remembered by where it lives, never by value: the
+     * object that holds it, that object's shape then, and the slot there, plus the receiver's
+     * immediate prototype and its shape when the holder is one step further. A hit walks that
+     * much of the chain by pointer, checks each shape is still the one remembered, and reads the
+     * slot live -- so a reassigned method is seen, a shadowing property added on the way changes
+     * a shape and misses, and a receiver whose prototype was swapped no longer reaches the
+     * holder. A method deeper than two steps is not remembered.
+     *
+     * A holder with a shape is read at `holder_slot`. One without -- a class prototype, whose
+     * methods are not enumerable and so live in the property list -- is read at that index of
+     * the list, valid while the record there still carries the key the site resolved, which is
+     * the realm's interned pointer for the name and is never freed. */
+    const kiln_object *holder;
+    const kiln_shape *holder_shape;
+    const char *holder_key;
+    const kiln_object *via;
+    const kiln_shape *via_shape;
+    uint32_t holder_slot;
+    /* What the list record held when remembered, and the same as the boxed value: a hit that
+     * finds the record still holding it answers the boxed value without converting. A record
+     * holding anything else is a reassignment, and the site resolves again. */
+    kiln_value holder_value;
+    kiln_val holder_val;
 } kiln_c99_pic_entry;
 
 typedef struct kiln_c99_site {
@@ -619,7 +641,7 @@ typedef struct kiln_c99_site {
 static inline uint32_t kiln_c99_site_slot_for(const kiln_c99_site *site, const kiln_shape *shape) {
     uint32_t p;
     for (p = 0; p < site->pic_count; ++p) {
-        if (site->entries[p].shape == shape && site->entries[p].method == 0 &&
+        if (site->entries[p].shape == shape && site->entries[p].holder == NULL &&
             site->entries[p].transition_to == NULL) {
             return site->entries[p].slot;
         }
@@ -627,17 +649,53 @@ static inline uint32_t kiln_c99_site_slot_for(const kiln_c99_site *site, const k
     return UINT32_MAX;
 }
 
-/* The callee a method-call site remembers for an object of `obj`'s shape, or 0. A method found
- * on the prototype is remembered by value; one that is the object's own property is remembered
- * by slot and read from *this* object, because two objects of one shape hold their own values.
- * Caching the value for an own property is what called the first subscriber's callback for
- * every later one. */
+/* The callee a method-call site remembers for an object of `obj`'s shape, or 0. One that is the
+ * object's own property is remembered by slot and read from *this* object, because two objects
+ * of one shape hold their own values -- caching the value for an own property is what called
+ * the first subscriber's callback for every later one. One found on the prototype chain is read
+ * live from the holder the entry names, after the chain from this object still reaches it and
+ * every object on the way still has the shape it had: a shape is a key path and says nothing
+ * about the prototype, so two classes with one field order share a shape, and only the chain
+ * tells their methods apart. */
 static inline kiln_val kiln_c99_site_cached_callee(const kiln_c99_site *site, const kiln_object *obj) {
     uint32_t p;
     for (p = 0; p < site->pic_count; ++p) {
         if (site->entries[p].shape == obj->shape) {
-            if (site->entries[p].method != 0) {
-                return site->entries[p].method;
+            if (site->entries[p].holder != NULL) {
+                const kiln_c99_pic_entry *entry = &site->entries[p];
+                const kiln_object *step;
+                if (obj->prototype.tag != KILN_VALUE_OBJECT) {
+                    return 0;
+                }
+                step = (const kiln_object *)(uintptr_t)obj->prototype.bits;
+                if (entry->via != NULL) {
+                    if (step != entry->via || step->shape != entry->via_shape ||
+                        step->prototype.tag != KILN_VALUE_OBJECT) {
+                        return 0;
+                    }
+                    step = (const kiln_object *)(uintptr_t)step->prototype.bits;
+                }
+                if (step != entry->holder || step->shape != entry->holder_shape) {
+                    return 0;
+                }
+                if (entry->holder_shape != NULL) {
+                    if (entry->holder_slot >= step->slot_capacity) {
+                        return 0;
+                    }
+                    return step->slots[entry->holder_slot];
+                }
+                if (entry->holder_slot >= step->count) {
+                    return 0;
+                }
+                {
+                    const kiln_property *record = &step->properties[entry->holder_slot];
+                    if (record->key != entry->holder_key ||
+                        record->value.tag != entry->holder_value.tag ||
+                        record->value.bits != entry->holder_value.bits) {
+                        return 0;
+                    }
+                }
+                return entry->holder_val;
             }
             if (site->entries[p].slot != UINT32_MAX && site->entries[p].slot < obj->slot_capacity) {
                 return obj->slots[site->entries[p].slot];
@@ -701,6 +759,79 @@ typedef enum kiln_gc_kind {
     KILN_GC_TIMER,
     KILN_GC_KIND_COUNT
 } kiln_gc_kind;
+
+/* A function's receiver-shape cache: four rows of shapes seen as `this`, and for each a slot
+ * per name the body reads of `this`. The row for `shape`, or NULL: a read through a row is one
+ * indexed load, with no absent-slot test and no capacity test, because a row is only ever
+ * claimed whole (below) and an object holds every slot its shape names. */
+static inline const uint32_t *kiln_c99_recv_row(const kiln_shape **shapes, const uint32_t *slots,
+                                                size_t columns, const kiln_shape *shape) {
+    size_t j;
+    for (j = 0; j < 4 && shapes[j] != NULL; ++j) {
+        if (shapes[j] == shape) {
+            return slots + j * columns;
+        }
+    }
+    return NULL;
+}
+
+/* Claims a row for `obj`'s shape when one is free and every name is an own data slot of the
+ * shape -- the shape knows its keys in slot order, so the whole row is filled from it here and
+ * needs no slow path to learn from. A shape with a name that is not its own -- a getter, a
+ * prototype's -- gets no row and is remembered as refused, so the attempt is not repeated;
+ * those reads take the site cache. The caller has checked the kind of the object first: a
+ * proxy is boxed like an object and whatever lies at its shape offset is not a shape to read
+ * keys from. `keys` are the realm's interned pointers, as a shape's are. */
+/* Whether a claim for `shape` was refused before, so it is not tried again. */
+static inline int kiln_c99_recv_refused(const kiln_shape *const *refused, const kiln_shape *shape) {
+    size_t j;
+    for (j = 0; j < 4; ++j) {
+        if (refused[j] == shape) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static inline const uint32_t *kiln_c99_recv_claim(const kiln_shape **shapes,
+                                                  const kiln_shape **refused, uint32_t *slots,
+                                                  size_t columns, const char *const *keys,
+                                                  const kiln_object *obj) {
+    const kiln_shape *shape = obj->shape;
+    size_t j, c;
+    if (shape == NULL) {
+        return NULL;
+    }
+    for (j = 0; j < 4 && shapes[j] != NULL; ++j) {
+    }
+    if (j == 4) {
+        return NULL;
+    }
+    for (c = 0; c < columns; ++c) {
+        uint32_t i;
+        uint32_t found = UINT32_MAX;
+        for (i = 0; i < shape->property_count; ++i) {
+            if (shape->keys[i] == keys[c]) {
+                found = i;
+                break;
+            }
+        }
+        if (found == UINT32_MAX) {
+            size_t r;
+            for (r = 0; r < 4; ++r) {
+                if (refused[r] == NULL) {
+                    refused[r] = shape;
+                    break;
+                }
+            }
+            return NULL;
+        }
+        slots[j * columns + c] = found;
+    }
+    shapes[j] = shape;
+    return slots + j * columns;
+}
+
 
 /* An array's elements are dense and its `length` is derived, not stored: writing past the end
  * grows it and the gap is filled with holes, which read as undefined and are not the same thing --

@@ -47,3 +47,11 @@ shape, and nothing about the shape changes when the prototype does. Either `setP
 transitions the shape (V8 gives the object a fresh map), or the entry also remembers the
 prototype it resolved through and the hit compares it. The second is one load and one compare
 on the hit path and needs no shape-tree change.
+
+## Fixed 2026-09-06
+
+The entry remembers the holder, its shape and the record (slot, or list index with the key
+pointer), plus the intermediate for a two-step chain; a hit walks the chain by pointer and reads
+the record live. Both cases above answer as node does; `conformance/native/method-cache-prototype.js`
+keeps them. Methods deeper than two steps, or behind a list-mode intermediate, are no longer
+cached at all rather than cached wrongly.

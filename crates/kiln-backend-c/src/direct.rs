@@ -64,6 +64,9 @@ pub struct TypedNeeds {
     pub upvalues: bool,
     /// `this`.
     pub receiver: bool,
+    /// The receiver-shape cache row for `this`, when the caller has it; NULL when it does not,
+    /// and the entry finds or claims one itself.
+    pub row: bool,
 }
 
 /// How one body's calls are emitted.
@@ -90,6 +93,9 @@ pub struct CallPlan {
     pub typed_needs: Vec<TypedNeeds>,
     /// Per proto: whether its typed entry exists in the unit.
     pub typed_entries: Vec<bool>,
+    /// Per proto: how many columns its receiver-shape cache has -- the names its body reads
+    /// of `this` -- so a call site can look a row up in the callee's table.
+    pub receiver_columns: Vec<usize>,
     /// Per proto: whether a fast clone exists -- the body with every slow path replaced by a
     /// restart through the boxed entry, for a body that can be restarted.
     pub fast: Vec<bool>,
@@ -224,6 +230,7 @@ impl DirectPlan {
                 typed_returns: typed_returns.clone(),
                 typed_needs: vec![TypedNeeds::default(); graphs.len()],
                 typed_entries: vec![false; graphs.len()],
+                receiver_columns: vec![0; graphs.len()],
                 fast: vec![false; graphs.len()],
             }
         };
@@ -364,6 +371,18 @@ impl DirectPlan {
             .chain(std::iter::once(&mut self.entry))
         {
             plan.fast = fast.to_vec();
+        }
+    }
+
+    /// Record every proto's receiver-shape cache width, in every body's plan.
+    pub fn set_receiver_columns(&mut self, columns: &[usize]) {
+        for plan in self
+            .functions
+            .iter_mut()
+            .chain(self.typed.iter_mut().flatten())
+            .chain(std::iter::once(&mut self.entry))
+        {
+            plan.receiver_columns = columns.to_vec();
         }
     }
 

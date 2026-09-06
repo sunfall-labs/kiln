@@ -4951,3 +4951,54 @@ typed entries, receiver rows) is ready for them.
 either way. A method-call site remembers a prototype method by value with nothing to forget it
 when the prototype's property is reassigned (`.scratch/method-cache-prototype-write`); the
 by-name and typed dispatch inherit the cached value and are exactly as right as the cache.
+
+## A method cache that answers by where the method lives (2026-09-06, Claude `alee/fastest-native`)
+
+**The hole.** A shape here is a key path and nothing else: instances of two classes whose
+constructors store the same keys share one shape, and a receiver whose prototype is swapped
+after construction keeps its shape. A method-call site remembered a prototype method *by
+value* under the receiver's shape, so `Object.setPrototypeOf(q, Other.prototype)` on a `Point`
+still called `Point.dist`, and `Point.prototype.dist = ...` was never seen. That was the by-name
+and typed dispatch's foundation, and it was wrong.
+
+**The fix.** An entry remembers where the method lives, never what it was: the holder object,
+the holder's shape then, the slot there -- or for a class prototype, whose methods are not
+enumerable and so live in the property list, the record's index and its key pointer -- and,
+when the holder is two steps up, the intermediate object and its shape. A hit walks that much
+of the chain by pointer, checks each shape is still the one remembered, and reads the record:
+a reassignment is seen, a shadowing property added on the way changes a shape and misses, a
+swapped prototype no longer reaches the holder. A method deeper than two steps, or behind an
+intermediate in list mode, is not remembered; the site resolves it each time. Class prototypes
+are list-mode, so the record is validated by its key pointer, the realm's interned one, which
+is never freed; the value is compared to the one remembered so the answer needs no conversion.
+`conformance/native/method-cache-prototype.js` holds every way the chain can change.
+
+**What it cost, and what bought it back.** class-poly 2.2 → 3.0 ms with the validation, then:
+
+- The chain by-name arm compares the cached callee against the closure that last entered this
+  candidate here, and enters the typed entry on equality: the site just read that closure
+  live, so it is alive and its body is known without a load. 2.9 ms.
+- The receiver-shape cache no longer learns a column at a time from a site's slow path. A
+  row is claimed whole, at first sight, from the shape's own key table, which lists keys in
+  slot order, and only when every name the body reads of `this` is an own slot; a shape with
+  a name that is not -- a getter, a prototype's -- is remembered as refused. A read is then
+  one indexed load: no absent-slot test and no capacity test, because an object holds every
+  slot its shape names. This is the "slot indices at compile time" of the last entry's
+  assessment, without predicting a constructor's path: the shape is the prediction, and the
+  claim is a lookup in it. Any clone may claim, since the claim has no effect. 2.4 ms.
+- A typed entry takes its row from a call site that has it; the site remembers the callee's
+  row for the receiver's shape from the callee's own table. 2.37 ms, within noise.
+
+**What remains.** The validation is about ten instructions a call, on top of the cache walk,
+the closure compare and the two flag tests. A prototype-write epoch -- one global bumped by
+any write to an object a site has remembered as a holder or intermediate -- would make the
+whole chain one load and one compare, but it has to be bumped on *every* write path, and a
+missed one is exactly the hole this entry closed. That is the next runtime step if this cost
+matters beyond this benchmark; the facts baseline is the judge.
+
+**Two things noticed.** `Date.now()` and `performance.now()` answer 0 under `kiln run`, native
+and interpreted: the wall clock is a realm capability the launcher requests for a built
+program and `run` does not grant. The benchmark harness measures built binaries, so every
+number in these entries stands; a timing probe under `run` will not. And the two-classes-one-
+shape probe answered correctly *before* the fix while the swapped-prototype probe did not; I
+did not find what separated them, and the fix does not depend on it.

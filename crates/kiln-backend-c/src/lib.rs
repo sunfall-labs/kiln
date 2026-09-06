@@ -867,6 +867,8 @@ fn render_functions(
             .unwrap();
         }
     }
+    let receiver_columns: Vec<usize> = graphs.iter().map(emit_graph::this_site_count).collect();
+    direct.set_receiver_columns(&receiver_columns);
     // A typed entry over a restartable body is emitted as one: decided by emitting it, which
     // depends on the plan and not on what the entry turns out to need.
     let typed_restartable: Vec<bool> = program
@@ -963,11 +965,13 @@ fn render_functions(
                 runtime: names(body, "host") || names(body, "thrown"),
                 upvalues: names(body, "upvalues"),
                 receiver: names(body, "receiver"),
+                row: names(body, "recv_row"),
             };
             let merged = direct::TypedNeeds {
                 runtime: needs[index].runtime || found.runtime,
                 upvalues: needs[index].upvalues || found.upvalues,
                 receiver: needs[index].receiver || found.receiver,
+                row: needs[index].row || found.row,
             };
             if merged != needs[index] {
                 needs[index] = merged;
@@ -1000,6 +1004,17 @@ fn render_functions(
         })
         .collect();
     direct.set_fast(&fast);
+    // A call site remembers the callee's receiver-cache row, so the tables are declared
+    // before any body: the definitions follow with the boxed clone that owns them.
+    for (index, &columns) in receiver_columns.iter().enumerate() {
+        if columns > 0 {
+            writeln!(
+                output,
+                "static const kiln_shape *{symbol}_fn_{index}_recv_shape[4];\nstatic uint32_t {symbol}_fn_{index}_recv_slot[4][{columns}];"
+            )
+            .unwrap();
+        }
+    }
     for (index, &has_fast) in fast.iter().enumerate() {
         writeln!(
             output,
