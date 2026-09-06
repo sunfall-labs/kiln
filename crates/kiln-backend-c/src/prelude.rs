@@ -3450,21 +3450,44 @@ static uint64_t kiln_c99_lookup_method_group(const char *key, size_t key_len, ui
 }
 
 /* A few prototype tables intentionally share a code span with another table. Their existing
- * explicit endpoints remain a lookup detail; the receiver-dispatch paths use generated groups. */
+ * explicit endpoints remain a lookup detail; the receiver-dispatch paths use generated groups.
+ *
+ * This used to walk `code` from `first` to `last`, asking `kiln_c99_method_name` for each and
+ * `strlen`+`memcmp`-ing the result against the key -- the same shape `kiln_c99_lookup_method_group`
+ * replaced for the array and string dispatch paths, and just as hot here: every JSON `toJSON`
+ * probe on a plain object or array reaches a range through this function on its way to answering
+ * "no such method", which is the common case and used to cost the whole range every time.
+ *
+ * `kiln_c99_method_index` is sorted by name already and holds every code the table above builds
+ * from, `[first, last]` included, so the same binary search answers a range exactly as it answers
+ * a group: find the run of entries whose name equals the key, and return the first of that run
+ * whose code falls in range. Entries with equal names are ordered by ascending code (see
+ * `kiln_c99_method_entry_before`), so that is the same code the walk would have found first
+ * scanning up from `first` -- the lowest in-range code with a matching name, or 0. */
 static uint64_t kiln_c99_lookup_method(const char *key, size_t key_len, uint64_t first,
                                        uint64_t last) {
-    uint64_t code;
+    size_t low = 0;
+    size_t high;
+    size_t at;
     if (key == NULL || key_len == 0) return 0;
-    for (code = first; code <= last; ++code) {
-        const char *name = kiln_c99_method_name(code);
-        size_t len;
-        if (name == NULL) {
-            continue;
+    if (!kiln_c99_method_index_ready) kiln_c99_method_index_build();
+    high = kiln_c99_method_index_len;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        const kiln_method_entry *entry = &kiln_c99_method_index[middle];
+        size_t shortest = entry->len < key_len ? entry->len : key_len;
+        int ordering = memcmp(entry->name, key, shortest);
+        if (ordering == 0 && entry->len != key_len) ordering = entry->len < key_len ? -1 : 1;
+        if (ordering < 0) {
+            low = middle + 1;
+        } else {
+            high = middle;
         }
-        len = strlen(name);
-        if (len == key_len && memcmp(name, key, len) == 0) {
-            return code;
-        }
+    }
+    for (at = low; at < kiln_c99_method_index_len; ++at) {
+        const kiln_method_entry *entry = &kiln_c99_method_index[at];
+        if (entry->len != key_len || memcmp(entry->name, key, key_len) != 0) break;
+        if (entry->code >= first && entry->code <= last) return entry->code;
     }
     return 0;
 }

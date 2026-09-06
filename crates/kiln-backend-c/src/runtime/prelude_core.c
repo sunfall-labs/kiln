@@ -19512,6 +19512,29 @@ static int kiln_c99_json_string(kiln_json_reader *reader, kiln_value *out) {
     kiln_text text = {NULL, 0, 0};
     uint16_t pending_high = 0;
     reader->at += 1;
+    /* The common case by far -- a string with no escape and no embedded control byte -- copies in
+     * one allocation, at `kiln_c99_copy_text`, rather than growing a builder one
+     * `kiln_c99_text_append` call per byte and copying it again at the end. Same shape as
+     * `kiln_c99_json_needs_escape` on the stringify side: one pass of plain comparisons either
+     * finds the closing quote, or finds the reason (an escape, a control byte, unterminated
+     * input) this string needs the byte-by-byte path below, which is untouched and still owns
+     * every one of those cases exactly as before. */
+    {
+        size_t start = reader->at;
+        size_t scan = start;
+        while (scan < reader->len) {
+            unsigned char byte = (unsigned char)reader->bytes[scan];
+            if (byte == '"') {
+                *out = kiln_c99_copy_text(reader->bytes + start, scan - start);
+                reader->at = scan + 1;
+                return KILN_C99_OK;
+            }
+            if (byte == '\\' || byte < 0x20) {
+                break;
+            }
+            ++scan;
+        }
+    }
     while (reader->at < reader->len) {
         char byte = reader->bytes[reader->at];
         if (byte == '"') {
@@ -26003,7 +26026,16 @@ static kiln_val kiln_c99_collection_delete_val_fast(kiln_collection *collection,
 static int kiln_c99_val_json_stringify_fast(kiln_host *host, kiln_val val, kiln_val *out, int depth, kiln_value *thrown) {
     kiln_text text = {NULL, 0, 0};
     int wrote = 0;
-    int status = kiln_c99_json_value(host, &text, kiln_val_to_boundary(val), "", 0, "", 0, &wrote, depth, NULL, thrown);
+    int status;
+    /* A generous first reservation, ignored on failure: the builder starts at capacity 4 and
+     * doubles from there, so an ordinary small document -- a handful of keys, a short array --
+     * paid for five or six reallocations on its way to a few hundred bytes, every one of them on
+     * this call's hot path. Skipping ahead to 128 bytes covers that common case in one
+     * allocation; a document too big for it still grows the same geometric way from here, and a
+     * failed reservation here is retried (and, if it still fails, correctly reported as
+     * out-of-memory) by the first real append below, so there is nothing to unwind. */
+    (void)kiln_c99_reserve((void **)&text.bytes, &text.capacity, 128, 1);
+    status = kiln_c99_json_value(host, &text, kiln_val_to_boundary(val), "", 0, "", 0, &wrote, depth, NULL, thrown);
     if (KILN_UNLIKELY(status != KILN_C99_OK)) {
         free(text.bytes);
         return status;
