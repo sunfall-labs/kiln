@@ -943,6 +943,18 @@ static uint32_t kiln_c99_gc_kind_of_ptr(const void *ptr) {
     return block->kind & KILN_GC_KIND_MASK;
 }
 
+/* The same answer as `kiln_c99_gc_kind_of_ptr`, without its slab lookup, for a pointer the caller
+ * already knows is a live GC payload -- one just taken off a `kiln_val` this frame holds, never an
+ * untrusted or possibly-interior address (that is what `kiln_c99_gc_lookup` is for). The block
+ * header is exactly one `kiln_gc_block` before the payload regardless of nursery, slab or malloc
+ * origin (see `kiln_c99_gc_alloc_ex` above), so this is pointer arithmetic and one read instead of
+ * a slab-table probe. A fast path that only ever sees a `kiln_val` it already trusts (a shaped
+ * object's own key path, the target `DefineNamedProperty` writes onto) can use this in place of
+ * `kiln_c99_gc_kind_of_ptr` for one call fewer of `kiln_c99_gc_lookup_slab` on its hot path. */
+static inline uint32_t kiln_c99_gc_payload_kind(const void *payload) {
+    return ((const kiln_gc_block *)payload - 1)->kind & KILN_GC_KIND_MASK;
+}
+
 /* A branch-light ASCII test, 8 bytes at a time: ASCII is exactly the bytes with their top bit
  * clear, so a single mask-and-compare per word answers for all eight at once. The tail below
  * 8 bytes falls back to one byte at a time. */

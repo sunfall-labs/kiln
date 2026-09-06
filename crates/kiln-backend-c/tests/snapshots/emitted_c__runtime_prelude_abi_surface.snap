@@ -1273,6 +1273,7 @@ static void kiln_c99_nursery_clear_bit(kiln_gc_heap *heap, const kiln_gc_block *
 static kiln_gc_block *kiln_c99_gc_lookup_nursery(const kiln_gc_heap *heap, const void *payload) {
 static kiln_gc_block *kiln_c99_gc_lookup(const kiln_gc_heap *heap, const void *payload) {
 static uint32_t kiln_c99_gc_kind_of_ptr(const void *ptr) {
+static inline uint32_t kiln_c99_gc_payload_kind(const void *payload) {
 static int kiln_c99_ascii_scan(const char *bytes, size_t len) {
 static int kiln_c99_string_is_ascii(kiln_value value) {
 static inline int kiln_c99_gc_is_tenured_kind(uint32_t kind) {
@@ -1794,6 +1795,7 @@ static int kiln_c99_keys_contain(kiln_value keys, const char *key, size_t key_le
 static int kiln_c99_enumerate_keys(kiln_host *host, kiln_value target, kiln_value *out,
 static int kiln_c99_spread_proxy(kiln_host *host, kiln_value target, kiln_value source, int depth,
 static int kiln_c99_grow_slots(kiln_object *dest, size_t needed) {
+static int kiln_c99_define_named_fast(kiln_val target, kiln_val key, kiln_val value, int *status) {
 static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value source,
 static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_definition_store(kiln_value target, kiln_value *out) {
