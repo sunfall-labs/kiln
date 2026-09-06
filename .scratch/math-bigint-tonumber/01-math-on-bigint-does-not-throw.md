@@ -20,3 +20,9 @@ either way -- the call answers a number or throws -- so nothing there depends on
 
 Triage: bug, language semantics, both engines. The fix is one `ToNumber` that refuses a BigInt,
 wherever the shared `Math` implementation converts its argument.
+
+**Status:** fixed 2026-09-06.
+- In native C backend: `kiln_c99_to_number_checked` now explicitly checks for and rejects `KILN_VALUE_SYMBOL` and `KILN_VALUE_BIGINT` with `TypeError: Cannot convert a Symbol/BigInt value to a number`. `KILN_C99_BUILTIN_NUMBER` handles BigInt conversion via `ToNumeric`. `MathNumber` group added to Math methods in `crates/kiln-backend-c/src/prelude.rs` so argument conversion goes through `kiln_c99_to_number_checked`.
+- In interpreter: `dispatch_native` validates arguments left-to-right rejecting `BigInt` (when hint is `PrimitiveHint::Number` and native != `NumberConstructor`) and `Symbol` with `TypeError`. `argument_number` and `argument_number_at` return `Result<f64, ExecutionError>`.
+- Verified across interpreter and native with `conformance/regress/r13-math-bigint-tonumber.js` and `conformance/native/math-bigint-tonumber.ts`.
+
