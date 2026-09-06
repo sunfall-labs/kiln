@@ -1305,7 +1305,8 @@ fn plan_unit(
         .collect::<Result<Vec<_>, _>>()?;
     let body = entry_proto(program);
     let entry_graph = graph_for(&body, program, "the module body", diagnostic_site)?;
-    let direct = direct::DirectPlan::plan(program, &graphs, &entry_graph);
+    let publishes_frame = compute_publishes_frame(program);
+    let direct = direct::DirectPlan::plan(program, &graphs, &entry_graph, &publishes_frame);
     Ok((graphs, body, entry_graph, direct))
 }
 
@@ -2221,40 +2222,85 @@ fn unary_code(operator: UnaryOp) -> u16 {
     }
 }
 
-/// Whether a call into this function must publish the per-frame context.
+/// Whether this proto's own code reads the per-frame globals directly, ignoring anything it
+/// calls or creates.
 ///
 /// `kiln_c99_invoke_closure_body` saves and restores `new_target`, `frame_args`, `frame_argc`,
-/// `captured_arguments` and the arrow flag around every call. Only three instructions can read
-/// them -- `LoadArguments`, `LoadNewTarget`, `RestArguments` -- so a function containing none of
-/// them cannot tell whether the publication happened. Skipping it measured 1.48x on a recursive
-/// `fib`, which is call-bound and reads neither.
+/// `captured_arguments` and the arrow flag around every call. Two instructions read them --
+/// `LoadArguments` and `LoadNewTarget` -- so a function containing neither cannot tell whether
+/// the publication happened, *from its own code alone*. Skipping it measured 1.48x on a
+/// recursive `fib`, which is call-bound and reads neither.
 ///
-/// Conservative in four directions beyond that, because a wrong answer here is a silently wrong
-/// `arguments` rather than a slow program:
+/// `RestArguments` is deliberately not in this list: the emitted C builds it from the body's own
+/// `args` and `argc` parameters (see `tail.rs`'s `Instruction::RestArguments` arm), never the
+/// frame globals, so `(...xs) => xs.length` does not need the frame merely for the rest
+/// parameter.
 ///
-///   - A function that creates any closure needs it: an arrow captures the enclosing frame's
-///     `arguments` at `MakeFunction` time, so the context must be live then even though this
-///     function never reads it.
-///   - An arrow needs it, because its own `arguments` resolves to the captured value.
-///   - A generator or async function needs it, because its body is entered and re-entered
-///     through paths that do not all pass through this predicate.
+/// A generator, async, or async-generator function is conservative unconditionally: its body is
+/// entered and re-entered through paths that do not all pass through this predicate.
 ///
-/// The diagnostic depth and refusal attribution are performed either way, so provenance is
-/// unaffected: this decides only the fields the language can observe.
-fn proto_publishes_frame(proto: &FunctionProto) -> bool {
-    proto.arrow
-        || proto.generator
+/// This is the *local* half of the answer. Whether a function needs the frame because of what it
+/// creates is [`compute_publishes_frame`]'s fixpoint over the whole program, not this function --
+/// an arrow that only reads `this` does not need the frame at all, so `arrow` alone is
+/// deliberately not a term here (unlike the predicate this replaced).
+fn proto_reads_frame_directly(proto: &FunctionProto) -> bool {
+    proto.generator
         || proto.asynchronous
         || proto.async_generator
         || proto.code.iter().any(|instruction| {
             matches!(
                 instruction,
-                Instruction::LoadArguments
-                    | Instruction::LoadNewTarget
-                    | Instruction::RestArguments(_)
-                    | Instruction::MakeFunction(_)
+                Instruction::LoadArguments | Instruction::LoadNewTarget
             )
         })
+}
+
+/// Whether a call into each of `program.functions` must publish the per-frame context, computed
+/// once for the whole program and threaded to every user -- `direct_callable`, the fast-clone and
+/// direct-call eligibility checks in `emit_graph.rs`, and the `kiln_c99_closure_of(built)
+/// ->publishes_frame` write at `MakeFunction` -- rather than recomputed per call site. The result
+/// rides alongside `CallPlan::typed_entries` and friends, cloned into every function's plan.
+///
+/// Proto `i` publishes when [`proto_reads_frame_directly`] says so, or when its code contains
+/// `MakeFunction(j)` for an arrow `j` that itself publishes: `kiln_c99_make_closure` captures the
+/// *enclosing* frame's visible `arguments`/`new.target` into an arrow's closure unconditionally
+/// at construction time, so the frame must be live then whenever the new arrow will actually read
+/// what it captured. A nested arrow that itself needs nothing from the frame captures values
+/// nobody reads, which is inert rather than wrong; a nested *non-arrow* function has its own
+/// `arguments` and never forces its parent, published or not.
+///
+/// Iterated to a fixpoint because an arrow can nest inside an arrow: each pass over the program
+/// can only turn a `false` into a `true`, never back, so this settles in at most
+/// `program.functions.len()` passes.
+pub(crate) fn compute_publishes_frame(program: &Program) -> Vec<bool> {
+    let mut publishes: Vec<bool> = program
+        .functions
+        .iter()
+        .map(proto_reads_frame_directly)
+        .collect();
+    loop {
+        let mut changed = false;
+        for (i, proto) in program.functions.iter().enumerate() {
+            if publishes[i] {
+                continue;
+            }
+            let forces = proto.code.iter().any(|instruction| match instruction {
+                Instruction::MakeFunction(j) => {
+                    let j = *j as usize;
+                    program.functions[j].arrow && publishes[j]
+                }
+                _ => false,
+            });
+            if forces {
+                publishes[i] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    publishes
 }
 
 fn binary_code(operator: BinaryOp) -> u16 {

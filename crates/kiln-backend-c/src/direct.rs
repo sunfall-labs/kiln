@@ -36,7 +36,6 @@ use crate::emit_graph::method_candidates;
 use crate::graph::{
     BlockId, FunctionGraph, GraphOp, Proven, Terminator, ValueId, proven_types_with,
 };
-use crate::proto_publishes_frame;
 
 /// Which body a graph belongs to.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -99,6 +98,12 @@ pub struct CallPlan {
     /// Per proto: whether a fast clone exists -- the body with every slow path replaced by a
     /// restart through the boxed entry, for a body that can be restarted.
     pub fast: Vec<bool>,
+    /// Per proto: whether a call into it must publish the per-frame context, from
+    /// [`crate::compute_publishes_frame`]'s one whole-program fixpoint. Cloned into every
+    /// function's plan the same way `typed_entries` is, so every user reads the same answer
+    /// instead of recomputing it -- the emitted C's `plain->publishes_frame` runtime flag must
+    /// agree with this at every proto, since call sites branch on both.
+    pub publishes_frame: Vec<bool>,
 }
 
 /// The whole unit's plan: a boxed plan per function, a typed one where the typed entry exists,
@@ -111,14 +116,41 @@ pub struct DirectPlan {
 }
 
 impl DirectPlan {
-    pub fn plan(program: &Program, graphs: &[FunctionGraph], entry: &FunctionGraph) -> Self {
+    pub fn plan(
+        program: &Program,
+        graphs: &[FunctionGraph],
+        entry: &FunctionGraph,
+        publishes_frame: &[bool],
+    ) -> Self {
         let known = known_callees(program, graphs, entry);
-        let direct: Vec<bool> = program.functions.iter().map(direct_callable).collect();
-        let typed_eligible: Vec<bool> = program
+        let direct: Vec<bool> = program
             .functions
             .iter()
-            .zip(&direct)
-            .map(|(_, &direct)| direct)
+            .zip(publishes_frame)
+            .map(|(proto, &publishes)| direct_callable(proto, publishes))
+            .collect();
+        // A typed entry's parameters are its declared ones, unpacked as `double`s -- no `args`
+        // array, no `argc`, because its contract is "called with exactly its parameter count of
+        // arguments" (see the module doc). `RestArguments` is emitted against the *boxed*
+        // calling convention's `args`/`argc` (`tail.rs`), which a typed entry does not have, so a
+        // proto that reads a rest parameter keeps its boxed and fast-clone direct-call
+        // eligibility (`direct`, computed above) but is excluded here: entering it typed would be
+        // emitting `args`/`argc` in a body that never declares them, a compile error rather than
+        // a wrong answer, but still not something to emit.
+        let has_rest_parameter: Vec<bool> = program
+            .functions
+            .iter()
+            .map(|proto| {
+                proto
+                    .code
+                    .iter()
+                    .any(|instruction| matches!(instruction, Instruction::RestArguments(_)))
+            })
+            .collect();
+        let typed_eligible: Vec<bool> = direct
+            .iter()
+            .zip(&has_rest_parameter)
+            .map(|(&direct, &has_rest)| direct && !has_rest)
             .collect();
         let intrinsics: Vec<HashMap<ValueId, Proven>> = graphs
             .iter()
@@ -232,6 +264,7 @@ impl DirectPlan {
                 typed_entries: vec![false; graphs.len()],
                 receiver_columns: vec![0; graphs.len()],
                 fast: vec![false; graphs.len()],
+                publishes_frame: publishes_frame.to_vec(),
             }
         };
         let functions: Vec<CallPlan> = graphs
@@ -276,7 +309,7 @@ impl DirectPlan {
                     && args.iter().all(|a| plan.numbers.contains(a))
                 {
                     targets.extend(
-                        method_candidates(program, key)
+                        method_candidates(program, key, publishes_frame)
                             .into_iter()
                             .filter(|&i| params[i as usize] as usize == args.len()),
                     );
@@ -410,8 +443,13 @@ struct Site {
 }
 
 /// A proto whose call needs nothing but the body: no frame published, no suspension.
-pub(crate) fn direct_callable(proto: &FunctionProto) -> bool {
-    !proto_publishes_frame(proto) && !proto.generator && !proto.asynchronous
+///
+/// `publishes_frame` is this proto's entry in the whole-program
+/// [`crate::compute_publishes_frame`] vector, not recomputed here -- it already folds in
+/// `generator`/`asynchronous`/`async_generator`, so the two extra checks below are redundant with
+/// it in practice and kept only so this reads as a complete answer on its own.
+pub(crate) fn direct_callable(proto: &FunctionProto, publishes_frame: bool) -> bool {
+    !publishes_frame && !proto.generator && !proto.asynchronous
 }
 
 /// What the unit knows about the built-ins it lowers as intrinsics: a `Math` method of the
