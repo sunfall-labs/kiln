@@ -1,6 +1,6 @@
 # PRD: Tagged Template Object Caching Across Evaluations
 
-Status: ready-for-agent
+Status: resolved
 Branch: `feat/tagged-template-cache`
 Owner: Antigravity, 2026-09-06
 
