@@ -1,6 +1,5 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 801
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -746,6 +745,7 @@ typedef struct kiln_object {
 #define KILN_C99_PIC_SIZE 4
 typedef struct kiln_c99_pic_entry {
 typedef struct kiln_c99_site {
+static inline kiln_val kiln_c99_site_cached_callee(const kiln_c99_site *site, const kiln_object *obj) {
 #define KILN_C99_SITE_NONE 0xFFFFFFFFu
 #define KILN_C99_SITE_GIVE_UP 8u
 typedef struct kiln_proxy {

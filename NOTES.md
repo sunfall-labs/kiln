@@ -4778,3 +4778,51 @@ hoisted its pure `fib_generic(30)` out of the five-iteration loop and timed one 
 five; a `volatile` argument fixes it and the honest ceiling is 11 ms. The plan's "fib ≤ 5 ms"
 was set against the wrong number; the corrected target, within 1.2x of the ceiling, is met.
 The `frame` benchmark is untouched by design: every function in it publishes a frame.
+
+## The inline method cache remembered the wrong thing (2026-09-05, Claude `work/fastest-native`)
+
+Rebasing the direct-call work onto the evening's landing -- twenty-six commits, Steps 2.1 to
+5.3 and B.3 to B.8 in one go -- found five thirdparty bundles diverging on `main`, reproduced on
+`origin/main` without the rebased commits. `native.sh` and the crate tests were green on that
+tree; `thirdparty.sh` is the corpus that landing did not run. Four causes, all in the inline
+sites of Step 2.4 (`a5aa5447`, which a bisecting subagent and a reduction by hand named alike):
+
+**A method-call site cached the callee by value, keyed by the receiver's shape.** Two objects
+of one shape hold their own values. `function run(cb) { const o = { next: cb }; o.next(3); }`
+called the first `cb` on every later call, `rxjs` delivered the first subscriber's callback to
+every subscriber, and `p-limit`'s queue -- `item.run = resolve` on each item -- resolved the
+first item's promise for every item, so `main()` awaited forever and the process exited clean
+and silent. An own property is now remembered by slot and read from *this* receiver at the
+call; a prototype's method is still remembered by value. Silence with exit 0 is what a dead
+promise chain looks like; the bundles buffer their lines and print once at the end.
+
+**The cached callee was entered through `plain->body` with only its generator flag checked.**
+A body that reads `arguments` ran without the frame globals the runtime sets on the way in,
+so `mobx`'s `join("+")` saw no arguments the second time through the site and joined with a
+comma. Every cached or intrinsic callee enters through `kiln_c99_invoke_closure` now, which is
+the one place that knows what a body needs.
+
+**A proxy is boxed with the object prefix and is not an object.** The caches read its handler
+as a shape, cached a trap's result under it, and hit on the next proxy of an array, whose
+first word is the same. Every cache path asks the collector for the kind before it reads one.
+
+**An element index was cast to `size_t` before its sign was checked**, which zig's safety
+mode traps on; `ajv` died on `-1`. The cast now sits inside the range check.
+
+**A regex class treated `\s` as a mode, not a member.** Step 5.3's C matchers modelled a
+class with `\s` in it as "the whitespace class", ignoring its other members and its negation:
+`/[^\s:]/` matched a space. postcss infers the `between` raw of a new declaration by stripping
+`[^\s:]` from an existing one, got `:` for `: `, and printed `top:0`. A class is now the union
+of its ranges and its escape sets with the negation over the whole of it.
+
+**Where the proxy check went.** A proxy is boxed with the object prefix and is forty bytes;
+an object's shape sits seventy-two bytes in, so a cache hit reading a proxy's shape reads past
+it. The only cheap test is a pointer compare against shapes the site has learned, and the
+kind lookup that would make the hit itself safe is a heap search that cost `class-poly` 3x
+when it ran per call. So the lookup guards the *fill*, once per shape, and a hit compares
+against shapes learned only from objects. The honest fix is a box bit for the kinds that are
+not objects -- a 47-bit payload leaves one free -- so the hit can test it in a mask; noted in
+`.scratch/thirdparty-regressions-2026-09-05/` as the follow-up.
+
+One more, mine to name: a module with top-level `await` fails to compile natively, because the
+entry point has no frame to suspend. It never worked; it should refuse by name.

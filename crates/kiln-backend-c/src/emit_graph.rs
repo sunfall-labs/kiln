@@ -2162,9 +2162,10 @@ fn emit_graph_op(
                                          continue; \
                                      }} \
                                      kiln_val vargs[3] = {{ arr->elements[idx], kiln_c99_val_from_double((double)idx), v{o} }}; \
-                                     kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; \
                                      kiln_val prod = KILN_VAL_UNDEFINED; \
-                                     status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)3); \
+                                     status; \
+                                     if (!plain->publishes_frame) {{ kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)3); }} \
+                                     else status = kiln_c99_invoke_closure(host, &prod, plain, vrecv, vargs, (size_t)3, depth, thrown, NULL, 0); \
                                      if (KILN_UNLIKELY(status != KILN_C99_OK)) {{ \
                                          {check} \
                                      }} \
@@ -2205,9 +2206,10 @@ fn emit_graph_op(
                                      if (arr->elements[idx] == KILN_VAL_HOLE) continue; \
                                      kiln_val elem = arr->elements[idx]; \
                                      kiln_val vargs[3] = {{ elem, kiln_c99_val_from_double((double)idx), v{o} }}; \
-                                     kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; \
                                      kiln_val prod = KILN_VAL_UNDEFINED; \
-                                     status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)3); \
+                                     status; \
+                                     if (!plain->publishes_frame) {{ kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)3); }} \
+                                     else status = kiln_c99_invoke_closure(host, &prod, plain, vrecv, vargs, (size_t)3, depth, thrown, NULL, 0); \
                                      if (KILN_UNLIKELY(status != KILN_C99_OK)) {{ \
                                          {check} \
                                      }} \
@@ -2243,9 +2245,10 @@ fn emit_graph_op(
                                  for (size_t idx = 0; idx < arr->count; ++idx) {{ \
                                      if (arr->elements[idx] == KILN_VAL_HOLE) continue; \
                                      kiln_val vargs[4] = {{ vacc, arr->elements[idx], kiln_c99_val_from_double((double)idx), v{o} }}; \
-                                     kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; \
                                      kiln_val prod = KILN_VAL_UNDEFINED; \
-                                     int status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)4); \
+                                     int status; \
+                                     if (!plain->publishes_frame) {{ kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)4); }} \
+                                     else status = kiln_c99_invoke_closure(host, &prod, plain, vrecv, vargs, (size_t)4, depth, thrown, NULL, 0); \
                                      if (KILN_UNLIKELY(status != KILN_C99_OK)) {{ \
                                          {check} \
                                      }} \
@@ -2459,19 +2462,16 @@ fn emit_graph_op(
                 {math_s}{push_s}{regex_s}{map_s}{filter_s}{reduce_s}{slice_s}{join_s}{split_s}{index_of_s}{substring_s} \
                 if (!handled && site.pic_count > 0 && KILN_VAL_IS_OBJECT(v{o})) {{ \
                     const kiln_object *obj = (const kiln_object *)KILN_VAL_PTR(v{o}); \
-                    kiln_val cached_fn = 0; \
-                    if (site.pic_count >= 1 && obj->shape == site.entries[0].shape) cached_fn = site.entries[0].method; \
-                    else if (site.pic_count >= 2 && obj->shape == site.entries[1].shape) cached_fn = site.entries[1].method; \
-                    else if (site.pic_count >= 3 && obj->shape == site.entries[2].shape) cached_fn = site.entries[2].method; \
-                    else if (site.pic_count >= 4 && obj->shape == site.entries[3].shape) cached_fn = site.entries[3].method; \
+                    kiln_val cached_fn = kiln_c99_site_cached_callee(&site, obj); \
                     if (cached_fn != 0 && KILN_VAL_IS_CLOSURE(cached_fn)) {{ \
                         kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(cached_fn); \
                         if (!plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
                             kiln_val vreceiver = plain->arrow ? plain->captured_this : v{o}; \
                             if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vreceiver); \
-                            kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; \
                             v{v} = KILN_VAL_UNDEFINED; \
-                            int status = plain->body(&ctx_call, &v{v}, plain->upvalues, &vreceiver, call_args, (size_t){argc}); \
+                            int status; \
+                            if (!plain->publishes_frame) {{ kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &v{v}, plain->upvalues, &vreceiver, call_args, (size_t){argc}); }} \
+                            else status = kiln_c99_invoke_closure(host, &v{v}, plain, vreceiver, call_args, (size_t){argc}, depth, thrown, NULL, 0); \
                             if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) {{ \
                                 if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = kiln_val_to_boundary(v{o}).tag; \
                                 if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod invocation refused\"; \

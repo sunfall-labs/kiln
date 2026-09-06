@@ -47,7 +47,10 @@ pub struct CharClass {
     pub ranges: Vec<(u16, u16)>,
     pub negated: bool,
     pub is_dot: bool,
+    /// `\s` is a member of the class: the union of `ranges` and the whitespace set. The
+    /// negation applies to the whole union, so `[^\s:]` is neither whitespace nor a colon.
     pub is_whitespace: bool,
+    /// `\S` is a member: everything that is not whitespace.
     pub is_non_whitespace: bool,
 }
 
@@ -97,10 +100,10 @@ impl CharClass {
     pub fn whitespace(negated: bool) -> Self {
         Self {
             ranges: Vec::new(),
-            negated: false,
+            negated,
             is_dot: false,
-            is_whitespace: !negated,
-            is_non_whitespace: negated,
+            is_whitespace: true,
+            is_non_whitespace: false,
         }
     }
 
@@ -136,16 +139,12 @@ impl CharClass {
             }
             return c != 0x000A && c != 0x000D && c != 0x2028 && c != 0x2029;
         }
-        if self.is_whitespace {
-            return is_ecma_whitespace(c);
-        }
-        if self.is_non_whitespace {
-            return !is_ecma_whitespace(c);
-        }
         let in_range = self
             .ranges
             .iter()
-            .any(|&(start, end)| c >= start && c <= end);
+            .any(|&(start, end)| c >= start && c <= end)
+            || (self.is_whitespace && is_ecma_whitespace(c))
+            || (self.is_non_whitespace && !is_ecma_whitespace(c));
         if self.negated { !in_range } else { in_range }
     }
 }
@@ -758,21 +757,9 @@ pub fn emit_regex_matcher(output: &mut String, prefix: &str, compiled: &Compiled
                 )
                 .unwrap();
             }
-        } else if class.is_whitespace {
-            writeln!(
-                output,
-                "    return c == ' ' || (c >= 0x0009 && c <= 0x000D) || c == 0x00A0 || c == 0xFEFF || (c >= 0x2000 && c <= 0x200A) || c == 0x2028 || c == 0x2029 || c == 0x202F || c == 0x205F || c == 0x3000 || c == 0x1680;"
-            )
-            .unwrap();
-        } else if class.is_non_whitespace {
-            writeln!(
-                output,
-                "    return !(c == ' ' || (c >= 0x0009 && c <= 0x000D) || c == 0x00A0 || c == 0xFEFF || (c >= 0x2000 && c <= 0x200A) || c == 0x2028 || c == 0x2029 || c == 0x202F || c == 0x205F || c == 0x3000 || c == 0x1680);"
-            )
-            .unwrap();
-        } else if class.ranges.is_empty() {
-            writeln!(output, "    return {};", if class.negated { 1 } else { 0 }).unwrap();
         } else {
+            // The union of the ranges and the escape sets, then the negation over all of it.
+            const WHITESPACE: &str = "(c == ' ' || (c >= 0x0009 && c <= 0x000D) || c == 0x00A0 || c == 0xFEFF || (c >= 0x2000 && c <= 0x200A) || c == 0x2028 || c == 0x2029 || c == 0x202F || c == 0x205F || c == 0x3000 || c == 0x1680)";
             let mut conds = Vec::new();
             for &(s, e) in &class.ranges {
                 if s == e {
@@ -781,11 +768,21 @@ pub fn emit_regex_matcher(output: &mut String, prefix: &str, compiled: &Compiled
                     conds.push(format!("(c >= 0x{s:04x} && c <= 0x{e:04x})"));
                 }
             }
-            let expr = conds.join(" || ");
-            if class.negated {
-                writeln!(output, "    return !({expr});").unwrap();
+            if class.is_whitespace {
+                conds.push(WHITESPACE.to_owned());
+            }
+            if class.is_non_whitespace {
+                conds.push(format!("!{WHITESPACE}"));
+            }
+            if conds.is_empty() {
+                writeln!(output, "    return {};", if class.negated { 1 } else { 0 }).unwrap();
             } else {
-                writeln!(output, "    return {expr};").unwrap();
+                let expr = conds.join(" || ");
+                if class.negated {
+                    writeln!(output, "    return !({expr});").unwrap();
+                } else {
+                    writeln!(output, "    return {expr};").unwrap();
+                }
             }
         }
         writeln!(output, "}}").unwrap();
