@@ -300,7 +300,7 @@ pub(crate) fn emit_tail_instruction(
         Instruction::DefineNamedProperty => {
             writeln!(
                 output,
-                "    {{ kiln_val kiln_dnp_value = stack[--sp]; kiln_val kiln_dnp_key = stack[--sp]; int kiln_dnp_status; if (kiln_c99_define_named_fast(stack[sp - 1], kiln_dnp_key, kiln_dnp_value, &kiln_dnp_status)) {{ if (kiln_dnp_status != KILN_C99_OK) {{ {direct_refusal} }} }} else {{ kiln_value method = kiln_val_to_boundary(kiln_dnp_value); kiln_value key = kiln_val_to_boundary(kiln_dnp_key); kiln_value name = kiln_c99_property_key(key); if (name.tag != KILN_VALUE_STRING) {{ {direct_refusal} }} if (kiln_c99_set_function_name(method, key, NULL) != KILN_C99_OK) {{ {direct_refusal} }} if (kiln_c99_put(host, kiln_val_to_boundary(stack[sp - 1]), name.ptr, name.len, method, depth, thrown) != KILN_C99_OK) {{ {direct_refusal} }} }} }}"
+                "    {{ static kiln_c99_site kiln_dnp_site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_val kiln_dnp_value = stack[--sp]; kiln_val kiln_dnp_key = stack[--sp]; int kiln_dnp_status; if (kiln_c99_define_named_fast(stack[sp - 1], kiln_dnp_key, kiln_dnp_value, &kiln_dnp_status, &kiln_dnp_site)) {{ if (kiln_dnp_status != KILN_C99_OK) {{ {direct_refusal} }} }} else {{ kiln_value method = kiln_val_to_boundary(kiln_dnp_value); kiln_value key = kiln_val_to_boundary(kiln_dnp_key); kiln_value name = kiln_c99_property_key(key); if (name.tag != KILN_VALUE_STRING) {{ {direct_refusal} }} if (kiln_c99_set_function_name(method, key, NULL) != KILN_C99_OK) {{ {direct_refusal} }} if (kiln_c99_put(host, kiln_val_to_boundary(stack[sp - 1]), name.ptr, name.len, method, depth, thrown) != KILN_C99_OK) {{ {direct_refusal} }} }} }}"
             )
             .unwrap();
         }
