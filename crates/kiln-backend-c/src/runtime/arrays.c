@@ -17,6 +17,9 @@ static int kiln_c99_new_array(kiln_value *out) {
     return KILN_C99_OK;
 }
 
+/* A capacity of eight or fewer fits the array's own `inline_elements` -- the shape
+ * `kiln_c99_val_array_push_fast` (boxed.c) already grows out of and the GC already knows not to
+ * free, both by checking `elements == inline_elements` first. */
 static int kiln_c99_new_array_with_capacity(kiln_value *out, size_t capacity, int is_numeric) {
     kiln_array *array = (kiln_array *)kiln_c99_gc_alloc(KILN_GC_ARRAY, sizeof *array);
     if (array == NULL) {
@@ -32,8 +35,14 @@ static int kiln_c99_new_array_with_capacity(kiln_value *out, size_t capacity, in
     array->match_input = kiln_c99_undefined();
     array->is_numeric = is_numeric;
     if (capacity > 0) {
-        int status = kiln_c99_reserve((void **)&array->elements, &array->capacity, capacity, sizeof *array->elements);
-        if (status != KILN_C99_OK) return status;
+        size_t inline_capacity = sizeof array->inline_elements / sizeof array->inline_elements[0];
+        if (capacity <= inline_capacity) {
+            array->elements = array->inline_elements;
+            array->capacity = inline_capacity;
+        } else {
+            int status = kiln_c99_reserve((void **)&array->elements, &array->capacity, capacity, sizeof *array->elements);
+            if (status != KILN_C99_OK) return status;
+        }
     }
     *out = kiln_c99_value(KILN_VALUE_ARRAY, (uint64_t)(uintptr_t)array, NULL, 0);
     return KILN_C99_OK;

@@ -272,6 +272,19 @@ static int kiln_c99_invoke_string_method(kiln_value *result, uint64_t code, kiln
         }
         if (code == KILN_C99_METHOD_SPLIT) {
             kiln_value sep = argc > 0 ? args[0] : kiln_c99_undefined();
+            /* A limit of zero answers the empty array before anything else is asked. `ToUint32`
+             * is why NaN reads as zero and a negative limit reads as unlimited. */
+            size_t lim = (size_t)0xFFFFFFFFu;
+            if (argc > 1 && args[1].tag != KILN_VALUE_UNDEFINED) {
+                lim = (size_t)kiln_c99_to_uint32(kiln_c99_as_number(args[1]));
+            }
+            if (lim == 0) {
+                kiln_value built;
+                int st = kiln_c99_new_array_with_capacity(&built, 0, 0);
+                if (st != KILN_C99_OK) return st;
+                *result = built;
+                return KILN_C99_OK;
+            }
             if (sep.tag == KILN_VALUE_UNDEFINED) {
                 kiln_value built;
                 int st = kiln_c99_new_array_with_capacity(&built, 1, 0);
@@ -285,40 +298,59 @@ static int kiln_c99_invoke_string_method(kiln_value *result, uint64_t code, kiln
             if (shown.tag == KILN_VALUE_STRING && kiln_c99_string_is_ascii(shown)) {
                 kiln_value built;
                 if (shown.len == 0) {
-                    int st = kiln_c99_new_array_with_capacity(&built, receiver.len, 0);
+                    size_t taken = receiver.len < lim ? receiver.len : lim;
+                    int st = kiln_c99_new_array_with_capacity(&built, taken, 0);
                     if (st != KILN_C99_OK) return st;
                     kiln_array *arr = kiln_c99_array_of(built);
-                    for (size_t i = 0; i < receiver.len; ++i) {
+                    for (size_t i = 0; i < taken; ++i) {
                         arr->elements[arr->count++] = kiln_c99_val_single_char((unsigned char)receiver.ptr[i]);
                     }
                     *result = built;
                     return KILN_C99_OK;
                 }
-                int st = kiln_c99_new_array_with_capacity(&built, 8, 0);
-                if (st != KILN_C99_OK) return st;
-                const char *p = receiver.ptr;
-                const char *end = receiver.ptr + receiver.len;
-                while (p <= end) {
-                    const char *next = NULL;
-                    if (shown.len == 1) {
-                        next = (const char *)memchr(p, shown.ptr[0], (size_t)(end - p));
-                    } else {
-                        next = kiln_c99_memmem(p, (size_t)(end - p), shown.ptr, shown.len);
+                /* Counted first and written once, directly, never through the growable
+                 * `kiln_c99_array_push`: that reallocs the array's element pointer, and an
+                 * inline-capacity array's element pointer is not a heap block to realloc. */
+                {
+                    size_t part_count = 1;
+                    const char *scan = receiver.ptr;
+                    const char *scan_end = receiver.ptr + receiver.len;
+                    while (scan <= scan_end && part_count < lim) {
+                        const char *next = shown.len == 1
+                            ? (const char *)memchr(scan, shown.ptr[0], (size_t)(scan_end - scan))
+                            : kiln_c99_memmem(scan, (size_t)(scan_end - scan), shown.ptr, shown.len);
+                        if (next == NULL) {
+                            break;
+                        }
+                        part_count += 1;
+                        scan = next + shown.len;
                     }
-                    if (next != NULL) {
-                        kiln_value piece = kiln_c99_copy_text(p, (size_t)(next - p));
-                        st = kiln_c99_array_push(built, piece);
-                        if (st != KILN_C99_OK) return st;
-                        p = next + shown.len;
-                    } else {
-                        kiln_value piece = kiln_c99_copy_text(p, (size_t)(end - p));
-                        st = kiln_c99_array_push(built, piece);
-                        if (st != KILN_C99_OK) return st;
-                        break;
+                    int st = kiln_c99_new_array_with_capacity(&built, part_count, 0);
+                    if (st != KILN_C99_OK) return st;
+                    {
+                        /* A truncating limit drops the tail rather than merging it into the
+                         * last kept piece, so the last piece is searched for like every other. */
+                        kiln_array *arr = kiln_c99_array_of(built);
+                        const char *p = receiver.ptr;
+                        const char *end = receiver.ptr + receiver.len;
+                        while (arr->count < part_count) {
+                            const char *next = shown.len == 1
+                                ? (const char *)memchr(p, shown.ptr[0], (size_t)(end - p))
+                                : kiln_c99_memmem(p, (size_t)(end - p), shown.ptr, shown.len);
+                            if (next != NULL) {
+                                arr->elements[arr->count++] =
+                                    kiln_val_from_boundary(kiln_c99_copy_text(p, (size_t)(next - p)));
+                                p = next + shown.len;
+                            } else {
+                                arr->elements[arr->count++] =
+                                    kiln_val_from_boundary(kiln_c99_copy_text(p, (size_t)(end - p)));
+                                break;
+                            }
+                        }
                     }
+                    *result = built;
+                    return KILN_C99_OK;
                 }
-                *result = built;
-                return KILN_C99_OK;
             }
         }
     }
