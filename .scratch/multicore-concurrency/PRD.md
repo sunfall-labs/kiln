@@ -1,6 +1,6 @@
 # Multicore In-Process Concurrency: Native Actors, Zero-Copy Region Transfer, and Effect v4 Integration
 
-## Status: Implemented (Gate Validated)
+Status: resolved
 
 Governing ADRs: [ADR 0057](file:///home/coder/kiln/docs/adr/0057-region-isolated-actors-and-zero-copy-transfer.md), [ADR 0028](file:///home/coder/kiln/docs/adr/0028-one-tokio-runtime-owns-interpreted-and-native-execution.md), [ADR 0041](file:///home/coder/kiln/docs/adr/0041-the-native-heap-is-collected-at-the-turn-boundary.md), [ADR 0056](file:///home/coder/kiln/docs/adr/0056-value-graph-and-verifier.md).
 

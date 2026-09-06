@@ -1,5 +1,7 @@
 # Real libraries run natively
 
+Status: in-progress
+
 ## Why
 
 Native compilation is the point of this engine, and until 2026-09-01 nothing measured it against

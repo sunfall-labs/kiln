@@ -1,5 +1,7 @@
 # Finish the HTTP engine migration (ADR 0046)
 
+Status: resolved
+
 ## Why
 
 ADR 0046 put HTTP connections on one Hyper task over a host-owned transport, with protocol events
