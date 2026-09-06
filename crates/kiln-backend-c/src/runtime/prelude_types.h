@@ -715,7 +715,13 @@ static inline kiln_val kiln_c99_site_cached_callee(const kiln_c99_site *site, co
 __attribute__((noinline, cold)) static double kiln_c99_int_slow(double value) {
     /* Opaque to the optimiser: an identity it could see through would be deleted, and the
      * conversions would be folded back beside the fast path. */
+    #if defined(__aarch64__)
     __asm__ volatile("" : "+w"(value));
+    #elif defined(__x86_64__) || defined(_M_X64)
+    __asm__ volatile("" : "+x"(value));
+    #else
+    __asm__ volatile("" : "+m"(value));
+    #endif
     return value;
 }
 
