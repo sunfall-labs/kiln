@@ -330,7 +330,7 @@ int main(void) {{
     kiln_value thrown = kiln_c99_undefined();
     if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
     kiln_test_realm_active = 1;
-    if (kiln_c99_make_closure(&callback, listener, "listener", 8, NULL, 0, "<test>", 0, 1, 0, 0, 0, 0,
+    if (kiln_c99_make_closure(&callback, listener, "listener", 8, NULL, 0, "<test>", 0, 1, 0, 0, 0, 0, 0,
                               1, KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED, 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 1;
     if ({symbol}(NULL, &result, NULL, 0, exports, 1) != KILN_C99_OK) return 2;
@@ -341,7 +341,7 @@ int main(void) {{
        if (kiln_c99_own_keys(NULL, emitter, &keys, 0, &thrown) != KILN_C99_OK) return 32;
        if (kiln_c99_array_of(keys)->count != 0) return 33;
     }}
-    if (kiln_c99_make_closure(&child, child_constructor, "Child", 5, NULL, 0, "<test>", 0, 0, 0, 0, 0, 0,
+    if (kiln_c99_make_closure(&child, child_constructor, "Child", 5, NULL, 0, "<test>", 0, 0, 0, 0, 0, 0, 0,
                               1, KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED, 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 34;
     args[0] = child; args[1] = exports[0];
@@ -421,7 +421,7 @@ int main(void) {
         method.bits != KILN_C99_METHOD_NODE_READABLE_PUSH) return 4;
     if (kiln_c99_get(NULL, readable_prototype, "on", 2, &method, 0, &thrown) != KILN_C99_OK ||
         method.tag != KILN_VALUE_METHOD || method.bits != KILN_C99_METHOD_NODE_EVENT_ON) return 5;
-    if (kiln_c99_make_closure(&child, readable_child, "Child", 5, "<test>", 6, "<test>", 0, 0, 0, 0, 0, 0,
+    if (kiln_c99_make_closure(&child, readable_child, "Child", 5, "<test>", 6, "<test>", 0, 0, 0, 0, 0, 0, 0,
                               1, KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED, 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 6;
     arguments[0] = child;
@@ -589,6 +589,7 @@ fn executable_numeric_operand_order_matches_symbol_conversion_rules() {
                     arrow: false,
                     generator: false,
                     async_generator: false,
+                    is_method: false,
                     parameter_count: 0,
                     declared_length: 0,
                     mapped_arguments: false,
@@ -610,6 +611,7 @@ fn executable_numeric_operand_order_matches_symbol_conversion_rules() {
                     arrow: false,
                     generator: false,
                     async_generator: false,
+                    is_method: false,
                     parameter_count: 0,
                     declared_length: 0,
                     mapped_arguments: false,
@@ -1127,6 +1129,7 @@ fn nested_call_refusal_preserves_the_failing_instruction_without_blaming_the_cal
             arrow: false,
             generator: false,
             async_generator: false,
+            is_method: false,
             parameter_count: 0,
             declared_length: 0,
             mapped_arguments: false,
@@ -1189,7 +1192,7 @@ int main(void) {
     if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
     kiln_test_realm_active = 1;
     if (kiln_c99_make_closure(&function, refuses_before_instruction, "initialize", 10,
-                              NULL, 0, "node_modules/example/index.js", 0, 0, 0, 0, 0, 0,
+                              NULL, 0, "node_modules/example/index.js", 0, 0, 0, 0, 0, 0, 0,
                               1, KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED, 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 1;
     if (kiln_c99_call(NULL, &result, function, kiln_c99_undefined(), NULL, 0, 0,
@@ -1788,6 +1791,7 @@ fn function(code: Vec<Instruction>) -> FunctionProto {
         arrow: false,
         generator: false,
         async_generator: false,
+        is_method: false,
         parameter_count: 0,
         declared_length: 0,
         mapped_arguments: false,
@@ -1841,6 +1845,11 @@ fn program_hash_covers_function_table_and_proto_contents() {
             prologue_end: 0,
             generator: true,
             async_generator: false,
+            ..function(vec![Instruction::Return])
+        },
+        FunctionProto {
+            prologue_end: 0,
+            is_method: true,
             ..function(vec![Instruction::Return])
         },
         FunctionProto {
@@ -4369,7 +4378,7 @@ int main(void) {
     kiln_value callable;
     if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
     kiln_test_realm_active = 1;
-    if (kiln_c99_make_closure(&callable, callback, "callback", 8, NULL, 0, "<test>", 0, 0, 0, 0, 0, 0,
+    if (kiln_c99_make_closure(&callable, callback, "callback", 8, NULL, 0, "<test>", 0, 0, 0, 0, 0, 0, 0,
                               1, KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED, 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK)
         return 1;
@@ -4610,6 +4619,7 @@ fn proven_numbers_reach_a_loop_carried_phi_and_stop_at_a_parameter() {
         generator: false,
         asynchronous: false,
         async_generator: false,
+        is_method: false,
         mapped_arguments: false,
         upvalues: Vec::new(),
         type_annotations: None,
@@ -4698,6 +4708,7 @@ fn versioning_emits_two_clones_with_entry_guard_and_loop_exit() {
         generator: false,
         asynchronous: false,
         async_generator: false,
+        is_method: false,
         mapped_arguments: false,
         upvalues: Vec::new(),
         type_annotations: None,
@@ -4783,6 +4794,7 @@ fn speculation_disabled_emits_generic_clone_alone() {
         generator: false,
         asynchronous: false,
         async_generator: false,
+        is_method: false,
         mapped_arguments: false,
         upvalues: Vec::new(),
         type_annotations: None,
@@ -4853,6 +4865,7 @@ fn value_graph_merges_locals_at_a_loop_header_with_phis() {
         generator: false,
         asynchronous: false,
         async_generator: false,
+        is_method: false,
         mapped_arguments: false,
         upvalues: Vec::new(),
         type_annotations: None,
@@ -4958,6 +4971,7 @@ fn value_graph_builds_and_verifies_scalar_loop() {
         generator: false,
         asynchronous: false,
         async_generator: false,
+        is_method: false,
         mapped_arguments: false,
         upvalues: Vec::new(),
         type_annotations: None,
@@ -5005,6 +5019,7 @@ fn value_graph_builds_and_verifies_try_catch() {
         generator: false,
         asynchronous: false,
         async_generator: false,
+        is_method: false,
         mapped_arguments: false,
         upvalues: Vec::new(),
         type_annotations: None,
@@ -5057,6 +5072,7 @@ fn value_graph_lowers_to_c_without_stack_or_sp() {
         generator: false,
         asynchronous: false,
         async_generator: false,
+        is_method: false,
         mapped_arguments: false,
         upvalues: Vec::new(),
         type_annotations: None,
@@ -5138,6 +5154,7 @@ fn typed_dist_compiles_to_guarded_unboxed_clone_with_entry_guards_matching_untyp
         generator: false,
         asynchronous: false,
         async_generator: false,
+        is_method: false,
         mapped_arguments: false,
         upvalues: Vec::new(),
         type_annotations,
@@ -5225,6 +5242,7 @@ fn type_annotations_drive_candidate_speculation_without_prior_inferred_uses() {
         generator: false,
         asynchronous: false,
         async_generator: false,
+        is_method: false,
         mapped_arguments: false,
         upvalues: Vec::new(),
         type_annotations,
@@ -5310,6 +5328,7 @@ fn type_profile_drives_candidate_speculation_and_recording() {
         generator: false,
         asynchronous: false,
         async_generator: false,
+        is_method: false,
         mapped_arguments: false,
         upvalues: Vec::new(),
         type_annotations: None,
