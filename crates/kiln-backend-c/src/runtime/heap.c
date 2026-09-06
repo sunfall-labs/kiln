@@ -1005,6 +1005,7 @@ static void *kiln_c99_gc_stack_base(kiln_gc_heap *heap) {
 #if defined(__APPLE__)
         heap->stack_base = pthread_get_stackaddr_np(pthread_self());
 #else
+        extern int pthread_getattr_np(pthread_t, pthread_attr_t *);
         pthread_attr_t attr;
         void *addr = NULL;
         size_t size = 0;
