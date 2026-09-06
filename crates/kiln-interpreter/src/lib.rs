@@ -14797,18 +14797,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // numeric call sites. The recursion terminates because a reduced argument is a primitive,
         // so the second pass finds nothing left to reduce.
         // A symbol has neither a number nor a string, and every built-in in that list asks for
-        // one or the other -- so a symbol argument is a `TypeError` before any of them runs. The
-        // reduction below only fires for objects, so a symbol reached the pure `argument_number`
-        // and answered NaN: `Math.abs(sym)` was NaN and `parseInt(sym)` was NaN where the
-        // language promises a throw. `String(sym)` is the one conversion that is legal, and
-        // `StringConstructor` is deliberately not in the list.
-        if native.primitive_argument_hint(arguments.len()).is_some()
-            && arguments
-                .iter()
-                .any(|argument| matches!(argument, Value::Symbol(_)))
-        {
-            return Err(ExecutionError::SymbolIsNotANumber);
-        }
+        // one or the other -- so a symbol argument is a `TypeError` before any of them runs.
+        // Similarly, BigInt refuses ToNumber, throwing TypeError unless the native is NumberConstructor
+        // (which uses ToNumeric).
         if let Some(hint) = native.primitive_argument_hint(arguments.len())
             && arguments.iter().any(|argument| {
                 matches!(
@@ -14825,9 +14816,32 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             for argument in arguments {
                 // Left to right, because each reduction can run user code and the order in which
                 // those calls happen is observable.
-                reduced.push(self.as_primitive(argument, hint, instruction)?);
+                let primitive = self.as_primitive(argument, hint, instruction)?;
+                if hint == PrimitiveHint::Number
+                    && native != Native::NumberConstructor
+                    && matches!(primitive, Value::BigInt(_))
+                {
+                    return Err(ExecutionError::BigIntIsNotANumber);
+                }
+                if matches!(primitive, Value::Symbol(_)) {
+                    return Err(ExecutionError::SymbolIsNotANumber);
+                }
+                reduced.push(primitive);
             }
             return self.dispatch_native(native, receiver, &reduced, instruction);
+        }
+        if let Some(hint) = native.primitive_argument_hint(arguments.len()) {
+            for argument in arguments {
+                if hint == PrimitiveHint::Number
+                    && native != Native::NumberConstructor
+                    && matches!(argument, Value::BigInt(_))
+                {
+                    return Err(ExecutionError::BigIntIsNotANumber);
+                }
+                if matches!(argument, Value::Symbol(_)) {
+                    return Err(ExecutionError::SymbolIsNotANumber);
+                }
+            }
         }
         // `CanBeHeldWeakly`: an object or an *unregistered* symbol, and nothing else. A weak
         // collection that took a number held something it could never observe being collected,
@@ -15384,7 +15398,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(Value::Number(id.get() as f64))
             }
             Native::ClearTimeout | Native::ClearInterval | Native::ClearImmediate => {
-                let id = argument_number(arguments);
+                let id = arguments.first().map_or(f64::NAN, Value::as_number);
                 if id.is_finite() && id >= 1.0 && id.fract() == 0.0 && id <= u64::MAX as f64 {
                     self.with_realm_mut(|realm| realm.clear_timeout(TimerId::new(id as u64)));
                 }
@@ -36512,13 +36526,13 @@ fn call_native(
         }
         // Every one of these is a plain transformation of its arguments, which is what keeps
         // them in this function rather than on the interpreter.
-        Native::MathAbs => Value::Number(argument_number(arguments).abs()),
-        Native::MathFloor => Value::Number(argument_number(arguments).floor()),
-        Native::MathCeil => Value::Number(argument_number(arguments).ceil()),
+        Native::MathAbs => Value::Number(argument_number(arguments)?.abs()),
+        Native::MathFloor => Value::Number(argument_number(arguments)?.floor()),
+        Native::MathCeil => Value::Number(argument_number(arguments)?.ceil()),
         // Not `f64::round`, which rounds a half away from zero: JavaScript rounds a half toward
         // positive infinity, so `Math.round(-1.5)` is -1 rather than -2.
         Native::MathRound => {
-            let value = argument_number(arguments);
+            let value = argument_number(arguments)?;
             Value::Number(if !value.is_finite() {
                 value
             } else {
@@ -36533,60 +36547,64 @@ fn call_native(
                 }
             })
         }
-        Native::MathTrunc => Value::Number(argument_number(arguments).trunc()),
+        Native::MathTrunc => Value::Number(argument_number(arguments)?.trunc()),
         // `Math.sign` preserves the sign of zero and passes NaN through, which `signum` does not.
         Native::MathSign => {
-            let value = argument_number(arguments);
+            let value = argument_number(arguments)?;
             Value::Number(if value.is_nan() || value == 0.0 {
                 value
             } else {
                 value.signum()
             })
         }
-        Native::MathSqrt => Value::Number(argument_number(arguments).sqrt()),
-        Native::MathCbrt => Value::Number(argument_number(arguments).cbrt()),
-        Native::MathSinh => Value::Number(argument_number(arguments).sinh()),
-        Native::MathCosh => Value::Number(argument_number(arguments).cosh()),
-        Native::MathTanh => Value::Number(argument_number(arguments).tanh()),
-        Native::MathAsinh => Value::Number(argument_number(arguments).asinh()),
-        Native::MathAcosh => Value::Number(argument_number(arguments).acosh()),
-        Native::MathAtanh => Value::Number(argument_number(arguments).atanh()),
+        Native::MathSqrt => Value::Number(argument_number(arguments)?.sqrt()),
+        Native::MathCbrt => Value::Number(argument_number(arguments)?.cbrt()),
+        Native::MathSinh => Value::Number(argument_number(arguments)?.sinh()),
+        Native::MathCosh => Value::Number(argument_number(arguments)?.cosh()),
+        Native::MathTanh => Value::Number(argument_number(arguments)?.tanh()),
+        Native::MathAsinh => Value::Number(argument_number(arguments)?.asinh()),
+        Native::MathAcosh => Value::Number(argument_number(arguments)?.acosh()),
+        Native::MathAtanh => Value::Number(argument_number(arguments)?.atanh()),
         // `ln(1 + x)` and `e^x - 1` as one operation each, which is the whole point of both: the
         // two-step spelling loses every significant digit for small `x`.
-        Native::MathLog1p => Value::Number(argument_number(arguments).ln_1p()),
-        Native::MathExpm1 => Value::Number(argument_number(arguments).exp_m1()),
+        Native::MathLog1p => Value::Number(argument_number(arguments)?.ln_1p()),
+        Native::MathExpm1 => Value::Number(argument_number(arguments)?.exp_m1()),
         // The nearest `f32`, widened back. A round trip, not a truncation.
         #[expect(clippy::cast_possible_truncation)]
-        Native::MathFround => Value::Number(f64::from(argument_number(arguments) as f32)),
+        Native::MathFround => Value::Number(f64::from(argument_number(arguments)? as f32)),
         // Through the bit pattern rather than through `as f32`: rounding to half and rounding to
         // single are different roundings, and doing the second one twice would answer with a
         // value half cannot hold.
         Native::MathF16Round => {
-            Value::Number(f64::from(half_to_f32(f64_to_half(argument_number(arguments)))))
+            Value::Number(f64::from(half_to_f32(f64_to_half(argument_number(arguments)?))))
         }
-        Native::MathClz32 => Value::Number(f64::from(to_uint32(argument_number(arguments)).leading_zeros())),
+        Native::MathClz32 => Value::Number(f64::from(to_uint32(argument_number(arguments)?).leading_zeros())),
         // Both operands are truncated to 32-bit *first*, which is what makes this different from
         // `a * b`: the product is exact in 32 bits and wraps rather than rounding.
         Native::MathImul => Value::Number(f64::from(
-            to_int32(argument_number(arguments))
-                .wrapping_mul(to_int32(arguments.get(1).map_or(f64::NAN, Value::as_number))),
+            to_int32(argument_number(arguments)?)
+                .wrapping_mul(to_int32(argument_number_at(arguments, 1)?)),
         )),
         // `hypot` is not `sqrt(x*x + y*y)`: squaring overflows for arguments whose result is
         // perfectly representable, which is the whole reason it exists.
-        Native::MathHypot => Value::Number(arguments.iter().fold(0.0f64, |total, argument| {
-            total.hypot(argument.as_number())
-        })),
+        Native::MathHypot => {
+            let mut total = 0.0f64;
+            for (index, _) in arguments.iter().enumerate() {
+                total = total.hypot(argument_number_at(arguments, index)?);
+            }
+            Value::Number(total)
+        }
         Native::MathAtan2 => Value::Number(
-            argument_number(arguments).atan2(arguments.get(1).map_or(f64::NAN, Value::as_number)),
+            argument_number(arguments)?.atan2(argument_number_at(arguments, 1)?),
         ),
-        Native::MathSin => Value::Number(argument_number(arguments).sin()),
-        Native::MathCos => Value::Number(argument_number(arguments).cos()),
-        Native::MathTan => Value::Number(argument_number(arguments).tan()),
-        Native::MathAsin => Value::Number(argument_number(arguments).asin()),
-        Native::MathAcos => Value::Number(argument_number(arguments).acos()),
-        Native::MathAtan => Value::Number(argument_number(arguments).atan()),
+        Native::MathSin => Value::Number(argument_number(arguments)?.sin()),
+        Native::MathCos => Value::Number(argument_number(arguments)?.cos()),
+        Native::MathTan => Value::Number(argument_number(arguments)?.tan()),
+        Native::MathAsin => Value::Number(argument_number(arguments)?.asin()),
+        Native::MathAcos => Value::Number(argument_number(arguments)?.acos()),
+        Native::MathAtan => Value::Number(argument_number(arguments)?.atan()),
         Native::MathPow => Value::Number(
-            argument_number(arguments).powf(arguments.get(1).map_or(f64::NAN, Value::as_number)),
+            argument_number(arguments)?.powf(argument_number_at(arguments, 1)?),
         ),
         // `Math.min()` with no arguments is Infinity and `Math.max()` is -Infinity, which are the
         // identities for the fold rather than an error. Any NaN argument wins outright.
@@ -36598,22 +36616,20 @@ fn call_native(
                 f64::NEG_INFINITY
             };
             let mut best = identity;
-            for argument in arguments {
-                let value = argument.as_number();
+            for (index, _) in arguments.iter().enumerate() {
+                let value = argument_number_at(arguments, index)?;
                 if value.is_nan() {
                     best = f64::NAN;
-                    break;
-                }
-                if (smallest && value < best) || (!smallest && value > best) {
+                } else if !best.is_nan() && ((smallest && value < best) || (!smallest && value > best)) {
                     best = value;
                 }
             }
             Value::Number(best)
         }
-        Native::MathLog => Value::Number(argument_number(arguments).ln()),
-        Native::MathLog2 => Value::Number(argument_number(arguments).log2()),
-        Native::MathLog10 => Value::Number(argument_number(arguments).log10()),
-        Native::MathExp => Value::Number(argument_number(arguments).exp()),
+        Native::MathLog => Value::Number(argument_number(arguments)?.ln()),
+        Native::MathLog2 => Value::Number(argument_number(arguments)?.log2()),
+        Native::MathLog10 => Value::Number(argument_number(arguments)?.log10()),
+        Native::MathExp => Value::Number(argument_number(arguments)?.exp()),
         // `Number(x)` converts; `Number()` with no argument is 0, not NaN.
         Native::PrimitiveValueOf | Native::StringToStringMethod => receiver.clone(),
         // Every hint answers the same thing, which is the point: a symbol does not become a
@@ -36752,8 +36768,8 @@ fn call_native(
                 if is_integer(*value) && value.abs() <= 9_007_199_254_740_991.0))
         }
         // The globals do coerce, which is the difference.
-        Native::IsNaN => Value::Boolean(argument_number(arguments).is_nan()),
-        Native::IsFinite => Value::Boolean(argument_number(arguments).is_finite()),
+        Native::IsNaN => Value::Boolean(argument_number(arguments)?.is_nan()),
+        Native::IsFinite => Value::Boolean(argument_number(arguments)?.is_finite()),
         Native::ParseInt => parse_int(arguments),
         Native::ParseFloat => parse_float(arguments),
         // Serialising reads every property, and reading an accessor is a call.
@@ -40108,12 +40124,24 @@ fn number_in_radix(value: f64, radix: u32) -> String {
     if negative { format!("-{text}") } else { text }
 }
 
+/// Positional argument at `index` as a number, or NaN when there is none.
+///
+/// ToNumber refuses BigInt and Symbol with a TypeError.
+fn argument_number_at(arguments: &[Value], index: usize) -> Result<f64, ExecutionError> {
+    match arguments.get(index) {
+        None | Some(Value::Undefined) => Ok(f64::NAN),
+        Some(Value::BigInt(_)) => Err(ExecutionError::BigIntIsNotANumber),
+        Some(Value::Symbol(_)) => Err(ExecutionError::SymbolIsNotANumber),
+        Some(other) => Ok(other.as_number()),
+    }
+}
+
 /// The first argument as a number, or NaN when there is none.
 ///
 /// `Math.abs()` is NaN rather than 0: a missing argument is `undefined`, and `Number(undefined)`
 /// is NaN.
-fn argument_number(arguments: &[Value]) -> f64 {
-    arguments.first().map_or(f64::NAN, Value::as_number)
+fn argument_number(arguments: &[Value]) -> Result<f64, ExecutionError> {
+    argument_number_at(arguments, 0)
 }
 
 fn is_integer(value: f64) -> bool {
