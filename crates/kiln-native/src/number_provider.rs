@@ -767,7 +767,7 @@ mod tests {
 
         assert_eq!(
             source_digest(&root.0).expect("hash source identity fixture"),
-            Digest::from_hex("56dc960212e519445cb0524af569ff7581ee759406249df78d95fcf4a6803091")
+            Digest::from_hex("1a4fdb47acac5a5a4b0ca1b34b2e2a1af930ba89167a69e34f416f2bc7697552")
                 .expect("fixture digest")
         );
     }

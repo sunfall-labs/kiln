@@ -4940,10 +4940,8 @@ pub enum ModuleLoadError {
     NotFound(String),
     /// A requested module is not a module. A `SyntaxError`, raised at link time.
     Syntax(String),
-    /// A module this compiler cannot build yet. Kept apart from the other two for the same
-    /// reason [`EvalCompileError::Unsupported`] is: rejecting would tell the program the module
-    /// is broken, and a program that believes that takes the branch it wrote for that instead of
-    /// failing.
+    /// A module this compiler cannot build yet, or an unsupported dynamic import. Rejects the
+    /// returned promise with a `TypeError` per ECMA-262 §13.3.10.1 (`HostLoadImportedModule`).
     Unsupported(String),
 }
 
@@ -32693,17 +32691,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// Resolve, evaluate and answer one `import(specifier)`.
     ///
     /// `Ok(Err(value))` is the rejection the promise gets: a specifier that names nothing, a
-    /// module that is not a module, a module whose body threw. An `Err` is this engine admitting
-    /// it cannot host the request at all, which is not something to tell the program -- a
-    /// rejection would look to it exactly like a module that failed.
+    /// module that is not a module, a host that cannot load the module, or a module whose body threw.
     fn import_module(&mut self, specifier: &str) -> Result<Result<Value, Value>, ExecutionError> {
         let Some(load) = self.module_loader else {
-            return Err(ExecutionError::NoModuleLoader);
+            let error = self.construct_error(
+                ErrorKind::Type,
+                &[Value::String("no module loader is installed".to_owned())],
+            );
+            return Ok(Err(error));
         };
         let plan = match load(specifier) {
             Ok(plan) => plan,
             Err(ModuleLoadError::Unsupported(message)) => {
-                return Err(ExecutionError::DynamicImportUnsupported { message });
+                let error = self.construct_error(ErrorKind::Type, &[Value::String(message)]);
+                return Ok(Err(error));
             }
             Err(ModuleLoadError::NotFound(message)) => {
                 let error = self.construct_error(ErrorKind::Type, &[Value::String(message)]);
@@ -32745,12 +32746,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             match self.drive_module(Rc::clone(&planned.program), locals)? {
                 Ok(returned) => {
                     let Value::Array(exported) = returned else {
-                        return Err(ExecutionError::DynamicImportUnsupported {
-                            message: format!(
+                        let error = self.construct_error(
+                            ErrorKind::Type,
+                            &[Value::String(format!(
                                 "module `{}` did not hand back its exports",
                                 planned.key
-                            ),
-                        });
+                            ))],
+                        );
+                        return Ok(Err(error));
                     };
                     let exported = Rc::new(exported.items.borrow().clone());
                     self.dynamic_modules
