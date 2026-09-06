@@ -34,6 +34,7 @@ macro_rules! provider_abi_registry {
             (realm, kiln_realm_entropy_word, realm_entropy_word);
             (realm, kiln_realm_runtime_report, realm_runtime_report);
             (realm, kiln_realm_gc_current_heap, realm_gc_current_heap);
+            (realm, kiln_realm_generation_slot, realm_generation_slot);
             (realm, kiln_realm_gc_attach, realm_gc_attach);
             (realm, kiln_realm_gc_register_roots, realm_gc_register_roots);
             (realm, kiln_realm_gc_unregister_roots, realm_gc_unregister_roots);
@@ -113,7 +114,7 @@ macro_rules! provider_export_names {
 }
 
 /// Version of the private provider ABI represented by [`provider_abi_registry!`].
-pub const PROVIDER_ABI_VERSION: u32 = 29;
+pub const PROVIDER_ABI_VERSION: u32 = 30;
 
 /// Canonical ordered export names required in a packaged provider manifest.
 pub const PROVIDER_EXPORTS: &[&str] = provider_abi_registry!(provider_export_names);
@@ -124,13 +125,16 @@ mod tests {
 
     #[test]
     fn registry_has_the_packaged_contract_shape() {
-        // 29, and 86 exports: `kiln_realm_runtime_report` joined the contract when a compiled
-        // server learned to answer `SIGUSR1` with what it is doing, because the numbers it
-        // reports are Rust-private and the dump is assembled in the prelude. A shipped archive
-        // built before that does not export it, and the version is how a resolver knows to
-        // rebuild rather than to fail at link time.
-        assert_eq!(PROVIDER_ABI_VERSION, 29);
-        assert_eq!(PROVIDER_EXPORTS.len(), 86);
+        // 30, and 87 exports: `kiln_realm_generation_slot` joined the contract when the prelude
+        // learned to cache per-realm answers -- the heap pointer first -- behind a generation the
+        // realm bumps on every entry, exit and heap attach, so a thread that hosts several realms
+        // never serves one realm the other's cache. Before that, 29 and 86:
+        // `kiln_realm_runtime_report` joined when a compiled server learned to answer `SIGUSR1`
+        // with what it is doing. A shipped archive built before either does not export the newer
+        // symbol, and the version is how a resolver knows to rebuild rather than to fail at link
+        // time.
+        assert_eq!(PROVIDER_ABI_VERSION, 30);
+        assert_eq!(PROVIDER_EXPORTS.len(), 87);
         assert_eq!(PROVIDER_EXPORTS.first(), Some(&"kiln_realm_create"));
         assert_eq!(PROVIDER_EXPORTS.last(), Some(&"kiln_temporal_last_error"));
     }

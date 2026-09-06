@@ -310,6 +310,7 @@ typedef struct kiln_gc_hooks {
     int (*introspect)(void *heap);
 } kiln_gc_hooks;
 extern void *kiln_realm_gc_current_heap(void);
+extern const uint64_t *kiln_realm_generation_slot(void);
 extern int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap);
 extern int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t flags);
 extern int kiln_realm_gc_mark_roots(void *heap);

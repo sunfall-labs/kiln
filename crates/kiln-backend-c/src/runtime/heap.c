@@ -530,7 +530,38 @@ static int kiln_c99_gc_hook_introspect(void *opaque) {
 
 #endif
 
+/* The heap for this thread's realm, remembered until the realm changes. Every allocation and
+ * every kind lookup asks for it, and the answer used to be a call into the runtime archive each
+ * time. The realm bumps a per-thread generation on every entry, exit and heap attach
+ * (`kiln_realm_generation_slot` is the address of it); a cached heap is trusted only while the
+ * generation it was cached under is the current one, so a thread that hosts several realms in
+ * turn -- the daemon -- never serves one realm the other's heap. Thread-local, not static,
+ * because two threads may each be in a realm. */
+typedef struct kiln_realm_cache {
+    const uint64_t *generation_slot;
+    uint64_t generation;
+    kiln_gc_heap *heap;
+} kiln_realm_cache;
+static _Thread_local kiln_realm_cache kiln_c99_realm_cached;
+
+static kiln_gc_heap *kiln_c99_gc_heap_uncached(void);
+
 static kiln_gc_heap *kiln_c99_gc_heap(void) {
+    kiln_realm_cache *cache = &kiln_c99_realm_cached;
+    uint64_t generation;
+    kiln_gc_heap *heap;
+    if (cache->generation_slot == NULL) cache->generation_slot = kiln_realm_generation_slot();
+    generation = *cache->generation_slot;
+    if (cache->heap != NULL && cache->generation == generation) return cache->heap;
+    heap = kiln_c99_gc_heap_uncached();
+    /* A fallback heap is the answer for a realm that could not attach one; it is per process
+     * and remembering it is harmless. NULL is not remembered. */
+    cache->heap = heap;
+    cache->generation = generation;
+    return heap;
+}
+
+static kiln_gc_heap *kiln_c99_gc_heap_uncached(void) {
     void *attached = kiln_realm_gc_current_heap();
     kiln_gc_heap *candidate;
     int status;
