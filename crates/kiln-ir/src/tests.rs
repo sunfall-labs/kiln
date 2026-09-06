@@ -1666,8 +1666,9 @@ fn an_object_literal_without_a_spread_stays_one_instruction() {
 
 #[test]
 fn a_spread_splits_the_literal_into_merged_segments() {
-    // `{ a: 1, ...source, b: 2 }`: the leading run, the spread, and the trailing run each
-    // merge in source order, which is what makes the later property win.
+    // `{ a: 1, ...source, b: 2 }`: the leading run becomes the accumulator, the spread merges
+    // into it, and the trailing property is defined on it directly -- one object, one merge --
+    // in source order, which is what makes the later property win.
     let program = compile(&module(vec![statement(StatementKind::Expression(
         Expression {
             kind: ExpressionKind::Object {
@@ -1701,7 +1702,12 @@ fn a_spread_splits_the_literal_into_merged_segments() {
         .iter()
         .filter(|instruction| matches!(instruction, Instruction::SpreadObject))
         .count();
-    assert_eq!((objects, merges), (2, 2));
+    let defines = program
+        .code
+        .iter()
+        .filter(|instruction| matches!(instruction, Instruction::DefineNamedProperty))
+        .count();
+    assert_eq!((objects, merges, defines), (1, 1, 1));
 }
 
 #[test]

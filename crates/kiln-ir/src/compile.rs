@@ -4688,13 +4688,27 @@ impl Compiler {
                     // object are flushed first so the object exists to define on -- the shape a
                     // spread already uses -- and the key is then evaluated in its own place, so
                     // the source order of its side effects is unchanged.
-                    if let ObjectKey::Computed(key) = &property.key
-                        && anonymous_function_value(&property.value)
-                    {
+                    //
+                    // The same path serves every pair written after a spread: the accumulator
+                    // exists by then, so the pair is defined on it directly rather than built
+                    // into a second object and spread in -- one literal, not two, and the
+                    // spread's per-key copy is not run twice for `{ ...base, f: i }`.
+                    let named_after_key = matches!(&property.key, ObjectKey::Computed(_))
+                        && anonymous_function_value(&property.value);
+                    if accumulating || named_after_key {
                         let method = property.form == kiln_hir::PropertyForm::Method;
                         self.emit_object_segment(&mut pending, accumulating);
                         accumulating = true;
-                        self.expression(key);
+                        match &property.key {
+                            ObjectKey::Private(name) => self.error(
+                                Some(span),
+                                format!("private name `#{name}` in an object literal"),
+                            ),
+                            ObjectKey::Static(key) => {
+                                self.push_constant(Constant::String(key.clone()));
+                            }
+                            ObjectKey::Computed(key) => self.expression(key),
+                        }
                         if method && let Some(home) = &home {
                             self.home_bindings.push(home.clone());
                         }

@@ -511,7 +511,7 @@ typedef struct kiln_property {
     kiln_value setter;
 } kiln_property;
 
-#define KILN_C99_INLINE_SLOTS 4
+#define KILN_C99_INLINE_SLOTS 8
 
 typedef struct kiln_object {
     kiln_property *properties;
