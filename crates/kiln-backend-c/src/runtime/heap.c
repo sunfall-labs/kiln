@@ -10,12 +10,18 @@
  * symbol that points at the well-known table, or an allocation site still on plain `malloc` is
  * ignored rather than freed.
  *
- * Collection runs only at the top of the realm's drive loop, where no generated frame is on the
- * stack (ADR 0041 says why that is enough for a server and not yet enough for a CPU-bound body).
- * The runtime archive calls `collect` through the hooks below; it never reads a C layout. It
- * enumerates the roots it owns by handing pointers and value slots back to `mark_block` and
- * `mark_value`, and each translation unit marks its own statics through a registered root
- * function.
+ * Collection runs in two places now. At the top of the realm's drive loop, no generated frame is
+ * on the stack (ADR 0041 says why that was enough for a server and not yet enough for a
+ * CPU-bound body); there the runtime archive calls `collect` through the hooks below, never
+ * reading a C layout, and enumerates the roots it owns by handing pointers and value slots back
+ * to `mark_block` and `mark_value`, with each translation unit marking its own statics through a
+ * registered root function. A CPU-bound body is also covered: `kiln_c99_gc_alloc` can call
+ * `kiln_c99_gc_collect_mid_turn` from inside a turn, once allocation since the last collection
+ * has grown enough to be worth the pass, and that path has no root list to hand back -- generated
+ * frames are on the stack -- so `kiln_c99_gc_scan_stack` treats the stack conservatively instead,
+ * scanning both the spilled callee-saved registers (`setjmp`) and every word from there down to
+ * the realm's recorded stack base, marking anything that resolves to a live block or interior
+ * pointer and leaving everything else alone.
  *
  * The heap struct's first member is the hooks pointer. The runtime reads exactly that one word
  * through the otherwise opaque heap pointer, so a root function outside the prelude (the graph
