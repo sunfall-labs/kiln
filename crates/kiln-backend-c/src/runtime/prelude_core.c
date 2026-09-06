@@ -7212,7 +7212,7 @@ static int kiln_c99_node_close_socket(kiln_node_socket *socket, int force) {
 
 static int kiln_c99_node_socket_object(kiln_node_socket *socket, kiln_value *thrown) {
     kiln_value ignored;
-    int status = kiln_c99_new_object(&socket->object);
+    int status = kiln_c99_new_object_tenured(&socket->object);
     if (status == KILN_C99_OK)
         status = kiln_c99_node_event(socket->host, &ignored, KILN_C99_METHOD_NODE_EVENT_EMITTER,
                                      socket->object, NULL, 0, 0, thrown);
@@ -7361,7 +7361,7 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
             response->url_used = 0;
             response->target_ptr = (const char *)event->target;
             response->target_len = (size_t)event->target_len;
-            status = kiln_c99_new_object_with_capacity(&request, 6);
+            status = kiln_c99_new_object_with_capacity_tenured(&request, 6);
             if (status == KILN_C99_OK) {
                 kiln_value prototype;
                 status = kiln_c99_node_incoming_message_prototype(&prototype);
@@ -7396,8 +7396,8 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
                 response->request_headers_owned = 0;
             }
             if (status == KILN_C99_OK)
-                status = kiln_c99_new_object_with_capacity(&response->object, 6);
-            if (status == KILN_C99_OK) status = kiln_c99_new_object(&response->headers);
+                status = kiln_c99_new_object_with_capacity_tenured(&response->object, 6);
+            if (status == KILN_C99_OK) status = kiln_c99_new_object_tenured(&response->headers);
             if (status == KILN_C99_OK) {
                 kiln_value prototype;
                 status = kiln_c99_callable_prototype(
@@ -7415,9 +7415,9 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
             if (status == KILN_C99_OK)
                 status = kiln_c99_own_data_hot_key(response->object, KILN_C99_HOT_KEY_CONNECTION, socket->object);
             if (status == KILN_C99_OK) {
-                status = kiln_c99_new_object_with_capacity(&response->url_object, 4);
+                status = kiln_c99_new_object_with_capacity_tenured(&response->url_object, 4);
                 if (status == KILN_C99_OK)
-                    status = kiln_c99_new_object_with_capacity(&response->search_params_object, 4);
+                    status = kiln_c99_new_object_with_capacity_tenured(&response->search_params_object, 4);
                 if (status == KILN_C99_OK)
                     status = kiln_c99_put_hot_key(NULL, response->search_params_object, KILN_C99_HOT_KEY_GET,
                                                   kiln_c99_method(KILN_C99_METHOD_URL_SEARCH_PARAMS_GET), 0, NULL);
@@ -7478,6 +7478,8 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
                     }
                 }
                 socket->recycled_response = response;
+                kiln_c99_own_data_hot_key(response->request, KILN_C99_HOT_KEY_URL,
+                                          kiln_c99_static_text(kiln_c99_slash, 1));
                 return status;
             }
         }
