@@ -3171,182 +3171,68 @@ int main(void) {{
 #[test]
 fn refusal_sites_name_themselves() {
     const SOURCES: [(&str, &str); 44] = [
-        (
-            "runtime/surface.c",
-            include_str!("runtime/surface.c"),
-        ),
-        (
-            "runtime/values.c",
-            include_str!("runtime/values.c"),
-        ),
-        (
-            "runtime/text.c",
-            include_str!("runtime/text.c"),
-        ),
-        (
-            "runtime/stores.c",
-            include_str!("runtime/stores.c"),
-        ),
-        (
-            "runtime/proxies.c",
-            include_str!("runtime/proxies.c"),
-        ),
-        (
-            "runtime/keys.c",
-            include_str!("runtime/keys.c"),
-        ),
-        (
-            "runtime/read.c",
-            include_str!("runtime/read.c"),
-        ),
-        (
-            "runtime/write.c",
-            include_str!("runtime/write.c"),
-        ),
-        (
-            "runtime/inspect.c",
-            include_str!("runtime/inspect.c"),
-        ),
-        (
-            "runtime/strings.c",
-            include_str!("runtime/strings.c"),
-        ),
-        (
-            "runtime/node.c",
-            include_str!("runtime/node.c"),
-        ),
-        (
-            "runtime/temporal.c",
-            include_str!("runtime/temporal.c"),
-        ),
-        (
-            "runtime/dispatch.c",
-            include_str!("runtime/dispatch.c"),
-        ),
+        ("runtime/surface.c", include_str!("runtime/surface.c")),
+        ("runtime/values.c", include_str!("runtime/values.c")),
+        ("runtime/text.c", include_str!("runtime/text.c")),
+        ("runtime/stores.c", include_str!("runtime/stores.c")),
+        ("runtime/proxies.c", include_str!("runtime/proxies.c")),
+        ("runtime/keys.c", include_str!("runtime/keys.c")),
+        ("runtime/read.c", include_str!("runtime/read.c")),
+        ("runtime/write.c", include_str!("runtime/write.c")),
+        ("runtime/inspect.c", include_str!("runtime/inspect.c")),
+        ("runtime/strings.c", include_str!("runtime/strings.c")),
+        ("runtime/node.c", include_str!("runtime/node.c")),
+        ("runtime/temporal.c", include_str!("runtime/temporal.c")),
+        ("runtime/dispatch.c", include_str!("runtime/dispatch.c")),
         (
             "runtime/enumeration.c",
             include_str!("runtime/enumeration.c"),
         ),
-        (
-            "runtime/spread.c",
-            include_str!("runtime/spread.c"),
-        ),
+        ("runtime/spread.c", include_str!("runtime/spread.c")),
         (
             "runtime/definitions.c",
             include_str!("runtime/definitions.c"),
         ),
-        (
-            "runtime/json.c",
-            include_str!("runtime/json.c"),
-        ),
-        (
-            "runtime/dates.c",
-            include_str!("runtime/dates.c"),
-        ),
+        ("runtime/json.c", include_str!("runtime/json.c")),
+        ("runtime/dates.c", include_str!("runtime/dates.c")),
         (
             "runtime/collections.c",
             include_str!("runtime/collections.c"),
         ),
-        (
-            "runtime/iterators.c",
-            include_str!("runtime/iterators.c"),
-        ),
-        (
-            "runtime/errors.c",
-            include_str!("runtime/errors.c"),
-        ),
-        (
-            "runtime/promises.c",
-            include_str!("runtime/promises.c"),
-        ),
+        ("runtime/iterators.c", include_str!("runtime/iterators.c")),
+        ("runtime/errors.c", include_str!("runtime/errors.c")),
+        ("runtime/promises.c", include_str!("runtime/promises.c")),
         (
             "runtime/constructors.c",
             include_str!("runtime/constructors.c"),
         ),
-        (
-            "runtime/dynamic.c",
-            include_str!("runtime/dynamic.c"),
-        ),
-        (
-            "runtime/calls.c",
-            include_str!("runtime/calls.c"),
-        ),
-        (
-            "runtime/operators.c",
-            include_str!("runtime/operators.c"),
-        ),
-        (
-            "runtime/boxed.c",
-            include_str!("runtime/boxed.c"),
-        ),
-        (
-            "runtime/foundation.c",
-            include_str!("runtime/foundation.c"),
-        ),
-        (
-            "runtime/heap.c",
-            include_str!("runtime/heap.c"),
-        ),
-        (
-            "runtime/shapes.c",
-            include_str!("runtime/shapes.c"),
-        ),
-        (
-            "runtime/platform.c",
-            include_str!("runtime/platform.c"),
-        ),
+        ("runtime/dynamic.c", include_str!("runtime/dynamic.c")),
+        ("runtime/calls.c", include_str!("runtime/calls.c")),
+        ("runtime/operators.c", include_str!("runtime/operators.c")),
+        ("runtime/boxed.c", include_str!("runtime/boxed.c")),
+        ("runtime/foundation.c", include_str!("runtime/foundation.c")),
+        ("runtime/heap.c", include_str!("runtime/heap.c")),
+        ("runtime/shapes.c", include_str!("runtime/shapes.c")),
+        ("runtime/platform.c", include_str!("runtime/platform.c")),
         (
             "runtime/node_support.c",
             include_str!("runtime/node_support.c"),
         ),
-        (
-            "runtime/arrays.c",
-            include_str!("runtime/arrays.c"),
-        ),
-        (
-            "runtime/properties.c",
-            include_str!("runtime/properties.c"),
-        ),
-        (
-            "runtime/generators.c",
-            include_str!("runtime/generators.c"),
-        ),
-        (
-            "runtime/methods.c",
-            include_str!("runtime/methods.c"),
-        ),
-        (
-            "runtime/web.c",
-            include_str!("runtime/web.c"),
-        ),
-        (
-            "runtime/numbers.c",
-            include_str!("runtime/numbers.c"),
-        ),
-        (
-            "runtime/builtins.c",
-            include_str!("runtime/builtins.c"),
-        ),
-        (
-            "runtime/globals.c",
-            include_str!("runtime/globals.c"),
-        ),
-        (
-            "runtime/bigint.c",
-            include_str!("runtime/bigint.c"),
-        ),
+        ("runtime/arrays.c", include_str!("runtime/arrays.c")),
+        ("runtime/properties.c", include_str!("runtime/properties.c")),
+        ("runtime/generators.c", include_str!("runtime/generators.c")),
+        ("runtime/methods.c", include_str!("runtime/methods.c")),
+        ("runtime/web.c", include_str!("runtime/web.c")),
+        ("runtime/numbers.c", include_str!("runtime/numbers.c")),
+        ("runtime/builtins.c", include_str!("runtime/builtins.c")),
+        ("runtime/globals.c", include_str!("runtime/globals.c")),
+        ("runtime/bigint.c", include_str!("runtime/bigint.c")),
         (
             "runtime/temporal_values.c",
             include_str!("runtime/temporal_values.c"),
         ),
-        (
-            "runtime/regexp.c",
-            include_str!("runtime/regexp.c"),
-        ),
-        (
-            "runtime/symbols.c",
-            include_str!("runtime/symbols.c"),
-        ),
+        ("runtime/regexp.c", include_str!("runtime/regexp.c")),
+        ("runtime/symbols.c", include_str!("runtime/symbols.c")),
     ];
 
     let mut unnamed = Vec::new();
@@ -4595,182 +4481,68 @@ int main(void) {
 #[test]
 fn absent_answers_are_where_they_say() {
     const SOURCES: [(&str, &str); 44] = [
-        (
-            "runtime/surface.c",
-            include_str!("runtime/surface.c"),
-        ),
-        (
-            "runtime/values.c",
-            include_str!("runtime/values.c"),
-        ),
-        (
-            "runtime/text.c",
-            include_str!("runtime/text.c"),
-        ),
-        (
-            "runtime/stores.c",
-            include_str!("runtime/stores.c"),
-        ),
-        (
-            "runtime/proxies.c",
-            include_str!("runtime/proxies.c"),
-        ),
-        (
-            "runtime/keys.c",
-            include_str!("runtime/keys.c"),
-        ),
-        (
-            "runtime/read.c",
-            include_str!("runtime/read.c"),
-        ),
-        (
-            "runtime/write.c",
-            include_str!("runtime/write.c"),
-        ),
-        (
-            "runtime/inspect.c",
-            include_str!("runtime/inspect.c"),
-        ),
-        (
-            "runtime/strings.c",
-            include_str!("runtime/strings.c"),
-        ),
-        (
-            "runtime/node.c",
-            include_str!("runtime/node.c"),
-        ),
-        (
-            "runtime/temporal.c",
-            include_str!("runtime/temporal.c"),
-        ),
-        (
-            "runtime/dispatch.c",
-            include_str!("runtime/dispatch.c"),
-        ),
+        ("runtime/surface.c", include_str!("runtime/surface.c")),
+        ("runtime/values.c", include_str!("runtime/values.c")),
+        ("runtime/text.c", include_str!("runtime/text.c")),
+        ("runtime/stores.c", include_str!("runtime/stores.c")),
+        ("runtime/proxies.c", include_str!("runtime/proxies.c")),
+        ("runtime/keys.c", include_str!("runtime/keys.c")),
+        ("runtime/read.c", include_str!("runtime/read.c")),
+        ("runtime/write.c", include_str!("runtime/write.c")),
+        ("runtime/inspect.c", include_str!("runtime/inspect.c")),
+        ("runtime/strings.c", include_str!("runtime/strings.c")),
+        ("runtime/node.c", include_str!("runtime/node.c")),
+        ("runtime/temporal.c", include_str!("runtime/temporal.c")),
+        ("runtime/dispatch.c", include_str!("runtime/dispatch.c")),
         (
             "runtime/enumeration.c",
             include_str!("runtime/enumeration.c"),
         ),
-        (
-            "runtime/spread.c",
-            include_str!("runtime/spread.c"),
-        ),
+        ("runtime/spread.c", include_str!("runtime/spread.c")),
         (
             "runtime/definitions.c",
             include_str!("runtime/definitions.c"),
         ),
-        (
-            "runtime/json.c",
-            include_str!("runtime/json.c"),
-        ),
-        (
-            "runtime/dates.c",
-            include_str!("runtime/dates.c"),
-        ),
+        ("runtime/json.c", include_str!("runtime/json.c")),
+        ("runtime/dates.c", include_str!("runtime/dates.c")),
         (
             "runtime/collections.c",
             include_str!("runtime/collections.c"),
         ),
-        (
-            "runtime/iterators.c",
-            include_str!("runtime/iterators.c"),
-        ),
-        (
-            "runtime/errors.c",
-            include_str!("runtime/errors.c"),
-        ),
-        (
-            "runtime/promises.c",
-            include_str!("runtime/promises.c"),
-        ),
+        ("runtime/iterators.c", include_str!("runtime/iterators.c")),
+        ("runtime/errors.c", include_str!("runtime/errors.c")),
+        ("runtime/promises.c", include_str!("runtime/promises.c")),
         (
             "runtime/constructors.c",
             include_str!("runtime/constructors.c"),
         ),
-        (
-            "runtime/dynamic.c",
-            include_str!("runtime/dynamic.c"),
-        ),
-        (
-            "runtime/calls.c",
-            include_str!("runtime/calls.c"),
-        ),
-        (
-            "runtime/operators.c",
-            include_str!("runtime/operators.c"),
-        ),
-        (
-            "runtime/boxed.c",
-            include_str!("runtime/boxed.c"),
-        ),
-        (
-            "runtime/foundation.c",
-            include_str!("runtime/foundation.c"),
-        ),
-        (
-            "runtime/heap.c",
-            include_str!("runtime/heap.c"),
-        ),
-        (
-            "runtime/shapes.c",
-            include_str!("runtime/shapes.c"),
-        ),
-        (
-            "runtime/platform.c",
-            include_str!("runtime/platform.c"),
-        ),
+        ("runtime/dynamic.c", include_str!("runtime/dynamic.c")),
+        ("runtime/calls.c", include_str!("runtime/calls.c")),
+        ("runtime/operators.c", include_str!("runtime/operators.c")),
+        ("runtime/boxed.c", include_str!("runtime/boxed.c")),
+        ("runtime/foundation.c", include_str!("runtime/foundation.c")),
+        ("runtime/heap.c", include_str!("runtime/heap.c")),
+        ("runtime/shapes.c", include_str!("runtime/shapes.c")),
+        ("runtime/platform.c", include_str!("runtime/platform.c")),
         (
             "runtime/node_support.c",
             include_str!("runtime/node_support.c"),
         ),
-        (
-            "runtime/arrays.c",
-            include_str!("runtime/arrays.c"),
-        ),
-        (
-            "runtime/properties.c",
-            include_str!("runtime/properties.c"),
-        ),
-        (
-            "runtime/generators.c",
-            include_str!("runtime/generators.c"),
-        ),
-        (
-            "runtime/methods.c",
-            include_str!("runtime/methods.c"),
-        ),
-        (
-            "runtime/web.c",
-            include_str!("runtime/web.c"),
-        ),
-        (
-            "runtime/numbers.c",
-            include_str!("runtime/numbers.c"),
-        ),
-        (
-            "runtime/builtins.c",
-            include_str!("runtime/builtins.c"),
-        ),
-        (
-            "runtime/globals.c",
-            include_str!("runtime/globals.c"),
-        ),
-        (
-            "runtime/bigint.c",
-            include_str!("runtime/bigint.c"),
-        ),
+        ("runtime/arrays.c", include_str!("runtime/arrays.c")),
+        ("runtime/properties.c", include_str!("runtime/properties.c")),
+        ("runtime/generators.c", include_str!("runtime/generators.c")),
+        ("runtime/methods.c", include_str!("runtime/methods.c")),
+        ("runtime/web.c", include_str!("runtime/web.c")),
+        ("runtime/numbers.c", include_str!("runtime/numbers.c")),
+        ("runtime/builtins.c", include_str!("runtime/builtins.c")),
+        ("runtime/globals.c", include_str!("runtime/globals.c")),
+        ("runtime/bigint.c", include_str!("runtime/bigint.c")),
         (
             "runtime/temporal_values.c",
             include_str!("runtime/temporal_values.c"),
         ),
-        (
-            "runtime/regexp.c",
-            include_str!("runtime/regexp.c"),
-        ),
-        (
-            "runtime/symbols.c",
-            include_str!("runtime/symbols.c"),
-        ),
+        ("runtime/regexp.c", include_str!("runtime/regexp.c")),
+        ("runtime/symbols.c", include_str!("runtime/symbols.c")),
     ];
 
     let mut by_function: Vec<(String, usize)> = Vec::new();
