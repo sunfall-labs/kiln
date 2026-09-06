@@ -1580,6 +1580,7 @@ int kiln_realm_runtime_report(uint64_t *out_fields, uint64_t capacity, uint64_t 
     return KILN_C99_INVALID_ARGUMENT;
 }
 void *kiln_realm_gc_current_heap(void) { return NULL; }
+const uint64_t *kiln_realm_generation_slot(void) { static uint64_t generation = 1; return &generation; }
 int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap) {
     /* The fixture has no realm heap: every unit collects nothing and keeps its fallback heap. */
     (void)hooks;

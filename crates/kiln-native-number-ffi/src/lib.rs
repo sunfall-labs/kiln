@@ -925,6 +925,7 @@ mod realm {
             // thread-local load rather than a hash lookup.
             ACTIVE_REALM_RC.with(|slot| *slot.borrow_mut() = Some(Rc::clone(&realm)));
             ACTIVE_HEAP.with(|slot| slot.set(realm.gc.borrow().heap));
+            bump_generation();
             Some(Self { realm })
         }
     }
@@ -934,6 +935,7 @@ mod realm {
             ACTIVE_REALM.with(|active| active.set(0));
             ACTIVE_REALM_RC.with(|slot| slot.borrow_mut().take());
             ACTIVE_HEAP.with(|slot| slot.set(std::ptr::null_mut()));
+            bump_generation();
             self.realm.entered.set(false);
         }
     }
@@ -947,6 +949,23 @@ mod realm {
         static ACTIVE_REALM_RC: RefCell<Option<Rc<NativeRealm>>> = const { RefCell::new(None) };
         static ACTIVE_HEAP: Cell<*mut c_void> = const { Cell::new(std::ptr::null_mut()) };
         static ACTIVE_RUNTIME: Cell<*mut RealmRuntime> = const { Cell::new(std::ptr::null_mut()) };
+        /// Bumped whenever the answer to "which realm, which heap" changes on this thread: a
+        /// realm entered or left, a heap attached. The prelude caches per-realm answers in
+        /// thread-locals of its own and compares against this before trusting one, reading it
+        /// through the pointer `kiln_realm_generation_slot` hands out, which is stable for the
+        /// thread's life. A generation rather than the heap pointer itself, because a heap
+        /// address can be freed and reused by the next realm on the same thread.
+        static ACTIVE_GENERATION: Cell<u64> = const { Cell::new(1) };
+    }
+
+    fn bump_generation() {
+        ACTIVE_GENERATION.with(|generation| generation.set(generation.get().wrapping_add(1)));
+    }
+
+    /// The address of this thread's realm generation, for the prelude to read directly.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn kiln_realm_generation_slot() -> *const u64 {
+        ACTIVE_GENERATION.with(|generation| generation.as_ptr() as *const u64)
     }
 
     struct ActiveRuntime {
@@ -1978,6 +1997,7 @@ mod realm {
                 gc.heap = candidate;
                 gc.hooks = Some(table);
                 ACTIVE_HEAP.with(|slot| slot.set(candidate));
+                bump_generation();
             }
             // SAFETY: checked non-null above.
             unsafe { out_heap.write(gc.heap) };
@@ -5526,6 +5546,9 @@ mod realm {
         };
         (realm, kiln_realm_gc_current_heap, realm_gc_current_heap) => {
             const _: extern "C" fn() -> *mut c_void = kiln_realm_gc_current_heap;
+        };
+        (realm, kiln_realm_generation_slot, realm_generation_slot) => {
+            const _: extern "C" fn() -> *const u64 = kiln_realm_generation_slot;
         };
         (realm, kiln_realm_gc_attach, realm_gc_attach) => {
             const _: unsafe extern "C" fn(*const GcHooks, *mut c_void, *mut *mut c_void) -> i32 = kiln_realm_gc_attach;

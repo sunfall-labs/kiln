@@ -1,6 +1,6 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 802
+assertion_line: 803
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -724,6 +724,7 @@ extern int kiln_realm_entropy_word(uint64_t seed, uint64_t *out_word);
 typedef void (*kiln_gc_roots_fn)(void *heap, void *context, int phase);
 typedef struct kiln_gc_hooks {
 extern void *kiln_realm_gc_current_heap(void);
+extern const uint64_t *kiln_realm_generation_slot(void);
 extern int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap);
 extern int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t flags);
 extern int kiln_realm_gc_mark_roots(void *heap);
@@ -1253,7 +1254,11 @@ static int kiln_c99_introspect_armed;
 static int kiln_c99_introspect_arm(void) { return 0; }
 static int kiln_c99_gc_hook_introspect(void *opaque) {
 #endif
+typedef struct kiln_realm_cache {
+static _Thread_local kiln_realm_cache kiln_c99_realm_cached;
+static kiln_gc_heap *kiln_c99_gc_heap_uncached(void);
 static kiln_gc_heap *kiln_c99_gc_heap(void) {
+static kiln_gc_heap *kiln_c99_gc_heap_uncached(void) {
 static size_t kiln_c99_gc_hash(const void *pointer, size_t mask) {
 static int kiln_c99_gc_ptrset_grow(kiln_gc_ptrset *set, size_t wanted) {
 static int kiln_c99_gc_ptrset_insert(kiln_gc_ptrset *set, void *pointer) {
