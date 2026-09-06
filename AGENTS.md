@@ -258,6 +258,13 @@ Reclaim **in this order**:
 worktrees. **Never delete build outputs you do not own.** An agent did that and destroyed two other
 worktrees' builds.
 
+## Profiling a native binary
+
+`scripts/profile-native.sh <binary> [top-n]` records an Instruments CPU profile of a built
+program and prints the hottest symbols and the hottest instruction offsets, for `objdump -d` to
+read. Use it once `sample` names a single emitted function and the question is what inside it
+is slow. Valgrind does not run on Apple Silicon; this is the platform's profiler.
+
 ## Freeze `prelude_core.c` (Phase 5.1)
 
 `prelude_core.c` is frozen for new built-in implementations.
