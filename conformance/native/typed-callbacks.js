@@ -175,3 +175,9 @@ function benchmarkPattern() {
   return checksum;
 }
 console.log("benchmark-checksum", benchmarkPattern());
+// The boxed loops (a non-numeric array) hand a plain callback the receiver the language gives a
+// function called with none: undefined in strict code, the global object in sloppy code -- never
+// the array itself.
+console.log("boxed-this", ["a", "b"].map(function () { "use strict"; return typeof this; }).join(","),
+  ["a"].filter(function () { "use strict"; return this === undefined; }).length,
+  ["a", "b"].reduce(function (acc) { "use strict"; return acc + (this === undefined ? 1 : 0); }, 0));

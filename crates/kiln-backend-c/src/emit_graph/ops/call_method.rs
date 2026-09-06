@@ -671,7 +671,7 @@ pub(super) fn emit_call_method(
                                  int status = kiln_c99_new_array_with_capacity(&built_val, arr->count, arr->is_numeric); \
                                  if (status != KILN_C99_OK) return status; \
                                  kiln_array *built_arr = kiln_c99_array_of(built_val); \
-                                 kiln_val vrecv = plain->arrow ? plain->captured_this : v{o}; \
+                                 kiln_val vrecv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; \
                                  if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
                                  for (size_t idx = 0; idx < arr->count; ++idx) {{ \
                                      if (arr->elements[idx] == KILN_VAL_HOLE) {{ \
@@ -721,7 +721,7 @@ pub(super) fn emit_call_method(
                                  int status = kiln_c99_new_array_with_capacity(&built_val, arr->count, arr->is_numeric); \
                                  if (status != KILN_C99_OK) return status; \
                                  kiln_array *built_arr = kiln_c99_array_of(built_val); \
-                                 kiln_val vrecv = plain->arrow ? plain->captured_this : v{o}; \
+                                 kiln_val vrecv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; \
                                  if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
                                  for (size_t idx = 0; idx < arr->count; ++idx) {{ \
                                      if (arr->elements[idx] == KILN_VAL_HOLE) continue; \
@@ -770,7 +770,7 @@ pub(super) fn emit_call_method(
                              kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
                              if (!plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
                                  kiln_val vacc = v{a1}; \
-                                 kiln_val vrecv = plain->arrow ? plain->captured_this : v{o}; \
+                                 kiln_val vrecv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; \
                                  if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
                                  for (size_t idx = 0; idx < arr->count; ++idx) {{ \
                                      if (arr->elements[idx] == KILN_VAL_HOLE) continue; \
