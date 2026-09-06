@@ -636,6 +636,8 @@ typedef struct kiln_c99_site {
     kiln_c99_pic_entry entries[KILN_C99_PIC_SIZE];
     uint8_t cached_tag;
     uint8_t has_cached_method;
+    /* Registered with the collector, which clears entries whose holder dies. */
+    uint8_t registered;
     uint64_t cached_method;
 } kiln_c99_site;
 

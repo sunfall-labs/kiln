@@ -1,6 +1,6 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 801
+assertion_line: 802
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -1195,6 +1195,7 @@ static kiln_data_view *kiln_c99_data_view_of(kiln_value value) {
 #define KILN_GC_ROOT_SURVIVES_TEARDOWN 1u
 #define KILN_GC_HOOKS_VERSION 2u
 #define KILN_GC_DEFAULT_FLOOR ((size_t)256 * 1024)
+#define KILN_GC_MID_TURN_FLOOR ((size_t)4 * 1024 * 1024)
 #define KILN_C99_INTROSPECT_ARMED 1
 #define KILN_C99_INTROSPECT_DUMPED 2
 #define KILN_GC_KIND_MASK ((uint32_t)0x0FFFFFFFu)
@@ -1275,6 +1276,24 @@ static uint32_t kiln_c99_gc_kind_of_ptr(const void *ptr) {
 static int kiln_c99_ascii_scan(const char *bytes, size_t len) {
 static int kiln_c99_string_is_ascii(kiln_value value) {
 static inline int kiln_c99_gc_is_tenured_kind(uint32_t kind) {
+#include <setjmp.h>
+#include <pthread.h>
+static void *kiln_c99_gc_stack_base(kiln_gc_heap *heap) {
+#if defined(__APPLE__)
+#else
+#endif
+static kiln_gc_block *kiln_c99_gc_bitmap_block(const uint64_t *bitmap, size_t bitmap_words,
+static kiln_gc_block *kiln_c99_gc_lookup_interior(const kiln_gc_heap *heap, uintptr_t address) {
+static void kiln_c99_gc_mark_found(kiln_gc_heap *heap, kiln_gc_block *block);
+static void kiln_c99_gc_mark_word(kiln_gc_heap *heap, uintptr_t word) {
+__attribute__((noinline)) static void kiln_c99_gc_scan_from_here(kiln_gc_heap *heap) {
+static void kiln_c99_gc_scan_stack(kiln_gc_heap *heap) {
+#if defined(__GNUC__) || defined(__clang__)
+#endif
+static void kiln_c99_gc_register_site(kiln_c99_site *site) {
+static void kiln_c99_gc_clear_dead_sites(kiln_gc_heap *heap) {
+static void kiln_c99_gc_collect(void *opaque, int force);
+static void kiln_c99_gc_collect_mid_turn(kiln_gc_heap *heap) {
 static void *kiln_c99_gc_alloc(uint32_t kind, size_t size) {
 static void *kiln_c99_gc_alloc_tenured(uint32_t kind, size_t size) {
 static void *kiln_c99_gc_calloc(uint32_t kind, size_t size) {
@@ -1298,6 +1317,7 @@ static void kiln_c99_key_purge(kiln_gc_heap *heap) {
 static void kiln_c99_gc_unlink(kiln_gc_heap *heap, kiln_gc_block *block) {
 static void kiln_c99_gc_finalize(kiln_gc_block *block);
 static void kiln_c99_gc_release(void *payload) {
+static void kiln_c99_gc_mark_found(kiln_gc_heap *heap, kiln_gc_block *block) {
 static void kiln_c99_gc_mark_block(kiln_gc_heap *heap, const void *payload) {
 static void kiln_c99_gc_mark_value(kiln_gc_heap *heap, const kiln_value *value) {
 static void kiln_c99_gc_mark_values(kiln_gc_heap *heap, const kiln_value *values,
@@ -1508,6 +1528,13 @@ static int kiln_c99_node_has_lazy_header(kiln_value headers_obj, const char *key
 static int kiln_c99_val_call(kiln_host *host, kiln_val callee, const kiln_val *args, size_t argc,
 static int kiln_c99_backlog_names(const char *owner, const char *key, size_t key_len) {
 static int kiln_c99_has_surface(uint64_t builtin) {
+typedef struct kiln_builtin_member_entry {
+static kiln_builtin_member_entry kiln_c99_builtin_member_index[KILN_C99_SURFACE_MEMBER_COUNT];
+static size_t kiln_c99_builtin_member_index_len;
+static int kiln_c99_builtin_member_index_ready;
+static int kiln_c99_builtin_member_entry_before(const kiln_builtin_member_entry *left,
+static void kiln_c99_builtin_member_index_build(void) {
+static size_t kiln_c99_builtin_member_lower_bound(uint64_t builtin, const char *key, size_t key_len) {
 static const kiln_builtin_member *kiln_c99_builtin_member(uint64_t builtin, const char *key,
 static uint64_t kiln_c99_surface_method(uint64_t builtin, const char *key, size_t key_len,
 static const char *kiln_c99_surface_method_name(uint64_t code) {
