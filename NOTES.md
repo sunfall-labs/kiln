@@ -4885,3 +4885,69 @@ overflow check. About 120 instructions against node's fifteen, on a machine alre
 near its peak width, so the count is the only lever. The next step is a typed loop region:
 the slots and the call's result speculated as numbers under one guard at the loop head, with
 the generic loop as the exit, which is the second half of 2.1 applied to a region.
+
+## The typed entry becomes the fast clone, and the loop guesses (2026-09-06, Claude `alee/fastest-native`)
+
+**Node's 0.5 ms is real.** Three runs of `bench/non-io/class-poly.mjs` answered 0.48, 0.48 and
+0.50 ms with the checksum kiln produces, 128 workloads per sample against a millisecond clock.
+Half a million `dist` calls in half a millisecond is one nanosecond a call, three or four
+cycles: V8 inlines both bodies under one map check and reads the fields as unboxed doubles at
+offsets it knew when it compiled. The hand-emitted C at 0.31 ms is the proof the hardware can.
+
+**Five changes, from 4.2 ms.** The emitted loop was about 120 instructions an iteration, and
+the disassembly, not the C, said which ones.
+
+- *A restartable body's typed entry is the fast clone with a typed signature.* Every slow path
+  is a restart through the boxed body, with the parameters boxed again for it, so on the fast
+  path a guarded arithmetic result *is* a number and is planned as one (`guarded_numbers`):
+  the intermediates stay doubles, `Math.sqrt` takes the twin, the return is a register. A
+  method-call site whose cache remembers one of the unit's methods of that name enters the
+  typed entry by name, with the arrow, strict, generator and frame flags decided by the proto
+  instead of read from the closure; a zero-parameter method qualifies now. Two reads of one
+  name of `this` share a receiver-cache column, and the compiler reads the slot once. 3.2 ms.
+- *The twin first.* `d = a * b; v = box(d)` instead of `v = box(a * b); d = bits(v)`: the box
+  is dead where only the twin is read, and its NaN canonicalisation -- four instructions --
+  goes with it. The same for the intrinsics, with a `kiln_twin` flag so the statement's tail
+  leaves the twin alone. The receiver-cache row is a pointer computed once at entry, and
+  `-fno-math-errno` removes the negative-operand branch before every `fsqrt`. 2.9 ms.
+- *The loop guesses.* The versioned body assumed only its parameters. It now also assumes
+  that an upvalue stored once and then indexed or measured is an array, checked once at entry
+  because the binding never changes, and that a method call whose answer feeds arithmetic
+  answers a number, checked where it answers: a call that answers anything else jumps into
+  the generic clone at a label right after that same call, every value before it already
+  computed and shared. The element read then tests bounds and a hole, the length is a double,
+  `i` is an integer, and `sum` is a double phi. Both guesses are rows in
+  `SPECULATION_INVARIANTS`, and `KILN_SPECULATE=exit` fuzzes both exits. 2.6 ms.
+- *`static inline` is a suggestion.* The typed entries were `bl` calls in the loop: five
+  arguments, a frame, and a receiver-shape match the caller had just done. `always_inline`,
+  as the fast clone already had. 2.3 ms.
+- *The fuzz-mode flag was read every iteration* by the loop-head guard. Read once at entry.
+  2.2 ms.
+
+**Two things that bit.** The effects scan that decides a body is restartable ran over the whole
+text, and a typed entry's parameter list names `thrown` once the entry needs it -- so the body
+was restartable on the first pass and not on the second, and the emitter panicked between
+them. The scan reads the body past the signature now. And the label a speculation exit jumps
+to must be in a clone that shares every variable: the generic clone of the same function does,
+a separate function would not. And a union of two proofs is not a proof: the versioned body
+took the plan's numbers and the speculative proof's numbers together, and an operation whose
+operands each came from one -- a `Math.pow` the plan knew and a method call the guess assumed
+-- was typed by the union and proven by neither, so `date-fns` and `dayjs` failed to compile
+on a twin nothing declared. The speculative proof now starts from the plan's.
+
+**Where 2.2 ms is.** About ninety instructions an iteration: the call site's cache walk and
+closure checks (~25), each slot read's index load, bound check and tag test (~10, two or three
+reads a call), the loop's bound, hole and overflow checks (~15), the arithmetic and the
+typed-failure test (~8). The ceiling of this design, with the dispatch keyed by shape and the
+receiver row handed to the callee, is about fifty. The ideal's twenty-five needs the *shape
+model* to say more than it does: slot indices known at compile time, which a constructor's
+stores give -- `this.x = x; this.y = y` is one path through the shape tree -- and a per-shape
+representation bit that says a slot holds a number, invalidated by the store that breaks it.
+Those are runtime work in the object model, not emitter work; the emitter's side (regions,
+typed entries, receiver rows) is ready for them.
+
+**Found on the way, filed.** `Math.sqrt(10n)` answers `3.16` in both engines where node throws
+(`.scratch/math-bigint-tonumber`); the proof "an intrinsic's answer is a number" stays right
+either way. A method-call site remembers a prototype method by value with nothing to forget it
+when the prototype's property is reassigned (`.scratch/method-cache-prototype-write`); the
+by-name and typed dispatch inherit the cached value and are exactly as right as the cache.

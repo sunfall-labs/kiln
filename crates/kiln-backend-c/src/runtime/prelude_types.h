@@ -213,8 +213,9 @@ static inline int kiln_c99_speculate_exit_active(void) {
     return kiln_c99_speculate_mode;
 }
 
-static inline int kiln_c99_guard_should_exit(uint32_t *counter) {
-    int mode = kiln_c99_speculate_exit_active();
+/* The guard with the mode already read: a versioned body reads it once at entry, and a loop
+ * head then tests a register instead of re-reading the flag every iteration. */
+static inline int kiln_c99_guard_should_exit_in(int mode, uint32_t *counter) {
     if (KILN_UNLIKELY(mode == -1)) {
         return 1;
     }
@@ -229,6 +230,10 @@ static inline int kiln_c99_guard_should_exit(uint32_t *counter) {
         return (rng & 1) != 0;
     }
     return 0;
+}
+
+static inline int kiln_c99_guard_should_exit(uint32_t *counter) {
+    return kiln_c99_guard_should_exit_in(kiln_c99_speculate_exit_active(), counter);
 }
 
 typedef enum kiln_typed_kind {

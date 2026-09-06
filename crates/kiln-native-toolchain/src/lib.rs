@@ -413,8 +413,10 @@ impl BuildProfile {
         match self {
             Self::NativeDev => &["-O0"],
             Self::NativeCheck => &["-O0", "-g", "-fsanitize=undefined"],
-            Self::NativeRelease => &["-O3", "-ffp-contract=off"],
-            Self::NativeProfile => &["-O3", "-ffp-contract=off", "-pg"],
+            // No `errno` from `sqrt` and friends: the language has none, and the check for a
+            // negative operand before every square root is a branch the loop pays for it.
+            Self::NativeRelease => &["-O3", "-ffp-contract=off", "-fno-math-errno"],
+            Self::NativeProfile => &["-O3", "-ffp-contract=off", "-fno-math-errno", "-pg"],
         }
     }
 
@@ -2182,11 +2184,11 @@ mod tests {
     fn release_profile_uses_fp_contract_off_and_portable_baseline() {
         assert_eq!(
             BuildProfile::NativeRelease.compile_flags(),
-            &["-O3", "-ffp-contract=off"]
+            &["-O3", "-ffp-contract=off", "-fno-math-errno"]
         );
         assert_eq!(
             BuildProfile::NativeProfile.compile_flags(),
-            &["-O3", "-ffp-contract=off", "-pg"]
+            &["-O3", "-ffp-contract=off", "-fno-math-errno", "-pg"]
         );
     }
 

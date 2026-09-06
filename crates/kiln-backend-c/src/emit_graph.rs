@@ -90,7 +90,38 @@ pub enum EntryKind {
     /// leaves as one too, through `double *result`; otherwise through `kiln_val *result`.
     Typed {
         returns_number: bool,
+        /// The typed signature over a restartable body: every slow path is a restart through
+        /// the boxed entry, exactly as in the fast clone, so what the fast path computes is
+        /// known to be a number and stays in a register. The restart boxes the parameters,
+        /// runs the boxed body once, and hands its answer back through the typed result.
+        restartable: bool,
     },
+}
+
+/// What a versioned body's fast clone assumes beyond its parameters, and how it leaves when
+/// an assumption fails. An invariant read in `arrays` is an array, checked once at entry. A
+/// method call in `calls` answers a number: checked where it answers, and a call that answers
+/// anything else leaves for the generic clone at the label after that same call, with every
+/// value before it already computed. The generic clone, `exits` false, only carries the labels.
+#[derive(Default, Clone, Debug)]
+pub struct Speculation {
+    pub arrays: HashSet<ValueId>,
+    pub calls: HashSet<ValueId>,
+    pub exits: bool,
+}
+
+impl EntryKind {
+    /// Whether every slow path of this body is a restart through the boxed entry.
+    pub fn restarts(self) -> bool {
+        matches!(
+            self,
+            EntryKind::Fast
+                | EntryKind::Typed {
+                    restartable: true,
+                    ..
+                }
+        )
+    }
 }
 
 /// Which body a graph is emitted as: a function, called through a closure, or the unit's entry
@@ -113,7 +144,7 @@ pub enum Site<'a> {
 /// only: a method-call site whose cached callee's body is one of these calls it by name, which
 /// lets the C compiler inline it; a callee that is none of them takes the indirect call. Nothing
 /// is assumed about which closure a site sees.
-fn method_candidates(program: &Program, key: &str) -> Vec<u32> {
+pub(crate) fn method_candidates(program: &Program, key: &str) -> Vec<u32> {
     let mut found = Vec::new();
     let mut scan = |code: &[Instruction]| {
         for window in code.windows(3) {
@@ -337,11 +368,21 @@ fn bail_out(op: &GraphOp, text: &str, bail: &str) -> String {
     }
 }
 
-/// The fast clone of a function, or `None` when the body cannot be restarted: an operation
-/// with an effect before a slow path, a handler, a suspension, or a slow path the surgery
-/// could not replace. The text is what will be compiled, so the last word is a scan of it.
+/// The placeholder every slow path of a restartable body is replaced by while the text is
+/// checked; the real restart is spliced in last, so the check sees the body and nothing else.
+const RESTART: &str = "KILN_RESTART;";
+
+/// A restartable clone of a function -- the fast clone, or the typed entry over a restartable
+/// body -- or `None` when the body cannot be restarted: an operation with an effect before a
+/// slow path, a handler, a suspension, or a slow path the surgery could not replace. The text
+/// is what will be compiled, so the last word is a scan of it.
+///
+/// Inside such a body a guarded operation's result is known on the fast path: an arithmetic
+/// operation whose operands failed the number test has restarted, so past it the result is a
+/// number, and so is what a `Math` intrinsic answered. The clone is planned with those proofs
+/// folded in, and its intermediates stay unboxed.
 #[allow(clippy::too_many_arguments)]
-pub fn emit_fast_clone(
+pub fn emit_restartable(
     graph: &FunctionGraph,
     proto: &FunctionProto,
     program: &Program,
@@ -352,7 +393,10 @@ pub fn emit_fast_clone(
     frame_stacks: &[usize],
     strict_functions: &[bool],
     plan: &CallPlan,
+    kind: EntryKind,
+    type_profile_record: bool,
 ) -> Option<String> {
+    debug_assert!(kind.restarts());
     if proto.generator || proto.asynchronous || proto_publishes_frame(proto) {
         return None;
     }
@@ -372,9 +416,102 @@ pub fn emit_fast_clone(
             }
         }
     }
+    let mut restart_plan = plan.clone();
+    restart_plan.numbers = guarded_numbers(graph, program, plan);
     let mut text = String::new();
-    emit_function_from_graph(
+    emit_function_from_graph_with_profile(
         &mut text,
+        graph,
+        proto,
+        program,
+        symbol,
+        index,
+        scalar_proto,
+        diagnostic_site,
+        frame_stacks,
+        strict_functions,
+        &restart_plan,
+        kind,
+        None,
+        type_profile_record,
+    );
+    const EFFECTS: &[&str] = &[
+        "goto kiln_",
+        "return status",
+        "kiln_c99_typed_status = ",
+        "kiln_c99_val_call",
+        "->body(",
+        "kiln_c99_invoke",
+        "kiln_c99_val_read_property(",
+        "kiln_c99_val_read_element(",
+        "kiln_c99_val_binary(",
+        "kiln_c99_val_unary(",
+        "thrown",
+        "locals[",
+    ];
+    // The body, past the signature: a typed entry's parameter list names `thrown` when the
+    // entry needs it, and the decision may not depend on what the entry needs.
+    let body = &text[text.find(") {\n").map_or(0, |at| at + 4)..];
+    if EFFECTS.iter().any(|needle| body.contains(needle)) {
+        return None;
+    }
+    let bail = match kind {
+        EntryKind::Fast => fast_bail(symbol, index),
+        EntryKind::Typed { returns_number, .. } => typed_bail(symbol, index, proto, returns_number),
+        EntryKind::Boxed => unreachable!("a boxed body is not a restart"),
+    };
+    Some(text.replace(RESTART, &bail))
+}
+
+/// What a restartable body proves on its fast path, beyond the plan: every guarded arithmetic
+/// result and every `Math` intrinsic's answer is a number, because the path that saw anything
+/// else has restarted.
+fn guarded_numbers(graph: &FunctionGraph, program: &Program, plan: &CallPlan) -> HashSet<ValueId> {
+    let mut assumptions: std::collections::HashMap<ValueId, Proven> = plan
+        .numbers
+        .iter()
+        .map(|&v| (v, Proven::Number))
+        .chain(plan.ints.iter().map(|&v| (v, Proven::Int)))
+        .collect();
+    for (vid, op) in graph.blocks.iter().flat_map(|b| b.operations.iter()) {
+        let guarded = match op {
+            GraphOp::Binary { op, .. } => matches!(
+                op,
+                BinaryOp::Add
+                    | BinaryOp::Subtract
+                    | BinaryOp::Multiply
+                    | BinaryOp::Divide
+                    | BinaryOp::Exponentiate
+                    | BinaryOp::Remainder
+            ),
+            GraphOp::CallMethod { .. } => restartable(op, plan, *vid, graph, program),
+            _ => false,
+        };
+        if guarded {
+            assumptions.entry(*vid).or_insert(Proven::Number);
+        }
+    }
+    crate::graph::proven_types_with(graph, &assumptions)
+        .into_iter()
+        .filter_map(|(v, kind)| kind.is_number().then_some(v))
+        .collect()
+}
+
+/// The fast clone of a function: the boxed signature over a restartable body.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_fast_clone(
+    graph: &FunctionGraph,
+    proto: &FunctionProto,
+    program: &Program,
+    symbol: &str,
+    index: usize,
+    scalar_proto: bool,
+    diagnostic_site: &str,
+    frame_stacks: &[usize],
+    strict_functions: &[bool],
+    plan: &CallPlan,
+) -> Option<String> {
+    emit_restartable(
         graph,
         proto,
         program,
@@ -386,24 +523,39 @@ pub fn emit_fast_clone(
         strict_functions,
         plan,
         EntryKind::Fast,
-    );
-    const EFFECTS: &[&str] = &[
-        "goto kiln_",
-        "return status",
-        "kiln_c99_val_call",
-        "->body(",
-        "kiln_c99_invoke",
-        "kiln_c99_val_read_property(",
-        "kiln_c99_val_read_element(",
-        "kiln_c99_val_binary(",
-        "kiln_c99_val_unary(",
-        "thrown",
-        "locals[",
-    ];
-    if EFFECTS.iter().any(|needle| text.contains(needle)) {
-        return None;
-    }
-    Some(text)
+        false,
+    )
+}
+
+/// A restartable typed entry's way out: the boxed body, once, with the parameters boxed
+/// again, and its answer handed back the way the typed entry answers. A status other than
+/// success is left pending exactly as the routed typed body leaves it.
+fn typed_bail(symbol: &str, index: usize, proto: &FunctionProto, returns_number: bool) -> String {
+    let argc = proto.parameter_count;
+    let boxed: Vec<String> = (0..argc)
+        .map(|k| format!("kiln_c99_val_from_double(p{k})"))
+        .collect();
+    let init = if boxed.is_empty() {
+        "KILN_VAL_UNDEFINED".to_owned()
+    } else {
+        boxed.join(", ")
+    };
+    // The plan proved every return a number, so the boxed answer is one: its bits are the
+    // double.
+    let answer = if returns_number {
+        "double kiln_restart_d; memcpy(&kiln_restart_d, &kiln_restart_out, sizeof(kiln_restart_d)); return kiln_restart_d;"
+    } else {
+        "return kiln_restart_out;"
+    };
+    let fail = if returns_number {
+        "kiln_c99_typed_fail_double()"
+    } else {
+        "KILN_VAL_TYPED_FAIL"
+    };
+    format!(
+        "{{ kiln_call_context kiln_restart_ctx = {{ host, thrown, NULL, depth }}; kiln_val kiln_restart_args[{n}] = {{ {init} }}; kiln_val kiln_restart_out = KILN_VAL_UNDEFINED; int kiln_restart_status = {symbol}_fn_{index}(&kiln_restart_ctx, &kiln_restart_out, upvalues, &receiver, kiln_restart_args, (size_t){argc}); if (KILN_UNLIKELY(kiln_restart_status != KILN_C99_OK)) {{ kiln_c99_typed_status = kiln_restart_status; if (kiln_restart_status == KILN_C99_THROWN) kiln_c99_typed_thrown = *thrown; return {fail}; }} {answer} }}",
+        n = argc.max(1)
+    )
 }
 
 /// A function's inline-cache sites, shared by every clone of it. Each operation declares its
@@ -450,21 +602,42 @@ fn share_sites(body: &str, prefix: &str) -> (String, usize) {
     (out, count)
 }
 
-/// How many reads of `this` a body has, in the order every clone numbers them.
-fn this_site_count(graph: &FunctionGraph) -> usize {
+/// The reads of `this` in a body, each with its column in the function's receiver-shape
+/// cache: one column per property name, in first-read order -- the same order in every
+/// clone. Two reads of one name share a column because for one receiver of one shape they
+/// are one slot, and the C compiler then reads it once.
+fn this_columns(graph: &FunctionGraph) -> std::collections::HashMap<ValueId, usize> {
+    let mut names: Vec<u32> = Vec::new();
     graph
         .blocks
         .iter()
         .flat_map(|b| b.operations.iter())
-        .filter(|(_, op)| match op {
-            GraphOp::GetProperty { object, .. } => graph
-                .blocks
-                .iter()
-                .flat_map(|b| b.operations.iter())
-                .any(|(v, def)| v == object && matches!(def, GraphOp::LoadThis)),
-            _ => false,
+        .filter_map(|(vid, op)| match op {
+            GraphOp::GetProperty { object, name, .. }
+                if graph
+                    .blocks
+                    .iter()
+                    .flat_map(|b| b.operations.iter())
+                    .any(|(v, def)| v == object && matches!(def, GraphOp::LoadThis)) =>
+            {
+                let column = names.iter().position(|n| n == name).unwrap_or_else(|| {
+                    names.push(*name);
+                    names.len() - 1
+                });
+                Some((*vid, column))
+            }
+            _ => None,
         })
-        .count()
+        .collect()
+}
+
+/// How many columns the receiver-shape cache of a body has.
+fn this_site_count(graph: &FunctionGraph) -> usize {
+    this_columns(graph)
+        .values()
+        .map(|c| c + 1)
+        .max()
+        .unwrap_or(0)
 }
 
 /// The receiver-shape cache's match at entry: the row whose shape is the receiver's, or -1.
@@ -480,13 +653,12 @@ fn receiver_prologue(symbol: &str, index: usize, kind: EntryKind) -> String {
         String::new()
     };
     format!(
-        "    int recv_k = -1; const kiln_object *recv_obj = NULL; if (KILN_VAL_IS_OBJECT(receiver)) {{ recv_obj = (const kiln_object *)KILN_VAL_PTR(receiver); const kiln_shape *recv_shape = recv_obj->shape; if (recv_shape != NULL) {{ if (recv_shape == {symbol}_fn_{index}_recv_shape[0]) recv_k = 0; else if (recv_shape == {symbol}_fn_{index}_recv_shape[1]) recv_k = 1; else if (recv_shape == {symbol}_fn_{index}_recv_shape[2]) recv_k = 2; else if (recv_shape == {symbol}_fn_{index}_recv_shape[3]) recv_k = 3;{claim} }} }}\n"
+        "    int recv_k = -1; const kiln_object *recv_obj = NULL; if (KILN_VAL_IS_OBJECT(receiver)) {{ recv_obj = (const kiln_object *)KILN_VAL_PTR(receiver); const kiln_shape *recv_shape = recv_obj->shape; if (recv_shape != NULL) {{ if (recv_shape == {symbol}_fn_{index}_recv_shape[0]) recv_k = 0; else if (recv_shape == {symbol}_fn_{index}_recv_shape[1]) recv_k = 1; else if (recv_shape == {symbol}_fn_{index}_recv_shape[2]) recv_k = 2; else if (recv_shape == {symbol}_fn_{index}_recv_shape[3]) recv_k = 3;{claim} }} }} const uint32_t *recv_row = recv_k >= 0 ? {symbol}_fn_{index}_recv_slot[recv_k] : NULL; (void)recv_row;\n"
     )
 }
 
 /// The fast clone's way out: the boxed entry, from the top, with everything as it arrived.
-fn fast_bail(symbol: &str, self_index: Option<u32>) -> String {
-    let index = self_index.expect("a fast clone is a function");
+fn fast_bail(symbol: &str, index: usize) -> String {
     format!("return {symbol}_fn_{index}(ctx, result, upvalues, receiver_ptr, args, argc);")
 }
 
@@ -495,6 +667,7 @@ fn typed_fail(kind: EntryKind) -> &'static str {
     match kind {
         EntryKind::Typed {
             returns_number: true,
+            ..
         } => "kiln_c99_typed_fail_double()",
         _ => "KILN_VAL_TYPED_FAIL",
     }
@@ -623,12 +796,23 @@ pub fn emit_function_from_graph_with_profile(
             "static inline __attribute__((always_inline)) int {symbol}_fn_{index}_f(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc) {{"
         )
         .unwrap(),
-        EntryKind::Typed { returns_number } => {
+        EntryKind::Typed {
+            returns_number,
+            restartable,
+        } => {
             let (result, params) =
                 typed_signature(proto, returns_number, plan.typed_needs[index]);
+            // A restartable typed entry is the fast clone's body with a typed signature: no
+            // runtime call survives in it, so it inlines where a method call enters it by
+            // name, and the receiver the caller matched is the receiver it reads.
+            let inline = if restartable {
+                "static inline __attribute__((always_inline))"
+            } else {
+                "static inline"
+            };
             writeln!(
                 output,
-                "static inline {result} {symbol}_fn_{index}_t({params}) {{"
+                "{inline} {result} {symbol}_fn_{index}_t({params}) {{"
             )
             .unwrap();
         }
@@ -957,6 +1141,7 @@ fn emit_block_sequence(
     is_fast_clone: bool,
     type_profile_record: bool,
     this_sites: &std::collections::HashMap<ValueId, usize>,
+    spec: &Speculation,
 ) {
     let self_index = match site {
         Site::Function { index } => Some(*index),
@@ -1011,6 +1196,12 @@ fn emit_block_sequence(
             }
     };
     for block in &graph.blocks {
+        // A restartable body never suspends, so a block nothing jumps to is the code the
+        // compiler leaves after a body's last statement: emitted, it would be a refusal in a
+        // typed entry, and a typed entry with a refusal in it is not restartable.
+        if kind.restarts() && block.id != graph.entry_block && block.predecessors.is_empty() {
+            continue;
+        }
         for from in &graph.blocks {
             if let Terminator::Suspend {
                 resume,
@@ -1072,7 +1263,7 @@ fn emit_block_sequence(
             .unwrap();
             writeln!(
                 output,
-                "    if (KILN_UNLIKELY(kiln_c99_guard_should_exit(&kiln_loop_guard_{}))) goto kiln_generic_block_{};",
+                "    if (KILN_UNLIKELY(kiln_c99_guard_should_exit_in(kiln_spec_mode, &kiln_loop_guard_{}))) goto kiln_generic_block_{};",
                 block.id.0, block.id.0
             )
             .unwrap();
@@ -1083,7 +1274,7 @@ fn emit_block_sequence(
                 continue;
             }
             let mut op_text = String::new();
-            let target: &mut String = if kind == EntryKind::Fast {
+            let target: &mut String = if kind.restarts() {
                 &mut op_text
             } else {
                 output
@@ -1111,10 +1302,13 @@ fn emit_block_sequence(
                 kind,
                 self_index,
                 this_sites.get(&vid).copied(),
+                spec,
             );
-            if kind == EntryKind::Fast {
-                let bail = fast_bail(symbol, self_index);
-                output.push_str(&bail_out(op, &op_text, &bail));
+            if kind.restarts() {
+                output.push_str(&bail_out(op, &op_text, RESTART));
+            }
+            if !spec.exits && spec.calls.contains(&vid) {
+                writeln!(output, "kiln_generic_resume_{}:;", vid.0).unwrap();
             }
         }
 
@@ -1158,23 +1352,9 @@ fn emit_blocks(
     type_profile_record: bool,
 ) -> (usize, usize) {
     let body_start = output.len();
-    // The reads of `this`, numbered in emission order -- the same order in every clone -- for
-    // the function's receiver-shape cache: one row per shape seen, one slot per read.
-    let this_sites: std::collections::HashMap<ValueId, usize> = graph
-        .blocks
-        .iter()
-        .flat_map(|b| b.operations.iter())
-        .filter(|(_, op)| match op {
-            GraphOp::GetProperty { object, .. } => graph
-                .blocks
-                .iter()
-                .flat_map(|b| b.operations.iter())
-                .any(|(v, def)| v == object && matches!(def, GraphOp::LoadThis)),
-            _ => false,
-        })
-        .enumerate()
-        .map(|(i, (vid, _))| (*vid, i))
-        .collect();
+    // The reads of `this`, each with its column in the function's receiver-shape cache: one
+    // row per shape seen, one column per property name.
+    let this_sites = this_columns(graph);
     let candidate_params = candidate_number_parameters_with_profile(graph, proto, func_profile);
     let speculate_enabled = std::env::var("KILN_SPECULATE").as_deref() != Ok("0");
     let suspends = graph
@@ -1182,8 +1362,58 @@ fn emit_blocks(
         .iter()
         .any(|b| matches!(b.terminator, Terminator::Suspend { .. }))
         || graph.seam_block.is_some();
-    let versioning =
-        speculate_enabled && !candidate_params.is_empty() && !suspends && kind == EntryKind::Boxed;
+    // Beyond the parameters: invariant upvalue reads indexed or measured as arrays, and method
+    // calls whose answers feed arithmetic. Neither is proven; both are guessed and checked.
+    let ops: Vec<(ValueId, &GraphOp)> = graph
+        .blocks
+        .iter()
+        .flat_map(|b| b.operations.iter().map(|(v, op)| (*v, op)))
+        .collect();
+    let spec_arrays: HashSet<ValueId> = ops
+        .iter()
+        .filter_map(|(vid, op)| match op {
+            GraphOp::LoadUpvalue(_) if plan.invariant.contains(vid) => Some(*vid),
+            _ => None,
+        })
+        .filter(|vid| {
+            ops.iter().any(|(_, op)| match op {
+                GraphOp::GetComputed { object, .. } => object == vid,
+                GraphOp::GetProperty { object, name, .. } => {
+                    object == vid
+                        && matches!(program.constants.get(*name as usize), Some(Constant::String(s)) if s == "length")
+                }
+                _ => false,
+            })
+        })
+        .collect();
+    let spec_calls: HashSet<ValueId> = ops
+        .iter()
+        .filter_map(|(vid, op)| match op {
+            GraphOp::CallMethod { .. } if !plan.numbers.contains(vid) => Some(*vid),
+            _ => None,
+        })
+        .filter(|vid| {
+            ops.iter().any(|(_, op)| match op {
+                GraphOp::Binary { op, left, right } => {
+                    (left == vid || right == vid)
+                        && matches!(
+                            op,
+                            BinaryOp::Add
+                                | BinaryOp::Subtract
+                                | BinaryOp::Multiply
+                                | BinaryOp::Divide
+                                | BinaryOp::Remainder
+                                | BinaryOp::Exponentiate
+                        )
+                }
+                _ => false,
+            })
+        })
+        .collect();
+    let versioning = speculate_enabled
+        && !suspends
+        && kind == EntryKind::Boxed
+        && (!candidate_params.is_empty() || !spec_arrays.is_empty() || !spec_calls.is_empty());
 
     let baseline_numbers = &plan.numbers;
     let baseline_ints = &plan.ints;
@@ -1195,15 +1425,32 @@ fn emit_blocks(
     let ivs = find_induction_variables(graph);
 
     if versioning {
-        let candidate_assumptions: std::collections::HashMap<ValueId, Proven> = candidate_params
-            .iter()
-            .filter_map(|&slot| {
-                graph
-                    .initial_locals
-                    .get(slot)
-                    .map(|&vid| (vid, Proven::Number))
-            })
-            .collect();
+        // The speculative proof starts from the plan's: what the plan proved by a typed call
+        // site or an intrinsic is not derivable from the graph alone, and a union of two
+        // proofs is not a proof -- an operation whose operands each came from one would be
+        // typed by neither and have no twin.
+        let mut candidate_assumptions: std::collections::HashMap<ValueId, Proven> =
+            baseline_numbers
+                .iter()
+                .map(|&v| (v, Proven::Number))
+                .chain(baseline_ints.iter().map(|&v| (v, Proven::Int)))
+                .collect();
+        for &slot in &candidate_params {
+            if let Some(&vid) = graph.initial_locals.get(slot) {
+                candidate_assumptions.insert(vid, Proven::Number);
+            }
+        }
+        for vid in &spec_calls {
+            candidate_assumptions.insert(*vid, Proven::Number);
+        }
+        // An array's `length` is a number.
+        for (vid, op) in &ops {
+            if let GraphOp::GetProperty { object, .. } = op
+                && spec_arrays.contains(object)
+            {
+                candidate_assumptions.insert(*vid, Proven::Number);
+            }
+        }
         let speculative_numbers = proven_numbers_with_assumptions(graph, &candidate_assumptions);
         let mut all_numbers = baseline_numbers.clone();
         all_numbers.extend(&speculative_numbers);
@@ -1226,12 +1473,37 @@ fn emit_blocks(
         )
         .unwrap();
         writeln!(output, "    static uint32_t kiln_guard_entry_{index} = 0;").unwrap();
+        output.push_str("    const int kiln_spec_mode = kiln_c99_speculate_exit_active();\n");
         let mut conds = vec![format!(
-            "!kiln_c99_guard_should_exit(&kiln_guard_entry_{index})"
+            "!kiln_c99_guard_should_exit_in(kiln_spec_mode, &kiln_guard_entry_{index})"
         )];
         for &slot in &candidate_params {
             conds.push(format!(
                 "(argc > {slot} && KILN_VAL_IS_DOUBLE(args[{slot}]))"
+            ));
+        }
+        let mut spec_sorted: Vec<ValueId> = spec_arrays.iter().copied().collect();
+        spec_sorted.sort();
+        for vid in &spec_sorted {
+            let Some(GraphOp::LoadUpvalue(index)) = defs.get(vid) else {
+                continue;
+            };
+            let invariant = lookup_speculation_invariant("upvalue_array");
+            writeln!(
+                output,
+                "    /* Speculation entry guard [{}]: {} */",
+                invariant.name, invariant.language_rule
+            )
+            .unwrap();
+            writeln!(
+                output,
+                "    kiln_val kiln_spec_{} = *(const kiln_val *)KILN_VAL_PTR(upvalues[{index}]);",
+                vid.0
+            )
+            .unwrap();
+            conds.push(format!(
+                "((kiln_spec_{v} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && kiln_c99_gc_kind_of_ptr(KILN_VAL_PTR(kiln_spec_{v})) == KILN_GC_ARRAY)",
+                v = vid.0
             ));
         }
         let entry_id = graph.entry_block.0;
@@ -1265,6 +1537,11 @@ fn emit_blocks(
             true,
             type_profile_record,
             &this_sites,
+            &Speculation {
+                arrays: spec_arrays.clone(),
+                calls: spec_calls.clone(),
+                exits: true,
+            },
         );
 
         writeln!(output, "    /* Clone B: generic fallback path */").unwrap();
@@ -1290,6 +1567,11 @@ fn emit_blocks(
             false,
             type_profile_record,
             &this_sites,
+            &Speculation {
+                arrays: HashSet::new(),
+                calls: spec_calls.clone(),
+                exits: false,
+            },
         );
     } else {
         emit_ssa_declarations(output, graph, baseline_numbers, baseline_ints);
@@ -1315,6 +1597,7 @@ fn emit_blocks(
             false,
             type_profile_record,
             &this_sites,
+            &Speculation::default(),
         );
     }
 
@@ -1406,7 +1689,7 @@ fn emit_blocks(
             }
         }
     }
-    (shared_sites, this_sites.len())
+    (shared_sites, this_site_count(graph))
 }
 
 /// One status check after a runtime call. A throw unwinds; a refusal is attributed to this site
@@ -1420,6 +1703,18 @@ fn status_check(diagnostic_site: &str, pc: u32, operation: &str, unwind: &str) -
 
 /// The numeric fast path of a binary operator on two unboxed doubles `a` and `b`, as the C
 /// expression producing a `kiln_val`, or `None` for an operator with no numeric form.
+/// The arithmetic of a binary operation on two doubles `a` and `b`, as a double.
+fn binary_raw_body(op: BinaryOp) -> Option<&'static str> {
+    Some(match op {
+        BinaryOp::Add => "a + b",
+        BinaryOp::Subtract => "a - b",
+        BinaryOp::Multiply => "a * b",
+        BinaryOp::Divide => "a / b",
+        BinaryOp::Exponentiate => "pow(a, b)",
+        _ => return None,
+    })
+}
+
 fn binary_fast_body(op: BinaryOp) -> Option<&'static str> {
     Some(match op {
         BinaryOp::Add => "kiln_c99_val_from_double(a + b)",
@@ -1533,6 +1828,7 @@ fn emit_graph_op(
     kind: EntryKind,
     self_index: Option<u32>,
     this_site: Option<usize>,
+    spec: &Speculation,
 ) {
     let v = vid.0;
     let typed = numbers.contains(&vid);
@@ -2264,16 +2560,33 @@ fn emit_graph_op(
                 f.replace("LEFT", &format!("v{l}"))
                     .replace("RIGHT", &format!("v{r}"))
             });
-            match fast {
-                Some(fast) => writeln!(
+            // A result proven a number -- by a restart, in a restartable body -- is computed
+            // as its twin and boxed from it, so a box nothing reads costs nothing: the NaN
+            // canonicalisation is the box's, not the arithmetic's. The slow path, where it
+            // survives, keeps the twin in step.
+            let raw = if typed && !typed_int {
+                binary_raw_body(*op)
+            } else {
+                None
+            };
+            match (fast, raw) {
+                (Some(_), Some(raw)) => writeln!(
+                    output,
+                    "    if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{l}) && KILN_VAL_IS_NUMBER(v{r}))) {{ double a; double b; memcpy(&a, &v{l}, sizeof(a)); memcpy(&b, &v{r}, sizeof(b)); d{v} = {raw}; v{v} = kiln_c99_val_from_double(d{v}); }} else {{ {slow} memcpy(&d{v}, &v{v}, sizeof(d{v})); }}"
+                )
+                .unwrap(),
+                (Some(fast), None) => writeln!(
                     output,
                     "    if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{l}) && KILN_VAL_IS_NUMBER(v{r}))) {{ double a; double b; memcpy(&a, &v{l}, sizeof(a)); memcpy(&b, &v{r}, sizeof(b)); v{v} = {fast}; }} else {{ {slow} }}"
                 )
                 .unwrap(),
-                None => writeln!(output, "    {{ {slow} }}").unwrap(),
+                (None, _) => writeln!(output, "    {{ {slow} }}").unwrap(),
             }
             if typed_int {
                 writeln!(output, "    if (KILN_VAL_IS_NUMBER(v{v})) {{ memcpy(&d{v}, &v{v}, sizeof(d{v})); i{v} = (int64_t)d{v}; }}").unwrap();
+            } else if typed && raw.is_none() {
+                // Proven a number by a restart: the guarded form ran, so the twin is the bits.
+                writeln!(output, "    memcpy(&d{v}, &v{v}, sizeof(d{v}));").unwrap();
             }
         }
         // A call is the direct path on `kiln_val`: a plain closure that
@@ -2446,8 +2759,63 @@ fn emit_graph_op(
             let key_len = key_str.len();
             // The unit's own methods of this name: a cached callee whose body is one of them is
             // called by name, and the C compiler may inline it into this site.
-            let by_name: String = method_candidates(program, key_str)
+            let candidates = method_candidates(program, key_str);
+            // A candidate with a typed entry, at a site that proved every argument a number,
+            // is entered typed: the receiver is the object the cache matched, so what the
+            // language decides about a method's `this` -- an arrow's captured one, a sloppy
+            // body's global object -- is decided here, by the proto, and not read from the
+            // closure. The generator, frame and arrow tests are the proto's too.
+            let typed_candidates: Vec<u32> = candidates
                 .iter()
+                .copied()
+                .filter(|&i| {
+                    let callee = &program.functions[i as usize];
+                    plan.typed_entries.get(i as usize).copied().unwrap_or(false)
+                        && !callee.arrow
+                        && callee.parameter_count as usize == argc
+                        && args.iter().all(|a| numbers.contains(a))
+                })
+                .collect();
+            let diag = format!(
+                "if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) {{ if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = kiln_val_to_boundary(v{o}).tag; if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod invocation refused\"; kiln_c99_note_refusal(\"{diagnostic_site}\", (size_t){pc}, \"{label}\", (size_t)kiln_c99_diagnostic_active_depth); }} else if (KILN_UNLIKELY(status == KILN_C99_THROWN)) {{ if (kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = kiln_val_to_boundary(v{o}).tag; kiln_c99_diagnostic_detail = \"CallMethod invocation threw\"; }} kiln_c99_note_refusal(\"{diagnostic_site}\", (size_t){pc}, \"{label}\", (size_t)kiln_c99_diagnostic_active_depth); }}",
+                o = object.0
+            );
+            let typed_check = status_check(diagnostic_site, pc, label, unwind);
+            let typed_chain: String = typed_candidates
+                .iter()
+                .map(|&i| {
+                    let needs = plan.typed_needs[i as usize];
+                    let mut call_args = String::from("depth + 1");
+                    if needs.upvalues {
+                        call_args.push_str(", plain->upvalues");
+                    }
+                    if needs.receiver {
+                        call_args.push_str(&format!(", v{}", object.0));
+                    }
+                    if needs.runtime {
+                        call_args.push_str(", host, thrown");
+                    }
+                    for a in args {
+                        call_args.push_str(&format!(", d{}", a.0));
+                    }
+                    let failed = format!(
+                        "{{ int status = kiln_c99_typed_status; if (status == KILN_C99_THROWN) *thrown = kiln_c99_typed_thrown; {diag} {typed_check} }}"
+                    );
+                    if plan.typed_returns[i as usize] {
+                        let twin = if typed { format!(" d{v} = kiln_typed_d;") } else { String::new() };
+                        format!(
+                            "if (plain->body == (kiln_body_fn){symbol}_fn_{i} && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ double kiln_typed_d = {symbol}_fn_{i}_t({call_args}); if (KILN_UNLIKELY(kiln_c99_typed_failed(kiln_typed_d))) {failed} else {{ v{v} = kiln_c99_val_from_double(kiln_typed_d);{twin} }} handled = 1; }} else "
+                        )
+                    } else {
+                        format!(
+                            "if (plain->body == (kiln_body_fn){symbol}_fn_{i} && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ kiln_val kiln_typed_r = {symbol}_fn_{i}_t({call_args}); if (KILN_UNLIKELY(kiln_typed_r == KILN_VAL_TYPED_FAIL)) {failed} else {{ v{v} = kiln_typed_r; }} handled = 1; }} else "
+                        )
+                    }
+                })
+                .collect();
+            let by_name: String = candidates
+                .iter()
+                .filter(|i| !typed_candidates.contains(i))
                 .enumerate()
                 .map(|(k, i)| {
                     format!(
@@ -3272,6 +3640,43 @@ fn emit_graph_op(
                 None
             };
 
+            // An argument the plan proved a number needs no test: its twin is the operand.
+            let math_intrinsic = math_intrinsic.map(|text| {
+                args.iter().filter(|a| numbers.contains(a)).fold(text, |text, a| {
+                    text.replace(
+                        &format!(
+                            "if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a}))) {{ double d; memcpy(&d, &v{a}, sizeof(d));",
+                            a = a.0
+                        ),
+                        &format!("{{ double d = d{};", a.0),
+                    )
+                })
+            });
+            // A result proven a number is computed as its twin and boxed from it, and the
+            // box, when nothing reads it, is not computed; the statement's tail then leaves
+            // the twin alone where the intrinsic answered.
+            let math_intrinsic = match math_intrinsic {
+                Some(text) if typed => {
+                    let assign = format!("v{v} = kiln_c99_val_from_double(");
+                    let mut out = String::with_capacity(text.len());
+                    let mut rest = text.as_str();
+                    while let Some(at) = rest.find(&assign) {
+                        let expr_start = at + assign.len();
+                        let Some(end) = rest[expr_start..].find(");") else {
+                            break;
+                        };
+                        let expr = &rest[expr_start..expr_start + end];
+                        out.push_str(&rest[..at]);
+                        out.push_str(&format!(
+                            "d{v} = {expr}; v{v} = kiln_c99_val_from_double(d{v}); kiln_twin = 1;"
+                        ));
+                        rest = &rest[expr_start + end + 2..];
+                    }
+                    out.push_str(rest);
+                    Some(out)
+                }
+                other => other,
+            };
             let math_s = math_intrinsic.map(|s| format!(" {s}")).unwrap_or_default();
             let push_s = push_intrinsic.map(|s| format!(" {s}")).unwrap_or_default();
             let regex_s = regex_intrinsic.map(|s| format!(" {s}")).unwrap_or_default();
@@ -3311,14 +3716,14 @@ fn emit_graph_op(
                 output,
                 "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; \
                 kiln_val call_args[{n}] = {{ {init} }}; \
-                int handled = 0; \
+                int handled = 0; int kiln_twin = 0; (void)kiln_twin; \
                 {math_s}{push_s}{regex_s}{map_s}{filter_s}{reduce_s}{slice_s}{join_s}{split_s}{index_of_s}{substring_s}{collection_s}{json_s}{sort_s}{array_extra_s}{string_extra_s}{iterator_s} \
                 if (!handled && site.pic_count > 0 && KILN_VAL_IS_OBJECT(v{o})) {{ \
                     const kiln_object *obj = (const kiln_object *)KILN_VAL_PTR(v{o}); \
                     kiln_val cached_fn = kiln_c99_site_cached_callee(&site, obj); \
                     if (cached_fn != 0 && KILN_VAL_IS_CLOSURE(cached_fn)) {{ \
                         kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(cached_fn); \
-                        if (!plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                        {typed_chain}if (!plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
                             kiln_val vreceiver = plain->arrow ? plain->captured_this : v{o}; \
                             if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vreceiver); \
                             v{v} = KILN_VAL_UNDEFINED; \
@@ -3363,10 +3768,16 @@ fn emit_graph_op(
                 if (!handled) {{ \
                     int status = kiln_c99_val_call_method(host, v{o}, call_args, (size_t){argc}, {symbol}_key_{name}, {key_len}, depth, thrown, &site, \"{diagnostic_site}\", (size_t){pc}, \"{label}\", &v{v}); \
                     {check} \
-                }} }}\
-                {typed_sync}",
+                }} {typed_sync} }}",
                 o = object.0,
-                typed_sync = if typed { format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));") } else { String::new() }
+                typed_sync = if typed && spec.exits && spec.calls.contains(&vid) {
+                    let invariant = lookup_speculation_invariant("method_call_number");
+                    format!("/* Speculation exit [{}]: {} */ if (!kiln_twin) {{ if (KILN_UNLIKELY(!KILN_VAL_IS_NUMBER(v{v}))) goto kiln_generic_resume_{v}; memcpy(&d{v}, &v{v}, sizeof(d{v})); }}", invariant.name, invariant.language_rule)
+                } else if typed {
+                    format!("if (!kiln_twin) memcpy(&d{v}, &v{v}, sizeof(d{v}));")
+                } else {
+                    String::new()
+                }
             )
             .unwrap();
         }
@@ -3569,7 +3980,12 @@ fn emit_graph_op(
             };
             let key_len = key_str.len();
             let check = status_check(diagnostic_site, pc, label, unwind);
-            let length_check = if key_str == "length" {
+            let length_check = if key_str == "length" && spec.arrays.contains(object) {
+                format!(
+                    "{{ v{v} = kiln_c99_val_from_double((double)((const kiln_array *)KILN_VAL_PTR(v{o}))->count); handled = 1; }} ",
+                    o = object.0
+                )
+            } else if key_str == "length" {
                 format!(
                     "if (KILN_LIKELY((v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX)) {{ \
                          void *ptr = KILN_VAL_PTR(v{o}); \
@@ -3613,7 +4029,7 @@ fn emit_graph_op(
             let (receiver_tier, receiver_learn) = match (this_site, self_index) {
                 (Some(i), Some(index)) => (
                     format!(
-                        "if (recv_k >= 0) {{ uint32_t rs = {symbol}_fn_{index}_recv_slot[recv_k][{i}]; if (rs != UINT32_MAX && KILN_LIKELY(rs < recv_obj->slot_capacity)) {{ v{v} = recv_obj->slots[rs]; handled = 1; }} }} "
+                        "if (recv_row != NULL) {{ uint32_t rs = recv_row[{i}]; if (rs != UINT32_MAX && KILN_LIKELY(rs < recv_obj->slot_capacity)) {{ v{v} = recv_obj->slots[rs]; handled = 1; }} }} "
                     ),
                     if kind == EntryKind::Boxed {
                         format!(
@@ -3764,11 +4180,28 @@ fn emit_graph_op(
                 return;
             }
             let check = status_check(diagnostic_site, pc, label, unwind);
+            // The object an array by the entry guard: no tag or kind to test, and an index
+            // proven an integer is the element's index as it is.
+            let array_tier = if spec.arrays.contains(object) && ints.contains(key) {
+                format!(
+                    "{{ const kiln_array *arr = (const kiln_array *)KILN_VAL_PTR(v{o}); if (KILN_LIKELY(i{k} >= 0 && (uint64_t)i{k} < arr->count && arr->elements[i{k}] != KILN_VAL_HOLE)) {{ v{v} = arr->elements[i{k}]; handled = 1; }} }} ",
+                    o = object.0,
+                    k = key.0
+                )
+            } else if spec.arrays.contains(object) {
+                format!(
+                    "if (KILN_VAL_IS_NUMBER(v{k})) {{ const kiln_array *arr = (const kiln_array *)KILN_VAL_PTR(v{o}); double idx; memcpy(&idx, &v{k}, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < arr->count && arr->elements[slot] != KILN_VAL_HOLE)) {{ v{v} = arr->elements[slot]; handled = 1; }} }} ",
+                    o = object.0,
+                    k = key.0
+                )
+            } else {
+                String::new()
+            };
             writeln!(
                 output,
                 "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; \
-                int handled = 0; \
-                if (KILN_LIKELY((v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_NUMBER(v{k}))) {{ \
+                int handled = 0; {array_tier}\
+                if (!handled && KILN_LIKELY((v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_NUMBER(v{k}))) {{ \
                     void *ptr = KILN_VAL_PTR(v{o}); \
                     if (site.has_cached_method == 1 || kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
                         site.has_cached_method = 1; \
@@ -3906,7 +4339,8 @@ fn emit_terminator(
                 if matches!(
                     kind,
                     EntryKind::Typed {
-                        returns_number: true
+                        returns_number: true,
+                        ..
                     }
                 ) =>
             {

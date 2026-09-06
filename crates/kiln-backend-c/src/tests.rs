@@ -4737,11 +4737,16 @@ fn versioning_emits_two_clones_with_entry_guard_and_loop_exit() {
 
 #[test]
 fn speculation_invariants_table_is_sound_and_complete() {
-    assert_eq!(assert_speculation_invariants(SPECULATION_INVARIANTS), 2);
-    let p = lookup_speculation_invariant("parameter_number");
-    assert!(!p.name.is_empty() && !p.language_rule.is_empty());
-    let l = lookup_speculation_invariant("loop_speculation_exit");
-    assert!(!l.name.is_empty() && !l.language_rule.is_empty());
+    assert_eq!(assert_speculation_invariants(SPECULATION_INVARIANTS), 4);
+    for name in [
+        "parameter_number",
+        "loop_speculation_exit",
+        "upvalue_array",
+        "method_call_number",
+    ] {
+        let row = lookup_speculation_invariant(name);
+        assert!(!row.name.is_empty() && !row.language_rule.is_empty());
+    }
 }
 
 #[test]

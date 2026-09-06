@@ -32,6 +32,7 @@ use std::collections::{HashMap, HashSet};
 
 use kiln_ir::{Constant, FunctionProto, Instruction, Program, Upvalue};
 
+use crate::emit_graph::method_candidates;
 use crate::graph::{
     BlockId, FunctionGraph, GraphOp, Proven, Terminator, ValueId, proven_types_with,
 };
@@ -79,11 +80,16 @@ pub struct CallPlan {
     /// Reads of a known binding that is never marked uninitialized: the binding holds
     /// `undefined` and then the closure, so the read needs no dead-zone check.
     pub unchecked: HashSet<ValueId>,
+    /// Reads of a settled binding stored exactly once: the value is the same at every read,
+    /// so a fact checked about it at entry holds for the whole body.
+    pub invariant: HashSet<ValueId>,
     /// Per proto: whether its typed entry is proven to return a number, and so hands its
     /// result back as a `double`.
     pub typed_returns: Vec<bool>,
     /// Per proto: what its typed entry takes beyond its parameters.
     pub typed_needs: Vec<TypedNeeds>,
+    /// Per proto: whether its typed entry exists in the unit.
+    pub typed_entries: Vec<bool>,
     /// Per proto: whether a fast clone exists -- the body with every slow path replaced by a
     /// restart through the boxed entry, for a body that can be restarted.
     pub fast: Vec<bool>,
@@ -106,8 +112,13 @@ impl DirectPlan {
             .functions
             .iter()
             .zip(&direct)
-            .map(|(proto, &direct)| direct && proto.parameter_count > 0)
+            .map(|(_, &direct)| direct)
             .collect();
+        let intrinsics: Vec<HashMap<ValueId, Proven>> = graphs
+            .iter()
+            .map(|g| intrinsic_results(g, program))
+            .collect();
+        let entry_intrinsics = intrinsic_results(entry, program);
         let params: Vec<u32> = program
             .functions
             .iter()
@@ -148,12 +159,13 @@ impl DirectPlan {
                 if !typed_eligible[i] {
                     continue;
                 }
-                let seeds: HashMap<ValueId, Proven> = graph
+                let mut seeds: HashMap<ValueId, Proven> = graph
                     .initial_locals
                     .iter()
                     .take(params[i] as usize)
                     .map(|&v| (v, Proven::Number))
                     .collect();
+                seeds.extend(intrinsics[i].iter().map(|(&v, &k)| (v, k)));
                 let (proven, _) = settle(
                     graph,
                     seeds,
@@ -208,15 +220,24 @@ impl DirectPlan {
                     .filter_map(|(v, kind)| (kind == Proven::Int).then_some(v))
                     .collect(),
                 unchecked: known.unchecked.clone(),
+                invariant: known.invariant.clone(),
                 typed_returns: typed_returns.clone(),
                 typed_needs: vec![TypedNeeds::default(); graphs.len()],
+                typed_entries: vec![false; graphs.len()],
                 fast: vec![false; graphs.len()],
             }
         };
         let functions: Vec<CallPlan> = graphs
             .iter()
             .enumerate()
-            .map(|(i, g)| plan_for(g, &known.functions[i], &function_sites[i], HashMap::new()))
+            .map(|(i, g)| {
+                plan_for(
+                    g,
+                    &known.functions[i],
+                    &function_sites[i],
+                    intrinsics[i].clone(),
+                )
+            })
             .collect();
         let typed: Vec<Option<CallPlan>> = graphs
             .iter()
@@ -225,16 +246,37 @@ impl DirectPlan {
                 if !typed_eligible[i] {
                     return None;
                 }
-                let seeds: HashMap<ValueId, Proven> = g
+                let mut seeds: HashMap<ValueId, Proven> = g
                     .initial_locals
                     .iter()
                     .take(params[i] as usize)
                     .map(|&v| (v, Proven::Number))
                     .collect();
+                seeds.extend(intrinsics[i].iter().map(|(&v, &k)| (v, k)));
                 Some(plan_for(g, &known.functions[i], &function_sites[i], seeds))
             })
             .collect();
-        let entry_plan = plan_for(entry, &known.entry, &entry_sites, HashMap::new());
+        let entry_plan = plan_for(entry, &known.entry, &entry_sites, entry_intrinsics);
+
+        // A method call reaches a typed entry by name when the callee the cache remembers is
+        // one of the unit's own methods of that name, so every such method a site could enter
+        // typed -- the arguments proven numbers, the count exact -- is referenced.
+        let method_targets = |graph: &FunctionGraph, plan: &CallPlan| -> Vec<u32> {
+            let mut targets = Vec::new();
+            for (_, op) in graph.blocks.iter().flat_map(|b| b.operations.iter()) {
+                if let GraphOp::CallMethod { name, args, .. } = op
+                    && let Some(Constant::String(key)) = program.constants.get(*name as usize)
+                    && args.iter().all(|a| plan.numbers.contains(a))
+                {
+                    targets.extend(
+                        method_candidates(program, key)
+                            .into_iter()
+                            .filter(|&i| params[i as usize] as usize == args.len()),
+                    );
+                }
+            }
+            targets
+        };
 
         // A typed entry exists only where some site calls it; an unreferenced clone is dead C.
         let mut referenced: HashSet<u32> = HashSet::new();
@@ -262,6 +304,10 @@ impl DirectPlan {
                 .filter(|s| entry_plan.typed_sites.contains(&s.result))
                 .map(|s| s.target),
         );
+        for (graph, plan) in graphs.iter().zip(&functions) {
+            referenced.extend(method_targets(graph, plan));
+        }
+        referenced.extend(method_targets(entry, &entry_plan));
         // A typed entry referenced only from typed entries that are themselves unreferenced is
         // still dead, but only after those are dropped: close the set through the typed sites.
         loop {
@@ -277,6 +323,7 @@ impl DirectPlan {
                             .filter(|s| plan.typed_sites.contains(&s.result))
                             .map(|s| s.target),
                     );
+                    next.extend(method_targets(&graphs[i], plan));
                 }
             }
             referenced = next;
@@ -284,17 +331,27 @@ impl DirectPlan {
                 break;
             }
         }
-        let typed = typed
+        let typed: Vec<Option<CallPlan>> = typed
             .into_iter()
             .enumerate()
             .map(|(i, plan)| plan.filter(|_| referenced.contains(&(i as u32))))
             .collect();
+        let typed_entries: Vec<bool> = typed.iter().map(Option::is_some).collect();
 
-        DirectPlan {
+        let mut plan = DirectPlan {
             functions,
             typed,
             entry: entry_plan,
+        };
+        for plan in plan
+            .functions
+            .iter_mut()
+            .chain(plan.typed.iter_mut().flatten())
+            .chain(std::iter::once(&mut plan.entry))
+        {
+            plan.typed_entries = typed_entries.clone();
         }
+        plan
     }
 
     /// Record what every typed entry needs, in every body's plan.
@@ -336,6 +393,54 @@ struct Site {
 /// A proto whose call needs nothing but the body: no frame published, no suspension.
 pub(crate) fn direct_callable(proto: &FunctionProto) -> bool {
     !proto_publishes_frame(proto) && !proto.generator && !proto.asynchronous
+}
+
+/// What the unit knows about the built-ins it lowers as intrinsics: a `Math` method of the
+/// emitter's list, in a program that cannot redefine it, answers a number whenever it answers.
+/// The proofs are seeds for every plan of the body, so a body that ends in `Math.sqrt(..)`
+/// returns a number wherever its inputs came from.
+fn intrinsic_results(graph: &FunctionGraph, program: &Program) -> HashMap<ValueId, Proven> {
+    if program.has_direct_eval() || program.has_dynamic_import() {
+        return HashMap::new();
+    }
+    let math: HashSet<ValueId> = graph
+        .blocks
+        .iter()
+        .flat_map(|b| b.operations.iter())
+        .filter_map(|(v, op)| {
+            matches!(op, GraphOp::LoadBuiltin(kiln_ir::Builtin::Math)).then_some(*v)
+        })
+        .collect();
+    graph
+        .blocks
+        .iter()
+        .flat_map(|b| b.operations.iter())
+        .filter_map(|(v, op)| match op {
+            GraphOp::CallMethod {
+                object, name, args, ..
+            } if math.contains(object) => {
+                let key = match program.constants.get(*name as usize) {
+                    Some(Constant::String(s)) => s.as_str(),
+                    _ => return None,
+                };
+                let intrinsic = matches!(
+                    (key, args.len()),
+                    ("sqrt", 1)
+                        | ("abs", 1)
+                        | ("floor", 1)
+                        | ("ceil", 1)
+                        | ("round", 1)
+                        | ("trunc", 1)
+                        | ("sign", 1)
+                        | ("min", 2)
+                        | ("max", 2)
+                        | ("pow", 2)
+                );
+                intrinsic.then_some((*v, Proven::Number))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// The proven types of one body under `seeds`, with the typed sites settled: a site is typed
@@ -386,6 +491,7 @@ fn settle(
 struct KnownValues {
     known: HashMap<ValueId, u32>,
     unchecked: HashSet<ValueId>,
+    invariant: HashSet<ValueId>,
 }
 
 struct Known {
@@ -727,6 +833,13 @@ fn known_callees(program: &Program, graphs: &[FunctionGraph], entry: &FunctionGr
     for binding in &settled {
         for (owner, vid) in reads.get(binding).into_iter().flatten() {
             values_of(&mut known, *owner).unchecked.insert(*vid);
+        }
+        // A settled binding with one store holds one value for the rest of the program: every
+        // read of it, from wherever, answers the same thing.
+        if stores.get(binding).is_some_and(|s| s.len() == 1) {
+            for (owner, vid) in reads.get(binding).into_iter().flatten() {
+                values_of(&mut known, *owner).invariant.insert(*vid);
+            }
         }
     }
     for (binding, index) in &known_bindings {
