@@ -1070,7 +1070,20 @@ fn emit_ssa_declarations(
     graph: &FunctionGraph,
     numbers: &HashSet<ValueId>,
     ints: &HashSet<ValueId>,
+    booleans: &HashSet<ValueId>,
 ) {
+    if !booleans.is_empty() {
+        let mut ids: Vec<u32> = booleans.iter().map(|v| v.0).collect();
+        ids.sort_unstable();
+        output.push_str("    int ");
+        for (i, vid) in ids.iter().enumerate() {
+            if i > 0 {
+                output.push_str(", ");
+            }
+            write!(output, "b{vid} = 0").unwrap();
+        }
+        output.push_str(";\n");
+    }
     if !ints.is_empty() {
         let mut ids: Vec<u32> = ints.iter().map(|v| v.0).collect();
         ids.sort_unstable();
@@ -1140,6 +1153,7 @@ fn emit_block_sequence(
     kind: EntryKind,
     numbers: &HashSet<ValueId>,
     ints: &HashSet<ValueId>,
+    booleans: &HashSet<ValueId>,
     defs: &std::collections::HashMap<ValueId, &GraphOp>,
     ivs: &std::collections::HashMap<ValueId, InductionVariable>,
     block_prefix: &str,
@@ -1148,6 +1162,14 @@ fn emit_block_sequence(
     this_sites: &std::collections::HashMap<ValueId, usize>,
     spec: &Speculation,
 ) {
+    // A proven number nothing reads boxed is never boxed: its box statement is dropped from
+    // the operation's text, and its twin is all that lives. Only in a body with one clone --
+    // a versioned body's clones share every value, and the generic one reads them boxed.
+    let boxed = if block_prefix == "kiln_block_" {
+        Some(boxed_uses(graph, numbers, booleans, array_slots, kind))
+    } else {
+        None
+    };
     let self_index = match site {
         Site::Function { index } => Some(*index),
         Site::Entry { .. } => None,
@@ -1279,11 +1301,7 @@ fn emit_block_sequence(
                 continue;
             }
             let mut op_text = String::new();
-            let target: &mut String = if kind.restarts() {
-                &mut op_text
-            } else {
-                output
-            };
+            let target: &mut String = &mut op_text;
             emit_graph_op(
                 target,
                 vid,
@@ -1310,7 +1328,22 @@ fn emit_block_sequence(
                 spec,
             );
             if kind.restarts() {
-                output.push_str(&bail_out(op, &op_text, RESTART));
+                op_text = bail_out(op, &op_text, RESTART);
+            }
+            if let Some(boxed) = &boxed
+                && numbers.contains(&vid)
+                && !boxed.contains(&vid)
+            {
+                op_text = op_text.replace(
+                    &format!(" v{} = kiln_c99_val_from_double(d{});", vid.0, vid.0),
+                    " ",
+                );
+            }
+            output.push_str(&op_text);
+            // A boolean's twin follows from its box: one compare, and a branch or a phi then
+            // reads the twin.
+            if booleans.contains(&vid) && !matches!(op, GraphOp::Phi { .. }) {
+                writeln!(output, "    b{} = (v{} == KILN_VAL_TRUE);", vid.0, vid.0).unwrap();
             }
             if !spec.exits && spec.calls.contains(&vid) {
                 writeln!(output, "kiln_generic_resume_{}:;", vid.0).unwrap();
@@ -1324,6 +1357,7 @@ fn emit_block_sequence(
             &block.terminator,
             numbers,
             ints,
+            booleans,
             defs,
             &unwind,
             site,
@@ -1333,6 +1367,120 @@ fn emit_block_sequence(
             symbol,
             type_profile_record,
         );
+    }
+}
+
+/// The values proven booleans under `assumptions`: comparisons, `!`, `in`, `instanceof`, the
+/// literals, and phis that agree.
+fn booleans_with(
+    graph: &FunctionGraph,
+    assumptions: &std::collections::HashMap<ValueId, Proven>,
+) -> HashSet<ValueId> {
+    crate::graph::proven_types_with(graph, assumptions)
+        .into_iter()
+        .filter_map(|(v, kind)| (kind == Proven::Boolean).then_some(v))
+        .collect()
+}
+
+/// The values some operation reads boxed. Arithmetic and comparison on two proven numbers
+/// read the twins; a branch on such a comparison or on a proven boolean reads no box; a typed
+/// entry returning a number returns the twin. Everything else reads the box, and a phi that is
+/// read boxed reads its inputs boxed.
+fn boxed_uses(
+    graph: &FunctionGraph,
+    numbers: &HashSet<ValueId>,
+    booleans: &HashSet<ValueId>,
+    array_slots: &HashSet<u32>,
+    kind: EntryKind,
+) -> HashSet<ValueId> {
+    let twin_only = |op: &BinaryOp| {
+        matches!(
+            op,
+            BinaryOp::Add
+                | BinaryOp::Subtract
+                | BinaryOp::Multiply
+                | BinaryOp::Divide
+                | BinaryOp::Exponentiate
+                | BinaryOp::Remainder
+                | BinaryOp::StrictEqual
+                | BinaryOp::StrictNotEqual
+                | BinaryOp::LooseEqual
+                | BinaryOp::LooseNotEqual
+                | BinaryOp::LessThan
+                | BinaryOp::LessThanOrEqual
+                | BinaryOp::GreaterThan
+                | BinaryOp::GreaterThanOrEqual
+        )
+    };
+    let defs: std::collections::HashMap<ValueId, &GraphOp> = graph
+        .blocks
+        .iter()
+        .flat_map(|b| b.operations.iter().map(|(v, op)| (*v, op)))
+        .collect();
+    let mut used: HashSet<ValueId> = HashSet::new();
+    // A phi, a store to a slot that lives in SSA, and a dead-zone check of a proven number
+    // are copies: they read their input boxed only if something reads them boxed.
+    let mut phis: Vec<(ValueId, Vec<ValueId>)> = Vec::new();
+    for block in &graph.blocks {
+        for (vid, op) in &block.operations {
+            match op {
+                GraphOp::Phi { inputs } => {
+                    phis.push((*vid, inputs.iter().map(|(_, v)| *v).collect()));
+                }
+                GraphOp::StoreLocal { slot, value } if !array_slots.contains(slot) => {
+                    phis.push((*vid, vec![*value]));
+                }
+                GraphOp::CheckTdz { value, .. } if numbers.contains(value) => {
+                    phis.push((*vid, vec![*value]));
+                }
+                GraphOp::Binary { op, left, right }
+                    if twin_only(op) && numbers.contains(left) && numbers.contains(right) => {}
+                _ => used.extend(op.operands()),
+            }
+        }
+        match &block.terminator {
+            Terminator::Branch { condition, .. } => {
+                let compares_twins = matches!(
+                    defs.get(condition),
+                    Some(GraphOp::Binary { op, left, right })
+                        if twin_only(op) && numbers.contains(left) && numbers.contains(right)
+                );
+                if !compares_twins && !booleans.contains(condition) {
+                    used.insert(*condition);
+                }
+            }
+            Terminator::Return(Some(v)) => {
+                let typed_number = matches!(
+                    kind,
+                    EntryKind::Typed {
+                        returns_number: true,
+                        ..
+                    }
+                );
+                if !(typed_number && numbers.contains(v)) {
+                    used.insert(*v);
+                }
+            }
+            Terminator::Throw(v) => {
+                used.insert(*v);
+            }
+            Terminator::Suspend { value, spilled, .. } => {
+                used.insert(*value);
+                used.extend(spilled.iter().copied());
+            }
+            _ => {}
+        }
+    }
+    loop {
+        let before = used.len();
+        for (phi, inputs) in &phis {
+            if used.contains(phi) {
+                used.extend(inputs.iter().copied());
+            }
+        }
+        if used.len() == before {
+            return used;
+        }
     }
 }
 
@@ -1422,6 +1570,14 @@ fn emit_blocks(
 
     let baseline_numbers = &plan.numbers;
     let baseline_ints = &plan.ints;
+    let baseline_booleans = booleans_with(
+        graph,
+        &baseline_numbers
+            .iter()
+            .map(|&v| (v, Proven::Number))
+            .chain(baseline_ints.iter().map(|&v| (v, Proven::Int)))
+            .collect(),
+    );
     let defs: std::collections::HashMap<ValueId, &GraphOp> = graph
         .blocks
         .iter()
@@ -1464,7 +1620,8 @@ fn emit_blocks(
         let mut all_ints = baseline_ints.clone();
         all_ints.extend(&speculative_ints);
 
-        emit_ssa_declarations(output, graph, &all_numbers, &all_ints);
+        let all_booleans = booleans_with(graph, &candidate_assumptions);
+        emit_ssa_declarations(output, graph, &all_numbers, &all_ints, &all_booleans);
 
         let index = match site {
             Site::Function { index } => *index,
@@ -1536,6 +1693,7 @@ fn emit_blocks(
             kind,
             &all_numbers,
             &all_ints,
+            &all_booleans,
             &defs,
             &ivs,
             "kiln_fast_block_",
@@ -1566,6 +1724,7 @@ fn emit_blocks(
             kind,
             baseline_numbers,
             baseline_ints,
+            &baseline_booleans,
             &defs,
             &ivs,
             "kiln_generic_block_",
@@ -1579,7 +1738,13 @@ fn emit_blocks(
             },
         );
     } else {
-        emit_ssa_declarations(output, graph, baseline_numbers, baseline_ints);
+        emit_ssa_declarations(
+            output,
+            graph,
+            baseline_numbers,
+            baseline_ints,
+            &baseline_booleans,
+        );
         emit_block_sequence(
             output,
             graph,
@@ -1596,6 +1761,7 @@ fn emit_blocks(
             kind,
             baseline_numbers,
             baseline_ints,
+            &baseline_booleans,
             &defs,
             &ivs,
             "kiln_block_",
@@ -2103,7 +2269,8 @@ fn emit_graph_op(
             writeln!(output, "    v{v} = KILN_VAL_UNINITIALIZED;").unwrap();
         }
         GraphOp::CheckTdz { slot: _, value } => {
-            if graph.scalar_alias_map.contains_key(value) {
+            // A proven number is initialized by definition: no check, just the copies.
+            if graph.scalar_alias_map.contains_key(value) || numbers.contains(value) {
                 writeln!(output, "    v{v} = v{};", value.0).unwrap();
                 if typed {
                     writeln!(output, "    d{v} = d{};", value.0).unwrap();
@@ -4359,6 +4526,7 @@ fn emit_terminator(
     terminator: &Terminator,
     numbers: &HashSet<ValueId>,
     ints: &HashSet<ValueId>,
+    booleans: &HashSet<ValueId>,
     defs: &std::collections::HashMap<ValueId, &GraphOp>,
     unwind: &str,
     site: &Site<'_>,
@@ -4473,7 +4641,15 @@ fn emit_terminator(
             .unwrap();
         }
         Terminator::Jump(target) => {
-            emit_phi_assignments(output, graph, current_block.id, *target, numbers, ints);
+            emit_phi_assignments(
+                output,
+                graph,
+                current_block.id,
+                *target,
+                numbers,
+                ints,
+                booleans,
+            );
             writeln!(output, "    goto {block_prefix}{};", target.0).unwrap();
         }
         Terminator::Branch {
@@ -4513,14 +4689,32 @@ fn emit_terminator(
                     };
                     sym.map(|sym| format!("d{} {sym} d{}", left.0, right.0))
                 }
+                // A proven boolean branches on its twin.
+                _ if booleans.contains(condition) => Some(format!("b{}", condition.0)),
                 _ => None,
             }
             .unwrap_or_else(|| format!("kiln_c99_val_truthy(v{})", condition.0));
             writeln!(output, "    if ({test}) {{").unwrap();
-            emit_phi_assignments(output, graph, current_block.id, *true_block, numbers, ints);
+            emit_phi_assignments(
+                output,
+                graph,
+                current_block.id,
+                *true_block,
+                numbers,
+                ints,
+                booleans,
+            );
             writeln!(output, "        goto {block_prefix}{};", true_block.0).unwrap();
             output.push_str("    } else {\n");
-            emit_phi_assignments(output, graph, current_block.id, *false_block, numbers, ints);
+            emit_phi_assignments(
+                output,
+                graph,
+                current_block.id,
+                *false_block,
+                numbers,
+                ints,
+                booleans,
+            );
             writeln!(output, "        goto {block_prefix}{};", false_block.0).unwrap();
             output.push_str("    }\n");
         }
@@ -4561,6 +4755,7 @@ fn emit_phi_assignments(
     target: BlockId,
     numbers: &HashSet<ValueId>,
     ints: &HashSet<ValueId>,
+    booleans: &HashSet<ValueId>,
 ) {
     // A parallel move: every input is read before any phi is written, so two phis that swap
     // values (`[a, b] = [b, a]` across a back edge) do not clobber each other.
@@ -4589,6 +4784,9 @@ fn emit_phi_assignments(
         if ints.contains(&ValueId(phi_v)) {
             write!(output, " int64_t phi_ti{i} = i{from_v};").unwrap();
         }
+        if booleans.contains(&ValueId(phi_v)) {
+            write!(output, " int phi_tb{i} = b{from_v};").unwrap();
+        }
     }
     for (i, &(phi_v, _)) in moves.iter().enumerate() {
         write!(output, " v{phi_v} = phi_t{i};").unwrap();
@@ -4597,6 +4795,9 @@ fn emit_phi_assignments(
         }
         if ints.contains(&ValueId(phi_v)) {
             write!(output, " i{phi_v} = phi_ti{i};").unwrap();
+        }
+        if booleans.contains(&ValueId(phi_v)) {
+            write!(output, " b{phi_v} = phi_tb{i};").unwrap();
         }
     }
     output.push_str(" }\n");
