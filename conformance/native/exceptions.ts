@@ -71,3 +71,20 @@ function depth(): number {
   try { return 1 + risky(-1) + 100; } catch (e) { return 5; }
 }
 console.log(depth());
+
+// `finally` runs when the `catch` block itself throws.
+function nestedThrowInCatch(): string {
+  try {
+    try {
+      throw 1;
+    } catch (e: any) {
+      throw e + 1;
+    } finally {
+      console.log("inner-finally");
+    }
+  } catch (e: any) {
+    return `outer:${e}`;
+  }
+}
+console.log(nestedThrowInCatch());
+
