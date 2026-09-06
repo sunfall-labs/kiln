@@ -7,7 +7,7 @@ typedef struct kiln_data_view kiln_data_view;
 #define KILN_GC_PHASE_RESET 2
 /* Opaque: a unit marks its module globals through the prelude and never looks inside the heap.
  * Declared as the bare struct rather than the typedef so this header cannot collide with the
- * definition in `prelude_runtime.c`. */
+ * definition in `heap.c` (formerly part of `prelude_runtime.c`; see `runtime/README.md`). */
 struct kiln_gc_heap;
 extern void kiln_c99_gc_mark_values(struct kiln_gc_heap *heap, const kiln_value *values,
                                     size_t count);
