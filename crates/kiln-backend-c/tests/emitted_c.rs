@@ -70,6 +70,7 @@ fn function(
         arrow: false,
         generator: false,
         async_generator: false,
+        is_method: false,
         parameter_count,
         declared_length: parameter_count,
         mapped_arguments: false,

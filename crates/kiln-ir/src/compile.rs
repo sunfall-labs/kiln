@@ -4632,7 +4632,7 @@ impl Compiler {
                         if method && let Some(home) = &home {
                             self.home_bindings.push(home.clone());
                         }
-                        self.next_is_method = method && home.is_some();
+                        self.next_is_method = method;
                         self.expression(&property.value);
                         if method && home.is_some() {
                             self.home_bindings.pop();
@@ -4660,8 +4660,8 @@ impl Compiler {
                     if method && let Some(home) = &home {
                         self.home_bindings.push(home.clone());
                     }
-                    // The body about to be compiled is a method, so `super.x` is legal in it.
-                    self.next_is_method = method && home.is_some();
+                    // The body about to be compiled is a method.
+                    self.next_is_method = method;
                     self.expression(&property.value);
                     if method && home.is_some() {
                         self.home_bindings.pop();
@@ -4697,7 +4697,7 @@ impl Compiler {
                     if let Some(home) = &home {
                         self.home_bindings.push(home.clone());
                     }
-                    self.next_is_method = home.is_some();
+                    self.next_is_method = true;
                     let compiled = self.compile_function(function, span);
                     if home.is_some() {
                         self.home_bindings.pop();
@@ -5187,7 +5187,6 @@ impl Compiler {
                 (*field, binding)
             })
             .collect();
-        self.next_is_method = true;
         let compiled = self.compile_constructor(
             &constructor,
             class.span,
@@ -5915,16 +5914,18 @@ impl Compiler {
         // An arrow has no boundary of its own for any of these: `super.x`, `new.target` and a
         // field initialiser's `undefined` new.target all reach through it to where it was
         // written. Every other function is a boundary, and `next_is_method` -- set by whichever
-        // caller is compiling a method body -- is what says whether this one carries a home
-        // object. It is taken either way, so it cannot leak into the next function compiled.
+        // caller is compiling a method body -- is what says whether this one was written as a method.
+        // It is taken either way, so it cannot leak into the next function compiled.
         let method = std::mem::take(&mut self.next_is_method);
+        let is_method = method && !function.arrow && class.is_none();
         let outer_in_function = self.in_function;
         let outer_super_property = self.super_property;
         let outer_field_initialiser = self.field_initialiser;
         let outer_this_binding = self.this_binding.take();
         if !function.arrow {
             self.in_function = true;
-            self.super_property = method;
+            self.super_property =
+                (method && self.home_bindings.last().is_some()) || class.is_some();
             self.field_initialiser = false;
         } else {
             // An arrow has no `this` of its own, so it reads the enclosing one -- including a
@@ -6130,6 +6131,7 @@ impl Compiler {
             // driver rather than by the program.
             generator: function.generator || function.asynchronous,
             async_generator: function.generator && function.asynchronous,
+            is_method,
             parameter_count,
             mapped_arguments,
             declared_length,

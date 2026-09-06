@@ -790,6 +790,7 @@ pub(crate) fn closure_construction(
     let asynchronous = i32::from(target.asynchronous);
     let arrow = i32::from(target.arrow);
     let async_generator = i32::from(target.async_generator);
+    let is_method = i32::from(target.is_method);
     let strict = i32::from(
         strict_functions
             .get(proto as usize)
@@ -811,7 +812,7 @@ pub(crate) fn closure_construction(
     };
     let diagnostic_source = c_string(diagnostic_site);
     format!(
-        "kiln_c99_make_closure(&built, {symbol}_fn_{proto}, {name}, {name_len}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {strict}, {defining_receiver}, kiln_val_from_boundary(kiln_c99_new_target), UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), {captured}, UINT32_C({capture_count}))"
+        "kiln_c99_make_closure(&built, {symbol}_fn_{proto}, {name}, {name_len}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {is_method}, {arrow}, {strict}, {defining_receiver}, kiln_val_from_boundary(kiln_c99_new_target), UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), {captured}, UINT32_C({capture_count}))"
     )
 }
 
@@ -1241,6 +1242,7 @@ fn entry_proto(program: &Program) -> FunctionProto {
         arrow: false,
         generator: false,
         async_generator: false,
+        is_method: false,
         parameter_count: 0,
         mapped_arguments: false,
         declared_length: 0,
@@ -2698,6 +2700,7 @@ fn hash_function_proto(hash: &mut u64, function: &FunctionProto) {
     // Appended after `generator`, which is where a new flag has to go: the bytes before it are a
     // persisted cache key and cannot move.
     byte(hash, u8::from(function.async_generator));
+    byte(hash, u8::from(function.is_method));
     word(hash, u64::from(function.parameter_count));
     word(hash, u64::from(function.local_count));
 

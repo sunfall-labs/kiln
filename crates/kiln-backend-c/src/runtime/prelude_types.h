@@ -355,6 +355,9 @@ typedef struct kiln_closure {
     /* ...unless it is *both*, in which case the object is handed over after all and each `next`
      * gets a promise of its own. */
     int async_generator;
+    /* Whether this function was written with method syntax. Methods have no `prototype`
+     * unless they are generators, and cannot be constructed with `new`. */
+    int is_method;
     /* What a generator's frame has to be big enough for, known when the body is emitted. */
     uint32_t local_count;
     uint32_t stack_size;

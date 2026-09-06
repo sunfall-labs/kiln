@@ -10,7 +10,7 @@ pub use kiln_hir::{Span, TypeAnnotation, VariableKind};
 pub use kiln_host_abi::HostOp;
 
 /// Version of the bytecode contract produced by this crate.
-pub const BYTECODE_VERSION: u16 = 2;
+pub const BYTECODE_VERSION: u16 = 3;
 
 /// A constant embedded in a [`Program`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -594,6 +594,10 @@ pub struct FunctionProto {
     /// `generator` is set for an async function too -- its body suspends the same way -- so the
     /// pair cannot say which of the three shapes this is. This is the third bit.
     pub async_generator: bool,
+    /// A method: written with method-definition syntax (object method, class method, static
+    /// method, or accessor). It has no `prototype` property unless it is a generator, and can
+    /// never be constructed with `new`.
+    pub is_method: bool,
     pub parameter_count: u32,
     /// Whether this function's `arguments` is the *mapped* kind: the code is sloppy and
     /// `IsSimpleParameterList` is true.

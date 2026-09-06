@@ -1274,3 +1274,32 @@ undefined
 ReferenceError
 undefined
 """
+
+[[test]]
+id = "regress/r12-method-prototype"
+group = "regress"
+source = "regress/r12-method-prototype.js"
+status = "runnable"
+features = ["method-definition", "prototype", "construct"]
+catches = """
+Methods (object methods, class methods, static methods, accessors) carrying an own \
+prototype property or being constructible with new. In JavaScript, method definitions \
+must not have an own prototype and must throw TypeError when called with new.\
+"""
+expected_stdout = """
+true object
+true
+false false undefined
+TypeError
+false undefined
+TypeError
+false undefined
+TypeError
+true object
+true
+true object
+TypeError
+false undefined
+TypeError
+"""
+

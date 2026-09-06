@@ -420,7 +420,7 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
                                  const char *diagnostic_source,
                                  uint32_t proto, uint32_t arity, int generator,
                                  int asynchronous,
-                                 int async_generator, int arrow, int strict, kiln_val receiver,
+                                 int async_generator, int is_method, int arrow, int strict, kiln_val receiver,
                                  kiln_val new_target, uint32_t local_count,
                                  uint32_t stack_size,
                                  uint32_t handler_depth, uint32_t prologue_resume,
@@ -453,6 +453,7 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
     closure->publishes_frame = 1;
     closure->captured_this = arrow ? receiver : KILN_VAL_UNDEFINED;
     closure->async_generator = async_generator;
+    closure->is_method = is_method;
     /* Captured whether or not it is wanted, because whether it is wanted is a property of the
      * closure and the value is a property of *here*. */
     closure->captured_new_target = new_target;
@@ -2954,7 +2955,10 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
     }
     case KILN_VALUE_FUNCTION: {
         kiln_closure *closure = kiln_c99_closure_of(target);
-        if (kiln_c99_same_name(key, key_len, "prototype")) {
+        if (kiln_c99_same_name(key, key_len, "prototype") &&
+            !closure->arrow &&
+            (!closure->asynchronous || closure->async_generator) &&
+            (!closure->is_method || closure->generator)) {
             return kiln_c99_prototype_object(target, out);
         }
         if (kiln_c99_same_name(key, key_len, "name")) {
@@ -18572,18 +18576,34 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
          * knows about, so it answers rather than a fourth restatement of them. */
         return kiln_c99_describe_property(host, target, name.ptr, name.len, &descriptor, found,
                                           depth, thrown);
-    case KILN_VALUE_FUNCTION:
-        /* `prototype` is own for every function that has one, whatever its attributes turn out
-         * to be; the descriptor path refuses it for want of the attributes and would report a
-         * plainly own property as absent. An arrow has none, which is the case a bundle actually
-         * asks about -- a shorthand method has none either and this backend does not record
-         * which functions were written that way, so it is answered as an ordinary one. */
+    case KILN_VALUE_FUNCTION: {
+        kiln_closure *closure = kiln_c99_closure_of(target);
         if (kiln_c99_same_name(name.ptr, name.len, "prototype")) {
-            *found = !kiln_c99_closure_of(target)->arrow;
+            if (!closure->arrow &&
+                (!closure->asynchronous || closure->async_generator) &&
+                (!closure->is_method || closure->generator)) {
+                *found = 1;
+                return KILN_C99_OK;
+            }
+            if (closure->properties.tag == KILN_VALUE_OBJECT) {
+                kiln_object *store = kiln_c99_object_of(closure->properties);
+                size_t index;
+                if (store->shape != NULL) {
+                    kiln_c99_ensure_dictionary(store);
+                }
+                for (index = 0; index < store->count; ++index) {
+                    if (kiln_c99_same_key(&store->properties[index], name.ptr, name.len)) {
+                        *found = 1;
+                        return KILN_C99_OK;
+                    }
+                }
+            }
+            *found = 0;
             return KILN_C99_OK;
         }
         return kiln_c99_describe_property(host, target, name.ptr, name.len, &descriptor, found,
                                           depth, thrown);
+    }
     case KILN_VALUE_METHOD:
     case KILN_VALUE_BOUND:
     case KILN_VALUE_SETTLER:
@@ -22934,7 +22954,7 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                                        fn_name, fn_name_len,
                                        (upvals[1].tag == KILN_VALUE_STRING) ? upvals[1].ptr : "",
                                        (upvals[1].tag == KILN_VALUE_STRING) ? upvals[1].len : 0,
-                                       "eval", 0, 0, 0, 0, 0, 0, 0,
+                                       "eval", 0, 0, 0, 0, 0, 0, 0, 0,
                                        KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED,
                                        0, 16, 0, 0, val_upvals, 3);
         if (status != KILN_C99_OK) return status;
@@ -23982,7 +24002,7 @@ static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
     return kiln_c99_make_closure(result, kiln_c99_dynamic_body_trampoline,
                                  "anonymous", 9, body_src, body_len,
                                  "eval", 0, (uint32_t)(argc > 1 ? argc - 1 : 0),
-                                 0, 0, 0, 0, 0, KILN_VAL_UNDEFINED,
+                                 0, 0, 0, 0, 0, 0, KILN_VAL_UNDEFINED,
                                  KILN_VAL_UNDEFINED, 0, 16, 0, 0,
                                  val_upvalues, 3);
 }
@@ -24462,6 +24482,12 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
     }
     if (callee.tag != KILN_VALUE_FUNCTION) {
         KILN_C99_REFUSE("new on a callee that is not a generated function");
+    }
+    {
+        kiln_closure *closure = kiln_c99_closure_of(callee);
+        if (closure->arrow || closure->generator || closure->asynchronous || closure->is_method) {
+            return kiln_c99_throw_not_a(thrown, callee, "constructor");
+        }
     }
     status = kiln_c99_prototype_object(callee, &prototype);
     if (status != KILN_C99_OK) {

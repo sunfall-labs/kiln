@@ -26281,6 +26281,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 return self.construct_as(target, forwarded, new_target, current);
             }
             Value::Function(closure) => {
+                if !closure_is_constructor(&closure) {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "a function is not a constructor".to_owned(),
+                    });
+                }
                 // `new` creates the instance, runs the body with it as `this`, and
                 // yields the instance -- unless the body returned an object, which
                 // wins. That override is what makes factory constructors work.
@@ -38403,7 +38408,8 @@ fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
         // what a read would produce, or a feature-detect and the call after it disagree.
         Value::Function(closure) => {
             closure.properties.borrow().lookup(&name).is_some()
-                || matches!(name.as_str(), "name" | "length" | "prototype")
+                || matches!(name.as_str(), "name" | "length")
+                || (name == "prototype" && has_prototype_property(closure))
                 || !matches!(
                     function_property(intrinsics, &name, value_realm(target)),
                     Value::Undefined
@@ -42942,13 +42948,19 @@ fn is_js_whitespace(character: char) -> bool {
     character.is_whitespace() || character == '\u{feff}'
 }
 
+fn closure_is_constructor(closure: &Closure) -> bool {
+    closure
+        .program
+        .functions
+        .get(closure.function as usize)
+        .is_some_and(|proto| {
+            !proto.arrow && !proto.generator && !proto.asynchronous && !proto.is_method
+        })
+}
+
 fn is_constructor(value: &Value) -> bool {
     match value {
-        Value::Function(closure) => closure
-            .program
-            .functions
-            .get(closure.function as usize)
-            .is_some_and(|proto| !proto.arrow && !proto.generator && !proto.asynchronous),
+        Value::Function(closure) => closure_is_constructor(closure),
         // A bound function is constructable exactly when what it wraps is: `new f.bind(x)()`
         // runs `f` as a constructor and ignores the bound receiver.
         Value::Bound(bound) => is_constructor(&bound.target),
@@ -43805,17 +43817,18 @@ fn identity_property(target: &Value, key: &str) -> Option<Value> {
 /// contradiction: it keeps a `prototype`, because that object is what its generator instances
 /// inherit from, not something `new` reaches.
 ///
-/// A *method* -- shorthand, class, static, getter or setter -- should also have none, and still
-/// does. That one cannot be decided from the proto: nothing on it records that a function was
-/// written as a method, so it needs either a new field in the bytecode both engines read or a
-/// runtime mark set by `DefineMethod`, and the C backend has to learn whichever it is. Recorded
-/// in `.scratch/method-prototype/` rather than guessed at from the flags that exist.
+/// A *method* -- shorthand, class, static, getter or setter -- has none unless it is a generator
+/// (generators keep `prototype` because generator instances inherit from it).
 fn has_prototype_property(closure: &Closure) -> bool {
     closure
         .program
         .functions
         .get(closure.function as usize)
-        .is_some_and(|proto| !proto.arrow && (!proto.asynchronous || proto.async_generator))
+        .is_some_and(|proto| {
+            !proto.arrow
+                && (!proto.asynchronous || proto.async_generator)
+                && (!proto.is_method || proto.generator)
+        })
 }
 
 /// The attributes every function's own `name` and `length` carry.

@@ -1,6 +1,6 @@
 # A method carries a `prototype` property, and can be `new`ed
 
-**Status:** open · **Severity:** medium — `new obj.method()` succeeds where every engine throws
+**Status:** resolved · **Severity:** medium — `new obj.method()` succeeds where every engine throws
 
     ({ m(){} }).m.hasOwnProperty("prototype")     // true, node false
     new ({ m(){} }).m()                            // succeeds, node TypeError
@@ -45,3 +45,12 @@ squeezed in beside an unrelated fix.
 `language/statements/class` and `language/expressions/object/method-definition` both have rows
 that turn on it, and a library that feature-detects with `typeof x.prototype` sees a method as
 constructible.
+
+## Resolution
+
+- Added `pub is_method: bool` to `FunctionProto` in `kiln-ir` and bumped `BYTECODE_VERSION` to 3.
+- In `kiln-ir::compile`: object methods, class methods, static methods, and accessors are marked with `is_method: true`. Class constructors explicitly have `is_method: false` (they are constructors, not methods).
+- In `kiln-interpreter`: `closure_is_constructor` requires `!proto.is_method`, `has_prototype_property` requires `(!proto.is_method || proto.generator)`, and `has_property` (`in` operator) only returns true for `prototype` if `has_prototype_property(closure)`.
+- In `kiln-backend-c`: `struct kiln_closure` stores `is_method`, `kiln_c99_construct` throws `TypeError` on methods, and `kiln_c99_get_own_kind` / `kiln_c99_own_property_present` only answer own prototype if `(!closure->is_method || closure->generator)`.
+- Verified via `conformance/regress/r12-method-prototype.js` (matches Node and interpreter) and `conformance/native/method-prototype.ts` (interpreter and native parity).
+

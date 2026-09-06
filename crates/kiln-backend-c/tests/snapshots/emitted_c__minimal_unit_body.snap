@@ -2,12 +2,12 @@
 source: crates/kiln-backend-c/tests/emitted_c.rs
 expression: body(&unit)
 ---
-/* Program hash: 6f821f3641b87c4f; bytecode version: 2. */
-static void kiln_module_6f821f3641b87c4fcf58a3af90bd2540_gc_roots(void *heap, void *context, int phase) {
+/* Program hash: 2cb725cfa9384700; bytecode version: 3. */
+static void kiln_module_2cb725cfa9384700a6c06074f2ccb08f_gc_roots(void *heap, void *context, int phase) {
     kiln_c99_gc_unit_roots(heap, context, phase);
 }
-int kiln_module_6f821f3641b87c4fcf58a3af90bd2540(kiln_host *host, kiln_value *result) {
-    (void)kiln_realm_gc_register_roots(kiln_module_6f821f3641b87c4fcf58a3af90bd2540_gc_roots, NULL, 0);
+int kiln_module_2cb725cfa9384700a6c06074f2ccb08f(kiln_host *host, kiln_value *result) {
+    (void)kiln_realm_gc_register_roots(kiln_module_2cb725cfa9384700a6c06074f2ccb08f_gc_roots, NULL, 0);
     kiln_val receiver = KILN_VAL_UNDEFINED; (void)receiver;
     kiln_val locals[1];
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
