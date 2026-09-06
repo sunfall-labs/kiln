@@ -2319,7 +2319,7 @@ fn emit_graph_op(
                     } else if ints.contains(value) {
                         writeln!(
                             output,
-                            "    {{ int64_t res; if (KILN_LIKELY(!__builtin_add_overflow(i{x}, 1LL, &res) && res >= -9007199254740991LL && res <= 9007199254740991LL)) {{ i{v} = res; d{v} = (double)res; }} else {{ d{v} = (double)i{x} + 1.0; i{v} = (int64_t)d{v}; }} v{v} = kiln_c99_val_from_double(d{v}); }}"
+                            "    {{ int64_t res; if (KILN_LIKELY(!__builtin_add_overflow(i{x}, 1LL, &res) && res >= -9007199254740991LL && res <= 9007199254740991LL)) {{ i{v} = res; d{v} = (double)res; }} else {{ d{v} = kiln_c99_int_slow((double)i{x} + 1.0); i{v} = (int64_t)d{v}; }} v{v} = kiln_c99_val_from_double(d{v}); }}"
                         )
                         .unwrap();
                     } else {
@@ -2340,7 +2340,7 @@ fn emit_graph_op(
                     } else if ints.contains(value) {
                         writeln!(
                             output,
-                            "    {{ int64_t res; if (KILN_LIKELY(!__builtin_sub_overflow(i{x}, 1LL, &res) && res >= -9007199254740991LL && res <= 9007199254740991LL)) {{ i{v} = res; d{v} = (double)res; }} else {{ d{v} = (double)i{x} - 1.0; i{v} = (int64_t)d{v}; }} v{v} = kiln_c99_val_from_double(d{v}); }}"
+                            "    {{ int64_t res; if (KILN_LIKELY(!__builtin_sub_overflow(i{x}, 1LL, &res) && res >= -9007199254740991LL && res <= 9007199254740991LL)) {{ i{v} = res; d{v} = (double)res; }} else {{ d{v} = kiln_c99_int_slow((double)i{x} - 1.0); i{v} = (int64_t)d{v}; }} v{v} = kiln_c99_val_from_double(d{v}); }}"
                         )
                         .unwrap();
                     } else {
@@ -2532,7 +2532,7 @@ fn emit_graph_op(
                     } else if typed_int {
                         writeln!(
                             output,
-                            "    {{ int64_t res; if (KILN_LIKELY(!__builtin_add_overflow(i{l}, i{r}, &res) && res >= -9007199254740991LL && res <= 9007199254740991LL)) {{ i{v} = res; d{v} = (double)res; }} else {{ d{v} = (double)i{l} + (double)i{r}; i{v} = isfinite(d{v}) ? (int64_t)d{v} : 0; }} v{v} = kiln_c99_val_from_double(d{v}); }}"
+                            "    {{ int64_t res; if (KILN_LIKELY(!__builtin_add_overflow(i{l}, i{r}, &res) && res >= -9007199254740991LL && res <= 9007199254740991LL)) {{ i{v} = res; d{v} = (double)res; }} else {{ d{v} = kiln_c99_int_slow((double)i{l} + (double)i{r}); i{v} = isfinite(d{v}) ? (int64_t)d{v} : 0; }} v{v} = kiln_c99_val_from_double(d{v}); }}"
                         ).unwrap();
                     } else {
                         writeln!(output, "    d{v} = (double)i{l} + (double)i{r}; v{v} = kiln_c99_val_from_double(d{v});").unwrap();
@@ -2544,7 +2544,7 @@ fn emit_graph_op(
                     } else if typed_int {
                         writeln!(
                             output,
-                            "    {{ int64_t res; if (KILN_LIKELY(!__builtin_sub_overflow(i{l}, i{r}, &res) && res >= -9007199254740991LL && res <= 9007199254740991LL)) {{ i{v} = res; d{v} = (double)res; }} else {{ d{v} = (double)i{l} - (double)i{r}; i{v} = isfinite(d{v}) ? (int64_t)d{v} : 0; }} v{v} = kiln_c99_val_from_double(d{v}); }}"
+                            "    {{ int64_t res; if (KILN_LIKELY(!__builtin_sub_overflow(i{l}, i{r}, &res) && res >= -9007199254740991LL && res <= 9007199254740991LL)) {{ i{v} = res; d{v} = (double)res; }} else {{ d{v} = kiln_c99_int_slow((double)i{l} - (double)i{r}); i{v} = isfinite(d{v}) ? (int64_t)d{v} : 0; }} v{v} = kiln_c99_val_from_double(d{v}); }}"
                         ).unwrap();
                     } else {
                         writeln!(output, "    d{v} = (double)i{l} - (double)i{r}; v{v} = kiln_c99_val_from_double(d{v});").unwrap();

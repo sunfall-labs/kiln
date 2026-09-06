@@ -708,6 +708,17 @@ static inline kiln_val kiln_c99_site_cached_callee(const kiln_c99_site *site, co
     }
     return 0;
 }
+/* The slow path of integer arithmetic -- a result outside the safe range, computed as a
+ * double -- passes through here so that it stays a branch. Inlined beside the fast path, the
+ * compiler folds both into a select, and the loop-carried integer then waits on the double
+ * conversions every iteration; a call it cannot speculate keeps the cold path cold. */
+__attribute__((noinline, cold)) static double kiln_c99_int_slow(double value) {
+    /* Opaque to the optimiser: an identity it could see through would be deleted, and the
+     * conversions would be folded back beside the fast path. */
+    __asm__ volatile("" : "+w"(value));
+    return value;
+}
+
 #define KILN_C99_SITE_NONE 0xFFFFFFFFu
 #define KILN_C99_SITE_GIVE_UP 8u
 
