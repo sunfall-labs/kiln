@@ -1,6 +1,6 @@
 # `import()` does not resolve under `kiln run`
 
-**Status:** open · **Severity:** medium — reported, but the promise never settles
+Status: ready-for-agent · Severity: medium
 
 **CORRECTION (same session).** This was first written as "silent, no diagnostic, exit 0". That
 was wrong, and the error was in the probe rather than in kiln. The probes piped output through
