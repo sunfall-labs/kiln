@@ -4826,3 +4826,47 @@ not objects -- a 47-bit payload leaves one free -- so the hit can test it in a m
 
 One more, mine to name: a module with top-level `await` fails to compile natively, because the
 entry point has no frame to suspend. It never worked; it should refuse by name.
+
+## What a polymorphic method call costs, one piece at a time (2026-09-06, Claude `alee/fastest-native`)
+
+class-poly: a loop over a thousand `Point`s and `Point3D`s calling `dist()`, node 0.5 ms, native
+6.5 ms at the start of the day, 4.5 at the end. Each piece was found by sampling the binary and
+reading its disassembly; none of them showed in the C.
+
+**Two out-of-line calls that should not have existed.** `pts`, a module `const` captured by
+the benchmark closure, was dead-zone checked on every read -- 14% of the samples -- because
+the proof that a binding is initialized before any closure can read it only covered bindings
+holding a closure. It now covers any binding whose first store sits behind an inert prefix of
+its owner's entry block, where "inert" includes literals, class setup (defining methods on a
+value the prefix itself made) and reads of cells the prefix itself filled. `Math` was built as
+a boundary value and converted on every `dist` call -- 5% -- and is a constant in the box.
+
+**The cached callee was called through a pointer.** A method-call site that hits its cache
+now compares the callee's body against the unit's own methods of that name and calls by
+name, which is what lets the C compiler inline. It was worth nothing on its own, because the
+bodies were too large to inline.
+
+**A body without slow paths.** `dist` reads five slots and does five arithmetic operations,
+and every one of them carried a runtime call for its slow path; the function kept seven pairs
+of callee-saved registers across those calls it never made. A *fast clone* is the same body
+with every slow path replaced by a restart through the boxed entry, legal when nothing in the
+body has an effect before a slow path could be taken -- reads, arithmetic on numbers, a `Math`
+intrinsic -- so running it again from the top is the same as taking the slow path. The clone
+has no call in it, no saved registers, and `always_inline` puts it in the loop. Its first
+version did nothing at all: every clone declared its own cache sites, which only the slow path
+learns, and a clone has no slow path, so it missed on every call and restarted. A function's
+sites are now file-scope statics numbered in emission order, declared by the boxed clone and
+shared by all of them.
+
+**An address taken anywhere is a stack slot everywhere.** Every runtime call that answers
+through `&vN` pinned that SSA value to memory for the whole body. Answers go through one
+scratch slot per body and are copied out; the copy is legal only where the call is a statement
+of its own, so the rewrite matches a balanced close followed by `;` and leaves calls inside
+conditions alone. It moved nothing on class-poly and everything on the shape of the code.
+
+**Where the 4.5 ms is.** Per iteration: the element read, the call site's cache walk and
+closure checks, and inside `dist` five site walks of up to two entries each and ten tag tests.
+About 150 instructions against node's fifteen, and the machine already runs them at near its
+peak width, so the count is the only lever left. The ceiling's shape is one shape test per call
+with static slots after it, and unboxed slots: receiver-shape specialisation and per-shape slot
+types. That is field-type speculation, and it is the next design.

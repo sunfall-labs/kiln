@@ -17,7 +17,7 @@ use crate::prelude::lookup_speculation_invariant;
 use crate::tail::{TailContext, emit_tail_instruction};
 use crate::{BuiltinLoad, builtin_load, closure_construction, proto_publishes_frame};
 use kiln_ir::Upvalue;
-use kiln_ir::{BinaryOp, Constant, ExportBinding, FunctionProto, Program, UnaryOp};
+use kiln_ir::{BinaryOp, Constant, ExportBinding, FunctionProto, Instruction, Program, UnaryOp};
 use std::collections::HashSet;
 use std::fmt::Write;
 
@@ -80,6 +80,12 @@ fn lowers(op: &GraphOp) -> bool {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
     Boxed,
+    /// The boxed signature, with every slow path replaced by a restart through the boxed
+    /// entry. Only a body that can be restarted gets one: nothing in it has an effect before
+    /// the point a slow path could be taken, so running it again from the top is the same
+    /// as running the slow path. With no runtime call left in it, the clone needs no saved
+    /// registers and the C compiler inlines it where a cached callee is called by name.
+    Fast,
     /// The parameters arrive as `double`s. When the plan proved the return a number, the result
     /// leaves as one too, through `double *result`; otherwise through `kiln_val *result`.
     Typed {
@@ -100,6 +106,35 @@ pub enum Site<'a> {
         /// A CommonJS unit: its one export is `module.exports`, read from the `module` slot.
         commonjs: bool,
     },
+}
+
+/// The protos this unit defines as a method of `key` -- `class C { key() {} }` and
+/// `{ key() {} }` -- read off the bytecode as `Const(key) MakeFunction(i) DefineMethod`. A hint
+/// only: a method-call site whose cached callee's body is one of these calls it by name, which
+/// lets the C compiler inline it; a callee that is none of them takes the indirect call. Nothing
+/// is assumed about which closure a site sees.
+fn method_candidates(program: &Program, key: &str) -> Vec<u32> {
+    let mut found = Vec::new();
+    let mut scan = |code: &[Instruction]| {
+        for window in code.windows(3) {
+            if let [
+                Instruction::Const(k),
+                Instruction::MakeFunction(i),
+                Instruction::DefineMethod,
+            ] = window
+                && matches!(program.constants.get(*k as usize), Some(Constant::String(s)) if s == key)
+                && direct_callable(&program.functions[*i as usize])
+                && !found.contains(i)
+            {
+                found.push(*i);
+            }
+        }
+    };
+    scan(&program.code);
+    for proto in &program.functions {
+        scan(&proto.code);
+    }
+    found
 }
 
 /// The typed entry's declaration: the result in a register, `double` where the plan proved
@@ -125,6 +160,300 @@ pub fn typed_signature(
         params.push_str(&format!(", double p{k}"));
     }
     (result, params)
+}
+
+/// A runtime call that writes its answer through `&vN` takes the address of the SSA value, and
+/// a C compiler then keeps that value in memory for the whole body -- every read of it, on
+/// every path, pays a load and a store, for a slow path that rarely runs. The answer goes
+/// through one scratch slot per body instead and is copied into the value, which stays in a
+/// register. `memcpy(&dN, &vN, ..)` is the double twin's move and is left alone.
+fn hoist_out_params(body: &str) -> (String, bool) {
+    let mut out = String::with_capacity(body.len());
+    let mut used = false;
+    for line in body.split_inclusive('\n') {
+        let mut rest = line;
+        let mut rewritten = String::with_capacity(line.len());
+        while let Some(at) = rest.find("&v") {
+            let digits_end = rest[at + 2..]
+                .find(|c: char| !c.is_ascii_digit())
+                .map_or(rest.len(), |i| at + 2 + i);
+            let digits = &rest[at + 2..digits_end];
+            // Inside an open `memcpy(` the address is a source or the twin's destination.
+            let before = format!("{rewritten}{}", &rest[..at]);
+            let in_memcpy = before
+                .rfind("memcpy(")
+                .is_some_and(|m| !before[m..].contains(')'));
+            if digits.is_empty() || in_memcpy || !rest[digits_end..].starts_with([')', ',']) {
+                rewritten.push_str(&rest[..digits_end]);
+                rest = &rest[digits_end..];
+                continue;
+            }
+            // The call's own end: its balanced close followed by `;`. A call inside a
+            // condition or a nested argument has no statement of its own to append to.
+            let mut depth = 1usize;
+            let mut close = None;
+            for (i, c) in rest[digits_end..].char_indices() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            if rest[digits_end + i + 1..].starts_with(';') {
+                                close = Some(digits_end + i + 2);
+                            }
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let Some(close) = close else {
+                rewritten.push_str(&rest[..digits_end]);
+                rest = &rest[digits_end..];
+                continue;
+            };
+            rewritten.push_str(&rest[..at]);
+            rewritten.push_str("&kiln_out");
+            rewritten.push_str(&rest[digits_end..close]);
+            rewritten.push_str(&format!(" v{digits} = kiln_out;"));
+            used = true;
+            rest = &rest[close..];
+        }
+        rewritten.push_str(rest);
+        out.push_str(&rewritten);
+    }
+    (out, used)
+}
+
+/// Whether an operation may appear in a restartable body: it has a pure fast path, and its
+/// slow path -- the one the fast clone replaces with a restart -- is where every effect lives.
+fn restartable(
+    op: &GraphOp,
+    plan: &CallPlan,
+    vid: ValueId,
+    graph: &FunctionGraph,
+    program: &Program,
+) -> bool {
+    match op {
+        GraphOp::Const { .. }
+        | GraphOp::LoadLocal(_)
+        | GraphOp::LoadThis
+        | GraphOp::LoadBuiltin(_)
+        | GraphOp::Phi { .. }
+        | GraphOp::StoreLocal { .. }
+        | GraphOp::CheckTdz { .. }
+        | GraphOp::GetProperty { .. }
+        | GraphOp::GetComputed { .. }
+        | GraphOp::Unary { .. } => true,
+        GraphOp::LoadUpvalue(_) | GraphOp::LoadCell(_) => plan.unchecked.contains(&vid),
+        GraphOp::Binary { op, .. } => !matches!(op, BinaryOp::In | BinaryOp::InstanceOf),
+        // A method call is restartable only as an intrinsic on the `Math` built-in: the call
+        // that would otherwise run is a user function, which must not run twice.
+        GraphOp::CallMethod { object, name, .. } => {
+            let on_math = graph
+                .blocks
+                .iter()
+                .flat_map(|b| b.operations.iter())
+                .any(|(v, op)| {
+                    v == object && matches!(op, GraphOp::LoadBuiltin(kiln_ir::Builtin::Math))
+                });
+            let key = match program.constants.get(*name as usize) {
+                Some(Constant::String(s)) => s.as_str(),
+                _ => "",
+            };
+            on_math
+                && matches!(
+                    key,
+                    "sqrt" | "abs" | "floor" | "ceil" | "round" | "min" | "max" | "trunc" | "sign"
+                )
+        }
+        _ => false,
+    }
+}
+
+/// One operation's text with its slow path replaced by `bail`. The fast path of a property or
+/// element read is its cache hit and the slow path the last `if (!handled)`; of an intrinsic
+/// method call, the intrinsic and everything from the first `if (!handled)` on; of an
+/// arithmetic operation, the guarded double form and its `else`.
+fn bail_out(op: &GraphOp, text: &str, bail: &str) -> String {
+    fn block_end(text: &str, open: usize) -> Option<usize> {
+        let mut depth = 0usize;
+        for (i, c) in text[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(open + i);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+    match op {
+        GraphOp::CallMethod { .. } => match text.find("if (!handled") {
+            Some(at) => {
+                // Everything after the intrinsic, up to the statement's closing brace.
+                let tail_close = text.rfind('}').unwrap_or(text.len());
+                format!(
+                    "{}if (!handled) {{ {bail} }} {}",
+                    &text[..at],
+                    &text[tail_close..]
+                )
+            }
+            None => text.to_owned(),
+        },
+        GraphOp::GetProperty { .. } | GraphOp::GetComputed { .. } => {
+            match text.rfind("if (!handled) {") {
+                Some(at) => {
+                    let open = at + "if (!handled) ".len();
+                    match block_end(text, open) {
+                        Some(close) => format!(
+                            "{}if (!handled) {{ {bail} }}{}",
+                            &text[..at],
+                            &text[close + 1..]
+                        ),
+                        None => text.to_owned(),
+                    }
+                }
+                None => text.to_owned(),
+            }
+        }
+        GraphOp::Unary { .. } | GraphOp::Binary { .. } => match text.find("} else {") {
+            Some(at) => {
+                let open = at + "} else ".len();
+                match block_end(text, open) {
+                    Some(close) => {
+                        format!("{}}} else {{ {bail} }}{}", &text[..at], &text[close + 1..])
+                    }
+                    None => text.to_owned(),
+                }
+            }
+            None => text.to_owned(),
+        },
+        _ => text.to_owned(),
+    }
+}
+
+/// The fast clone of a function, or `None` when the body cannot be restarted: an operation
+/// with an effect before a slow path, a handler, a suspension, or a slow path the surgery
+/// could not replace. The text is what will be compiled, so the last word is a scan of it.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_fast_clone(
+    graph: &FunctionGraph,
+    proto: &FunctionProto,
+    program: &Program,
+    symbol: &str,
+    index: usize,
+    scalar_proto: bool,
+    diagnostic_site: &str,
+    frame_stacks: &[usize],
+    strict_functions: &[bool],
+    plan: &CallPlan,
+) -> Option<String> {
+    if proto.generator || proto.asynchronous || proto_publishes_frame(proto) {
+        return None;
+    }
+    for block in &graph.blocks {
+        if block.exception_handler.is_some() {
+            return None;
+        }
+        if !matches!(
+            block.terminator,
+            Terminator::Return(_) | Terminator::Branch { .. } | Terminator::Jump(_)
+        ) {
+            return None;
+        }
+        for (vid, op) in &block.operations {
+            if !restartable(op, plan, *vid, graph, program) {
+                return None;
+            }
+        }
+    }
+    let mut text = String::new();
+    emit_function_from_graph(
+        &mut text,
+        graph,
+        proto,
+        program,
+        symbol,
+        index,
+        scalar_proto,
+        diagnostic_site,
+        frame_stacks,
+        strict_functions,
+        plan,
+        EntryKind::Fast,
+    );
+    const EFFECTS: &[&str] = &[
+        "goto kiln_",
+        "return status",
+        "kiln_c99_val_call",
+        "->body(",
+        "kiln_c99_invoke",
+        "kiln_c99_val_read_property(",
+        "kiln_c99_val_read_element(",
+        "kiln_c99_val_binary(",
+        "kiln_c99_val_unary(",
+        "thrown",
+        "locals[",
+    ];
+    if EFFECTS.iter().any(|needle| text.contains(needle)) {
+        return None;
+    }
+    Some(text)
+}
+
+/// A function's inline-cache sites, shared by every clone of it. Each operation declares its
+/// site inline as `static kiln_c99_site site`; a clone that declared its own would start
+/// empty and, having no slow path to learn with, stay empty. So the sites are hoisted to file
+/// scope, named per function and numbered in emission order -- the same order in every clone
+/// -- and only the boxed clone, emitted first, declares them. Returns the body with the sites
+/// renamed and how many there were.
+fn share_sites(body: &str, prefix: &str) -> (String, usize) {
+    const DECLARATION: &str =
+        "static kiln_c99_site site = {KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}; ";
+    let mut out = String::with_capacity(body.len());
+    let mut count = 0usize;
+    for line in body.split_inclusive('\n') {
+        if let Some(at) = line.find(DECLARATION) {
+            let name = format!("{prefix}_{count}");
+            count += 1;
+            let stripped = format!("{}{}", &line[..at], &line[at + DECLARATION.len()..]);
+            // `site` as a token of its own: `site.`, `&site`, `(site` -- never inside an
+            // identifier such as `kiln_c99_site` or `diagnostic_site`.
+            let mut renamed = String::with_capacity(stripped.len() + 64);
+            let bytes = stripped.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                if stripped[i..].starts_with("site")
+                    && (i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_'))
+                    && !bytes
+                        .get(i + 4)
+                        .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+                {
+                    renamed.push_str(&name);
+                    i += 4;
+                } else {
+                    let ch = stripped[i..].chars().next().unwrap();
+                    renamed.push(ch);
+                    i += ch.len_utf8();
+                }
+            }
+            out.push_str(&renamed);
+        } else {
+            out.push_str(line);
+        }
+    }
+    (out, count)
+}
+
+/// The fast clone's way out: the boxed entry, from the top, with everything as it arrived.
+fn fast_bail(symbol: &str, self_index: Option<u32>) -> String {
+    let index = self_index.expect("a fast clone is a function");
+    format!("return {symbol}_fn_{index}(ctx, result, upvalues, receiver_ptr, args, argc);")
 }
 
 /// What a typed entry returns on failure, for the kind of result it has.
@@ -227,6 +556,7 @@ pub fn emit_function_from_graph_with_profile(
     func_profile: Option<&FunctionTypeProfile>,
     type_profile_record: bool,
 ) {
+    let function_start = output.len();
     // 1. Function comment header
     if let Some(name) = proto.name.as_deref().filter(|name| {
         !name.is_empty()
@@ -239,6 +569,9 @@ pub fn emit_function_from_graph_with_profile(
             EntryKind::Typed { .. } => {
                 writeln!(output, "/* function {index}: {name}, typed entry */").unwrap()
             }
+            EntryKind::Fast => {
+                writeln!(output, "/* function {index}: {name}, fast clone */").unwrap()
+            }
         }
     }
 
@@ -249,6 +582,11 @@ pub fn emit_function_from_graph_with_profile(
         EntryKind::Boxed => writeln!(
             output,
             "static inline int {symbol}_fn_{index}(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc) {{"
+        )
+        .unwrap(),
+        EntryKind::Fast => writeln!(
+            output,
+            "static inline __attribute__((always_inline)) int {symbol}_fn_{index}_f(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc) {{"
         )
         .unwrap(),
         EntryKind::Typed { returns_number } => {
@@ -266,6 +604,13 @@ pub fn emit_function_from_graph_with_profile(
     // emitted direct path alike, passes its own.
     if matches!(kind, EntryKind::Typed { .. }) {
         output.push_str("    (void)depth;\n");
+    } else if kind == EntryKind::Fast {
+        // No runtime call survives in a fast clone; what it reads is the receiver and the
+        // arguments, and the context only to hand on when it restarts.
+        output.push_str("    (void)upvalues;\n");
+        output.push_str(
+            "    kiln_val receiver = receiver_ptr ? *receiver_ptr : KILN_VAL_UNDEFINED;\n",
+        );
     } else if scalar_proto {
         output.push_str("    (void)ctx; (void)receiver_ptr; (void)upvalues;\n");
     } else {
@@ -372,7 +717,7 @@ pub fn emit_function_from_graph_with_profile(
         output.push_str("    (void)args; (void)argc;\n");
     }
 
-    emit_blocks(
+    let shared_sites = emit_blocks(
         output,
         graph,
         proto,
@@ -392,6 +737,18 @@ pub fn emit_function_from_graph_with_profile(
         type_profile_record,
     );
     output.push_str("}\n");
+    // The boxed clone, emitted first, declares the sites every clone of this function uses.
+    if kind == EntryKind::Boxed && shared_sites > 0 {
+        let mut declarations = String::new();
+        for k in 0..shared_sites {
+            writeln!(
+                declarations,
+                "static kiln_c99_site {symbol}_fn_{index}_site_{k} = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}};"
+            )
+            .unwrap();
+        }
+        output.insert_str(function_start, &declarations);
+    }
 }
 
 /// Emits the unit's entry point body from its graph. The caller has opened the function,
@@ -673,8 +1030,14 @@ fn emit_block_sequence(
             if dead_read(vid, op) {
                 continue;
             }
+            let mut op_text = String::new();
+            let target: &mut String = if kind == EntryKind::Fast {
+                &mut op_text
+            } else {
+                output
+            };
             emit_graph_op(
-                output,
+                target,
                 vid,
                 op,
                 graph,
@@ -696,6 +1059,10 @@ fn emit_block_sequence(
                 kind,
                 self_index,
             );
+            if kind == EntryKind::Fast {
+                let bail = fast_bail(symbol, self_index);
+                output.push_str(&bail_out(op, &op_text, &bail));
+            }
         }
 
         emit_terminator(
@@ -736,7 +1103,7 @@ fn emit_blocks(
     kind: EntryKind,
     func_profile: Option<&FunctionTypeProfile>,
     type_profile_record: bool,
-) {
+) -> usize {
     let body_start = output.len();
     let candidate_params = candidate_number_parameters_with_profile(graph, proto, func_profile);
     let speculate_enabled = std::env::var("KILN_SPECULATE").as_deref() != Ok("0");
@@ -878,8 +1245,33 @@ fn emit_blocks(
         );
     }
 
+    // 5b. Answers through `&vN` go through one scratch slot, so the values stay in registers.
+    {
+        let (hoisted, used) = hoist_out_params(&output[body_start..]);
+        if used {
+            let declaration = "    kiln_val kiln_out = KILN_VAL_UNDEFINED;\n";
+            output.truncate(body_start);
+            output.push_str(declaration);
+            output.push_str(&hoisted);
+        }
+    }
+
+    // 5c. A function's sites are shared by its clones.
+    let mut shared_sites = 0usize;
+    if let Site::Function { index } = site {
+        let (renamed, count) =
+            share_sites(&output[body_start..], &format!("{symbol}_fn_{index}_site"));
+        output.truncate(body_start);
+        output.push_str(&renamed);
+        shared_sites = count;
+    }
+
     // 6. Unwind and refusal handlers
     match site {
+        Site::Function { .. } if kind == EntryKind::Fast => {
+            // A fast clone has no slow path left to unwind from; a body that still jumps to
+            // one is not restartable, and `emit_fast_clone` says so.
+        }
         Site::Function { .. } if matches!(kind, EntryKind::Typed { .. }) => {
             // A typed entry leaves its failure pending and returns the failure value. The
             // labels exist only where the body jumps to them: a body with nothing that throws
@@ -941,6 +1333,7 @@ fn emit_blocks(
             }
         }
     }
+    shared_sites
 }
 
 /// One status check after a runtime call. A throw unwinds; a refusal is attributed to this site
@@ -1224,6 +1617,16 @@ fn emit_graph_op(
             writeln!(output, "    v{v} = v{};", value.0).unwrap();
         }
         GraphOp::LoadBuiltin(builtin) => match builtin_load(*builtin) {
+            // A built-in object or method is a constant in the box, not a boundary value to
+            // build and convert on every mention: `Math` inside a hot method was doing both.
+            BuiltinLoad::Value(expr) if expr.starts_with("kiln_c99_builtin(") => {
+                let id = &expr["kiln_c99_builtin(".len()..expr.len() - 1];
+                writeln!(output, "    v{v} = KILN_VAL_BUILTIN({id});").unwrap();
+            }
+            BuiltinLoad::Value(expr) if expr.starts_with("kiln_c99_method(") => {
+                let id = &expr["kiln_c99_method(".len()..expr.len() - 1];
+                writeln!(output, "    v{v} = KILN_VAL_METHOD({id});").unwrap();
+            }
             BuiltinLoad::Value(expr) => {
                 writeln!(output, "    v{v} = kiln_val_from_boundary({expr});").unwrap();
             }
@@ -1911,7 +2314,8 @@ fn emit_graph_op(
                 };
                 writeln!(
                     output,
-                    "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow} else {{ kiln_val call_args[{n}] = {{ {init} }}; {receiver} kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status = {symbol}_fn_{target}(&ctx_call, &v{v}, {upvalues}, &recv, {argc} > 0 ? call_args : NULL, (size_t){argc}); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status;{twin} }}",
+                    "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow} else {{ kiln_val call_args[{n}] = {{ {init} }}; {receiver} kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status = {symbol}_fn_{target}{fast}(&ctx_call, &v{v}, {upvalues}, &recv, {argc} > 0 ? call_args : NULL, (size_t){argc}); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status;{twin} }}",
+                    fast = if plan.fast.get(target as usize).copied().unwrap_or(false) { "_f" } else { "" },
                     n = argc.max(1)
                 )
                 .unwrap();
@@ -1927,13 +2331,18 @@ fn emit_graph_op(
             if program.functions.len() <= 32 {
                 for i in 0..program.functions.len() {
                     let fn_name = format!("{symbol}_fn_{i}");
+                    let entry = if plan.fast.get(i).copied().unwrap_or(false) {
+                        format!("{fn_name}_f")
+                    } else {
+                        fn_name.clone()
+                    };
                     let keyword = if static_branches.is_empty() {
                         "if"
                     } else {
                         " else if"
                     };
                     static_branches.push_str(&format!(
-                        "{keyword} (plain->body == (kiln_body_fn){fn_name}) {{ status = {fn_name}(&ctx_call, &call_result, plain->upvalues, &recv, call_args, (size_t){argc}); }}"
+                        "{keyword} (plain->body == (kiln_body_fn){fn_name}) {{ status = {entry}(&ctx_call, &call_result, plain->upvalues, &recv, call_args, (size_t){argc}); }}"
                     ));
                 }
             }
@@ -1961,6 +2370,19 @@ fn emit_graph_op(
                 _ => "",
             };
             let key_len = key_str.len();
+            // The unit's own methods of this name: a cached callee whose body is one of them is
+            // called by name, and the C compiler may inline it into this site.
+            let by_name: String = method_candidates(program, key_str)
+                .iter()
+                .enumerate()
+                .map(|(k, i)| {
+                    format!(
+                        "{} (plain->body == (kiln_body_fn){symbol}_fn_{i}) {{ status = {symbol}_fn_{i}{fast}(&ctx_call, &v{v}, plain->upvalues, &vreceiver, call_args, (size_t){argc}); }} else",
+                        if k == 0 { "if" } else { " if" },
+                        fast = if plan.fast.get(*i as usize).copied().unwrap_or(false) { "_f" } else { "" }
+                    )
+                })
+                .collect();
             let init = if args.is_empty() {
                 "KILN_VAL_UNDEFINED".to_owned()
             } else {
@@ -2827,8 +3249,8 @@ fn emit_graph_op(
                             if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vreceiver); \
                             v{v} = KILN_VAL_UNDEFINED; \
                             int status; \
-                            if (!plain->publishes_frame) {{ kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &v{v}, plain->upvalues, &vreceiver, call_args, (size_t){argc}); }} \
-                            else status = kiln_c99_invoke_closure(host, &v{v}, plain, vreceiver, call_args, (size_t){argc}, depth, thrown, NULL, 0); \
+                            if (!plain->publishes_frame) {{ kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; {by_name} {{ status = plain->body(&ctx_call, &v{v}, plain->upvalues, &vreceiver, call_args, (size_t){argc}); }} }} \
+                            else {{ status = kiln_c99_invoke_closure(host, &v{v}, plain, vreceiver, call_args, (size_t){argc}, depth, thrown, NULL, 0); }} \
                             if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) {{ \
                                 if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = kiln_val_to_boundary(v{o}).tag; \
                                 if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod invocation refused\"; \
@@ -3116,13 +3538,16 @@ fn emit_graph_op(
                 "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; \
                 int handled = 0; \
                 {length_check}{size_check}\
-                if (!handled && site.pic_count > 0 && KILN_VAL_IS_OBJECT(v{o})) {{ \
+                if (!handled && KILN_VAL_IS_OBJECT(v{o})) {{ \
                     const kiln_object *obj = (const kiln_object *)KILN_VAL_PTR(v{o}); \
+                    const kiln_shape *shape = obj->shape; \
                     uint32_t slot = UINT32_MAX; \
-                    if (site.pic_count >= 1 && obj->shape == site.entries[0].shape) slot = site.entries[0].slot; \
-                    else if (site.pic_count >= 2 && obj->shape == site.entries[1].shape) slot = site.entries[1].slot; \
-                    else if (site.pic_count >= 3 && obj->shape == site.entries[2].shape) slot = site.entries[2].slot; \
-                    else if (site.pic_count >= 4 && obj->shape == site.entries[3].shape) slot = site.entries[3].slot; \
+                    if (KILN_LIKELY(shape != NULL)) {{ \
+                        if (shape == site.entries[0].shape) slot = site.entries[0].slot; \
+                        else if (shape == site.entries[1].shape) slot = site.entries[1].slot; \
+                        else if (shape == site.entries[2].shape) slot = site.entries[2].slot; \
+                        else if (shape == site.entries[3].shape) slot = site.entries[3].slot; \
+                    }} \
                     if (slot != UINT32_MAX && KILN_LIKELY(slot < obj->slot_capacity)) {{ \
                         v{v} = obj->slots[slot]; \
                         handled = 1; \
@@ -3193,13 +3618,16 @@ fn emit_graph_op(
                 output,
                 "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; \
                 int handled = 0; \
-                if (site.pic_count > 0 && KILN_VAL_IS_OBJECT(v{o})) {{ \
+                if (KILN_VAL_IS_OBJECT(v{o})) {{ \
                     kiln_object *obj = (kiln_object *)KILN_VAL_PTR(v{o}); \
+                    const kiln_shape *shape = obj->shape; \
                     uint32_t slot = UINT32_MAX; \
-                    if (site.pic_count >= 1 && obj->shape == site.entries[0].shape && site.entries[0].transition_to == NULL) slot = site.entries[0].slot; \
-                    else if (site.pic_count >= 2 && obj->shape == site.entries[1].shape && site.entries[1].transition_to == NULL) slot = site.entries[1].slot; \
-                    else if (site.pic_count >= 3 && obj->shape == site.entries[2].shape && site.entries[2].transition_to == NULL) slot = site.entries[2].slot; \
-                    else if (site.pic_count >= 4 && obj->shape == site.entries[3].shape && site.entries[3].transition_to == NULL) slot = site.entries[3].slot; \
+                    if (KILN_LIKELY(shape != NULL)) {{ \
+                        if (shape == site.entries[0].shape && site.entries[0].transition_to == NULL) slot = site.entries[0].slot; \
+                        else if (shape == site.entries[1].shape && site.entries[1].transition_to == NULL) slot = site.entries[1].slot; \
+                        else if (shape == site.entries[2].shape && site.entries[2].transition_to == NULL) slot = site.entries[2].slot; \
+                        else if (shape == site.entries[3].shape && site.entries[3].transition_to == NULL) slot = site.entries[3].slot; \
+                    }} \
                     if (slot != UINT32_MAX && KILN_LIKELY(slot < obj->slot_capacity && !obj->frozen)) {{ \
                         obj->slots[slot] = v{val}; \
                         v{v} = v{val}; \
