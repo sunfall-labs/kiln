@@ -1,7 +1,9 @@
 # `kiln run foo.js` parses as a Script but executes as a Module
 
-**Status:** open. **No test262 rows** -- recorded because it is a real inconsistency, not because
-it costs conformance.
+**Status:** resolved.
+
+**Resolution:**
+`parse` (`crates/frontend-oxc/src/lib.rs`) now sets `.with_module(true)` for non-`.cjs` files, aligning parser early error checking with the module runtime semantics enforced by `kiln_ir::compile_module` and `kiln-module-graph`. `.cjs` continues to parse with CommonJS / Script grammar. Verified with unit tests, differential tests, regress tests, and native parity.
 
 `parse` (`crates/frontend-oxc/src/lib.rs`) takes the source type from the path, and Oxc maps
 `.js` to a *Script*. The runtime then reports the same file as a module -- its errors read
