@@ -1017,15 +1017,17 @@ static inline uint32_t kiln_c99_gc_payload_kind(const void *payload) {
  * every boxed pointer crossing to a `kiln_value`; it answered the same word. The search remains
  * the tool for a word that may not be a pointer at all, which is the conservative scanner's
  * question and never this one. */
+static __attribute__((noinline)) void kiln_c99_gc_kind_check(const void *ptr, uint32_t kind) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    kiln_gc_block *block = heap == NULL ? NULL : kiln_c99_gc_lookup(heap, ptr);
+    if (block == NULL || (block->kind & KILN_GC_KIND_MASK) != kind) __builtin_trap();
+}
+
 static uint32_t kiln_c99_gc_kind_of_ptr(const void *ptr) {
     uint32_t kind;
     if (ptr == NULL) return 0;
     kind = kiln_c99_gc_payload_kind(ptr);
-    if (KILN_UNLIKELY(kiln_c99_gc_stress_checks)) {
-        kiln_gc_heap *heap = kiln_c99_gc_heap();
-        kiln_gc_block *block = heap == NULL ? NULL : kiln_c99_gc_lookup(heap, ptr);
-        if (block == NULL || (block->kind & KILN_GC_KIND_MASK) != kind) __builtin_trap();
-    }
+    if (KILN_UNLIKELY(kiln_c99_gc_stress_checks)) kiln_c99_gc_kind_check(ptr, kind);
     return kind;
 }
 
