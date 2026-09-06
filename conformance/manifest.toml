@@ -50,8 +50,8 @@ source_commit = "bfdd2b0"
 source_commit_subject = "porffor/Effect: findings, and the three regression gates"
 ported = "2026-08-29"
 guard_tests = 20
-effect_tests = 12
-total_tests = 32
+effect_tests = 15
+total_tests = 35
 
 # How the expected output in this file was obtained. Both halves were *observed*, not
 # transcribed: every value below is what `node v25.9.0` actually printed on this machine.
@@ -682,6 +682,55 @@ cannot be parsed mechanically and the output here was observed instead.\
 expected_stdout = """
 RESULT hi world | 2,4,6
 """
+
+[[test]]
+id = "effect/13-actor-service"
+group = "effect"
+source = "effect/src/13-actor-service.ts"
+bundle = "effect/bundle/13-actor-service.js"
+bundle_inputs = ["effect/package.json", "effect/package-lock.json", "effect/build.sh"]
+status = "needs-bundle"
+features = ["modules", "classes", "actors", "scopes", "event-loop", "promises"]
+effect_api = ["Context.Service", "spawnActorLayer", "Effect.gen", "Effect.scoped", "Effect.provide", "Effect.runPromise"]
+notes = """
+Actor service lifecycle, mailbox serialization, and Scope finalizer cleanup.
+"""
+expected_stdout = """
+ACTOR 10 | 25 | closed
+"""
+
+[[test]]
+id = "effect/14-zero-copy-queue"
+group = "effect"
+source = "effect/src/14-zero-copy-queue.ts"
+bundle = "effect/bundle/14-zero-copy-queue.js"
+bundle_inputs = ["effect/package.json", "effect/package-lock.json", "effect/build.sh"]
+status = "needs-bundle"
+features = ["modules", "regions", "zero-copy", "event-loop", "promises"]
+effect_api = ["isolate", "transfer", "Effect.gen", "Effect.runPromise"]
+notes = """
+Zero-copy isolated region transfer across realm boundaries.
+"""
+expected_stdout = """
+QUEUE transfer 42 ok
+"""
+
+[[test]]
+id = "effect/15-native-parallel"
+group = "effect"
+source = "effect/src/15-native-parallel.ts"
+bundle = "effect/bundle/15-native-parallel.js"
+bundle_inputs = ["effect/package.json", "effect/package-lock.json", "effect/build.sh"]
+status = "needs-bundle"
+features = ["modules", "concurrency", "parallelism", "fiber-interruption", "event-loop", "promises"]
+effect_api = ["forEachParallel", "Effect.gen", "Effect.sleep", "Effect.onInterrupt", "Effect.flip", "Effect.runPromise"]
+notes = """
+Native parallel collection evaluation with fiber interruption and error short-circuiting.
+"""
+expected_stdout = """
+PARALLEL 20,40,60 | interrupted ok
+"""
+
 
 # ---------------------------------------------------------------------------------------------
 # Not a test. A committed input fixture, listed here so it is inventoried rather than being an

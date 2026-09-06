@@ -1,6 +1,6 @@
 # Issue 03: Base TypeScript Concurrency Surface (@kiln/concurrency)
 
-Status: planned
+Status: done
 Feature: multicore-concurrency
 Governing ADR: ADR 0057
 

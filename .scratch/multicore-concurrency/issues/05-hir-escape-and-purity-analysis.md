@@ -1,6 +1,6 @@
 # Issue 05: HIR Escape Analysis & SSA Purity Loop Lowering
 
-Status: planned
+Status: done
 Feature: multicore-concurrency
 Governing ADR: ADR 0056, ADR 0057
 

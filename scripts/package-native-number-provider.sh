@@ -214,6 +214,7 @@ KILN_PROVIDER_SOURCE_DIGEST=$(
 		crates/kiln-temporal/Cargo.toml \
 		crates/kiln-temporal/src/lib.rs \
 		crates/kiln-runtime/Cargo.toml \
+		crates/kiln-runtime/src/concurrency.rs \
 		crates/kiln-runtime/src/http_body.rs \
 		crates/kiln-runtime/src/http_client.rs \
 		crates/kiln-runtime/src/http_engine.rs \

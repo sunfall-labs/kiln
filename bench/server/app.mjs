@@ -144,6 +144,28 @@ const server = http.createServer(async (req, res) => {
     });
     return;
   }
+  if (req.method === "POST" && path === "/multicore") {
+    const text = await readBody(req);
+    const chunks = [];
+    for (let i = 0; i < 16; i++) {
+      chunks.push((i * 31 + text.length) % 256);
+    }
+    const hashes = await (chunks.parallelMap ? chunks.parallelMap(x => {
+      let h = x;
+      for (let j = 0; j < 1000; j++) {
+        h = ((h << 5) - h + j) & 0xffffffff;
+      }
+      return h;
+    }) : chunks.map(x => {
+      let h = x;
+      for (let j = 0; j < 1000; j++) {
+        h = ((h << 5) - h + j) & 0xffffffff;
+      }
+      return h;
+    }));
+    json(res, 200, { ok: true, hashes });
+    return;
+  }
   if (req.method === "GET" && path === "/churn") {
     res.writeHead(200, { "content-type": "text/plain", "connection": "close" });
     res.end("churn ok");

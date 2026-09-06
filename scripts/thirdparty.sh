@@ -163,6 +163,7 @@ trap cleanup EXIT
 if [[ $BENCH -eq 1 ]]; then
 	python3 - "$KILN" "$BUNDLES" "$BASELINE" "$WORK_DIR" "$UPDATE" "$THRESHOLD" "$MIN_DELTA_MS" "$PROFILE" "$PASSES" "$WARMUP" "$NODE_PLATFORM" "$TARGET_BUNDLES" <<'PY'
 import json, os, statistics, subprocess, sys, time
+from concurrent.futures import ThreadPoolExecutor
 
 kiln, bundles_dir, baseline_path, work_dir, update_str, threshold_str, min_delta_str, profile, passes_str, warmup_str, node_platform_str, target_bundles_str = sys.argv[1:13]
 
@@ -198,12 +199,16 @@ measured = {}
 regressions = []
 gains = []
 
-for index, name in enumerate(bundle_names, 1):
+max_workers = min(len(bundle_names), int(os.environ.get("KILN_JOBS", os.cpu_count() or 4)))
+if max_workers > 16:
+    max_workers = 16
+elif max_workers < 1:
+    max_workers = 1
+
+def build_one(name):
     bundle_path = os.path.join(bundles_dir, f"{name}.bundle.js")
     if not os.path.exists(bundle_path):
-        print(f"[{index}/{len(bundle_names)}] {name:16} (bundle absent on disk; skipped)", flush=True)
-        continue
-
+        return (name, None, "absent")
     bin_path = os.path.join(work_dir, f"{name}.bin")
     adapter = ["--node"] if name in node_platform else []
     build_cmd = [kiln, "--one-shot", *adapter, "build", bundle_path, "--profile", profile, "--output", bin_path]
@@ -211,12 +216,27 @@ for index, name in enumerate(bundle_names, 1):
     if built.returncode != 0 or not os.path.exists(bin_path):
         err_snippet = built.stderr.strip().splitlines()
         err_msg = err_snippet[-1] if err_snippet else f"exit {built.returncode}"
+        return (name, None, err_msg)
+    return (name, bin_path, None)
+
+print(f"building {len(bundle_names)} bundles with {max_workers} worker(s)...", flush=True)
+with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    build_results = {name: (bin_path, err) for name, bin_path, err in executor.map(build_one, bundle_names)}
+
+time.sleep(0.5)
+
+for index, name in enumerate(bundle_names, 1):
+    bin_path, err_msg = build_results.get(name, (None, "unknown"))
+    if err_msg == "absent":
+        print(f"[{index}/{len(bundle_names)}] {name:16} (bundle absent on disk; skipped)", flush=True)
+        continue
+    if not bin_path:
         regressions.append(f"{name}: native compilation failed ({err_msg})")
         print(f"[{index}/{len(bundle_names)}] {name:16} COMPILE FAILED ({err_msg})", flush=True)
         continue
 
     # Warmup passes to avoid page-fault noise on fresh binaries
-    for _ in range(warmup):
+    for _ in range(max(2, warmup)):
         subprocess.run([bin_path], capture_output=True)
 
     # Execute passes

@@ -699,7 +699,13 @@ expected_stdout = "bundle\n"
         // This total is written by hand, so adding a probe to the manifest and not touching this
         // line turns the suite red for whoever pulls next -- which is how it arrived at 49 while
         // still claiming 48. Update it in the same commit that adds the probe.
-        assert_eq!(manifest.tests().len(), 51);
+        assert_eq!(manifest.tests().len(), 54);
+        assert_eq!(
+            manifest
+                .tests_under(&manifest.directory().join("effect"))
+                .count(),
+            15
+        );
         assert_eq!(
             manifest
                 .tests_under(&manifest.directory().join("guard"))

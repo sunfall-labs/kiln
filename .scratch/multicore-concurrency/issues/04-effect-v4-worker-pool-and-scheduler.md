@@ -1,6 +1,6 @@
 # Issue 04: Universal Effect v4 Integration (@kiln/effect)
 
-Status: planned
+Status: done
 Feature: multicore-concurrency
 Governing ADR: ADR 0057
 

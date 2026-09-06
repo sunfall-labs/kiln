@@ -1,6 +1,6 @@
 # Issue 06: Conformance Test Suite & Multicore Performance Benchmarking
 
-Status: planned
+Status: done
 Feature: multicore-concurrency
 Governing ADR: ADR 0020, ADR 0057
 

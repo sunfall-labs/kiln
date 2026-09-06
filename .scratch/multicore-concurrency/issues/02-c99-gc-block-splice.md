@@ -1,6 +1,6 @@
 # Issue 02: O(1) GC Block Sublist Unlinking and Splicing in Native C
 
-Status: planned
+Status: done
 Feature: multicore-concurrency
 Governing ADR: ADR 0041, ADR 0057
 

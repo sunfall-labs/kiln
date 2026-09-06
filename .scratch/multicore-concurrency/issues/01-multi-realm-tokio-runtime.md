@@ -1,6 +1,6 @@
 # Issue 01: Multi-Realm In-Process Hosting on Tokio Worker Threads
 
-Status: planned
+Status: done
 Feature: multicore-concurrency
 Governing ADR: ADR 0028, ADR 0057
 
