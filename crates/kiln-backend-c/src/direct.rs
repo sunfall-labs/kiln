@@ -51,6 +51,20 @@ struct Binding {
     slot: u32,
 }
 
+/// What a typed entry's body reaches for beyond its parameters. Each is a parameter of the
+/// entry only when needed, so a body that needs none carries nothing across its calls but the
+/// depth and its numbers. Found by emitting the body and reading it: what the C names is what
+/// it needs, and a typed callee's needs are its caller's.
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct TypedNeeds {
+    /// `host` and `thrown`: any operation that can call the runtime or throw.
+    pub runtime: bool,
+    /// The closure's upvalue table.
+    pub upvalues: bool,
+    /// `this`.
+    pub receiver: bool,
+}
+
 /// How one body's calls are emitted.
 #[derive(Default, Clone, Debug)]
 pub struct CallPlan {
@@ -68,6 +82,8 @@ pub struct CallPlan {
     /// Per proto: whether its typed entry is proven to return a number, and so hands its
     /// result back as a `double`.
     pub typed_returns: Vec<bool>,
+    /// Per proto: what its typed entry takes beyond its parameters.
+    pub typed_needs: Vec<TypedNeeds>,
 }
 
 /// The whole unit's plan: a boxed plan per function, a typed one where the typed entry exists,
@@ -190,6 +206,7 @@ impl DirectPlan {
                     .collect(),
                 unchecked: known.unchecked.clone(),
                 typed_returns: typed_returns.clone(),
+                typed_needs: vec![TypedNeeds::default(); graphs.len()],
             }
         };
         let functions: Vec<CallPlan> = graphs
@@ -273,6 +290,18 @@ impl DirectPlan {
             functions,
             typed,
             entry: entry_plan,
+        }
+    }
+
+    /// Record what every typed entry needs, in every body's plan.
+    pub fn set_typed_needs(&mut self, needs: &[TypedNeeds]) {
+        for plan in self
+            .functions
+            .iter_mut()
+            .chain(self.typed.iter_mut().flatten())
+            .chain(std::iter::once(&mut self.entry))
+        {
+            plan.typed_needs = needs.to_vec();
         }
     }
 

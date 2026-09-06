@@ -172,6 +172,53 @@ pub enum GraphOp {
 }
 
 impl GraphOp {
+    /// Every value this operation reads.
+    pub fn operands(&self) -> Vec<ValueId> {
+        match self {
+            Self::Const { .. }
+            | Self::LoadLocal(_)
+            | Self::LoadCell(_)
+            | Self::LoadUpvalue(_)
+            | Self::LoadBuiltin(_)
+            | Self::CaughtValue
+            | Self::MakeCell(_)
+            | Self::LoadGlobal(_)
+            | Self::LoadThis
+            | Self::LoadNewTarget
+            | Self::MarkUninitialized(_)
+            | Self::MakeFunction { .. } => Vec::new(),
+            Self::StoreLocal { value, .. }
+            | Self::StoreCell { value, .. }
+            | Self::StoreUpvalue { value, .. }
+            | Self::StoreGlobal { value, .. }
+            | Self::CheckTdz { value, .. }
+            | Self::Unary { value, .. } => vec![*value],
+            Self::Bridge { operands, .. } => operands.clone(),
+            Self::Binary { left, right, .. } => vec![*left, *right],
+            Self::GetProperty { object, .. } => vec![*object],
+            Self::SetProperty { object, value, .. }
+            | Self::SetPropertyStrict { object, value, .. } => vec![*object, *value],
+            Self::GetComputed { object, key, .. } => vec![*object, *key],
+            Self::SetComputed {
+                object, key, value, ..
+            }
+            | Self::SetComputedStrict {
+                object, key, value, ..
+            } => vec![*object, *key, *value],
+            Self::Call { callee, args, .. } | Self::New { callee, args, .. } => {
+                std::iter::once(*callee)
+                    .chain(args.iter().copied())
+                    .collect()
+            }
+            Self::CallMethod { object, args, .. } => std::iter::once(*object)
+                .chain(args.iter().copied())
+                .collect(),
+            Self::NewArray { elements, .. } => elements.clone(),
+            Self::NewObject { pairs, .. } => pairs.iter().flat_map(|(k, v)| [*k, *v]).collect(),
+            Self::Phi { inputs } => inputs.iter().map(|(_, v)| *v).collect(),
+        }
+    }
+
     /// Effect classification for this operation.
     pub fn effect(&self) -> Effect {
         match self {

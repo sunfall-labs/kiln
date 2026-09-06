@@ -92,7 +92,7 @@ column before it is the same source at `84b2087b`, whole process, for the size o
 | | node, warm | native at `84b2087b` | bodies boxed, `cf93bb61` | seam done, `44822464` | hand-emitted C, warm | ceiling vs node |
 | --- | --- | --- | --- | --- | --- | --- |
 | `cpu/loop` | 25 ms | 279 ms | 162 ms | 185 to 212 ms | 28.7 ms | level |
-| `cpu/fib` | 21 ms | 92 ms | 118 ms | 57 ms | 3.4 ms | 6x ahead |
+| `cpu/fib` | 21 ms | 92 ms | 118 ms | 57 ms | 11.0 ms (was reported as 3.4: clang had hoisted the pure call out of the five-iteration loop, so the file timed one `fib(30)` as five; fixed 2026-09-05) | 2x ahead |
 | `non-io/class-poly` | 0.47 ms | 50.5 ms | 62.7 ms | 56 ms | 0.3 to 0.9 ms | level |
 
 The `44822464` column is three interleaved passes at a load average between 2.8 and 4.6; fib and

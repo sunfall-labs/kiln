@@ -824,7 +824,7 @@ fn render_functions(
     diagnostic_site: &str,
     strict_functions: &[bool],
     graphs: &[FunctionGraph],
-    direct: &direct::DirectPlan,
+    direct: &mut direct::DirectPlan,
     policy: &EmissionPolicy,
 ) {
     if policy.type_profile_record {
@@ -867,6 +867,55 @@ fn render_functions(
             .unwrap();
         }
     }
+    // What each typed entry needs is what its emitted body names, and what its typed callees
+    // need. Emit the typed bodies to find out, until nothing more is needed.
+    let mut needs = vec![direct::TypedNeeds::default(); program.functions.len()];
+    loop {
+        direct.set_typed_needs(&needs);
+        let mut changed = false;
+        for (index, proto) in program.functions.iter().enumerate() {
+            let Some(typed) = &direct.typed[index] else {
+                continue;
+            };
+            let mut scratch = String::new();
+            emit_function_from_graph(
+                &mut scratch,
+                &graphs[index],
+                proto,
+                program,
+                symbol,
+                index,
+                !proto_produces_references(proto, program),
+                diagnostic_site,
+                &plan.functions,
+                strict_functions,
+                typed,
+                emit_graph::EntryKind::Typed {
+                    returns_number: typed.typed_returns[index],
+                },
+            );
+            let body = scratch
+                .find("kiln_block_0:;")
+                .map_or("", |at| &scratch[at..]);
+            let found = direct::TypedNeeds {
+                runtime: names(body, "host") || names(body, "thrown"),
+                upvalues: names(body, "upvalues"),
+                receiver: names(body, "receiver"),
+            };
+            let merged = direct::TypedNeeds {
+                runtime: needs[index].runtime || found.runtime,
+                upvalues: needs[index].upvalues || found.upvalues,
+                receiver: needs[index].receiver || found.receiver,
+            };
+            if merged != needs[index] {
+                needs[index] = merged;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
     for index in 0..program.functions.len() {
         writeln!(
             output,
@@ -874,13 +923,14 @@ fn render_functions(
         )
         .unwrap();
         if direct.has_typed_entry(index as u32) {
+            let (result, params) = emit_graph::typed_signature(
+                &program.functions[index],
+                direct.entry.typed_returns[index],
+                direct.entry.typed_needs[index],
+            );
             writeln!(
                 output,
-                "static inline int {symbol}_fn_{index}_t({});",
-                emit_graph::typed_signature(
-                    &program.functions[index],
-                    direct.entry.typed_returns[index]
-                )
+                "static inline {result} {symbol}_fn_{index}_t({params});"
             )
             .unwrap();
         }
@@ -1094,6 +1144,26 @@ fn entry_proto(program: &Program) -> FunctionProto {
         span: kiln_ir::Span::default(),
         type_annotations: None,
     }
+}
+
+/// Whether emitted C names `word` as an identifier of its own: not as part of a longer name,
+/// and not as a struct field behind `->`.
+fn names(text: &str, word: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut from = 0;
+    while let Some(at) = text[from..].find(word) {
+        let start = from + at;
+        let end = start + word.len();
+        let before = start.checked_sub(1).map(|i| bytes[i]);
+        let after = bytes.get(end).copied();
+        let is_ident = |b: Option<u8>| b.is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_');
+        let field = start >= 2 && &text[start - 2..start] == "->";
+        if !is_ident(before) && !is_ident(after) && !field {
+            return true;
+        }
+        from = end;
+    }
+    false
 }
 
 /// Every body's graph, built and verified before any is emitted, and the unit's direct-call
@@ -1801,7 +1871,7 @@ fn render(
         program.local_count,
         !keys.is_empty(),
     );
-    let (graphs, body, entry_graph, direct) = plan_unit(program, symbol)?;
+    let (graphs, body, entry_graph, mut direct) = plan_unit(program, symbol)?;
     render_functions(
         &mut output,
         program,
@@ -1810,7 +1880,7 @@ fn render(
         symbol,
         &strict_functions,
         &graphs,
-        &direct,
+        &mut direct,
         policy,
     );
     render_entry(
@@ -1899,7 +1969,7 @@ fn render_module(
         program.local_count,
         !keys.is_empty(),
     );
-    let (graphs, body, entry_graph, direct) = plan_unit(program, diagnostic_site)?;
+    let (graphs, body, entry_graph, mut direct) = plan_unit(program, diagnostic_site)?;
     render_functions(
         &mut output,
         program,
@@ -1908,7 +1978,7 @@ fn render_module(
         diagnostic_site,
         &strict_functions,
         &graphs,
-        &direct,
+        &mut direct,
         policy,
     );
     render_entry(

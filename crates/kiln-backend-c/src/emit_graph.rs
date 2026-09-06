@@ -6,7 +6,7 @@
 //! - Retains `locals[]` only when needed for closure cells or generator suspension frames.
 //! - Materializes call arguments into local stack arrays at call sites only, avoiding whole-body address-taking.
 
-use crate::direct::{CallPlan, direct_callable};
+use crate::direct::{CallPlan, TypedNeeds, direct_callable};
 use crate::graph::{
     BasicBlock, BlockId, FunctionGraph, FunctionTypeProfile, GraphOp, InductionVariable, Proven,
     Terminator, ValueId, as_safe_integer, candidate_number_parameters_with_profile,
@@ -102,20 +102,70 @@ pub enum Site<'a> {
     },
 }
 
-/// The typed entry's parameter list: what a direct call has in registers, the parameters as
-/// the doubles they are, and the result as one where the plan proved it.
-pub fn typed_signature(proto: &FunctionProto, returns_number: bool) -> String {
-    let result = if returns_number {
-        "double *result"
-    } else {
-        "kiln_val *result"
-    };
-    let params: String = (0..proto.parameter_count)
-        .map(|k| format!(", double p{k}"))
-        .collect();
-    format!(
-        "kiln_host *host, kiln_value *thrown, int depth, kiln_val *upvalues, kiln_val receiver, {result}{params}"
-    )
+/// The typed entry's declaration: the result in a register, `double` where the plan proved
+/// it and `kiln_val` otherwise, with `KILN_VAL_TYPED_FAIL` for a failure; then the depth, what
+/// the body needs and nothing it does not, and the parameters as the doubles they are.
+pub fn typed_signature(
+    proto: &FunctionProto,
+    returns_number: bool,
+    needs: TypedNeeds,
+) -> (&'static str, String) {
+    let result = if returns_number { "double" } else { "kiln_val" };
+    let mut params = String::from("int depth");
+    if needs.upvalues {
+        params.push_str(", kiln_val *upvalues");
+    }
+    if needs.receiver {
+        params.push_str(", kiln_val receiver");
+    }
+    if needs.runtime {
+        params.push_str(", kiln_host *host, kiln_value *thrown");
+    }
+    for k in 0..proto.parameter_count {
+        params.push_str(&format!(", double p{k}"));
+    }
+    (result, params)
+}
+
+/// What a typed entry returns on failure, for the kind of result it has.
+fn typed_fail(kind: EntryKind) -> &'static str {
+    match kind {
+        EntryKind::Typed {
+            returns_number: true,
+        } => "kiln_c99_typed_fail_double()",
+        _ => "KILN_VAL_TYPED_FAIL",
+    }
+}
+
+/// A typed entry's `return status;` and `return KILN_C99_*;` leave the status pending and
+/// return the failure value instead: the entry's result is in a register, so a status cannot
+/// travel in it. Applied to the emitted body text, which is exactly what will be compiled.
+fn route_typed_failures(body: &str, fail: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(at) = rest.find("return ") {
+        let (before, after) = rest.split_at(at);
+        out.push_str(before);
+        match after[7..].find(';').map(|i| i + 7) {
+            Some(end) => {
+                let token = &after[7..end];
+                if token == "status" || (token.starts_with("KILN_C99_") && token != "KILN_C99_OK") {
+                    out.push_str(&format!(
+                        "{{ kiln_c99_typed_status = {token}; return {fail}; }}"
+                    ));
+                } else {
+                    out.push_str(&after[..=end]);
+                }
+                rest = &after[end + 1..];
+            }
+            None => {
+                out.push_str(after);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 pub(crate) use crate::graph::array_slots;
@@ -202,10 +252,11 @@ pub fn emit_function_from_graph_with_profile(
         )
         .unwrap(),
         EntryKind::Typed { returns_number } => {
+            let (result, params) =
+                typed_signature(proto, returns_number, plan.typed_needs[index]);
             writeln!(
                 output,
-                "static inline int {symbol}_fn_{index}_t({}) {{",
-                typed_signature(proto, returns_number)
+                "static inline {result} {symbol}_fn_{index}_t({params}) {{"
             )
             .unwrap();
         }
@@ -214,9 +265,7 @@ pub fn emit_function_from_graph_with_profile(
     // 3. Context & arguments setup. `ctx` is never null: every caller, the runtime's and the
     // emitted direct path alike, passes its own.
     if matches!(kind, EntryKind::Typed { .. }) {
-        output.push_str(
-            "    (void)upvalues; (void)receiver; (void)host; (void)thrown; (void)depth;\n",
-        );
+        output.push_str("    (void)depth;\n");
     } else if scalar_proto {
         output.push_str("    (void)ctx; (void)receiver_ptr; (void)upvalues;\n");
     } else {
@@ -504,6 +553,54 @@ fn emit_block_sequence(
         Site::Function { index } => Some(*index),
         Site::Entry { .. } => None,
     };
+    // A pure read nothing consumes is not emitted: it would only name something -- an upvalue
+    // table, a slot -- that the body then appears to need. The callee read a direct self-call
+    // has replaced is the common case.
+    let mut used: HashSet<ValueId> = HashSet::new();
+    for block in &graph.blocks {
+        for (vid, op) in &block.operations {
+            // A direct call reads its callee value only for the upvalue table it carries: not
+            // on a self-call, which has its own, and not into a typed entry that takes none.
+            // A boxed body's direct call keeps it for the generic path past the depth limit.
+            if let GraphOp::Call { callee, args, .. } = op
+                && let Some(&target) = plan.known.get(callee)
+                && direct_callable(&program.functions[target as usize])
+                && matches!(kind, EntryKind::Typed { .. })
+            {
+                used.extend(args.iter().copied());
+                let self_call = self_index == Some(target);
+                let typed_site = plan.typed_sites.contains(vid);
+                let reads_callee =
+                    !self_call && (!typed_site || plan.typed_needs[target as usize].upvalues);
+                if reads_callee {
+                    used.insert(*callee);
+                }
+                continue;
+            }
+            used.extend(op.operands());
+        }
+        match &block.terminator {
+            Terminator::Return(Some(v)) | Terminator::Throw(v) => {
+                used.insert(*v);
+            }
+            Terminator::Branch { condition, .. } => {
+                used.insert(*condition);
+            }
+            Terminator::Suspend { value, spilled, .. } => {
+                used.insert(*value);
+                used.extend(spilled.iter().copied());
+            }
+            _ => {}
+        }
+    }
+    let dead_read = |vid: ValueId, op: &GraphOp| {
+        !used.contains(&vid)
+            && match op {
+                GraphOp::LoadGlobal(_) | GraphOp::Const { .. } => true,
+                GraphOp::LoadCell(_) | GraphOp::LoadUpvalue(_) => plan.unchecked.contains(&vid),
+                _ => false,
+            }
+    };
     for block in &graph.blocks {
         for from in &graph.blocks {
             if let Terminator::Suspend {
@@ -573,6 +670,9 @@ fn emit_block_sequence(
         }
 
         for &(vid, ref op) in &block.operations {
+            if dead_read(vid, op) {
+                continue;
+            }
             emit_graph_op(
                 output,
                 vid,
@@ -780,23 +880,42 @@ fn emit_blocks(
 
     // 6. Unwind and refusal handlers
     match site {
+        Site::Function { .. } if matches!(kind, EntryKind::Typed { .. }) => {
+            // A typed entry leaves its failure pending and returns the failure value. The
+            // labels exist only where the body jumps to them: a body with nothing that throws
+            // has no unwind, and no `thrown` to read.
+            let fail = typed_fail(kind);
+            let body = &output[body_start..];
+            let unwinds = body.contains("goto kiln_unwind;");
+            let refuses = body.contains("goto kiln_refusal;");
+            if unwinds {
+                output.push_str("kiln_unwind:;\n");
+                writeln!(
+                    output,
+                    "    kiln_c99_typed_status = KILN_C99_THROWN; kiln_c99_typed_thrown = *thrown; return {fail};"
+                )
+                .unwrap();
+            }
+            if refuses {
+                output.push_str("kiln_refusal:;\n");
+                writeln!(
+                    output,
+                    "    kiln_c99_typed_status = KILN_C99_CONTROL_ERROR; return {fail};"
+                )
+                .unwrap();
+            }
+            let routed = route_typed_failures(&output[body_start..], fail);
+            output.truncate(body_start);
+            output.push_str(&routed);
+        }
         Site::Function { .. } => {
             output.push_str("kiln_unwind:;\n");
             output.push_str("    return KILN_C99_THROWN;\n");
             if !scalar_proto {
-                // The diagnostic travels in the realm's control record, which the entry point
-                // reads; a boxed body also carries it in its result, a double result cannot.
                 output.push_str("kiln_refusal:;\n");
-                if !matches!(
-                    kind,
-                    EntryKind::Typed {
-                        returns_number: true
-                    }
-                ) {
-                    output.push_str(
-                        "    *result = kiln_val_from_boundary(kiln_c99_control_diagnostic());\n",
-                    );
-                }
+                output.push_str(
+                    "    *result = kiln_val_from_boundary(kiln_c99_control_diagnostic());\n",
+                );
                 output.push_str("    return KILN_C99_CONTROL_ERROR;\n");
             }
         }
@@ -1704,10 +1823,12 @@ fn emit_graph_op(
                     .collect::<Vec<_>>()
                     .join(", ")
             };
-            let receiver = if strict_functions[target as usize] {
-                ""
+            let in_typed = matches!(kind, EntryKind::Typed { .. });
+            let sloppy = !strict_functions[target as usize];
+            let receiver = if sloppy {
+                "kiln_val recv = KILN_VAL_UNDEFINED; (void)kiln_c99_global_object_val(&recv);"
             } else {
-                " (void)kiln_c99_global_object_val(&recv);"
+                "kiln_val recv = KILN_VAL_UNDEFINED;"
             };
             let check = status_check(diagnostic_site, pc, label, unwind);
             // A function calling itself through its own binding is calling the very closure
@@ -1719,24 +1840,68 @@ fn emit_graph_op(
             } else {
                 format!("((kiln_closure *)KILN_VAL_PTR(v{}))->upvalues", callee.0)
             };
-            let (direct, twin) = if plan.typed_sites.contains(&vid) {
-                let doubles: String = args.iter().map(|a| format!(", d{}", a.0)).collect();
-                if plan.typed_returns[target as usize] {
-                    // The result comes back as the double it is; the box is made here and
-                    // deleted by the C compiler wherever nothing reads it untyped.
-                    (
-                        format!(
-                            "int status = {symbol}_fn_{target}_t(host, thrown, depth + 1, {upvalues}, recv, &d{v}{doubles}); v{v} = kiln_c99_val_from_double(d{v});"
-                        ),
-                        String::new(),
+            // Past the depth limit a boxed body takes the generic call, which throws the
+            // `RangeError`; a typed entry leaves it pending and fails.
+            let overflow = if in_typed {
+                format!(
+                    "{{ kiln_c99_typed_overflow(); return {}; }}",
+                    typed_fail(kind)
+                )
+            } else {
+                format!(
+                    "{{ kiln_val call_args[{n}] = {{ {init} }}; int status = kiln_c99_val_call(host, v{c}, {argc} > 0 ? call_args : NULL, (size_t){argc}, depth, thrown, \"{diagnostic_site}\", (size_t){pc}, \"{label}\", &v{v}); {check} }}",
+                    n = argc.max(1),
+                    c = callee.0
+                )
+            };
+            if plan.typed_sites.contains(&vid) {
+                let needs = plan.typed_needs[target as usize];
+                let mut call_args = String::from("depth + 1");
+                if needs.upvalues {
+                    call_args.push_str(&format!(", {upvalues}"));
+                }
+                if needs.receiver {
+                    call_args.push_str(", recv");
+                }
+                if needs.runtime {
+                    call_args.push_str(", host, thrown");
+                }
+                for a in args {
+                    call_args.push_str(&format!(", d{}", a.0));
+                }
+                let recv = if needs.receiver { receiver } else { "" };
+                // A failed typed callee has left its status pending. A typed caller with a
+                // handler hands a throw to it; without one it fails on, the status still
+                // pending. A boxed caller answers as it would to any status.
+                let failed = if in_typed && unwind != "goto kiln_unwind;" {
+                    format!(
+                        "{{ if (kiln_c99_typed_status == KILN_C99_THROWN) {{ *thrown = kiln_c99_typed_thrown; {unwind} }} return {}; }}",
+                        typed_fail(kind)
                     )
+                } else if in_typed {
+                    format!("return {};", typed_fail(kind))
                 } else {
-                    (
-                        format!(
-                            "int status = {symbol}_fn_{target}_t(host, thrown, depth + 1, {upvalues}, recv, &v{v}{doubles});"
-                        ),
-                        String::new(),
+                    format!(
+                        "{{ int status = kiln_c99_typed_status; if (status == KILN_C99_THROWN) {{ *thrown = kiln_c99_typed_thrown; {unwind} }} {check} }}"
                     )
+                };
+                if plan.typed_returns[target as usize] {
+                    writeln!(
+                        output,
+                        "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow} else {{ {recv} d{v} = {symbol}_fn_{target}_t({call_args}); if (KILN_UNLIKELY(kiln_c99_typed_failed(d{v}))) {failed} v{v} = kiln_c99_val_from_double(d{v}); }}"
+                    )
+                    .unwrap();
+                } else {
+                    let twin = if typed {
+                        format!(" memcpy(&d{v}, &v{v}, sizeof(d{v}));")
+                    } else {
+                        String::new()
+                    };
+                    writeln!(
+                        output,
+                        "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow} else {{ {recv} v{v} = {symbol}_fn_{target}_t({call_args}); if (KILN_UNLIKELY(v{v} == KILN_VAL_TYPED_FAIL)) {failed}{twin} }}"
+                    )
+                    .unwrap();
                 }
             } else {
                 let twin = if typed {
@@ -1744,21 +1909,13 @@ fn emit_graph_op(
                 } else {
                     String::new()
                 };
-                (
-                    format!(
-                        "kiln_val call_args[{n}] = {{ {init} }}; kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status = {symbol}_fn_{target}(&ctx_call, &v{v}, {upvalues}, &recv, {argc} > 0 ? call_args : NULL, (size_t){argc});",
-                        n = argc.max(1)
-                    ),
-                    twin,
+                writeln!(
+                    output,
+                    "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow} else {{ kiln_val call_args[{n}] = {{ {init} }}; {receiver} kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status = {symbol}_fn_{target}(&ctx_call, &v{v}, {upvalues}, &recv, {argc} > 0 ? call_args : NULL, (size_t){argc}); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status;{twin} }}",
+                    n = argc.max(1)
                 )
-            };
-            writeln!(
-                output,
-                "    if (KILN_LIKELY(!kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ kiln_val recv = KILN_VAL_UNDEFINED;{receiver} {direct} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status;{twin} }} else {{ kiln_val call_args[{n}] = {{ {init} }}; int status = kiln_c99_val_call(host, v{c}, {argc} > 0 ? call_args : NULL, (size_t){argc}, depth, thrown, \"{diagnostic_site}\", (size_t){pc}, \"{label}\", &v{v}); {check}{twin} }}",
-                n = argc.max(1),
-                c = callee.0
-            )
-            .unwrap();
+                .unwrap();
+            }
         }
         GraphOp::Call { callee, args, .. } => {
             let argc = args.len();
@@ -2845,13 +3002,17 @@ fn emit_terminator(
                 }
                 match value {
                     Some(val) if numbers.contains(val) => {
-                        writeln!(output, "    *result = d{}; return KILN_C99_OK;", val.0).unwrap();
+                        writeln!(output, "    return d{};", val.0).unwrap();
                     }
                     // The plan proved every reachable return a number; a return of anything
                     // else is in a block nothing reaches. It answers as a bug would, loudly.
                     _ => output.push_str("    goto kiln_refusal;\n"),
                 }
             }
+            Site::Function { .. } if matches!(kind, EntryKind::Typed { .. }) => match value {
+                Some(val) => writeln!(output, "    return v{};", val.0).unwrap(),
+                None => output.push_str("    return KILN_VAL_UNDEFINED;\n"),
+            },
             Site::Function { index } => match value {
                 Some(val) => {
                     if type_profile_record {
