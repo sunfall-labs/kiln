@@ -26215,12 +26215,10 @@ static int kiln_c99_val_call_method(kiln_host *host, kiln_val receiver, const ki
     } else if (KILN_LIKELY(site != NULL && site->pic_count > 0 && KILN_VAL_IS_OBJECT(receiver))) {
         const kiln_object *object = (const kiln_object *)KILN_VAL_PTR(receiver);
         size_t p;
-        for (p = 0; p < site->pic_count; ++p) {
-            if (site->entries[p].shape == object->shape && site->entries[p].method != 0) {
-                method = site->entries[p].method;
-                from_cache = 1;
-                break;
-            }
+        (void)p;
+        method = kiln_c99_site_cached_callee(site, object);
+        if (method != 0) {
+            from_cache = 1;
         }
     }
     int status = KILN_C99_OK;
@@ -26240,14 +26238,24 @@ static int kiln_c99_val_call_method(kiln_host *host, kiln_val receiver, const ki
             site->cached_tag = (uint8_t)kiln_val_to_boundary(receiver).tag;
             site->cached_method = KILN_VAL_METHOD_ID(method);
             site->has_cached_method = 1;
-        } else if (site != NULL && KILN_VAL_IS_OBJECT(receiver)) {
+        } else if (site != NULL && KILN_VAL_IS_OBJECT(receiver) &&
+                   /* A proxy, a generator and a collection are boxed with the object prefix and
+                    * are not objects; a site learns a shape only from an object, so a hit -- a
+                    * pointer compare against learned shapes -- cannot be one of theirs. The kind
+                    * lookup is a heap search, affordable once per shape here and not per call. */
+                   kiln_c99_gc_kind_of_ptr(KILN_VAL_PTR(receiver)) == KILN_GC_OBJECT) {
             const kiln_object *object = (const kiln_object *)KILN_VAL_PTR(receiver);
             if (object->shape != NULL) {
+                /* An own property is remembered by its slot; a prototype's by value. */
+                uint32_t own_slot = UINT32_MAX;
+                int own = kiln_c99_shape_find_slot(object->shape, key, &own_slot);
+                kiln_val remembered = own ? 0 : method;
                 size_t p;
                 int found = 0;
                 for (p = 0; p < site->pic_count; ++p) {
                     if (site->entries[p].shape == object->shape) {
-                        site->entries[p].method = method;
+                        site->entries[p].slot = own ? own_slot : UINT32_MAX;
+                        site->entries[p].method = remembered;
                         found = 1;
                         break;
                     }
@@ -26255,8 +26263,8 @@ static int kiln_c99_val_call_method(kiln_host *host, kiln_val receiver, const ki
                 if (!found && site->pic_count < KILN_C99_PIC_SIZE) {
                     site->entries[site->pic_count].shape = object->shape;
                     site->entries[site->pic_count].transition_to = NULL;
-                    site->entries[site->pic_count].slot = 0;
-                    site->entries[site->pic_count].method = method;
+                    site->entries[site->pic_count].slot = own ? own_slot : UINT32_MAX;
+                    site->entries[site->pic_count].method = remembered;
                     site->pic_count += 1;
                 }
             }

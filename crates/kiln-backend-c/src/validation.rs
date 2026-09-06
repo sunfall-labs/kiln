@@ -18,6 +18,19 @@ pub(crate) fn validate_program(program: &Program) -> Result<StackPlan, EmitError
             message: "program has no instructions".into(),
         });
     }
+    // The entry point runs once on an automatic frame and has nowhere to suspend: a module
+    // that awaits at its top level needs the frame a generator keeps, which the entry does not
+    // have. Refused by name; until 2026-09-05 it reached the C compiler as an undeclared
+    // `frame` and failed there.
+    if let Some(pc) = program
+        .code
+        .iter()
+        .position(|instruction| matches!(instruction, Instruction::Await | Instruction::Yield))
+    {
+        return Err(EmitError::Unsupported {
+            feature: format!("top-level await at instruction {pc}"),
+        });
+    }
     for proto in &program.functions {
         // A generator does not run when it is called: it builds an object that runs in pieces,
         // each resumption picking up where the last left off. That is a suspended frame, which

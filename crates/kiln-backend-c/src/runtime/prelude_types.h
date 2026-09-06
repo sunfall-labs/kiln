@@ -608,6 +608,27 @@ typedef struct kiln_c99_site {
     uint8_t has_cached_method;
     uint64_t cached_method;
 } kiln_c99_site;
+
+/* The callee a method-call site remembers for an object of `obj`'s shape, or 0. A method found
+ * on the prototype is remembered by value; one that is the object's own property is remembered
+ * by slot and read from *this* object, because two objects of one shape hold their own values.
+ * Caching the value for an own property is what called the first subscriber's callback for
+ * every later one. */
+static inline kiln_val kiln_c99_site_cached_callee(const kiln_c99_site *site, const kiln_object *obj) {
+    uint32_t p;
+    for (p = 0; p < site->pic_count; ++p) {
+        if (site->entries[p].shape == obj->shape) {
+            if (site->entries[p].method != 0) {
+                return site->entries[p].method;
+            }
+            if (site->entries[p].slot != UINT32_MAX && site->entries[p].slot < obj->slot_capacity) {
+                return obj->slots[site->entries[p].slot];
+            }
+            return 0;
+        }
+    }
+    return 0;
+}
 #define KILN_C99_SITE_NONE 0xFFFFFFFFu
 #define KILN_C99_SITE_GIVE_UP 8u
 
