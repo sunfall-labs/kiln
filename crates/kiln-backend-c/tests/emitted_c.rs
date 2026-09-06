@@ -962,10 +962,10 @@ fn runtime_prelude_size() {
     // Widened on 2026-09-05, at 36,507 lines. The NaN-boxing seam (ADR 0053) put a `kiln_val`
     // wrapper in front of most of the generic paths -- about 190 boundary conversions -- and the
     // graph emitter added `kiln_c99_val_call_method`, a method call end to end on machine values.
-    // The wrappers are scaffolding: they disappear as the generic paths take `kiln_val` themselves,
-    // and this ceiling is expected to come back down with them. 38,000 for now.
+    // Widened on 2026-09-06, at 38,239 lines for Step 5.2 partial evaluation of builtins
+    // (fast collections, JSON, array sort, iterator primitives for machine values). 39,500 for now.
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 38_000;
+    const CEILING_LINES: usize = 39_500;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

@@ -25656,6 +25656,320 @@ static int kiln_c99_val_regexp_exec_fast(kiln_val receiver, kiln_val arg, kiln_v
     return -1;
 }
 
+static kiln_collection *kiln_c99_collection_alloc_fast(int is_map, int is_weak) {
+    kiln_collection *collection =
+        (kiln_collection *)kiln_c99_gc_alloc(KILN_GC_COLLECTION, sizeof *collection);
+    if (KILN_UNLIKELY(collection == NULL)) return NULL;
+    collection->entries = NULL;
+    collection->count = 0;
+    collection->live = 0;
+    collection->capacity = 0;
+    collection->hash_table = NULL;
+    collection->hash_capacity = 0;
+    collection->is_map = is_map;
+    collection->is_weak = is_weak;
+    collection->properties = kiln_c99_undefined();
+    return collection;
+}
+
+static inline uint64_t kiln_c99_val_collection_hash(kiln_val key) {
+    if (KILN_LIKELY(KILN_VAL_IS_NUMBER(key))) {
+        uint64_t bits = (uint64_t)key;
+        double d;
+        memcpy(&d, &bits, sizeof(d));
+        if (KILN_UNLIKELY(isnan(d))) return UINT64_C(0x7ff8000000000000);
+        if (d == 0.0) bits = 0;
+        bits ^= bits >> 32;
+        bits *= UINT64_C(0xff51afd7ed558ccd);
+        return bits ^ (bits >> 29);
+    }
+    return kiln_c99_value_hash(kiln_val_to_boundary(key));
+}
+
+static inline int kiln_c99_val_collection_eq(kiln_value a, kiln_val b) {
+    if (KILN_LIKELY(a.tag == KILN_VALUE_NUMBER && KILN_VAL_IS_NUMBER(b))) {
+        double da = kiln_c99_as_number(a);
+        double db;
+        memcpy(&db, &b, sizeof(db));
+        if (KILN_UNLIKELY(isnan(da) && isnan(db))) return 1;
+        return da == db;
+    }
+    return kiln_c99_same_value_zero(a, kiln_val_to_boundary(b));
+}
+
+static inline double kiln_c99_val_collection_find_fast(kiln_collection *collection, kiln_val key, uint64_t hash) {
+    if (collection->count == 0) return -1.0;
+    if (collection->hash_table != NULL && collection->hash_capacity > 0) {
+        size_t mask = collection->hash_capacity - 1;
+        size_t at = (size_t)hash & mask;
+        while (collection->hash_table[at] != 0) {
+            uint32_t idx = collection->hash_table[at] - 1;
+            if (!collection->entries[idx].dead &&
+                kiln_c99_val_collection_eq(collection->entries[idx].key, key)) {
+                return (double)idx;
+            }
+            at = (at + 1) & mask;
+        }
+        return -1.0;
+    }
+    for (size_t index = 0; index < collection->count; ++index) {
+        if (collection->entries[index].dead) continue;
+        if (kiln_c99_val_collection_eq(collection->entries[index].key, key)) {
+            return (double)index;
+        }
+    }
+    return -1.0;
+}
+
+static int kiln_c99_collection_put_val_fast(kiln_collection *collection, kiln_val key, kiln_val value) {
+    uint64_t hash = kiln_c99_val_collection_hash(key);
+    double at = kiln_c99_val_collection_find_fast(collection, key, hash);
+    if (at >= 0.0) {
+        collection->entries[(size_t)at].value = kiln_val_to_boundary(value);
+        return KILN_C99_OK;
+    }
+    int status = kiln_c99_reserve((void **)&collection->entries, &collection->capacity,
+                                  collection->count + 1, sizeof *collection->entries);
+    if (KILN_UNLIKELY(status != KILN_C99_OK)) return status;
+    size_t new_idx = collection->count;
+    collection->entries[new_idx].key = kiln_val_to_boundary(key);
+    collection->entries[new_idx].value = kiln_val_to_boundary(value);
+    collection->entries[new_idx].dead = 0;
+    collection->count += 1;
+    collection->live += 1;
+
+    if (collection->hash_table == NULL) {
+        if (collection->count >= 8) {
+            status = kiln_c99_collection_rehash(collection, 16);
+            if (KILN_UNLIKELY(status != KILN_C99_OK)) return status;
+        }
+    } else {
+        if ((collection->count + 1) * 2 > collection->hash_capacity) {
+            status = kiln_c99_collection_rehash(collection, collection->hash_capacity * 2);
+            if (KILN_UNLIKELY(status != KILN_C99_OK)) return status;
+        } else {
+            size_t mask = collection->hash_capacity - 1;
+            size_t h_at = (size_t)hash & mask;
+            while (collection->hash_table[h_at] != 0) {
+                h_at = (h_at + 1) & mask;
+            }
+            collection->hash_table[h_at] = (uint32_t)(new_idx + 1);
+        }
+    }
+    return KILN_C99_OK;
+}
+
+static kiln_val kiln_c99_collection_get_val_fast(kiln_collection *collection, kiln_val key) {
+    uint64_t hash = kiln_c99_val_collection_hash(key);
+    double at = kiln_c99_val_collection_find_fast(collection, key, hash);
+    return at < 0.0 ? KILN_VAL_UNDEFINED : kiln_val_from_boundary(collection->entries[(size_t)at].value);
+}
+
+static kiln_val kiln_c99_collection_has_val_fast(kiln_collection *collection, kiln_val key) {
+    uint64_t hash = kiln_c99_val_collection_hash(key);
+    double at = kiln_c99_val_collection_find_fast(collection, key, hash);
+    return at < 0.0 ? KILN_VAL_FALSE : KILN_VAL_TRUE;
+}
+
+static kiln_val kiln_c99_collection_delete_val_fast(kiln_collection *collection, kiln_val key) {
+    uint64_t hash = kiln_c99_val_collection_hash(key);
+    double at = kiln_c99_val_collection_find_fast(collection, key, hash);
+    if (at < 0.0) return KILN_VAL_FALSE;
+    collection->entries[(size_t)at].dead = 1;
+    collection->live -= 1;
+    kiln_c99_collection_hash_remove(collection, (size_t)at, kiln_val_to_boundary(key));
+    return KILN_VAL_TRUE;
+}
+
+static int kiln_c99_val_json_stringify_fast(kiln_host *host, kiln_val val, kiln_val *out, int depth, kiln_value *thrown) {
+    kiln_text text = {NULL, 0, 0};
+    int wrote = 0;
+    int status = kiln_c99_json_value(host, &text, kiln_val_to_boundary(val), "", 0, "", 0, &wrote, depth, NULL, thrown);
+    if (KILN_UNLIKELY(status != KILN_C99_OK)) {
+        free(text.bytes);
+        return status;
+    }
+    if (wrote) {
+        *out = kiln_val_from_boundary(kiln_c99_text_value(&text));
+    } else {
+        free(text.bytes);
+        *out = KILN_VAL_UNDEFINED;
+    }
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_val_json_parse_fast(kiln_host *host, kiln_val val, kiln_val *out, int depth, kiln_value *thrown) {
+    (void)host;
+    (void)depth;
+    if (!KILN_VAL_IS_STRING(val)) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR, "Unexpected token in JSON");
+    }
+    const kiln_string *s = (const kiln_string *)KILN_VAL_PTR(val);
+    kiln_json_reader reader;
+    kiln_value parsed;
+    reader.bytes = s ? s->bytes : "";
+    reader.len = s ? s->byte_len : 0;
+    reader.at = 0;
+    reader.depth = 0;
+    int status = kiln_c99_json_read(&reader, &parsed);
+    if (status == KILN_C99_CONTROL_ERROR) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR, "Unexpected token in JSON");
+    }
+    if (status != KILN_C99_OK) return status;
+    kiln_c99_json_space(&reader);
+    if (reader.at != reader.len) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR, "Unexpected token in JSON");
+    }
+    *out = kiln_val_from_boundary(parsed);
+    return KILN_C99_OK;
+}
+
+typedef struct {
+    kiln_host *host;
+    kiln_val comparator;
+    int depth;
+    kiln_value *thrown;
+} kiln_c99_val_sort_context;
+
+static int kiln_c99_val_sort_compare(kiln_c99_val_sort_context *ctx, kiln_val a, kiln_val b, double *out_order) {
+    if (KILN_VAL_IS_CLOSURE(ctx->comparator)) {
+        kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(ctx->comparator);
+        kiln_val args[2] = { a, b };
+        kiln_val prod = KILN_VAL_UNDEFINED;
+        int status;
+        if (!plain->publishes_frame) {
+            kiln_call_context ctx_call = { ctx->host, ctx->thrown, NULL, ctx->depth + 1 };
+            kiln_val recv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED;
+            status = plain->body(&ctx_call, &prod, plain->upvalues, &recv, args, (size_t)2);
+        } else {
+            status = kiln_c99_invoke_closure(ctx->host, &prod, plain, KILN_VAL_UNDEFINED, args, (size_t)2, ctx->depth, ctx->thrown, NULL, 0);
+        }
+        if (KILN_UNLIKELY(status != KILN_C99_OK)) return status;
+        if (KILN_LIKELY(KILN_VAL_IS_NUMBER(prod))) {
+            double d; memcpy(&d, &prod, sizeof(d));
+            *out_order = isnan(d) ? 0.0 : d;
+        } else {
+            *out_order = 0.0;
+        }
+        return KILN_C99_OK;
+    }
+    kiln_c99_sort_context legacy_ctx = { ctx->host, kiln_val_to_boundary(ctx->comparator), ctx->depth, ctx->thrown };
+    return kiln_c99_sort_compare_val(&legacy_ctx, a, b, out_order);
+}
+
+KILN_DEF_TIMSORT(val_fast, kiln_val, kiln_c99_val_sort_context, kiln_c99_val_sort_compare)
+
+static int kiln_c99_val_array_sort_fast(kiln_host *host, kiln_array *array, kiln_val comparator, int depth, kiln_value *thrown) {
+    if (comparator != KILN_VAL_UNDEFINED && !KILN_VAL_IS_CLOSURE(comparator)) {
+        kiln_value bcomp = kiln_val_to_boundary(comparator);
+        if (!kiln_c99_is_callable(bcomp)) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "The comparison function must be either a function or undefined");
+        }
+    }
+    size_t live = 0;
+    for (size_t index = 0; index < array->count; ++index) {
+        if (array->elements[index] != KILN_VAL_HOLE && array->elements[index] != KILN_VAL_UNDEFINED) {
+            array->elements[live++] = array->elements[index];
+        }
+    }
+    for (size_t index = live; index < array->count; ++index) {
+        array->elements[index] = KILN_VAL_UNDEFINED;
+    }
+    if (live > 1) {
+        kiln_c99_val_sort_context ctx;
+        ctx.host = host;
+        ctx.comparator = comparator;
+        ctx.depth = depth;
+        ctx.thrown = thrown;
+        int status = kiln_c99_timsort_val_fast(&ctx, array->elements, live);
+        if (KILN_UNLIKELY(status != KILN_C99_OK)) return status;
+    }
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_val_iterator_next_fast(kiln_host *host, kiln_val receiver, kiln_val *out, int depth, kiln_value *thrown) {
+    (void)host;
+    (void)depth;
+    (void)thrown;
+    if (!KILN_VAL_IS_OBJECT(receiver)) return -1;
+    kiln_value v_iter = kiln_val_to_boundary(receiver);
+    kiln_property *p_iterated = kiln_c99_own_private(v_iter, "@@iterated", 10);
+    kiln_property *p_index = kiln_c99_own_private(v_iter, "@@index", 7);
+    if (p_iterated == NULL || p_index == NULL || p_index->value.tag != KILN_VALUE_NUMBER) return -1;
+    double idx = kiln_c99_as_number(p_index->value);
+    if (p_iterated->value.tag == KILN_VALUE_ARRAY) {
+        kiln_array *arr = kiln_c99_array_of(p_iterated->value);
+        size_t i = (size_t)idx;
+        kiln_value item;
+        int status = kiln_c99_new_object(&item);
+        if (KILN_UNLIKELY(status != KILN_C99_OK)) return status;
+        if (i < arr->count) {
+            p_index->value = kiln_c99_number((double)(i + 1));
+            kiln_c99_put(NULL, item, "value", 5, kiln_val_to_boundary(arr->elements[i]), 0, NULL);
+            kiln_c99_put(NULL, item, "done", 4, kiln_c99_boolean(0), 0, NULL);
+        } else {
+            p_index->value = kiln_c99_number((double)arr->count);
+            kiln_c99_put(NULL, item, "value", 5, kiln_c99_undefined(), 0, NULL);
+            kiln_c99_put(NULL, item, "done", 4, kiln_c99_boolean(1), 0, NULL);
+        }
+        *out = kiln_val_from_boundary(item);
+        return KILN_C99_OK;
+    }
+    if (p_iterated->value.tag == KILN_VALUE_COLLECTION) {
+        kiln_collection *col = kiln_c99_collection_of(p_iterated->value);
+        kiln_property *p_part = kiln_c99_own_private(v_iter, "@@part", 6);
+        double which = p_part ? kiln_c99_as_number(p_part->value) : 0.0;
+        size_t pos = (size_t)idx;
+        while (pos < col->count && col->entries[pos].dead) {
+            pos++;
+        }
+        kiln_value item;
+        int status = kiln_c99_new_object(&item);
+        if (KILN_UNLIKELY(status != KILN_C99_OK)) return status;
+        if (pos < col->count) {
+            p_index->value = kiln_c99_number((double)(pos + 1));
+            kiln_value val;
+            if (which == 2.0) {
+                kiln_value pair;
+                status = kiln_c99_new_array(&pair);
+                if (status != KILN_C99_OK) return status;
+                status = kiln_c99_array_push(pair, col->entries[pos].key);
+                if (status != KILN_C99_OK) return status;
+                status = kiln_c99_array_push(pair, col->entries[pos].value);
+                if (status != KILN_C99_OK) return status;
+                val = pair;
+            } else if (which == 1.0) {
+                val = col->entries[pos].key;
+            } else {
+                val = col->entries[pos].value;
+            }
+            kiln_c99_put(NULL, item, "value", 5, val, 0, NULL);
+            kiln_c99_put(NULL, item, "done", 4, kiln_c99_boolean(0), 0, NULL);
+        } else {
+            p_index->value = kiln_c99_number((double)col->count);
+            kiln_c99_put(NULL, item, "value", 5, kiln_c99_undefined(), 0, NULL);
+            kiln_c99_put(NULL, item, "done", 4, kiln_c99_boolean(1), 0, NULL);
+        }
+        *out = kiln_val_from_boundary(item);
+        return KILN_C99_OK;
+    }
+    return -1;
+}
+
+static int kiln_c99_val_same_value_zero(kiln_val a, kiln_val b) {
+    if (a == b) {
+        return 1;
+    }
+    if (KILN_VAL_IS_NUMBER(a) && KILN_VAL_IS_NUMBER(b)) {
+        double da, db;
+        memcpy(&da, &a, sizeof(da));
+        memcpy(&db, &b, sizeof(db));
+        if (isnan(da) && isnan(db)) return 1;
+        return da == db;
+    }
+    return kiln_c99_same_value_zero(kiln_val_to_boundary(a), kiln_val_to_boundary(b));
+}
+
 static int kiln_c99_val_compare(uint16_t operation, kiln_val left, kiln_val right, int *result) {
     if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left) && KILN_VAL_IS_NUMBER(right))) {
         double a, b;
