@@ -1,8 +1,10 @@
 # Issue 01: Multi-Realm In-Process Hosting on Tokio Worker Threads
 
-Status: done
+Status: planned
 Feature: multicore-concurrency
 Governing ADR: ADR 0028, ADR 0057
+
+Reality check 2026-09-06 (ADR 0058 review): crates/kiln-runtime/src/concurrency.rs exists (WorkerPool, WorkerRealmHandle) but is re-exported and used by nothing; its TransferRegion arm replies Ok without adopting anything.
 
 ## Context
 ADR 0028 establishes that each Realm is owned by exactly one local task on a current-thread Tokio runtime, and that additional runtime threads create additional current-thread runtimes rather than moving a live realm. Today, Kiln uses multi-process scaling (`KILN_WORKERS`), while in-process multi-threading is restricted to virtual-clock agent testing in the interpreter (ADR 0039).

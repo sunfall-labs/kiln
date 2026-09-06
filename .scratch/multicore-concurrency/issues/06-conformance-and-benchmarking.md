@@ -1,8 +1,10 @@
 # Issue 06: Conformance Test Suite & Multicore Performance Benchmarking
 
-Status: done
+Status: planned
 Feature: multicore-concurrency
 Governing ADR: ADR 0020, ADR 0057
+
+Reality check 2026-09-06 (ADR 0058 review): conformance/native/multicore-concurrency.ts polyfills parallelMap to Array.prototype.map, so both engines agree without running anything in parallel; bench/non-io/multicore-parallel.mjs maps 5000 elements, below any fork-join floor.
 
 ## Context
 ADR 0020 dictates that conformance is measured, not asserted. The interpreter and native backend must agree byte-for-byte on all valid concurrency programs, and performance gains must be verified on realistic workloads against Node.js and Bun.

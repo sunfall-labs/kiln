@@ -1,8 +1,10 @@
 # Issue 03: Base TypeScript Concurrency Surface (@kiln/concurrency)
 
-Status: done
+Status: planned
 Feature: multicore-concurrency
 Governing ADR: ADR 0057
+
+Reality check 2026-09-06 (ADR 0058 review): packages/kiln-concurrency ships the .d.ts and a Promise.all polyfill; the __kiln_actor_dispatch / __kiln_transfer_region / __kiln_parallel_map hooks it calls are implemented by neither engine, and the Promise<U[]> type contradicts the native lowering, which returns an array synchronously.
 
 ## Context
 Developers require clean, ergonomic concurrency primitives that do not rely on non-standard syntax or compiler forks. All types and functions must typecheck cleanly under standard, unpatched `tsc --strict`.

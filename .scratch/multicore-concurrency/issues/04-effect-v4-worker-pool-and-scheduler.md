@@ -1,8 +1,10 @@
 # Issue 04: Universal Effect v4 Integration (@kiln/effect)
 
-Status: done
+Status: planned
 Feature: multicore-concurrency
 Governing ADR: ADR 0057
+
+Reality check 2026-09-06 (ADR 0058 review): forEachParallel maps concurrency: "native" to Effect "unbounded"; KilnWorkerPool.layer is Layer.empty; __kiln_schedule_task is implemented nowhere.
 
 ## Context
 Effect v4 (`effect@4`, tested in `conformance/effect`) provides rich structured concurrency, fibers, and resource management. In standard Node/Bun runtimes, Effect fibers are multiplexed cooperatively onto a single thread. This issue introduces an Effect v4 companion library that brings true multi-core parallel execution to Effect applications.
