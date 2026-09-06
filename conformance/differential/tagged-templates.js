@@ -49,3 +49,14 @@ function twice() {
 }
 const [siteA, siteB] = twice();
 console.log(siteA === siteB, siteA[0] === siteB[0]);
+
+// Repeated evaluation of the *same* call site yields the identical canonical template object.
+function callSite() {
+  return ((s) => s)`cached${1}site`;
+}
+const firstCall = callSite();
+const secondCall = callSite();
+console.log(firstCall === secondCall, firstCall.raw === secondCall.raw);
+const rawDesc = Object.getOwnPropertyDescriptor(firstCall, "raw");
+console.log(rawDesc.enumerable, rawDesc.writable, rawDesc.configurable);
+

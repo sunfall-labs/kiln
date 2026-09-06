@@ -89,6 +89,14 @@ pub(crate) fn validate_code(
                     format!("constant {constant} is out of bounds"),
                 ));
             }
+            Instruction::LoadTemplateObject(site)
+                if (*site as usize) >= program.template_sites.len() =>
+            {
+                return Err(invalid(
+                    index,
+                    format!("template site {site} is out of bounds"),
+                ));
+            }
             // The interpreter can make a second realm; this backend cannot. Its global object is
             // built once in C, in one copy, so a compiled program that reached the hook would get
             // a plausible-looking realm whose intrinsics were secretly this one's -- and every
@@ -383,6 +391,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
             feature: "a `with` statement in the native backend".to_owned(),
         }),
         Instruction::Const(_)
+        | Instruction::LoadTemplateObject(_)
         | Instruction::LoadLocal(_)
         | Instruction::StoreLocal(_)
         | Instruction::NewCell(_)
@@ -520,6 +529,7 @@ pub(crate) fn stack_effect(
         // and refusing here is what keeps the two backends from silently disagreeing about
         // what a program means. `kiln run` works on these; `kiln run --native` says why not.
         Instruction::Const(_)
+        | Instruction::LoadTemplateObject(_)
         | Instruction::LoadLocal(_)
         | Instruction::LoadCell(_)
         | Instruction::LoadUpvalue(_)

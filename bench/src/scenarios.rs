@@ -972,6 +972,7 @@ fn native_dependency_program(value: u64) -> ModuleProgram {
         program: Program {
             // Assembled as bytecode, so there is no source text its spans could point into.
             source: "".into(),
+            template_sites: Vec::new(),
             version: BYTECODE_VERSION,
             constants: vec![Constant::Number((value as f64).to_bits())],
             code: vec![
@@ -1001,6 +1002,7 @@ fn native_entry_program() -> ModuleProgram {
         program: Program {
             // Assembled as bytecode, so there is no source text its spans could point into.
             source: "".into(),
+            template_sites: Vec::new(),
             version: BYTECODE_VERSION,
             constants: Vec::new(),
             code: vec![

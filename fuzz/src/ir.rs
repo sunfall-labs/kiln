@@ -587,6 +587,7 @@ impl IrProgram {
 
         let well_formed = Program {
             source: std::sync::Arc::from(""),
+            template_sites: Vec::new(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: builder.constants,
             code: builder.code,

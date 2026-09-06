@@ -1,6 +1,10 @@
 # IR Template Site Table and `LoadTemplateObject` Instruction
 
-Status: ready-for-agent
+Status: resolved
+
+## Comments
+
+Resolved in `kiln-ir`: added `TemplateSite` struct and `Instruction::LoadTemplateObject(u32)`, lowered tagged template literals to record template sites and emit `LoadTemplateObject`.
 
 ## Goal
 

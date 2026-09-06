@@ -1,6 +1,10 @@
 # Interpreter Template Object Caching
 
-Status: ready-for-agent
+Status: resolved
+
+## Comments
+
+Resolved in `kiln-interpreter`: template objects cached per realm, unit, and site. Constructs frozen cooked array and raw array with non-enumerable, non-writable, non-configurable `raw` property descriptor. Preserves element enumerability on frozen arrays.
 
 ## Goal
 

@@ -326,6 +326,7 @@ mod tests {
             code: Vec::new(),
             local_count: 0,
             functions: Vec::new(),
+            template_sites: Vec::new(),
             source: "".into(),
         }
     }

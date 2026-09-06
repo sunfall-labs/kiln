@@ -200,6 +200,7 @@ fn probe(program: Program) -> (bool, bool) {
 fn a_cell_read_as_a_local_still_aborts_the_interpreter() {
     let (accepted, aborted) = probe(Program {
         source: std::sync::Arc::from(""),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: vec![Constant::Undefined],
         code: vec![
@@ -235,6 +236,7 @@ fn a_cell_read_as_a_local_still_aborts_the_interpreter() {
 fn an_array_hole_used_as_a_value_still_aborts_the_interpreter() {
     let (accepted, aborted) = probe(Program {
         source: std::sync::Arc::from(""),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: vec![Constant::Undefined],
         code: vec![

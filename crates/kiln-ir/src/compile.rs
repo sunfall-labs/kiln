@@ -664,6 +664,7 @@ struct Compiler {
     source: Arc<str>,
     constants: Vec<Constant>,
     functions: Vec<FunctionProto>,
+    template_sites: Vec<TemplateSite>,
     /// Whether `functions[i]` was compiled as strict code, in the same order.
     ///
     /// Beside the protos rather than on them, because a proto is bytecode the C backend reads
@@ -950,6 +951,7 @@ impl Compiler {
             constants: Vec::new(),
             code: Vec::new(),
             functions: Vec::new(),
+            template_sites: Vec::new(),
             strict_functions: Vec::new(),
             enclosing: Vec::new(),
             upvalues: Vec::new(),
@@ -1079,6 +1081,7 @@ impl Compiler {
                     local_count: self.local_count,
                     functions: self.functions,
                     source: self.source,
+                    template_sites: self.template_sites,
                 },
                 Strictness {
                     body: self.strict,
@@ -4493,46 +4496,16 @@ impl Compiler {
                 }
             }
             ExpressionKind::TemplateStrings { cooked, raw } => {
-                if cooked.len() > u32::MAX as usize {
+                if cooked.len() > u32::MAX as usize || raw.len() > u32::MAX as usize {
                     self.error(Some(expression.span), "template has too many segments");
                     return;
                 }
-                // Both halves are frozen, which the specification requires: a tag that changed
-                // the object it was handed would be changing something its caller may hold. The
-                // `Object` doing the freezing is pushed first, under everything else, because
-                // `CallMethod` wants its receiver beneath the argument and there is no swap.
-                let freeze = self.constant_index(Constant::String("freeze".to_owned()));
-                self.code.push(Instruction::LoadBuiltin(Builtin::Object));
-                for segment in cooked {
-                    match segment {
-                        Some(text) => self.push_constant(Constant::String(text.clone())),
-                        None => self.push_constant(Constant::Undefined),
-                    }
-                }
-                self.code.push(Instruction::NewArray {
-                    count: cooked.len() as u32,
+                let site_index = u32::try_from(self.template_sites.len()).unwrap_or(u32::MAX);
+                self.template_sites.push(TemplateSite {
+                    cooked: cooked.clone(),
+                    raw: raw.clone(),
                 });
-                // `SetProperty` leaves the value, not the target, so the object is duplicated
-                // first and the leftover raw array popped after.
-                self.code.push(Instruction::Dup);
-                self.code.push(Instruction::LoadBuiltin(Builtin::Object));
-                for segment in raw {
-                    self.push_constant(Constant::String(segment.clone()));
-                }
-                self.code.push(Instruction::NewArray {
-                    count: raw.len() as u32,
-                });
-                self.code.push(Instruction::CallMethod {
-                    name: freeze,
-                    argc: 1,
-                });
-                let name = self.constant_index(Constant::String("raw".to_owned()));
-                self.code.push(self.set_property_instruction(name));
-                self.code.push(Instruction::Pop);
-                self.code.push(Instruction::CallMethod {
-                    name: freeze,
-                    argc: 1,
-                });
+                self.code.push(Instruction::LoadTemplateObject(site_index));
             }
             ExpressionKind::RegExp { pattern, flags } => {
                 let pattern = self.constant_index(Constant::String(pattern.clone()));

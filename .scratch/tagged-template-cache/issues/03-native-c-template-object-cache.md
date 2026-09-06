@@ -1,6 +1,10 @@
 # Native C Template Object Caching and GC Roots
 
-Status: ready-for-agent
+Status: resolved
+
+## Comments
+
+Resolved in `kiln-backend-c`: lowered `LoadTemplateObject` using per-unit static template site cache slots `{symbol}_template_sites`, marked during GC, materialized lazily using `kiln_c99_own_slot` to set frozen `raw` array and freeze cooked array without modifying the frozen prelude core. Program cache hash includes non-empty template sites.
 
 ## Goal
 

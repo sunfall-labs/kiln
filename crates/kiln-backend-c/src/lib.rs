@@ -1597,12 +1597,146 @@ fn render_key_prologue(output: &mut String, symbol: &str, keyed: bool) {
 
 /// The root function this unit registers with the realm (ADR 0041): its module-scope slots,
 /// when it has them, and the prelude statics every unit owns a copy of.
+fn render_template_sites(output: &mut String, program: &Program, symbol: &str) {
+    if program.template_sites.is_empty() {
+        return;
+    }
+    for (site_idx, site) in program.template_sites.iter().enumerate() {
+        for (raw_idx, raw) in site.raw.iter().enumerate() {
+            let byte_len = raw.len();
+            let utf16_len = raw.encode_utf16().count();
+            writeln!(
+                output,
+                "static const struct {{ kiln_string header; char bytes[{}]; }} {symbol}_site_{site_idx}_raw_{raw_idx} = {{ {{ {utf16_len}, {byte_len}, {symbol}_site_{site_idx}_raw_{raw_idx}.bytes }}, {} }};",
+                byte_len + 1,
+                c_string(raw)
+            )
+            .unwrap();
+        }
+        for (cooked_idx, cooked) in site.cooked.iter().enumerate() {
+            if let Some(text) = cooked {
+                let byte_len = text.len();
+                let utf16_len = text.encode_utf16().count();
+                writeln!(
+                    output,
+                    "static const struct {{ kiln_string header; char bytes[{}]; }} {symbol}_site_{site_idx}_cooked_{cooked_idx} = {{ {{ {utf16_len}, {byte_len}, {symbol}_site_{site_idx}_cooked_{cooked_idx}.bytes }}, {} }};",
+                    byte_len + 1,
+                    c_string(text)
+                )
+                .unwrap();
+            }
+        }
+    }
+    writeln!(
+        output,
+        "static kiln_val {symbol}_template_sites[{}];",
+        program.template_sites.len()
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "static int {symbol}_materialize_template_site(size_t site) {{"
+    )
+    .unwrap();
+    writeln!(output, "    switch (site) {{").unwrap();
+    for (site_idx, site) in program.template_sites.iter().enumerate() {
+        let raw_len = site.raw.len();
+        let cooked_len = site.cooked.len();
+        writeln!(output, "    case {site_idx}: {{").unwrap();
+        writeln!(output, "        kiln_value raw_built;").unwrap();
+        writeln!(
+            output,
+            "        int status = kiln_c99_new_array_with_capacity(&raw_built, {raw_len}, 0);"
+        )
+        .unwrap();
+        writeln!(output, "        if (status != KILN_C99_OK) return status;").unwrap();
+        writeln!(
+            output,
+            "        kiln_array *raw_arr = kiln_c99_array_of(raw_built);"
+        )
+        .unwrap();
+        for raw_idx in 0..raw_len {
+            writeln!(
+                output,
+                "        raw_arr->elements[{raw_idx}] = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &{symbol}_site_{site_idx}_raw_{raw_idx});"
+            )
+            .unwrap();
+        }
+        writeln!(output, "        raw_arr->count = {raw_len};").unwrap();
+        writeln!(output, "        raw_arr->frozen = 1;").unwrap();
+
+        writeln!(output, "        kiln_value cooked_built;").unwrap();
+        writeln!(
+            output,
+            "        status = kiln_c99_new_array_with_capacity(&cooked_built, {cooked_len}, 0);"
+        )
+        .unwrap();
+        writeln!(output, "        if (status != KILN_C99_OK) return status;").unwrap();
+        writeln!(
+            output,
+            "        kiln_array *cooked_arr = kiln_c99_array_of(cooked_built);"
+        )
+        .unwrap();
+        for (cooked_idx, cooked) in site.cooked.iter().enumerate() {
+            if cooked.is_some() {
+                writeln!(
+                    output,
+                    "        cooked_arr->elements[{cooked_idx}] = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &{symbol}_site_{site_idx}_cooked_{cooked_idx});"
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    output,
+                    "        cooked_arr->elements[{cooked_idx}] = KILN_VAL_UNDEFINED;"
+                )
+                .unwrap();
+            }
+        }
+        writeln!(output, "        cooked_arr->count = {cooked_len};").unwrap();
+
+        writeln!(output, "        kiln_value props;").unwrap();
+        writeln!(output, "        status = kiln_c99_new_object(&props);").unwrap();
+        writeln!(output, "        if (status != KILN_C99_OK) return status;").unwrap();
+        writeln!(output, "        kiln_property *raw_slot;").unwrap();
+        writeln!(
+            output,
+            "        status = kiln_c99_own_slot(props, \"raw\", 3, &raw_slot);"
+        )
+        .unwrap();
+        writeln!(output, "        if (status != KILN_C99_OK) return status;").unwrap();
+        writeln!(output, "        raw_slot->value = raw_built;").unwrap();
+        writeln!(output, "        raw_slot->writable = 0;").unwrap();
+        writeln!(output, "        raw_slot->enumerable = 0;").unwrap();
+        writeln!(output, "        raw_slot->configurable = 0;").unwrap();
+        writeln!(output, "        raw_slot->accessor = 0;").unwrap();
+        writeln!(
+            output,
+            "        kiln_c99_object_of(props)->read_only_seen = 1;"
+        )
+        .unwrap();
+        writeln!(output, "        cooked_arr->properties = props;").unwrap();
+        writeln!(output, "        cooked_arr->frozen = 1;").unwrap();
+
+        writeln!(
+            output,
+            "        {symbol}_template_sites[{site_idx}] = kiln_val_from_boundary(cooked_built);"
+        )
+        .unwrap();
+        writeln!(output, "        return KILN_C99_OK;").unwrap();
+        writeln!(output, "    }}").unwrap();
+    }
+    writeln!(output, "    default: return KILN_C99_CONTROL_ERROR;").unwrap();
+    writeln!(output, "    }}").unwrap();
+    writeln!(output, "}}").unwrap();
+}
+
 fn render_unit_roots(
     output: &mut String,
     symbol: &str,
     module_scope: bool,
     local_count: u32,
     keyed: bool,
+    template_sites_count: usize,
 ) {
     writeln!(
         output,
@@ -1614,6 +1748,18 @@ fn render_unit_roots(
         writeln!(
             output,
             "    if (phase == KILN_GC_PHASE_RESET) {symbol}_keys_ready = 0;"
+        )
+        .unwrap();
+    }
+    if template_sites_count > 0 {
+        writeln!(
+            output,
+            "    if (phase == KILN_GC_PHASE_MARK) kiln_c99_gc_mark_vals((struct kiln_gc_heap *)heap, {symbol}_template_sites, {template_sites_count});"
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "    if (phase == KILN_GC_PHASE_RESET) memset({symbol}_template_sites, 0, sizeof({symbol}_template_sites));"
         )
         .unwrap();
     }
@@ -1966,6 +2112,7 @@ fn render(
     render_regex_matchers(&mut output, program, symbol);
     let keys = property_key_constants(program);
     render_key_table(&mut output, program, symbol, &keys);
+    render_template_sites(&mut output, program, symbol);
     if uses_module_scope(program) {
         writeln!(
             output,
@@ -1980,6 +2127,7 @@ fn render(
         uses_module_scope(program),
         program.local_count,
         !keys.is_empty(),
+        program.template_sites.len(),
     );
     let (graphs, body, entry_graph, mut direct) = plan_unit(program, symbol)?;
     render_functions(
@@ -2064,6 +2212,7 @@ fn render_module(
     render_regex_matchers(&mut output, program, symbol);
     let keys = property_key_constants(program);
     render_key_table(&mut output, program, symbol, &keys);
+    render_template_sites(&mut output, program, symbol);
     if uses_module_scope(program) {
         writeln!(
             output,
@@ -2078,6 +2227,7 @@ fn render_module(
         uses_module_scope(program),
         program.local_count,
         !keys.is_empty(),
+        program.template_sites.len(),
     );
     let (graphs, body, entry_graph, mut direct) = plan_unit(program, diagnostic_site)?;
     render_functions(
@@ -2552,6 +2702,10 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             }
             Instruction::DefineMethod => byte(&mut hash, 43),
             Instruction::DefineNamedProperty => byte(&mut hash, 194),
+            Instruction::LoadTemplateObject(site) => {
+                byte(&mut hash, 195);
+                word(&mut hash, u64::from(*site));
+            }
             Instruction::DefinePrivate { name, kind } => {
                 byte(&mut hash, 70);
                 word(&mut hash, u64::from(*name));
@@ -2715,6 +2869,32 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
     for value in program.source.bytes() {
         byte(&mut hash, value);
     }
+    if !program.template_sites.is_empty() {
+        byte(&mut hash, 0x64);
+        word(&mut hash, program.template_sites.len() as u64);
+        for site in &program.template_sites {
+            word(&mut hash, site.cooked.len() as u64);
+            for segment in &site.cooked {
+                match segment {
+                    Some(text) => {
+                        byte(&mut hash, 1);
+                        word(&mut hash, text.len() as u64);
+                        for b in text.bytes() {
+                            byte(&mut hash, b);
+                        }
+                    }
+                    None => byte(&mut hash, 0),
+                }
+            }
+            word(&mut hash, site.raw.len() as u64);
+            for segment in &site.raw {
+                word(&mut hash, segment.len() as u64);
+                for b in segment.bytes() {
+                    byte(&mut hash, b);
+                }
+            }
+        }
+    }
     hash
 }
 
@@ -2769,6 +2949,7 @@ fn hash_function_proto(hash: &mut u64, function: &FunctionProto) {
             code: function.code.clone(),
             local_count: 0,
             functions: Vec::new(),
+            template_sites: Vec::new(),
             // The body's own bytes are hashed by the caller; this synthetic program exists only
             // to reach the canonical instruction encoder.
             source: Arc::from(""),

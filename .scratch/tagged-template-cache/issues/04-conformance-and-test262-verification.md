@@ -1,6 +1,13 @@
 # Conformance and Test262 Verification for Tagged Template Caching
 
-Status: ready-for-agent
+Status: resolved
+
+## Comments
+
+Resolved and verified:
+- All 14 Test262 tests in `language/expressions/tagged-template/cache-*` pass.
+- Conformance differential passes (109 matched, 0 diverged) including updated `tagged-templates.js`.
+- Conformance native parity passes (118 matched, 0 diverged) including new `tagged-template-cache.js`.
 
 ## Goal
 

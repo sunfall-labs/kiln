@@ -2372,3 +2372,24 @@ fn compile_module_detects_dynamic_imports() {
         ]
     );
 }
+
+#[test]
+fn tagged_template_strings_compile_to_template_site_and_instruction() {
+    let m = module(vec![statement(StatementKind::Expression(Expression {
+        kind: ExpressionKind::TemplateStrings {
+            cooked: vec![Some("hello ".into()), Some("world".into())],
+            raw: vec!["hello\\x20".into(), "world".into()],
+        },
+        span: Span::default(),
+    }))]);
+    let program = compile(&m).expect("compilation succeeds");
+    assert_eq!(program.template_sites.len(), 1);
+    assert_eq!(
+        program.template_sites[0],
+        TemplateSite {
+            cooked: vec![Some("hello ".into()), Some("world".into())],
+            raw: vec!["hello\\x20".into(), "world".into()],
+        }
+    );
+    assert!(program.code.contains(&Instruction::LoadTemplateObject(0)));
+}

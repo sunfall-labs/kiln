@@ -508,7 +508,21 @@ pub enum Instruction {
     /// reach another frame's locals by accident.
     LoadGlobal(u32),
     StoreGlobal(u32),
+    /// Load or materialize the canonical frozen template object for a tagged template site.
+    ///
+    /// Stack: `[] -> [template_object]`.
+    ///
+    /// Per ECMA-262 §13.2.8.5 (`GetTemplateObject`), evaluating a syntactic tagged template
+    /// site yields the identical frozen object (`===`) on every evaluation within the realm.
+    LoadTemplateObject(u32),
     Return,
+}
+
+/// A template literal site for canonical template object caching (ECMA-262 §13.2.8.5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemplateSite {
+    pub cooked: Vec<Option<String>>,
+    pub raw: Vec<String>,
 }
 
 /// A compiled module body.
@@ -535,6 +549,9 @@ pub struct Program {
     /// Shared with the [`Module`] it was compiled from rather than copied out of it, so a program
     /// and its HIR cost one buffer between them and not two.
     pub source: Arc<str>,
+    /// Syntactic template literal sites compiled in this program, referenced by
+    /// [`Instruction::LoadTemplateObject`].
+    pub template_sites: Vec<TemplateSite>,
 }
 
 impl Default for Program {
@@ -546,6 +563,7 @@ impl Default for Program {
             local_count: 0,
             functions: Vec::new(),
             source: "".into(),
+            template_sites: Vec::new(),
         }
     }
 }
