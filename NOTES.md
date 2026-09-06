@@ -5106,3 +5106,28 @@ Also new: `scripts/profile-native.sh <binary>` records an Instruments CPU profil
 the hottest symbols and instruction offsets. `sample` names a function; once a loop inlines
 into one emitted body, this is what says whether it has a hot spot or, as array-functional did,
 none at all.
+
+## Callbacks typed, seams removed (2026-09-06, Claude `work/fastest-native`)
+
+Two subagents, disjoint files. **array-functional 3.30 → 0.59 ms, node 1.1.** The map,
+filter and reduce intrinsics called the callback through a boxed indirect call with three
+boxed arguments; when the callback is a closure the plan knows and the array is numeric, the
+loop now calls the callback's typed entry with the element as a double, and since such
+callbacks are restartable the entry inlines and the loop is arithmetic on `arr->elements`.
+The typed entry is referenced from the intrinsic site the way a method site references its
+candidates. On the way: the boxed loops handed a plain callback the array as `this`, where a
+strict callback should see `undefined`; fixed, with the probe. Filed: `reduce` re-reads the
+length each step in both engines where the specification reads it once.
+
+**object-spread 4.04 → 2.10 ms.** `DefineNamedProperty` and `SpreadObject` reached the runtime
+through the boundary struct, re-interned the key, and walked every kind before the shape;
+both now have a fast path over the raw NaN-boxed values: intern once, overwrite the slot or
+take one transition. The object's kind is read from its block header (`kiln_c99_gc_payload_kind`),
+one load, instead of the slab-table lookup. Allocations whose tracer reads no pointer -- text,
+dates, the CommonJS require -- are no longer zeroed (json 92 → 84 ms, string-ops 14.3 → 12.5).
+
+**What stopped it, and why it matters beyond these rows.** Caching the heap pointer, or an
+interned key pointer, in C statics is unsafe: one OS thread hosts several realms across turns,
+the thread-local the Rust side keeps is rewritten on every realm entry, and compiled C has no
+hook for "the realm changed under me". Several caches the runtime would like are per-realm for
+that reason; a realm generation the C can compare against is the mechanism they all need.
