@@ -2267,7 +2267,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                                             "function");
             }
             *result = kiln_c99_undefined();
-            return kiln_c99_enqueue(args[0], kiln_c99_undefined(), kiln_c99_undefined(), 0);
+            return kiln_c99_enqueue(args[0], kiln_c99_undefined(), kiln_c99_undefined(), 0, 0);
         }
         case KILN_C99_METHOD_ESCAPE:
         case KILN_C99_METHOD_UNESCAPE: {
@@ -3711,6 +3711,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 return status;
             }
             adopt.derived = kiln_c99_undefined();
+            adopt.continuation = 0;
             *result = kiln_c99_undefined();
             if (inner->state != KILN_C99_PENDING) {
                 return kiln_c99_schedule(inner, &adopt);

@@ -139,6 +139,12 @@ static void kiln_c99_drop_callable_store(void *pointer) {
     kiln_c99_gc_release(entry);
 }
 
+/* Bumped by every write that reaches a builtin's own-property store, whether it creates the store
+ * or adds to one; a method-call site that cached a builtin's method compares the epoch it learned
+ * under, so `Promise.resolve = f` is seen by the next call at every site in the program. Reads
+ * pass with `create` clear and do not move it. */
+static uint64_t kiln_c99_builtin_store_epoch;
+
 static int kiln_c99_callable_store(kiln_value callable, kiln_value *out, int create) {
     kiln_method_store *entry;
     if (callable.tag == KILN_VALUE_FUNCTION) {
@@ -167,6 +173,7 @@ static int kiln_c99_callable_store(kiln_value callable, kiln_value *out, int cre
     if (callable.tag != KILN_VALUE_METHOD && callable.tag != KILN_VALUE_BUILTIN &&
         callable.tag != KILN_VALUE_SETTLER)
         KILN_C99_REFUSE("own properties are not modelled on this callable");
+    if (create) kiln_c99_builtin_store_epoch += 1;
     /* Direct C embedding fixtures exercise helpers without entering a realm. Keep that legacy
      * path local; every generated scalar/module entry creates or inherits a realm and therefore
      * uses only the shared registry below. */

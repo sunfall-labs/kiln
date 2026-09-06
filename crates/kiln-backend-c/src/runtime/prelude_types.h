@@ -640,6 +640,12 @@ typedef struct kiln_c99_site {
     /* Registered with the collector, which clears entries whose holder dies. */
     uint8_t registered;
     uint64_t cached_method;
+    /* A builtin receiver's method is cached by which builtin it was, stamped with the store epoch
+     * and realm generation it was learned under: an own property written onto any builtin, or a
+     * turn in another realm, sends the site through the name lookup once more. */
+    uint32_t cached_builtin;
+    uint64_t cached_epoch;
+    uint64_t cached_generation;
 } kiln_c99_site;
 
 /* The slot a property-read site remembers for `shape`, or UINT32_MAX when it remembers none
@@ -1002,6 +1008,10 @@ typedef struct kiln_reaction {
     kiln_value on_rejected;
     /* The promise `then` returned, settled with whatever the handler produces. */
     kiln_value derived;
+    /* Set when both handlers are the suspended frame an `await` left, to be stepped rather than
+     * called: a frame is not callable, and a reaction merely carrying one would otherwise read
+     * as a `then` with no handler. */
+    int continuation;
 } kiln_reaction;
 
 typedef struct kiln_promise {
@@ -1098,6 +1108,7 @@ typedef struct kiln_microtask {
     kiln_value argument;
     kiln_value derived;
     int rejected;
+    int continuation;
 } kiln_microtask;
 
 /* One process.nextTick callback. The Realm Runtime owns lane ordering; this payload contains

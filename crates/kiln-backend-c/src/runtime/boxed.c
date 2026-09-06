@@ -11,6 +11,14 @@ static kiln_val kiln_c99_string_constant(void **cached, const char *bytes, size_
     return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, *cached);
 }
 
+/* What a method-call or property-read site remembers about a builtin receiver, beside the method:
+ * see `kiln_c99_cached_method_matches`. */
+static inline void kiln_c99_site_stamp_builtin(kiln_c99_site *site, uint32_t builtin) {
+    site->cached_builtin = builtin;
+    site->cached_epoch = kiln_c99_builtin_store_epoch;
+    site->cached_generation = kiln_c99_realm_generation();
+}
+
 static kiln_value kiln_val_to_boundary(kiln_val v) {
     if (KILN_VAL_IS_NUMBER(v)) {
         kiln_value out;
@@ -804,10 +812,12 @@ static int kiln_c99_read_property(kiln_host *host, kiln_value target,
             target.tag == KILN_VALUE_BOOLEAN ||
             (target.tag == KILN_VALUE_ARRAY && kiln_c99_array_of(target)->properties.tag == KILN_VALUE_UNDEFINED) ||
             target.tag == KILN_VALUE_TYPED_ARRAY ||
-            target.tag == KILN_VALUE_COLLECTION) {
+            target.tag == KILN_VALUE_COLLECTION ||
+            target.tag == KILN_VALUE_BUILTIN) {
             site->cached_tag = (uint8_t)target.tag;
             site->cached_method = out->bits;
             site->has_cached_method = 1;
+            if (target.tag == KILN_VALUE_BUILTIN) kiln_c99_site_stamp_builtin(site, (uint32_t)target.bits);
         }
     }
     return status;
@@ -859,6 +869,13 @@ static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln
         return 1;
     } else if (ctag == KILN_VALUE_BOOLEAN && KILN_VAL_IS_BOOLEAN(target)) {
         return 1;
+    } else if (ctag == KILN_VALUE_BUILTIN) {
+        /* `Promise.resolve`, `Object.keys`, `Math.max`: the same builtin at the same site answers
+         * the same method until an own property is written onto some builtin or the realm
+         * changes, and either moves a stamp the site compares. */
+        return KILN_VAL_IS_BUILTIN(target) && KILN_VAL_BUILTIN_ID(target) == site->cached_builtin &&
+               site->cached_epoch == kiln_c99_builtin_store_epoch &&
+               site->cached_generation == kiln_c99_realm_generation();
     } else if (ctag == KILN_VALUE_ARRAY && ((target & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX)) {
         void *ptr = KILN_VAL_PTR(target);
         if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {
@@ -1169,6 +1186,7 @@ static int kiln_c99_val_call_method(kiln_host *host, kiln_val receiver, const ki
             site->cached_tag = (uint8_t)kiln_val_to_boundary(receiver).tag;
             site->cached_method = KILN_VAL_METHOD_ID(method);
             site->has_cached_method = 1;
+            if (KILN_VAL_IS_BUILTIN(receiver)) kiln_c99_site_stamp_builtin(site, KILN_VAL_BUILTIN_ID(receiver));
         } else if (site != NULL && KILN_VAL_IS_OBJECT(receiver) &&
                    /* A proxy, a generator and a collection are boxed with the object prefix and
                     * are not objects; a site learns a shape only from an object, so a hit -- a
