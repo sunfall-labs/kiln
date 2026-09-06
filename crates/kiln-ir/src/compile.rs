@@ -2797,6 +2797,41 @@ impl Compiler {
     }
 
     /// `try`/`catch`/`finally`.
+    fn statement_always_terminates(stmt: &Statement) -> bool {
+        match &stmt.kind {
+            StatementKind::Return(_) | StatementKind::Throw(_) => true,
+            StatementKind::Block(stmts) => Self::statements_always_terminate(stmts),
+            StatementKind::If {
+                consequent,
+                alternate: Some(alt),
+                ..
+            } => {
+                Self::statement_always_terminates(consequent)
+                    && Self::statement_always_terminates(alt)
+            }
+            StatementKind::Try {
+                block,
+                handler,
+                finalizer,
+            } => {
+                if !finalizer.is_empty() && Self::statements_always_terminate(finalizer) {
+                    return true;
+                }
+                if let Some(clause) = handler {
+                    Self::statements_always_terminate(block)
+                        && Self::statements_always_terminate(&clause.body)
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    fn statements_always_terminate(stmts: &[Statement]) -> bool {
+        stmts.iter().any(Self::statement_always_terminates)
+    }
+
     ///
     /// The cleanup block is emitted once per exit path rather than once with a dispatcher.
     /// A `finally` has to run on every way out -- falling off the end, `return`, `break`,
@@ -2846,11 +2881,40 @@ impl Compiler {
                     // `catch { }` discards the value rather than binding it.
                     None => self.code.push(Instruction::Pop),
                 }
+
+                let catch_handler_jump = if has_finalizer {
+                    let j = self.emit_jump(Instruction::PushHandler(0));
+                    self.handler_depth += 1;
+                    Some(j)
+                } else {
+                    None
+                };
+
                 self.statements(&clause.body);
+
+                if catch_handler_jump.is_some() {
+                    self.code.push(Instruction::PopHandler);
+                    self.handler_depth -= 1;
+                }
+
                 self.scopes.pop().expect("catch scope was just pushed");
                 if has_finalizer {
                     self.finalizers.pop();
                     self.emit_finalizer(&Cleanup::Finally(finalizer.to_vec()));
+                }
+
+                if let Some(j) = catch_handler_jump {
+                    let catch_done_jump = self.emit_jump(Instruction::Jump(0));
+
+                    // Catch block threw: landing pad for `catch_handler_jump`.
+                    // The thrown value from catch is on the value stack.
+                    self.patch_jump(j);
+                    self.emit_finalizer(&Cleanup::Finally(finalizer.to_vec()));
+                    if !Self::statements_always_terminate(finalizer) {
+                        self.code.push(Instruction::Throw);
+                    }
+
+                    self.patch_jump(catch_done_jump);
                 }
             }
             None => {
@@ -2860,7 +2924,9 @@ impl Compiler {
                     self.finalizers.pop();
                     self.emit_finalizer(&Cleanup::Finally(finalizer.to_vec()));
                 }
-                self.code.push(Instruction::Throw);
+                if !Self::statements_always_terminate(finalizer) {
+                    self.code.push(Instruction::Throw);
+                }
             }
         }
 

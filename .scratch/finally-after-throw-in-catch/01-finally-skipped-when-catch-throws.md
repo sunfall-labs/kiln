@@ -23,3 +23,14 @@ Probe: the `nested` function in the handler probe written for the graph emitter;
 
 Triage: bug, language semantics, both engines. The fix is in the compiler's handler layout: the
 catch body must remain protected by the finally handler until the finally runs.
+
+**Status:** fixed 2026-09-06.
+- In `crates/kiln-ir/src/compile.rs` (`try_statement`):
+  - When `has_finalizer` is true and a `catch` handler is present, emit a nested `PushHandler` around the catch clause's body.
+  - If the catch clause's body finishes normally, pop the handler and emit the normal finally block.
+  - If the catch clause's body throws, jump to a dedicated catch-exception landing pad: execute the finally block, and (if the finally block does not terminate with `return` or `throw`) re-throw the catch exception outwards to enclosing handlers.
+  - Added `statement_always_terminates` / `statements_always_terminate` to avoid emitting dead `Throw` instructions when `finally` unconditionally returns or throws.
+- Added differential conformance test: `conformance/differential/finally-after-throw-in-catch.js`.
+- Added native exception test in `conformance/native/exceptions.ts`.
+- Verified clean run on `scripts/differential.sh`, `scripts/native.sh`, and `gate-quick`.
+
