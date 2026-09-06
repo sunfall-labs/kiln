@@ -707,6 +707,54 @@ pub(super) fn emit_call_method(
         None
     };
 
+    let parallel_map_intrinsic = if key_str == "parallelMap" && argc >= 1 {
+        Some(format!(
+            "if (!handled && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
+                         void *ptr = KILN_VAL_PTR(v{o}); \
+                         if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
+                             kiln_array *arr = (kiln_array *)ptr; \
+                             kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
+                             if (!plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                                 kiln_value built_val; \
+                                 int status = kiln_c99_new_array_with_capacity(&built_val, arr->count, arr->is_numeric); \
+                                 if (status != KILN_C99_OK) return status; \
+                                 kiln_array *built_arr = kiln_c99_array_of(built_val); \
+                                 built_arr->count = arr->count; \
+                                 kiln_val vrecv = plain->arrow ? plain->captured_this : v{o}; \
+                                 if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
+                                 for (size_t idx = 0; idx < arr->count; ++idx) {{ \
+                                     if (arr->elements[idx] == KILN_VAL_HOLE) {{ \
+                                         built_arr->elements[idx] = KILN_VAL_HOLE; \
+                                         built_arr->is_numeric = 0; \
+                                         continue; \
+                                     }} \
+                                     kiln_val vargs[3] = {{ arr->elements[idx], kiln_c99_val_from_double((double)idx), v{o} }}; \
+                                     kiln_val prod = KILN_VAL_UNDEFINED; \
+                                     int status; \
+                                     if (!plain->publishes_frame) {{ kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)3); }} \
+                                     else status = kiln_c99_invoke_closure(host, &prod, plain, vrecv, vargs, (size_t)3, depth, thrown, NULL, 0); \
+                                     if (KILN_UNLIKELY(status != KILN_C99_OK)) {{ \
+                                         {check} \
+                                     }} \
+                                     if (built_arr->is_numeric && !KILN_VAL_IS_NUMBER(prod)) {{ \
+                                         built_arr->is_numeric = 0; \
+                                     }} \
+                                     built_arr->elements[idx] = prod; \
+                                 }} \
+                                 v{v} = kiln_val_from_boundary(built_val); \
+                                 handled = 1; \
+                             }} \
+                         }} \
+                     }}",
+            o = object.0,
+            a0 = args[0].0,
+            v = v,
+            check = check
+        ))
+    } else {
+        None
+    };
+
     let filter_intrinsic = if closed_world && key_str == "filter" && argc == 1 {
         Some(match &filter_typed {
             Some(c) => emit_filter_typed(symbol, object.0, args[0].0, v, &check, &typed_failed, c),
@@ -1348,6 +1396,9 @@ pub(super) fn emit_call_method(
     let push_s = push_intrinsic.map(|s| format!(" {s}")).unwrap_or_default();
     let regex_s = regex_intrinsic.map(|s| format!(" {s}")).unwrap_or_default();
     let map_s = map_intrinsic.map(|s| format!(" {s}")).unwrap_or_default();
+    let parallel_map_s = parallel_map_intrinsic
+        .map(|s| format!(" {s}"))
+        .unwrap_or_default();
     let filter_s = filter_intrinsic
         .map(|s| format!(" {s}"))
         .unwrap_or_default();
@@ -1384,7 +1435,7 @@ pub(super) fn emit_call_method(
                 "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; \
                 kiln_val call_args[{n}] = {{ {init} }}; \
                 int handled = 0; int kiln_twin = 0; (void)kiln_twin; {typed_remembered}\
-                {math_s}{push_s}{regex_s}{map_s}{filter_s}{reduce_s}{slice_s}{join_s}{split_s}{index_of_s}{substring_s}{collection_s}{json_s}{sort_s}{array_extra_s}{string_extra_s}{iterator_s} \
+                {math_s}{push_s}{regex_s}{map_s}{parallel_map_s}{filter_s}{reduce_s}{slice_s}{join_s}{split_s}{index_of_s}{substring_s}{collection_s}{json_s}{sort_s}{array_extra_s}{string_extra_s}{iterator_s} \
                 if (!handled && site.pic_count > 0 && KILN_VAL_IS_OBJECT(v{o})) {{ \
                     const kiln_object *obj = (const kiln_object *)KILN_VAL_PTR(v{o}); \
                     kiln_val cached_fn = kiln_c99_site_cached_callee(&site, obj); \

@@ -5659,3 +5659,73 @@ fn executable_scalar_replacement_of_non_escaping_objects_in_loop() {
         String::from_utf8_lossy(&run.stderr)
     );
 }
+
+#[test]
+fn pure_closure_classification_and_parallel_map_emission() {
+    use crate::graph::build_function_graph;
+
+    // A pure callback: (x) => x * 2
+    let callback = FunctionProto {
+        prologue_end: 0,
+        local_count: 1,
+        parameter_count: 1,
+        upvalues: Vec::new(),
+        code: vec![
+            Instruction::LoadLocal(0),
+            Instruction::Const(0), // 2.0
+            Instruction::Binary(BinaryOp::Multiply),
+            Instruction::Return,
+        ],
+        arrow: true,
+        ..function(Vec::new())
+    };
+
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants: vec![
+            Constant::Number(2f64.to_bits()),
+            Constant::String("parallelMap".into()),
+        ],
+        code: Vec::new(),
+        local_count: 0,
+        functions: vec![callback.clone()],
+        template_sites: Vec::new(),
+    };
+
+    let graph = build_function_graph(&callback, &program).expect("callback graph builds");
+    assert!(
+        graph.is_pure(),
+        "pure arithmetic closure should be classified as is_pure"
+    );
+
+    // Code calling array.parallelMap(callback)
+    let module_code = vec![
+        Instruction::NewArray { count: 0 },
+        Instruction::MakeFunction(0),
+        Instruction::CallMethod {
+            name: 1, // "parallelMap"
+            argc: 1,
+        },
+        Instruction::Return,
+    ];
+
+    let full_program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants: vec![
+            Constant::Number(2f64.to_bits()),
+            Constant::String("parallelMap".into()),
+        ],
+        code: module_code,
+        local_count: 0,
+        functions: vec![callback],
+        template_sites: Vec::new(),
+    };
+
+    let generated = emit(&full_program).expect("parallelMap emission succeeds");
+    assert!(
+        generated.source.contains("built_arr"),
+        "emitted C should contain native array lowering for parallelMap"
+    );
+}

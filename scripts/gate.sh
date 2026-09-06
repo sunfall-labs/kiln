@@ -78,6 +78,12 @@ kiln_cargo build --release --locked -p kiln-cli >/dev/null || {
 	echo "gate: release build failed" >&2
 	exit 1
 }
+KILN_BIN="$(kiln_repo_root)/target/release/kiln"
+export KILN_BIN
+KILN_TEST262_KILN="$KILN_BIN"
+export KILN_TEST262_KILN
+KILN_BENCH_KILN="$KILN_BIN"
+export KILN_BENCH_KILN
 
 # `--test-threads` is bounded because several of `kiln-native`'s tests each shell out to a C
 # compiler, and this repository is routinely built by more than one agent at once: unbounded, they
@@ -108,7 +114,7 @@ if [[ $QUICK -eq 0 ]]; then
 	step "facts baseline" ./scripts/facts-baseline.sh --check
 	for corpus in node server regress; do
 		step "conformance/$corpus" "$BASH" -c "
-			out=\"\$(./target/release/kiln --one-shot test conformance/$corpus --node 2>&1)\"
+			out=\"\$(\"\$KILN_BIN\" --one-shot test conformance/$corpus --node 2>&1)\"
 			printf '%s\n' \"\$out\" | grep -E '^  (pass|fail) '
 			[[ \$(grep -cE '^  fail +[1-9]' <<<\"\$out\") -eq 0 ]]
 		"

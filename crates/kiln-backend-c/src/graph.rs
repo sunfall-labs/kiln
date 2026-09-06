@@ -229,7 +229,8 @@ impl GraphOp {
             | Self::LoadNewTarget
             | Self::Phi { .. } => Effect::Pure,
             Self::Unary {
-                op: UnaryOp::Not | UnaryOp::BitwiseNot | UnaryOp::Void,
+                op:
+                    UnaryOp::Not | UnaryOp::BitwiseNot | UnaryOp::Void | UnaryOp::Plus | UnaryOp::Negate,
                 ..
             } => Effect::Pure,
             Self::Binary {
@@ -238,11 +239,59 @@ impl GraphOp {
                     | BinaryOp::StrictNotEqual
                     | BinaryOp::BitwiseAnd
                     | BinaryOp::BitwiseOr
-                    | BinaryOp::BitwiseXor,
+                    | BinaryOp::BitwiseXor
+                    | BinaryOp::Add
+                    | BinaryOp::Subtract
+                    | BinaryOp::Multiply
+                    | BinaryOp::Divide
+                    | BinaryOp::Remainder
+                    | BinaryOp::LessThan
+                    | BinaryOp::LessThanOrEqual
+                    | BinaryOp::GreaterThan
+                    | BinaryOp::GreaterThanOrEqual
+                    | BinaryOp::ShiftLeft
+                    | BinaryOp::ShiftRight
+                    | BinaryOp::UnsignedShiftRight,
                 ..
             } => Effect::Pure,
             _ => Effect::Unknown,
         }
+    }
+}
+
+impl FunctionGraph {
+    /// Inspects whether this function graph is pure:
+    /// - Mutates no outer variables (no StoreUpvalue, StoreGlobal, StoreCell).
+    /// - Performs no mutating property writes or calls with side effects.
+    /// - All internal operations are classified as Effect::Pure (or local stores).
+    /// - Contains no exception handlers or throw instructions.
+    pub fn is_pure(&self) -> bool {
+        for block in &self.blocks {
+            if matches!(block.terminator, Terminator::Throw(_)) {
+                return false;
+            }
+            if block.exception_handler.is_some() {
+                return false;
+            }
+            for (_, op) in &block.operations {
+                match op {
+                    GraphOp::StoreUpvalue { .. }
+                    | GraphOp::StoreGlobal { .. }
+                    | GraphOp::StoreCell { .. }
+                    | GraphOp::SetProperty { .. }
+                    | GraphOp::SetPropertyStrict { .. }
+                    | GraphOp::SetComputed { .. }
+                    | GraphOp::SetComputedStrict { .. } => return false,
+                    _ => {
+                        if op.effect() != Effect::Pure && !matches!(op, GraphOp::StoreLocal { .. })
+                        {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        true
     }
 }
 

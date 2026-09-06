@@ -311,7 +311,7 @@ fn lower_parsed_in_context(
     let mut lowerer = Lowerer { text: source };
     let body = lowerer.statements(&parsed.program.body);
 
-    Module {
+    let mut module = Module {
         // The one copy of the text every span in this module points into.
         source: Arc::from(source),
         source_kind: source_kind(source_type),
@@ -336,7 +336,9 @@ fn lower_parsed_in_context(
         exports,
         diagnostics,
         panicked: parsed.panicked,
-    }
+    };
+    module.check_isolate_escapes();
+    module
 }
 
 /// Whether a directive prologue opens with `"use strict"`.

@@ -385,8 +385,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -489,8 +489,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -624,8 +624,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -633,8 +633,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -643,8 +643,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -1073,8 +1073,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -1177,8 +1177,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -1304,8 +1304,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -1736,8 +1736,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -1840,8 +1840,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -2619,8 +2619,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -2723,8 +2723,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -3209,8 +3209,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -3313,8 +3313,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -3910,8 +3910,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -4014,8 +4014,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -4740,8 +4740,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -4844,8 +4844,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -5330,8 +5330,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -5434,8 +5434,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -6008,8 +6008,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -6112,8 +6112,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -6628,8 +6628,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -6732,8 +6732,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -7276,8 +7276,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -7380,8 +7380,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -7866,8 +7866,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -7970,8 +7970,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -8501,8 +8501,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -8605,8 +8605,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -9131,8 +9131,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -9235,8 +9235,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -14220,8 +14220,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -14268,8 +14268,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -14278,8 +14278,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -14341,8 +14341,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -14351,8 +14351,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -14361,8 +14361,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -14371,8 +14371,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -14381,8 +14381,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -14391,8 +14391,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -14401,8 +14401,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -67935,8 +67935,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -87424,8 +87424,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             }
           ]
@@ -93313,8 +93313,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -93322,8 +93322,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -93907,8 +93907,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -94142,8 +94142,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -94151,8 +94151,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -103068,8 +103068,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -108439,8 +108439,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -108490,8 +108490,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -108502,8 +108502,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -108513,8 +108513,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -108620,8 +108620,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -108649,8 +108649,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -114435,8 +114435,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -118067,8 +118067,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -124292,8 +124292,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -125121,8 +125121,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -140403,8 +140403,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -140448,8 +140448,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -141133,8 +141133,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -141143,8 +141143,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -141153,8 +141153,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -141163,8 +141163,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -174763,8 +174763,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -174789,8 +174789,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -174846,8 +174846,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -174929,8 +174929,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -174939,8 +174939,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -199334,8 +199334,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -200282,8 +200282,8 @@
                 "Unknown"
               ],
               "return_type": "Number",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -230827,8 +230827,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -230856,8 +230856,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -230947,8 +230947,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -230976,8 +230976,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -231004,8 +231004,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -248826,8 +248826,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -257657,8 +257657,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {

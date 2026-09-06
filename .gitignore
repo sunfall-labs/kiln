@@ -11,6 +11,8 @@
 !/bench/results/facts-baseline.json
 .DS_Store
 /.kiln/
+**/.kiln/
+node_modules/
 
 # agent worktrees and session state
 .claude/

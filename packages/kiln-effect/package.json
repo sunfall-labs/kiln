@@ -1,0 +1,20 @@
+{
+  "name": "@kiln/effect",
+  "version": "0.1.0",
+  "description": "Effect v4 native multicore concurrency, worker pool, and Tokio scheduler for Kiln and Node.js.",
+  "type": "module",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js"
+    }
+  },
+  "dependencies": {
+    "@kiln/concurrency": "0.1.0"
+  },
+  "peerDependencies": {
+    "effect": ">=4.0.0-rc"
+  }
+}
