@@ -263,6 +263,16 @@ extern size_t kiln_c99_val_string_length(kiln_val v);
 extern int kiln_c99_val_array_push_fast(kiln_val receiver, kiln_val arg, kiln_val *out);
 extern int kiln_c99_val_regexp_test_fast(kiln_val receiver, kiln_val arg, kiln_val *out);
 extern int kiln_c99_val_regexp_exec_fast(kiln_val receiver, kiln_val arg, kiln_val *out);
+extern kiln_collection *kiln_c99_collection_alloc_fast(int is_map, int is_weak);
+extern int kiln_c99_collection_put_val_fast(kiln_collection *collection, kiln_val key, kiln_val value);
+extern kiln_val kiln_c99_collection_get_val_fast(kiln_collection *collection, kiln_val key);
+extern kiln_val kiln_c99_collection_has_val_fast(kiln_collection *collection, kiln_val key);
+extern kiln_val kiln_c99_collection_delete_val_fast(kiln_collection *collection, kiln_val key);
+extern int kiln_c99_val_json_stringify_fast(kiln_host *host, kiln_val val, kiln_val *out, int depth, kiln_value *thrown);
+extern int kiln_c99_val_json_parse_fast(kiln_host *host, kiln_val val, kiln_val *out, int depth, kiln_value *thrown);
+extern int kiln_c99_val_array_sort_fast(kiln_host *host, kiln_array *array, kiln_val comparator, int depth, kiln_value *thrown);
+extern int kiln_c99_val_iterator_next_fast(kiln_host *host, kiln_val receiver, kiln_val *out, int depth, kiln_value *thrown);
+extern int kiln_c99_val_same_value_zero(kiln_val a, kiln_val b);
 extern kiln_val kiln_c99_string_constant(void **cached, const char *bytes, size_t len);
 extern void kiln_c99_gc_mark_vals(struct kiln_gc_heap *heap, const kiln_val *values, size_t count);
 

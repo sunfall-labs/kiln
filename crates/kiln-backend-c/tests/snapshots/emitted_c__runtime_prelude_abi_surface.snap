@@ -1933,6 +1933,22 @@ static size_t kiln_c99_val_string_length(kiln_val v) {
 static int kiln_c99_val_array_push_fast(kiln_val receiver, kiln_val arg, kiln_val *out) {
 static int kiln_c99_val_regexp_test_fast(kiln_val receiver, kiln_val arg, kiln_val *out) {
 static int kiln_c99_val_regexp_exec_fast(kiln_val receiver, kiln_val arg, kiln_val *out) {
+static kiln_collection *kiln_c99_collection_alloc_fast(int is_map, int is_weak) {
+static inline uint64_t kiln_c99_val_collection_hash(kiln_val key) {
+static inline int kiln_c99_val_collection_eq(kiln_value a, kiln_val b) {
+static inline double kiln_c99_val_collection_find_fast(kiln_collection *collection, kiln_val key, uint64_t hash) {
+static int kiln_c99_collection_put_val_fast(kiln_collection *collection, kiln_val key, kiln_val value) {
+static kiln_val kiln_c99_collection_get_val_fast(kiln_collection *collection, kiln_val key) {
+static kiln_val kiln_c99_collection_has_val_fast(kiln_collection *collection, kiln_val key) {
+static kiln_val kiln_c99_collection_delete_val_fast(kiln_collection *collection, kiln_val key) {
+static int kiln_c99_val_json_stringify_fast(kiln_host *host, kiln_val val, kiln_val *out, int depth, kiln_value *thrown) {
+static int kiln_c99_val_json_parse_fast(kiln_host *host, kiln_val val, kiln_val *out, int depth, kiln_value *thrown) {
+typedef struct {
+static int kiln_c99_val_sort_compare(kiln_c99_val_sort_context *ctx, kiln_val a, kiln_val b, double *out_order) {
+KILN_DEF_TIMSORT(val_fast, kiln_val, kiln_c99_val_sort_context, kiln_c99_val_sort_compare)
+static int kiln_c99_val_array_sort_fast(kiln_host *host, kiln_array *array, kiln_val comparator, int depth, kiln_value *thrown) {
+static int kiln_c99_val_iterator_next_fast(kiln_host *host, kiln_val receiver, kiln_val *out, int depth, kiln_value *thrown) {
+static int kiln_c99_val_same_value_zero(kiln_val a, kiln_val b) {
 static int kiln_c99_val_compare(uint16_t operation, kiln_val left, kiln_val right, int *result) {
 static kiln_val kiln_c99_val_binary_fast(uint16_t operation, kiln_val left, kiln_val right) {
 static kiln_val kiln_c99_val_binary(uint16_t operation, kiln_host *host, kiln_val left, kiln_val right, int *status, int depth, kiln_value *thrown) {

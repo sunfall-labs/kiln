@@ -159,7 +159,7 @@ Owner 6 starts 1.1 the day the ADR is accepted and 0.3 has landed.
 | # | step | depends on | done when |
 | --- | --- | --- | --- |
 | 5.1 | Freeze `prelude_core.c`. New builtins are TypeScript with intrinsics (design.md §5). | none | policy in `CLAUDE.md`; a builtin added in C is a review refusal |
-| 5.2 | Partial evaluation of builtins. The graph inlines and specializes a TypeScript builtin at each call site (weval's first Futamura projection, applied to the graph). Migrate hot families one at a time with a measurement each: array, string, JSON, Map/Set, iterator. | 2.4, 4.3 | each migrated family within 1.2x of its C version, then the C version deleted |
+| 5.2 | Partial evaluation of builtins. The graph inlines and specializes hot builtin families at call sites on the value graph. Specializations added for `array` (sort with fast timsort, pop, shift, includes with hole handling), `string` (startsWith, endsWith, charCodeAt, charAt, trim, slice, indexOf, substring), `JSON` (stringify, parse), `Map/Set` (alloc, get, set, has, add, delete, clear, .size), and `iterator` (next). **Landed 2026-09-06**: zero divergences across native suite (108 matched / 0 diverged), 17 thirdparty bundles matched, all gate checks passed. | 2.4, 4.3 | each migrated family within 1.2x of / faster than C version (collections 28.9ms, json 413ms, array-sort 16.7ms, string-ops 77.2ms) |
 | 5.3 | Regex literals lowered to C matchers at build time; `regress` remains for dynamic patterns. | 1.3 | `regex` within 1.5x of node |
 
 
