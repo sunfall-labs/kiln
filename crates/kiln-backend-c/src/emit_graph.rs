@@ -2861,7 +2861,7 @@ fn emit_graph_op(
                         site.has_cached_method = 1; \
                         double idx; \
                         memcpy(&idx, &v{k}, sizeof(idx)); \
-                        size_t slot = (size_t)idx; \
+                        size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; \
                         const kiln_array *arr = (const kiln_array *)ptr; \
                         if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < arr->count && arr->elements[slot] != KILN_VAL_HOLE)) {{ \
                             v{v} = arr->elements[slot]; \
@@ -2871,7 +2871,7 @@ fn emit_graph_op(
                 }} else if (KILN_VAL_IS_STRING(v{o}) && KILN_VAL_IS_NUMBER(v{k})) {{ \
                     double idx; \
                     memcpy(&idx, &v{k}, sizeof(idx)); \
-                    size_t slot = (size_t)idx; \
+                    size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; \
                     const kiln_string *str = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                     if (KILN_LIKELY(str != NULL && idx >= 0.0 && idx == (double)slot && slot < str->length && str->length == str->byte_len)) {{ \
                         v{v} = kiln_c99_val_single_char((unsigned char)str->bytes[slot]); \
@@ -2940,7 +2940,7 @@ fn emit_graph_op(
                         site.has_cached_method = 1; \
                         double idx; \
                         memcpy(&idx, &v{k}, sizeof(idx)); \
-                        size_t slot = (size_t)idx; \
+                        size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; \
                         kiln_array *arr = (kiln_array *)ptr; \
                         if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < arr->count && !arr->frozen)) {{ \
                             if (arr->is_numeric && !KILN_VAL_IS_NUMBER(v{val})) arr->is_numeric = 0; \
