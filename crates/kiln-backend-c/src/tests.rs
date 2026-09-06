@@ -12,6 +12,7 @@ fn default_emission_policy_is_inert_and_host_clock_changes_identity() {
         code: vec![Instruction::Return],
         local_count: 0,
         functions: Vec::new(),
+        template_sites: Vec::new(),
     };
     let legacy = emit(&program).expect("default program emits");
     let explicit_default =
@@ -113,6 +114,7 @@ fn runtime_module_materializer_stays_inside_the_backend_value_abi() {
             code: vec![Instruction::Return],
             local_count: 1,
             functions: Vec::new(),
+            template_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -150,6 +152,7 @@ fn executable_namespace_wrapper_materializes_sorted_immutable_namespace() {
             code: vec![Instruction::Return],
             local_count: 0,
             functions: Vec::new(),
+            template_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -281,6 +284,7 @@ fn executable_runtime_event_emitter_preserves_order_once_and_removal() {
             code: vec![Instruction::Return],
             local_count: 1,
             functions: Vec::new(),
+            template_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -629,6 +633,7 @@ fn executable_numeric_operand_order_matches_symbol_conversion_rules() {
                     type_annotations: None,
                 },
             ],
+            template_sites: Vec::new(),
         })
         .expect("symbol conversion order probe emits");
         let wrapper = format!(
@@ -1142,6 +1147,7 @@ fn nested_call_refusal_preserves_the_failing_instruction_without_blaming_the_cal
             upvalues: Vec::new(),
             type_annotations: None,
         }],
+        template_sites: Vec::new(),
     })
     .expect("nested refusal probe emits");
     let wrapper = format!(
@@ -1256,6 +1262,7 @@ fn program(constants: Vec<Constant>, code: Vec<Instruction>, local_count: u32) -
         code,
         local_count,
         functions: Vec::new(),
+        template_sites: Vec::new(),
     }
 }
 
@@ -3475,6 +3482,7 @@ fn borrowed_array_map_and_filter_keep_generic_typed_array_semantics() {
         code,
         local_count: 3,
         functions: vec![callback],
+        template_sites: Vec::new(),
     })
     .expect("borrowed typed-array methods emit");
     let wrapper = format!(
@@ -3533,6 +3541,7 @@ fn executable_closure_shares_a_cell_with_the_module_body() {
         ],
         local_count: 2,
         functions: vec![bump],
+        template_sites: Vec::new(),
     })
     .expect("program emits");
     let wrapper = format!(
@@ -3586,6 +3595,7 @@ fn executable_arrow_captures_its_defining_receiver() {
         ],
         local_count: 3,
         functions: vec![maker, arrow],
+        template_sites: Vec::new(),
     })
     .expect("arrow receiver program emits");
     let wrapper = format!(
@@ -3631,6 +3641,7 @@ fn executable_runaway_recursion_reports_rather_than_crashing() {
         ],
         local_count: 1,
         functions: vec![forever],
+        template_sites: Vec::new(),
     })
     .expect("program emits");
     let wrapper = format!(
@@ -4055,6 +4066,7 @@ fn executable_for_in_follows_prototypes_and_keeps_constructor_hidden() {
         ],
         local_count: 3,
         functions: vec![function(vec![Instruction::Return])],
+        template_sites: Vec::new(),
     })
     .expect("prototype enumeration probe emits");
     let wrapper = format!(
@@ -4739,6 +4751,7 @@ fn proven_numbers_reach_a_loop_carried_phi_and_stop_at_a_parameter() {
         code: vec![Instruction::Return],
         local_count: 0,
         functions: vec![proto.clone()],
+        template_sites: Vec::new(),
     };
     let graph = build_function_graph(&proto, &program).unwrap();
     verify_function_graph(&graph).unwrap();
@@ -4828,6 +4841,7 @@ fn versioning_emits_two_clones_with_entry_guard_and_loop_exit() {
         code: vec![Instruction::Return],
         local_count: 0,
         functions: vec![proto.clone()],
+        template_sites: Vec::new(),
     };
     let graph = build_function_graph(&proto, &prog).unwrap();
     let candidates = crate::graph::candidate_number_parameters(&graph, &proto);
@@ -4914,6 +4928,7 @@ fn speculation_disabled_emits_generic_clone_alone() {
         code: vec![Instruction::Return],
         local_count: 0,
         functions: vec![proto.clone()],
+        template_sites: Vec::new(),
     };
     let orig = std::env::var("KILN_SPECULATE").ok();
     unsafe {
@@ -4989,6 +5004,7 @@ fn value_graph_merges_locals_at_a_loop_header_with_phis() {
         code: vec![Instruction::Return],
         local_count: 0,
         functions: vec![proto.clone()],
+        template_sites: Vec::new(),
     };
 
     let graph = build_function_graph(&proto, &program).unwrap();
@@ -5096,6 +5112,7 @@ fn value_graph_builds_and_verifies_scalar_loop() {
         code: vec![Instruction::Return],
         local_count: 0,
         functions: vec![proto.clone()],
+        template_sites: Vec::new(),
     };
 
     let graph = build_function_graph(&proto, &program).unwrap();
@@ -5140,6 +5157,7 @@ fn value_graph_builds_and_verifies_try_catch() {
         code: vec![Instruction::Return],
         local_count: 0,
         functions: vec![proto.clone()],
+        template_sites: Vec::new(),
     };
 
     let graph = build_function_graph(&proto, &program).unwrap();
@@ -5197,6 +5215,7 @@ fn value_graph_lowers_to_c_without_stack_or_sp() {
         code: vec![Instruction::Return],
         local_count: 0,
         functions: vec![proto.clone()],
+        template_sites: Vec::new(),
     };
 
     let graph = build_function_graph(&proto, &program).unwrap();
@@ -5281,6 +5300,7 @@ fn typed_dist_compiles_to_guarded_unboxed_clone_with_entry_guards_matching_untyp
         code: vec![Instruction::Return],
         local_count: 0,
         functions: vec![untyped_proto.clone()],
+        template_sites: Vec::new(),
     };
     let typed_prog = Program {
         source: "".into(),
@@ -5289,6 +5309,7 @@ fn typed_dist_compiles_to_guarded_unboxed_clone_with_entry_guards_matching_untyp
         code: vec![Instruction::Return],
         local_count: 0,
         functions: vec![typed_proto.clone()],
+        template_sites: Vec::new(),
     };
 
     let untyped_graph = build_function_graph(&untyped_proto, &untyped_prog).unwrap();
@@ -5369,6 +5390,7 @@ fn type_annotations_drive_candidate_speculation_without_prior_inferred_uses() {
         code: vec![Instruction::Return],
         local_count: 0,
         functions: vec![untyped_proto.clone()],
+        template_sites: Vec::new(),
     };
     let typed_prog = Program {
         source: "".into(),
@@ -5377,6 +5399,7 @@ fn type_annotations_drive_candidate_speculation_without_prior_inferred_uses() {
         code: vec![Instruction::Return],
         local_count: 0,
         functions: vec![typed_proto.clone()],
+        template_sites: Vec::new(),
     };
 
     let untyped_graph = build_function_graph(&untyped_proto, &untyped_prog).unwrap();
@@ -5450,6 +5473,7 @@ fn type_profile_drives_candidate_speculation_and_recording() {
         code: vec![Instruction::Return],
         local_count: 0,
         functions: vec![proto.clone()],
+        template_sites: Vec::new(),
     };
 
     let graph = build_function_graph(&proto, &prog).unwrap();

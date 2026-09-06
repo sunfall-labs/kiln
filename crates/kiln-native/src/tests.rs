@@ -374,6 +374,7 @@ fn typed_node_querystring_has_a_native_materializer() {
             ],
             local_count: 1,
             functions: Vec::new(),
+            template_sites: Vec::new(),
         },
         dependencies: vec!["node:querystring".to_owned()],
         imports: Vec::new(),
@@ -478,6 +479,7 @@ fn node_events_has_a_native_runtime_module_materializer() {
             code: vec![Instruction::Return],
             local_count: 2,
             functions: Vec::new(),
+            template_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -2243,6 +2245,7 @@ fn one_module_graph(project: &Path, value: f64, export: &str) -> ModuleGraph {
             ],
             local_count: 1,
             functions: Vec::new(),
+            template_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -2336,6 +2339,7 @@ fn realm_scheduling_graph(project: &Path) -> ModuleGraph {
                     type_annotations: None,
                 },
             ],
+            template_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -2363,6 +2367,7 @@ fn realm_scheduling_graph(project: &Path) -> ModuleGraph {
             ],
             local_count: 0,
             functions: Vec::new(),
+            template_sites: Vec::new(),
         },
         dependencies: vec!["./dep.js".to_owned()],
         imports: Vec::new(),
@@ -2652,6 +2657,7 @@ fn star_reexport_graph(project: &Path) -> ModuleGraph {
             ],
             local_count: 1,
             functions: Vec::new(),
+            template_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -2670,6 +2676,7 @@ fn star_reexport_graph(project: &Path) -> ModuleGraph {
             code: vec![Instruction::Const(0), Instruction::Return],
             local_count: 1,
             functions: Vec::new(),
+            template_sites: Vec::new(),
         },
         dependencies: vec!["./origin.js".into()],
         imports: vec![ImportBinding {
@@ -2702,6 +2709,7 @@ fn star_reexport_graph(project: &Path) -> ModuleGraph {
             ],
             local_count: 1,
             functions: Vec::new(),
+            template_sites: Vec::new(),
         },
         dependencies: vec!["./barrel.js".into()],
         imports: vec![ImportBinding {
@@ -2746,6 +2754,7 @@ fn namespace_import_graph(project: &Path) -> ModuleGraph {
             ],
             local_count: 1,
             functions: Vec::new(),
+            template_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -2772,6 +2781,7 @@ fn namespace_import_graph(project: &Path) -> ModuleGraph {
             ],
             local_count: 1,
             functions: Vec::new(),
+            template_sites: Vec::new(),
         },
         dependencies: vec!["./origin.js".into()],
         imports: vec![ImportBinding {
@@ -3820,6 +3830,7 @@ fn a_second_build_reuses_every_material_artifact_and_runs() {
         ],
         local_count: 0,
         functions: Vec::new(),
+        template_sites: Vec::new(),
     };
 
     let first = builder
@@ -3902,6 +3913,7 @@ fn embedded_shared_library_calls_host_without_cli_runtime_and_reuses_cache() {
         ],
         local_count: 0,
         functions: Vec::new(),
+        template_sites: Vec::new(),
     };
     let colliding_output = root.path.join("embedded-header.H");
     let collision = builder
@@ -4121,6 +4133,7 @@ fn owned_result_scalar_api_copies_strings_and_is_idempotent() {
         code: vec![Instruction::Const(0), Instruction::Return],
         local_count: 0,
         functions: Vec::new(),
+        template_sites: Vec::new(),
     };
     let report = builder
         .build_shared_library(
@@ -4254,6 +4267,7 @@ fn owned_result_scalar_api_rejects_malformed_host_strings() {
         ],
         local_count: 0,
         functions: Vec::new(),
+        template_sites: Vec::new(),
     };
     let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain.clone())
         .build_shared_library(
@@ -4355,6 +4369,7 @@ fn owned_result_graph_api_preserves_uncaught_thrown_scalars() {
             code: vec![Instruction::Const(0), Instruction::Throw],
             local_count: 0,
             functions: Vec::new(),
+            template_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -4680,6 +4695,7 @@ fn graph_build_reuses_sibling_objects_across_different_roots() {
             ],
             local_count: 1,
             functions: Vec::new(),
+            template_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -4707,6 +4723,7 @@ fn graph_build_reuses_sibling_objects_across_different_roots() {
             ],
             local_count: 1,
             functions: Vec::new(),
+            template_sites: Vec::new(),
         },
         dependencies: vec!["./dep.js".into()],
         imports: vec![ImportBinding {
@@ -4814,6 +4831,7 @@ fn graph_build_reuses_sibling_objects_across_different_roots() {
             ],
             local_count: 1,
             functions: Vec::new(),
+            template_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -4978,6 +4996,7 @@ fn shared_graph_wrapper_emits_and_links_without_static_value_arrays() {
             ],
             local_count: 1,
             functions: Vec::new(),
+            template_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -4996,6 +5015,7 @@ fn shared_graph_wrapper_emits_and_links_without_static_value_arrays() {
             code: vec![Instruction::LoadLocal(0), Instruction::Return],
             local_count: 1,
             functions: Vec::new(),
+            template_sites: Vec::new(),
         },
         dependencies: vec!["./dep.js".into()],
         imports: vec![ImportBinding {
@@ -5216,6 +5236,7 @@ fn shared_graph_proxy_preserves_host_strings_across_module_boundaries() {
             ],
             local_count: 1,
             functions: Vec::new(),
+            template_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -5241,6 +5262,7 @@ fn shared_graph_proxy_preserves_host_strings_across_module_boundaries() {
             ],
             local_count: 1,
             functions: Vec::new(),
+            template_sites: Vec::new(),
         },
         dependencies: vec!["./dep.js".into()],
         imports: vec![ImportBinding {
@@ -5431,6 +5453,7 @@ fn content_named_loaders_allow_same_basename_libraries_in_one_host() {
         code: vec![Instruction::Const(0), Instruction::Return],
         local_count: 0,
         functions: Vec::new(),
+        template_sites: Vec::new(),
     };
     let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain.clone());
     let first = builder
@@ -5771,6 +5794,7 @@ fn stdout_program(text: &str, result: f64) -> Program {
         ],
         local_count: 0,
         functions: Vec::new(),
+        template_sites: Vec::new(),
     }
 }
 
@@ -5793,6 +5817,7 @@ fn native_host_clock_is_explicit_while_default_date_stays_at_epoch() {
         ],
         local_count: 0,
         functions: Vec::new(),
+        template_sites: Vec::new(),
     };
 
     let deterministic = builder
@@ -5863,6 +5888,7 @@ fn native_entropy_policy_is_reproducible_or_explicitly_host_backed() {
         ],
         local_count: 0,
         functions: Vec::new(),
+        template_sites: Vec::new(),
     };
     let run = |name: &str, entropy: NativeEntropyPolicy| {
         builder
@@ -6034,6 +6060,7 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
         code: string_numeric_code,
         local_count: 0,
         functions: Vec::new(),
+        template_sites: Vec::new(),
     };
 
     let number = |value: f64| Constant::Number(value.to_bits());
@@ -6136,6 +6163,7 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
         code: operator_code,
         local_count: 0,
         functions: Vec::new(),
+        template_sites: Vec::new(),
     };
 
     vec![
@@ -6172,6 +6200,7 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
                 ],
                 local_count: 1,
                 functions: Vec::new(),
+                template_sites: Vec::new(),
             },
         ),
         (
@@ -6198,6 +6227,7 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
                 ],
                 local_count: 0,
                 functions: Vec::new(),
+                template_sites: Vec::new(),
             },
         ),
         (
@@ -6285,6 +6315,7 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
                 ],
                 local_count: 0,
                 functions: Vec::new(),
+                template_sites: Vec::new(),
             },
         ),
         ("scalar-operators", operator_program),
@@ -6310,6 +6341,7 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
                 ],
                 local_count: 0,
                 functions: Vec::new(),
+                template_sites: Vec::new(),
             },
         ),
         (
@@ -6334,6 +6366,7 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
                 ],
                 local_count: 0,
                 functions: Vec::new(),
+                template_sites: Vec::new(),
             },
         ),
     ]

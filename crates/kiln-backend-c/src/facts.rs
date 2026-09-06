@@ -1156,6 +1156,7 @@ mod tests {
             code: vec![],
             local_count: 0,
             functions: vec![handler_proto],
+            template_sites: Vec::new(),
         };
 
         let facts = analyze_program(&program, Some("server.mjs"));

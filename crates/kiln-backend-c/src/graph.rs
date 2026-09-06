@@ -1187,6 +1187,7 @@ pub fn bridge_effect(instruction: &Instruction) -> Option<(usize, u8)> {
     Some(match instruction {
         Instruction::HostCall { argc, .. } => (usize::from(*argc), 1),
         Instruction::LoadArguments
+        | Instruction::LoadTemplateObject(_)
         | Instruction::RestArguments(_)
         | Instruction::NewRegExp { .. }
         | Instruction::PushHole

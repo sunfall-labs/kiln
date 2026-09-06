@@ -162,6 +162,7 @@ fn node_readable_is_a_transport_independent_buffered_event_source() {
     let mut vm = Vm::with_entropy_seed(
         Rc::new(Program {
             source: "".into(),
+            template_sites: Vec::new(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: vec![Instruction::Return],
@@ -275,6 +276,7 @@ fn node_writable_owns_lifecycle_without_owning_a_transport() {
     let mut vm = Vm::with_entropy_seed(
         Rc::new(Program {
             source: "".into(),
+            template_sites: Vec::new(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: vec![Instruction::Return],
@@ -354,6 +356,7 @@ fn calling_program(argc: u16, arguments: Vec<Instruction>) -> Program {
     code.push(Instruction::Return);
     Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: vec![number(1.0), number(2.0), number(3.0)],
         code,
@@ -385,6 +388,7 @@ fn calling_program(argc: u16, arguments: Vec<Instruction>) -> Program {
 fn no_program() -> Rc<Program> {
     Rc::new(Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: Vec::new(),
         code: Vec::new(),
@@ -427,6 +431,7 @@ fn test_vm<'a>(program: &'a Program, host: &'a mut TestHost) -> Vm<'a, TestHost>
 fn host_clock_is_explicit_and_does_not_replace_the_monotonic_clock() {
     let program = Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: Vec::new(),
         code: Vec::new(),
@@ -486,6 +491,7 @@ fn host_clock_is_explicit_and_does_not_replace_the_monotonic_clock() {
 fn virtual_clock_never_calls_the_host() {
     let program = Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: Vec::new(),
         code: Vec::new(),
@@ -512,6 +518,7 @@ fn virtual_clock_never_calls_the_host() {
 fn realm_timezone_and_locale_are_resolved_once_at_entry() {
     let program = Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: Vec::new(),
         code: Vec::new(),
@@ -553,6 +560,7 @@ fn realm_timezone_and_locale_are_resolved_once_at_entry() {
 fn named_timezone_and_locale_never_call_the_host() {
     let program = Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: Vec::new(),
         code: Vec::new(),
@@ -591,6 +599,7 @@ fn named_timezone_and_locale_never_call_the_host() {
 fn host_entropy_is_one_explicit_word_per_draw() {
     let program = Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: Vec::new(),
         code: Vec::new(),
@@ -648,6 +657,7 @@ fn host_entropy_is_one_explicit_word_per_draw() {
 fn seeded_entropy_reproduces_without_calling_the_host() {
     let program = Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: Vec::new(),
         code: Vec::new(),
@@ -693,6 +703,7 @@ fn seeded_entropy_reproduces_without_calling_the_host() {
 fn date_methods_stay_on_the_machine_dispatch_path() {
     let program = Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: Vec::new(),
         code: Vec::new(),
@@ -719,6 +730,7 @@ fn date_methods_stay_on_the_machine_dispatch_path() {
 fn array_species_definition_observes_a_proxy_define_property_trap() {
     let program = Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: Vec::new(),
         code: Vec::new(),
@@ -753,6 +765,7 @@ fn array_species_definition_observes_a_proxy_define_property_trap() {
 fn array_species_definition_writes_typed_array_elements() {
     let program = Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: Vec::new(),
         code: Vec::new(),
@@ -795,6 +808,7 @@ fn array_species_definition_writes_typed_array_elements() {
 fn node_events_builtin_exposes_event_emitter() {
     let program = Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: Vec::new(),
         code: Vec::new(),
@@ -876,6 +890,7 @@ fn node_builtin_defaults_preserve_namespace_or_callable_shape() {
 fn node_http_exports_a_server_constructor_with_coded_option_errors() {
     let program = Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: Vec::new(),
         code: Vec::new(),
@@ -925,6 +940,7 @@ fn node_http_exports_a_server_constructor_with_coded_option_errors() {
 fn node_event_emitter_stores_listeners_and_methods_are_chainable() {
     let program = Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: Vec::new(),
         code: Vec::new(),
@@ -979,6 +995,7 @@ fn node_event_emitter_stores_listeners_and_methods_are_chainable() {
 fn node_event_once_is_removed_before_reentrant_emit() {
     let program = Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: Vec::new(),
         code: Vec::new(),
@@ -1027,6 +1044,7 @@ fn node_event_once_is_removed_before_reentrant_emit() {
 fn node_event_new_listener_runs_before_registration() {
     let program = Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: Vec::new(),
         code: Vec::new(),
@@ -1098,6 +1116,7 @@ fn stub_eval_compiler(request: &EvalSource<'_>) -> Result<(Program, Strictness),
     Ok((
         Program {
             source: "".into(),
+            template_sites: Vec::new(),
             version: kiln_ir::BYTECODE_VERSION,
             // `x = 2; x` against the cell installed in slot 0.
             constants: vec![Constant::Number(2.0f64.to_bits())],
@@ -1537,6 +1556,7 @@ fn typeof_reports_the_language_tags_including_the_null_one() {
 fn new_on_a_non_constructor_is_rejected() {
     let program = Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: vec![number(1.0)],
         code: vec![
@@ -1725,6 +1745,7 @@ fn map_keys_are_matched_by_identity() {
 fn an_uncaught_throw_names_what_was_thrown() {
     let program = Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: vec![Constant::String("boom".to_owned())],
         code: vec![Instruction::Const(0), Instruction::Throw],
@@ -1743,6 +1764,7 @@ fn an_uncaught_throw_names_what_was_thrown() {
 fn unwinding_restores_the_stack_the_handler_expected() {
     let program = Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: vec![number(1.0), number(2.0), Constant::String("x".to_owned())],
         code: vec![
@@ -1909,6 +1931,7 @@ fn a_missing_property_reads_as_undefined() {
 fn setting_a_property_on_a_primitive_is_rejected() {
     let program = Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: vec![Constant::String("x".to_owned()), number(1.0)],
         code: vec![
@@ -1932,6 +1955,7 @@ fn closures_from_separate_calls_capture_separate_cells() {
     // outer(): let c = <cell>; return closure(inner) -- inner increments and returns c.
     let program = Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: vec![number(1.0)],
         code: vec![
@@ -2004,6 +2028,7 @@ fn closures_from_separate_calls_capture_separate_cells() {
 fn a_captured_cell_outlives_the_frame_that_created_it() {
     let program = Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: vec![number(5.0)],
         code: vec![
@@ -2063,6 +2088,7 @@ fn a_captured_cell_outlives_the_frame_that_created_it() {
 fn capturing_a_slot_that_was_never_boxed_is_rejected() {
     let program = Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: Vec::new(),
         code: vec![Instruction::MakeFunction(0), Instruction::Return],
@@ -2134,6 +2160,7 @@ fn a_call_leaves_only_its_result_on_the_caller_stack() {
 fn calling_a_non_function_is_an_error_rather_than_a_coercion() {
     let program = Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: vec![number(1.0)],
         code: vec![
@@ -2159,6 +2186,7 @@ fn calling_a_non_function_is_an_error_rather_than_a_coercion() {
 fn runaway_recursion_is_bounded_by_call_depth() {
     let program = Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: Vec::new(),
         code: vec![
@@ -2222,6 +2250,7 @@ fn runaway_recursion_is_bounded_by_call_depth() {
 fn module_slots_are_shared_across_frames() {
     let program = Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: vec![number(7.0)],
         code: vec![
@@ -2282,6 +2311,7 @@ fn module_slots_are_shared_across_frames() {
 fn an_unknown_function_index_is_rejected_rather_than_indexed() {
     let program = Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: Vec::new(),
         code: vec![Instruction::MakeFunction(3), Instruction::Return],
@@ -2301,6 +2331,7 @@ fn number(value: f64) -> Constant {
 fn program(constants: Vec<Constant>, code: Vec<Instruction>) -> Program {
     Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants,
         code,
@@ -2368,6 +2399,7 @@ fn symbol_with_throwing_right_value_of(operator: BinaryOp) -> Program {
     // throws "called" and hides the required Symbol TypeError.
     Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: vec![
             Constant::String("valueOf".to_owned()),
@@ -2484,6 +2516,7 @@ fn a_marked_local_read_throws_a_reference_error() {
     // regression where `LoadLocal` silently returned the marker as `undefined`.
     let program = Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: Vec::new(),
         code: vec![
@@ -2632,6 +2665,7 @@ fn module_execution_initializes_import_slots_and_publishes_exports() {
     let module = ModuleProgram {
         program: Program {
             source: "".into(),
+            template_sites: Vec::new(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: vec![number(2.0)],
             // An import slot holds a cell and an exported slot must too, which is what the
@@ -3326,6 +3360,7 @@ fn timer_program(schedule: &[(&str, f64)]) -> Program {
     code.push(Instruction::Return);
     Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants,
         code,
@@ -3346,6 +3381,7 @@ fn generator_receiver_program() -> Program {
     ];
     Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants,
         code: vec![
@@ -3419,6 +3455,7 @@ fn timers_due_together_run_in_the_order_they_were_scheduled() {
 fn node_next_tick_runs_before_promise_reactions() {
     let program = Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: vec![
             Constant::String("nextTick".into()),
@@ -3569,6 +3606,7 @@ fn an_async_arrow_captures_its_defining_receiver() {
     };
     let program = Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: vec![
             Constant::String("make".into()),
@@ -3848,6 +3886,7 @@ fn node_buffer_statics_are_enumerable_own_properties() {
 fn return_signal_rejected_promise_does_not_surface_as_unhandled_rejection() {
     let program = Program {
         source: "".into(),
+        template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: Vec::new(),
         code: Vec::new(),
@@ -4241,4 +4280,61 @@ fn report_name_key_mismatches() {
     }
     println!("{}", rows.join("\n"));
     println!("total mismatches: {}", rows.len());
+}
+
+#[test]
+fn template_object_is_cached_by_site_and_frozen() {
+    let program = Program {
+        source: "".into(),
+        template_sites: vec![
+            kiln_ir::TemplateSite {
+                cooked: vec![Some("hello ".into()), Some("world".into())],
+                raw: vec!["hello\\x20".into(), "world".into()],
+            },
+            kiln_ir::TemplateSite {
+                cooked: vec![Some("hello ".into()), Some("world".into())],
+                raw: vec!["hello\\x20".into(), "world".into()],
+            },
+        ],
+        version: kiln_ir::BYTECODE_VERSION,
+        constants: Vec::new(),
+        code: vec![
+            Instruction::LoadTemplateObject(0),
+            Instruction::StoreLocal(0),
+            Instruction::LoadTemplateObject(0),
+            Instruction::StoreLocal(1),
+            Instruction::LoadTemplateObject(1),
+            Instruction::StoreLocal(2),
+            Instruction::LoadLocal(0),
+            Instruction::LoadLocal(1),
+            Instruction::Binary(kiln_ir::BinaryOp::StrictEqual),
+            Instruction::LoadLocal(0),
+            Instruction::LoadLocal(2),
+            Instruction::Binary(kiln_ir::BinaryOp::StrictEqual),
+            Instruction::Binary(kiln_ir::BinaryOp::StrictEqual),
+            Instruction::Return,
+        ],
+        local_count: 3,
+        functions: Vec::new(),
+    };
+    assert_eq!(run(&program), Ok(Value::Boolean(false)));
+
+    let program_same = Program {
+        source: "".into(),
+        template_sites: vec![kiln_ir::TemplateSite {
+            cooked: vec![Some("hello ".into())],
+            raw: vec!["hello".into()],
+        }],
+        version: kiln_ir::BYTECODE_VERSION,
+        constants: Vec::new(),
+        code: vec![
+            Instruction::LoadTemplateObject(0),
+            Instruction::LoadTemplateObject(0),
+            Instruction::Binary(kiln_ir::BinaryOp::StrictEqual),
+            Instruction::Return,
+        ],
+        local_count: 0,
+        functions: Vec::new(),
+    };
+    assert_eq!(run(&program_same), Ok(Value::Boolean(true)));
 }

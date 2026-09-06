@@ -120,11 +120,11 @@ for probe in "$PROBES"/*.js; do
 	run_probe "$probe" &
 	running=$((running + 1))
 	if (( running >= JOBS )); then
-		wait -n
+		wait -n || true
 		running=$((running - 1))
 	fi
 done
-wait
+wait || true
 
 for probe in "$PROBES"/*.js; do
 	name="$(basename -- "$probe" .js)"

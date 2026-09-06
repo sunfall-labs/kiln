@@ -1988,6 +1988,7 @@ fn builtin_module_program(builtin: NodeBuiltin) -> ModuleProgram {
             code: vec![Instruction::Return],
             local_count: names.len() as u32,
             functions: vec![],
+            template_sites: vec![],
             // A builtin has no source body at all, which is why it has no functions either.
             source: "".into(),
         },
@@ -2028,6 +2029,7 @@ fn json_module_program() -> ModuleProgram {
             code: vec![Instruction::Return],
             local_count: 1,
             functions: vec![],
+            template_sites: vec![],
             // The JSON text is the node's `data`, not a program the compiler produced.
             source: "".into(),
         },

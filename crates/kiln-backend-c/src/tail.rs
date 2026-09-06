@@ -448,6 +448,13 @@ pub(crate) fn emit_tail_instruction(
             )
             .unwrap();
         }
+        Instruction::LoadTemplateObject(site) => {
+            writeln!(
+                output,
+                "    if ({symbol}_template_sites[{site}] == 0) {{ int status = {symbol}_materialize_template_site({site}); if (status != KILN_C99_OK) return status; }} stack[sp++] = {symbol}_template_sites[{site}];"
+            )
+            .unwrap();
+        }
         Instruction::HostCall { op, argc } => {
             // The embedding boundary carries only the five scalar tags, so a function argument
             // is reduced to its text before the host sees it -- which is also what the

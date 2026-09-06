@@ -52,6 +52,7 @@ fn program(constants: Vec<Constant>, code: Vec<Instruction>, local_count: u32) -
         code,
         local_count,
         functions: Vec::new(),
+        template_sites: Vec::new(),
     }
 }
 
@@ -1195,6 +1196,7 @@ fn typed_array_borrowed_generic_methods() {
         ],
         local_count: 0,
         functions: vec![callback],
+        template_sites: Vec::new(),
     })
     .expect("borrowed typed-array method emits");
     insta::assert_snapshot!(body(&unit));

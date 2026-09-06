@@ -5107,6 +5107,7 @@ struct ModuleRealmShared {
     symbol_serial: u64,
     symbol_registry: Vec<(String, Value)>,
     symbols: Vec<Rc<UniqueSymbol>>,
+    template_objects: std::collections::HashMap<(RealmId, usize, u32), Value>,
 }
 
 impl Default for ModuleRealmSession {
@@ -5122,6 +5123,7 @@ impl Default for ModuleRealmSession {
                 symbol_serial: 0,
                 symbol_registry: Vec::new(),
                 symbols: Vec::new(),
+                template_objects: std::collections::HashMap::new(),
             })),
         }
     }
@@ -7456,6 +7458,9 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// lookups of one key are the *same* symbol, which is what makes it usable across module
     /// boundaries where `Symbol()` would produce two.
     symbol_registry: Vec<(String, Value)>,
+    /// Canonical tagged-template literal objects cached by (RealmId, program pointer, site index)
+    /// per ECMA-262 §13.2.8.5 (GetTemplateObject).
+    template_objects: std::collections::HashMap<(RealmId, usize, u32), Value>,
     /// The state `Math.random` advances. Seeded from a constant rather than from the environment
     /// (ADR 0026), so the same program produces the same sequence in both engines and on every
     /// machine -- the same trade the virtual clock makes.
@@ -7653,6 +7658,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             self_namespaces: Vec::new(),
             symbol_registry: Vec::new(),
             symbols: Vec::new(),
+            template_objects: std::collections::HashMap::new(),
             random_state: match entropy {
                 EntropyCapability::Deterministic | EntropyCapability::Host => DEFAULT_ENTROPY_SEED,
                 EntropyCapability::Seeded(seed) => seed,
@@ -7857,6 +7863,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             realm.borrow_mut().http_client_requests.remove(&id);
         } else {
             self.http_client_requests.remove(&id);
+        }
+    }
+
+    fn get_template_object(&self, site: u32) -> Option<Value> {
+        let key = (self.current_realm, Rc::as_ptr(&self.program) as usize, site);
+        if let Some(realm) = &self.module_realm {
+            realm.borrow().template_objects.get(&key).cloned()
+        } else {
+            self.template_objects.get(&key).cloned()
+        }
+    }
+
+    fn insert_template_object(&mut self, site: u32, value: Value) {
+        let key = (self.current_realm, Rc::as_ptr(&self.program) as usize, site);
+        if let Some(realm) = &self.module_realm {
+            realm.borrow_mut().template_objects.insert(key, value);
+        } else {
+            self.template_objects.insert(key, value);
         }
     }
 
@@ -12919,6 +12943,50 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             value: self.stack.pop().unwrap_or(Value::Undefined),
                             steps: self.steps,
                         });
+                    }
+                }
+                Instruction::LoadTemplateObject(site) => {
+                    let site_index = *site as usize;
+                    if let Some(cached) = self.get_template_object(*site) {
+                        self.stack.push(cached);
+                    } else {
+                        let template_site = match self.program.template_sites.get(site_index) {
+                            Some(site) => site.clone(),
+                            None => {
+                                return Err(ExecutionError::ConstantOutOfBounds {
+                                    index: site_index,
+                                });
+                            }
+                        };
+                        let raw_items: Vec<Value> = template_site
+                            .raw
+                            .iter()
+                            .map(|s| Value::String(s.clone()))
+                            .collect();
+                        let raw_array = ArrayData::new(raw_items);
+                        raw_array.length_writable.set(false);
+                        raw_array.properties.borrow_mut().freeze();
+
+                        let cooked_items: Vec<Value> = template_site
+                            .cooked
+                            .iter()
+                            .map(|s| match s {
+                                Some(text) => Value::String(text.clone()),
+                                None => Value::Undefined,
+                            })
+                            .collect();
+                        let cooked_array = ArrayData::new(cooked_items);
+                        cooked_array.properties.borrow_mut().define_value(
+                            "raw",
+                            Value::Array(raw_array),
+                            Attributes::NONE,
+                        );
+                        cooked_array.length_writable.set(false);
+                        cooked_array.properties.borrow_mut().freeze();
+
+                        let template_obj = Value::Array(cooked_array);
+                        self.insert_template_object(*site, template_obj.clone());
+                        self.stack.push(template_obj);
                     }
                 }
             }
@@ -45595,7 +45663,11 @@ fn own_attributes(intrinsics: &Intrinsics, target: &Value, key: &str) -> Option<
                     return None;
                 }
                 Some(if frozen {
-                    Attributes::NONE
+                    Attributes {
+                        writable: false,
+                        enumerable: true,
+                        configurable: false,
+                    }
                 } else {
                     Attributes::DEFAULT
                 })
