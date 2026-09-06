@@ -28,6 +28,95 @@ static int kiln_c99_grow_slots(kiln_object *dest, size_t needed) {
     return KILN_C99_OK;
 }
 
+/* The bridge for `DefineNamedProperty` (tail.rs, the only caller): `{ ...base, f: i, g: i * 2 }`
+ * defines `f` and `g` straight onto the literal's own accumulator, which the generic path (a
+ * boundary round trip through `kiln_value` for both the key and the value, `kiln_c99_property_key`,
+ * `kiln_c99_set_function_name`, then `kiln_c99_put` interning the key again and walking the whole
+ * target-kind ladder -- proxy, function, method, array, collection, promise -- before it even
+ * reaches the shape it is going to write into) pays for on every key of every object literal.
+ *
+ * Returns 1 when it fully handled the definition (`*status` says whether that succeeded), 0 to
+ * fall back to the generic path unchanged. A miss is the common shape of "this write needs the
+ * generic path's care" -- a dictionary-mode or non-extensible or frozen or accessor-bearing
+ * object, a key the shape tree refuses (the fast-property limit), `__proto__` (which the generic
+ * path relinks the prototype for instead of defining, and only when the key is *this* literal
+ * spelling of it -- computed and symbol keys never reach here to begin with), or a value that is
+ * a function and so needs `kiln_c99_set_function_name`'s attention -- and is never a correctness
+ * problem: every one of them is a plain `return 0` before anything is mutated.
+ *
+ * `target` is trusted to be the literal's own fresh object without asking `kiln_c99_gc_kind_of_ptr`
+ * -- the compiler emits `DefineNamedProperty` nowhere but here (`kiln_ir::compile::object_literal`),
+ * always immediately after `NewObject` or `SpreadObject` built the very object on top of the stack
+ * -- but the kind is still confirmed with `kiln_c99_gc_payload_kind`'s pointer arithmetic rather
+ * than trusted blindly, because a wrong guess here would read a `kiln_promise` or `kiln_collection`
+ * payload as a `kiln_object` and corrupt it: cheap enough not to be worth skipping, unlike the
+ * slab-table lookup `kiln_c99_gc_kind_of_ptr` would otherwise cost on every key. */
+static int kiln_c99_define_named_fast(kiln_val target, kiln_val key, kiln_val value, int *status) {
+    kiln_object *object;
+    const kiln_string *keystr;
+    const char *ikey;
+    uint32_t slot;
+    kiln_shape *next;
+
+    if (!KILN_VAL_IS_STRING(key) || KILN_VAL_IS_CLOSURE(value) || !KILN_VAL_IS_OBJECT(target)) {
+        return 0;
+    }
+    object = (kiln_object *)KILN_VAL_PTR(target);
+    if (object == NULL || kiln_c99_gc_payload_kind(object) != KILN_GC_OBJECT) {
+        return 0;
+    }
+    if (object->shape == NULL || object->properties != NULL || object->frozen ||
+        object->not_extensible || object->accessor_count != 0) {
+        return 0;
+    }
+    keystr = (const kiln_string *)KILN_VAL_PTR(key);
+    if (keystr == NULL || keystr->byte_len == 0) {
+        return 0;
+    }
+    if (keystr->byte_len >= 2 && keystr->bytes[0] == '@' && keystr->bytes[1] == '@') {
+        /* A shape has no per-slot enumerable flag, and a `@@`-prefixed key must come out
+         * non-enumerable (own_slot_ikey's rule); the generic path's dictionary-mode store is
+         * where that is tracked. Reachable only via a computed key that happens to spell one --
+         * a literal key can never start with `@`. */
+        return 0;
+    }
+    if (keystr->byte_len == 9 && memcmp(keystr->bytes, "__proto__", 9) == 0) {
+        /* This literal spelling of the key relinks the prototype instead of defining a property
+         * (kiln_c99_put_mode_ikey's own `__proto__` special case, reached the same way whether
+         * this fast path exists or not); leave it there rather than duplicate the check. */
+        return 0;
+    }
+    ikey = kiln_c99_intern(keystr->bytes, keystr->byte_len);
+    if (ikey == NULL) {
+        *status = KILN_C99_OUT_OF_MEMORY;
+        return 1;
+    }
+    if (kiln_c99_shape_find_slot(object->shape, ikey, &slot)) {
+        if (slot >= object->slot_capacity) {
+            return 0;
+        }
+        object->slots[slot] = value;
+        *status = KILN_C99_OK;
+        return 1;
+    }
+    if (kiln_c99_shape_transition(object->shape, ikey, &next)) {
+        if ((size_t)next->slot_index >= object->slot_capacity) {
+            int grown = kiln_c99_grow_slots(object, (size_t)next->slot_index + 1);
+            if (grown != KILN_C99_OK) {
+                *status = grown;
+                return 1;
+            }
+        }
+        object->slots[next->slot_index] = value;
+        object->shape = next;
+        *status = KILN_C99_OK;
+        return 1;
+    }
+    /* The shape tree refused the transition (the fast-property limit): the generic path's
+     * `kiln_c99_ensure_dictionary` is what a key past that point needs. */
+    return 0;
+}
+
 static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value source,
                                   int depth, kiln_value *thrown) {
     kiln_value named = kiln_c99_undefined();
