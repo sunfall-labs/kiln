@@ -2155,10 +2155,28 @@ static void kiln_c99_gc_begin(kiln_gc_heap *heap) {
  * leaked whole instead (a bounded, one-time cost paid only for a borrowed result, ADR 0034); a
  * slab with no survivors is freed like any other. An ordinary collection instead returns each
  * dead slot to its slab's free list and prunes a slab that lands completely empty. */
+#define KILN_GC_SLAB_CLASSES \
+    ((KILN_GC_SLAB_CLASS_MAX - KILN_GC_SLAB_CLASS_MIN) / KILN_GC_SLAB_CLASS_STEP + 1)
+
 static void kiln_c99_gc_sweep(kiln_gc_heap *heap, int orphan_marked) {
     kiln_gc_block *block = heap->head;
     kiln_gc_slab *slab = heap->all_slabs;
     size_t survived = 0;
+    /* What each class had in use as this collection began is what the next turn of the same
+     * loop will fill again: a slab the sweep empties is kept, up to that count, before the
+     * general retention rule is consulted. Returning sixty slabs to the allocator and taking
+     * sixty back at the next collection was a tenth of `string-ops` and went through the
+     * kernel's reclaim path on the way. */
+    uint32_t in_use_before[KILN_GC_SLAB_CLASSES];
+    uint32_t retained[KILN_GC_SLAB_CLASSES];
+    memset(in_use_before, 0, sizeof in_use_before);
+    memset(retained, 0, sizeof retained);
+    if (!orphan_marked) {
+        const kiln_gc_slab *each;
+        for (each = heap->all_slabs; each != NULL; each = each->all_next) {
+            if (each->free_count < each->slot_count) in_use_before[each->class_index] += 1;
+        }
+    }
     while (block != NULL) {
         kiln_gc_block *next = block->next;
         if (block->mark != heap->epoch) {
@@ -2210,7 +2228,11 @@ static void kiln_c99_gc_sweep(kiln_gc_heap *heap, int orphan_marked) {
             }
             /* else: leaked with a live survivor inside; the heap is being torn down anyway. */
         } else if (slab->free_count == slab->slot_count) {
-            kiln_c99_gc_slab_maybe_destroy(heap, slab);
+            if (retained[slab->class_index] < in_use_before[slab->class_index]) {
+                retained[slab->class_index] += 1;
+            } else {
+                kiln_c99_gc_slab_maybe_destroy(heap, slab);
+            }
         }
         slab = next_slab;
     }
