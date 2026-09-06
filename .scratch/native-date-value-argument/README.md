@@ -1,6 +1,6 @@
 # `new Date(object)` never asks the object what it is, in the native backend only
 
-**Status:** open. Native backend. A **silent wrong answer**, not a refusal.
+**Status:** fixed 2026-09-06. Native Date constructor routes single argument through `ToPrimitive(..., "default")` and field form through `ToNumber` left-to-right. Verified against interpreter and node with `conformance/native/date-value-argument.ts`.
 
 ## What is wrong
 

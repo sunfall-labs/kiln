@@ -24366,16 +24366,57 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
         if (argc == 0) {
             time = 0.0;
         } else if (argc == 1) {
-            time = args[0].tag == KILN_VALUE_STRING
-                       ? kiln_c99_parse_date(args[0].ptr, args[0].len)
-                       : kiln_c99_as_number(args[0]);
+            if (args[0].tag == KILN_VALUE_DATE) {
+                time = kiln_c99_date_time(args[0]);
+            } else if (args[0].tag == KILN_VALUE_STRING) {
+                time = kiln_c99_parse_date(args[0].ptr, args[0].len);
+            } else {
+                kiln_value primitive;
+                status = kiln_c99_to_primitive(host, args[0], 2 /* default */,
+                                               &primitive, depth, thrown);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                if (primitive.tag == KILN_VALUE_STRING) {
+                    time = kiln_c99_parse_date(primitive.ptr, primitive.len);
+                } else if (primitive.tag == KILN_VALUE_SYMBOL) {
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                                "Cannot convert a Symbol value to a number");
+                } else if (primitive.tag == KILN_VALUE_BIGINT) {
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                                "Cannot convert a BigInt value to a number");
+                } else {
+                    time = kiln_c99_as_number(primitive);
+                }
+            }
         } else {
             double fields[7];
             size_t index;
-            for (index = 0; index < 7; ++index) {
-                fields[index] = index < argc  ? kiln_c99_as_number(args[index])
-                                : index == 2 ? 1.0
-                                             : 0.0;
+            for (index = 0; index < argc; ++index) {
+                if (args[index].tag == KILN_VALUE_SYMBOL) {
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                                "Cannot convert a Symbol value to a number");
+                }
+                if (kiln_c99_is_reference(args[index])) {
+                    kiln_value primitive;
+                    status = kiln_c99_to_primitive(host, args[index], 0 /* number */,
+                                                   &primitive, depth, thrown);
+                    if (status != KILN_C99_OK) {
+                        return status;
+                    }
+                    if (primitive.tag == KILN_VALUE_SYMBOL) {
+                        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                                    "Cannot convert a Symbol value to a number");
+                    }
+                    if (index < 7) {
+                        fields[index] = kiln_c99_as_number(primitive);
+                    }
+                } else if (index < 7) {
+                    fields[index] = kiln_c99_as_number(args[index]);
+                }
+            }
+            for (index = argc; index < 7; ++index) {
+                fields[index] = index == 2 ? 1.0 : 0.0;
             }
             time = kiln_c99_instant_from_parts(fields);
         }
