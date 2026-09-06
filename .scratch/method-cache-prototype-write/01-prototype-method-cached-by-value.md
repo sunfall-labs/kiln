@@ -1,5 +1,7 @@
 # A method call site remembers a prototype method by value with nothing to forget it
 
+**Status:** fixed 2026-09-06
+
 Found 2026-09-06 while reading `kiln_c99_val_call_method`'s cache fill for the typed method
 entries. A site that resolved `dist` on `Point.prototype` remembers the closure *by value* in
 the entry for the receiver's shape (an own property is remembered by slot, which is right). The
