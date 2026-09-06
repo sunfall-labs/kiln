@@ -1169,7 +1169,12 @@ static void kiln_c99_gc_collect_mid_turn(kiln_gc_heap *heap) {
     heap->mid_turn = 0;
 }
 
-static void *kiln_c99_gc_alloc(uint32_t kind, size_t size) {
+/* `zero_payload` is 0 only for a kind `kiln_c99_gc_trace` never reads a byte of -- see the
+ * comment there, next to `kiln_c99_gc_alloc_pointer_free` below, for the invariant this trades
+ * on. Every other caller goes through `kiln_c99_gc_alloc`, which always asks for zero: a mid-turn
+ * collection can run before the payload is filled in, and the tracer must not walk a previous
+ * occupant's pointers as if they belonged to the new block. */
+static void *kiln_c99_gc_alloc_ex(uint32_t kind, size_t size, int zero_payload) {
     kiln_gc_heap *heap = kiln_c99_gc_heap();
     size_t payload = size == 0 ? 1 : size;
     int class_index;
@@ -1209,7 +1214,7 @@ static void *kiln_c99_gc_alloc(uint32_t kind, size_t size) {
             heap->count += 1;
             heap->bytes += size;
             heap->since_collection += size;
-            memset(block + 1, 0, payload);
+            if (zero_payload) memset(block + 1, 0, payload);
             return block + 1;
         }
     }
@@ -1232,7 +1237,7 @@ static void *kiln_c99_gc_alloc(uint32_t kind, size_t size) {
         heap->since_collection += size;
         /* Zeroed like a nursery block: a collection can now run before the caller has filled
          * the payload in, and the tracer must not read a previous occupant's pointers. */
-        memset(block + 1, 0, payload);
+        if (zero_payload) memset(block + 1, 0, payload);
         return block + 1;
     }
     block = (kiln_gc_block *)malloc(sizeof *block + payload);
@@ -1251,7 +1256,27 @@ static void *kiln_c99_gc_alloc(uint32_t kind, size_t size) {
     ++heap->count;
     heap->bytes += size;
     heap->since_collection += size;
+    /* The large/malloc path has never zeroed: it was already relying on the same "kind fills its
+     * own payload before anything else can observe it" property this function generalises. */
     return block + 1;
+}
+
+static void *kiln_c99_gc_alloc(uint32_t kind, size_t size) {
+    return kiln_c99_gc_alloc_ex(kind, size, 1);
+}
+
+/* A non-zeroing allocation, for a kind whose `kiln_c99_gc_trace` case is a no-op (see the comment
+ * there): such a kind's tracer walks no field of the payload, so a mid-turn collection landing
+ * before the caller has filled the bytes in can never read a previous occupant's pointer out of
+ * them. The kind's own header fields (anything the kind's read paths dereference before the
+ * caller's first write) must still be set by the allocator or the immediate caller before either
+ * can yield to another allocation -- `kiln_c99_gc_alloc_text` does this itself. Do not call this
+ * for a kind that has, or later gains, a non-empty `kiln_c99_gc_trace` case, and do not call it
+ * for a kind whose *finalizer* reads a field the allocator has not set yet on an early-return
+ * path (`KILN_GC_TYPED_BUFFER` is exactly that case: its finalizer frees `->bytes`, which a
+ * failed secondary `calloc` can leave unset, so it stays on the zeroing path). */
+static void *kiln_c99_gc_alloc_pointer_free(uint32_t kind, size_t size) {
+    return kiln_c99_gc_alloc_ex(kind, size, 0);
 }
 
 static void *kiln_c99_gc_alloc_tenured(uint32_t kind, size_t size) {
@@ -1670,6 +1695,14 @@ static void kiln_c99_gc_mark_vals(kiln_gc_heap *heap, const kiln_val *values,
     for (index = 0; index < count; ++index) kiln_c99_gc_mark_val(heap, values[index]);
 }
 
+/* Every kind that falls to the `default:` case below owns no pointer this tracer walks, which is
+ * exactly the invariant `kiln_c99_gc_alloc_pointer_free` trades its zeroing for: a mid-turn
+ * collection that lands before such a kind's payload is filled in traces the block (this
+ * function runs on it) but reads none of the bytes the caller has not written yet, so garbage
+ * left over from the slab or nursery slot's previous occupant is never mistaken for a pointer.
+ * Adding a field to one of these kinds that this switch must start marking means it can no
+ * longer allocate through `kiln_c99_gc_alloc_pointer_free` -- move its case out of `default` and
+ * its allocation back onto `kiln_c99_gc_alloc` in the same change. */
 static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
     void *payload = block + 1;
     switch (block->kind & KILN_GC_KIND_MASK) {
@@ -2321,9 +2354,16 @@ static void kiln_c99_gc_result_roots(void *opaque, void *context, int phase) {
     kiln_c99_gc_mark_value((kiln_gc_heap *)opaque, (const kiln_value *)context);
 }
 
-/* Allocation helpers for the kinds whose bytes are the value: strings and raw byte payloads. */
+/* Allocation helpers for the kinds whose bytes are the value: strings and raw byte payloads.
+ *
+ * `KILN_GC_STRING` is one of the pointer-free kinds `kiln_c99_gc_trace` never reads a field of
+ * (see the comment there), so this goes through `kiln_c99_gc_alloc_pointer_free`: every field of
+ * the header below is set before `return`, and every caller of `kiln_c99_gc_alloc_text` fills the
+ * `len` body bytes immediately after (`memcpy` or an equivalent loop) before doing anything else
+ * that could yield to another allocation, so no one ever reads the slab or nursery slot's
+ * previous occupant back out of them. */
 static char *kiln_c99_gc_alloc_text(size_t len) {
-    kiln_string *s = (kiln_string *)kiln_c99_gc_alloc(KILN_GC_STRING, sizeof(kiln_string) + len + 1);
+    kiln_string *s = (kiln_string *)kiln_c99_gc_alloc_pointer_free(KILN_GC_STRING, sizeof(kiln_string) + len + 1);
     if (s == NULL) return NULL;
     s->length = len;
     s->byte_len = len;

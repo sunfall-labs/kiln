@@ -1294,7 +1294,9 @@ static void kiln_c99_gc_register_site(kiln_c99_site *site) {
 static void kiln_c99_gc_clear_dead_sites(kiln_gc_heap *heap) {
 static void kiln_c99_gc_collect(void *opaque, int force);
 static void kiln_c99_gc_collect_mid_turn(kiln_gc_heap *heap) {
+static void *kiln_c99_gc_alloc_ex(uint32_t kind, size_t size, int zero_payload) {
 static void *kiln_c99_gc_alloc(uint32_t kind, size_t size) {
+static void *kiln_c99_gc_alloc_pointer_free(uint32_t kind, size_t size) {
 static void *kiln_c99_gc_alloc_tenured(uint32_t kind, size_t size) {
 static void *kiln_c99_gc_calloc(uint32_t kind, size_t size) {
 static const char kiln_c99_key_empty[1] = "";

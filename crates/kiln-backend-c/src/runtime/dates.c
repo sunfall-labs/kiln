@@ -72,7 +72,10 @@ static double kiln_c99_date_time(kiln_value value) {
 }
 
 static int kiln_c99_new_date(kiln_value *out, double time) {
-    double *slot = (double *)kiln_c99_gc_alloc(KILN_GC_DATE, sizeof *slot);
+    /* KILN_GC_DATE is pointer-free (kiln_c99_gc_trace's default case) and the one field its
+     * payload has is written on the next line, before anything else can run, so the zeroing
+     * kiln_c99_gc_alloc would do first is never observed. */
+    double *slot = (double *)kiln_c99_gc_alloc_pointer_free(KILN_GC_DATE, sizeof *slot);
     if (slot == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }

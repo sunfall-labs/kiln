@@ -72,8 +72,11 @@ static int kiln_c99_commonjs_require_value(kiln_value *out, kiln_commonjs_requir
                                            void *context) {
     kiln_commonjs_require *require;
     if (out == NULL || call == NULL) return KILN_C99_INVALID_ARGUMENT;
-    require = (kiln_commonjs_require *)kiln_c99_gc_alloc(KILN_GC_COMMONJS_REQUIRE,
-                                                         sizeof *require);
+    /* KILN_GC_COMMONJS_REQUIRE is pointer-free (kiln_c99_gc_trace's default case) and both its
+     * fields are written below before anything else can run, so it never observes the zeroing
+     * kiln_c99_gc_alloc would otherwise do first. */
+    require = (kiln_commonjs_require *)kiln_c99_gc_alloc_pointer_free(KILN_GC_COMMONJS_REQUIRE,
+                                                                      sizeof *require);
     if (require == NULL) return KILN_C99_OUT_OF_MEMORY;
     require->call = call;
     require->context = context;
