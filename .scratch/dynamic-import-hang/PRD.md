@@ -24,5 +24,5 @@ Per ECMA-262 §13.3.10.1 (`HostLoadImportedModule`):
 
 ## Phased Approach
 
-- **Issue 01**: Ensure all module loader errors and unsupported loader paths reject through the returned Promise with a `TypeError` / `SyntaxError` rather than aborting the VM via unhandled `ExecutionError`.
+- **Issue 01** (Resolved): Ensure all module loader errors and unsupported loader paths reject through the returned Promise with a `TypeError` / `SyntaxError` rather than aborting the VM via unhandled `ExecutionError`.
 - **Issue 02**: Connect referrer-aware module resolution so that `import("./relative.mjs")` can resolve relative to the importing file.

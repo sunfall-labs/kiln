@@ -4338,3 +4338,88 @@ fn template_object_is_cached_by_site_and_frozen() {
     };
     assert_eq!(run(&program_same), Ok(Value::Boolean(true)));
 }
+
+#[test]
+fn dynamic_import_without_module_loader_rejects_with_type_error() {
+    let program = Program {
+        source: "".into(),
+        template_sites: Vec::new(),
+        version: kiln_ir::BYTECODE_VERSION,
+        constants: vec![Constant::String("dep.js".into())],
+        code: vec![
+            Instruction::Const(0),
+            Instruction::DynamicImport,
+            Instruction::Return,
+        ],
+        local_count: 0,
+        functions: Vec::new(),
+    };
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: std::collections::VecDeque::new(),
+        timezone: None,
+        locale: None,
+    };
+    let result = execute(
+        Rc::new(program),
+        &mut host,
+        ExecutionLimits::default(),
+        ExecutionCapabilities::default(),
+    );
+    match result {
+        Err(ExecutionError::Uncaught { message, .. }) => {
+            assert!(
+                message.contains("no module loader is installed"),
+                "expected uncaught rejection mentioning loader, got {message}"
+            );
+        }
+        other => panic!("expected unhandled rejection from dynamic import, got {other:?}"),
+    }
+}
+
+#[test]
+fn dynamic_import_with_unsupported_loader_rejects_with_type_error() {
+    fn mock_loader(_specifier: &str) -> Result<ModulePlan, ModuleLoadError> {
+        Err(ModuleLoadError::Unsupported(
+            "custom resolver refused specifier".into(),
+        ))
+    }
+
+    let program = Program {
+        source: "".into(),
+        template_sites: Vec::new(),
+        version: kiln_ir::BYTECODE_VERSION,
+        constants: vec![Constant::String("dep.js".into())],
+        code: vec![
+            Instruction::Const(0),
+            Instruction::DynamicImport,
+            Instruction::Return,
+        ],
+        local_count: 0,
+        functions: Vec::new(),
+    };
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: std::collections::VecDeque::new(),
+        timezone: None,
+        locale: None,
+    };
+    let capabilities = ExecutionCapabilities::default().with_module_loader(mock_loader);
+    let result = execute(
+        Rc::new(program),
+        &mut host,
+        ExecutionLimits::default(),
+        capabilities,
+    );
+    match result {
+        Err(ExecutionError::Uncaught { message, .. }) => {
+            assert!(
+                message.contains("custom resolver refused specifier"),
+                "expected uncaught rejection mentioning custom reason, got {message}"
+            );
+        }
+        other => panic!("expected unhandled rejection from dynamic import, got {other:?}"),
+    }
+}
