@@ -966,8 +966,11 @@ fn runtime_prelude_size() {
     // graph emitter added `kiln_c99_val_call_method`, a method call end to end on machine values.
     // Widened on 2026-09-06, at 38,239 lines for Step 5.2 partial evaluation of builtins
     // (fast collections, JSON, array sort, iterator primitives for machine values). 39,500 for now.
+    // Widened on 2026-09-06 at 39,526 lines: the await continuation, the header-based cell
+    // release, the builtin-receiver method cache and the concurrency work of the same day each
+    // added a screen or two, none of them a block emitted twice. 41,000 for now.
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 39_500;
+    const CEILING_LINES: usize = 41_000;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

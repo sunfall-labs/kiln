@@ -22,6 +22,15 @@ static int kiln_c99_buffer_from(kiln_value *out, kiln_value source, kiln_value *
     return KILN_C99_OK;
 }
 
+/* The typed array a boxed value names, or NULL when it names something else. */
+static kiln_typed_array *kiln_c99_val_typed_array(kiln_val value) {
+    void *ptr;
+    if ((value & KILN_TAG_MASK) != KILN_TAG_BUFFER_PREFIX) return NULL;
+    ptr = KILN_VAL_PTR(value);
+    if (ptr == NULL || kiln_c99_gc_payload_kind(ptr) != KILN_GC_TYPED_ARRAY) return NULL;
+    return (kiln_typed_array *)ptr;
+}
+
 static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value receiver,
                                   const kiln_value *args, size_t argc, kiln_value *thrown) {
     kiln_value first = argc > 0 ? args[0] : kiln_c99_undefined();
@@ -57,17 +66,21 @@ static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value rec
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                         "Buffer.concat needs an array");
         items = kiln_c99_array_of(first);
+        /* The entries are read as the boxed values they are: a typed array is the buffer prefix
+         * over a payload whose header says so, one load each, where the boundary conversion of
+         * every entry -- twice, once to measure and once to copy -- was a third of `Buffer.concat`
+         * over a thousand chunks. */
         for (at = 0; at < items->count; ++at) {
-            kiln_value item_val = kiln_val_to_boundary(items->elements[at]);
-            if (item_val.tag != KILN_VALUE_TYPED_ARRAY)
+            const kiln_typed_array *view = kiln_c99_val_typed_array(items->elements[at]);
+            if (view == NULL)
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                             "Buffer.concat entries must be typed arrays");
-            total += kiln_c99_typed_array_of(item_val)->length;
+            total += view->length;
         }
         status = kiln_c99_typed_alloc(out, KILN_TYPED_UINT8, total);
         if (status != KILN_C99_OK) return status;
         for (at = 0; at < items->count; ++at) {
-            kiln_typed_array *view = kiln_c99_typed_array_of(kiln_val_to_boundary(items->elements[at]));
+            kiln_typed_array *view = kiln_c99_val_typed_array(items->elements[at]);
             kiln_typed_array *target = kiln_c99_typed_array_of(*out);
             size_t index;
             /* A Buffer is a `Uint8Array`, and so is what `Buffer.concat` allocates, so the
