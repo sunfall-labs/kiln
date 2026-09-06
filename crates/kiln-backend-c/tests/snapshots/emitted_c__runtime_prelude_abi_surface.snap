@@ -749,6 +749,7 @@ typedef struct kiln_c99_pic_entry {
 typedef struct kiln_c99_site {
 static inline uint32_t kiln_c99_site_slot_for(const kiln_c99_site *site, const kiln_shape *shape) {
 static inline kiln_val kiln_c99_site_cached_callee(const kiln_c99_site *site, const kiln_object *obj) {
+__attribute__((noinline, cold)) static double kiln_c99_int_slow(double value) {
 #define KILN_C99_SITE_NONE 0xFFFFFFFFu
 #define KILN_C99_SITE_GIVE_UP 8u
 typedef struct kiln_proxy {
