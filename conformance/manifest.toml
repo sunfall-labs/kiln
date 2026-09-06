@@ -1303,3 +1303,32 @@ false undefined
 TypeError
 """
 
+[[test]]
+id = "regress/r13-math-bigint-tonumber"
+group = "regress"
+source = "regress/r13-math-bigint-tonumber.js"
+status = "runnable"
+features = ["bigint", "symbol", "math", "tonumber"]
+catches = """
+Math.* functions converting BigInt/Symbol to number instead of throwing TypeError. \
+In ECMA-262 §7.1.4 ToNumber, BigInt and Symbol throw TypeError. Number(x) uses \
+ToNumeric, converting BigInt to number and throwing on Symbol.\
+"""
+expected_stdout = """
+sqrt throws TypeError
+floor throws TypeError
+max throws TypeError
+abs throws TypeError
+atan2 throws TypeError
+hypot throws TypeError
+imul throws TypeError
+isNaN throws TypeError
+isFinite throws TypeError
+Number 10
+sqrt-obj throws TypeError
+sqrt-sym throws TypeError
+sqrt-ok 4
+min-nan throws TypeError
+number-sym throws TypeError
+"""
+

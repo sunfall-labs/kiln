@@ -757,6 +757,8 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
             return KILN_C99_OK;
         }
         case KILN_C99_BUILTIN_NUMBER: {
+            kiln_value subject;
+            kiln_value reduced;
             double converted;
             int status;
             /* `Number()` with no argument is zero, not NaN: there is nothing to fail to convert. */
@@ -764,9 +766,21 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
                 *result = kiln_c99_number(0.0);
                 return KILN_C99_OK;
             }
+            subject = args[0];
+            reduced = subject;
+            if (kiln_c99_is_reference(subject)) {
+                status = kiln_c99_to_primitive(host, subject, 0, &reduced, depth, thrown);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+            }
+            if (reduced.tag == KILN_VALUE_BIGINT) {
+                *result = kiln_c99_number(kiln_c99_as_number(reduced));
+                return KILN_C99_OK;
+            }
             /* The *number* hint, the reverse of the `String` builtin above: `Number([6])` is 6
              * because an array declines `valueOf` and its `toString` answers "6". */
-            status = kiln_c99_to_number_checked(host, args[0], &converted, depth, thrown);
+            status = kiln_c99_to_number_checked(host, reduced, &converted, depth, thrown);
             if (status != KILN_C99_OK) {
                 return status;
             }
@@ -12842,9 +12856,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 }
                 if (isnan(value)) {
                     best = value;
-                    break;
-                }
-                if (code == KILN_C99_METHOD_MATH_MIN ? value < best : value > best) {
+                } else if (!isnan(best) && (code == KILN_C99_METHOD_MATH_MIN ? value < best : value > best)) {
                     best = value;
                 }
             }
@@ -25256,15 +25268,21 @@ static int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int hint,
  * makes below for the operators. */
 static int kiln_c99_to_number_checked(kiln_host *host, kiln_value value, double *out, int depth,
                                       kiln_value *thrown) {
-    kiln_value reduced;
+    kiln_value reduced = value;
     int status;
-    if (!kiln_c99_is_reference(value)) {
-        *out = kiln_c99_as_number(value);
-        return KILN_C99_OK;
+    if (kiln_c99_is_reference(value)) {
+        status = kiln_c99_to_primitive(host, value, 0, &reduced, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
     }
-    status = kiln_c99_to_primitive(host, value, 0, &reduced, depth, thrown);
-    if (status != KILN_C99_OK) {
-        return status;
+    if (reduced.tag == KILN_VALUE_SYMBOL) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Cannot convert a Symbol value to a number");
+    }
+    if (reduced.tag == KILN_VALUE_BIGINT) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Cannot convert a BigInt value to a number");
     }
     *out = kiln_c99_as_number(reduced);
     return KILN_C99_OK;
