@@ -17727,6 +17727,84 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
         return KILN_C99_OK;
     }
     object = kiln_c99_object_of(named);
+    /* The common case a benchmark makes common: `{ ...base, f: i }` where `base` is a fresh
+     * shaped object and the literal being built is too. Ordinarily every key goes through
+     * `kiln_c99_put` -- interning the name again, walking a shape transition one key at a time,
+     * and round-tripping the value through `kiln_value` (which for a string allocates a fresh
+     * copy) -- work the language does not actually require, because a spread copies references,
+     * not fresh values, and this source's whole key *path* is already a shape the target could
+     * simply adopt.
+     *
+     * That substitution is only safe when nothing about either object asks for slower handling:
+     * the target must still be the shape's fresh, empty starting point (no keys, no properties,
+     * no elements, extensible, no accessor could have intercepted a write because none exists to
+     * intercept), and the source must have nothing that needs per-key attention -- no integer
+     * keys (handled separately below), no accessors (a shaped object can never hold one; see
+     * `kiln_c99_define_accessor`, which knocks `shape` to NULL the moment one is defined -- this
+     * checks it anyway rather than trust that invariant from a distance), and no symbol keys
+     * (spelled "@@..." in a shape's keys, and needing the validation the loop below gives them).
+     * Anything else -- a target with keys already, list-mode sources, arrays, proxies -- never
+     * reaches here in the first place. */
+    if (object->properties == NULL && object->shape != NULL && object->elements == NULL &&
+        object->accessor_count == 0 && target.tag == KILN_VALUE_OBJECT) {
+        kiln_object *dest = kiln_c99_object_of(target);
+        if (dest->properties == NULL && dest->shape != NULL && dest->shape->property_count == 0 &&
+            dest->elements == NULL && !dest->frozen && !dest->not_extensible &&
+            dest->accessor_count == 0) {
+            kiln_shape *sshape = object->shape;
+            size_t scount = sshape->property_count;
+            size_t k;
+            int has_symbol_key = 0;
+            for (k = 0; k < scount; ++k) {
+                const char *skey = sshape->keys[k];
+                if (skey != NULL && skey[0] == '@' && skey[1] == '@') {
+                    has_symbol_key = 1;
+                    break;
+                }
+            }
+            if (!has_symbol_key) {
+                /* Grow exactly as the generic per-key path does (`kiln_c99_define_computed`'s
+                 * slot-growth site): double from the inline slots, or from whatever heap array
+                 * is already there, until the source's slot count fits. */
+                if (scount > dest->slot_capacity) {
+                    size_t new_cap = dest->slot_capacity == 0 ? KILN_C99_INLINE_SLOTS : dest->slot_capacity * 2;
+                    kiln_val *new_slots;
+                    size_t fill_i;
+                    while (scount > new_cap) new_cap *= 2;
+                    if (dest->slots == dest->inline_slots) {
+                        new_slots = (kiln_val *)malloc(new_cap * sizeof(kiln_val));
+                        if (new_slots == NULL) return KILN_C99_OUT_OF_MEMORY;
+                        memcpy(new_slots, dest->inline_slots, KILN_C99_INLINE_SLOTS * sizeof(kiln_val));
+                    } else if (dest->slots == NULL) {
+                        new_slots = (kiln_val *)malloc(new_cap * sizeof(kiln_val));
+                        if (new_slots == NULL) return KILN_C99_OUT_OF_MEMORY;
+                    } else {
+                        new_slots = (kiln_val *)realloc(dest->slots, new_cap * sizeof(kiln_val));
+                        if (new_slots == NULL) return KILN_C99_OUT_OF_MEMORY;
+                    }
+                    for (fill_i = dest->slot_capacity; fill_i < new_cap; ++fill_i) {
+                        new_slots[fill_i] = KILN_VAL_UNDEFINED;
+                    }
+                    dest->slots = new_slots;
+                    dest->slot_capacity = new_cap;
+                }
+                /* Slots are NaN-boxed `kiln_val`s, so this `memcpy` copies references exactly as
+                 * a spread must: a nested object or array or string is shared with the source,
+                 * not cloned, and mutating the copy later does not touch the source's slot
+                 * because the two objects hold independent slot arrays from here on. Adopting
+                 * the source's shape is what makes the copied slots meaningful -- a shape is
+                 * nothing but the key path that says what each slot index means -- and every
+                 * later write to the target transitions from there exactly as if its keys had
+                 * been added one at a time, because shapes reached by the same key order are
+                 * the same shape pointer regardless of how an object arrived at one. */
+                if (scount > 0) {
+                    memcpy(dest->slots, object->slots, scount * sizeof(kiln_val));
+                }
+                dest->shape = sshape;
+                return KILN_C99_OK;
+            }
+        }
+    }
     if (object->properties == NULL && object->shape != NULL) {
         if (object->elements != NULL) {
             for (index = 0; index < object->element_count; ++index) {
