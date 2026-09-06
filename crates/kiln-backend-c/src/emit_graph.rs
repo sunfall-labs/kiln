@@ -15,7 +15,7 @@ use crate::graph::{
 };
 use crate::prelude::lookup_speculation_invariant;
 use crate::tail::{TailContext, emit_tail_instruction};
-use crate::{BuiltinLoad, builtin_load, closure_construction, proto_publishes_frame};
+use crate::{BuiltinLoad, builtin_load, closure_construction};
 use kiln_ir::Upvalue;
 use kiln_ir::{BinaryOp, Constant, ExportBinding, FunctionProto, Instruction, Program, UnaryOp};
 use std::collections::HashSet;
@@ -144,7 +144,11 @@ pub enum Site<'a> {
 /// only: a method-call site whose cached callee's body is one of these calls it by name, which
 /// lets the C compiler inline it; a callee that is none of them takes the indirect call. Nothing
 /// is assumed about which closure a site sees.
-pub(crate) fn method_candidates(program: &Program, key: &str) -> Vec<u32> {
+pub(crate) fn method_candidates(
+    program: &Program,
+    key: &str,
+    publishes_frame: &[bool],
+) -> Vec<u32> {
     let mut found = Vec::new();
     let mut scan = |code: &[Instruction]| {
         for window in code.windows(3) {
@@ -154,7 +158,10 @@ pub(crate) fn method_candidates(program: &Program, key: &str) -> Vec<u32> {
                 Instruction::DefineMethod,
             ] = window
                 && matches!(program.constants.get(*k as usize), Some(Constant::String(s)) if s == key)
-                && direct_callable(&program.functions[*i as usize])
+                && direct_callable(
+                    &program.functions[*i as usize],
+                    publishes_frame[*i as usize],
+                )
                 && !found.contains(i)
             {
                 found.push(*i);
@@ -400,7 +407,7 @@ pub fn emit_restartable(
     type_profile_record: bool,
 ) -> Option<String> {
     debug_assert!(kind.restarts());
-    if proto.generator || proto.asynchronous || proto_publishes_frame(proto) {
+    if proto.generator || proto.asynchronous || plan.publishes_frame[index] {
         return None;
     }
     for block in &graph.blocks {
@@ -856,7 +863,7 @@ pub fn emit_function_from_graph_with_profile(
         // Which of the two `arguments` objects a mention in this body, or in an arrow made
         // here, would build. Only such a body reads the frame global, so only such a body
         // writes it; a plain body leaves its caller's value alone.
-        if proto_publishes_frame(proto) {
+        if plan.publishes_frame[index] {
             writeln!(
                 output,
                 "    kiln_c99_frame_mapped_arguments = {};",
@@ -1185,14 +1192,25 @@ fn emit_block_sequence(
             // A boxed body's direct call keeps it for the generic path past the depth limit.
             if let GraphOp::Call { callee, args, .. } = op
                 && let Some(&target) = plan.known.get(callee)
-                && direct_callable(&program.functions[target as usize])
+                && direct_callable(
+                    &program.functions[target as usize],
+                    plan.publishes_frame[target as usize],
+                )
                 && matches!(kind, EntryKind::Typed { .. })
             {
                 used.extend(args.iter().copied());
                 let self_call = self_index == Some(target);
                 let typed_site = plan.typed_sites.contains(vid);
-                let reads_callee =
-                    !self_call && (!typed_site || plan.typed_needs[target as usize].upvalues);
+                // An arrow's typed entry, when it needs a receiver, reads it out of the
+                // callee's own `captured_this` (see the `Call` arm of `emit_graph_op`), so the
+                // callee value must stay alive for that too -- not only for its upvalue table.
+                // A self-call needs neither: the receiver a self-referencing arrow would read
+                // this way is this frame's own, already in scope as `receiver`.
+                let reads_callee = !self_call
+                    && (!typed_site
+                        || plan.typed_needs[target as usize].upvalues
+                        || (program.functions[target as usize].arrow
+                            && plan.typed_needs[target as usize].receiver));
                 if reads_callee {
                     used.insert(*callee);
                 }
@@ -2765,10 +2783,12 @@ fn emit_graph_op(
         // publishes no frame is entered directly, a body this unit compiled is called by name so
         // the C compiler may inline it, and everything else goes through the runtime.
         GraphOp::Call { callee, args, .. }
-            if plan
-                .known
-                .get(callee)
-                .is_some_and(|&target| direct_callable(&program.functions[target as usize])) =>
+            if plan.known.get(callee).is_some_and(|&target| {
+                direct_callable(
+                    &program.functions[target as usize],
+                    plan.publishes_frame[target as usize],
+                )
+            }) =>
         {
             // The callee is the closure of a proto this unit compiled, so the body is called by
             // name: no callable test, no body-pointer comparison, and the receiver the language
@@ -2776,6 +2796,7 @@ fn emit_graph_op(
             // enters the typed clone. What the direct path does not cover -- a `super()` in
             // flight, the depth limit -- takes the generic call, which answers the same way.
             let target = plan.known[callee];
+            let target_proto = &program.functions[target as usize];
             let argc = args.len();
             let init = if args.is_empty() {
                 "KILN_VAL_UNDEFINED".to_owned()
@@ -2787,21 +2808,38 @@ fn emit_graph_op(
             };
             let in_typed = matches!(kind, EntryKind::Typed { .. });
             let sloppy = !strict_functions[target as usize];
-            let receiver = if sloppy {
-                "kiln_val recv = KILN_VAL_UNDEFINED; (void)kiln_c99_global_object_val(&recv);"
-            } else {
-                "kiln_val recv = KILN_VAL_UNDEFINED;"
-            };
-            let check = status_check(diagnostic_site, pc, label, unwind);
             // A function calling itself through its own binding is calling the very closure
             // that is running: its upvalue table is this one, and the callee value need not be
-            // read at all.
-            let own_upvalues = matches!(self_index, Some(index) if index == target);
-            let upvalues = if own_upvalues {
+            // read at all -- and, when the callee is an arrow, neither is its `this`: the
+            // closure now running is the one being called, so its captured `this` is already
+            // in scope as `receiver`.
+            let own_call = matches!(self_index, Some(index) if index == target);
+            let upvalues = if own_call {
                 "upvalues".to_owned()
             } else {
                 format!("((kiln_closure *)KILN_VAL_PTR(v{}))->upvalues", callee.0)
             };
+            // An arrow has no `this` of its own: it always runs with the closure it is,
+            // `captured_this`, exactly as `plain->arrow ? plain->captured_this : ..` decides it
+            // for the runtime's `kiln_c99_invoke_closure` path -- this is where the direct path
+            // decides the same thing. A plain function gets the language's ordinary receiver:
+            // `undefined`, substituted with the global object in sloppy code.
+            let receiver = if target_proto.arrow {
+                if own_call {
+                    "kiln_val recv = receiver;".to_owned()
+                } else {
+                    format!(
+                        "kiln_val recv = ((kiln_closure *)KILN_VAL_PTR(v{}))->captured_this;",
+                        callee.0
+                    )
+                }
+            } else if sloppy {
+                "kiln_val recv = KILN_VAL_UNDEFINED; (void)kiln_c99_global_object_val(&recv);"
+                    .to_owned()
+            } else {
+                "kiln_val recv = KILN_VAL_UNDEFINED;".to_owned()
+            };
+            let check = status_check(diagnostic_site, pc, label, unwind);
             // Past the depth limit a boxed body takes the generic call, which throws the
             // `RangeError`; a typed entry leaves it pending and fails.
             let overflow = if in_typed {
@@ -2834,7 +2872,11 @@ fn emit_graph_op(
                 for a in args {
                     call_args.push_str(&format!(", d{}", a.0));
                 }
-                let recv = if needs.receiver { receiver } else { "" };
+                let recv = if needs.receiver {
+                    receiver.as_str()
+                } else {
+                    ""
+                };
                 // A failed typed callee has left its status pending. A typed caller with a
                 // handler hands a throw to it; without one it fails on, the status still
                 // pending. A boxed caller answers as it would to any status.
@@ -2934,7 +2976,7 @@ fn emit_graph_op(
             let key_len = key_str.len();
             // The unit's own methods of this name: a cached callee whose body is one of them is
             // called by name, and the C compiler may inline it into this site.
-            let candidates = method_candidates(program, key_str);
+            let candidates = method_candidates(program, key_str, &plan.publishes_frame);
             // A candidate with a typed entry, at a site that proved every argument a number,
             // is entered typed: the receiver is the object the cache matched, so what the
             // language decides about a method's `this` -- an arrow's captured one, a sloppy
@@ -4121,7 +4163,7 @@ fn emit_graph_op(
                 captured,
                 captures.len(),
             );
-            let publish = if proto_publishes_frame(target) {
+            let publish = if plan.publishes_frame[*index as usize] {
                 ""
             } else {
                 " kiln_c99_closure_of(built)->publishes_frame = 0;"
