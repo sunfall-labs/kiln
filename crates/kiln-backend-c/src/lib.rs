@@ -916,12 +916,41 @@ fn render_functions(
             break;
         }
     }
+    // A restartable body gets a fast clone: decided by emitting it, once, before any caller.
+    let fast: Vec<bool> = program
+        .functions
+        .iter()
+        .enumerate()
+        .map(|(index, proto)| {
+            emit_graph::emit_fast_clone(
+                &graphs[index],
+                proto,
+                program,
+                symbol,
+                index,
+                !proto_produces_references(proto, program),
+                diagnostic_site,
+                &plan.functions,
+                strict_functions,
+                &direct.functions[index],
+            )
+            .is_some()
+        })
+        .collect();
+    direct.set_fast(&fast);
     for index in 0..program.functions.len() {
         writeln!(
             output,
             "static inline int {symbol}_fn_{index}(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc);"
         )
         .unwrap();
+        if fast[index] {
+            writeln!(
+                output,
+                "static inline int {symbol}_fn_{index}_f(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc);"
+            )
+            .unwrap();
+        }
         if direct.has_typed_entry(index as u32) {
             let (result, params) = emit_graph::typed_signature(
                 &program.functions[index],
@@ -995,6 +1024,24 @@ fn render_functions(
                 func_profile,
                 policy.type_profile_record,
             );
+        }
+        // Emitted again now that every plan knows the fast set: a fast clone calls other fast
+        // clones by name.
+        if fast[index]
+            && let Some(clone) = emit_graph::emit_fast_clone(
+                &graphs[index],
+                proto,
+                program,
+                symbol,
+                index,
+                scalar_proto,
+                diagnostic_site,
+                &plan.functions,
+                strict_functions,
+                &direct.functions[index],
+            )
+        {
+            output.push_str(&clone);
         }
     }
     if policy.type_profile_record {

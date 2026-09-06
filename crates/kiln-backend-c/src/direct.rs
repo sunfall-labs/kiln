@@ -30,7 +30,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use kiln_ir::{Constant, FunctionProto, Program, Upvalue};
+use kiln_ir::{Constant, FunctionProto, Instruction, Program, Upvalue};
 
 use crate::graph::{
     BlockId, FunctionGraph, GraphOp, Proven, Terminator, ValueId, proven_types_with,
@@ -84,6 +84,9 @@ pub struct CallPlan {
     pub typed_returns: Vec<bool>,
     /// Per proto: what its typed entry takes beyond its parameters.
     pub typed_needs: Vec<TypedNeeds>,
+    /// Per proto: whether a fast clone exists -- the body with every slow path replaced by a
+    /// restart through the boxed entry, for a body that can be restarted.
+    pub fast: Vec<bool>,
 }
 
 /// The whole unit's plan: a boxed plan per function, a typed one where the typed entry exists,
@@ -207,6 +210,7 @@ impl DirectPlan {
                 unchecked: known.unchecked.clone(),
                 typed_returns: typed_returns.clone(),
                 typed_needs: vec![TypedNeeds::default(); graphs.len()],
+                fast: vec![false; graphs.len()],
             }
         };
         let functions: Vec<CallPlan> = graphs
@@ -294,6 +298,18 @@ impl DirectPlan {
     }
 
     /// Record what every typed entry needs, in every body's plan.
+    /// Record which protos have a fast clone, in every body's plan.
+    pub fn set_fast(&mut self, fast: &[bool]) {
+        for plan in self
+            .functions
+            .iter_mut()
+            .chain(self.typed.iter_mut().flatten())
+            .chain(std::iter::once(&mut self.entry))
+        {
+            plan.fast = fast.to_vec();
+        }
+    }
+
     pub fn set_typed_needs(&mut self, needs: &[TypedNeeds]) {
         for plan in self
             .functions
@@ -608,6 +624,95 @@ fn known_callees(program: &Program, graphs: &[FunctionGraph], entry: &FunctionGr
         known_bindings.insert(*binding, index);
     }
 
+    // A binding whose first store sits behind an inert prefix of its owner's entry block -- an
+    // entry block nothing jumps back to -- is initialized before any executor can read it:
+    // the owner reads it later in program order, and a closure the prefix made runs only after
+    // a call, which the prefix has none of. Every read of such a binding needs no dead-zone
+    // check, whatever it holds.
+    let mut settled: HashSet<Binding> = HashSet::new();
+    for (binding, binding_stores) in &stores {
+        let graph = graph_of(binding.owner);
+        let Some(entry) = graph.block(graph.entry_block) else {
+            continue;
+        };
+        if !entry.predecessors.is_empty() {
+            continue;
+        }
+        let Some(first) = binding_stores
+            .iter()
+            .filter(|s| s.owner == binding.owner && s.block == graph.entry_block)
+            .map(|s| s.position)
+            .min()
+        else {
+            continue;
+        };
+        // A value made in this prefix -- a closure, a literal -- has no accessor and no proxy
+        // behind it, so defining or reading its properties runs nothing of the program's.
+        // That is what a class body does before the code after it can run.
+        fn fresh(prefix: &[(ValueId, GraphOp)], value: ValueId, depth: u32) -> bool {
+            if depth > 4 {
+                return false;
+            }
+            let Some(at) = prefix.iter().position(|(vid, _)| *vid == value) else {
+                return false;
+            };
+            match &prefix[at].1 {
+                GraphOp::MakeFunction { .. }
+                | GraphOp::NewObject { .. }
+                | GraphOp::NewArray { .. } => true,
+                GraphOp::CheckTdz { value, .. } => fresh(prefix, *value, depth + 1),
+                // A cell read is the value the prefix last stored there, if it stored one.
+                GraphOp::LoadCell(slot) => prefix[..at]
+                    .iter()
+                    .rev()
+                    .find_map(|(_, op)| match op {
+                        GraphOp::StoreCell { slot: s, value } if s == slot => Some(*value),
+                        _ => None,
+                    })
+                    .is_some_and(|stored| fresh(prefix, stored, depth + 1)),
+                _ => false,
+            }
+        }
+        let prefix = &entry.operations[..first];
+        let inert_op = |op: &GraphOp| match op {
+            GraphOp::Const { .. }
+            | GraphOp::MakeCell(_)
+            | GraphOp::MarkUninitialized(_)
+            | GraphOp::MakeFunction { .. }
+            | GraphOp::LoadLocal(_)
+            | GraphOp::LoadBuiltin(_)
+            | GraphOp::LoadThis
+            | GraphOp::LoadNewTarget
+            | GraphOp::LoadUpvalue(_)
+            | GraphOp::CheckTdz { .. }
+            | GraphOp::StoreCell { .. }
+            | GraphOp::StoreLocal { .. }
+            | GraphOp::StoreGlobal { .. }
+            | GraphOp::NewArray { .. }
+            | GraphOp::NewObject { .. } => true,
+            GraphOp::GetProperty { object, .. }
+            | GraphOp::SetProperty { object, .. }
+            | GraphOp::SetPropertyStrict { object, .. } => fresh(prefix, *object, 0),
+            GraphOp::Bridge { instruction, .. } => matches!(
+                instruction,
+                Instruction::DefineMethod
+                    | Instruction::DefineAccessor { .. }
+                    | Instruction::DefineNamedProperty
+                    | Instruction::DefinePrivate { .. }
+                    | Instruction::SetPrototype
+                    | Instruction::PushHole
+                    | Instruction::NewRegExp { .. }
+            ),
+            GraphOp::LoadCell(slot) => *slot != binding.slot,
+            GraphOp::LoadGlobal(slot) => binding.owner != Owner::Entry || *slot != binding.slot,
+            _ => false,
+        };
+        let inert = entry.operations[..first].iter().all(|(_, op)| inert_op(op));
+        if inert {
+            settled.insert(*binding);
+        }
+    }
+
     // Known values: the closures themselves, the reads of known bindings, and what aliases them.
     let mut known = Known {
         functions: vec![KnownValues::default(); graphs.len()],
@@ -619,21 +724,14 @@ fn known_callees(program: &Program, graphs: &[FunctionGraph], entry: &FunctionGr
             Owner::Function(i) => &mut known.functions[i as usize],
         }
     }
-    for (binding, index) in &known_bindings {
-        // A binding the owner never marks uninitialized holds `undefined` from the first
-        // instruction and the closure from the defining store: no read of it can be in the
-        // dead zone.
-        let marked = graph_of(binding.owner)
-            .blocks
-            .iter()
-            .flat_map(|b| b.operations.iter())
-            .any(|(_, op)| matches!(op, GraphOp::MarkUninitialized(slot) if *slot == binding.slot));
+    for binding in &settled {
         for (owner, vid) in reads.get(binding).into_iter().flatten() {
-            let values = values_of(&mut known, *owner);
-            values.known.insert(*vid, *index);
-            if !marked {
-                values.unchecked.insert(*vid);
-            }
+            values_of(&mut known, *owner).unchecked.insert(*vid);
+        }
+    }
+    for (binding, index) in &known_bindings {
+        for (owner, vid) in reads.get(binding).into_iter().flatten() {
+            values_of(&mut known, *owner).known.insert(*vid, *index);
         }
     }
     for &owner in &owners {
