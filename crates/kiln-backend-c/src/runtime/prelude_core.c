@@ -17622,6 +17622,36 @@ static int kiln_c99_spread_proxy(kiln_host *host, kiln_value target, kiln_value 
  * is the whole reason `{ ...postcss }` copies anything at all when `postcss` is a function
  * carrying its plugins; an array and a string contribute their indices and then whatever was
  * hung on them by name. */
+/* Makes room for `needed` slots, exactly as the generic per-key path grows: doubling from the
+ * inline slots or from whatever heap array is there, new slots undefined. */
+static int kiln_c99_grow_slots(kiln_object *dest, size_t needed) {
+    size_t new_cap;
+    kiln_val *new_slots;
+    size_t fill_i;
+    if (needed <= dest->slot_capacity) {
+        return KILN_C99_OK;
+    }
+    new_cap = dest->slot_capacity == 0 ? KILN_C99_INLINE_SLOTS : dest->slot_capacity * 2;
+    while (needed > new_cap) new_cap *= 2;
+    if (dest->slots == dest->inline_slots) {
+        new_slots = (kiln_val *)malloc(new_cap * sizeof(kiln_val));
+        if (new_slots == NULL) return KILN_C99_OUT_OF_MEMORY;
+        memcpy(new_slots, dest->inline_slots, KILN_C99_INLINE_SLOTS * sizeof(kiln_val));
+    } else if (dest->slots == NULL) {
+        new_slots = (kiln_val *)malloc(new_cap * sizeof(kiln_val));
+        if (new_slots == NULL) return KILN_C99_OUT_OF_MEMORY;
+    } else {
+        new_slots = (kiln_val *)realloc(dest->slots, new_cap * sizeof(kiln_val));
+        if (new_slots == NULL) return KILN_C99_OUT_OF_MEMORY;
+    }
+    for (fill_i = dest->slot_capacity; fill_i < new_cap; ++fill_i) {
+        new_slots[fill_i] = KILN_VAL_UNDEFINED;
+    }
+    dest->slots = new_slots;
+    dest->slot_capacity = new_cap;
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value source,
                                   int depth, kiln_value *thrown) {
     kiln_value named = kiln_c99_undefined();
@@ -17766,27 +17796,9 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
                 /* Grow exactly as the generic per-key path does (`kiln_c99_define_computed`'s
                  * slot-growth site): double from the inline slots, or from whatever heap array
                  * is already there, until the source's slot count fits. */
-                if (scount > dest->slot_capacity) {
-                    size_t new_cap = dest->slot_capacity == 0 ? KILN_C99_INLINE_SLOTS : dest->slot_capacity * 2;
-                    kiln_val *new_slots;
-                    size_t fill_i;
-                    while (scount > new_cap) new_cap *= 2;
-                    if (dest->slots == dest->inline_slots) {
-                        new_slots = (kiln_val *)malloc(new_cap * sizeof(kiln_val));
-                        if (new_slots == NULL) return KILN_C99_OUT_OF_MEMORY;
-                        memcpy(new_slots, dest->inline_slots, KILN_C99_INLINE_SLOTS * sizeof(kiln_val));
-                    } else if (dest->slots == NULL) {
-                        new_slots = (kiln_val *)malloc(new_cap * sizeof(kiln_val));
-                        if (new_slots == NULL) return KILN_C99_OUT_OF_MEMORY;
-                    } else {
-                        new_slots = (kiln_val *)realloc(dest->slots, new_cap * sizeof(kiln_val));
-                        if (new_slots == NULL) return KILN_C99_OUT_OF_MEMORY;
-                    }
-                    for (fill_i = dest->slot_capacity; fill_i < new_cap; ++fill_i) {
-                        new_slots[fill_i] = KILN_VAL_UNDEFINED;
-                    }
-                    dest->slots = new_slots;
-                    dest->slot_capacity = new_cap;
+                {
+                    int grown = kiln_c99_grow_slots(dest, scount);
+                    if (grown != KILN_C99_OK) return grown;
                 }
                 /* Slots are NaN-boxed `kiln_val`s, so this `memcpy` copies references exactly as
                  * a spread must: a nested object or array or string is shared with the source,
@@ -17801,6 +17813,50 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
                     memcpy(dest->slots, object->slots, scount * sizeof(kiln_val));
                 }
                 dest->shape = sshape;
+                return KILN_C99_OK;
+            }
+        }
+        /* A shaped target that already has keys -- `{ a: 1, ...base }`, or the trailing
+         * `{ ...base, f: i }` that the compiler builds as a second literal spread in -- takes
+         * each source key as the target's own slot when it has one, or as one transition of
+         * its shape, which is all the generic put does for it minus the interning and the
+         * trip through `kiln_value`: the shape's keys are the interned pointers already, and
+         * a spread copies references. A key the shape tree will not take -- the fast-property
+         * limit -- leaves the rest to the generic path, which redefines what was copied to the
+         * same value. */
+        if (dest->properties == NULL && dest->shape != NULL && dest->elements == NULL &&
+            !dest->frozen && !dest->not_extensible && dest->accessor_count == 0) {
+            kiln_shape *sshape = object->shape;
+            size_t scount = sshape->property_count;
+            size_t k;
+            int plain = 1;
+            for (k = 0; k < scount; ++k) {
+                const char *skey = sshape->keys[k];
+                if (skey != NULL && skey[0] == '@' && skey[1] == '@') {
+                    plain = 0;
+                    break;
+                }
+            }
+            for (k = 0; plain && k < scount; ++k) {
+                const char *ikey = sshape->keys[k];
+                kiln_val sval = k < object->slot_capacity ? object->slots[k] : KILN_VAL_UNDEFINED;
+                uint32_t slot;
+                kiln_shape *next;
+                if (kiln_c99_shape_find_slot(dest->shape, ikey, &slot)) {
+                    if (slot >= dest->slot_capacity) {
+                        break;
+                    }
+                    dest->slots[slot] = sval;
+                } else if (kiln_c99_shape_transition(dest->shape, ikey, &next)) {
+                    int grown = kiln_c99_grow_slots(dest, (size_t)next->slot_index + 1);
+                    if (grown != KILN_C99_OK) return grown;
+                    dest->slots[next->slot_index] = sval;
+                    dest->shape = next;
+                } else {
+                    break;
+                }
+            }
+            if (plain && k == scount) {
                 return KILN_C99_OK;
             }
         }

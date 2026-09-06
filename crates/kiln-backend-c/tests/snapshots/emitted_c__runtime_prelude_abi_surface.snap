@@ -741,7 +741,7 @@ struct kiln_shape;
 typedef struct kiln_shape_transition {
 typedef struct kiln_shape {
 typedef struct kiln_property {
-#define KILN_C99_INLINE_SLOTS 4
+#define KILN_C99_INLINE_SLOTS 8
 typedef struct kiln_object {
 #define KILN_C99_MAX_PROTOTYPE_DEPTH 10000
 #define KILN_C99_PIC_SIZE 4
@@ -1764,6 +1764,7 @@ static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out
 static int kiln_c99_keys_contain(kiln_value keys, const char *key, size_t key_len) {
 static int kiln_c99_enumerate_keys(kiln_host *host, kiln_value target, kiln_value *out,
 static int kiln_c99_spread_proxy(kiln_host *host, kiln_value target, kiln_value source, int depth,
+static int kiln_c99_grow_slots(kiln_object *dest, size_t needed) {
 static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value source,
 static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_definition_store(kiln_value target, kiln_value *out) {
