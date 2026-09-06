@@ -5089,3 +5089,20 @@ full marks; the barrier has to be on every reference store and a missed one is s
 is a project, not a patch. Large blocks are found by their payload address only; an interior
 pointer into a large block held in a register with no other reference would be missed, and
 none of the corpus does that, but it is the known hole.
+
+## The runtime and the emitter, split by domain (2026-09-06, Claude `alee/fastest-native`)
+
+Two subagents, one afternoon, no behaviour change. `prelude_runtime.c` (8.2k lines) and
+`prelude_core.c` (27k) are now 44 files under `crates/kiln-backend-c/src/runtime/`, listed in
+order in `runtime/README.md`; the concatenation of each group is byte-identical to the file it
+replaced, which is why not one snapshot moved, and the order is load-bearing because C needs a
+declaration before its use. The freeze on new built-ins applies to every file that came from
+`prelude_core.c`. `emit_graph.rs` (4.8k lines) is `emit_graph/` -- `clones.rs`, `sites.rs`,
+`body.rs`, `ops/` -- with the three largest arms of the op match extracted behind an
+`OpContext` so a change to the method-call site reads as a change to one file. The proof was
+the same for both: every test green, no `.snap.new`, native and facts baselines unchanged.
+
+Also new: `scripts/profile-native.sh <binary>` records an Instruments CPU profile and prints
+the hottest symbols and instruction offsets. `sample` names a function; once a loop inlines
+into one emitted body, this is what says whether it has a hot spot or, as array-functional did,
+none at all.
