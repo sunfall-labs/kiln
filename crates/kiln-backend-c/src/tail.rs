@@ -410,10 +410,16 @@ pub(crate) fn emit_tail_instruction(
             )
             .unwrap();
         }
+        // The same substitution as `DefineNamedProperty`'s, and for the same reason: a shaped,
+        // fresh-into-fresh spread (`{ ...base }`) is a bulk `memcpy` of NaN-boxed slots that
+        // `kiln_c99_spread_object` already special-cases (see spread.c), but reaching that branch
+        // its own way costs a `kiln_val_to_boundary` per operand -- which for an object resolves
+        // the exact kind through a slab-table lookup this case never needed. A miss falls through
+        // to the untouched generic call.
         Instruction::SpreadObject => {
             writeln!(
                 output,
-                "    {{ kiln_value source = kiln_val_to_boundary(stack[--sp]); int status = kiln_c99_spread_object(host, kiln_val_to_boundary(stack[sp - 1]), source, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                "    {{ kiln_val kiln_spread_source = stack[--sp]; int kiln_spread_status; if (kiln_c99_spread_object_fast(stack[sp - 1], kiln_spread_source, &kiln_spread_status)) {{ if (kiln_spread_status != KILN_C99_OK) return kiln_spread_status; }} else {{ kiln_value source = kiln_val_to_boundary(kiln_spread_source); int status = kiln_c99_spread_object(host, kiln_val_to_boundary(stack[sp - 1]), source, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }} }}"
             )
             .unwrap();
         }

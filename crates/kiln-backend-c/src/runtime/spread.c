@@ -117,6 +117,72 @@ static int kiln_c99_define_named_fast(kiln_val target, kiln_val key, kiln_val va
     return 0;
 }
 
+/* The bridge for `SpreadObject` (tail.rs, the only caller): `{ ...base }` where both `base` and
+ * the literal being built are the shape's fresh, empty-starting-point case that
+ * `kiln_c99_spread_object` already special-cases below (see the comment on that branch) --
+ * everything this checks duplicates that branch's conditions exactly, on raw `kiln_val`s instead
+ * of the boundary `kiln_value` `SpreadObject`'s generic path converts both operands through
+ * first. That conversion is one `kiln_val_to_boundary` per operand, and for an object each of
+ * those resolves the payload's exact kind via `kiln_c99_gc_kind_of_ptr`'s slab-table lookup --
+ * work this bulk-copy case never needed, since it only ever wants to know "is this a plain
+ * KILN_GC_OBJECT", which `kiln_c99_gc_payload_kind`'s pointer arithmetic answers directly.
+ *
+ * Returns 1 when it fully handled the spread (`*status` says whether that succeeded), 0 to fall
+ * back to the generic `kiln_c99_spread_object` unchanged -- which every case this does not
+ * recognize needs, including a source that is not a plain object at all (an array, a string, a
+ * function, a proxy, `undefined`), so a miss here is never a correctness question, only which
+ * function does the (still fully re-checked) work. */
+static int kiln_c99_spread_object_fast(kiln_val target, kiln_val source, int *status) {
+    kiln_object *object;
+    kiln_object *dest;
+    kiln_shape *sshape;
+    size_t scount;
+    size_t k;
+
+    if (!KILN_VAL_IS_OBJECT(source) || !KILN_VAL_IS_OBJECT(target)) {
+        return 0;
+    }
+    object = (kiln_object *)KILN_VAL_PTR(source);
+    if (object == NULL || kiln_c99_gc_payload_kind(object) != KILN_GC_OBJECT) {
+        return 0;
+    }
+    dest = (kiln_object *)KILN_VAL_PTR(target);
+    if (dest == NULL || kiln_c99_gc_payload_kind(dest) != KILN_GC_OBJECT) {
+        return 0;
+    }
+    if (object->properties != NULL || object->shape == NULL || object->elements != NULL ||
+        object->accessor_count != 0) {
+        return 0;
+    }
+    if (dest->properties != NULL || dest->shape == NULL || dest->shape->property_count != 0 ||
+        dest->elements != NULL || dest->frozen || dest->not_extensible ||
+        dest->accessor_count != 0) {
+        return 0;
+    }
+    sshape = object->shape;
+    scount = sshape->property_count;
+    for (k = 0; k < scount; ++k) {
+        const char *skey = sshape->keys[k];
+        if (skey != NULL && skey[0] == '@' && skey[1] == '@') {
+            /* A symbol key needs the validation kiln_c99_spread_object's per-key loop gives it. */
+            return 0;
+        }
+    }
+    {
+        int grown = kiln_c99_grow_slots(dest, scount);
+        if (grown != KILN_C99_OK) {
+            *status = grown;
+            return 1;
+        }
+    }
+    if (scount > 0) {
+        memcpy(dest->slots, object->slots, scount * sizeof(kiln_val));
+    }
+    dest->shape = sshape;
+    *status = KILN_C99_OK;
+    return 1;
+}
+
 static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value source,
                                   int depth, kiln_value *thrown) {
     kiln_value named = kiln_c99_undefined();
