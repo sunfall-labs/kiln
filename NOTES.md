@@ -4864,9 +4864,24 @@ scratch slot per body and are copied out; the copy is legal only where the call 
 of its own, so the rewrite matches a balanced close followed by `;` and leaves calls inside
 conditions alone. It moved nothing on class-poly and everything on the shape of the code.
 
-**Where the 4.5 ms is.** Per iteration: the element read, the call site's cache walk and
-closure checks, and inside `dist` five site walks of up to two entries each and ten tag tests.
-About 150 instructions against node's fifteen, and the machine already runs them at near its
-peak width, so the count is the only lever left. The ceiling's shape is one shape test per call
-with static slots after it, and unboxed slots: receiver-shape specialisation and per-shape slot
-types. That is field-type speculation, and it is the next design.
+**One shape test per call.** Inside `dist` the five reads of `this` each walked their own
+site's entries against the same shape. A function now has a *receiver-shape cache*: four rows
+of shapes, matched once at entry, with a slot per read of `this` in each row. A read is one
+indexed load and a bound check, no compare. The boxed clone fills a row after its slow path
+has learned the site, guarded on the object still having the shape the row is for, since a
+getter may have changed it; every clone reads the rows. Shapes never change their layout, so
+a row is never wrong, only absent. 4.5 → 4.2 ms. Its first version crashed
+`async-concurrency`: the row match was emitted with the values, after a generator's resume
+switch, and a resumed body jumped past it and read the row index uninitialized -- a `goto`
+skips an initializer as gladly as a declaration. Anything a resumed body relies on goes
+before the dispatch, right after `receiver`; the values are fine there only because a landing
+refills every one it reads.
+
+**Where the 4.2 ms is.** Every sample is in the loop function now, the clones inlined into
+it. Per iteration: the element read with its index conversion, the call site's cache walk and
+six closure checks, three status compares, the receiver match, five slot reads each with a tag
+test, five arithmetic operations each with two, the sum's two, and the induction variable's
+overflow check. About 120 instructions against node's fifteen, on a machine already running
+near its peak width, so the count is the only lever. The next step is a typed loop region:
+the slots and the call's result speculated as numbers under one guard at the loop head, with
+the generic loop as the exit, which is the second half of 2.1 applied to a region.
