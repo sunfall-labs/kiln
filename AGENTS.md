@@ -265,6 +265,11 @@ New built-ins must be written in TypeScript with intrinsics (design.md §5, ADR 
 Adding a built-in method or function to `prelude_core.c` is a review refusal.
 Existing C built-ins are migrated to TypeScript in Phase 5.2.
 
+`prelude_core.c` and `prelude_runtime.c` were later split, as a pure move, into the domain files
+under `crates/kiln-backend-c/src/runtime/` (see `runtime/README.md` for the list and the order,
+which is load-bearing). The freeze applies to all of them: a built-in added to any file in that
+directory is the same review refusal.
+
 ## Agent skills
 
 ### Issue tracker

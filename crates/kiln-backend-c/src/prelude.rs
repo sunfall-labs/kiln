@@ -2082,12 +2082,73 @@ const fn assert_refusals_name_themselves(source: &str, internal_sites: usize, ab
     );
 }
 
+/// `prelude_runtime.c`, split into domain files under `runtime/` (see `runtime/README.md`); the
+/// concatenation in this order is byte-identical to the original single file, and order is
+/// load-bearing because C needs a declaration before its use.
+macro_rules! runtime_parts {
+    () => {
+        concat!(
+            include_str!("runtime/foundation.c"),
+            include_str!("runtime/heap.c"),
+            include_str!("runtime/shapes.c"),
+            include_str!("runtime/platform.c"),
+            include_str!("runtime/node_support.c"),
+            include_str!("runtime/arrays.c"),
+            include_str!("runtime/properties.c"),
+            include_str!("runtime/generators.c"),
+            include_str!("runtime/methods.c"),
+            include_str!("runtime/web.c"),
+            include_str!("runtime/numbers.c"),
+            include_str!("runtime/builtins.c"),
+            include_str!("runtime/globals.c"),
+            include_str!("runtime/bigint.c"),
+            include_str!("runtime/temporal_values.c"),
+            include_str!("runtime/regexp.c"),
+            include_str!("runtime/symbols.c"),
+        )
+    };
+}
+
+/// `prelude_core.c`, split into domain files under `runtime/` (see `runtime/README.md`); the
+/// concatenation in this order is byte-identical to the original single file, and order is
+/// load-bearing because C needs a declaration before its use.
+macro_rules! core_parts {
+    () => {
+        concat!(
+            include_str!("runtime/surface.c"),
+            include_str!("runtime/values.c"),
+            include_str!("runtime/text.c"),
+            include_str!("runtime/stores.c"),
+            include_str!("runtime/proxies.c"),
+            include_str!("runtime/keys.c"),
+            include_str!("runtime/read.c"),
+            include_str!("runtime/write.c"),
+            include_str!("runtime/inspect.c"),
+            include_str!("runtime/strings.c"),
+            include_str!("runtime/node.c"),
+            include_str!("runtime/temporal.c"),
+            include_str!("runtime/dispatch.c"),
+            include_str!("runtime/enumeration.c"),
+            include_str!("runtime/spread.c"),
+            include_str!("runtime/definitions.c"),
+            include_str!("runtime/json.c"),
+            include_str!("runtime/dates.c"),
+            include_str!("runtime/collections.c"),
+            include_str!("runtime/iterators.c"),
+            include_str!("runtime/errors.c"),
+            include_str!("runtime/promises.c"),
+            include_str!("runtime/constructors.c"),
+            include_str!("runtime/dynamic.c"),
+            include_str!("runtime/calls.c"),
+            include_str!("runtime/operators.c"),
+            include_str!("runtime/boxed.c"),
+        )
+    };
+}
+
 #[allow(long_running_const_eval)]
 const _: () = assert_refusals_name_themselves(
-    concat!(
-        include_str!("runtime/prelude_core.c"),
-        include_str!("runtime/prelude_runtime.c")
-    ),
+    concat!(core_parts!(), runtime_parts!()),
     internal_refusal_sites(REFUSAL_INTERNAL_STATUS),
     absent_answer_sites(ABSENT_ANSWER_SITES),
 );
@@ -3351,7 +3412,7 @@ pub(crate) const HEADER: &str = concat!(
     header_prefix!(),
     header_static_diagnostics!(),
     header_rest!(),
-    include_str!("runtime/prelude_runtime.c"),
+    runtime_parts!(),
     emit_method_code_list!(),
     r#"};
 
@@ -3852,7 +3913,7 @@ typedef struct {
 static const kiln_builtin_gap kiln_c99_builtin_backlog[] = {
 "#,
     emit_builtin_backlog_rows!(),
-    include_str!("runtime/prelude_core.c"),
+    core_parts!(),
 );
 
 pub(crate) const PRELUDE_HEADER: &str = concat!(
