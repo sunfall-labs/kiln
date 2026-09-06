@@ -1809,7 +1809,9 @@ static int kiln_c99_keys_contain(kiln_value keys, const char *key, size_t key_le
 static int kiln_c99_enumerate_keys(kiln_host *host, kiln_value target, kiln_value *out,
 static int kiln_c99_spread_proxy(kiln_host *host, kiln_value target, kiln_value source, int depth,
 static int kiln_c99_grow_slots(kiln_object *dest, size_t needed) {
-static int kiln_c99_define_named_fast(kiln_val target, kiln_val key, kiln_val value, int *status) {
+static inline int kiln_c99_define_named_cached(kiln_object *object, kiln_val value,
+static inline void kiln_c99_define_named_teach(kiln_c99_site *site, const kiln_shape *from,
+static int kiln_c99_define_named_fast(kiln_val target, kiln_val key, kiln_val value, int *status,
 static int kiln_c99_spread_object_fast(kiln_val target, kiln_val source, int *status) {
 static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value source,
 static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t key_len,

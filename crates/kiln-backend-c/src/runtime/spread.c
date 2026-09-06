@@ -51,7 +51,47 @@ static int kiln_c99_grow_slots(kiln_object *dest, size_t needed) {
  * than trusted blindly, because a wrong guess here would read a `kiln_promise` or `kiln_collection`
  * payload as a `kiln_object` and corrupt it: cheap enough not to be worth skipping, unlike the
  * slab-table lookup `kiln_c99_gc_kind_of_ptr` would otherwise cost on every key. */
-static int kiln_c99_define_named_fast(kiln_val target, kiln_val key, kiln_val value, int *status) {
+/* The site remembers the one thing this operation computes: which shape the target arrived
+ * with, and which shape and slot the key sends it to. The transition tree is append-only and
+ * its shapes are never freed, so `(shape, key) -> (next shape, slot)` is a pure function and
+ * the memo holds for as long as the program runs; the key itself need not be compared, because
+ * a site's key is a literal that never changes. A miss -- another shape at the same site --
+ * takes the general path below and re-teaches the site. */
+static inline int kiln_c99_define_named_cached(kiln_object *object, kiln_val value,
+                                               const kiln_c99_site *site) {
+    const kiln_c99_pic_entry *entry;
+    if (site == NULL || site->pic_count == 0) return 0;
+    entry = &site->entries[0];
+    if (object->shape != entry->shape) return 0;
+    if (entry->transition_to == NULL) {
+        if (entry->slot >= object->slot_capacity) return 0;
+        object->slots[entry->slot] = value;
+        return 1;
+    }
+    if (entry->slot >= object->slot_capacity &&
+        kiln_c99_grow_slots(object, (size_t)entry->slot + 1) != KILN_C99_OK) {
+        return 0;
+    }
+    object->slots[entry->slot] = value;
+    object->shape = (kiln_shape *)entry->transition_to;
+    return 1;
+}
+
+static inline void kiln_c99_define_named_teach(kiln_c99_site *site, const kiln_shape *from,
+                                               const kiln_shape *to, uint32_t slot) {
+    kiln_c99_pic_entry *entry;
+    if (site == NULL) return;
+    entry = &site->entries[0];
+    memset(entry, 0, sizeof *entry);
+    entry->shape = from;
+    entry->transition_to = to;
+    entry->slot = slot;
+    entry->holder_slot = UINT32_MAX;
+    site->pic_count = 1;
+}
+
+static int kiln_c99_define_named_fast(kiln_val target, kiln_val key, kiln_val value, int *status,
+                                      kiln_c99_site *site) {
     kiln_object *object;
     const kiln_string *keystr;
     const char *ikey;
@@ -68,6 +108,10 @@ static int kiln_c99_define_named_fast(kiln_val target, kiln_val key, kiln_val va
     if (object->shape == NULL || object->properties != NULL || object->frozen ||
         object->not_extensible || object->accessor_count != 0) {
         return 0;
+    }
+    if (kiln_c99_define_named_cached(object, value, site)) {
+        *status = KILN_C99_OK;
+        return 1;
     }
     keystr = (const kiln_string *)KILN_VAL_PTR(key);
     if (keystr == NULL || keystr->byte_len == 0) {
@@ -95,6 +139,7 @@ static int kiln_c99_define_named_fast(kiln_val target, kiln_val key, kiln_val va
         if (slot >= object->slot_capacity) {
             return 0;
         }
+        kiln_c99_define_named_teach(site, object->shape, NULL, slot);
         object->slots[slot] = value;
         *status = KILN_C99_OK;
         return 1;
@@ -107,6 +152,7 @@ static int kiln_c99_define_named_fast(kiln_val target, kiln_val key, kiln_val va
                 return 1;
             }
         }
+        kiln_c99_define_named_teach(site, object->shape, next, next->slot_index);
         object->slots[next->slot_index] = value;
         object->shape = next;
         *status = KILN_C99_OK;
@@ -168,7 +214,7 @@ static int kiln_c99_spread_object_fast(kiln_val target, kiln_val source, int *st
             return 0;
         }
     }
-    {
+    if (scount > dest->slot_capacity) {
         int grown = kiln_c99_grow_slots(dest, scount);
         if (grown != KILN_C99_OK) {
             *status = grown;

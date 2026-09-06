@@ -5184,3 +5184,33 @@ What remains in microtasks, by the profile: the method dispatch prologue (`numer
 queue allocates per job (malloc and free, 12%), the allocations themselves (11%), the
 collections they cause (10%), and the two boundary conversions around `invoke_method` (8%).
 Node is 0.43 ms; each of those is a change to one place.
+
+## A define site remembers its transition (2026-09-06, Claude `work/fastest-native`)
+
+**object-spread 1.96 → 1.15 ms** (node 0.32). The profile after the generation work was
+`kiln_c99_define_named_fast` 16%, `kiln_c99_intern` 12%, `kiln_c99_shape_transition` 6.5%: every
+`f: i` in `{ ...base, f: i, g: i * 2 }` hashed and probed its literal key in the intern table,
+scanned the shape for it, then walked the transition list, to arrive at the same next shape and
+slot it arrived at the previous fifty thousand times. Shapes are `calloc`'d once and never
+freed, the transition tree is append-only, and a site's key is a literal, so `(shape, key) →
+(next shape, slot)` is a pure function the site can memoise in its first PIC entry: a hit is one
+pointer compare, a store, and a shape pointer write. The stack emitter (`tail.rs`) declares the
+site inline beside the instruction, as the graph emitter's sites are. Probe:
+`conformance/native/define-site-cache.js` (a site fed five shapes in rotation, an overwrite of a
+spread-in key, function values, `__proto__`, a dictionary-mode spread, a frozen spread). Found
+on the way and filed: a plain member after a getter of the same name keeps the getter, because
+the general branch ends in `kiln_c99_put` rather than a define
+(`.scratch/object-literal-accessor-override`); present on a binary two days older.
+
+Also in this batch: the spread's `kiln_c99_grow_slots` call is guarded (it was an out-of-line
+call that returned at once, per spread); `Buffer.concat` reads its entries as boxed values
+(buffer 6.06 → 5.1 ms, node 2.75, the rest is 78 MB of memcpy); and the sweep keeps as many
+emptied slabs per class as the class had in use when the collection began, because a loop that
+frees sixty slabs a collection takes sixty back at the next one, through the kernel's reclaim
+path (string-ops 11.6 → 11.1 ms before the string work proper).
+
+Two rules relearned at a cost. The prelude builder strips `static` from every non-inline function
+so the decoupled module units can link against it, and keeps `static inline` internal: a
+`static inline` on an exported function is an undefined symbol at the program's link, not at the
+tests. And editing the working tree while a gate runs in it invalidates the gate -- the backend
+tests compile the runtime from the tree at that moment -- which cost one full gate run today.
