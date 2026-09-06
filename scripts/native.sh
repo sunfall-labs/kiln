@@ -51,8 +51,12 @@ PROBES="${KILN_NATIVE_DIR:-conformance/native}"
 
 KILN="${KILN_BIN:-}"
 if [[ -z $KILN ]]; then
-	kiln_cargo build --locked -p kiln-cli >&2
-	KILN="$(kiln_repo_root)/target/debug/kiln"
+	if [[ -x "$(kiln_repo_root)/target/release/kiln" ]]; then
+		KILN="$(kiln_repo_root)/target/release/kiln"
+	else
+		kiln_cargo build --locked -p kiln-cli >&2
+		KILN="$(kiln_repo_root)/target/debug/kiln"
+	fi
 fi
 
 matched=0
