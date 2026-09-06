@@ -1,6 +1,6 @@
 # PRD: Dynamic `import()` Promise Settling and Host Loader Resolution
 
-Status: ready-for-agent
+Status: resolved
 Branch: `feat/dynamic-import-settling`
 Owner: Antigravity, 2026-09-06
 
