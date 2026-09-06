@@ -318,6 +318,34 @@ impl DirectPlan {
             targets
         };
 
+        // An intrinsic array loop (map, filter, reduce) whose one callback argument is a value
+        // this body proves is the closure of proto `i` -- not a cached guess, a proof -- reaches
+        // that proto's typed entry the same way a by-name candidate does when the callback's own
+        // declared arity is one the loop can call typed: element, or element and index, for
+        // map/filter; accumulator and element for reduce. An entry only these sites would use is
+        // otherwise dead C, so it is referenced here exactly as `method_targets` references a
+        // by-name candidate.
+        let callback_targets = |graph: &FunctionGraph, plan: &CallPlan| -> Vec<u32> {
+            let mut targets = Vec::new();
+            for (_, op) in graph.blocks.iter().flat_map(|b| b.operations.iter()) {
+                if let GraphOp::CallMethod { name, args, .. } = op
+                    && let Some(Constant::String(key)) = program.constants.get(*name as usize)
+                {
+                    let arities: &[u32] = match (key.as_str(), args.len()) {
+                        ("map", 1) | ("filter", 1) => &[1, 2],
+                        ("reduce", 2) => &[2],
+                        _ => continue,
+                    };
+                    if let Some(&target) = plan.known.get(&args[0])
+                        && arities.contains(&params[target as usize])
+                    {
+                        targets.push(target);
+                    }
+                }
+            }
+            targets
+        };
+
         // A typed entry exists only where some site calls it; an unreferenced clone is dead C.
         let mut referenced: HashSet<u32> = HashSet::new();
         for (plan, sites) in functions.iter().zip(&function_sites) {
@@ -346,8 +374,10 @@ impl DirectPlan {
         );
         for (graph, plan) in graphs.iter().zip(&functions) {
             referenced.extend(method_targets(graph, plan));
+            referenced.extend(callback_targets(graph, plan));
         }
         referenced.extend(method_targets(entry, &entry_plan));
+        referenced.extend(callback_targets(entry, &entry_plan));
         // A typed entry referenced only from typed entries that are themselves unreferenced is
         // still dead, but only after those are dropped: close the set through the typed sites.
         loop {
@@ -364,6 +394,7 @@ impl DirectPlan {
                             .map(|s| s.target),
                     );
                     next.extend(method_targets(&graphs[i], plan));
+                    next.extend(callback_targets(&graphs[i], plan));
                 }
             }
             referenced = next;

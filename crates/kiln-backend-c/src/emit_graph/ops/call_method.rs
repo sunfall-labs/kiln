@@ -1,9 +1,324 @@
 use super::OpContext;
 use super::{method_candidates, status_check};
+use crate::direct::TypedNeeds;
 use crate::graph::ValueId;
 use crate::prelude::lookup_speculation_invariant;
 use kiln_ir::Constant;
 use std::fmt::Write;
+
+/// A callback argument of an intrinsic array loop (`map`, `filter`, `reduce`) whose proto this
+/// compile *proves* -- `plan.known`, not a cache -- and whose declared arity the loop can call
+/// typed. `arity` is the proto's own declared parameter count (1 or 2 for map/filter's element
+/// and optional index; always 2 for reduce's accumulator and element), already checked against
+/// the loop's own expectation by [`typed_callback`].
+struct TypedCallback {
+    target: u32,
+    needs: TypedNeeds,
+    returns_double: bool,
+    arity: u32,
+}
+
+/// The callback argument's typed entry, when this callsite may call it typed: known by proto,
+/// entered (referenced in [`crate::direct::DirectPlan::plan`]'s `callback_targets`, the same way
+/// this reads it here), and declared at one of `expected_arity`'s parameter counts.
+fn typed_callback(
+    plan: &crate::direct::CallPlan,
+    program: &kiln_ir::Program,
+    callback: ValueId,
+    expected_arity: &[u32],
+) -> Option<TypedCallback> {
+    let &target = plan.known.get(&callback)?;
+    if !plan
+        .typed_entries
+        .get(target as usize)
+        .copied()
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let arity = program.functions[target as usize].parameter_count;
+    if !expected_arity.contains(&arity) {
+        return None;
+    }
+    Some(TypedCallback {
+        target,
+        needs: plan.typed_needs[target as usize],
+        returns_double: plan.typed_returns[target as usize],
+        arity,
+    })
+}
+
+/// The typed entry's own argument list, in its declared order: depth, then whatever
+/// `TypedNeeds` says it reaches for beyond its parameters (upvalues, the receiver `vrecv`, a
+/// `NULL` receiver-shape row -- this call site keeps none, exactly as the direct `Call` arm
+/// does -- and the runtime), then one `double` per declared parameter, named by `params`.
+fn typed_call_args(needs: TypedNeeds, params: &[&str]) -> String {
+    let mut args = String::from("depth + 1");
+    if needs.upvalues {
+        args.push_str(", plain->upvalues");
+    }
+    if needs.receiver {
+        args.push_str(", vrecv");
+    }
+    if needs.row {
+        args.push_str(", NULL");
+    }
+    if needs.runtime {
+        args.push_str(", host, thrown");
+    }
+    for p in params {
+        args.push_str(", ");
+        args.push_str(p);
+    }
+    args
+}
+
+/// `map`'s typed loop: entered only when `arr->is_numeric` and the callback closure's own body
+/// is this call's known proto -- both checked once, ahead of the loop, exactly as the module
+/// doc for `DirectPlan` asks. Every element is then already a number (that is what
+/// `is_numeric` means -- see `runtime/arrays.c` and the writes that clear it), so there is
+/// nothing to test per element: read it as a double, call the typed entry, and box or keep the
+/// result depending on what the entry proves it returns. `arr->count` is captured once, into
+/// `count0`, before the loop -- unlike the generic loop below it, which re-reads `arr->count`
+/// each iteration because a callback may mutate the array; `map` does not let such a mutation
+/// change which indices are visited (the interpreter's own `generic_array_callback` captures the
+/// length once too, for the same reason), so the built array's capacity, fixed to `count0` at
+/// creation, is exactly what the loop writes.
+fn emit_map_typed(
+    symbol: &str,
+    o: u32,
+    a0: u32,
+    v: u32,
+    check: &str,
+    typed_failed: &str,
+    c: &TypedCallback,
+) -> String {
+    let target = c.target;
+    let mut params = vec!["d_elem".to_string()];
+    if c.arity == 2 {
+        params.push("(double)idx".to_string());
+    }
+    let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
+    let call_args = typed_call_args(c.needs, &param_refs);
+    let result = if c.returns_double {
+        format!(
+            "double r_elem = {symbol}_fn_{target}_t({call_args}); \
+             if (KILN_UNLIKELY(kiln_c99_typed_failed(r_elem))) {typed_failed} \
+             built_arr->elements[idx] = kiln_c99_val_from_double(r_elem);"
+        )
+    } else {
+        format!(
+            "kiln_val r_elem = {symbol}_fn_{target}_t({call_args}); \
+             if (KILN_UNLIKELY(r_elem == KILN_VAL_TYPED_FAIL)) {typed_failed} \
+             if (built_arr->is_numeric && !KILN_VAL_IS_NUMBER(r_elem)) built_arr->is_numeric = 0; \
+             built_arr->elements[idx] = r_elem;"
+        )
+    };
+    format!(
+        "if (!handled && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
+             void *ptr = KILN_VAL_PTR(v{o}); \
+             if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
+                 kiln_array *arr = (kiln_array *)ptr; \
+                 kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
+                 if (!kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                     kiln_val vrecv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; \
+                     if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
+                     if (arr->is_numeric && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
+                         size_t count0 = arr->count; \
+                         kiln_value built_val; \
+                         int status = kiln_c99_new_array_with_capacity(&built_val, count0, 1); \
+                         if (status != KILN_C99_OK) return status; \
+                         kiln_array *built_arr = kiln_c99_array_of(built_val); \
+                         for (size_t idx = 0; idx < count0; ++idx) {{ \
+                             double d_elem; memcpy(&d_elem, &arr->elements[idx], sizeof(d_elem)); \
+                             {result} \
+                         }} \
+                         built_arr->count = count0; \
+                         v{v} = kiln_val_from_boundary(built_val); \
+                         handled = 1; \
+                     }} else if (!plain->generator) {{ \
+                         kiln_value built_val; \
+                         int status = kiln_c99_new_array_with_capacity(&built_val, arr->count, arr->is_numeric); \
+                         if (status != KILN_C99_OK) return status; \
+                         kiln_array *built_arr = kiln_c99_array_of(built_val); \
+                         for (size_t idx = 0; idx < arr->count; ++idx) {{ \
+                             if (arr->elements[idx] == KILN_VAL_HOLE) {{ \
+                                 built_arr->elements[built_arr->count++] = KILN_VAL_HOLE; \
+                                 built_arr->is_numeric = 0; \
+                                 continue; \
+                             }} \
+                             kiln_val vargs[3] = {{ arr->elements[idx], kiln_c99_val_from_double((double)idx), v{o} }}; \
+                             kiln_val prod = KILN_VAL_UNDEFINED; \
+                             int status; \
+                             if (!plain->publishes_frame) {{ kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)3); }} \
+                             else status = kiln_c99_invoke_closure(host, &prod, plain, vrecv, vargs, (size_t)3, depth, thrown, NULL, 0); \
+                             if (KILN_UNLIKELY(status != KILN_C99_OK)) {{ \
+                                 {check} \
+                             }} \
+                             if (built_arr->is_numeric && !KILN_VAL_IS_NUMBER(prod)) {{ \
+                                 built_arr->is_numeric = 0; \
+                             }} \
+                             built_arr->elements[built_arr->count++] = prod; \
+                         }} \
+                         v{v} = kiln_val_from_boundary(built_val); \
+                         handled = 1; \
+                     }} \
+                 }} \
+             }} \
+         }}"
+    )
+}
+
+/// `filter`'s typed loop: the same proof and the same once-ahead-of-the-loop guards as `map`'s,
+/// `count0` captured for the same reason (the interpreter's `generic_array_callback` captures
+/// `filter`'s length once too). The element is snapshotted before the call -- `elem`, read once
+/// -- and appended after it, exactly as the generic loop below already does, so a callback that
+/// overwrites the very slot it is being called with still contributes the value it was called
+/// with, not whatever is there afterward.
+fn emit_filter_typed(
+    symbol: &str,
+    o: u32,
+    a0: u32,
+    v: u32,
+    check: &str,
+    typed_failed: &str,
+    c: &TypedCallback,
+) -> String {
+    let target = c.target;
+    let mut params = vec!["d_elem".to_string()];
+    if c.arity == 2 {
+        params.push("(double)idx".to_string());
+    }
+    let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
+    let call_args = typed_call_args(c.needs, &param_refs);
+    let (call, truthy) = if c.returns_double {
+        (
+            format!(
+                "double r_elem = {symbol}_fn_{target}_t({call_args}); \
+                 if (KILN_UNLIKELY(kiln_c99_typed_failed(r_elem))) {typed_failed}"
+            ),
+            "(r_elem == r_elem && r_elem != 0.0)".to_string(),
+        )
+    } else {
+        (
+            format!(
+                "kiln_val r_elem = {symbol}_fn_{target}_t({call_args}); \
+                 if (KILN_UNLIKELY(r_elem == KILN_VAL_TYPED_FAIL)) {typed_failed}"
+            ),
+            "kiln_c99_val_truthy(r_elem)".to_string(),
+        )
+    };
+    format!(
+        "if (!handled && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
+             void *ptr = KILN_VAL_PTR(v{o}); \
+             if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
+                 kiln_array *arr = (kiln_array *)ptr; \
+                 kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
+                 if (!kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                     kiln_val vrecv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; \
+                     if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
+                     if (arr->is_numeric && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
+                         size_t count0 = arr->count; \
+                         kiln_value built_val; \
+                         int status = kiln_c99_new_array_with_capacity(&built_val, count0, 1); \
+                         if (status != KILN_C99_OK) return status; \
+                         kiln_array *built_arr = kiln_c99_array_of(built_val); \
+                         for (size_t idx = 0; idx < count0; ++idx) {{ \
+                             kiln_val elem = arr->elements[idx]; \
+                             double d_elem; memcpy(&d_elem, &elem, sizeof(d_elem)); \
+                             {call} \
+                             if ({truthy}) {{ built_arr->elements[built_arr->count++] = elem; }} \
+                         }} \
+                         v{v} = kiln_val_from_boundary(built_val); \
+                         handled = 1; \
+                     }} else if (!plain->generator) {{ \
+                         kiln_value built_val; \
+                         int status = kiln_c99_new_array_with_capacity(&built_val, arr->count, arr->is_numeric); \
+                         if (status != KILN_C99_OK) return status; \
+                         kiln_array *built_arr = kiln_c99_array_of(built_val); \
+                         for (size_t idx = 0; idx < arr->count; ++idx) {{ \
+                             if (arr->elements[idx] == KILN_VAL_HOLE) continue; \
+                             kiln_val elem = arr->elements[idx]; \
+                             kiln_val vargs[3] = {{ elem, kiln_c99_val_from_double((double)idx), v{o} }}; \
+                             kiln_val prod = KILN_VAL_UNDEFINED; \
+                             int status; \
+                             if (!plain->publishes_frame) {{ kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)3); }} \
+                             else status = kiln_c99_invoke_closure(host, &prod, plain, vrecv, vargs, (size_t)3, depth, thrown, NULL, 0); \
+                             if (KILN_UNLIKELY(status != KILN_C99_OK)) {{ \
+                                 {check} \
+                             }} \
+                             if (kiln_c99_val_truthy(prod)) {{ \
+                                 built_arr->elements[built_arr->count++] = elem; \
+                             }} \
+                         }} \
+                         v{v} = kiln_val_from_boundary(built_val); \
+                         handled = 1; \
+                     }} \
+                 }} \
+             }} \
+         }}"
+    )
+}
+
+/// `reduce`'s typed loop: reached only when the typed entry is also proven to return a number
+/// (the accumulator must stay a `double` for the whole loop) and the initial value is proven a
+/// number too, both checked in [`emit_call_method`] before this is called. `arr->count` is *not*
+/// captured once here: the interpreter's own dense-array `reduce` re-reads the live length each
+/// step (its own comment: "a callback that shortens the array stops the walk rather than
+/// reading past the end"), and the generic `reduce` loop below does the same, so a callback that
+/// grows the receiver during a typed `reduce` is visited the same way it is in both of those --
+/// consistent with each other, not with the specification.
+fn emit_reduce_typed(
+    symbol: &str,
+    site: (u32, u32, u32, u32),
+    check: &str,
+    typed_failed: &str,
+    c: &TypedCallback,
+) -> String {
+    let (o, a0, a1, v) = site;
+    let target = c.target;
+    let call_args = typed_call_args(c.needs, &["dacc", "d_elem"]);
+    format!(
+        "if (!handled && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
+             void *ptr = KILN_VAL_PTR(v{o}); \
+             if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
+                 kiln_array *arr = (kiln_array *)ptr; \
+                 kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
+                 if (!kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                     kiln_val vrecv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; \
+                     if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
+                     if (arr->is_numeric && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
+                         double dacc = d{a1}; \
+                         for (size_t idx = 0; idx < arr->count; ++idx) {{ \
+                             double d_elem; memcpy(&d_elem, &arr->elements[idx], sizeof(d_elem)); \
+                             double r_acc = {symbol}_fn_{target}_t({call_args}); \
+                             if (KILN_UNLIKELY(kiln_c99_typed_failed(r_acc))) {typed_failed} \
+                             dacc = r_acc; \
+                         }} \
+                         v{v} = kiln_c99_val_from_double(dacc); \
+                         handled = 1; \
+                     }} else if (!plain->generator) {{ \
+                         kiln_val vacc = v{a1}; \
+                         for (size_t idx = 0; idx < arr->count; ++idx) {{ \
+                             if (arr->elements[idx] == KILN_VAL_HOLE) continue; \
+                             kiln_val vargs[4] = {{ vacc, arr->elements[idx], kiln_c99_val_from_double((double)idx), v{o} }}; \
+                             kiln_val prod = KILN_VAL_UNDEFINED; \
+                             int status; \
+                             if (!plain->publishes_frame) {{ kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)4); }} \
+                             else status = kiln_c99_invoke_closure(host, &prod, plain, vrecv, vargs, (size_t)4, depth, thrown, NULL, 0); \
+                             if (KILN_UNLIKELY(status != KILN_C99_OK)) {{ \
+                                 {check} \
+                             }} \
+                             vacc = prod; \
+                         }} \
+                         v{v} = vacc; \
+                         handled = 1; \
+                     }} \
+                 }} \
+             }} \
+         }}"
+    )
+}
 
 /// `GraphOp::CallMethod { object, name, args, .. }`, moved out of `emit_graph_op`'s match
 /// verbatim: a receiver-shape inline cache, this unit's own candidates by name, and a typed
@@ -317,9 +632,36 @@ pub(super) fn emit_call_method(
         None
     };
 
+    // A callback whose proto this compile proves the identity of -- `plan.known`, not a cache --
+    // and whose own declared arity the loop can call typed, is entered through its typed entry
+    // directly from the loop, ahead of the generic (boxed) one. `DirectPlan::plan`'s
+    // `callback_targets` references such a proto from the same three call shapes read here, so
+    // its typed entry exists exactly when one of these finds it.
+    let map_typed = (closed_world && key_str == "map" && argc == 1)
+        .then(|| typed_callback(plan, program, args[0], &[1, 2]))
+        .flatten();
+    let filter_typed = (closed_world && key_str == "filter" && argc == 1)
+        .then(|| typed_callback(plan, program, args[0], &[1, 2]))
+        .flatten();
+    // `reduce`'s accumulator has to stay a `double` for the whole loop, so the typed loop is
+    // reached only when the typed entry is proven to return one and the initial value is
+    // already proven a number -- both checked here, not inside the loop.
+    let reduce_typed = (closed_world && key_str == "reduce" && argc == 2)
+        .then(|| typed_callback(plan, program, args[0], &[2]))
+        .flatten()
+        .filter(|c| c.returns_double && numbers.contains(&args[1]));
+    // On failure `kiln_c99_typed_status` holds the status and `kiln_c99_typed_thrown` the thrown
+    // value when it is `KILN_C99_THROWN` -- the same failure handling the by-name typed
+    // candidates above use, verbatim.
+    let typed_failed = format!(
+        "{{ int status = kiln_c99_typed_status; if (status == KILN_C99_THROWN) *thrown = kiln_c99_typed_thrown; {diag} {typed_check} }}"
+    );
+
     let map_intrinsic = if closed_world && key_str == "map" && argc == 1 {
-        Some(format!(
-            "if (!handled && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
+        Some(match &map_typed {
+            Some(c) => emit_map_typed(symbol, object.0, args[0].0, v, &check, &typed_failed, c),
+            None => format!(
+                "if (!handled && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
                          void *ptr = KILN_VAL_PTR(v{o}); \
                          if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
                              kiln_array *arr = (kiln_array *)ptr; \
@@ -355,18 +697,21 @@ pub(super) fn emit_call_method(
                              }} \
                          }} \
                      }}",
-            o = object.0,
-            a0 = args[0].0,
-            v = v,
-            check = check
-        ))
+                o = object.0,
+                a0 = args[0].0,
+                v = v,
+                check = check
+            ),
+        })
     } else {
         None
     };
 
     let filter_intrinsic = if closed_world && key_str == "filter" && argc == 1 {
-        Some(format!(
-            "if (!handled && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
+        Some(match &filter_typed {
+            Some(c) => emit_filter_typed(symbol, object.0, args[0].0, v, &check, &typed_failed, c),
+            None => format!(
+                "if (!handled && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
                          void *ptr = KILN_VAL_PTR(v{o}); \
                          if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
                              kiln_array *arr = (kiln_array *)ptr; \
@@ -398,18 +743,27 @@ pub(super) fn emit_call_method(
                              }} \
                          }} \
                      }}",
-            o = object.0,
-            a0 = args[0].0,
-            v = v,
-            check = check
-        ))
+                o = object.0,
+                a0 = args[0].0,
+                v = v,
+                check = check
+            ),
+        })
     } else {
         None
     };
 
     let reduce_intrinsic = if closed_world && key_str == "reduce" && argc == 2 {
-        Some(format!(
-            "if (!handled && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
+        Some(match &reduce_typed {
+            Some(c) => emit_reduce_typed(
+                symbol,
+                (object.0, args[0].0, args[1].0, v),
+                &check,
+                &typed_failed,
+                c,
+            ),
+            None => format!(
+                "if (!handled && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
                          void *ptr = KILN_VAL_PTR(v{o}); \
                          if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
                              kiln_array *arr = (kiln_array *)ptr; \
@@ -435,12 +789,13 @@ pub(super) fn emit_call_method(
                              }} \
                          }} \
                      }}",
-            o = object.0,
-            a0 = args[0].0,
-            a1 = args[1].0,
-            v = v,
-            check = check
-        ))
+                o = object.0,
+                a0 = args[0].0,
+                a1 = args[1].0,
+                v = v,
+                check = check
+            ),
+        })
     } else {
         None
     };
