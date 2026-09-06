@@ -450,6 +450,40 @@ fn share_sites(body: &str, prefix: &str) -> (String, usize) {
     (out, count)
 }
 
+/// How many reads of `this` a body has, in the order every clone numbers them.
+fn this_site_count(graph: &FunctionGraph) -> usize {
+    graph
+        .blocks
+        .iter()
+        .flat_map(|b| b.operations.iter())
+        .filter(|(_, op)| match op {
+            GraphOp::GetProperty { object, .. } => graph
+                .blocks
+                .iter()
+                .flat_map(|b| b.operations.iter())
+                .any(|(v, def)| v == object && matches!(def, GraphOp::LoadThis)),
+            _ => false,
+        })
+        .count()
+}
+
+/// The receiver-shape cache's match at entry: the row whose shape is the receiver's, or -1.
+/// The boxed clone, whose slow path learns, also claims a free row for a shape it has not
+/// seen. Emitted right after `receiver` is defined and before any dispatch that could jump
+/// past it: a resumed generator lands at its landing with this already run.
+fn receiver_prologue(symbol: &str, index: usize, kind: EntryKind) -> String {
+    let claim = if kind == EntryKind::Boxed {
+        format!(
+            " else {{ int j; for (j = 0; j < 4; ++j) if ({symbol}_fn_{index}_recv_shape[j] == NULL) {{ {symbol}_fn_{index}_recv_shape[j] = recv_shape; recv_k = j; break; }} }}"
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "    int recv_k = -1; const kiln_object *recv_obj = NULL; if (KILN_VAL_IS_OBJECT(receiver)) {{ recv_obj = (const kiln_object *)KILN_VAL_PTR(receiver); const kiln_shape *recv_shape = recv_obj->shape; if (recv_shape != NULL) {{ if (recv_shape == {symbol}_fn_{index}_recv_shape[0]) recv_k = 0; else if (recv_shape == {symbol}_fn_{index}_recv_shape[1]) recv_k = 1; else if (recv_shape == {symbol}_fn_{index}_recv_shape[2]) recv_k = 2; else if (recv_shape == {symbol}_fn_{index}_recv_shape[3]) recv_k = 3;{claim} }} }}\n"
+    )
+}
+
 /// The fast clone's way out: the boxed entry, from the top, with everything as it arrived.
 fn fast_bail(symbol: &str, self_index: Option<u32>) -> String {
     let index = self_index.expect("a fast clone is a function");
@@ -602,8 +636,14 @@ pub fn emit_function_from_graph_with_profile(
 
     // 3. Context & arguments setup. `ctx` is never null: every caller, the runtime's and the
     // emitted direct path alike, passes its own.
+    let receiver_cache = if this_site_count(graph) > 0 {
+        receiver_prologue(symbol, index, kind)
+    } else {
+        String::new()
+    };
     if matches!(kind, EntryKind::Typed { .. }) {
         output.push_str("    (void)depth;\n");
+        output.push_str(&receiver_cache);
     } else if kind == EntryKind::Fast {
         // No runtime call survives in a fast clone; what it reads is the receiver and the
         // arguments, and the context only to hand on when it restarts.
@@ -611,6 +651,7 @@ pub fn emit_function_from_graph_with_profile(
         output.push_str(
             "    kiln_val receiver = receiver_ptr ? *receiver_ptr : KILN_VAL_UNDEFINED;\n",
         );
+        output.push_str(&receiver_cache);
     } else if scalar_proto {
         output.push_str("    (void)ctx; (void)receiver_ptr; (void)upvalues;\n");
     } else {
@@ -622,6 +663,7 @@ pub fn emit_function_from_graph_with_profile(
             "    kiln_val receiver = receiver_ptr ? *receiver_ptr : KILN_VAL_UNDEFINED;\n",
         );
         output.push_str("    (void)receiver_ptr;\n");
+        output.push_str(&receiver_cache);
         // Which of the two `arguments` objects a mention in this body, or in an arrow made
         // here, would build. Only such a body reads the frame global, so only such a body
         // writes it; a plain body leaves its caller's value alone.
@@ -717,7 +759,7 @@ pub fn emit_function_from_graph_with_profile(
         output.push_str("    (void)args; (void)argc;\n");
     }
 
-    let shared_sites = emit_blocks(
+    let (shared_sites, this_sites) = emit_blocks(
         output,
         graph,
         proto,
@@ -737,13 +779,22 @@ pub fn emit_function_from_graph_with_profile(
         type_profile_record,
     );
     output.push_str("}\n");
-    // The boxed clone, emitted first, declares the sites every clone of this function uses.
-    if kind == EntryKind::Boxed && shared_sites > 0 {
+    // The boxed clone, emitted first, declares the sites every clone of this function uses,
+    // and the receiver-shape cache: four rows of shapes, a slot per read of `this` in each.
+    if kind == EntryKind::Boxed && (shared_sites > 0 || this_sites > 0) {
         let mut declarations = String::new();
         for k in 0..shared_sites {
             writeln!(
                 declarations,
                 "static kiln_c99_site {symbol}_fn_{index}_site_{k} = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}};"
+            )
+            .unwrap();
+        }
+        if this_sites > 0 {
+            let row = vec!["UINT32_MAX"; this_sites].join(", ");
+            writeln!(
+                declarations,
+                "static const kiln_shape *{symbol}_fn_{index}_recv_shape[4];\nstatic uint32_t {symbol}_fn_{index}_recv_slot[4][{this_sites}] = {{ {{{row}}}, {{{row}}}, {{{row}}}, {{{row}}} }};"
             )
             .unwrap();
         }
@@ -905,6 +956,7 @@ fn emit_block_sequence(
     block_prefix: &str,
     is_fast_clone: bool,
     type_profile_record: bool,
+    this_sites: &std::collections::HashMap<ValueId, usize>,
 ) {
     let self_index = match site {
         Site::Function { index } => Some(*index),
@@ -1058,6 +1110,7 @@ fn emit_block_sequence(
                 plan,
                 kind,
                 self_index,
+                this_sites.get(&vid).copied(),
             );
             if kind == EntryKind::Fast {
                 let bail = fast_bail(symbol, self_index);
@@ -1103,8 +1156,25 @@ fn emit_blocks(
     kind: EntryKind,
     func_profile: Option<&FunctionTypeProfile>,
     type_profile_record: bool,
-) -> usize {
+) -> (usize, usize) {
     let body_start = output.len();
+    // The reads of `this`, numbered in emission order -- the same order in every clone -- for
+    // the function's receiver-shape cache: one row per shape seen, one slot per read.
+    let this_sites: std::collections::HashMap<ValueId, usize> = graph
+        .blocks
+        .iter()
+        .flat_map(|b| b.operations.iter())
+        .filter(|(_, op)| match op {
+            GraphOp::GetProperty { object, .. } => graph
+                .blocks
+                .iter()
+                .flat_map(|b| b.operations.iter())
+                .any(|(v, def)| v == object && matches!(def, GraphOp::LoadThis)),
+            _ => false,
+        })
+        .enumerate()
+        .map(|(i, (vid, _))| (*vid, i))
+        .collect();
     let candidate_params = candidate_number_parameters_with_profile(graph, proto, func_profile);
     let speculate_enabled = std::env::var("KILN_SPECULATE").as_deref() != Ok("0");
     let suspends = graph
@@ -1194,6 +1264,7 @@ fn emit_blocks(
             "kiln_fast_block_",
             true,
             type_profile_record,
+            &this_sites,
         );
 
         writeln!(output, "    /* Clone B: generic fallback path */").unwrap();
@@ -1218,6 +1289,7 @@ fn emit_blocks(
             "kiln_generic_block_",
             false,
             type_profile_record,
+            &this_sites,
         );
     } else {
         emit_ssa_declarations(output, graph, baseline_numbers, baseline_ints);
@@ -1242,6 +1314,7 @@ fn emit_blocks(
             "kiln_block_",
             false,
             type_profile_record,
+            &this_sites,
         );
     }
 
@@ -1333,7 +1406,7 @@ fn emit_blocks(
             }
         }
     }
-    shared_sites
+    (shared_sites, this_sites.len())
 }
 
 /// One status check after a runtime call. A throw unwinds; a refusal is attributed to this site
@@ -1459,6 +1532,7 @@ fn emit_graph_op(
     plan: &CallPlan,
     kind: EntryKind,
     self_index: Option<u32>,
+    this_site: Option<usize>,
 ) {
     let v = vid.0;
     let typed = numbers.contains(&vid);
@@ -3533,11 +3607,29 @@ fn emit_graph_op(
             } else {
                 String::new()
             };
+            // A read of `this`: the function's receiver-shape cache answers first, one indexed
+            // load and no compare, because the shape was matched once at entry. The boxed
+            // clone, whose slow path is the one that learns, fills the row afterwards.
+            let (receiver_tier, receiver_learn) = match (this_site, self_index) {
+                (Some(i), Some(index)) => (
+                    format!(
+                        "if (recv_k >= 0) {{ uint32_t rs = {symbol}_fn_{index}_recv_slot[recv_k][{i}]; if (rs != UINT32_MAX && KILN_LIKELY(rs < recv_obj->slot_capacity)) {{ v{v} = recv_obj->slots[rs]; handled = 1; }} }} "
+                    ),
+                    if kind == EntryKind::Boxed {
+                        format!(
+                            " if (recv_k >= 0 && {symbol}_fn_{index}_recv_slot[recv_k][{i}] == UINT32_MAX && recv_obj->shape == {symbol}_fn_{index}_recv_shape[recv_k]) {symbol}_fn_{index}_recv_slot[recv_k][{i}] = kiln_c99_site_slot_for(&site, recv_obj->shape);"
+                        )
+                    } else {
+                        String::new()
+                    },
+                ),
+                _ => (String::new(), String::new()),
+            };
             writeln!(
                 output,
                 "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; \
                 int handled = 0; \
-                {length_check}{size_check}\
+                {receiver_tier}{length_check}{size_check}\
                 if (!handled && KILN_VAL_IS_OBJECT(v{o})) {{ \
                     const kiln_object *obj = (const kiln_object *)KILN_VAL_PTR(v{o}); \
                     const kiln_shape *shape = obj->shape; \
@@ -3557,7 +3649,7 @@ fn emit_graph_op(
                     int status = kiln_c99_val_read_property(host, v{o}, {symbol}_key_{name}, {key_len}, depth, thrown, &site, &v{v}); \
                     if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(v{o})); \
                     {check} \
-                }} }}\
+                }}{receiver_learn} }}\
                 {typed_sync}",
                 o = object.0,
                 typed_sync = if typed { format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));") } else { String::new() }

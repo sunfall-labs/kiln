@@ -609,6 +609,19 @@ typedef struct kiln_c99_site {
     uint64_t cached_method;
 } kiln_c99_site;
 
+/* The slot a property-read site remembers for `shape`, or UINT32_MAX when it remembers none
+ * or remembers a method instead. */
+static inline uint32_t kiln_c99_site_slot_for(const kiln_c99_site *site, const kiln_shape *shape) {
+    uint32_t p;
+    for (p = 0; p < site->pic_count; ++p) {
+        if (site->entries[p].shape == shape && site->entries[p].method == 0 &&
+            site->entries[p].transition_to == NULL) {
+            return site->entries[p].slot;
+        }
+    }
+    return UINT32_MAX;
+}
+
 /* The callee a method-call site remembers for an object of `obj`'s shape, or 0. A method found
  * on the prototype is remembered by value; one that is the object's own property is remembered
  * by slot and read from *this* object, because two objects of one shape hold their own values.
