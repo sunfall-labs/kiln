@@ -3,7 +3,7 @@
  * Runtime owns queueing, ordering, virtual time, cancellation and disposal timing through opaque
  * pointers; no language value layout crosses the private ABI. */
 static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value derived,
-                            int rejected) {
+                            int rejected, int continuation) {
     kiln_microtask *task;
     int status;
     task = (kiln_microtask *)kiln_c99_gc_alloc(KILN_GC_MICROTASK, sizeof *task);
@@ -12,6 +12,7 @@ static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value 
     task->argument = argument;
     task->derived = derived;
     task->rejected = rejected;
+    task->continuation = continuation;
     status = kiln_realm_queue_microtask(kiln_c99_run_microtask, kiln_c99_drop_microtask,
                                         task);
     if (status != KILN_C99_OK) {
@@ -103,7 +104,7 @@ static int kiln_c99_settle(kiln_value promise, kiln_value value, int rejected);
 static int kiln_c99_schedule(kiln_promise *promise, const kiln_reaction *reaction) {
     int rejected = promise->state == KILN_C99_REJECTED;
     return kiln_c99_enqueue(rejected ? reaction->on_rejected : reaction->on_fulfilled,
-                            promise->value, reaction->derived, rejected);
+                            promise->value, reaction->derived, rejected, reaction->continuation);
 }
 
 /* Settle a promise, queueing everything that was waiting for it.
@@ -127,7 +128,7 @@ static int kiln_c99_settle(kiln_value promise, kiln_value value, int rejected) {
         if (status != KILN_C99_OK) {
             return status;
         }
-        return kiln_c99_enqueue(step, value, kiln_c99_undefined(), 0);
+        return kiln_c99_enqueue(step, value, kiln_c99_undefined(), 0, 0);
     }
     state->state = rejected ? KILN_C99_REJECTED : KILN_C99_FULFILLED;
     state->value = value;
@@ -165,6 +166,7 @@ static int kiln_c99_then(kiln_value promise, kiln_value on_fulfilled, kiln_value
     }
     reaction.on_fulfilled = on_fulfilled;
     reaction.on_rejected = on_rejected;
+    reaction.continuation = 0;
     if (state->properties.tag == KILN_VALUE_OBJECT) {
         kiln_value proto = kiln_c99_object_of(state->properties)->prototype;
         if (proto.tag != KILN_VALUE_UNDEFINED && proto.tag != KILN_VALUE_NULL) {
@@ -185,8 +187,35 @@ static int kiln_c99_then(kiln_value promise, kiln_value on_fulfilled, kiln_value
     return KILN_C99_OK;
 }
 
+/* `await p`: the suspended frame is the reaction, on both sides.
+ *
+ * The general `then` binds `@@resume` and `@@throw` to the frame -- two closures -- and makes a
+ * derived promise nobody can reach; an await needs none of the three, only to be stepped with
+ * what arrived and which side it arrived on. Four allocations an await, and a bound call through
+ * the method dispatch on every resumption, become one microtask and a direct step. */
+static int kiln_c99_then_continue(kiln_value promise, kiln_value generator) {
+    kiln_promise *state = kiln_c99_promise_of(promise);
+    kiln_reaction reaction;
+    int status;
+    reaction.on_fulfilled = generator;
+    reaction.on_rejected = generator;
+    reaction.derived = kiln_c99_undefined();
+    reaction.continuation = 1;
+    if (state->state != KILN_C99_PENDING) {
+        return kiln_c99_schedule(state, &reaction);
+    }
+    status = kiln_c99_reserve((void **)&state->reactions, &state->capacity, state->count + 1,
+                              sizeof *state->reactions);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    state->reactions[state->count] = reaction;
+    state->count += 1;
+    return KILN_C99_OK;
+}
+
 static void kiln_c99_drop_microtask(void *work) {
-    kiln_c99_gc_release(work);
+    kiln_c99_gc_release_cell(work);
 }
 
 /* Give a refusal inside a turn somewhere to say what it was.
@@ -220,6 +249,21 @@ static int kiln_c99_run_microtask(void *work, void *host_pointer, void *thrown_p
     kiln_value produced = kiln_c99_undefined();
     int status;
     if (task == NULL || thrown == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (task->continuation) {
+        /* An await's value arriving at its frame: step it where `@@resume` bound to it used to. */
+        status = kiln_c99_generator_of(task->handler)->async_generator
+                     ? kiln_c99_async_generator_step(host, task->handler, task->argument,
+                                                     task->rejected, 0, thrown)
+                     : kiln_c99_async_step(host, task->handler, task->argument, task->rejected,
+                                           0, thrown);
+        /* The step read the task's fields by value and the queue releases the cell after this
+         * returns; without the pin the cell is unreachable during the step, a collection inside
+         * it reclaims the slot, and the release that follows would free it twice. */
+        kiln_c99_gc_keep_alive(task);
+        if (status == KILN_C99_THROWN) return KILN_C99_THROWN;
+        kiln_c99_publish_turn_refusal(status, kiln_c99_undefined(), thrown);
+        return status;
+    }
     if (!kiln_c99_is_callable(task->handler)) {
         /* No handler for this side, so the value travels on unchanged. */
         if (task->derived.tag == KILN_VALUE_PROMISE) {
@@ -343,32 +387,12 @@ static int kiln_c99_async_generator_step(kiln_host *host, kiln_value generator, 
     if (status == KILN_C99_YIELDED) {
         frame->started = 1;
         if (frame->awaiting) {
-            /* Still inside the step: wait for what was awaited and come back here. */
-            kiln_value awaited = produced;
-            kiln_value resume;
-            kiln_value raise;
-            kiln_value ignored;
-            if (awaited.tag != KILN_VALUE_PROMISE) {
-                kiln_value wrapped;
-                status = kiln_c99_new_promise(&wrapped);
-                if (status == KILN_C99_OK) {
-                    status = kiln_c99_settle(wrapped, awaited, 0);
-                }
-                if (status != KILN_C99_OK) {
-                    return status;
-                }
-                awaited = wrapped;
+            /* Still inside the step: wait for what was awaited and come back here. A plain value
+             * is one job away, as a promise already fulfilled with it would be. */
+            if (produced.tag != KILN_VALUE_PROMISE) {
+                return kiln_c99_enqueue(generator, produced, kiln_c99_undefined(), 0, 1);
             }
-            status = kiln_c99_bind(&resume, kiln_c99_method(KILN_C99_METHOD_ASYNC_RESUME),
-                                   generator);
-            if (status == KILN_C99_OK) {
-                status = kiln_c99_bind(&raise, kiln_c99_method(KILN_C99_METHOD_ASYNC_THROW),
-                                       generator);
-            }
-            if (status != KILN_C99_OK) {
-                return status;
-            }
-            return kiln_c99_then(awaited, resume, raise, &ignored);
+            return kiln_c99_then_continue(produced, generator);
         }
         status = kiln_c99_async_generator_settle(host, step, produced, 0, depth, thrown);
         frame->queue_executing = 0;
@@ -450,33 +474,14 @@ static int kiln_c99_async_step(kiln_host *host, kiln_value generator, kiln_value
                                           depth, thrown, frame, 0);
     produced = kiln_val_to_boundary(vproduced);
     if (status == KILN_C99_YIELDED) {
-        kiln_value awaited = produced;
-        kiln_value resume;
-        kiln_value raise;
-        kiln_value ignored;
         frame->started = 1;
-        if (awaited.tag != KILN_VALUE_PROMISE) {
-            /* Awaiting a plain value still yields to the queue: `await 1` is a suspension, and a
-             * program that relies on it running later is relying on that. */
-            kiln_value immediate;
-            status = kiln_c99_new_promise(&immediate);
-            if (status == KILN_C99_OK) {
-                status = kiln_c99_settle(immediate, awaited, 0);
-            }
-            if (status != KILN_C99_OK) {
-                return status;
-            }
-            awaited = immediate;
+        if (produced.tag != KILN_VALUE_PROMISE) {
+            /* Awaiting a plain value still yields to the queue: `await 1` is a suspension, and
+             * the resumption is a job -- one job, as a promise already fulfilled with the value
+             * would have queued. */
+            return kiln_c99_enqueue(generator, produced, kiln_c99_undefined(), 0, 1);
         }
-        status = kiln_c99_bind(&resume, kiln_c99_method(KILN_C99_METHOD_ASYNC_RESUME), generator);
-        if (status == KILN_C99_OK) {
-            status = kiln_c99_bind(&raise, kiln_c99_method(KILN_C99_METHOD_ASYNC_THROW),
-                                   generator);
-        }
-        if (status != KILN_C99_OK) {
-            return status;
-        }
-        return kiln_c99_then(awaited, resume, raise, &ignored);
+        return kiln_c99_then_continue(produced, generator);
     }
     frame->done = 1;
     if (status == KILN_C99_THROWN) {

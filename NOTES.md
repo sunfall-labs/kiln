@@ -5131,3 +5131,56 @@ interned key pointer, in C statics is unsafe: one OS thread hosts several realms
 the thread-local the Rust side keeps is rewritten on every realm entry, and compiled C has no
 hook for "the realm changed under me". Several caches the runtime would like are per-realm for
 that reason; a realm generation the C can compare against is the mechanism they all need.
+
+## An await is a step, a builtin is a stamp, a kind is a load (2026-09-06, Claude `work/fastest-native`)
+
+**microtasks 2.72 → 1.12 ms** (node 0.43), from three defects the profile named and one it hid.
+
+*The kind of a boxed pointer was a heap search.* `kiln_c99_gc_kind_of_ptr` ran the nursery
+bitmap probe, the slab binary search and the interior fallback to answer a word that sits one
+`kiln_gc_block` before every payload the allocator hands out -- nursery, slab and large block
+alike. Every emitted array and collection method call asked it, and so did every boxed pointer
+crossing into a `kiln_value`. It is the header read now; under `KILN_GC_STRESS` the read is
+checked against the search it replaced, and a pointer that never came from the allocator traps
+where it is used. This is also what item 4 of the list (buffer) was, generalised: buffer 6.06 →
+5.57 ms without touching a buffer method.
+
+*A static builtin call re-resolved its name every time.* `kiln_c99_cached_method_matches` had
+arms for strings, numbers, arrays, typed arrays and collections and none for `KILN_VALUE_BUILTIN`,
+so `Promise.resolve(i)` -- and `Object.keys`, `JSON.stringify`, any `X.f()` on a constructor or
+namespace -- went through `kiln_realm_callable_store` (an FFI call), `kiln_c99_builtin_member`
+and `memcmp` on each call. A site now remembers which builtin it saw, stamped with a store epoch
+that every write onto any builtin's own-property store moves (`kiln_c99_builtin_store_epoch`,
+bumped where `kiln_c99_callable_store` is asked to create) and with the realm generation the
+last entry made readable in C. Proved by probe: `Object.keys = f` and `Promise.resolve = f` are
+seen by the next call at a site that had cached, and the original is seen again when restored.
+Not covered, and filed: `Math.max = f` is not seen because the emitter lowers `Math.*` to an
+intrinsic behind a builtin-id guard that knows nothing of the epoch
+(`.scratch/builtin-static-override`).
+
+*An await allocated two bound closures and a promise nobody could reach.* `kiln_c99_async_step`
+bound `@@resume` and `@@throw` to the frame and called `kiln_c99_then`, which made a derived
+promise; the resumption then travelled `kiln_c99_call` → bound → method dispatch → `async_step`.
+The reaction now carries the frame itself (`kiln_reaction.continuation`), `kiln_c99_run_microtask`
+steps it directly, and a plain awaited value queues one job with no promise around it -- the
+same tick either way. Five allocations an iteration became two (the promise `Promise.resolve`
+must make, and the job). The hidden defect: a continuation reads the task's fields by value,
+so the cell was unreachable during the step, a collection inside the step reclaimed the slot,
+and the queue's drop callback then released it a second time -- the old `kiln_c99_gc_release`
+had been failing its search and returning silently, which is how the double release never
+showed. `kiln_c99_gc_keep_alive` pins the cell to the end of the step, and the new
+`kiln_c99_gc_release_cell` (header-based, no search: nursery flag, a `KILN_GC_FLAG_LARGE` for
+malloc'd blocks, slab base by alignment) refuses a slot that is already free. Ordering was
+proved against node and against the runtime before the change, which print the same thing; the
+two places both differ from node -- an async generator's consumer resumes a tick early, and a
+thenable is not adopted -- predate it and are filed (`.scratch/await-tick-order`).
+
+*Slab churn.* A class that grew to sixty slabs in one turn kept four at collection and returned
+the rest to the allocator, then took them straight back; retention is now the larger of four
+and a quarter of the class, so a class that stops growing still shrinks geometrically.
+
+What remains in microtasks, by the profile: the method dispatch prologue (`numeric_arguments`,
+`textual_arguments`, `method_groups` computed for every code, 10%), the `Rc<WorkOwner>` the Rust
+queue allocates per job (malloc and free, 12%), the allocations themselves (11%), the
+collections they cause (10%), and the two boundary conversions around `invoke_method` (8%).
+Node is 0.43 ms; each of those is a change to one place.

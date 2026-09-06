@@ -46,11 +46,14 @@
  * find) in its top two. `KILN_GC_KIND_COUNT` is nowhere near the mask's ~30 low bits, so the two
  * high bits are free; every reader of `block->kind` as a `kiln_gc_kind` must mask with
  * `KILN_GC_KIND_MASK` first. */
-#define KILN_GC_KIND_MASK ((uint32_t)0x0FFFFFFFu)
+#define KILN_GC_KIND_MASK ((uint32_t)0x07FFFFFFu)
 #define KILN_GC_FLAG_ASCII_KNOWN ((uint32_t)0x80000000u)
 #define KILN_GC_FLAG_ASCII ((uint32_t)0x40000000u)
 #define KILN_GC_FLAG_NURSERY ((uint32_t)0x20000000u)
 #define KILN_GC_FLAG_DEAD ((uint32_t)0x10000000u)
+/* A block malloc'd on its own, outside every slab: with `KILN_GC_FLAG_NURSERY` this lets a header
+ * alone say where its block lives, which is what `kiln_c99_gc_release_cell` needs. */
+#define KILN_GC_FLAG_LARGE ((uint32_t)0x08000000u)
 
 typedef struct kiln_gc_block {
     struct kiln_gc_block *prev;
@@ -207,6 +210,8 @@ typedef struct kiln_gc_heap {
     kiln_gc_ptrset large_table;
     kiln_gc_ptrset slab_table;
     kiln_gc_slab *all_slabs;
+    uint32_t class_slab_count[(KILN_GC_SLAB_CLASS_MAX - KILN_GC_SLAB_CLASS_MIN) /
+                              KILN_GC_SLAB_CLASS_STEP + 1]; /* slabs of each class, live */
     kiln_gc_slab *class_free_head[(KILN_GC_SLAB_CLASS_MAX - KILN_GC_SLAB_CLASS_MIN) /
                                        KILN_GC_SLAB_CLASS_STEP +
                                    1];
@@ -246,6 +251,11 @@ typedef struct kiln_gc_heap {
 static const kiln_gc_hooks kiln_c99_gc_hooks;
 /* The heap a unit uses when no realm is active: the prelude's own tests. It never collects. */
 static kiln_gc_heap kiln_c99_gc_fallback;
+
+/* Set with `KILN_GC_STRESS`, and read only on `kiln_c99_gc_kind_of_ptr`: the header read is checked
+ * against the heap search it replaced, so a pointer that never came from the allocator is caught
+ * where it is used rather than where its garbage kind is acted on. */
+static int kiln_c99_gc_stress_checks;
 
 static void kiln_c99_nursery_init(kiln_gc_nursery *nursery) {
     const char *setting;
@@ -317,6 +327,7 @@ static void kiln_c99_gc_heap_init(kiln_gc_heap *heap) {
         }
         heap->stress_every = every == 0 ? 1 : every;
         heap->stress_countdown = heap->stress_every;
+        kiln_c99_gc_stress_checks = 1;
     }
     setting = getenv("KILN_GC_TRACE");
     heap->trace = setting != NULL && setting[0] != '\0' && setting[0] != '0';
@@ -561,6 +572,15 @@ static kiln_gc_heap *kiln_c99_gc_heap(void) {
     return heap;
 }
 
+/* The generation of the realm this thread is in: the word `kiln_c99_gc_heap` trusts its heap
+ * pointer under, for any other cache in compiled C that must not outlive the realm it learned
+ * from. */
+static inline uint64_t kiln_c99_realm_generation(void) {
+    kiln_realm_cache *cache = &kiln_c99_realm_cached;
+    if (cache->generation_slot == NULL) cache->generation_slot = kiln_realm_generation_slot();
+    return *cache->generation_slot;
+}
+
 static kiln_gc_heap *kiln_c99_gc_heap_uncached(void) {
     void *attached = kiln_realm_gc_current_heap();
     kiln_gc_heap *candidate;
@@ -769,12 +789,18 @@ static void kiln_c99_gc_slab_maybe_destroy(kiln_gc_heap *heap, kiln_gc_slab *sla
             if (other != slab && other->free_count == other->slot_count) ++spare;
             other = other->free_next;
         }
-        if (spare < 4) return;
+        /* Four spares, or a quarter of the class, whichever is more: a class that ran to sixty
+         * slabs between collections -- twenty thousand promises and their jobs in one turn --
+         * would otherwise return fifty-six of them to the allocator at each collection and take
+         * them straight back, and that churn was a tenth of such a loop. A class that stops
+         * growing still shrinks, by a quarter per collection. */
+        if (spare < 4 || spare * 4 < heap->class_slab_count[slab->class_index]) return;
     }
     if (slab->free_prev == NULL && slab->free_next == NULL) return;
     kiln_c99_gc_slab_unlink_free(heap, slab);
     kiln_c99_gc_slab_unlink_all(heap, slab);
     kiln_c99_gc_ptrset_remove(&heap->slab_table, slab);
+    heap->class_slab_count[slab->class_index] -= 1;
     kiln_c99_gc_aligned_free(slab);
 }
 
@@ -816,6 +842,7 @@ static kiln_gc_slab *kiln_c99_gc_slab_new(kiln_gc_heap *heap, int class_index) {
     slab->all_next = heap->all_slabs;
     if (heap->all_slabs != NULL) heap->all_slabs->all_prev = slab;
     heap->all_slabs = slab;
+    heap->class_slab_count[class_index] += 1;
     slab->free_prev = NULL;
     slab->free_next = heap->class_free_head[class_index];
     if (heap->class_free_head[class_index] != NULL)
@@ -966,24 +993,40 @@ static kiln_gc_block *kiln_c99_gc_lookup(const kiln_gc_heap *heap, const void *p
     return NULL;
 }
 
-static uint32_t kiln_c99_gc_kind_of_ptr(const void *ptr) {
-    kiln_gc_heap *heap = kiln_c99_gc_heap();
-    if (heap == NULL || ptr == NULL) return 0;
-    kiln_gc_block *block = kiln_c99_gc_lookup(heap, ptr);
-    if (block == NULL) return 0;
-    return block->kind & KILN_GC_KIND_MASK;
+/* Keep `payload` a root until here. The collector finds a C frame's pointers by scanning the
+ * stack, and a pointer whose last use is behind it has usually left the stack by the time the
+ * frame allocates again; a caller that will hand the payload to something after that -- the
+ * queue's drop callback, a finaliser -- names the point it must survive to with this. */
+static inline void kiln_c99_gc_keep_alive(const void *payload) {
+    __asm__ volatile("" : : "r"(payload) : "memory");
 }
 
-/* The same answer as `kiln_c99_gc_kind_of_ptr`, without its slab lookup, for a pointer the caller
- * already knows is a live GC payload -- one just taken off a `kiln_val` this frame holds, never an
- * untrusted or possibly-interior address (that is what `kiln_c99_gc_lookup` is for). The block
- * header is exactly one `kiln_gc_block` before the payload regardless of nursery, slab or malloc
- * origin (see `kiln_c99_gc_alloc_ex` above), so this is pointer arithmetic and one read instead of
- * a slab-table probe. A fast path that only ever sees a `kiln_val` it already trusts (a shaped
- * object's own key path, the target `DefineNamedProperty` writes onto) can use this in place of
- * `kiln_c99_gc_kind_of_ptr` for one call fewer of `kiln_c99_gc_lookup_slab` on its hot path. */
+/* The kind of a heap payload, read from the block header in front of it. The header is exactly
+ * one `kiln_gc_block` before the payload whatever its origin -- nursery, slab or malloc, see
+ * `kiln_c99_gc_alloc_ex` above -- so this is pointer arithmetic and one load. */
 static inline uint32_t kiln_c99_gc_payload_kind(const void *payload) {
     return ((const kiln_gc_block *)payload - 1)->kind & KILN_GC_KIND_MASK;
+}
+
+/* The kind of the payload a boxed pointer names.
+ *
+ * Every pointer an object, buffer or generator prefix can box came out of `kiln_c99_gc_alloc_ex`,
+ * so its kind is the header read above. This used to be the heap search instead -- a nursery
+ * bitmap probe, a binary search over the slabs, then the interior fallback -- and that search was
+ * the largest single cost of every array and collection method call the emitted C makes, and of
+ * every boxed pointer crossing to a `kiln_value`; it answered the same word. The search remains
+ * the tool for a word that may not be a pointer at all, which is the conservative scanner's
+ * question and never this one. */
+static uint32_t kiln_c99_gc_kind_of_ptr(const void *ptr) {
+    uint32_t kind;
+    if (ptr == NULL) return 0;
+    kind = kiln_c99_gc_payload_kind(ptr);
+    if (KILN_UNLIKELY(kiln_c99_gc_stress_checks)) {
+        kiln_gc_heap *heap = kiln_c99_gc_heap();
+        kiln_gc_block *block = heap == NULL ? NULL : kiln_c99_gc_lookup(heap, ptr);
+        if (block == NULL || (block->kind & KILN_GC_KIND_MASK) != kind) __builtin_trap();
+    }
+    return kind;
 }
 
 /* A branch-light ASCII test, 8 bytes at a time: ASCII is exactly the bytes with their top bit
@@ -1289,7 +1332,7 @@ static void *kiln_c99_gc_alloc_ex(uint32_t kind, size_t size, int zero_payload) 
         free(block);
         return NULL;
     }
-    block->kind = kind;
+    block->kind = kind | KILN_GC_FLAG_LARGE;
     block->mark = 0;
     block->size = size;
     block->prev = NULL;
@@ -1353,7 +1396,7 @@ static void *kiln_c99_gc_alloc_tenured(uint32_t kind, size_t size) {
         free(block);
         return NULL;
     }
-    block->kind = kind;
+    block->kind = kind | KILN_GC_FLAG_LARGE;
     block->mark = 0;
     block->size = size;
     block->prev = NULL;
@@ -1623,6 +1666,56 @@ static void kiln_c99_gc_finalize(kiln_gc_block *block);
 
 /* Explicit release for a block whose lifetime is already known: queued work after it ran, a
  * host-operation completion after its callback. The collector remains the backstop. */
+/* Release a payload the caller allocated itself and knows to be whole and live: a microtask the
+ * queue has run, a settler, a store. The header in front of it says where it lives -- nursery,
+ * large block, or a slab, whose base is the address rounded down to the slab size -- so no
+ * search is made. `kiln_c99_gc_release` below is the general form, for a pointer that may be a
+ * string's bytes or otherwise interior; it searches. */
+static void kiln_c99_gc_release_cell(void *payload) {
+    kiln_gc_heap *heap;
+    kiln_gc_block *block;
+    if (payload == NULL) return;
+    heap = kiln_c99_gc_heap();
+    if (heap == NULL) return;
+    block = (kiln_gc_block *)payload - 1;
+    /* Already on a free list, or already finalised: a collection got here first. The general
+     * release answers that case by failing its search; this one reads the header's own word. */
+    if (block->size == KILN_GC_SLOT_FREE || (block->kind & KILN_GC_FLAG_DEAD)) return;
+    if (block->kind & KILN_GC_FLAG_NURSERY) {
+        if ((block->kind & KILN_GC_FLAG_DEAD) == 0) {
+            kiln_c99_gc_finalize(block);
+            block->kind |= KILN_GC_FLAG_DEAD;
+            kiln_c99_nursery_clear_bit(heap, block);
+            heap->freed_blocks += 1;
+            heap->freed_bytes += block->size;
+            heap->count -= 1;
+            heap->bytes -= block->size;
+        }
+        return;
+    }
+    kiln_c99_gc_finalize(block);
+    heap->freed_blocks += 1;
+    heap->freed_bytes += block->size;
+    if (block->kind & KILN_GC_FLAG_LARGE) {
+        kiln_c99_gc_unlink(heap, block);
+        kiln_c99_gc_ptrset_remove(&heap->large_table, block);
+        free(block);
+        return;
+    }
+    {
+        kiln_gc_slab *slab =
+            (kiln_gc_slab *)((uintptr_t)block & ~(uintptr_t)(KILN_GC_SLAB_SIZE - 1));
+        heap->count -= 1;
+        heap->bytes -= block->size;
+        block->size = KILN_GC_SLOT_FREE;
+        block->kind = KILN_GC_NONE;
+        block->next = slab->free_head;
+        slab->free_head = block;
+        if (++slab->free_count == 1) kiln_c99_gc_slab_link_free(heap, slab);
+        if (slab->free_count == slab->slot_count) kiln_c99_gc_slab_maybe_destroy(heap, slab);
+    }
+}
+
 static void kiln_c99_gc_release(void *payload) {
     kiln_gc_heap *heap;
     kiln_gc_slab *slab = NULL;
@@ -2112,6 +2205,7 @@ static void kiln_c99_gc_sweep(kiln_gc_heap *heap, int orphan_marked) {
                 if (slab->free_count != 0) kiln_c99_gc_slab_unlink_free(heap, slab);
                 kiln_c99_gc_slab_unlink_all(heap, slab);
                 kiln_c99_gc_ptrset_remove(&heap->slab_table, slab);
+                heap->class_slab_count[slab->class_index] -= 1;
                 kiln_c99_gc_aligned_free(slab);
             }
             /* else: leaked with a live survivor inside; the heap is being torn down anyway. */

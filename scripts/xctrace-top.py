@@ -35,6 +35,6 @@ for m in re.finditer(r'<row>(.*?)</row>', xml, re.S):
     sym[name]+=1
     if b[0]==binname: addrs[(name, addr-b[1])]+=1
 tot=sum(sym.values()); print("samples:", tot)
-for n,c in sym.most_common(8): print(f"{c:6d} {n[:90]}")
+for n,c in sym.most_common(topn): print(f"{c:6d} {n[:90]}")
 print("--- hottest instructions (offset from load address)")
 for (n,off),c in addrs.most_common(topn): print(f"{c:5d} +0x{off:x}  {n[-24:]}")

@@ -452,7 +452,7 @@ static int kiln_c99_settle(kiln_value promise, kiln_value value, int rejected);
 static int kiln_c99_then(kiln_value promise, kiln_value on_fulfilled, kiln_value on_rejected,
                          kiln_value *out);
 static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value derived,
-                            int rejected);
+                            int rejected, int continuation);
 static int kiln_c99_enqueue_next_tick(kiln_value callback, const kiln_value *args, size_t argc);
 static int kiln_c99_run_microtask(void *work, void *host, void *thrown);
 static void kiln_c99_drop_microtask(void *work);
