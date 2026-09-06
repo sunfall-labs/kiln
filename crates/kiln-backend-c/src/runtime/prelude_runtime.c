@@ -6137,6 +6137,13 @@ static kiln_value kiln_c99_new_target;
  * compute a fresh one. */
 static int kiln_c99_inheriting_new_target;
 
+/* Why a typed entry returned `KILN_VAL_TYPED_FAIL`, and what it threw when the status is a
+ * throw. A typed entry carries no `thrown` slot of its own unless its body needs one, so a
+ * failure leaves the way an exception leaves any frame: pending, for the caller to pick up at
+ * once. Both are frame state; nothing reads them past the call that set them. */
+static int kiln_c99_typed_status;
+static kiln_value kiln_c99_typed_thrown;
+
 /* What a derived constructor's `super()` produced, when a built-in parent produced something
  * other than the instance `new` allocated.
  *

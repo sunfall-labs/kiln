@@ -21537,6 +21537,14 @@ static int kiln_c99_throw_error(kiln_value *thrown, uint64_t kind, const char *m
     return KILN_C99_THROWN;
 }
 
+/* A typed entry at the call-depth limit: the `RangeError` the generic call would throw, left
+ * pending for the caller of the typed entry that stopped. */
+static void kiln_c99_typed_overflow(void) {
+    kiln_c99_typed_thrown = kiln_c99_undefined();
+    kiln_c99_typed_status = kiln_c99_throw_error(&kiln_c99_typed_thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                                "Maximum call stack size exceeded");
+}
+
 static int kiln_c99_throw_node_invalid_arg_type(kiln_value *thrown, const char *message) {
     int status = kiln_c99_new_error(
         thrown, KILN_C99_BUILTIN_TYPE_ERROR, kiln_c99_copy_text(message, strlen(message)));

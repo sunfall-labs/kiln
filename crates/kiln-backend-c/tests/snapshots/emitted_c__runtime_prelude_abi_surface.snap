@@ -664,6 +664,9 @@ typedef uint64_t kiln_val;
 #define KILN_TAG_BIGINT_PREFIX   UINT64_C(0xFFFE000000000000)
 #define KILN_TAG_TEMPORAL_PREFIX UINT64_C(0xFFFE800000000000)
 #define KILN_TAG_CELL_PREFIX     UINT64_C(0xFFFF000000000000)
+#define KILN_VAL_TYPED_FAIL     UINT64_C(0xFFF8000000000008)
+static inline double kiln_c99_typed_fail_double(void) {
+static inline int kiln_c99_typed_failed(double d) {
 #define KILN_VAL_IS_NUMBER(v)    ((uint64_t)(v) < UINT64_C(0xFFF8000000000000))
 #define KILN_VAL_IS_BOOLEAN(v)   (((uint64_t)(v) & UINT64_C(0xFFFFFFFFFFFFFFFE)) == KILN_VAL_FALSE)
 #define KILN_VAL_IS_NULL(v)      ((v) == KILN_VAL_NULL)
@@ -1388,6 +1391,8 @@ static const char *kiln_c99_builtin_name(uint64_t builtin) {
 static int kiln_c99_expand_replacement(kiln_text *out, const uint16_t *pattern,
 static kiln_value kiln_c99_new_target;
 static int kiln_c99_inheriting_new_target;
+static int kiln_c99_typed_status;
+static kiln_value kiln_c99_typed_thrown;
 static kiln_value kiln_c99_adopted_this;
 static const kiln_val *kiln_c99_frame_args;
 static size_t kiln_c99_frame_argc;
@@ -1823,6 +1828,7 @@ static int kiln_c99_throw_module_namespace_define(kiln_value *thrown, const char
 static int kiln_c99_throw_module_namespace_freeze(kiln_value *thrown) {
 static int kiln_c99_throw_cannot_delete(kiln_value *thrown, const char *key, size_t key_len) {
 static int kiln_c99_throw_error(kiln_value *thrown, uint64_t kind, const char *message) {
+static void kiln_c99_typed_overflow(void) {
 static int kiln_c99_throw_node_invalid_arg_type(kiln_value *thrown, const char *message) {
 static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value derived,
 static int kiln_c99_enqueue_next_tick(kiln_value callback, const kiln_value *args, size_t argc) {

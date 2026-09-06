@@ -42,6 +42,25 @@ typedef uint64_t kiln_val;
 #define KILN_TAG_TEMPORAL_PREFIX UINT64_C(0xFFFE800000000000)
 #define KILN_TAG_CELL_PREFIX     UINT64_C(0xFFFF000000000000)
 
+/* What a typed entry returns instead of its number when it failed -- a throw, a refusal, or the
+ * call-depth limit. No arithmetic produces this NaN payload and no value carries it, so the
+ * caller tells failure from any result by one comparison; the status and the thrown value wait
+ * in `kiln_c99_typed_status` and `kiln_c99_typed_thrown`. */
+#define KILN_VAL_TYPED_FAIL     UINT64_C(0xFFF8000000000008)
+static inline double kiln_c99_typed_fail_double(void) {
+    union { uint64_t u; double d; } bits = { .u = KILN_VAL_TYPED_FAIL };
+    return bits.d;
+}
+static inline int kiln_c99_typed_failed(double d) {
+    /* A number that is a number is not the failure value; the bit comparison, which needs the
+     * constant in a register, runs only for a NaN. */
+    if (KILN_LIKELY(d == d)) {
+        return 0;
+    }
+    union { double d; uint64_t u; } bits = { .d = d };
+    return bits.u == KILN_VAL_TYPED_FAIL;
+}
+
 #define KILN_VAL_IS_NUMBER(v)    ((uint64_t)(v) < UINT64_C(0xFFF8000000000000))
 #define KILN_VAL_IS_BOOLEAN(v)   (((uint64_t)(v) & UINT64_C(0xFFFFFFFFFFFFFFFE)) == KILN_VAL_FALSE)
 #define KILN_VAL_IS_NULL(v)      ((v) == KILN_VAL_NULL)

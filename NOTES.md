@@ -4761,7 +4761,20 @@ function already held, and a NaN canonicalisation on every argument that only a 
 needs. A `kiln_val` that is a number is its double's bits, so the caller boxes the result and
 the C compiler deletes the box where nothing reads it untyped.
 
-Not done: the plan's 5 ms for fib. The hand-emitted `double fib(double)` reaches 2 ms because
-clang inlines levels of the recursion, which it cannot do through a status-returning call with
-a pointer result; a `double`-returning entry with a sentinel for a throw is the next thing to
-try. The `frame` benchmark is untouched by design: every function in it publishes a frame.
+**Then the entry took only what its body names, and fib crossed node.** The machine code
+of the 31 ms entry spent its instructions saving and restoring five pointer-sized parameters
+across two recursive calls, storing a pointer result, and comparing a status. The entry now
+declares only what its emitted body names -- the text is scanned for `host`, `thrown`,
+`upvalues` and `receiver`, a callee's needs are its caller's, and a pure read nothing consumes
+is not emitted at all, so fib's is `double fib_t(int depth, double n)`. The number comes back
+in a register. A failure -- a throw, a refusal, the depth limit -- comes back as
+`KILN_VAL_TYPED_FAIL`, a NaN payload no arithmetic produces and no value carries, with the
+status and the thrown value left pending in two frame globals for the caller to take up; the
+test for it is `d == d` first, so a number pays one compare and no constant. fib: 13 ms
+against node's 22.
+
+**The ceiling was wrong by five.** The hand-emitted `fib.c` reported 2.2 ms because clang had
+hoisted its pure `fib_generic(30)` out of the five-iteration loop and timed one `fib(30)` as
+five; a `volatile` argument fixes it and the honest ceiling is 11 ms. The plan's "fib ≤ 5 ms"
+was set against the wrong number; the corrected target, within 1.2x of the ceiling, is met.
+The `frame` benchmark is untouched by design: every function in it publishes a frame.
