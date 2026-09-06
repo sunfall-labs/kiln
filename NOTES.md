@@ -5046,3 +5046,46 @@ builtin method table, and that table is searched by string compare; the rest is 
 and per-append reallocation in the parser. **array-functional 9.6x** is one line: every arrow
 was deemed to publish a frame, so every callback went through the general closure invocation
 and no arrow could be a direct callee. Both are with subagents as this is written.
+
+## Collecting inside a turn (2026-09-06, Claude `work/fastest-native`)
+
+**Why.** The collector ran only between turns, where no frame of the program is live and the
+realm's roots are the whole root set. A synchronous loop never had its garbage reclaimed: it
+spilled out of the 2 MiB nursery into slabs and grew until the turn ended. object-spread
+peaked at 6.6 GB resident, array-functional at 4 GB.
+
+**What.** JavaScriptCore's answer, which fits a compiler that emits C: conservative roots on
+the machine stack, a precise heap, and no moving. An allocation that finds the bytes since the
+last collection past a floor (4 MiB, or twice what survived) collects on the spot. The scan
+spills the callee-saved registers with `__builtin_unwind_init` and `setjmp`, then walks every
+word from its own frame to the thread's stack base (`pthread_get_stackaddr_np`; the Rust frames
+above are scanned too and cannot be harmed). A word is tried as a raw address and, when its
+top bits are a box prefix, as a box's payload; an interior-pointer lookup over the existing slab
+table and nursery bitmaps names the block that contains it, which is what a register holding a
+slots array or an element pointer needs. Mid-turn the nursery is left alone, since nothing
+moves and its reset belongs to the turn's end; the slabs are swept. Three things made it
+safe: slab payloads are zeroed so a collection cannot trace a half-built object; empty slabs
+are kept for reuse (four per class) instead of being freed and re-created every cycle; and a
+call-site cache that remembers a holder registers itself and is cleared when the holder dies,
+so a stale entry can never match an object that later reuses the address.
+
+**Proof.** `KILN_GC_STRESS=N` collects every N allocations. Every probe matches node at N=1,
+the whole native corpus at N=16, lodash at N=64. A root the scan missed shows up within a few
+allocations as a freed block under a live reference, which is the point of the knob.
+
+**What it did and did not do.** Peak memory: megabytes. Time: almost nothing -- object-spread
+4.43 → 4.05 ms, array-functional 3.53 → 3.26, microtasks unchanged, json unchanged. These loops
+were paying for the runtime's paths, not for the memory. The trigger also fired every 256 KB
+at first, seventeen thousand collections in one run, before the mid-turn floor was set apart
+from the turn-end one. Instruments (`xctrace record --template 'CPU Profiler'`, exported and
+aggregated by instruction) then showed where the rest is: for array-functional, nothing hot,
+just the boxed call protocol spread evenly across the intrinsic loop and the three callbacks;
+for microtasks, the built-in surface table resolving `Promise.resolve` by a string compare per
+row, now one binary search over the same rows sorted once (2.98 → 2.73 ms).
+
+**Not done, deliberately.** Generational collection by sticky mark bits and a write barrier
+(the second half of the JSC design) waits until a workload with a large live heap pays for
+full marks; the barrier has to be on every reference store and a missed one is silent, so it
+is a project, not a patch. Large blocks are found by their payload address only; an interior
+pointer into a large block held in a register with no other reference would be missed, and
+none of the corpus does that, but it is the known hole.
