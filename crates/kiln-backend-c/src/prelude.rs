@@ -4006,6 +4006,10 @@ pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_method_index", C99StateOwner::Constant),
     ("kiln_c99_method_index_len", C99StateOwner::Constant),
     ("kiln_c99_method_index_ready", C99StateOwner::Constant),
+    // The surface table's index: the same rows sorted once, a constant once built.
+    ("kiln_c99_builtin_member_index", C99StateOwner::Constant),
+    ("kiln_c99_builtin_member_index_len", C99StateOwner::Constant),
+    ("kiln_c99_builtin_member_index_ready", C99StateOwner::Constant),
     ("kiln_c99_introspect_pending", C99StateOwner::Process),
     ("kiln_c99_introspect_armed", C99StateOwner::Process),
     ("kiln_c99_root_shape", C99StateOwner::Constant),

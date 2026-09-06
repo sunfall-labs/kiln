@@ -904,6 +904,7 @@ static kiln_data_view *kiln_c99_data_view_of(kiln_value value) {
 #define KILN_GC_ROOT_SURVIVES_TEARDOWN 1u
 #define KILN_GC_HOOKS_VERSION 2u
 #define KILN_GC_DEFAULT_FLOOR ((size_t)256 * 1024)
+#define KILN_GC_MID_TURN_FLOOR ((size_t)4 * 1024 * 1024)
 /* What the `introspect` hook reports back, as a bitmask. `ARMED` is what tells the drive to keep
  * its park short enough to notice a signal; `DUMPED` says a request was pending and was served. */
 #define KILN_C99_INTROSPECT_ARMED 1
@@ -1091,6 +1092,25 @@ typedef struct kiln_gc_heap {
      * KILN_C99_HOT_KEYS. NULL means "not interned in this heap yet"; the table is per-heap
      * because a canonical pointer from one realm means nothing in another. */
     const char *hot_keys[KILN_C99_HOT_KEY_COUNT];
+    /* Mid-turn collection (perf/gc-mid-turn). The collector used to run only between turns,
+     * when no frame of the program is live and the realm's roots are the whole root set. A
+     * synchronous loop then never had its garbage reclaimed: it spilled out of the nursery into
+     * slabs and grew until the turn ended. An allocation that finds `since_collection` past
+     * the threshold now collects on the spot, with the program's frames found the way
+     * JavaScriptCore finds them: every word of the machine stack, and of the callee-saved
+     * registers spilled onto it, that decodes to an address inside a live block is a root.
+     * Objects never move, so a word that only looks like a pointer keeps one block alive for
+     * one collection and costs nothing else. */
+    void *stack_base;
+    int mid_turn;
+    size_t stress_every;
+    size_t stress_countdown;
+    /* Call-site caches that remember a heap object -- the holder a method lives on -- are
+     * registered on first fill and cleared after any collection that frees what they
+     * remember, so a stale entry can never match an object that later reuses the address. */
+    kiln_c99_site **sites;
+    size_t site_len;
+    size_t site_cap;
 } kiln_gc_heap;
 
 static const kiln_gc_hooks kiln_c99_gc_hooks;
@@ -1155,6 +1175,19 @@ static void kiln_c99_gc_heap_init(kiln_gc_heap *heap) {
     if (setting != NULL && setting[0] == '0' && setting[1] == '\0') heap->enabled = 0;
     setting = getenv("KILN_GC_STRESS");
     heap->stress = setting != NULL && setting[0] != '\0' && setting[0] != '0';
+    /* `KILN_GC_STRESS=N` also collects mid-turn every N allocations, `1` on every one: the
+     * conservative scan's correctness test, since a root it misses shows up as a freed block
+     * under a live reference within a few allocations. */
+    if (heap->stress) {
+        size_t every = 0;
+        const char *digit = setting;
+        while (*digit >= '0' && *digit <= '9' && every < ((size_t)-1) / 10) {
+            every = every * 10 + (size_t)(*digit - '0');
+            ++digit;
+        }
+        heap->stress_every = every == 0 ? 1 : every;
+        heap->stress_countdown = heap->stress_every;
+    }
     setting = getenv("KILN_GC_TRACE");
     heap->trace = setting != NULL && setting[0] != '\0' && setting[0] != '0';
     setting = getenv("KILN_GC_FLOOR_KIB");
@@ -1565,6 +1598,18 @@ static void kiln_c99_gc_slab_unlink_all(kiln_gc_heap *heap, kiln_gc_slab *slab) 
  * its class (`free_prev`/`free_next` both NULL): that bounds retention to about one empty slab
  * per class without forcing a fresh slab on the very next allocation of that class. */
 static void kiln_c99_gc_slab_maybe_destroy(kiln_gc_heap *heap, kiln_gc_slab *slab) {
+    /* An empty slab is kept for reuse while the class has few of them: a loop that fills and
+     * frees the same slabs every collection would otherwise create and initialise them again
+     * each time, and that churn was a fifth of an allocation-heavy loop. */
+    {
+        size_t spare = 0;
+        const kiln_gc_slab *other = heap->class_free_head[slab->class_index];
+        while (other != NULL) {
+            if (other != slab && other->free_count == other->slot_count) ++spare;
+            other = other->free_next;
+        }
+        if (spare < 4) return;
+    }
     if (slab->free_prev == NULL && slab->free_next == NULL) return;
     kiln_c99_gc_slab_unlink_free(heap, slab);
     kiln_c99_gc_slab_unlink_all(heap, slab);
@@ -1819,12 +1864,200 @@ static inline int kiln_c99_gc_is_tenured_kind(uint32_t kind) {
            k == KILN_GC_TIMER;
 }
 
+#include <setjmp.h>
+#include <pthread.h>
+
+/* The highest address of this thread's stack, from the thread itself: the realm runs on one
+ * thread, so the base is found once and kept. Above it lie the launcher's and the runtime's
+ * own frames, which scanning them cannot harm. */
+static void *kiln_c99_gc_stack_base(kiln_gc_heap *heap) {
+    if (heap->stack_base == NULL) {
+#if defined(__APPLE__)
+        heap->stack_base = pthread_get_stackaddr_np(pthread_self());
+#else
+        pthread_attr_t attr;
+        void *addr = NULL;
+        size_t size = 0;
+        if (pthread_getattr_np(pthread_self(), &attr) == 0) {
+            if (pthread_attr_getstack(&attr, &addr, &size) == 0 && addr != NULL) {
+                heap->stack_base = (char *)addr + size;
+            }
+            pthread_attr_destroy(&attr);
+        }
+#endif
+    }
+    return heap->stack_base;
+}
+
+/* The block whose start is the nearest set bit at or below `bit_idx` in a nursery bitmap, if
+ * `address` falls inside it: blocks are 16-byte aligned and every start has its bit set. */
+static kiln_gc_block *kiln_c99_gc_bitmap_block(const uint64_t *bitmap, size_t bitmap_words,
+                                               const char *base, uintptr_t address) {
+    size_t bit_idx = (size_t)((const char *)address - base) >> 4;
+    while (1) {
+        size_t word = bit_idx >> 6;
+        uint64_t below = ((uint64_t)1 << (bit_idx & 63)) | (((uint64_t)1 << (bit_idx & 63)) - 1);
+        uint64_t mask = word < bitmap_words ? bitmap[word] & below : 0;
+        if (mask != 0) {
+            size_t top = 63 - (size_t)__builtin_clzll(mask);
+            kiln_gc_block *block = (kiln_gc_block *)(base + (((word << 6) + top) << 4));
+            size_t payload = block->size == 0 ? 1 : block->size;
+            if ((block->kind & KILN_GC_FLAG_DEAD) != 0) return NULL;
+            if ((const char *)address < (const char *)block + sizeof(kiln_gc_block) + payload) return block;
+            return NULL;
+        }
+        if (word == 0) return NULL;
+        bit_idx = (word << 6) - 1;
+    }
+}
+
+/* The live block that contains `address`, if any: an address anywhere inside a slab slot, a
+ * nursery block, or a promoted chunk's block finds the block, which is what a register holding
+ * a slots array or an element pointer needs. A large block is found by its payload address
+ * only. A free slot or a dead nursery block is nothing. */
+static kiln_gc_block *kiln_c99_gc_lookup_interior(const kiln_gc_heap *heap, uintptr_t address) {
+    void *slab_base;
+    const kiln_nursery_chunk *chunk;
+    if (address < sizeof(kiln_gc_block)) return NULL;
+    slab_base = (void *)(address & ~(uintptr_t)(KILN_GC_SLAB_SIZE - 1));
+    if (kiln_c99_gc_ptrset_contains(&heap->slab_table, slab_base)) {
+        const kiln_gc_slab *slab = (const kiln_gc_slab *)slab_base;
+        size_t offset = address - (uintptr_t)slab_base;
+        size_t slot_index;
+        kiln_gc_block *block;
+        if (offset < slab->first_slot_offset) return NULL;
+        slot_index = (offset - slab->first_slot_offset) / slab->slot_size;
+        if (slot_index >= slab->slot_count) return NULL;
+        block = kiln_c99_gc_slab_slot(slab, (uint32_t)slot_index);
+        if (block->size == KILN_GC_SLOT_FREE) return NULL;
+        return block;
+    }
+    if (heap->nursery.active && (const char *)address >= heap->nursery.base &&
+        (const char *)address < heap->nursery.bump) {
+        return kiln_c99_gc_bitmap_block(heap->nursery.bitmap, heap->nursery.bitmap_words,
+                                        heap->nursery.base, address);
+    }
+    for (chunk = heap->nursery.promoted; chunk != NULL; chunk = chunk->next) {
+        if ((const char *)address >= chunk->base && (const char *)address < chunk->limit) {
+            return kiln_c99_gc_bitmap_block(chunk->bitmap, chunk->bitmap_words, chunk->base, address);
+        }
+    }
+    {
+        kiln_gc_block *block = (kiln_gc_block *)(address - sizeof(kiln_gc_block));
+        if (kiln_c99_gc_ptrset_contains(&heap->large_table, block)) return block;
+    }
+    return NULL;
+}
+
+static void kiln_c99_gc_mark_found(kiln_gc_heap *heap, kiln_gc_block *block);
+
+/* One word of the stack: as a raw address, and as the payload of a boxed value when its top
+ * bits are a box prefix. Either that lands inside a live block marks the block. */
+static void kiln_c99_gc_mark_word(kiln_gc_heap *heap, uintptr_t word) {
+    kiln_gc_block *block = kiln_c99_gc_lookup_interior(heap, word);
+    if (block != NULL) kiln_c99_gc_mark_found(heap, block);
+    if ((word & KILN_TAG_MASK) >= KILN_TAG_STRING_PREFIX) {
+        block = kiln_c99_gc_lookup_interior(heap, word & UINT64_C(0x0000FFFFFFFFFFFF));
+        if (block != NULL) kiln_c99_gc_mark_found(heap, block);
+    }
+}
+
+/* Scans from its own frame, the lowest on the stack, up to the base: the caller has already
+ * spilled the callee-saved registers into its frame, which lies above this one. */
+__attribute__((noinline)) static void kiln_c99_gc_scan_from_here(kiln_gc_heap *heap) {
+    volatile uintptr_t anchor = 0;
+    uintptr_t *low = (uintptr_t *)((uintptr_t)&anchor & ~(uintptr_t)7);
+    uintptr_t *high = (uintptr_t *)kiln_c99_gc_stack_base(heap);
+    (void)anchor;
+    if (high == NULL) return;
+    for (; low < high; ++low) kiln_c99_gc_mark_word(heap, *low);
+}
+
+static void kiln_c99_gc_scan_stack(kiln_gc_heap *heap) {
+    jmp_buf registers;
+    size_t index;
+    /* Both, so the callee-saved registers are on the stack whatever the platform's setjmp
+     * keeps or mangles. */
+#if defined(__GNUC__) || defined(__clang__)
+    __builtin_unwind_init();
+#endif
+    if (setjmp(registers) == 0) {
+        for (index = 0; index + sizeof(uintptr_t) <= sizeof registers; index += sizeof(uintptr_t)) {
+            uintptr_t word;
+            memcpy(&word, (const char *)registers + index, sizeof word);
+            kiln_c99_gc_mark_word(heap, word);
+        }
+        kiln_c99_gc_scan_from_here(heap);
+    }
+}
+
+/* A call site that remembers a holder registers itself once; after a collection the entries
+ * whose holder or intermediate died are cleared. */
+static void kiln_c99_gc_register_site(kiln_c99_site *site) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    if (heap == NULL || site == NULL || site->registered) return;
+    if (heap->site_len == heap->site_cap) {
+        size_t wanted = heap->site_cap == 0 ? 64 : heap->site_cap * 2;
+        kiln_c99_site **grown = (kiln_c99_site **)realloc(heap->sites, wanted * sizeof *grown);
+        if (grown == NULL) return;
+        heap->sites = grown;
+        heap->site_cap = wanted;
+    }
+    heap->sites[heap->site_len++] = site;
+    site->registered = 1;
+}
+
+static void kiln_c99_gc_clear_dead_sites(kiln_gc_heap *heap) {
+    size_t index;
+    for (index = 0; index < heap->site_len; ++index) {
+        kiln_c99_site *site = heap->sites[index];
+        uint32_t p;
+        for (p = 0; p < site->pic_count; ++p) {
+            kiln_c99_pic_entry *entry = &site->entries[p];
+            if (entry->holder == NULL) continue;
+            if (kiln_c99_gc_lookup_interior(heap, (uintptr_t)entry->holder) == NULL ||
+                (entry->via != NULL && kiln_c99_gc_lookup_interior(heap, (uintptr_t)entry->via) == NULL)) {
+                entry->holder = NULL;
+                entry->holder_shape = NULL;
+                entry->holder_key = NULL;
+                entry->via = NULL;
+                entry->via_shape = NULL;
+                entry->holder_slot = UINT32_MAX;
+                entry->holder_val = 0;
+            }
+        }
+    }
+}
+
+static void kiln_c99_gc_collect(void *opaque, int force);
+
+/* A collection from inside a turn, at an allocation. */
+static void kiln_c99_gc_collect_mid_turn(kiln_gc_heap *heap) {
+    heap->mid_turn = 1;
+    kiln_c99_gc_collect(heap, 1);
+    heap->mid_turn = 0;
+}
+
 static void *kiln_c99_gc_alloc(uint32_t kind, size_t size) {
     kiln_gc_heap *heap = kiln_c99_gc_heap();
     size_t payload = size == 0 ? 1 : size;
     int class_index;
     kiln_gc_block *block;
     if (heap == NULL || size > ((size_t)-1) - sizeof(kiln_gc_block)) return NULL;
+    if (KILN_UNLIKELY(!heap->collecting && heap->enabled && !heap->fallback)) {
+        /* A mid-turn collection scans the whole stack and sweeps every slab, so it earns its
+         * keep only after a few megabytes, or after allocation has matched twice what
+         * survived the last one; the turn's end keeps its own, lower, threshold. */
+        size_t threshold = heap->survived * 2;
+        int due;
+        if (threshold < KILN_GC_MID_TURN_FLOOR) threshold = KILN_GC_MID_TURN_FLOOR;
+        due = heap->since_collection >= threshold;
+        if (heap->stress_every != 0 && --heap->stress_countdown == 0) {
+            heap->stress_countdown = heap->stress_every;
+            due = 1;
+        }
+        if (due) kiln_c99_gc_collect_mid_turn(heap);
+    }
 
     if (!kiln_c99_gc_is_tenured_kind(kind) && heap->nursery.active && (payload + sizeof(kiln_gc_block) <= (heap->nursery.capacity >> 2))) {
         size_t total = sizeof(kiln_gc_block) + payload;
@@ -1866,6 +2099,9 @@ static void *kiln_c99_gc_alloc(uint32_t kind, size_t size) {
         heap->count += 1;
         heap->bytes += size;
         heap->since_collection += size;
+        /* Zeroed like a nursery block: a collection can now run before the caller has filled
+         * the payload in, and the tracer must not read a previous occupant's pointers. */
+        memset(block + 1, 0, payload);
         return block + 1;
     }
     block = (kiln_gc_block *)malloc(sizeof *block + payload);
@@ -2239,6 +2475,23 @@ static void kiln_c99_gc_release(void *payload) {
         kiln_c99_gc_ptrset_remove(&heap->large_table, block);
         free(block);
     }
+}
+
+static void kiln_c99_gc_mark_found(kiln_gc_heap *heap, kiln_gc_block *block) {
+    if (block == NULL || block->mark == heap->epoch) return;
+    block->mark = heap->epoch;
+    if (heap->stack_len == heap->stack_capacity) {
+        size_t wanted = heap->stack_capacity == 0 ? 256 : heap->stack_capacity * 2;
+        kiln_gc_block **grown =
+            (kiln_gc_block **)realloc(heap->stack, wanted * sizeof *heap->stack);
+        if (grown == NULL) {
+            heap->mark_failed = 1;
+            return;
+        }
+        heap->stack = grown;
+        heap->stack_capacity = wanted;
+    }
+    heap->stack[heap->stack_len++] = block;
 }
 
 static void kiln_c99_gc_mark_block(kiln_gc_heap *heap, const void *payload) {
@@ -2735,11 +2988,16 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
     kiln_c99_gc_begin(heap);
     (void)kiln_realm_gc_mark_roots(heap);
     kiln_c99_key_mark_pinned(heap);
+    if (heap->mid_turn) kiln_c99_gc_scan_stack(heap);
     kiln_c99_gc_drain(heap);
 
     if (!heap->mark_failed) {
         kiln_c99_key_purge(heap);
-        if (nursery_has_allocs) {
+        /* Mid-turn, the nursery is left as it is: its dead blocks wait for the turn's end,
+         * when the whole region resets or promotes as before, and its live ones need no
+         * promotion because nothing moves. The slabs, where a long turn's allocation goes
+         * once the nursery is full, are swept below. */
+        if (nursery_has_allocs && !heap->mid_turn) {
             size_t nursery_survivors = 0;
             size_t nursery_dead = 0;
             size_t nursery_reclaimed_bytes = 0;
@@ -2828,6 +3086,7 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
 
         if (tenured_due || (heap->nursery.promoted != NULL)) {
             kiln_c99_gc_sweep(heap, 0);
+            kiln_c99_gc_clear_dead_sites(heap);
             heap->collections += 1;
         }
     }

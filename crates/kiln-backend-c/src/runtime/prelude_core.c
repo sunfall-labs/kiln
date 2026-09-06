@@ -46,18 +46,98 @@ static int kiln_c99_has_surface(uint64_t builtin) {
  * access whose receiver is a built-in -- `Math.floor` inside a loop reaches it once per iteration
  * -- and asking `kiln_c99_has_surface` first walked the whole table a second time to learn
  * something this walk already knows. */
-static const kiln_builtin_member *kiln_c99_builtin_member(uint64_t builtin, const char *key,
-                                                          size_t key_len, int *owned) {
+/* The surface table, indexed for the read path. The table is one linear list of every member
+ * of every table-driven built-in, and a read of `Promise.resolve` or a miss on `Math.foo`
+ * walked all of it, string compare by string compare -- the single hottest leaf of a promise
+ * loop. The index is the same rows sorted by (built-in, name, row), built once per process;
+ * a lookup is one binary search, and the first row of a run of equal names is the row the
+ * walk found first, so the answer is the same. */
+typedef struct kiln_builtin_member_entry {
+    uint16_t builtin;
+    size_t len;
+    const char *name;
+    size_t row;
+} kiln_builtin_member_entry;
+
+static kiln_builtin_member_entry kiln_c99_builtin_member_index[KILN_C99_SURFACE_MEMBER_COUNT];
+static size_t kiln_c99_builtin_member_index_len;
+static int kiln_c99_builtin_member_index_ready;
+
+static int kiln_c99_builtin_member_entry_before(const kiln_builtin_member_entry *left,
+                                                const kiln_builtin_member_entry *right) {
+    size_t shortest;
+    int ordering;
+    if (left->builtin != right->builtin) return left->builtin < right->builtin;
+    shortest = left->len < right->len ? left->len : right->len;
+    ordering = memcmp(left->name, right->name, shortest);
+    if (ordering != 0) return ordering < 0;
+    if (left->len != right->len) return left->len < right->len;
+    return left->row < right->row;
+}
+
+static void kiln_c99_builtin_member_index_build(void) {
     size_t index;
-    *owned = 0;
     for (index = 0; index < KILN_C99_SURFACE_MEMBER_COUNT; ++index) {
         const kiln_builtin_member *member = &kiln_c99_builtin_members[index];
-        if (member->builtin != builtin) {
-            continue;
+        kiln_c99_builtin_member_index[index].builtin = member->builtin;
+        kiln_c99_builtin_member_index[index].name = member->name;
+        kiln_c99_builtin_member_index[index].len = member->name != NULL ? strlen(member->name) : 0;
+        kiln_c99_builtin_member_index[index].row = index;
+    }
+    for (index = 1; index < KILN_C99_SURFACE_MEMBER_COUNT; ++index) {
+        kiln_builtin_member_entry pending = kiln_c99_builtin_member_index[index];
+        size_t behind = index;
+        while (behind > 0 &&
+               kiln_c99_builtin_member_entry_before(&pending, &kiln_c99_builtin_member_index[behind - 1])) {
+            kiln_c99_builtin_member_index[behind] = kiln_c99_builtin_member_index[behind - 1];
+            --behind;
         }
-        *owned = 1;
-        if (kiln_c99_same_name(key, key_len, member->name)) {
-            return member;
+        kiln_c99_builtin_member_index[behind] = pending;
+    }
+    kiln_c99_builtin_member_index_len = KILN_C99_SURFACE_MEMBER_COUNT;
+    kiln_c99_builtin_member_index_ready = 1;
+}
+
+/* The first index entry at or after (builtin, key): the lower bound. */
+static size_t kiln_c99_builtin_member_lower_bound(uint64_t builtin, const char *key, size_t key_len) {
+    size_t low = 0;
+    size_t high = kiln_c99_builtin_member_index_len;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        const kiln_builtin_member_entry *entry = &kiln_c99_builtin_member_index[middle];
+        int before;
+        if (entry->builtin != builtin) {
+            before = entry->builtin < builtin;
+        } else {
+            size_t shortest = entry->len < key_len ? entry->len : key_len;
+            int ordering = memcmp(entry->name, key, shortest);
+            if (ordering == 0 && entry->len != key_len) ordering = entry->len < key_len ? -1 : 1;
+            before = ordering < 0;
+        }
+        if (before) low = middle + 1; else high = middle;
+    }
+    return low;
+}
+
+static const kiln_builtin_member *kiln_c99_builtin_member(uint64_t builtin, const char *key,
+                                                          size_t key_len, int *owned) {
+    size_t at;
+    *owned = 0;
+    if (builtin > 0xFFFFu) return NULL;
+    if (!kiln_c99_builtin_member_index_ready) kiln_c99_builtin_member_index_build();
+    /* Owned: any row with this built-in, which is the lower bound of (builtin, "") landing on one. */
+    at = kiln_c99_builtin_member_lower_bound(builtin, "", 0);
+    if (at >= kiln_c99_builtin_member_index_len || kiln_c99_builtin_member_index[at].builtin != builtin) {
+        return NULL;
+    }
+    *owned = 1;
+    if (key == NULL) return NULL;
+    at = kiln_c99_builtin_member_lower_bound(builtin, key, key_len);
+    if (at < kiln_c99_builtin_member_index_len) {
+        const kiln_builtin_member_entry *entry = &kiln_c99_builtin_member_index[at];
+        if (entry->builtin == builtin && entry->len == key_len &&
+            memcmp(entry->name, key, key_len) == 0) {
+            return &kiln_c99_builtin_members[entry->row];
         }
     }
     return NULL;
@@ -26897,6 +26977,7 @@ static int kiln_c99_val_call_method(kiln_host *host, kiln_val receiver, const ki
                     site->entries[site->pic_count] = remembered;
                     site->pic_count += 1;
                 }
+                if (remembered.holder != NULL) kiln_c99_gc_register_site(site);
             }
         }
     }
