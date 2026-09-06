@@ -5002,3 +5002,47 @@ program and `run` does not grant. The benchmark harness measures built binaries,
 number in these entries stands; a timing probe under `run` will not. And the two-classes-one-
 shape probe answered correctly *before* the fix while the swapped-prototype probe did not; I
 did not find what separated them, and the fix does not depend on it.
+
+## The other benchmarks, and what was actually slow (2026-09-06, Claude `alee/fastest-native`)
+
+`bench/compare.sh` over all seventeen microbenchmarks, warm, native against node: eight rows at
+or ahead (collatz 0.45x, fib 0.60x, fs-promises 0.65x, collections, regex, nbody, loop,
+array-sort within 1.3x), then buffer, string-ops and mandelbrot at 2.2-2.4x, json 4.5x,
+class-poly 4.9x, microtasks 6.3x, array-functional 9.6x, frame 16x on two microseconds, and
+object-spread at 35x. A `sample` profile of each built binary named the cause, and none of the
+big ones was the emitter.
+
+**mandelbrot, 26 → 13 ms against node's 11.4 and the same loop in plain C at 11.5.** The
+emitted loop was 17 instructions with no boxing left, and still twice as slow: the integer
+`iter++` carries an overflow check whose out-of-range path is computed as a double, and the C
+compiler folded the two paths into a select, so every iteration waited on a
+convert-add-convert chain for a value it never used -- twelve cycles on the loop-carried
+counter. The slow path now passes through an opaque cold call (`kiln_c99_int_slow`, an asm
+barrier inside; a visible identity was deleted and the chain folded back), so it stays a
+predicted-never branch. Two emitter changes came first and were needed but not sufficient: a
+boolean twin `b` set from the box by one compare, copied by phis and tested by branches, so a
+`&&` condition no longer materialises booleans through a phi and a truthiness test; and boxes
+dropped for proven numbers nothing reads boxed (only in a single-clone body: a versioned
+body's generic clone reads every value boxed), with copies through slots and dead-zone
+checks made transparent and the dead-zone check of a proven number elided.
+
+**object-spread, 11.2 → 4.5 ms against node's 0.32.** Three layers. A spread of a shaped
+source into a fresh literal re-put every key through the generic store: interning the name
+again, one transition at a time, and a fresh copy of every string value through the boundary
+struct; a subagent made it adopt the source's shape and memcpy the slots (35x → 19x). The
+compiler then built the pairs after a spread into a *second* literal and spread it in, and
+that spread hit a target with keys and took the per-key path; the pairs are now defined on
+the accumulator as they are evaluated, and a shaped-into-shaped spread is one transition per
+key with the shape's interned pointers. Eight inline slots instead of four, so a literal of up
+to eight keys allocates nothing beyond itself. What remains is the collector: it runs only
+between turns, so a synchronous loop's garbage accumulates until the turn ends, the nursery
+spills to slabs after 2 MiB, and this benchmark peaks at 6.6 GB resident. Node collects its
+young generation inside the loop. That is the structural item behind object-spread, json,
+microtasks and array-functional alike, and it needs roots the emitted code does not expose
+today -- a design decision, not a fix.
+
+**json 4.5x** is a name scan: stringify asks every object for `toJSON`, the miss falls into the
+builtin method table, and that table is searched by string compare; the rest is allocation
+and per-append reallocation in the parser. **array-functional 9.6x** is one line: every arrow
+was deemed to publish a frame, so every callback went through the general closure invocation
+and no arrow could be a direct callee. Both are with subagents as this is written.
