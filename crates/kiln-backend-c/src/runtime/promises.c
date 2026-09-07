@@ -259,7 +259,7 @@ static int kiln_c99_run_microtask(void *work, void *host_pointer, void *thrown_p
                      ? kiln_c99_async_generator_step(host, task->handler, task->argument,
                                                      task->rejected, 0, thrown)
                      : kiln_c99_async_step(host, task->handler, task->argument, task->rejected,
-                                           0, thrown);
+                                           0, thrown, NULL, 0);
         if (status == KILN_C99_THROWN) return KILN_C99_THROWN;
         kiln_c99_publish_turn_refusal(status, kiln_c99_undefined(), thrown);
         return status;
@@ -451,8 +451,15 @@ static int kiln_c99_async_generator_step(kiln_host *host, kiln_value generator, 
     return status;
 }
 
+/* `args` and `argc` are the *call's* arguments, and only the entry that runs the prologue passes
+ * them: an async function is the one suspending shape whose parameter binding is not run by
+ * `kiln_c99_bind_parameters` at the call (`binds_at_call` excludes it, so its instantiation
+ * failure rejects rather than throwing), so its prologue -- `...rest` and `arguments` among it --
+ * runs here, in the first step. Resuming after an `await` passes none, because the prologue is
+ * behind the resume point by then and the bindings are already in the frame's locals. */
 static int kiln_c99_async_step(kiln_host *host, kiln_value generator, kiln_value sent,
-                               int rejected, int depth, kiln_value *thrown) {
+                               int rejected, int depth, kiln_value *thrown,
+                               const kiln_val *args, size_t argc) {
     kiln_generator *frame = kiln_c99_generator_of(generator);
     kiln_closure *closure;
     kiln_value produced;
@@ -470,7 +477,7 @@ static int kiln_c99_async_step(kiln_host *host, kiln_value generator, kiln_value
     frame->raising = rejected;
     closure = kiln_c99_closure_of(frame->function);
     kiln_val vproduced = KILN_VAL_UNDEFINED;
-    status = kiln_c99_invoke_closure_body(host, &vproduced, closure, kiln_val_from_boundary(frame->receiver), NULL, 0,
+    status = kiln_c99_invoke_closure_body(host, &vproduced, closure, kiln_val_from_boundary(frame->receiver), args, argc,
                                           depth, thrown, frame, 0);
     produced = kiln_val_to_boundary(vproduced);
     if (status == KILN_C99_YIELDED) {

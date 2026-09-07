@@ -3866,7 +3866,8 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                              code == KILN_C99_METHOD_ASYNC_THROW, depth, thrown)
                        : kiln_c99_async_step(host, receiver,
                                              argc > 0 ? args[0] : kiln_c99_undefined(),
-                                             code == KILN_C99_METHOD_ASYNC_THROW, depth, thrown);
+                                             code == KILN_C99_METHOD_ASYNC_THROW, depth, thrown,
+                                             NULL, 0);
         case KILN_C99_METHOD_COLLECTION_ITERATOR_NEXT: {
             kiln_value source;
             kiln_value at;
