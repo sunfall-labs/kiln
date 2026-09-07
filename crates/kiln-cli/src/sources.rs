@@ -915,6 +915,44 @@ mod tests {
         assert_eq!(texts.len(), 1);
     }
 
+    #[test]
+    fn node_resolves_typescript_extension_alias_imports() {
+        let tree = Tree::new("ts-extension-alias");
+        tree.file("package.json");
+        std::fs::write(tree.0.join("package.json"), r#"{"type":"module"}"#).expect("write package.json");
+        tree.file("src/main.ts");
+        tree.file("src/dep.ts");
+        let entry = tree.0.join("src/main.ts");
+        let dep = tree.0.join("src/dep.ts");
+        std::fs::write(
+            &entry,
+            "import { answer } from './dep.js'; console.log(answer);",
+        )
+        .expect("write entry");
+        std::fs::write(&dep, "export const answer = 42;").expect("write dep");
+
+        let canonical_entry = entry.canonicalize().expect("canonical entry");
+        let canonical_dep = dep.canonicalize().expect("canonical dep");
+        let mut texts = vec![(
+            canonical_entry.to_string_lossy().into_owned(),
+            std::fs::read_to_string(&entry).expect("read entry"),
+        )];
+
+        let (resolutions, node_formats) = include_reachable_dependencies(
+            &tree.0,
+            canonical_entry.to_str().expect("UTF-8 entry"),
+            &mut texts,
+            true,
+        )
+        .expect("resolves .js to .ts under node policy");
+
+        assert_eq!(resolutions.len(), 1);
+        assert_eq!(resolutions[0].specifier, "./dep.js");
+        assert_eq!(resolutions[0].target, canonical_dep.to_string_lossy());
+        assert_eq!(texts.len(), 2);
+        assert_eq!(node_formats.len(), 2);
+    }
+
     /// The loop `read_all` replaced: one `realpath` and one read per file.
     fn read_each_file_separately(files: &[PathBuf]) -> Vec<(String, String)> {
         files
