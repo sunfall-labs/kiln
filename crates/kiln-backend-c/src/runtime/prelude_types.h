@@ -1367,7 +1367,32 @@ typedef struct kiln_text {
     char *bytes;
     size_t len;
     size_t capacity;
+    /* Set while `bytes` is a buffer the builder does not own -- a caller's stack array. The
+     * first growth past it moves into memory of the builder's own; `kiln_c99_text_value` copies
+     * from it without freeing it. Only a builder that started that way ever has it set. */
+    int borrowed;
 } kiln_text;
+
+static int kiln_c99_text_append_grow(kiln_text *text, const char *bytes, size_t len);
+
+/* Append `len` bytes. A piece that fits is copied here, with a byte loop for the short ones a
+ * JSON writer appends by the thousand -- a quote, a comma, a key -- where a `memmove` call cost
+ * more than the copy; a piece that does not fit takes the growth path out of line. */
+static inline int kiln_c99_text_append(kiln_text *text, const char *bytes, size_t len) {
+    if (KILN_LIKELY(text->len + len <= text->capacity)) {
+        char *at = text->bytes + text->len;
+        if (len <= 16) {
+            size_t i;
+            for (i = 0; i < len; ++i) at[i] = bytes[i];
+        } else {
+            memcpy(at, bytes, len);
+        }
+        text->len += len;
+        return KILN_C99_OK;
+    }
+    if (len == 0) return KILN_C99_OK;
+    return kiln_c99_text_append_grow(text, bytes, len);
+}
 
 /* Internal link-time runtime contract. The final executable/shared library supplies these symbols
  * from the Rust provider archive; they are not part of the public embedding ABI.

@@ -415,26 +415,22 @@ static kiln_val kiln_c99_collection_delete_val_fast(kiln_collection *collection,
 }
 
 static int kiln_c99_val_json_stringify_fast(kiln_host *host, kiln_val val, kiln_val *out, int depth, kiln_value *thrown) {
-    kiln_text text = {NULL, 0, 0};
+    /* Most documents a program stringifies in a loop are a few hundred bytes: built on the
+     * stack, they cost the one copy into their string and no allocator call at all. A larger
+     * one moves into memory of the builder's own at the first append past the array. */
+    char stack_bytes[1024];
+    kiln_text text = {stack_bytes, 0, sizeof stack_bytes, 1};
     int wrote = 0;
     int status;
-    /* A generous first reservation, ignored on failure: the builder starts at capacity 4 and
-     * doubles from there, so an ordinary small document -- a handful of keys, a short array --
-     * paid for five or six reallocations on its way to a few hundred bytes, every one of them on
-     * this call's hot path. Skipping ahead to 128 bytes covers that common case in one
-     * allocation; a document too big for it still grows the same geometric way from here, and a
-     * failed reservation here is retried (and, if it still fails, correctly reported as
-     * out-of-memory) by the first real append below, so there is nothing to unwind. */
-    (void)kiln_c99_reserve((void **)&text.bytes, &text.capacity, 128, 1);
     status = kiln_c99_json_value(host, &text, kiln_val_to_boundary(val), "", 0, "", 0, &wrote, depth, NULL, thrown);
     if (KILN_UNLIKELY(status != KILN_C99_OK)) {
-        free(text.bytes);
+        if (!text.borrowed) free(text.bytes);
         return status;
     }
     if (wrote) {
         *out = kiln_val_from_boundary(kiln_c99_text_value(&text));
     } else {
-        free(text.bytes);
+        if (!text.borrowed) free(text.bytes);
         *out = KILN_VAL_UNDEFINED;
     }
     return KILN_C99_OK;

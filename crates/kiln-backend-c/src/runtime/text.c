@@ -343,14 +343,26 @@ static void kiln_c99_note_refusal(const char *site, size_t instruction,
 }
 
 
-static int kiln_c99_text_append(kiln_text *text, const char *bytes, size_t len) {
+/* The growth half of `kiln_c99_text_append`; the fit-in-place half is inline in prelude_types.h. */
+static int kiln_c99_text_append_grow(kiln_text *text, const char *bytes, size_t len) {
     int status;
-    if (len == 0) {
-        return KILN_C99_OK;
-    }
-    status = kiln_c99_reserve((void **)&text->bytes, &text->capacity, text->len + len, 1);
-    if (status != KILN_C99_OK) {
-        return status;
+    if (text->borrowed) {
+        size_t grown = text->capacity == 0 ? 4 : text->capacity;
+        char *owned;
+        while (grown < text->len + len) grown *= 2;
+        owned = (char *)malloc(grown);
+        if (owned == NULL) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        memcpy(owned, text->bytes, text->len);
+        text->bytes = owned;
+        text->capacity = grown;
+        text->borrowed = 0;
+    } else {
+        status = kiln_c99_reserve((void **)&text->bytes, &text->capacity, text->len + len, 1);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
     }
     memcpy(text->bytes + text->len, bytes, len);
     text->len += len;
@@ -370,7 +382,8 @@ static int kiln_c99_text_append_c(kiln_text *text, const char *literal) {
 static kiln_value kiln_c99_text_value(kiln_text *text) {
     kiln_value result = text->len == 0 ? kiln_c99_value(KILN_VALUE_STRING, 0, NULL, 0)
                                        : kiln_c99_copy_text(text->bytes, text->len);
-    free(text->bytes);
+    if (!text->borrowed) free(text->bytes);
+    text->borrowed = 0;
     text->bytes = NULL;
     text->len = 0;
     text->capacity = 0;
