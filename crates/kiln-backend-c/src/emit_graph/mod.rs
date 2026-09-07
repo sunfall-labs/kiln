@@ -109,6 +109,13 @@ pub enum EntryKind {
 pub struct Speculation {
     pub arrays: HashSet<ValueId>,
     pub calls: HashSet<ValueId>,
+    /// Field reads of a sunk literal (`FunctionGraph::spread_sinks`) assumed to answer numbers;
+    /// the fast clone checks each and leaves when one does not.
+    pub fields: HashSet<ValueId>,
+    /// Operations the fast clone leaves for the generic clone to run itself, after rebuilding
+    /// the sunk literal on the heap: the spread whose source failed its guard, and each checked
+    /// field read. The generic clone labels each before the operation.
+    pub sinks: HashSet<ValueId>,
     pub exits: bool,
 }
 

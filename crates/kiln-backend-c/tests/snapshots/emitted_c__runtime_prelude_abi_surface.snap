@@ -1401,6 +1401,7 @@ static char *kiln_c99_gc_alloc_text_tenured(size_t len) {
 static kiln_shape kiln_c99_root_shape = {
 static struct kiln_shape *kiln_c99_shape_root(void) {
 static int kiln_c99_shape_find_slot(const kiln_shape *shape, const char *ikey, uint32_t *out_slot) {
+static uint32_t kiln_c99_shape_slot_named(const kiln_shape *shape, const char *bytes, size_t len) {
 static void kiln_c99_pin_interned_key(const char *ikey) {
 static int kiln_c99_shape_transition(kiln_shape *current, const char *ikey, kiln_shape **out_shape) {
 static int kiln_c99_ensure_dictionary(kiln_object *object) {

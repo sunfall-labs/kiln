@@ -469,6 +469,9 @@ pub fn emit_async_entry_body(
         "    const int kiln_inheriting = kiln_c99_inheriting_new_target; (void)kiln_inheriting;\n",
     );
     output.push_str(
+        "    const int kiln_inheriting = kiln_c99_inheriting_new_target; (void)kiln_inheriting;\n",
+    );
+    output.push_str(
         "    kiln_val receiver = receiver_ptr ? *receiver_ptr : KILN_VAL_UNDEFINED; (void)receiver;\n",
     );
     output.push_str("    (void)receiver_ptr; (void)upvalues; (void)args; (void)argc;\n");
@@ -517,6 +520,7 @@ fn emit_ssa_declarations(
     numbers: &HashSet<ValueId>,
     ints: &HashSet<ValueId>,
     booleans: &HashSet<ValueId>,
+    sunk: bool,
 ) {
     if !booleans.is_empty() {
         let mut ids: Vec<u32> = booleans.iter().map(|v| v.0).collect();
@@ -564,8 +568,11 @@ fn emit_ssa_declarations(
         }
         output.push_str(";\n");
     }
-    if !graph.scalar_objects.is_empty() {
+    if !graph.scalar_objects.is_empty() || (sunk && !graph.spread_scalar_objects.is_empty()) {
         let mut sorted_objs: Vec<_> = graph.scalar_objects.values().collect();
+        if sunk {
+            sorted_objs.extend(graph.spread_scalar_objects.values());
+        }
         sorted_objs.sort_by_key(|s| s.alloc_id.0);
         for s in sorted_objs {
             let alloc = s.alloc_id.0;
@@ -798,8 +805,10 @@ fn emit_block_sequence(
             .unwrap();
             writeln!(
                 output,
-                "    if (KILN_UNLIKELY(kiln_c99_guard_should_exit_in(kiln_spec_mode, &kiln_loop_guard_{}))) goto kiln_generic_block_{};",
-                block.id.0, block.id.0
+                "    if (KILN_UNLIKELY(kiln_c99_guard_should_exit_in(kiln_spec_mode, &kiln_loop_guard_{}))) {{ {} goto kiln_generic_block_{}; }}",
+                block.id.0,
+                super::ops::materialize_all_sunk(graph, symbol, defs, array_slots),
+                block.id.0
             )
             .unwrap();
         }
@@ -847,6 +856,11 @@ fn emit_block_sequence(
                     &format!(" v{} = kiln_c99_val_from_double(d{});", vid.0, vid.0),
                     " ",
                 );
+            }
+            // The fast clone left this operation to the generic clone: it runs here, on the
+            // literal the exit rebuilt.
+            if !spec.exits && spec.sinks.contains(&vid) {
+                writeln!(output, "kiln_generic_resume_{}:;", vid.0).unwrap();
             }
             output.push_str(&op_text);
             // A boolean's twin follows from its box: one compare, and a branch or a phi then
@@ -1048,34 +1062,58 @@ fn emit_blocks(
             })
         })
         .collect();
+    let feeds_arithmetic = |vid: &ValueId| {
+        ops.iter().any(|(_, op)| match op {
+            GraphOp::Binary { op, left, right } => {
+                (left == vid || right == vid)
+                    && matches!(
+                        op,
+                        BinaryOp::Add
+                            | BinaryOp::Subtract
+                            | BinaryOp::Multiply
+                            | BinaryOp::Divide
+                            | BinaryOp::Remainder
+                            | BinaryOp::Exponentiate
+                    )
+            }
+            _ => false,
+        })
+    };
     let spec_calls: HashSet<ValueId> = ops
         .iter()
         .filter_map(|(vid, op)| match op {
             GraphOp::CallMethod { .. } if !plan.numbers.contains(vid) => Some(*vid),
             _ => None,
         })
-        .filter(|vid| {
-            ops.iter().any(|(_, op)| match op {
-                GraphOp::Binary { op, left, right } => {
-                    (left == vid || right == vid)
-                        && matches!(
-                            op,
-                            BinaryOp::Add
-                                | BinaryOp::Subtract
-                                | BinaryOp::Multiply
-                                | BinaryOp::Divide
-                                | BinaryOp::Remainder
-                                | BinaryOp::Exponentiate
-                        )
-                }
-                _ => false,
-            })
+        .filter(feeds_arithmetic)
+        .collect();
+    // A literal with a spread that never escapes is sunk by the fast clone alone, under a guard
+    // on its source; its field reads that feed arithmetic are guessed to be numbers, and checked.
+    let spec_fields: HashSet<ValueId> = ops
+        .iter()
+        .filter_map(|(vid, op)| match op {
+            GraphOp::GetProperty { object, .. }
+                if !plan.numbers.contains(vid) && graph.spread_alias_map.contains_key(object) =>
+            {
+                Some(*vid)
+            }
+            _ => None,
         })
+        .filter(feeds_arithmetic)
+        .collect();
+    let spec_sinks: HashSet<ValueId> = graph
+        .spread_sinks
+        .values()
+        .map(|sink| sink.spread)
+        .chain(spec_fields.iter().copied())
         .collect();
     let versioning = speculate_enabled
         && !suspends
         && kind == EntryKind::Boxed
-        && (!candidate_params.is_empty() || !spec_arrays.is_empty() || !spec_calls.is_empty());
+        && (!candidate_params.is_empty()
+            || !spec_arrays.is_empty()
+            || !spec_calls.is_empty()
+            || !graph.spread_sinks.is_empty());
 
     let baseline_numbers = &plan.numbers;
     let baseline_ints = &plan.ints;
@@ -1108,6 +1146,21 @@ fn emit_blocks(
     let ivs = find_induction_variables(graph, &length_bounds);
 
     if versioning {
+        // The fast clone's graph holds the sunk literals as scalar objects; the generic clone's
+        // does not, and allocates them.
+        let fast_graph = {
+            let mut fast = graph.clone();
+            fast.scalar_objects.extend(
+                graph
+                    .spread_scalar_objects
+                    .iter()
+                    .map(|(alloc, object)| (*alloc, object.clone())),
+            );
+            fast.scalar_alias_map
+                .extend(graph.spread_alias_map.iter().map(|(a, r)| (*a, *r)));
+            fast
+        };
+        let fast_graph = &fast_graph;
         // The speculative proof starts from the plan's: what the plan proved by a typed call
         // site or an intrinsic is not derivable from the graph alone, and a union of two
         // proofs is not a proof -- an operation whose operands each came from one would be
@@ -1123,7 +1176,7 @@ fn emit_blocks(
                 candidate_assumptions.insert(vid, Proven::Number);
             }
         }
-        for vid in &spec_calls {
+        for vid in spec_calls.iter().chain(spec_fields.iter()) {
             candidate_assumptions.insert(*vid, Proven::Number);
         }
         // An array's `length` is an integer below 2^32; any other read of a guarded array is
@@ -1143,16 +1196,17 @@ fn emit_blocks(
                 );
             }
         }
-        let speculative_numbers = proven_numbers_with_assumptions(graph, &candidate_assumptions);
+        let speculative_numbers =
+            proven_numbers_with_assumptions(fast_graph, &candidate_assumptions);
         let mut all_numbers = baseline_numbers.clone();
         all_numbers.extend(&speculative_numbers);
 
-        let speculative_ints = proven_ints_with_assumptions(graph, &candidate_assumptions);
+        let speculative_ints = proven_ints_with_assumptions(fast_graph, &candidate_assumptions);
         let mut all_ints = baseline_ints.clone();
         all_ints.extend(&speculative_ints);
 
-        let all_booleans = booleans_with(graph, &candidate_assumptions);
-        emit_ssa_declarations(output, graph, &all_numbers, &all_ints, &all_booleans);
+        let all_booleans = booleans_with(fast_graph, &candidate_assumptions);
+        emit_ssa_declarations(output, graph, &all_numbers, &all_ints, &all_booleans, true);
 
         let index = match site {
             Site::Function { index } => *index,
@@ -1210,7 +1264,7 @@ fn emit_blocks(
         writeln!(output, "    /* Clone A: guarded fast path */").unwrap();
         emit_block_sequence(
             output,
-            graph,
+            fast_graph,
             proto,
             program,
             symbol,
@@ -1234,6 +1288,8 @@ fn emit_blocks(
             &Speculation {
                 arrays: spec_arrays.clone(),
                 calls: spec_calls.clone(),
+                fields: spec_fields.clone(),
+                sinks: spec_sinks.clone(),
                 exits: true,
             },
         );
@@ -1265,6 +1321,8 @@ fn emit_blocks(
             &Speculation {
                 arrays: HashSet::new(),
                 calls: spec_calls.clone(),
+                fields: HashSet::new(),
+                sinks: spec_sinks.clone(),
                 exits: false,
             },
         );
@@ -1275,6 +1333,7 @@ fn emit_blocks(
             baseline_numbers,
             baseline_ints,
             &baseline_booleans,
+            false,
         );
         emit_block_sequence(
             output,
