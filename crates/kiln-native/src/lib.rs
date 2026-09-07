@@ -1602,20 +1602,28 @@ impl NativeBuilder {
             logical_paths.push(logical_path);
             modules.push((node, emitted));
         }
+        let bootstrap = native_builtin_bootstrap_module(&emission)?;
+        if !symbols.insert(bootstrap.symbol.clone()) {
+            return Err(NativeError::SymbolCollision {
+                symbol: bootstrap.symbol,
+            });
+        }
         let launcher = graph_launcher_source_with_imports(
             graph,
             &modules,
             &options.realm,
             Some(&selected.live_imports),
+            Some(&bootstrap),
         )?;
         let emit_elapsed = emit_started.elapsed();
         let runtime = runtime_source();
 
         let workspace = WorkDirectory::create()?;
-        let symbol_list = modules
+        let mut symbol_list = modules
             .iter()
             .map(|(_, emitted)| &emitted.symbol)
             .collect::<Vec<_>>();
+        symbol_list.push(&bootstrap.symbol);
         let paths = GraphBuildPaths::new(workspace.path(), &symbol_list);
         let identity = self.toolchain.identity().clone();
         let profile = options.profile;
@@ -1639,6 +1647,18 @@ impl NativeBuilder {
             );
             module_sources.push(self.cached_payload(&source_key, module.source.as_bytes())?);
         }
+        let bootstrap_source_key = key(
+            ArtifactKind::GeneratedC,
+            format!("kiln-c-abi-{C_ABI_VERSION}-generator-{C_GENERATOR_VERSION}"),
+            Backend::C,
+            &module_abi,
+            &target,
+            CacheProfile::Debug,
+            Digest::hash(b"native-builtin-bootstrap-c11"),
+            [Digest::hash(bootstrap.source.as_bytes())],
+        );
+        module_sources
+            .push(self.cached_payload(&bootstrap_source_key, bootstrap.source.as_bytes())?);
         let runtime_source_key = key(
             ArtifactKind::GeneratedC,
             format!("kiln-runtime-{NATIVE_RUNTIME_VERSION}"),
@@ -1719,8 +1739,8 @@ impl NativeBuilder {
             .as_bytes(),
         );
         let compile_started = Instant::now();
-        let mut module_keys = Vec::with_capacity(modules.len());
-        for (index, (_, _module)) in modules.iter().enumerate() {
+        let mut module_keys = Vec::with_capacity(module_sources.len());
+        for index in 0..module_sources.len() {
             let (_, source_digest, _) = &module_sources[index];
             module_keys.push(key(
                 ArtifactKind::NativeObject,
@@ -2224,6 +2244,85 @@ fn native_builtin_supports_export(
     export_name: &str,
 ) -> bool {
     native_builtin_supported_exports(builtin).contains(&export_name)
+}
+
+const NATIVE_BUILTIN_BOOTSTRAP_SOURCE: &str = r#"
+const __kilnSegmentBoundaries = globalThis.__kilnIntlSegment;
+delete globalThis.__kilnIntlSegment;
+
+function Segmenter(locales, options) {
+    const granularity = options === undefined || options.granularity === undefined
+        ? "grapheme"
+        : String(options.granularity);
+    if (granularity !== "grapheme" && granularity !== "word" && granularity !== "sentence") {
+        throw new RangeError("invalid granularity: " + granularity);
+    }
+    this.__kilnGranularity = granularity;
+    this.__kilnLocale = typeof locales === "string" ? locales : "en-US";
+}
+
+Segmenter.prototype.segment = function (input) {
+    const text = String(input);
+    const kind = this.__kilnGranularity === "word"
+        ? 1
+        : (this.__kilnGranularity === "sentence" ? 2 : 0);
+    const tape = __kilnSegmentBoundaries(text, kind);
+    const records = [];
+    for (let index = 0; index < tape.length; index += 4) {
+        const record = {
+            segment: text.slice(tape[index], tape[index + 1]),
+            index: tape[index],
+            input: text
+        };
+        if (tape[index + 2] !== 0) record.isWordLike = tape[index + 3] !== 0;
+        records.push(record);
+    }
+    const segments = {
+        containing(index) {
+            const position = Number(index);
+            if (!Number.isFinite(position) || position < 0 || position >= text.length) {
+                return undefined;
+            }
+            for (let at = 0; at < records.length; at += 1) {
+                const start = records[at].index;
+                const end = start + records[at].segment.length;
+                if (start <= position && position < end) return records[at];
+            }
+            return undefined;
+        }
+    };
+    segments[Symbol.iterator] = function () { return records[Symbol.iterator](); };
+    return segments;
+};
+
+Segmenter.prototype.resolvedOptions = function () {
+    return { locale: this.__kilnLocale, granularity: this.__kilnGranularity };
+};
+
+Segmenter.supportedLocalesOf = function (locales) {
+    if (locales === undefined) return [];
+    return Array.isArray(locales) ? locales.slice() : [String(locales)];
+};
+
+Intl.Segmenter = Segmenter;
+"#;
+
+fn native_builtin_bootstrap_module(
+    policy: &EmissionPolicy,
+) -> Result<kiln_backend_c::CModule, NativeError> {
+    const LOGICAL_PATH: &str = "@kiln/runtime-bootstrap.ts";
+    let hir = frontend_oxc::parse(LOGICAL_PATH, NATIVE_BUILTIN_BOOTSTRAP_SOURCE);
+    let program = kiln_ir::compile_module(&hir).map_err(|diagnostics| {
+        NativeError::Graph(ModuleGraphError::Compile {
+            path: PathBuf::from(LOGICAL_PATH),
+            diagnostics,
+        })
+    })?;
+    Ok(emit_module_with_logical_path_and_policy(
+        &program,
+        LOGICAL_PATH,
+        policy.clone(),
+    )?)
 }
 
 /// Whether an unbuilt member of `builtin` is a *function* in the interpreter.
@@ -4192,7 +4291,7 @@ fn graph_launcher_source(
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
     policy: &NativeRealmPolicy,
 ) -> Result<String, NativeError> {
-    graph_launcher_source_with_imports(graph, modules, policy, None)
+    graph_launcher_source_with_imports(graph, modules, policy, None, None)
 }
 
 fn graph_launcher_source_with_imports(
@@ -4200,6 +4299,7 @@ fn graph_launcher_source_with_imports(
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
     policy: &NativeRealmPolicy,
     live_imports: Option<&BTreeSet<(PathBuf, usize)>>,
+    bootstrap: Option<&kiln_backend_c::CModule>,
 ) -> Result<String, NativeError> {
     if modules.is_empty() {
         return Err(NativeError::Graph(
@@ -4320,6 +4420,14 @@ extern int kiln_realm_gc_mark_value(void *heap, const void *value);
             output,
             "extern int {}_namespace_wrapper(kiln_value *result, const char *const *names, const size_t *name_lengths, const kiln_value *values, size_t count);",
             module.symbol
+        )
+        .unwrap();
+    }
+    if let Some(bootstrap) = bootstrap {
+        writeln!(
+            output,
+            "extern int {}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count);",
+            bootstrap.symbol
         )
         .unwrap();
     }
@@ -4489,6 +4597,14 @@ static int kiln_graph_enter(void *opaque) {
     result = &graph->result;
 "#,
     );
+    if let Some(bootstrap) = bootstrap {
+        writeln!(
+            output,
+            "    status = {}(host, result, NULL, 0, NULL, 0);\n    if (status != 0) {{ if (result->tag != KILN_VALUE_STRING || result->len == 0) *result = kiln_graph_diagnostic(\"builtin-bootstrap\", \"@kiln/runtime-bootstrap\"); return status; }}",
+            bootstrap.symbol
+        )
+        .unwrap();
+    }
     // CommonJS cache identities and wrapper locals exist before any module body runs, so cycles
     // can return the initially allocated exports object without re-entering a module.
     for (index, (node, module)) in modules.iter().enumerate() {

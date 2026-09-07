@@ -1369,6 +1369,7 @@ pub fn build_function_graph(
                 // block's innermost handler is one static fact, decided by the pre-pass below
                 // from the state at the block's end, so no block may straddle a push or a pop.
                 block_starts.insert(*target as usize);
+                block_starts.insert(pc);
                 if pc + 1 < code.len() {
                     block_starts.insert(pc + 1);
                 }

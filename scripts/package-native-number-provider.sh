@@ -82,7 +82,7 @@ env -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \
 	CARGO_BUILD_RUSTC_WRAPPER= CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER= \
 	RUSTC="$KILN_PROVIDER_RUSTC" CARGO_BUILD_RUSTC="$KILN_PROVIDER_RUSTC" \
 	RUSTFLAGS="$KILN_PROVIDER_RUSTFLAGS" "$KILN_PROVIDER_CARGO" rustc --locked \
-	-p kiln-native-number-ffi --profile provider --features regexp,bigint,temporal,json,parallel,ffi \
+	-p kiln-native-number-ffi --profile provider --features regexp,bigint,temporal,json,intl,parallel,ffi \
 	--target "$KILN_PROVIDER_TARGET" --crate-type staticlib
 
 KILN_PROVIDER_TARGET_DIR="${CARGO_TARGET_DIR:-target}"
@@ -180,7 +180,7 @@ if command -v "$KILN_PROVIDER_NM" >/dev/null 2>&1; then
 			'failure would resurface as "Undefined symbols" from an unrelated native link.' >&2
 		printf '%s\n' \
 			'Most often the archive was built without the optional features. This script builds' \
-			'with --features regexp,bigint,temporal,json,parallel,ffi; check that those still cover every group in' \
+			'with --features regexp,bigint,temporal,json,intl,parallel,ffi; check that those still cover every group in' \
 			'provider_abi_registry! in crates/kiln-native-number-abi/src/lib.rs.' >&2
 		exit 1
 	fi

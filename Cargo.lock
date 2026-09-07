@@ -1347,6 +1347,7 @@ name = "kiln-native-number-ffi"
 version = "0.0.0"
 dependencies = [
  "kiln-host-abi",
+ "kiln-intl",
  "kiln-json",
  "kiln-native-number-abi",
  "kiln-node-path",

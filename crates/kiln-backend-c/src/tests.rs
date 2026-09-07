@@ -1498,6 +1498,11 @@ int32_t kiln_temporal_last_error(int32_t *out_kind, unsigned char *buffer, size_
     (void)out_kind; (void)buffer; (void)capacity;
     return -1;
 }
+int32_t kiln_intl_segment(const unsigned char *bytes, size_t len, uint32_t granularity,
+                          const uint32_t **out_records, size_t *out_count) {
+    (void)bytes; (void)len; (void)granularity; (void)out_records; (void)out_count;
+    return -1;
+}
 /* `JSON.parse`'s reader lives in the Rust provider archive too, and this host does not link it.
  * Refusing every document is honest for the same reason the regexp stub is: no test here parses
  * one, and a test that did would see a SyntaxError rather than a quiet wrong answer. */
@@ -5343,6 +5348,60 @@ fn value_graph_builds_and_verifies_try_catch() {
     };
 
     let graph = build_function_graph(&proto, &program).unwrap();
+    assert!(verify_function_graph(&graph).is_ok());
+}
+
+#[test]
+fn value_graph_does_not_protect_an_operation_before_try() {
+    let proto = FunctionProto {
+        span: kiln_ir::Span::default(),
+        prologue_end: 0,
+        declared_length: 0,
+        name: Some("pre_try_call".into()),
+        parameter_count: 0,
+        local_count: 0,
+        code: vec![
+            Instruction::Const(0),
+            Instruction::Call { argc: 0 },
+            Instruction::Pop,
+            Instruction::PushHandler(8),
+            Instruction::Const(0),
+            Instruction::Call { argc: 0 },
+            Instruction::PopHandler,
+            Instruction::Return,
+            Instruction::Return,
+        ],
+        arrow: false,
+        generator: false,
+        asynchronous: false,
+        async_generator: false,
+        is_method: false,
+        mapped_arguments: false,
+        upvalues: Vec::new(),
+        type_annotations: None,
+    };
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants: vec![Constant::Undefined],
+        code: vec![Instruction::Return],
+        local_count: 0,
+        functions: vec![proto.clone()],
+        template_sites: Vec::new(),
+    };
+
+    let graph = build_function_graph(&proto, &program).unwrap();
+    let mut handler_by_call_pc = std::collections::BTreeMap::new();
+    for block in &graph.blocks {
+        for (value, operation) in &block.operations {
+            if matches!(operation, GraphOp::Call { .. }) {
+                handler_by_call_pc.insert(graph.origins[value].pc, block.exception_handler);
+            }
+        }
+    }
+
+    assert_eq!(handler_by_call_pc[&1], None);
+    assert!(handler_by_call_pc[&5].is_some());
     assert!(verify_function_graph(&graph).is_ok());
 }
 

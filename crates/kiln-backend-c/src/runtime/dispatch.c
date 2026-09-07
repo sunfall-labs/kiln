@@ -1161,6 +1161,8 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
     kiln_array *array;
     size_t index;
     int status;
+    if (code == KILN_C99_METHOD_INTL_SEGMENT_RAW)
+        return kiln_c99_intl_segment_raw(result, args, argc, thrown);
     if ((code & KILN_C99_FFI_DYNAMIC_BASE) != 0 ||
         code == KILN_C99_METHOD_NODE_FFI_DLOPEN ||
         code == KILN_C99_METHOD_NODE_FFI_GET_RAW_POINTER ||
@@ -1560,8 +1562,12 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         status = kiln_realm_now_nanoseconds(&high, &low);
         if (status != KILN_C99_OK) return status;
         if (code == KILN_C99_METHOD_PROCESS_HRTIME_BIGINT) {
-            *result = kiln_c99_number((double)low);
-            return KILN_C99_OK;
+            /* A Duration reaches 2^64 nanoseconds only after roughly 584 years. Refuse that
+             * presently unreachable width rather than silently truncate it; ordinary readings
+             * become the BigInt this API promises instead of a Number that poisons arithmetic. */
+            if (high != 0)
+                KILN_C99_REFUSE("a process.hrtime.bigint reading wider than uint64");
+            return kiln_c99_u64_bigint(low, 0, result);
         }
         {
             kiln_value parts;

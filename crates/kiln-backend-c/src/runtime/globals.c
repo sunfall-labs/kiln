@@ -94,6 +94,7 @@ static int kiln_c99_process_object(kiln_value *out) {
         return KILN_C99_OK;
     }
     status = kiln_c99_new_object(process);
+    if (status == KILN_C99_OK) status = kiln_c99_install_event_emitter_methods(*process);
     if (status == KILN_C99_OK) status = kiln_c99_new_object(&env);
     if (status == KILN_C99_OK) status = kiln_c99_new_array(&argv);
     if (status == KILN_C99_OK) status = kiln_c99_new_array(&exec_argv);
@@ -183,6 +184,8 @@ static int kiln_c99_process_object(kiln_value *out) {
     }
     if (status == KILN_C99_OK) {
         status = kiln_c99_new_object(&stream);
+        if (status == KILN_C99_OK) status = kiln_c99_install_event_emitter_methods(stream);
+        if (status == KILN_C99_OK) status = kiln_c99_install_readable_methods(stream);
         if (status == KILN_C99_OK)
             status = kiln_c99_put(NULL, stream, "fd", 2, kiln_c99_number(0.0), 0, NULL);
         if (status == KILN_C99_OK)
@@ -190,6 +193,8 @@ static int kiln_c99_process_object(kiln_value *out) {
     }
     if (status == KILN_C99_OK) {
         status = kiln_c99_new_object(&stream);
+        if (status == KILN_C99_OK) status = kiln_c99_install_event_emitter_methods(stream);
+        if (status == KILN_C99_OK) status = kiln_c99_install_writable_methods(stream);
         if (status == KILN_C99_OK)
             status = kiln_c99_put(NULL, stream, "fd", 2, kiln_c99_number(1.0), 0, NULL);
         if (status == KILN_C99_OK)
@@ -197,6 +202,8 @@ static int kiln_c99_process_object(kiln_value *out) {
     }
     if (status == KILN_C99_OK) {
         status = kiln_c99_new_object(&stream);
+        if (status == KILN_C99_OK) status = kiln_c99_install_event_emitter_methods(stream);
+        if (status == KILN_C99_OK) status = kiln_c99_install_writable_methods(stream);
         if (status == KILN_C99_OK)
             status = kiln_c99_put(NULL, stream, "fd", 2, kiln_c99_number(2.0), 0, NULL);
         if (status == KILN_C99_OK)
@@ -313,7 +320,9 @@ static int kiln_c99_global_object(kiln_value *out) {
                      {"clearTimeout", KILN_C99_METHOD_CLEAR_TIMEOUT},
                      {"clearInterval", KILN_C99_METHOD_CLEAR_INTERVAL},
                      {"setImmediate", KILN_C99_METHOD_SET_IMMEDIATE},
-                     {"clearImmediate", KILN_C99_METHOD_CLEAR_IMMEDIATE}};
+                     {"clearImmediate", KILN_C99_METHOD_CLEAR_IMMEDIATE},
+                     /* Captured and deleted by the compiled builtin bootstrap before user code. */
+                     {"__kilnIntlSegment", KILN_C99_METHOD_INTL_SEGMENT_RAW}};
     size_t index;
     int status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_GLOBALS, &globals);
     if (status != KILN_C99_OK) return status;
