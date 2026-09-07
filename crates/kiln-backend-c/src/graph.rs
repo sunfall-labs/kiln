@@ -336,6 +336,24 @@ pub struct FunctionGraph {
     pub scalar_objects: HashMap<ValueId, ScalarObject>,
     /// Maps each alias ValueId (e.g. from StoreLocal, CheckTdz) to its root allocation ValueId.
     pub scalar_alias_map: HashMap<ValueId, ValueId>,
+    /// Objects that do not escape *if* their spread source turns out to be a plain shaped
+    /// object at run time: a literal with one `...source` and constant-key defines. The fast
+    /// clone sinks them under that guard and exits to the generic clone, which allocates,
+    /// when it fails; the generic clone never sees these maps.
+    pub spread_scalar_objects: HashMap<ValueId, ScalarObject>,
+    pub spread_alias_map: HashMap<ValueId, ValueId>,
+    /// The spread bridge, its source, and the define bridges of each speculatively sunk object.
+    pub spread_sinks: HashMap<ValueId, SpreadSink>,
+}
+
+/// A speculatively sunk literal with a spread: `{ ...source, k: v }` whose object never
+/// escapes. Its fields hold what `source` had at the spread, overwritten by the defines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpreadSink {
+    pub alloc: ValueId,
+    pub spread: ValueId,
+    pub source: ValueId,
+    pub defines: Vec<ValueId>,
 }
 
 /// The bytecode an operation was lowered from, for diagnostics.
@@ -361,6 +379,9 @@ impl FunctionGraph {
             non_escaping_objects: BTreeSet::new(),
             scalar_objects: HashMap::new(),
             scalar_alias_map: HashMap::new(),
+            spread_scalar_objects: HashMap::new(),
+            spread_alias_map: HashMap::new(),
+            spread_sinks: HashMap::new(),
         }
     }
 
@@ -373,6 +394,26 @@ impl FunctionGraph {
         self.non_escaping_objects = res.non_escaping;
         self.scalar_objects = res.scalar_objects;
         self.scalar_alias_map = res.alias_map;
+        // The same analysis with a spread allowed: what it finds beyond the unconditional
+        // result is sunk speculatively, by the fast clone alone.
+        let (with_spread, sinks) = escape_analysis_with(self, program, true);
+        self.spread_scalar_objects = with_spread
+            .scalar_objects
+            .into_iter()
+            .filter(|(alloc, _)| {
+                !self.scalar_objects.contains_key(alloc) && sinks.contains_key(alloc)
+            })
+            .collect();
+        let sunk: HashSet<ValueId> = self.spread_scalar_objects.keys().copied().collect();
+        self.spread_alias_map = with_spread
+            .alias_map
+            .into_iter()
+            .filter(|(_, root)| sunk.contains(root))
+            .collect();
+        self.spread_sinks = sinks
+            .into_iter()
+            .filter(|(alloc, _)| sunk.contains(alloc))
+            .collect();
     }
 
     pub fn alloc_value(&mut self) -> ValueId {
@@ -2207,12 +2248,36 @@ pub fn array_slots(graph: &FunctionGraph, program: &Program) -> HashSet<u32> {
 }
 
 pub fn resolve_root_alias(mut vid: ValueId, defs: &HashMap<ValueId, &GraphOp>) -> ValueId {
+    let mut steps = 0;
     while let Some(op) = defs.get(&vid) {
         match op {
             GraphOp::StoreLocal { value, .. } | GraphOp::CheckTdz { value, .. } => {
                 vid = *value;
             }
+            // A merge of one value with itself is that value: a constant hoisted before a
+            // conditional and carried across it on the operand stack, or a loop-invariant local.
+            GraphOp::Phi { inputs } => {
+                let mut single = None;
+                for (_, input) in inputs {
+                    if *input == vid {
+                        continue;
+                    }
+                    match single {
+                        None => single = Some(*input),
+                        Some(seen) if seen == *input => {}
+                        Some(_) => return vid,
+                    }
+                }
+                match single {
+                    Some(input) => vid = input,
+                    None => break,
+                }
+            }
             _ => break,
+        }
+        steps += 1;
+        if steps > 64 {
+            break;
         }
     }
     vid
@@ -2258,6 +2323,53 @@ const OBJECT_PROTOTYPE_PROPERTIES: &[&str] = &[
 ];
 
 pub fn escape_analysis(graph: &FunctionGraph, program: &Program) -> EscapeAnalysisResult {
+    escape_analysis_with(graph, program, false).0
+}
+
+/// A bridge that a spread-aware analysis treats as an aliasing write onto its target rather
+/// than an escape: the spread of a literal, and a constant-key define after one. Answers the
+/// target, the define's key and value when it is a define, and the source when it is a spread.
+type SpreadBridge<'a> = (
+    &'a ValueId,
+    Option<(&'a str, u32, &'a ValueId)>,
+    Option<&'a ValueId>,
+);
+
+fn spread_bridge<'a>(
+    op: &'a GraphOp,
+    defs: &HashMap<ValueId, &'a GraphOp>,
+    program: &'a Program,
+) -> Option<SpreadBridge<'a>> {
+    match op {
+        GraphOp::Bridge {
+            instruction: Instruction::SpreadObject,
+            operands,
+            pushes: 1,
+        } if operands.len() == 2 => Some((&operands[0], None, Some(&operands[1]))),
+        GraphOp::Bridge {
+            instruction: Instruction::DefineNamedProperty,
+            operands,
+            pushes: 1,
+        } if operands.len() == 3 => {
+            let key = resolve_const_string(operands[1], defs, program)?;
+            let index = match defs.get(&resolve_root_alias(operands[1], defs)) {
+                Some(GraphOp::Const { index, .. }) => *index,
+                _ => return None,
+            };
+            Some((&operands[0], Some((key, index, &operands[2])), None))
+        }
+        _ => None,
+    }
+}
+
+/// `with_spread`: a literal's spread and its defines alias their target instead of escaping
+/// it, and an object with exactly one spread is reported as a sink. Everything else is the
+/// unconditional analysis.
+fn escape_analysis_with(
+    graph: &FunctionGraph,
+    program: &Program,
+    with_spread: bool,
+) -> (EscapeAnalysisResult, HashMap<ValueId, SpreadSink>) {
     let mut defs = HashMap::new();
     for block in &graph.blocks {
         for (vid, op) in &block.operations {
@@ -2279,7 +2391,7 @@ pub fn escape_analysis(graph: &FunctionGraph, program: &Program) -> EscapeAnalys
     }
 
     if candidates.is_empty() {
-        return EscapeAnalysisResult::default();
+        return (EscapeAnalysisResult::default(), HashMap::new());
     }
 
     // Step 2: Build alias map (ValueId -> root candidate alloc_id)
@@ -2302,18 +2414,42 @@ pub fn escape_analysis(graph: &FunctionGraph, program: &Program) -> EscapeAnalys
                         changed = true;
                     }
                 }
-                GraphOp::Phi { inputs } if !inputs.is_empty() => {
+                GraphOp::Bridge { .. } if with_spread => {
+                    if let Some((target, _, _)) = spread_bridge(op, &defs, program)
+                        && let Some(&root) = alias_to_root.get(target)
+                    {
+                        alias_to_root.insert(*vid, root);
+                        changed = true;
+                    }
+                }
+                GraphOp::Phi { inputs }
+                    if !inputs.is_empty() && !alias_to_root.contains_key(vid) =>
+                {
+                    // Optimistic over the phis among its inputs that have no root yet -- two
+                    // phis of a loop header and its body merge each wait on the other -- and
+                    // exact over everything else. Step 4 verifies every aliased phi against
+                    // the fixpoint, so a guess that does not hold escapes the object instead.
                     let non_self: Vec<ValueId> = inputs
                         .iter()
                         .map(|(_, v)| *v)
                         .filter(|v| v != vid)
                         .collect();
-                    if let Some(&first_root) = non_self.first().and_then(|v| alias_to_root.get(v))
-                        && non_self
-                            .iter()
-                            .all(|v| alias_to_root.get(v) == Some(&first_root))
-                    {
-                        alias_to_root.insert(*vid, first_root);
+                    let mut root = None;
+                    let mut agree = true;
+                    for v in &non_self {
+                        match alias_to_root.get(v) {
+                            Some(&r) => {
+                                if root.is_some_and(|seen| seen != r) {
+                                    agree = false;
+                                }
+                                root = Some(r);
+                            }
+                            None if matches!(defs.get(v), Some(GraphOp::Phi { .. })) => {}
+                            None => agree = false,
+                        }
+                    }
+                    if agree && let Some(root) = root {
+                        alias_to_root.insert(*vid, root);
                         changed = true;
                     }
                 }
@@ -2417,6 +2553,14 @@ pub fn escape_analysis(graph: &FunctionGraph, program: &Program) -> EscapeAnalys
 
     // Step 4: Check escapes
     let mut escaped: HashSet<ValueId> = HashSet::new();
+    let mut spread_seen: HashSet<ValueId> = HashSet::new();
+    let defined_by_bridge = |root: ValueId, name: &str| -> bool {
+        with_spread
+            && defs.values().any(|op| {
+                matches!(spread_bridge(op, &defs, program),
+                    Some((target, Some((key, _, _)), _)) if alias_to_root.get(target) == Some(&root) && key == name)
+            })
+    };
     let slots_in_array = array_slots(graph, program);
 
     for block in &graph.blocks {
@@ -2505,9 +2649,36 @@ pub fn escape_analysis(graph: &FunctionGraph, program: &Program) -> EscapeAnalys
                     }
                 }
                 GraphOp::Bridge { operands, .. } => {
-                    for o in operands {
-                        if let Some(&root) = alias_to_root.get(o) {
-                            escaped.insert(root);
+                    let handled = with_spread
+                        && match spread_bridge(op, &defs, program) {
+                            Some((target, define, source))
+                                if alias_to_root.contains_key(target) =>
+                            {
+                                let root = alias_to_root[target];
+                                if let Some(source) = source {
+                                    // A candidate spread into another escapes; a second spread
+                                    // of the same object is not modelled.
+                                    if let Some(&sroot) = alias_to_root.get(source) {
+                                        escaped.insert(sroot);
+                                    }
+                                    if !spread_seen.insert(root) {
+                                        escaped.insert(root);
+                                    }
+                                }
+                                if let Some((_, _, value)) = define
+                                    && let Some(&vroot) = alias_to_root.get(value)
+                                {
+                                    escaped.insert(vroot);
+                                }
+                                true
+                            }
+                            _ => false,
+                        };
+                    if !handled {
+                        for o in operands {
+                            if let Some(&root) = alias_to_root.get(o) {
+                                escaped.insert(root);
+                            }
                         }
                     }
                 }
@@ -2525,7 +2696,7 @@ pub fn escape_analysis(graph: &FunctionGraph, program: &Program) -> EscapeAnalys
                     }
                 }
                 GraphOp::Phi { inputs } => {
-                    if live_values.contains(vid) {
+                    if live_values.contains(vid) || alias_to_root.contains_key(vid) {
                         let non_self: Vec<ValueId> = inputs
                             .iter()
                             .map(|(_, in_v)| *in_v)
@@ -2558,7 +2729,7 @@ pub fn escape_analysis(graph: &FunctionGraph, program: &Program) -> EscapeAnalys
                                     })
                                 } else {
                                     false
-                                };
+                                } || defined_by_bridge(root, prop_name);
                             if !defined {
                                 escaped.insert(root);
                             }
@@ -2643,6 +2814,7 @@ pub fn escape_analysis(graph: &FunctionGraph, program: &Program) -> EscapeAnalys
     }
 
     // Step 5: Construct ScalarObjects for non-escaping allocations
+    let mut sinks: HashMap<ValueId, SpreadSink> = HashMap::new();
     let mut non_escaping = BTreeSet::new();
     let mut scalar_objects = HashMap::new();
 
@@ -2662,9 +2834,15 @@ pub fn escape_analysis(graph: &FunctionGraph, program: &Program) -> EscapeAnalys
             }
         }
 
-        // 2. From SetProperty / GetProperty / SetComputed / GetComputed
+        // 2. From SetProperty / GetProperty / SetComputed / GetComputed, and the define bridges
         for block in &graph.blocks {
             for (_, op) in &block.operations {
+                if with_spread
+                    && let Some((target, Some((key, _, _)), _)) = spread_bridge(op, &defs, program)
+                    && alias_to_root.get(target) == Some(&alloc_id)
+                {
+                    field_names.insert(key.to_owned());
+                }
                 match op {
                     GraphOp::GetProperty { object, name, .. }
                     | GraphOp::SetProperty { object, name, .. }
@@ -2719,7 +2897,7 @@ pub fn escape_analysis(graph: &FunctionGraph, program: &Program) -> EscapeAnalys
         }
 
         for block in &graph.blocks {
-            for (_, op) in &block.operations {
+            for (op_vid, op) in &block.operations {
                 match op {
                     GraphOp::SetProperty {
                         object,
@@ -2755,8 +2933,59 @@ pub fn escape_analysis(graph: &FunctionGraph, program: &Program) -> EscapeAnalys
                                 .push(*value);
                         }
                     }
+                    GraphOp::Bridge { .. } if with_spread => {
+                        if let Some((target, define, source)) = spread_bridge(op, &defs, program)
+                            && alias_to_root.get(target) == Some(&alloc_id)
+                        {
+                            if let Some((key, _, value)) = define
+                                && let Some(&field_idx) = fields.get(key)
+                            {
+                                field_written_values
+                                    .entry(field_idx)
+                                    .or_default()
+                                    .push(*value);
+                            }
+                            // The spread may write any named field, with a value nothing
+                            // proves: the bridge itself stands in as the writer.
+                            if source.is_some() {
+                                for &field_idx in fields.values() {
+                                    field_written_values
+                                        .entry(field_idx)
+                                        .or_default()
+                                        .push(*op_vid);
+                                }
+                            }
+                        }
+                    }
                     _ => {}
                 }
+            }
+        }
+        if with_spread {
+            let mut sink = SpreadSink {
+                alloc: alloc_id,
+                spread: alloc_id,
+                source: alloc_id,
+                defines: Vec::new(),
+            };
+            let mut has_spread = false;
+            for block in &graph.blocks {
+                for (vid, op) in &block.operations {
+                    if let Some((target, define, source)) = spread_bridge(op, &defs, program)
+                        && alias_to_root.get(target) == Some(&alloc_id)
+                    {
+                        if let Some(source) = source {
+                            sink.spread = *vid;
+                            sink.source = *source;
+                            has_spread = true;
+                        } else if define.is_some() {
+                            sink.defines.push(*vid);
+                        }
+                    }
+                }
+            }
+            if has_spread {
+                sinks.insert(alloc_id, sink);
             }
         }
 
@@ -2780,11 +3009,14 @@ pub fn escape_analysis(graph: &FunctionGraph, program: &Program) -> EscapeAnalys
         }
     }
 
-    EscapeAnalysisResult {
-        non_escaping,
-        scalar_objects,
-        alias_map,
-    }
+    (
+        EscapeAnalysisResult {
+            non_escaping,
+            scalar_objects,
+            alias_map,
+        },
+        sinks,
+    )
 }
 
 /// The phis a merge block owns: one per local slot, allocated before the walk, and one per stack

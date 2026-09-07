@@ -88,6 +88,7 @@ extern int kiln_c99_reserve(void **items, size_t *capacity, size_t needed, size_
 extern int kiln_c99_same_name(const char *key, size_t key_len, const char *name);
 extern int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key, size_t key_len, kiln_value value, int strict, int depth, kiln_value *thrown);
 extern int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len, kiln_value value, int depth, kiln_value *thrown);
+extern uint32_t kiln_c99_shape_slot_named(const kiln_shape *shape, const char *bytes, size_t len);
 extern int kiln_c99_define_named_fast(kiln_val target, kiln_val key, kiln_val value, int *status,
                                       kiln_c99_site *site);
 extern int kiln_c99_spread_object_fast(kiln_val target, kiln_val source, int *status);
