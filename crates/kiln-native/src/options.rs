@@ -165,6 +165,7 @@ impl NativeRealmPolicy {
                 NativeStringPolicy::Host => EmissionStringPolicy::Host,
             },
             decoupled_prelude: true,
+            compact: false,
             type_profile_record: false,
             type_profile: None,
         }

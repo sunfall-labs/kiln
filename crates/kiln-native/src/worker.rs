@@ -1,6 +1,24 @@
 use super::*;
 use std::path::Path;
 use std::process::Command;
+use std::sync::OnceLock;
+
+const MAX_EMIT_THREADS: usize = 4;
+
+fn emit_pool() -> Option<&'static rayon::ThreadPool> {
+    static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let threads = std::thread::available_parallelism()
+            .map_or(MAX_EMIT_THREADS, |cores| cores.get())
+            .min(MAX_EMIT_THREADS);
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(|index| format!("kiln-native-emit-{index}"))
+            .build()
+            .ok()
+    })
+    .as_ref()
+}
 
 pub(crate) fn run_worker<T>(
     stage: &'static str,
@@ -35,6 +53,33 @@ where
         .collect::<Vec<_>>()
         .into_iter()
         .collect()
+}
+
+/// Emits independent module translation units concurrently without allowing a large graph to
+/// occupy every machine core or hold an unbounded number of large `String`s in flight.
+pub(crate) fn emit_indexed<T, F>(
+    count: usize,
+    stage: &'static str,
+    work: F,
+) -> Result<Vec<T>, NativeError>
+where
+    F: Fn(usize) -> Result<T, NativeError> + Send + Sync,
+    T: Send,
+{
+    let run = || {
+        (0..count)
+            .into_par_iter()
+            .map(|index| run_worker(stage, || work(index)))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .collect()
+    };
+    match emit_pool() {
+        Some(pool) => pool.install(run),
+        None => (0..count)
+            .map(|index| run_worker(stage, || work(index)))
+            .collect(),
+    }
 }
 
 pub(crate) fn read(path: &Path, operation: &'static str) -> Result<Vec<u8>, NativeError> {

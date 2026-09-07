@@ -51,7 +51,7 @@ pub(super) fn share_sites(body: &str, prefix: &str) -> (String, usize) {
     let mut count = 0usize;
     for line in body.split_inclusive('\n') {
         if let Some(at) = line.find(DECLARATION) {
-            let name = format!("{prefix}_{count}");
+            let name = format!("{prefix}[{count}]");
             count += 1;
             let stripped = format!("{}{}", &line[..at], &line[at + DECLARATION.len()..]);
             // `site` as a token of its own: `site.`, `&site`, `(site` -- never inside an
@@ -93,8 +93,8 @@ mod tests {
         let (shared, count) = share_sites(body, "fn_0_site");
         assert_eq!(count, 2);
         assert!(!shared.contains("static kiln_c99_site"));
-        assert!(shared.contains("use(&fn_0_site_0, fn_0_site_0.pic_count, diagnostic_site)"));
-        assert!(shared.contains("use(&fn_0_site_1)"));
+        assert!(shared.contains("use(&fn_0_site[0], fn_0_site[0].pic_count, diagnostic_site)"));
+        assert!(shared.contains("use(&fn_0_site[1])"));
     }
 }
 

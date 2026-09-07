@@ -11,7 +11,9 @@ use crate::graph::{
 };
 use crate::prelude::lookup_speculation_invariant;
 use crate::tail::{TailContext, emit_tail_instruction};
-use crate::{BuiltinLoad, builtin_load, closure_construction};
+use crate::{
+    BuiltinLoad, builtin_load, closure_construction, compact_diagnostic_site, diagnostic_source,
+};
 use kiln_ir::Instruction;
 use kiln_ir::Upvalue;
 use kiln_ir::{BinaryOp, Constant, FunctionProto, Program, UnaryOp};
@@ -62,8 +64,13 @@ pub(super) fn status_check(
     operation: &str,
     unwind: &str,
 ) -> String {
+    if compact_diagnostic_site(diagnostic_site) {
+        // Body assembly detects this marker to materialize the shared refusal label.
+        return format!("KU_STATUS({pc}, \"{operation}\", {unwind}); /* goto kiln_refusal; */");
+    }
+    let diagnostic_source = diagnostic_source(diagnostic_site);
     format!(
-        "if (status == KILN_C99_THROWN) {unwind} if (status == KILN_C99_CONTROL_ERROR) {{ kiln_c99_note_refusal(\"{diagnostic_site}\", (size_t){pc}, \"{operation}\", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; }} if (status != KILN_C99_OK) return status;"
+        "if (status == KILN_C99_THROWN) {unwind} if (status == KILN_C99_CONTROL_ERROR) {{ kiln_c99_note_refusal({diagnostic_source}, (size_t){pc}, \"{operation}\", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; }} if (status != KILN_C99_OK) return status;"
     )
 }
 
@@ -449,6 +456,7 @@ pub(super) fn emit_graph_op(
                     symbol,
                     diagnostic_site,
                     callables: !scalar_proto,
+                    compact: plan.compact,
                 },
                 unwind,
             );
@@ -720,6 +728,20 @@ pub(super) fn emit_graph_op(
             for arg in args {
                 init.push_str(&format!(", v{}", arg.0));
             }
+            if plan.compact {
+                let check = status_check(diagnostic_site, pc, label, unwind);
+                let sync_number = typed
+                    .then(|| format!(" memcpy(&d{v}, &v{v}, sizeof(d{v}));"))
+                    .unwrap_or_default();
+                writeln!(
+                    output,
+                    "    {{ kiln_val call_stack[{n}] = {{ {init} }}; const kiln_val *call_args = {argc} > 0 ? &call_stack[1] : NULL; int status = kiln_c99_val_call(host, call_stack[0], call_args, (size_t){argc}, depth, thrown, {diagnostic_source}, (size_t){pc}, \"{label}\", &v{v}); {check}{sync_number} }}",
+                    n = argc + 1,
+                    diagnostic_source = diagnostic_source(diagnostic_site),
+                )
+                .unwrap();
+                return;
+            }
             let mut static_branches = String::new();
             if program.functions.len() <= 32 {
                 for i in 0..program.functions.len() {
@@ -841,18 +863,24 @@ pub(super) fn emit_graph_op(
                 "kiln_c99_new_object(&built)".to_owned()
             };
             let check = status_check(diagnostic_site, pc, label, unwind);
-            let mut defines = String::new();
-            for (key, value) in pairs {
-                defines.push_str(&format!(
-                    " status = kiln_c99_define_computed(built, kiln_val_to_boundary(v{}), kiln_val_to_boundary(v{})); {check}",
-                    key.0, value.0
-                ));
+            if plan.compact && count > 1 {
+                let values = pairs
+                    .iter()
+                    .flat_map(|(key, value)| [key, value])
+                    .map(|value| format!("v{}", value.0))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                writeln!(output, "    {{ kiln_val pairs[{pair_count}] = {{ {values} }}; kiln_value built; int status = {alloc}; if (status != KILN_C99_OK) return status; for (size_t pair = 0; pair < (size_t){count}; ++pair) {{ status = kiln_c99_define_computed(built, kiln_val_to_boundary(pairs[pair * 2]), kiln_val_to_boundary(pairs[pair * 2 + 1])); {check} }} v{v} = kiln_val_from_boundary(built); }}", pair_count = count * 2).unwrap();
+            } else {
+                let mut defines = String::new();
+                for (key, value) in pairs {
+                    defines.push_str(&format!(
+                        " status = kiln_c99_define_computed(built, kiln_val_to_boundary(v{}), kiln_val_to_boundary(v{})); {check}",
+                        key.0, value.0
+                    ));
+                }
+                writeln!(output, "    {{ kiln_value built; int status = {alloc}; if (status != KILN_C99_OK) return status;{defines} v{v} = kiln_val_from_boundary(built); }}").unwrap();
             }
-            writeln!(
-                output,
-                "    {{ kiln_value built; int status = {alloc}; if (status != KILN_C99_OK) return status;{defines} v{v} = kiln_val_from_boundary(built); }}"
-            )
-            .unwrap();
         }
         GraphOp::MakeFunction { index, .. } => {
             let target = &program.functions[*index as usize];
@@ -912,17 +940,24 @@ pub(super) fn emit_graph_op(
                 )
                 .unwrap();
             } else {
-                let mut assigns = String::new();
                 let mut check_numeric = String::new();
-                for (i, elem) in elements.iter().enumerate() {
-                    assigns.push_str(&format!(" arr->elements[{i}] = v{};", elem.0));
+                for elem in elements {
                     check_numeric.push_str(&format!(" && KILN_VAL_IS_NUMBER(v{})", elem.0));
                 }
-                writeln!(
-                    output,
-                    "    {{ kiln_value built; int status = kiln_c99_new_array_with_capacity(&built, {count}, 1{check_numeric}); if (status != KILN_C99_OK) return status; kiln_array *arr = kiln_c99_array_of(built);{assigns} arr->count = {count}; v{v} = kiln_val_from_boundary(built); }}"
-                )
-                .unwrap();
+                if plan.compact && count > 1 {
+                    let values = elements
+                        .iter()
+                        .map(|elem| format!("v{}", elem.0))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    writeln!(output, "    {{ kiln_val elements[{count}] = {{ {values} }}; kiln_value built; int status = kiln_c99_new_array_with_capacity(&built, {count}, 1{check_numeric}); if (status != KILN_C99_OK) return status; kiln_array *arr = kiln_c99_array_of(built); memcpy(arr->elements, elements, sizeof(elements)); arr->count = {count}; v{v} = kiln_val_from_boundary(built); }}").unwrap();
+                } else {
+                    let mut assigns = String::new();
+                    for (i, elem) in elements.iter().enumerate() {
+                        assigns.push_str(&format!(" arr->elements[{i}] = v{};", elem.0));
+                    }
+                    writeln!(output, "    {{ kiln_value built; int status = kiln_c99_new_array_with_capacity(&built, {count}, 1{check_numeric}); if (status != KILN_C99_OK) return status; kiln_array *arr = kiln_c99_array_of(built);{assigns} arr->count = {count}; v{v} = kiln_val_from_boundary(built); }}").unwrap();
+                }
             }
         }
         // Property and element access call the value-shaped helpers directly: the same

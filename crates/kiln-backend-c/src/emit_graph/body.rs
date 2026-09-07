@@ -191,7 +191,7 @@ pub fn emit_function_from_graph_with_profile(
 
     // 3. Context & arguments setup. `ctx` is never null: every caller, the runtime's and the
     // emitted direct path alike, passes its own.
-    let receiver_cache = if this_site_count(graph) > 0 {
+    let receiver_cache = if !plan.compact && this_site_count(graph) > 0 {
         receiver_prologue(symbol, index, &this_columns(graph).1, kind)
     } else {
         String::new()
@@ -345,10 +345,10 @@ pub fn emit_function_from_graph_with_profile(
     // and the receiver-shape cache: four rows of shapes, a slot per read of `this` in each.
     if kind == EntryKind::Boxed && (shared_sites > 0 || this_sites > 0) {
         let mut declarations = String::new();
-        for k in 0..shared_sites {
+        if shared_sites > 0 {
             writeln!(
                 declarations,
-                "static kiln_c99_site {symbol}_fn_{index}_site_{k} = {{0}};"
+                "static kiln_c99_site {symbol}_fn_{index}_site[{shared_sites}] = {{0}};"
             )
             .unwrap();
         }
@@ -518,6 +518,7 @@ fn emit_ssa_declarations(
     ints: &HashSet<ValueId>,
     booleans: &HashSet<ValueId>,
     sunk: bool,
+    compact: bool,
 ) {
     if !booleans.is_empty() {
         let mut ids: Vec<u32> = booleans.iter().map(|v| v.0).collect();
@@ -556,14 +557,22 @@ fn emit_ssa_declarations(
         output.push_str(";\n");
     }
     if graph.next_value_id > 0 {
-        output.push_str("    kiln_val ");
-        for vid in 0..graph.next_value_id {
-            if vid > 0 {
-                output.push_str(", ");
+        if compact && graph.next_value_id >= 4096 {
+            writeln!(output, "    kiln_val v[{}];", graph.next_value_id).unwrap();
+        } else {
+            output.push_str("    kiln_val ");
+            for vid in 0..graph.next_value_id {
+                if vid > 0 {
+                    output.push_str(", ");
+                }
+                if compact {
+                    write!(output, "v{vid}").unwrap();
+                } else {
+                    write!(output, "v{vid} = KILN_VAL_UNDEFINED").unwrap();
+                }
             }
-            write!(output, "v{vid} = KILN_VAL_UNDEFINED").unwrap();
+            output.push_str(";\n");
         }
-        output.push_str(";\n");
     }
     if !graph.scalar_objects.is_empty() || (sunk && !graph.spread_scalar_objects.is_empty()) {
         let mut sorted_objs: Vec<_> = graph.scalar_objects.values().collect();
@@ -886,6 +895,7 @@ fn emit_block_sequence(
             block_prefix,
             symbol,
             type_profile_record,
+            plan.compact && graph.next_value_id >= 4096,
         );
     }
 }
@@ -1027,7 +1037,11 @@ fn emit_blocks(
     let body_start = output.len();
     // The reads of `this`, each with its column in the function's receiver-shape cache: one
     // row per shape seen, one column per property name.
-    let this_sites = this_columns(graph).0;
+    let this_sites = if plan.compact {
+        std::collections::HashMap::new()
+    } else {
+        this_columns(graph).0
+    };
     let candidate_params = candidate_number_parameters_with_profile(graph, proto, func_profile);
     let speculate_enabled = std::env::var("KILN_SPECULATE").as_deref() != Ok("0");
     let suspends = graph
@@ -1104,7 +1118,13 @@ fn emit_blocks(
         .map(|sink| sink.spread)
         .chain(spec_fields.iter().copied())
         .collect();
-    let versioning = speculate_enabled
+    // Duplicating a large body makes both the generated source and the downstream C compiler's
+    // memory grow linearly for a speedup that only matters inside small hot loops. Keep release
+    // speculation bounded, and make compact/native-dev emission single-bodied throughout.
+    const MAX_VERSIONED_OPERATIONS: usize = 192;
+    let versioning = !plan.compact
+        && ops.len() <= MAX_VERSIONED_OPERATIONS
+        && speculate_enabled
         && !suspends
         && kind == EntryKind::Boxed
         && (!candidate_params.is_empty()
@@ -1115,14 +1135,18 @@ fn emit_blocks(
 
     let baseline_numbers = &plan.numbers;
     let baseline_ints = &plan.ints;
-    let baseline_booleans = booleans_with(
-        graph,
-        &baseline_numbers
-            .iter()
-            .map(|&v| (v, Proven::Number))
-            .chain(baseline_ints.iter().map(|&v| (v, Proven::Int)))
-            .collect(),
-    );
+    let baseline_booleans = if plan.compact {
+        HashSet::new()
+    } else {
+        booleans_with(
+            graph,
+            &baseline_numbers
+                .iter()
+                .map(|&v| (v, Proven::Number))
+                .chain(baseline_ints.iter().map(|&v| (v, Proven::Int)))
+                .collect(),
+        )
+    };
     let defs: std::collections::HashMap<ValueId, &GraphOp> = graph
         .blocks
         .iter()
@@ -1204,7 +1228,15 @@ fn emit_blocks(
         all_ints.extend(&speculative_ints);
 
         let all_booleans = booleans_with(fast_graph, &candidate_assumptions);
-        emit_ssa_declarations(output, graph, &all_numbers, &all_ints, &all_booleans, true);
+        emit_ssa_declarations(
+            output,
+            fast_graph,
+            &all_numbers,
+            &all_ints,
+            &all_booleans,
+            true,
+            false,
+        );
 
         let index = match site {
             Site::Function { index } => *index,
@@ -1332,6 +1364,7 @@ fn emit_blocks(
             baseline_ints,
             &baseline_booleans,
             false,
+            plan.compact,
         );
         emit_block_sequence(
             output,
@@ -1464,7 +1497,93 @@ fn emit_blocks(
             }
         }
     }
-    (shared_sites, this_site_count(graph))
+    if plan.compact && graph.next_value_id >= 4096 {
+        let indexed = index_large_ssa_values(&output[body_start..]);
+        output.truncate(body_start);
+        output.push_str(&indexed);
+    }
+    (
+        shared_sites,
+        if plan.compact {
+            0
+        } else {
+            this_site_count(graph)
+        },
+    )
+}
+
+/// Turn exact C identifiers such as `v123` into `v[123]` for a large body's single value array.
+/// Strings, character literals, and comments are copied byte-for-byte so diagnostic/source text
+/// remains observable JavaScript rather than becoming part of this C-only compaction.
+fn index_large_ssa_values(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut output = String::with_capacity(source.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'"' || bytes[at] == b'\'' {
+            let quote = bytes[at];
+            let start = at;
+            at += 1;
+            while at < bytes.len() {
+                if bytes[at] == b'\\' {
+                    at = (at + 2).min(bytes.len());
+                } else {
+                    let done = bytes[at] == quote;
+                    at += 1;
+                    if done {
+                        break;
+                    }
+                }
+            }
+            output.push_str(&source[start..at]);
+            continue;
+        }
+        if bytes[at] == b'/' && at + 1 < bytes.len() && bytes[at + 1] == b'/' {
+            let start = at;
+            at += 2;
+            while at < bytes.len() && bytes[at] != b'\n' {
+                at += 1;
+            }
+            output.push_str(&source[start..at]);
+            continue;
+        }
+        if bytes[at] == b'/' && at + 1 < bytes.len() && bytes[at + 1] == b'*' {
+            let start = at;
+            at += 2;
+            while at + 1 < bytes.len() && !(bytes[at] == b'*' && bytes[at + 1] == b'/') {
+                at += 1;
+            }
+            at = (at + 2).min(bytes.len());
+            output.push_str(&source[start..at]);
+            continue;
+        }
+        if bytes[at].is_ascii_alphabetic() || bytes[at] == b'_' {
+            let start = at;
+            at += 1;
+            while at < bytes.len() && (bytes[at].is_ascii_alphanumeric() || bytes[at] == b'_') {
+                at += 1;
+            }
+            let identifier = &source[start..at];
+            if let Some(index) = identifier.strip_prefix('v')
+                && !index.is_empty()
+                && index.bytes().all(|byte| byte.is_ascii_digit())
+            {
+                output.push_str("v[");
+                output.push_str(index);
+                output.push(']');
+            } else {
+                output.push_str(identifier);
+            }
+            continue;
+        }
+        let ch = source[at..]
+            .chars()
+            .next()
+            .expect("the cursor is inside the source");
+        output.push(ch);
+        at += ch.len_utf8();
+    }
+    output
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1484,6 +1603,7 @@ fn emit_terminator(
     block_prefix: &str,
     symbol: &str,
     type_profile_record: bool,
+    indexed_values: bool,
 ) {
     match terminator {
         Terminator::Return(value) => match site {
@@ -1606,6 +1726,7 @@ fn emit_terminator(
                 numbers,
                 ints,
                 booleans,
+                indexed_values,
             );
             writeln!(output, "    goto {block_prefix}{};", target.0).unwrap();
         }
@@ -1660,6 +1781,7 @@ fn emit_terminator(
                 numbers,
                 ints,
                 booleans,
+                indexed_values,
             );
             writeln!(output, "        goto {block_prefix}{};", true_block.0).unwrap();
             output.push_str("    } else {\n");
@@ -1671,6 +1793,7 @@ fn emit_terminator(
                 numbers,
                 ints,
                 booleans,
+                indexed_values,
             );
             writeln!(output, "        goto {block_prefix}{};", false_block.0).unwrap();
             output.push_str("    }\n");
@@ -1713,6 +1836,7 @@ fn emit_phi_assignments(
     numbers: &HashSet<ValueId>,
     ints: &HashSet<ValueId>,
     booleans: &HashSet<ValueId>,
+    indexed_values: bool,
 ) {
     // A parallel move: every input is read before any phi is written, so two phis that swap
     // values (`[a, b] = [b, a]` across a back edge) do not clobber each other.
@@ -1730,6 +1854,38 @@ fn emit_phi_assignments(
         }
     }
     if moves.is_empty() {
+        return;
+    }
+    if indexed_values && moves.len() >= 4 {
+        let from = moves
+            .iter()
+            .map(|(_, from)| from.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let to = moves
+            .iter()
+            .map(|(to, _)| to.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(output, "        {{ static const uint32_t phi_from[{}] = {{ {from} }}; static const uint32_t phi_to[{}] = {{ {to} }}; kiln_val phi_tmp[{}]; for (size_t phi = 0; phi < (size_t){}; ++phi) phi_tmp[phi] = v[phi_from[phi]]; for (size_t phi = 0; phi < (size_t){}; ++phi) v[phi_to[phi]] = phi_tmp[phi]; }}", moves.len(), moves.len(), moves.len(), moves.len(), moves.len()).unwrap();
+        return;
+    }
+    if moves.len() >= 4 && numbers.is_empty() && ints.is_empty() && booleans.is_empty() {
+        let values = moves
+            .iter()
+            .map(|(_, from)| format!("v{from}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        write!(
+            output,
+            "        {{ kiln_val phi_tmp[{}] = {{ {values} }};",
+            moves.len()
+        )
+        .unwrap();
+        for (index, (to, _)) in moves.iter().enumerate() {
+            write!(output, " v{to} = phi_tmp[{index}];").unwrap();
+        }
+        output.push_str(" }\n");
         return;
     }
     output.push_str("        {");
@@ -1758,4 +1914,18 @@ fn emit_phi_assignments(
         }
     }
     output.push_str(" }\n");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::index_large_ssa_values;
+
+    #[test]
+    fn large_ssa_indexing_changes_only_c_identifiers() {
+        let source = "v12 = v3; const char *s = \"v4 ☃\"; /* v5 */ // v6\nvalue7 = v8;";
+        assert_eq!(
+            index_large_ssa_values(source),
+            "v[12] = v[3]; const char *s = \"v4 ☃\"; /* v5 */ // v6\nvalue7 = v[8];"
+        );
+    }
 }

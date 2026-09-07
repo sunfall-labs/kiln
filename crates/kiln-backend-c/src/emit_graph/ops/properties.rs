@@ -79,6 +79,22 @@ pub(super) fn emit_get_property(
     };
     let key_len = key_str.len();
     let check = status_check(diagnostic_site, pc, label, unwind);
+    if ctx.plan.compact {
+        writeln!(
+            output,
+            "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_val_read_property(host, v{o}, {symbol}_key_{name}, {key_len}, depth, thrown, &site, &v{v}); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(v{o})); {check} }}{typed_sync}",
+            o = object.0,
+            typed_sync = if typed_int {
+                format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v})); i{v} = (int64_t)d{v};")
+            } else if typed {
+                format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));")
+            } else {
+                String::new()
+            }
+        )
+        .unwrap();
+        return;
+    }
     let length_check = if key_str == "length" && spec.arrays.contains(object) {
         format!(
             "{{ v{v} = kiln_c99_val_from_double((double)((const kiln_array *)KILN_VAL_PTR(v{o}))->count); handled = 1; }} ",
@@ -272,6 +288,21 @@ pub(super) fn emit_set_property(
     let key_len = key_str.len();
     let strict = matches!(op, GraphOp::SetPropertyStrict { strict: true, .. }) as u8;
     let check = status_check(diagnostic_site, pc, label, unwind);
+    if ctx.plan.compact {
+        writeln!(
+            output,
+            "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_val_write_property(host, v{o}, {symbol}_key_{name}, {key_len}, v{val}, {strict}, depth, thrown, &site); {check} v{v} = v{val}; }}{typed_sync}",
+            o = object.0,
+            val = value.0,
+            typed_sync = if typed {
+                format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));")
+            } else {
+                String::new()
+            }
+        )
+        .unwrap();
+        return;
+    }
     writeln!(
                 output,
                 "    {{ static kiln_c99_site site = {{0}}; \
@@ -353,6 +384,21 @@ pub(super) fn emit_get_computed(
         return;
     }
     let check = status_check(diagnostic_site, pc, label, unwind);
+    if ctx.plan.compact {
+        writeln!(
+            output,
+            "    {{ int status = kiln_c99_val_read_element(host, v{o}, v{k}, depth, thrown, &v{v}); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(kiln_val_to_boundary(v{o}), kiln_val_to_boundary(v{k})); {check} }}{typed_sync}",
+            o = object.0,
+            k = key.0,
+            typed_sync = if typed {
+                format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));")
+            } else {
+                String::new()
+            }
+        )
+        .unwrap();
+        return;
+    }
     // The object an array by the entry guard: no tag or kind to test, and an index
     // proven an integer is the element's index as it is.
     let array_tier = if spec.arrays.contains(object) && ints.contains(key) {
@@ -470,6 +516,22 @@ pub(super) fn emit_set_computed(
     }
     let strict = matches!(op, GraphOp::SetComputedStrict { strict: true, .. }) as u8;
     let check = status_check(diagnostic_site, pc, label, unwind);
+    if ctx.plan.compact {
+        writeln!(
+            output,
+            "    {{ int status = kiln_c99_val_write_element(host, v{o}, v{k}, v{val}, {strict}, depth, thrown); {check} v{v} = v{val}; }}{typed_sync}",
+            o = object.0,
+            k = key.0,
+            val = value.0,
+            typed_sync = if typed {
+                format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));")
+            } else {
+                String::new()
+            }
+        )
+        .unwrap();
+        return;
+    }
     writeln!(
                 output,
                 "    {{ static kiln_c99_site site = {{0}}; \

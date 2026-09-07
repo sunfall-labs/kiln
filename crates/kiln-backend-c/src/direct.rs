@@ -71,6 +71,9 @@ pub struct TypedNeeds {
 /// How one body's calls are emitted.
 #[derive(Default, Clone, Debug)]
 pub struct CallPlan {
+    /// Emit only the generic body; native-dev uses this to keep the edit/run loop proportional
+    /// to the program instead of multiplying it by speculative clones.
+    pub compact: bool,
     /// Call results whose callee is the closure of the named proto.
     pub known: HashMap<ValueId, u32>,
     /// Call results emitted against the callee's typed entry: every argument proven a number.
@@ -126,6 +129,7 @@ impl DirectPlan {
         graphs: &[FunctionGraph],
         entry: &FunctionGraph,
         publishes_frame: &[bool],
+        compact: bool,
     ) -> Self {
         let known = known_callees(program, graphs, entry);
         let direct: Vec<bool> = program
@@ -155,7 +159,13 @@ impl DirectPlan {
         let typed_eligible: Vec<bool> = direct
             .iter()
             .zip(&has_rest_parameter)
-            .map(|(&direct, &has_rest)| direct && !has_rest)
+            .zip(&program.functions)
+            .map(|((&direct, &has_rest), proto)| {
+                direct
+                    && !has_rest
+                    && !compact
+                    && proto.code.len() <= crate::MAX_SPECIALIZED_INSTRUCTIONS
+            })
             .collect();
         let intrinsics: Vec<HashMap<ValueId, Proven>> = graphs
             .iter()
@@ -261,16 +271,29 @@ impl DirectPlan {
                 &params,
             );
             CallPlan {
-                known: known.known.clone(),
+                compact,
+                known: if compact {
+                    HashMap::new()
+                } else {
+                    known.known.clone()
+                },
                 typed_sites,
-                numbers: proven
-                    .iter()
-                    .filter_map(|(&v, &kind)| kind.is_number().then_some(v))
-                    .collect(),
-                ints: proven
-                    .into_iter()
-                    .filter_map(|(v, kind)| (kind == Proven::Int).then_some(v))
-                    .collect(),
+                numbers: (!compact)
+                    .then(|| {
+                        proven
+                            .iter()
+                            .filter_map(|(&v, &kind)| kind.is_number().then_some(v))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                ints: (!compact)
+                    .then(|| {
+                        proven
+                            .into_iter()
+                            .filter_map(|(v, kind)| (kind == Proven::Int).then_some(v))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
                 unchecked: known.unchecked.clone(),
                 invariant: known.invariant.clone(),
                 typed_returns: typed_returns.clone(),

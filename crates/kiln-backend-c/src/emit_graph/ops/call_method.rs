@@ -1,5 +1,6 @@
 use super::OpContext;
 use super::{method_candidates, status_check};
+use crate::diagnostic_source;
 use crate::direct::TypedNeeds;
 use crate::graph::{GraphOp, ValueId};
 use crate::prelude::lookup_speculation_invariant;
@@ -401,6 +402,29 @@ pub(super) fn emit_call_method(
         _ => "",
     };
     let key_len = key_str.len();
+    if plan.compact {
+        let n = argc.max(1);
+        let init = if args.is_empty() {
+            "KILN_VAL_UNDEFINED".to_owned()
+        } else {
+            args.iter()
+                .map(|argument| format!("v{}", argument.0))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let check = status_check(diagnostic_site, pc, label, unwind);
+        let sync_number = typed
+            .then(|| format!(" memcpy(&d{v}, &v{v}, sizeof(d{v}));"))
+            .unwrap_or_default();
+        writeln!(
+            output,
+            "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_val call_args[{n}] = {{ {init} }}; int status = kiln_c99_val_call_method(host, v{o}, call_args, (size_t){argc}, {symbol}_key_{name}, {key_len}, depth, thrown, &site, {diagnostic_source}, (size_t){pc}, \"{label}\", &v{v}); {check}{sync_number} }}",
+            o = object.0,
+            diagnostic_source = diagnostic_source(diagnostic_site),
+        )
+        .unwrap();
+        return;
+    }
     // The unit's own methods of this name: a cached callee whose body is one of them is
     // called by name, and the C compiler may inline it into this site.
     let candidates = method_candidates(program, key_str, &plan.publishes_frame);

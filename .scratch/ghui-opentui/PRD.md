@@ -12,6 +12,8 @@ It now compiles to a native executable, but it does not yet run to its first fra
 
 With the landing change, a clean ghui checkout builds successfully with the native-release profile. The
 build generated about 816 MB of C, compiled it in parallel, and produced a 231 MB executable.
+The size is now a tracked compiler defect, not an accepted application cost: issue 04 records that
+the supposedly decoupled runtime header is still copied into every module translation unit.
 
 The same application exposed a module scheduler bug in the interpreter: a dynamic-import job was
 queued on the interpreter's private realm while Node module execution drained the shared module

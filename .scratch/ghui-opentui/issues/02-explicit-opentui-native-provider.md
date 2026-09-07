@@ -1,6 +1,6 @@
 # Give OpenTUI an explicit native provider
 
-Status: needs-triage
+Status: in-progress
 
 ## Failure
 
@@ -8,12 +8,13 @@ OpenTUI 0.4.2 rejects the honest Kiln platform identity before it can initialise
 Changing the identity only reaches the next absent contract: the package requires `node:ffi` or
 `bun:ffi`, dynamic-library loading, pointers and array-buffer views, and same-thread callbacks.
 
-## Decision needed
+## Decision
 
-Choose whether Kiln should implement a reusable constrained `node:ffi` surface or a dedicated
-OpenTUI provider linked into native applications. The generic surface is more reusable but is a
-new capability and security boundary. A dedicated provider is narrower, but needs an integration
-contract that does not fork or patch OpenTUI's JavaScript package.
+Implement the reusable `node:ffi` surface. A dedicated OpenTUI-only provider would make this one
+application run while leaving the package's public runtime contract unimplemented. The generic
+surface is an explicit host capability: dynamic libraries, symbols, calls, pointers, array-buffer
+views, and same-thread callbacks are owned by the Rust provider; JavaScript validation and the
+Node-compatible facade are TypeScript built-ins over stable intrinsics.
 
 The implementation must verify the selected OpenTUI library and its symbol table at packaging or
 link time, as the native-number provider does, and must not advertise `process.platform` as a host
