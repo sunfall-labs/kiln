@@ -137,6 +137,15 @@ static void kiln_c99_gc_aligned_free(void *aligned);
  * a unit registered the same spelling after a computed key had already claimed it. Every other
  * entry is weak: its bytes are a string block that the properties holding the key keep marked,
  * and the collection that finds the block unmarked drops the entry before the sweep frees it. */
+/* The bytes of an interned key sit behind a `kiln_string` header, the block layout every other
+ * string has, so a key's length is one load and never `strlen`: a key may contain U+0000
+ * (`JSON.parse('{"a\\u0000b":1}')`, a registry symbol's binary id), and the collector's
+ * interior-pointer fallback for strings already looks one header back from the bytes. The
+ * trailing NUL stays so a `%s` diagnostic keeps working; it is not the length. */
+static inline size_t kiln_c99_key_len(const char *ikey) {
+    return ((const kiln_string *)ikey - 1)->byte_len;
+}
+
 typedef struct kiln_key_entry {
     const char *bytes; /* NULL when the slot is empty */
     size_t len;
@@ -1631,8 +1640,14 @@ static void *kiln_c99_gc_calloc(uint32_t kind, size_t size) {
  * Canonical pointers are distinct as pointers: a block is adopted as canonical only when its
  * size is exactly the key's length, so two keys can never share an address with different
  * lengths, and the empty key is one static byte rather than whichever empty string came first. */
-static const char kiln_c99_key_empty[1] = "";
+/* The empty key, headed like every other so `kiln_c99_key_len` reads zero from it. */
+static const struct kiln_c99_key_empty_storage {
+    kiln_string header;
+    char bytes[8];
+} kiln_c99_key_empty_storage = {{0, 0, kiln_c99_key_empty_storage.bytes}, ""};
+#define kiln_c99_key_empty (kiln_c99_key_empty_storage.bytes)
 static void kiln_c99_gc_mark_block(kiln_gc_heap *heap, const void *payload);
+static char *kiln_c99_gc_alloc_text_tenured(size_t len);
 
 /* `KILN_KEYS_CHECK=1`: every pointer-identity scan is re-run by bytes and a disagreement aborts
  * naming the key. The acceptance test for "interning is total", not a mode to ship. Read once
@@ -1779,22 +1794,26 @@ static const char *kiln_c99_intern(const char *bytes, size_t len) {
     hash = kiln_c99_key_hash(bytes, len);
     entry = kiln_c99_key_probe(&heap->keys, bytes, len, hash);
     if (entry != NULL) return entry->bytes;
-    /* A key must be null-terminated because shape keys and property lookups call strlen(ikey),
-     * and string blocks are not otherwise null-terminated. We allocate len + 1 bytes. */
-    copy = (char *)kiln_c99_gc_alloc_tenured(KILN_GC_STRING, len + 1);
+    /* A headed, NUL-terminated string block: `kiln_c99_key_len` reads the header, and the
+     * conservative scanner and the purge below find the block from these bytes the way they
+     * find any string's. */
+    copy = kiln_c99_gc_alloc_text_tenured(len);
     if (copy == NULL) return NULL;
     memcpy(copy, bytes, len);
-    copy[len] = '\0';
     return kiln_c99_key_insert(&heap->keys, copy, len, hash, 0);
 }
 
-/* For bytes that outlive the heap. NULL only when the table cannot grow; a unit that gets NULL
- * for one of its keys fails its entry with out-of-memory rather than run a site with a pointer
- * that is not canonical. */
+/* For a spelling that must stay canonical for the realm's whole life: a unit's constant, a
+ * symbol's reserved key. The bytes are copied once into a headed tenured block and the entry is
+ * pinned, so the collector marks the copy and the caller's storage is never borrowed -- a
+ * literal's address is not a key, and the caller must use the pointer returned here. NULL only
+ * when the table or the heap cannot grow; a unit that gets NULL for one of its keys fails its
+ * entry with out-of-memory rather than run a site with a pointer that is not canonical. */
 static const char *kiln_c99_intern_static(const char *bytes, size_t len) {
     kiln_gc_heap *heap;
     uint64_t hash;
     kiln_key_entry *entry;
+    char *copy;
     if (len == 0) return kiln_c99_key_empty;
     heap = kiln_c99_gc_heap();
     if (heap == NULL) return NULL;
@@ -1804,7 +1823,10 @@ static const char *kiln_c99_intern_static(const char *bytes, size_t len) {
         entry->pinned = 1;
         return entry->bytes;
     }
-    return kiln_c99_key_insert(&heap->keys, bytes, len, hash, 1);
+    copy = kiln_c99_gc_alloc_text_tenured(len);
+    if (copy == NULL) return NULL;
+    memcpy(copy, bytes, len);
+    return kiln_c99_key_insert(&heap->keys, copy, len, hash, 1);
 }
 
 /* A string block released by hand (`kiln_c99_gc_release`) must not stay canonical. */
@@ -1933,8 +1955,10 @@ static void kiln_c99_gc_release(void *payload) {
     }
     if (block != NULL) {
         if ((block->kind & KILN_GC_FLAG_DEAD) == 0) {
-            if ((block->kind & KILN_GC_KIND_MASK) == KILN_GC_STRING)
-                kiln_c99_key_forget(heap, (const char *)payload, block->size);
+            if ((block->kind & KILN_GC_KIND_MASK) == KILN_GC_STRING) {
+                const kiln_string *text = (const kiln_string *)payload;
+                kiln_c99_key_forget(heap, text->bytes, text->byte_len);
+            }
             kiln_c99_gc_finalize(block);
             block->kind |= KILN_GC_FLAG_DEAD;
             kiln_c99_nursery_clear_bit(heap, block);
@@ -1951,8 +1975,12 @@ static void kiln_c99_gc_release(void *payload) {
         if (block != NULL) payload = (char *)payload - sizeof(kiln_string);
     }
     if (block == NULL) return;
-    if ((block->kind & KILN_GC_KIND_MASK) == KILN_GC_STRING)
-        kiln_c99_key_forget(heap, (const char *)payload, block->size);
+    if ((block->kind & KILN_GC_KIND_MASK) == KILN_GC_STRING) {
+        /* Every string block is headed, an interned key's included, so the entry to forget is
+         * the one whose bytes are the header's. */
+        const kiln_string *text = (const kiln_string *)payload;
+        kiln_c99_key_forget(heap, text->bytes, text->byte_len);
+    }
     kiln_c99_gc_finalize(block);
     heap->freed_blocks += 1;
     heap->freed_bytes += block->size;

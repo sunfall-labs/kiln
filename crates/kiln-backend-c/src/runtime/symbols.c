@@ -128,11 +128,19 @@ static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
      * `Symbol(String(x))` -- is kept alive by the symbol that carries it. */
     symbol->key = key.bytes;
     symbol->key_len = key.len;
-    /* Registered as immortal so a property stored under the symbol carries these very bytes
-     * rather than a copy; the malloc above is the reason `intern_static` is the right form. */
+    /* Registered as immortal: the interned copy is pinned for the realm's life, and a property
+     * stored under the symbol carries that canonical pointer. The builder's malloc has done its
+     * job once the copy exists. */
     {
         const char *canonical = kiln_c99_intern_static(symbol->key, symbol->key_len);
-        if (canonical != NULL) symbol->key = canonical;
+        if (canonical == NULL) {
+            free(key.bytes);
+            kiln_c99_gc_release(symbol);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        symbol->key = canonical;
+        free(key.bytes);
+        key.bytes = NULL;
     }
     if (description.tag == KILN_VALUE_UNDEFINED) {
         /* `Symbol()` has no description, which prints as `Symbol()` rather than
@@ -182,10 +190,17 @@ static int kiln_c99_symbol_for(kiln_value *out, kiln_value key) {
     symbol->key = property_key;
     symbol->key_len = (sizeof property_prefix - 1) + sizeof id;
     /* Two `Symbol.for("x")` calls make two of these structs with one key: interning is what
-     * makes a property stored through either findable through the other by pointer. */
+     * makes a property stored through either findable through the other by pointer. The key
+     * carries the id's raw bytes, NULs included, which is one reason a key's length is read
+     * from its header and never measured. */
     {
         const char *canonical = kiln_c99_intern_static(symbol->key, symbol->key_len);
-        if (canonical != NULL) symbol->key = canonical;
+        free(property_key);
+        if (canonical == NULL) {
+            kiln_c99_gc_release(symbol);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        symbol->key = canonical;
     }
     symbol->description = (const char *)registered_key;
     symbol->description_len = (size_t)registered_key_len;

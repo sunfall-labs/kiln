@@ -561,7 +561,7 @@ static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out
             }
             for (index = 0; index < object->shape->property_count; ++index) {
                 const char *skey = object->shape->keys[index];
-                size_t key_len = strlen(skey);
+                size_t key_len = kiln_c99_key_len(skey);
                 if (key_len >= 2 && skey[0] == '@' && skey[1] == '@') {
                     continue;
                 }
@@ -601,7 +601,7 @@ static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out
             if (extra->properties == NULL && extra->shape != NULL) {
                 for (index = 0; index < extra->shape->property_count; ++index) {
                     const char *skey = extra->shape->keys[index];
-                    size_t key_len = strlen(skey);
+                    size_t key_len = kiln_c99_key_len(skey);
                     if (key_len >= 2 && skey[0] == '@' && skey[1] == '@') continue;
                     status = kiln_c99_array_push(built, kiln_c99_copy_text(skey, key_len));
                     if (status != KILN_C99_OK) return status;
@@ -699,7 +699,7 @@ static int kiln_c99_enumerate_keys(kiln_host *host, kiln_value target, kiln_valu
             }
             for (index = 0; index < object->shape->property_count; ++index) {
                 const char *skey = object->shape->keys[index];
-                size_t key_len = strlen(skey);
+                size_t key_len = kiln_c99_key_len(skey);
                 status = kiln_c99_array_push(shadowed, kiln_c99_copy_text(skey, key_len));
                 if (status != KILN_C99_OK) return status;
             }
@@ -740,7 +740,7 @@ static int kiln_c99_enumerate_keys(kiln_host *host, kiln_value target, kiln_valu
             }
             for (index = 0; index < object->shape->property_count; ++index) {
                 const char *key = object->shape->keys[index];
-                size_t key_len = strlen(key);
+                size_t key_len = kiln_c99_key_len(key);
                 if (key_len >= 2 && key[0] == '@' && key[1] == '@') continue;
                 if (kiln_c99_keys_contain(shadowed, key, key_len)) continue;
                 status = kiln_c99_array_push(shadowed, kiln_c99_copy_text(key, key_len));

@@ -2148,6 +2148,60 @@ const _: () = assert_refusals_name_themselves(
     absent_answer_sites(ABSENT_ANSWER_SITES),
 );
 
+/// Every `strlen(` in the prelude C measures a genuine C string -- a builtin's name out of a
+/// table, an error message, an environment value, a header name, a Temporal field -- and never
+/// a property key. A key is interned behind a `kiln_string` header and may contain U+0000
+/// (`JSON.parse('{"a\\u0000b":1}')`, a registry symbol's binary id), so its length is
+/// `kiln_c99_key_len(ikey)`, one load; `strlen` on a key stops at the NUL and the property
+/// answers under the wrong name with nothing failing (`.scratch/json-tape/issues/01`). The count
+/// is the guard, the way `ABSENT_ANSWER_SITES` is: a new `strlen(` does not compile until its
+/// argument has been shown to be a C string and this number raised, or it is rewritten as
+/// `kiln_c99_key_len`. The pass that set it classified all ninety sites on 2026-09-07: fourteen
+/// took a shape or property key and became `kiln_c99_key_len`, one became the property's stored
+/// `key_len`, and these are the rest.
+pub const C_STRING_LENGTH_SITES: usize = 75;
+
+/// How far the `strlen(` scan may skip after reading the last byte of its seven-byte window:
+/// the Horspool shift, as `refusal_scan_shift` is for the refusal scan, so the const evaluator
+/// touches a fraction of the prelude's bytes rather than every one.
+const fn strlen_scan_shift(last: u8) -> usize {
+    match last {
+        b's' => 6,
+        b't' => 5,
+        b'r' => 4,
+        b'l' => 3,
+        b'e' => 2,
+        b'n' => 1,
+        _ => 7,
+    }
+}
+
+/// The number of `strlen(` spellings in the prelude C, for the assertion below.
+pub const fn c_string_length_sites(prelude: &str) -> usize {
+    let bytes = prelude.as_bytes();
+    let mut at = 0;
+    let mut count = 0;
+    while at + 7 <= bytes.len() {
+        if bytes[at] == b's' && bytes_match_at(bytes, at, b"strlen(") {
+            count += 1;
+            at += 7;
+        } else {
+            at += strlen_scan_shift(bytes[at + 6]);
+        }
+    }
+    count
+}
+
+#[allow(long_running_const_eval)]
+const _: () = assert!(
+    c_string_length_sites(concat!(core_parts!(), runtime_parts!())) == C_STRING_LENGTH_SITES,
+    "the prelude C holds a different number of `strlen(` sites than C_STRING_LENGTH_SITES \
+     declares. If the new one measures a property or shape key, it truncates at an embedded NUL: \
+     use `kiln_c99_key_len(ikey)` (or the property's stored `key_len`) instead. If it measures a \
+     genuine C string, raise the count. `grep -n 'strlen(' crates/kiln-backend-c/src/runtime/*.c` \
+     lists the sites"
+);
+
 /// The globals [`BUILTIN_SURFACE`] speaks for, in declaration order and without repeats.
 pub fn builtin_surface_owners() -> Vec<&'static str> {
     let mut owners: Vec<&'static str> = Vec::new();
@@ -3956,7 +4010,10 @@ pub fn runtime_prelude_header() -> &'static str {
             "static uint64_t kiln_c99_proto_epoch;",
             "extern uint64_t kiln_c99_proto_epoch __attribute__((visibility(\"hidden\")));",
         );
-        assert!(text != PRELUDE_HEADER, "the prototype epoch's definition moved");
+        assert!(
+            text != PRELUDE_HEADER,
+            "the prototype epoch's definition moved"
+        );
         text
     })
 }
