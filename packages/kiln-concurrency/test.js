@@ -35,8 +35,10 @@ async function run() {
 
   // parallelMap
   const arr = [1, 2, 3, 4];
-  const squares = await arr.parallelMap(x => x * x);
-  assert.deepStrictEqual(squares, [1, 4, 9, 16]);
+  const squares = arr.parallelMap((x, i) => x * x + i);
+  assert.ok(Array.isArray(squares), "parallelMap answers an array, not a promise");
+  assert.deepStrictEqual(squares, [1, 5, 11, 19]);
+  assert.strictEqual(typeof arr.parallelMap(x => x).then, "undefined");
 
   console.log("All @kiln/concurrency tests passed!");
 }

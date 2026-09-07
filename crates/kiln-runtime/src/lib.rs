@@ -21,8 +21,6 @@ pub mod node_net;
 pub mod node_stream;
 pub mod scripted_transport;
 pub use scripted_transport::{ScriptedTransport, ScriptedTransportLog};
-pub mod concurrency;
-pub use concurrency::{ConcurrencyError, WorkerPool, WorkerRealmHandle};
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, HashSet, VecDeque};

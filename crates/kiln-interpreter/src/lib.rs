@@ -20445,7 +20445,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // has no way to consult it that the generic one does not already have.
         if matches!(
             method,
-            CallbackMethod::Map | CallbackMethod::Filter | CallbackMethod::FlatMap
+            CallbackMethod::Map
+                | CallbackMethod::ParallelMap
+                | CallbackMethod::Filter
+                | CallbackMethod::FlatMap
         ) {
             return self.generic_array_callback(method, receiver, arguments, instruction);
         }
@@ -20474,7 +20477,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // has to *leave* one: its result has an entry per input position, so a skipped hole
             // that produced nothing would shorten the array and shift everything after it.
             if Self::is_hole(&item) {
-                if matches!(method, CallbackMethod::Map) {
+                if matches!(method, CallbackMethod::Map | CallbackMethod::ParallelMap) {
                     collected.push(Value::Native(Native::Hole, RealmId::PRIMARY));
                 }
                 index += 1;
@@ -20506,7 +20509,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         return Ok(Value::Number(index as f64));
                     }
                 }
-                CallbackMethod::Map => collected.push(result),
+                CallbackMethod::Map | CallbackMethod::ParallelMap => collected.push(result),
                 CallbackMethod::ForEach => {}
                 CallbackMethod::Filter => {
                     if result.is_truthy() {
@@ -20562,7 +20565,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // Not undefined: `findIndex` reports -1 for "nowhere", where `find` reports the
             // absence of a value.
             CallbackMethod::FindIndex => Value::Number(-1.0),
-            CallbackMethod::Map | CallbackMethod::Filter => Value::Array(ArrayData::new(collected)),
+            CallbackMethod::Map | CallbackMethod::ParallelMap | CallbackMethod::Filter => {
+                Value::Array(ArrayData::new(collected))
+            }
             CallbackMethod::ForEach | CallbackMethod::Find => Value::Undefined,
             CallbackMethod::Some => Value::Boolean(false),
             CallbackMethod::Every => Value::Boolean(true),
@@ -23447,6 +23452,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Callback(method, _) => matches!(
                 method,
                 CallbackMethod::Map
+                    | CallbackMethod::ParallelMap
                     | CallbackMethod::ForEach
                     | CallbackMethod::Filter
                     | CallbackMethod::Reduce
@@ -24464,7 +24470,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // iteration early instead of handing the callback the `undefined` it is owed.
         || matches!(receiver, Value::TypedArray(_));
         let created = match method {
-            CallbackMethod::Map => {
+            CallbackMethod::Map | CallbackMethod::ParallelMap => {
                 Some(self.array_species_create(receiver, length, instruction)?)
             }
             CallbackMethod::Filter | CallbackMethod::FlatMap => {
@@ -24493,7 +24499,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 instruction,
             )?;
             match method {
-                CallbackMethod::Map => {
+                CallbackMethod::Map | CallbackMethod::ParallelMap => {
                     self.create_element(
                         created.as_ref().unwrap_or(&Value::Undefined),
                         index,
@@ -24553,7 +24559,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
         }
         Ok(match method {
-            CallbackMethod::Map => created.unwrap_or(Value::Undefined),
+            CallbackMethod::Map | CallbackMethod::ParallelMap => {
+                created.unwrap_or(Value::Undefined)
+            }
             CallbackMethod::Filter | CallbackMethod::FlatMap => {
                 let created = created.unwrap_or(Value::Undefined);
                 self.finish_created_array(&created, written)?;
@@ -30640,7 +30648,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     &original,
                     produced,
                     false,
-                    matches!(callback, CallbackMethod::Map | CallbackMethod::Filter),
+                    matches!(
+                        callback,
+                        CallbackMethod::Map | CallbackMethod::ParallelMap | CallbackMethod::Filter
+                    ),
                     instruction,
                 )?))
             }
@@ -39805,6 +39816,7 @@ fn same_value_zero(left: &Value, right: &Value) -> bool {
 fn array_callback_method(name: &str) -> Option<CallbackMethod> {
     match name {
         "map" => Some(CallbackMethod::Map),
+        "parallelMap" => Some(CallbackMethod::ParallelMap),
         "forEach" => Some(CallbackMethod::ForEach),
         "filter" => Some(CallbackMethod::Filter),
         "reduce" => Some(CallbackMethod::Reduce),
@@ -39840,6 +39852,11 @@ pub enum CallbackMethod {
     /// `throw` on an async generator: raises at the suspension point, promising the next step.
     AsyncGeneratorThrow,
     Map,
+    /// `parallelMap`: `map` by another name on this engine. The compiled backend may run the
+    /// walk on a pool (ADR 0058, application 2); the answer is the same array either way, and
+    /// a name that reads `undefined` here while the other engine has a value is the failure
+    /// CLAUDE.md calls the expensive one.
+    ParallelMap,
     ForEach,
     Filter,
     /// `reduce`: the only one whose callback takes the accumulator, so it does not fit the

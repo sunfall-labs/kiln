@@ -333,7 +333,7 @@ pub(crate) fn configure_shared_library_link(
     output: &Path,
     public_symbols: &[&str],
     workspace: &Path,
-    compiler: CompilerKind,
+    _compiler: CompilerKind,
 ) -> Result<(), NativeError> {
     let identity = shared_library_link_identity(output);
     #[cfg(target_os = "macos")]

@@ -1,12 +1,13 @@
 /**
  * @kiln/concurrency
- * Native in-process multicore actors, zero-copy region transfer, and parallel data processing.
- * Conforms to ADR 0057.
+ * Actors behind an asynchronous proxy, `isolate`/`transfer` identity brands, and a
+ * synchronous `parallelMap`. Conforms to ADR 0058 (revised 2026-09-06), which narrows ADR 0057
+ * to what both engines implement.
  */
 
 /**
  * Base class marking an Actor.
- * State within an Actor is strictly private, thread-local, and single-threaded.
+ * State within an Actor is private to it and reached only through the proxy.
  */
 export abstract class Actor {}
 
@@ -21,7 +22,7 @@ export type ActorRef<T extends Actor> = {
 };
 
 /**
- * Spawns an actor realm and returns a typed proxy.
+ * Constructs the actor and returns a typed asynchronous proxy over it, in this realm.
  */
 export function spawnActor<T extends Actor>(
   ctor: new (...args: any[]) => T,
@@ -35,22 +36,23 @@ declare const IsolatedBrand: unique symbol;
 export type Isolated<T> = T & { readonly [IsolatedBrand]: true };
 
 /**
- * Marks an expression or factory return as an isolated region.
- * In Kiln, triggers static escape analysis.
+ * Marks an expression or factory return as an isolated region; `kiln-hir` checks that the
+ * value does not escape by another alias.
  */
 export function isolate<T>(value: T): Isolated<T>;
 export function isolate<T>(factory: () => T): Isolated<T>;
 
 /**
- * Consumes an isolated region and prepares it for O(1) cross-realm transfer.
+ * Consumes an isolated region. Identity on every engine today.
  */
 export function transfer<T>(value: Isolated<T>): T;
 
 declare global {
   interface Array<T> {
     /**
-     * Executes a pure parallel map across worker threads.
+     * `map` that the compiled backend may run on a pool when the callback provably allocates
+     * nothing (ADR 0058). Synchronous: the answer is an array, never a promise.
      */
-    parallelMap<U>(fn: (item: T, index: number) => U): Promise<U[]>;
+    parallelMap<U>(fn: (item: T, index: number, array: T[]) => U): U[];
   }
 }
