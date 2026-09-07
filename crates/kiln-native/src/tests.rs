@@ -9,6 +9,129 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 struct OxcFrontend;
 
+#[test]
+fn compact_function_context_is_omitted_only_when_unused() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping compact context fixture: no C compiler found");
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-compact-context");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        include_str!("../../../conformance/native/compact-function-context.js"),
+    )
+    .expect("write context fixture");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("context graph");
+    let emitted = emit_native_graph_module_with_policy(
+        graph.module(graph.entry()).expect("entry module"),
+        "main.mjs",
+        &kiln_backend_c::EmissionPolicy {
+            compact: true,
+            ..kiln_backend_c::EmissionPolicy::default()
+        },
+    )
+    .expect("emit compact context fixture");
+    let identity = emitted
+        .source
+        .split("/* function ")
+        .find(|body| {
+            body.starts_with("0: identity */")
+                || body
+                    .lines()
+                    .next()
+                    .is_some_and(|line| line.ends_with(": identity */"))
+        })
+        .expect("identity body")
+        .split("\n}\n")
+        .next()
+        .unwrap();
+    assert!(!identity.contains("ctx->"), "{identity}");
+    assert!(!identity.contains("receiver_ptr ?"), "{identity}");
+    assert!(
+        !identity.contains("kiln_c99_inheriting_new_target"),
+        "{identity}"
+    );
+    assert!(
+        emitted
+            .source
+            .contains("kiln_generator *frame = ctx->frame;")
+    );
+    assert!(emitted.source.contains("kiln_value *thrown = ctx->thrown;"));
+    assert!(emitted.source.contains("receiver_ptr ? *receiver_ptr"));
+
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("context"), NativeProfile::Release),
+        )
+        .expect("build compact context fixture");
+    let result = Command::new(&report.output)
+        .output()
+        .expect("run context fixture");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "17 undefined\n41\n40 42\n44\n45\n46\n43\n"
+    );
+}
+
+#[test]
+fn dead_phi_pruning_preserves_effects_parallel_copies_and_suspension() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping dead phi fixture: no C compiler found");
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-dead-phi");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        include_str!("../../../conformance/native/dead-phi-copies.js"),
+    )
+    .expect("write dead phi fixture");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("dead phi graph");
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("phis"), NativeProfile::Release),
+        )
+        .expect("build dead phi fixture");
+    let result = Command::new(&report.output)
+        .output()
+        .expect("run dead phi fixture");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "123 231 312 123 231\ncoercion\n12\n9\n9\n1 2 208\n208\n"
+    );
+}
+
 impl kiln_module_graph::Frontend for OxcFrontend {
     fn parse(&mut self, path: &str, source: &str) -> kiln_hir::Module {
         frontend_oxc::parse(path, source)
@@ -166,6 +289,49 @@ fn environment_digest(kind: CompilerKind, entries: &[(&str, &str)]) -> Digest {
         .map(|(name, value)| ((*name).to_owned(), std::ffi::OsString::from(value)))
         .collect::<std::collections::HashMap<_, _>>();
     compiler_environment_digest_with(kind, |name| values.get(name).cloned())
+}
+
+#[test]
+fn largest_first_compilation_preserves_results_and_error_precedence() {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let observed = parking_lot::Mutex::new(Vec::new());
+    let result = pool
+        .install(|| {
+            compile_largest_first(&[1, 20, 3, 20], "priority test", |index| {
+                observed.lock().push(index);
+                Ok(index)
+            })
+        })
+        .unwrap();
+    assert_eq!(*observed.lock(), vec![1, 3, 2, 0]);
+    assert_eq!(result, vec![0, 1, 2, 3]);
+    let failure = pool
+        .install(|| {
+            compile_largest_first(&[1, 20, 3, 20], "priority test", |index| {
+                if index == 0 || index == 3 {
+                    return Err(NativeError::NumberProvider {
+                        message: format!("index {index}"),
+                    });
+                }
+                Ok(index)
+            })
+        })
+        .unwrap_err();
+    assert!(matches!(failure, NativeError::NumberProvider { message } if message == "index 0"));
+    let failure = compile_largest_first(&[1, 20, 3], "priority panic", |index| {
+        assert_ne!(index, 1, "deliberate test panic");
+        Ok(index)
+    })
+    .unwrap_err();
+    assert!(matches!(
+        failure,
+        NativeError::WorkerPanic {
+            stage: "priority panic"
+        }
+    ));
 }
 
 #[test]
@@ -2223,6 +2389,107 @@ fn shared_loader_paths_canonicalize_and_reserve_the_loader_namespace() {
         shared_library_loader_path(&real.join(".kiln-loaders"), identity),
         Err(NativeError::ArtifactPathCollision { .. })
     ));
+}
+
+#[test]
+fn graph_emission_cache_hits_persist_and_all_input_classes_invalidate() {
+    let project = TestDirectory::new("kiln-native-emission-cache");
+    let graph = one_module_graph(&project.path, 1.0, "value");
+    let node = graph.module(graph.entry()).unwrap();
+    let policy = EmissionPolicy {
+        decoupled_prelude: true,
+        compact: true,
+        ..Default::default()
+    };
+    let cache_path = project.path.join("emission-cache");
+    let cache = ArtifactCache::new(&cache_path);
+    let expected = emit_native_graph_module_with_policy(node, "main.js", &policy).unwrap();
+    let first = cached_graph_module(&cache, "test-target", node, "main.js", &policy, || {
+        Ok(expected.clone())
+    })
+    .unwrap();
+    assert_eq!(first, expected);
+    // A fresh cache object must hit without entering the emitter at all.
+    let reopened = ArtifactCache::new(&cache_path);
+    assert_eq!(
+        cached_graph_module(
+            &reopened,
+            "test-target",
+            node,
+            "main.js",
+            &policy,
+            || panic!("unchanged module was emitted again")
+        )
+        .unwrap(),
+        expected
+    );
+
+    let mut cases = Vec::new();
+    let mut changed = node.clone();
+    changed.program.program.constants[0] = Constant::Number(2.0_f64.to_bits());
+    cases.push((changed, policy.clone(), "main.js", "test-target"));
+    let mut changed = node.clone();
+    changed.program.program.source = "// changed observable source".into();
+    cases.push((changed, policy.clone(), "main.js", "test-target"));
+    let mut changed = node.clone();
+    changed.program.strictness.body = !changed.program.strictness.body;
+    cases.push((changed, policy.clone(), "main.js", "test-target"));
+    let mut changed = node.clone();
+    changed.program.exports[0].exported = "renamed".into();
+    cases.push((changed, policy.clone(), "main.js", "test-target"));
+    let mut changed = node.clone();
+    changed
+        .program
+        .link_facts
+        .immutable_bindings
+        .push("value".into());
+    cases.push((changed, policy.clone(), "main.js", "test-target"));
+    let mut changed = node.clone();
+    changed.source = ModuleSource::CommonJs;
+    cases.push((changed, policy.clone(), "main.js", "test-target"));
+    cases.push((node.clone(), policy.clone(), "other.js", "test-target"));
+    cases.push((node.clone(), policy.clone(), "main.js", "other-target"));
+    for change in 0..9 {
+        let mut changed = policy.clone();
+        match change {
+            0 => changed.compact = false,
+            1 => changed.host_clock = true,
+            2 => changed.entropy = kiln_backend_c::EmissionEntropyPolicy::Seeded(3),
+            3 => changed.timezone = kiln_backend_c::EmissionStringPolicy::Named("UTC".into()),
+            4 => changed.locale = kiln_backend_c::EmissionStringPolicy::Host,
+            5 => changed.type_profile_record = true,
+            6 => changed.type_profile = Some(Arc::new(Default::default())),
+            7 => changed.live_module_slots = Some(Arc::new(BTreeSet::new())),
+            8 => changed.live_module_slots = Some(Arc::new(BTreeSet::from([0]))),
+            _ => unreachable!(),
+        }
+        cases.push((node.clone(), changed, "main.js", "test-target"));
+    }
+    for (index, (node, policy, path, target)) in cases.iter().enumerate() {
+        let calls = std::cell::Cell::new(0);
+        let actual = cached_graph_module(&cache, target, node, path, policy, || {
+            calls.set(calls.get() + 1);
+            Ok(expected.clone())
+        })
+        .unwrap();
+        assert_eq!(calls.get(), 1, "input case {index} reused stale output");
+        assert_eq!(actual, expected);
+    }
+    let mut embedded = policy.clone();
+    embedded.decoupled_prelude = false;
+    let calls = std::cell::Cell::new(0);
+    for _ in 0..2 {
+        cached_graph_module(&cache, "test-target", node, "main.js", &embedded, || {
+            calls.set(calls.get() + 1);
+            Ok(expected.clone())
+        })
+        .unwrap();
+    }
+    assert_eq!(
+        calls.get(),
+        2,
+        "embedded runtime sources must bypass this cache"
+    );
 }
 
 fn one_module_graph(project: &Path, value: f64, export: &str) -> ModuleGraph {

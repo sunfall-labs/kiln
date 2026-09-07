@@ -219,6 +219,76 @@ impl GraphOp {
         }
     }
 
+    /// Rewrite SSA operands, leaving local slots, constant indices and site IDs untouched.
+    fn map_operands(&mut self, map: &impl Fn(ValueId) -> ValueId) {
+        let mut apply = |value: &mut ValueId| *value = map(*value);
+        match self {
+            Self::Const { .. }
+            | Self::LoadLocal(_)
+            | Self::LoadCell(_)
+            | Self::LoadUpvalue(_)
+            | Self::LoadBuiltin(_)
+            | Self::CaughtValue
+            | Self::MakeCell(_)
+            | Self::LoadGlobal(_)
+            | Self::LoadThis
+            | Self::LoadNewTarget
+            | Self::MarkUninitialized(_)
+            | Self::MakeFunction { .. } => {}
+            Self::StoreLocal { value, .. }
+            | Self::StoreCell { value, .. }
+            | Self::StoreUpvalue { value, .. }
+            | Self::StoreGlobal { value, .. }
+            | Self::CheckTdz { value, .. }
+            | Self::Unary { value, .. } => apply(value),
+            Self::Bridge { operands, .. } => operands.iter_mut().for_each(&mut apply),
+            Self::Binary { left, right, .. } => {
+                apply(left);
+                apply(right);
+            }
+            Self::GetProperty { object, .. } => apply(object),
+            Self::SetProperty { object, value, .. }
+            | Self::SetPropertyStrict { object, value, .. } => {
+                apply(object);
+                apply(value);
+            }
+            Self::GetComputed { object, key, .. } => {
+                apply(object);
+                apply(key);
+            }
+            Self::SetComputed {
+                object, key, value, ..
+            }
+            | Self::SetComputedStrict {
+                object, key, value, ..
+            } => {
+                apply(object);
+                apply(key);
+                apply(value);
+            }
+            Self::Call { callee, args, .. } | Self::New { callee, args, .. } => {
+                apply(callee);
+                args.iter_mut().for_each(&mut apply);
+            }
+            Self::CallMethod { object, args, .. } => {
+                apply(object);
+                args.iter_mut().for_each(&mut apply);
+            }
+            Self::NewArray { elements, .. } => elements.iter_mut().for_each(&mut apply),
+            Self::NewObject { pairs, .. } => {
+                for (key, value) in pairs {
+                    apply(key);
+                    apply(value);
+                }
+            }
+            Self::Phi { inputs } => {
+                for (_, value) in inputs {
+                    apply(value);
+                }
+            }
+        }
+    }
+
     /// Effect classification for this operation.
     pub fn effect(&self) -> Effect {
         match self {
@@ -2207,8 +2277,227 @@ pub fn build_function_graph(
     }
 
     graph.blocks = basic_blocks;
+    remove_dead_phis(&mut graph);
+    simplify_trivial_phis(&mut graph);
+    compact_value_ids(&mut graph);
     graph.mark_non_escaping_objects(program);
     Ok(graph)
+}
+
+/// Remove phi-only dependency chains and cycles with no consumer. Keep every non-phi
+/// operation, even when its result is unused: coercions, TDZ checks and calls can throw or
+/// have effects. This pass deliberately does not use the speculative effect classification.
+///
+/// Resume blocks restore phis positionally from the suspended stack and sent value. Keep
+/// all of their phis in order until that frame layout has an explicit value mapping.
+fn remove_dead_phis(graph: &mut FunctionGraph) {
+    let mut live = HashSet::new();
+    let mut resumes = HashSet::new();
+    for block in &graph.blocks {
+        match &block.terminator {
+            Terminator::Return(Some(value))
+            | Terminator::Throw(value)
+            | Terminator::Branch {
+                condition: value, ..
+            } => {
+                live.insert(*value);
+            }
+            Terminator::Suspend {
+                value,
+                spilled,
+                resume,
+                ..
+            } => {
+                live.insert(*value);
+                live.extend(spilled.iter().copied());
+                resumes.insert(*resume);
+            }
+            _ => {}
+        }
+    }
+    let mut inputs_by_phi = HashMap::new();
+    for block in &graph.blocks {
+        for (value, op) in &block.operations {
+            if let GraphOp::Phi { inputs } = op {
+                inputs_by_phi.insert(*value, inputs);
+                if resumes.contains(&block.id) {
+                    live.insert(*value);
+                }
+            } else {
+                live.extend(op.operands());
+            }
+        }
+    }
+    let mut pending: Vec<_> = live.iter().copied().collect();
+    while let Some(value) = pending.pop() {
+        if let Some(inputs) = inputs_by_phi.get(&value) {
+            for (_, input) in *inputs {
+                if live.insert(*input) {
+                    pending.push(*input);
+                }
+            }
+        }
+    }
+    for block in &mut graph.blocks {
+        block
+            .operations
+            .retain(|(value, op)| !matches!(op, GraphOp::Phi { .. }) || live.contains(value));
+    }
+}
+
+/// Apply a value renaming before escape-analysis metadata is constructed.
+fn map_graph_values(graph: &mut FunctionGraph, map: impl Fn(ValueId) -> ValueId) {
+    debug_assert!(graph.scalar_objects.is_empty() && graph.spread_scalar_objects.is_empty());
+    for block in &mut graph.blocks {
+        for (value, op) in &mut block.operations {
+            *value = map(*value);
+            op.map_operands(&map);
+        }
+        match &mut block.terminator {
+            Terminator::Return(Some(value))
+            | Terminator::Throw(value)
+            | Terminator::Branch {
+                condition: value, ..
+            } => *value = map(*value),
+            Terminator::Suspend { value, spilled, .. } => {
+                *value = map(*value);
+                for value in spilled {
+                    *value = map(*value);
+                }
+            }
+            _ => {}
+        }
+    }
+    for value in &mut graph.initial_locals {
+        *value = map(*value);
+    }
+    graph.origins = std::mem::take(&mut graph.origins)
+        .into_iter()
+        .map(|(value, origin)| (map(value), origin))
+        .collect();
+}
+
+/// A phi whose non-self inputs all name one value contributes no choice. Resolve its users
+/// directly to that value, including loop-invariant phis with a self input. Resume phis have
+/// implicit frame inputs and must never be simplified from their explicit edges alone.
+fn simplify_trivial_phis(graph: &mut FunctionGraph) {
+    let resumes: HashSet<_> = graph
+        .blocks
+        .iter()
+        .filter_map(|block| match block.terminator {
+            Terminator::Suspend { resume, .. } => Some(resume),
+            _ => None,
+        })
+        .collect();
+    let mut aliases: Vec<_> = (0..graph.next_value_id).map(ValueId).collect();
+    let mut users = vec![Vec::new(); aliases.len()];
+    let mut phis = HashMap::new();
+    let mut pending = Vec::new();
+    for block in &graph.blocks {
+        for (value, op) in &block.operations {
+            if let GraphOp::Phi { inputs } = op {
+                if resumes.contains(&block.id) {
+                    continue;
+                }
+                for (_, input) in inputs {
+                    users[input.0 as usize].push(*value);
+                }
+                phis.insert(*value, inputs);
+                pending.push(*value);
+            }
+        }
+    }
+    fn root(aliases: &[ValueId], mut value: ValueId) -> ValueId {
+        while aliases[value.0 as usize] != value {
+            value = aliases[value.0 as usize];
+        }
+        value
+    }
+    while let Some(phi) = pending.pop() {
+        if aliases[phi.0 as usize] != phi {
+            continue;
+        }
+        let mut replacement = None;
+        let mut agrees = true;
+        for (_, input) in phis[&phi] {
+            let input = root(&aliases, *input);
+            if input == phi {
+                continue;
+            }
+            if replacement.is_some_and(|value| value != input) {
+                agrees = false;
+                break;
+            }
+            replacement = Some(input);
+        }
+        if agrees && let Some(replacement) = replacement {
+            aliases[phi.0 as usize] = replacement;
+            // Users of an alias also need revisiting if its new root later simplifies.
+            let moved = std::mem::take(&mut users[phi.0 as usize]);
+            pending.extend(moved.iter().copied());
+            users[replacement.0 as usize].extend(moved);
+        }
+    }
+    for index in 0..aliases.len() {
+        aliases[index] = root(&aliases, ValueId(index as u32));
+    }
+    for block in &mut graph.blocks {
+        block
+            .operations
+            .retain(|(value, _)| aliases[value.0 as usize] == *value);
+    }
+    graph
+        .origins
+        .retain(|value, _| aliases[value.0 as usize] == *value);
+    map_graph_values(graph, |value| aliases[value.0 as usize]);
+}
+
+/// Pruning must shrink the backing SSA array too. Renumber surviving definitions and all
+/// references in old-ID order, retaining even an undefined reference for the verifier to reject.
+/// Site IDs, local slots, suspension order and bytecode diagnostic origins are preserved.
+fn compact_value_ids(graph: &mut FunctionGraph) {
+    let mut present = vec![false; graph.next_value_id as usize];
+    for value in &graph.initial_locals {
+        present[value.0 as usize] = true;
+    }
+    for block in &graph.blocks {
+        for (value, op) in &block.operations {
+            present[value.0 as usize] = true;
+            for operand in op.operands() {
+                present[operand.0 as usize] = true;
+            }
+        }
+        match &block.terminator {
+            Terminator::Return(Some(value))
+            | Terminator::Throw(value)
+            | Terminator::Branch {
+                condition: value, ..
+            } => present[value.0 as usize] = true,
+            Terminator::Suspend { value, spilled, .. } => {
+                present[value.0 as usize] = true;
+                for value in spilled {
+                    present[value.0 as usize] = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut next = 0;
+    let mapping: Vec<_> = present
+        .iter()
+        .map(|used| {
+            if *used {
+                let value = ValueId(next);
+                next += 1;
+                value
+            } else {
+                ValueId(u32::MAX)
+            }
+        })
+        .collect();
+    graph.origins.retain(|value, _| present[value.0 as usize]);
+    map_graph_values(graph, |value| mapping[value.0 as usize]);
+    graph.next_value_id = next;
 }
 
 /// The slots that must exist in `locals[]`: cells, and slots some block loads other than the
@@ -3087,5 +3376,241 @@ fn propagate_frame(
                 list.push((from, *value));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod dead_phi_tests {
+    use super::*;
+
+    #[test]
+    fn removes_dead_cycles_but_keeps_live_parallel_copies() {
+        let mut graph = FunctionGraph::new(None, 0, 0);
+        graph.next_value_id = 6;
+        graph.blocks = vec![
+            BasicBlock {
+                id: BlockId(0),
+                operations: vec![(
+                    ValueId(0),
+                    GraphOp::Const {
+                        index: 0,
+                        constant: Constant::Number(1),
+                    },
+                )],
+                terminator: Terminator::Jump(BlockId(1)),
+                predecessors: vec![],
+                successors: vec![BlockId(1)],
+                exception_handler: None,
+            },
+            BasicBlock {
+                id: BlockId(1),
+                operations: [(1, 2), (2, 1), (3, 4), (4, 3), (5, 4)]
+                    .into_iter()
+                    .map(|(to, from)| {
+                        (
+                            ValueId(to),
+                            GraphOp::Phi {
+                                inputs: vec![(BlockId(0), ValueId(0)), (BlockId(1), ValueId(from))],
+                            },
+                        )
+                    })
+                    .collect(),
+                terminator: Terminator::Branch {
+                    condition: ValueId(1),
+                    true_block: BlockId(1),
+                    false_block: BlockId(2),
+                },
+                predecessors: vec![BlockId(0), BlockId(1)],
+                successors: vec![BlockId(1), BlockId(2)],
+                exception_handler: None,
+            },
+            BasicBlock {
+                id: BlockId(2),
+                operations: vec![],
+                terminator: Terminator::Return(Some(ValueId(2))),
+                predecessors: vec![BlockId(1)],
+                successors: vec![],
+                exception_handler: None,
+            },
+        ];
+        crate::verifier::verify_function_graph(&graph).unwrap();
+        remove_dead_phis(&mut graph);
+        crate::verifier::verify_function_graph(&graph).unwrap();
+        assert_eq!(
+            graph.blocks[1]
+                .operations
+                .iter()
+                .map(|(v, _)| v.0)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        let once = graph.clone();
+        remove_dead_phis(&mut graph);
+        assert_eq!(graph, once);
+    }
+
+    #[test]
+    fn trivial_phis_and_dense_ids_preserve_live_choices_and_origins() {
+        let mut graph = FunctionGraph::new(None, 0, 0);
+        graph.next_value_id = 6;
+        graph.initial_locals = vec![ValueId(0)];
+        graph.origins.insert(
+            ValueId(4),
+            Origin {
+                pc: 17,
+                label: "choice".into(),
+            },
+        );
+        graph.origins.insert(
+            ValueId(2),
+            Origin {
+                pc: 3,
+                label: "deleted phi".into(),
+            },
+        );
+        graph.blocks = vec![
+            BasicBlock {
+                id: BlockId(0),
+                operations: vec![
+                    (
+                        ValueId(0),
+                        GraphOp::Const {
+                            index: 0,
+                            constant: Constant::Number(1),
+                        },
+                    ),
+                    (
+                        ValueId(1),
+                        GraphOp::Const {
+                            index: 1,
+                            constant: Constant::Number(2),
+                        },
+                    ),
+                ],
+                terminator: Terminator::Jump(BlockId(1)),
+                predecessors: vec![],
+                successors: vec![BlockId(1)],
+                exception_handler: None,
+            },
+            BasicBlock {
+                id: BlockId(1),
+                operations: vec![
+                    (
+                        ValueId(2),
+                        GraphOp::Phi {
+                            inputs: vec![(BlockId(0), ValueId(0)), (BlockId(1), ValueId(2))],
+                        },
+                    ),
+                    (
+                        ValueId(3),
+                        GraphOp::Phi {
+                            inputs: vec![(BlockId(0), ValueId(0)), (BlockId(1), ValueId(2))],
+                        },
+                    ),
+                    (
+                        ValueId(4),
+                        GraphOp::Phi {
+                            inputs: vec![(BlockId(0), ValueId(0)), (BlockId(1), ValueId(1))],
+                        },
+                    ),
+                    (
+                        ValueId(5),
+                        GraphOp::Binary {
+                            op: BinaryOp::Add,
+                            left: ValueId(3),
+                            right: ValueId(4),
+                        },
+                    ),
+                ],
+                terminator: Terminator::Branch {
+                    condition: ValueId(5),
+                    true_block: BlockId(1),
+                    false_block: BlockId(2),
+                },
+                predecessors: vec![BlockId(0), BlockId(1)],
+                successors: vec![BlockId(1), BlockId(2)],
+                exception_handler: None,
+            },
+            BasicBlock {
+                id: BlockId(2),
+                operations: vec![],
+                terminator: Terminator::Return(Some(ValueId(5))),
+                predecessors: vec![BlockId(1)],
+                successors: vec![],
+                exception_handler: None,
+            },
+        ];
+        crate::verifier::verify_function_graph(&graph).unwrap();
+        simplify_trivial_phis(&mut graph);
+        compact_value_ids(&mut graph);
+        crate::verifier::verify_function_graph(&graph).unwrap();
+        assert_eq!(graph.next_value_id, 4);
+        assert_eq!(graph.initial_locals, vec![ValueId(0)]);
+        assert_eq!(graph.origins.len(), 1);
+        assert_eq!(graph.origins[&ValueId(2)].pc, 17);
+        assert!(matches!(
+            graph.blocks[1].operations[1],
+            (
+                ValueId(3),
+                GraphOp::Binary {
+                    left: ValueId(0),
+                    right: ValueId(2),
+                    ..
+                }
+            )
+        ));
+        let once = graph.clone();
+        simplify_trivial_phis(&mut graph);
+        compact_value_ids(&mut graph);
+        assert_eq!(graph, once);
+    }
+
+    #[test]
+    fn preserves_positional_resume_phis_even_when_unused() {
+        let mut graph = FunctionGraph::new(None, 0, 0);
+        graph.next_value_id = 3;
+        graph.blocks = vec![
+            BasicBlock {
+                id: BlockId(0),
+                operations: vec![(
+                    ValueId(0),
+                    GraphOp::Const {
+                        index: 0,
+                        constant: Constant::Number(1),
+                    },
+                )],
+                terminator: Terminator::Suspend {
+                    value: ValueId(0),
+                    spilled: vec![ValueId(0)],
+                    resume: BlockId(1),
+                    pc: 1,
+                    awaiting: false,
+                },
+                predecessors: vec![],
+                successors: vec![BlockId(1)],
+                exception_handler: None,
+            },
+            BasicBlock {
+                id: BlockId(1),
+                operations: vec![
+                    (
+                        ValueId(1),
+                        GraphOp::Phi {
+                            inputs: vec![(BlockId(0), ValueId(0))],
+                        },
+                    ),
+                    (ValueId(2), GraphOp::Phi { inputs: vec![] }),
+                ],
+                terminator: Terminator::Return(Some(ValueId(2))),
+                predecessors: vec![BlockId(0)],
+                successors: vec![],
+                exception_handler: None,
+            },
+        ];
+        let before = graph.clone();
+        remove_dead_phis(&mut graph);
+        simplify_trivial_phis(&mut graph);
+        compact_value_ids(&mut graph);
+        assert_eq!(graph, before);
     }
 }

@@ -1084,7 +1084,14 @@ impl NativeBuilder {
         let emitted_modules = emit_indexed(nodes.len(), "shared graph module emission", |index| {
             let node = nodes[index];
             let logical_path = logical_module_path(graph.project_root(), &node.path)?;
-            let emitted = emit_native_graph_module_with_policy(node, &logical_path, &emission)?;
+            let emitted = cached_graph_module(
+                &self.cache,
+                &target_identity(self.toolchain.identity()),
+                node,
+                &logical_path,
+                &emission,
+                || emit_native_graph_module_with_policy(node, &logical_path, &emission),
+            )?;
             Ok(emitted)
         })?;
         let mut modules = Vec::with_capacity(nodes.len());
@@ -1390,7 +1397,11 @@ impl NativeBuilder {
                 let module_c_ref = &paths.module_c;
                 let module_o_ref = &paths.module_o;
                 let module_compile_options_ref = &module_compile_options;
-                compile_indexed(module_keys_ref.len(), "module compile", move |index| {
+                let sizes: Vec<_> = module_sources_ref
+                    .iter()
+                    .map(|(source, _, _)| source.len())
+                    .collect();
+                compile_largest_first(&sizes, "module compile", move |index| {
                     self.object(
                         &module_keys_ref[index],
                         &module_sources_ref[index].0,
@@ -1602,8 +1613,14 @@ impl NativeBuilder {
                         .unwrap_or_default(),
                 ));
             }
-            let emitted =
-                emit_native_graph_module_with_policy(node, &logical_path, &module_emission)?;
+            let emitted = cached_graph_module(
+                &self.cache,
+                &target_identity(self.toolchain.identity()),
+                node,
+                &logical_path,
+                &module_emission,
+                || emit_native_graph_module_with_policy(node, &logical_path, &module_emission),
+            )?;
             Ok((logical_path, emitted))
         })?;
         let mut modules = Vec::with_capacity(nodes.len());
@@ -1912,7 +1929,11 @@ impl NativeBuilder {
                 let module_c_ref = &paths.module_c;
                 let module_o_ref = &paths.module_o;
                 let compile_options_ref = &module_compile_options;
-                compile_indexed(module_keys_ref.len(), "module compile", move |index| {
+                let sizes: Vec<_> = module_sources_ref
+                    .iter()
+                    .map(|(source, _, _)| source.len())
+                    .collect();
+                compile_largest_first(&sizes, "module compile", move |index| {
                     self.object(
                         &module_keys_ref[index],
                         &module_sources_ref[index].0,
@@ -2522,6 +2543,73 @@ fn emit_native_graph_module(
     policy: &NativeRealmPolicy,
 ) -> Result<kiln_backend_c::CModule, NativeError> {
     emit_native_graph_module_with_policy(node, logical_path, &policy.emission())
+}
+
+// This wrapper decides which backend entry to call. Its source joins the backend source
+// fingerprint so an uncommitted emitter edit cannot be hidden by an input-cache hit.
+static GRAPH_EMISSION_WRAPPER_ID: std::sync::LazyLock<Digest> =
+    std::sync::LazyLock::new(|| Digest::hash(include_str!("lib.rs").as_bytes()));
+
+/// Cache before graph construction/C rendering, rather than hashing the rendered C first.
+/// Only ordinary code modules with the split prelude use this cache: builtin materializers,
+/// JSON and self-contained runtime bodies continue through their existing source identities.
+fn cached_graph_module(
+    cache: &ArtifactCache,
+    target: &str,
+    node: &kiln_module_graph::ModuleNode,
+    logical_path: &str,
+    policy: &EmissionPolicy,
+    emit: impl FnOnce() -> Result<kiln_backend_c::CModule, NativeError>,
+) -> Result<kiln_backend_c::CModule, NativeError> {
+    if !policy.decoupled_prelude
+        || !matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs)
+    {
+        return emit();
+    }
+    // These owned IR/policy types use derived Debug over ordered fields, Vecs and BTreeSets;
+    // there are no addresses or unordered maps. Hash the complete representation so additions
+    // to IR or policy automatically participate, including source spans, strictness, exports,
+    // type profiles and closed-world liveness. This is a versioned internal cache encoding,
+    // not a public serialization format. Representation changes can only cause cache misses.
+    let input = Digest::hash(
+        format!("{:?}", (&node.program, node.source, logical_path, policy)).as_bytes(),
+    );
+    let cache_key = key(
+        ArtifactKind::GeneratedC,
+        format!("kiln-c-abi-{C_ABI_VERSION}-generator-{C_GENERATOR_VERSION}"),
+        Backend::C,
+        &module_abi_identity(),
+        target,
+        CacheProfile::Debug,
+        Digest::hash(b"native-graph-emission-input-v1"),
+        [
+            input,
+            prelude_header_digest(),
+            Digest::hash(kiln_backend_c::C_EMITTER_BUILD_ID.as_bytes()),
+            *GRAPH_EMISSION_WRAPPER_ID,
+        ],
+    );
+    match cache.lookup(&cache_key)? {
+        Lookup::Hit(artifact) => {
+            let (program_hash, symbol, source): (u64, String, String) =
+                serde_json::from_slice(&artifact.bytes).map_err(|error| CacheError::Corrupt {
+                    path: artifact.path,
+                    reason: format!("invalid cached C module: {error}"),
+                })?;
+            Ok(kiln_backend_c::CModule {
+                program_hash,
+                symbol,
+                source,
+            })
+        }
+        Lookup::Miss => {
+            let module = emit()?;
+            let bytes = serde_json::to_vec(&(module.program_hash, &module.symbol, &module.source))
+                .expect("C module contains only strings and an integer");
+            cache.put(&cache_key, &bytes)?;
+            Ok(module)
+        }
+    }
 }
 
 fn emit_native_graph_module_with_policy(

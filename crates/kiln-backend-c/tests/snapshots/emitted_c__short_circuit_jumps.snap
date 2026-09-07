@@ -15,29 +15,26 @@ int kiln_module_0b1825e8f7333c14b718aac6284b99b9(kiln_host *host, kiln_value *re
     kiln_c99_reset_diagnostics();
     for (size_t slot = 0; slot < (size_t)1; ++slot) locals[slot] = KILN_VAL_UNDEFINED;
     const int kiln_inheriting = kiln_c99_inheriting_new_target; (void)kiln_inheriting;
-    int64_t i2 = 0;
-    double d2 = 0.0;
-    kiln_val v0 = KILN_VAL_UNDEFINED, v1 = KILN_VAL_UNDEFINED, v2 = KILN_VAL_UNDEFINED;
+    int64_t i1 = 0;
+    double d1 = 0.0;
+    kiln_val v0 = KILN_VAL_UNDEFINED, v1 = KILN_VAL_UNDEFINED;
 kiln_block_0:;
     v0 = KILN_VAL_NULL;
     if (kiln_c99_val_truthy(v0)) {
-        { kiln_val phi_t0 = v0; v1 = phi_t0; }
         goto kiln_block_2;
     } else {
         goto kiln_block_1;
     }
 kiln_block_1:;
     if (kiln_c99_val_truthy(v0)) {
-        { kiln_val phi_t0 = v0; v1 = phi_t0; }
         goto kiln_block_2;
     } else {
-        { kiln_val phi_t0 = v0; v1 = phi_t0; }
         goto kiln_block_2;
     }
 kiln_block_2:;
-    v2 = UINT64_C(4607182418800017408);
-    memcpy(&d2, &v2, sizeof(d2));
-    i2 = 1LL;
-    *result = kiln_val_to_boundary(v2);
+    v1 = UINT64_C(4607182418800017408);
+    memcpy(&d1, &v1, sizeof(d1));
+    i1 = 1LL;
+    *result = kiln_val_to_boundary(v1);
     return KILN_C99_OK;
 }

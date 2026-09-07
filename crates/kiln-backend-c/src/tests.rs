@@ -4985,13 +4985,11 @@ fn proven_numbers_reach_a_loop_carried_phi_and_stop_at_a_parameter() {
         .filter(|(_, op)| matches!(op, GraphOp::Phi { .. }))
         .map(|(v, _)| *v)
         .collect();
-    // Slot 0 is the parameter: its phi is not proven. Slots 1 and 2 are.
-    assert!(
-        !numbers.contains(&phis[0]),
-        "a parameter's phi is never proven"
-    );
-    assert!(numbers.contains(&phis[1]), "sum is proven through its phi");
-    assert!(numbers.contains(&phis[2]), "i is proven through its phi");
+    // The unchanged parameter's trivial phi disappears; the live sum and induction phis
+    // remain numeric. Renumbering must not turn the actual parameter into a proven number.
+    assert!(!numbers.contains(&graph.initial_locals[0]));
+    assert_eq!(phis.len(), 2);
+    assert!(phis.iter().all(|value| numbers.contains(value)));
 
     // Every arithmetic result in the body is proven; the compare against `n` is not.
     for block in &graph.blocks {
