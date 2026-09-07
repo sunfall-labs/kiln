@@ -59,3 +59,19 @@ smaller, but added 1.7 MB of generated C; adjacent full cold compiles remained i
 change. The graph itself still contains both React reconciler variants (11.4 MB development and
 6.4 MB production) and pulls 10.5 MB of `fast-check` through Effect's `sideEffects: false` graph.
 Removing unused modules and declarations before C emission is the next high-leverage boundary.
+
+The first whole-graph liveness pass now honors only the unambiguous package-wide forms
+`"sideEffects": false` and `"sideEffects": []`. Named imports are resolved straight through pure
+barrels to their canonical origins; unread imports and pure side-effect-only edges do not reach C.
+Packages without that explicit permission, CommonJS graphs, namespace contents, and non-empty
+side-effect pattern lists remain conservative. On an isolated cold ghui build this reduced C from
+145,298,364 to 110,929,436 bytes, application objects from 157,110,824 to 119,823,328 bytes, and
+compiler time from 15.95 to 12.19 seconds. The whole no-cache, one-shot command took 19.12 seconds
+wall (1.87 seconds emit and 1.35 seconds link). `--explain` adds about forty seconds on this graph
+and must not be included in an ordinary build-time comparison.
+
+That is a useful 24% C reduction and 19% compile reduction, not the required endpoint. The seven
+remaining units above 5 MB account for about 72 MB by themselves: three OpenTUI bundles, both
+React reconciler branches, fast-check, and Effect Schema. Getting to a few seconds requires
+export/declaration liveness inside those modules (and release-aware selection of React's CommonJS
+branch), not more work on the 156 KB declarations header.
