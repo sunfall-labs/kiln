@@ -116,6 +116,7 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER: return "createServer";
     case KILN_C99_METHOD_NODE_QUERYSTRING_PARSE: return "parse";
     case KILN_C99_METHOD_PROCESS_NEXT_TICK: return "nextTick";
+    case KILN_C99_METHOD_INTL_SEGMENT_RAW: return "__kilnIntlSegment";
     case KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_MILLISECONDS:
         return "fromEpochMilliseconds";
     case KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_NANOSECONDS:

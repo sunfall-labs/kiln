@@ -242,6 +242,10 @@ static int kiln_c99_new_object_with_capacity(kiln_value *out, size_t capacity);
 static int kiln_c99_new_object_tenured(kiln_value *out);
 static int kiln_c99_new_object_with_capacity_tenured(kiln_value *out, size_t capacity);
 static int kiln_c99_new_array(kiln_value *out);
+static int kiln_c99_new_array_with_capacity(kiln_value *out, size_t capacity, int is_numeric);
+static int kiln_c99_install_event_emitter_methods(kiln_value target);
+static int kiln_c99_install_readable_methods(kiln_value target);
+static int kiln_c99_install_writable_methods(kiln_value target);
 static int kiln_c99_new_abort_signal(kiln_value *out);
 static int kiln_c99_new_abort_controller(kiln_value *out);
 static int kiln_c99_new_text_encoder(kiln_value *out);
@@ -915,6 +919,44 @@ static kiln_value *kiln_c99_ffi_callback_thrown;
 static int kiln_c99_ffi_callback_depth;
 static uint32_t kiln_c99_ffi_callback_active;
 
+/* The native half of Intl segmentation deliberately returns only a flat scalar tape. Constructor
+ * semantics, option reads, record objects and iteration live in the compiled TypeScript bootstrap.
+ * This is the HostOps-shaped boundary: ICU4X decides Unicode boundaries and nothing observable
+ * about the JavaScript object model crosses into Rust. */
+static int kiln_c99_intl_segment_raw(kiln_value *out, const kiln_value *args, size_t argc,
+                                     kiln_value *thrown) {
+    const uint32_t *records = NULL;
+    size_t count = 0;
+    size_t index;
+    uint32_t granularity;
+    int status;
+    kiln_value built;
+    kiln_value text = argc > 0 ? args[0] : kiln_c99_undefined();
+    kiln_value kind = argc > 1 ? args[1] : kiln_c99_undefined();
+    if (text.tag != KILN_VALUE_STRING)
+        return kiln_c99_throw_not_a(thrown, text, "Intl segment text");
+    if (kind.tag != KILN_VALUE_NUMBER || !isfinite(kiln_c99_as_number(kind)) ||
+        floor(kiln_c99_as_number(kind)) != kiln_c99_as_number(kind) ||
+        kiln_c99_as_number(kind) < 0.0 || kiln_c99_as_number(kind) > 2.0)
+        return kiln_c99_throw_not_a(thrown, kind, "Intl segment granularity code");
+    granularity = (uint32_t)kiln_c99_as_number(kind);
+    status = kiln_intl_segment((const uint8_t *)text.ptr, text.len, granularity, &records, &count);
+    if (status != 0 || (count != 0 && records == NULL))
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_ERROR,
+                                    "Intl segmentation provider failed");
+    if (count > SIZE_MAX / 4)
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                    "Intl segmentation result is too large");
+    status = kiln_c99_new_array_with_capacity(&built, count * 4, 1);
+    if (status != KILN_C99_OK) return status;
+    for (index = 0; index < count * 4; ++index) {
+        status = kiln_c99_array_push(built, kiln_c99_number((double)records[index]));
+        if (status != KILN_C99_OK) return status;
+    }
+    *out = built;
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_ffi_raise(kiln_value *thrown) {
     const uint8_t *bytes = NULL;
     uint64_t len = 0;
@@ -954,7 +996,7 @@ static int kiln_c99_ffi_u64(kiln_value value, uint64_t *out, kiln_value *thrown)
     return kiln_c99_throw_not_a(thrown, value, "BigInt pointer");
 }
 
-static int kiln_c99_ffi_bigint(uint64_t value, int negative, kiln_value *out) {
+static int kiln_c99_u64_bigint(uint64_t value, int negative, kiln_value *out) {
     char digits[32];
     char reversed[32];
     void *handle = NULL;
@@ -1144,9 +1186,9 @@ static int kiln_c99_ffi_result(const kiln_ffi_value *value, kiln_value *out) {
         *out = kiln_c99_undefined();
         return value->reserved == 0 ? KILN_C99_OK : KILN_C99_INVALID_ARGUMENT;
     case KILN_C99_FFI_I64:
-        return kiln_c99_ffi_bigint(value->bits, (int64_t)value->bits < 0, out);
+        return kiln_c99_u64_bigint(value->bits, (int64_t)value->bits < 0, out);
     case KILN_C99_FFI_U64:
-    case KILN_C99_FFI_POINTER: return kiln_c99_ffi_bigint(value->bits, 0, out);
+    case KILN_C99_FFI_POINTER: return kiln_c99_u64_bigint(value->bits, 0, out);
     case KILN_C99_FFI_BOOL:
         *out = kiln_c99_boolean(value->bits != 0);
         return KILN_C99_OK;
@@ -1316,7 +1358,7 @@ call_done:
         kiln_value value = argc > 0 ? args[0] : kiln_c99_undefined();
         if (value.tag != KILN_VALUE_ARRAY_BUFFER)
             return kiln_c99_throw_not_a(thrown, value, "ArrayBuffer");
-        return kiln_c99_ffi_bigint((uint64_t)(uintptr_t)kiln_c99_typed_buffer_of(value)->bytes,
+        return kiln_c99_u64_bigint((uint64_t)(uintptr_t)kiln_c99_typed_buffer_of(value)->bytes,
                                    0, out);
     }
     if (code == KILN_C99_METHOD_NODE_FFI_TO_ARRAY_BUFFER) {
@@ -1406,7 +1448,7 @@ call_done:
                                   depth, thrown);
             if (status != KILN_C99_OK) goto open_fail;
         }
-        status = kiln_c99_ffi_bigint(library, 0, &answer);
+        status = kiln_c99_u64_bigint(library, 0, &answer);
         if (status == KILN_C99_OK)
             status = kiln_c99_put(host, library_object, "__kilnFfiLibrary", 16, answer, depth,
                                   thrown);
@@ -1468,7 +1510,7 @@ open_fail:
         callback->pointer = pointer;
         callback->next = kiln_c99_ffi_callbacks;
         kiln_c99_ffi_callbacks = callback;
-        return kiln_c99_ffi_bigint(pointer, 0, out);
+        return kiln_c99_u64_bigint(pointer, 0, out);
     }
     if (code == KILN_C99_METHOD_NODE_FFI_UNREGISTER_CALLBACK) {
         uint64_t library, pointer;

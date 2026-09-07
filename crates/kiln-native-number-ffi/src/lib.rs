@@ -8025,6 +8025,131 @@ mod json {
     }
 }
 
+/// ICU4X's Unicode segmentation engine behind a scalar-only provider seam.
+///
+/// The JavaScript-visible `Intl.Segmenter` object is compiled from TypeScript. This function does
+/// only the part that belongs in Rust: turn UTF-8 text into UAX #29 boundary records. Each record
+/// is four `u32`s: start and end UTF-16 indices, followed by an is-word-like presence bit and its
+/// boolean value. The thread-local result remains valid until this thread calls again.
+#[cfg(feature = "intl")]
+mod intl {
+    use super::INVALID_ARGUMENT;
+    use kiln_intl::segmenter::Segmenter;
+    use std::cell::RefCell;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    thread_local! {
+        static RECORDS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Segment one UTF-8 string. `granularity` is 0 for grapheme, 1 for word and 2 for sentence.
+    ///
+    /// # Safety
+    ///
+    /// `bytes` must be readable for `len` bytes (null is accepted only for an empty string), and
+    /// both output arguments must be writable slots. The returned pointer is borrowed until the
+    /// next call on this thread.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_intl_segment(
+        bytes: *const u8,
+        len: usize,
+        granularity: u32,
+        out_records: *mut *const u32,
+        out_count: *mut usize,
+    ) -> i32 {
+        if (bytes.is_null() && len != 0) || out_records.is_null() || out_count.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        let bytes = if len == 0 {
+            &[]
+        } else {
+            // SAFETY: the caller contract guarantees this readable span.
+            unsafe { core::slice::from_raw_parts(bytes, len) }
+        };
+        let Ok(text) = core::str::from_utf8(bytes) else {
+            return INVALID_ARGUMENT;
+        };
+        let granularity = match granularity {
+            0 => "grapheme",
+            1 => "word",
+            2 => "sentence",
+            _ => return INVALID_ARGUMENT,
+        };
+        let segmented = catch_unwind(AssertUnwindSafe(|| {
+            let segmenter = Segmenter::new(&["en-US".to_owned()], granularity)
+                .expect("the provider passes a declared granularity");
+            let units: Vec<u16> = text.encode_utf16().collect();
+            segmenter.segments(&units)
+        }));
+        let Ok(segments) = segmented else {
+            return -2;
+        };
+        RECORDS.with(|scratch| {
+            let mut records = scratch.borrow_mut();
+            records.clear();
+            let Some(capacity) = segments.len().checked_mul(4) else {
+                return -2;
+            };
+            records.reserve(capacity);
+            for segment in segments {
+                let (present, word_like) = match segment.word_like {
+                    None => (0, 0),
+                    Some(value) => (1, u32::from(value)),
+                };
+                let (Ok(start), Ok(end)) =
+                    (u32::try_from(segment.start), u32::try_from(segment.end))
+                else {
+                    return -2;
+                };
+                records.extend_from_slice(&[start, end, present, word_like]);
+            }
+            // SAFETY: both are writable slots by the caller contract. The RefCell's vector owns
+            // the returned storage after this borrow ends and until the next provider call.
+            unsafe {
+                out_records.write(records.as_ptr());
+                out_count.write(records.len() / 4);
+            }
+            0
+        })
+    }
+
+    macro_rules! assert_provider_export {
+        ($(($group:ident, $name:ident, $signature:ident);)*) => {
+            $(assert_provider_export!($group, $name, $signature);)*
+        };
+        (intl, kiln_intl_segment, intl_segment) => {
+            const _: unsafe extern "C" fn(*const u8, usize, u32, *mut *const u32, *mut usize) -> i32 = kiln_intl_segment;
+        };
+        ($group:ident, $name:ident, $signature:ident) => {};
+    }
+
+    kiln_native_number_abi::provider_abi_registry!(assert_provider_export);
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn reports_utf16_grapheme_boundaries() {
+            let text = "e\u{301}x😀";
+            let mut records = core::ptr::null();
+            let mut count = 0;
+            let status = unsafe {
+                kiln_intl_segment(
+                    text.as_ptr(),
+                    text.len(),
+                    0,
+                    &raw mut records,
+                    &raw mut count,
+                )
+            };
+            assert_eq!(status, 0);
+            let records = unsafe { core::slice::from_raw_parts(records, count * 4) };
+            assert_eq!(records, &[0, 2, 0, 0, 2, 3, 0, 0, 3, 5, 0, 0]);
+        }
+    }
+}
+
 /// `parallelMap`'s fork-join (ADR 0058, application 2).
 ///
 /// The emitted C hands over the element and result arrays as opaque pointers, a chunk worker
