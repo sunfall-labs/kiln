@@ -75,3 +75,12 @@ remaining units above 5 MB account for about 72 MB by themselves: three OpenTUI 
 React reconciler branches, fast-check, and Effect Schema. Getting to a few seconds requires
 export/declaration liveness inside those modules (and release-aware selection of React's CommonJS
 branch), not more work on the 156 KB declarations header.
+
+An exact retained cold workspace also ruled out compiler scheduling as the remaining lever. All
+module compiles at the machine's 16-way concurrency finished in 11.19 seconds; replaying the same
+translation units four at a time took 17.06 seconds. The largest unit alone takes 6.9 seconds at
+O0. Lowering compact emission's indexed-SSA cutoff from 4,096 values to 512 reduced the full graph
+to 109,419,533 bytes of C and its adjacent cold compile to 12.40 seconds (from 12.84); lowering it
+again to 64 grew the graph and regressed the compile. The 512 cutoff is a small safe improvement,
+but confirms the same conclusion: a few-second build requires eliminating unused declarations,
+not reparsing or rescheduling the same hundred megabytes.

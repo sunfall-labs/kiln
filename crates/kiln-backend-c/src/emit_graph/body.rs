@@ -13,6 +13,11 @@ use kiln_ir::{BinaryOp, Constant, ExportBinding, FunctionProto, Program};
 use std::collections::HashSet;
 use std::fmt::Write;
 
+// Clang spends more on thousands of distinct local declarations than on one constant-indexed
+// frame. Below this point the brackets cost more source and object bytes than they save; above it
+// the indexed spelling keeps large generated bodies smaller and modestly faster to compile.
+const COMPACT_INDEXED_VALUE_THRESHOLD: u32 = 512;
+
 /// A runtime call that writes its answer through `&vN` takes the address of the SSA value, and
 /// a C compiler then keeps that value in memory for the whole body -- every read of it, on
 /// every path, pays a load and a store, for a slow path that rarely runs. The answer goes
@@ -557,7 +562,7 @@ fn emit_ssa_declarations(
         output.push_str(";\n");
     }
     if graph.next_value_id > 0 {
-        if compact && graph.next_value_id >= 4096 {
+        if compact && graph.next_value_id >= COMPACT_INDEXED_VALUE_THRESHOLD {
             writeln!(output, "    kiln_val v[{}];", graph.next_value_id).unwrap();
         } else {
             output.push_str("    kiln_val ");
@@ -895,7 +900,7 @@ fn emit_block_sequence(
             block_prefix,
             symbol,
             type_profile_record,
-            plan.compact && graph.next_value_id >= 4096,
+            plan.compact && graph.next_value_id >= COMPACT_INDEXED_VALUE_THRESHOLD,
         );
     }
 }
@@ -1497,7 +1502,7 @@ fn emit_blocks(
             }
         }
     }
-    if plan.compact && graph.next_value_id >= 4096 {
+    if plan.compact && graph.next_value_id >= COMPACT_INDEXED_VALUE_THRESHOLD {
         let indexed = index_large_ssa_values(&output[body_start..]);
         output.truncate(body_start);
         output.push_str(&indexed);
