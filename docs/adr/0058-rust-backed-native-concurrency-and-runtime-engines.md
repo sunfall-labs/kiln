@@ -65,33 +65,34 @@ The condition is that nothing observable is given up: key order, error positions
 cases, the surrogate replacement ADR 0022 records, and the refusal-over-`undefined` discipline
 all hold on the Rust path or the change does not land.
 
-### Application 1: `JSON.parse` over a simd-json tape
+### Application 1: `JSON.parse` over a Rust reader (landed, c963d4bc)
 
-The archive gains a `json` feature backed by `simd-json`'s tape API. The DOM API is not used:
-its object is a hash map and loses insertion order, which JavaScript observes.
+The archive gains a `json` feature backed by a new crate, `kiln-json`, whose reader is a one-pass
+scalar scanner producing a flat tape: a node array plus an arena of already-decoded UTF-8.
+The interpreter links the crate directly; emitted C calls one export, `kiln_json_parse`, which
+lends a per-thread tape, and walks it. Both the C recursive-descent reader and the interpreter's
+`JsonReader` are deleted.
 
-* Exports, registered in `kiln-native-number-abi` with `PROVIDER_ABI_VERSION` bumped:
-  `kiln_json_parse(bytes, len, out_handle)` returning 0 or -1, a tape readback giving one
-  `#[repr(C)]` node array and one UTF-8 arena of already-decoded strings, an error-offset
-  readback, and `kiln_json_free(handle)`.
-* A node is a tag, a child count for containers (so C preallocates arrays and knows when an
-  object closes), an arena offset and length for strings, or a double for numbers. Objects list
-  key and value in source order; duplicate keys reach C in order and last-wins falls out of
-  `kiln_c99_put`; `__proto__` is an ordinary own property because the walker never consults the
-  prototype.
-* Rust owns unescaping, surrogate-pair combination, lone-surrogate replacement with U+FFFD,
-  `-0`, integers beyond 2^53 rounded as doubles, and every SyntaxError, at the same inputs the
-  C reader raises them today. The input is copied once into a padded mutable buffer; the JS
-  string's bytes are never mutated.
-* Both the C reader in `json.c` and the interpreter's `JsonReader` are deleted. The reviver and
-  JSON modules (`kiln_c99_json_document`, `parse_json_module`) walk the same tape.
-* `JSON.stringify` stays where it is. It is a language walk over `toJSON`, getters, proxies and
-  property order, and its scalar hot spot already comes from the archive through
-  `kiln_number_to_js_string`.
-
-This is in progress on branch `json/rust-tape`. It lands with before-and-after timings for a
-200-byte and a 1 MB document on both engines and a profile of each; a slower small-document
-number is reported, not hidden.
+* Rust owns the grammar, unescaping, surrogate-pair combination, lone-surrogate replacement
+  with U+FFFD, `-0`, the exact-multiply number fast path with `f64::from_str` as the
+  correctly-rounded fallback, and every SyntaxError. C keeps only allocation, string
+  materialisation, and property definition through the direct shape-transition path main's
+  reader introduced in 02792a3d, with keys interned straight from the arena.
+* **simd-json was the first reader and was measured out.** Its DOM loses key order, so only
+  its tape was ever usable, and on documents of the benchmark's shape a scalar pass beat it at
+  every size from 159 bytes to 8.5 MB (1.0x to 1.27x), because its two fixed SIMD stages over
+  padded 64-byte blocks cost more than one scalar pass, and its tape had to be converted into
+  ours. The crate has no dependencies. The table is in `crates/kiln-json/src/lib.rs` and in
+  `.scratch/json-tape/NOTES.md`, with two slower scanner variants recorded so they are not retried.
+* **Parity was reached and measured before landing**, 20 interleaved rounds against the base
+  commit, best / p25 / median: small payload 0.386 / 0.401 / 0.405 us on main against
+  0.377 / 0.398 / 0.402 us; 2.2 MB parse 5.45 / 6.45 / 6.56 ms against 5.79 / 6.26 / 6.34 ms;
+  the interpreter better on both. Best-of-N is dominated by tails on a loaded machine and is not
+  the statistic to gate on; median and p25 are.
+* Two things found on the way, both filed under `.scratch/json-tape/issues/`: keys with an
+  embedded NUL truncate in the shape store on both readers, because interned keys are C strings;
+  and commit 9d96e4a8's chunked nursery walks its chunk list on every pointer lookup, which makes
+  main's large parse fifty times slower on the native backend regardless of reader.
 
 ### Application 2: `parallelMap` over a Rayon fork-join
 
