@@ -469,9 +469,6 @@ pub fn emit_async_entry_body(
         "    const int kiln_inheriting = kiln_c99_inheriting_new_target; (void)kiln_inheriting;\n",
     );
     output.push_str(
-        "    const int kiln_inheriting = kiln_c99_inheriting_new_target; (void)kiln_inheriting;\n",
-    );
-    output.push_str(
         "    kiln_val receiver = receiver_ptr ? *receiver_ptr : KILN_VAL_UNDEFINED; (void)receiver;\n",
     );
     output.push_str("    (void)receiver_ptr; (void)upvalues; (void)args; (void)argc;\n");
