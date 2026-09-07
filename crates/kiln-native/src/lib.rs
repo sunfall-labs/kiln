@@ -2351,8 +2351,12 @@ fn emit_native_graph_module_with_policy(
                     message: "JSON module has no captured source text".to_owned(),
                 })
             })?;
+            // `kiln_c99_json_document` answers the heap's own `kiln_val`; `exports` is an array
+            // of boundary `kiln_value`, which is three times the size. Writing the answer
+            // straight into the slot left the tag and length of the export unwritten, and the
+            // module then handed out an object tag over a null pointer.
             let body = format!(
-                "int status = kiln_c99_json_document({}, (size_t){}, &exports[0]);\nif (status != KILN_C99_OK) return status;",
+                "kiln_val parsed;\nint status = kiln_c99_json_document({}, (size_t){}, &parsed);\nif (status != KILN_C99_OK) return status;\nexports[0] = kiln_val_to_boundary(parsed);",
                 native_c_string(source),
                 source.len()
             );
