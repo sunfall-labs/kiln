@@ -34,6 +34,11 @@ down from a 222-second O3 baseline.
 
 The remaining outcome is a few-second cold compile. A real-codegen experiment split the largest
 15.4 MB translation unit into five function-body shards: parallel clang time fell from 7.17 to
-2.24 seconds. That establishes independently cached body shards as the next implementation step.
-A correctly guarded PCH saves about 30 ms on an otherwise-empty unit and nothing on the large unit,
-so header precompilation cannot provide the required reduction.
+2.24 seconds. Whole-graph integration rejected that direction, however. Sharding every large body
+raised generated C to 179 MB and left compilation at 15.22 seconds; limiting it to the three units
+above 12 MB still raised generated C to 166 MB and compilation to 16.22 seconds. The graph already
+fills all 16 CPUs, so reducing one straggler does not reduce its roughly 185 CPU-seconds of parsing.
+
+A correctly guarded PCH saves about 30 ms on an otherwise-empty unit and nothing on a large unit.
+The next reduction must therefore remove syntax and AST work across the entire graph: compact
+operation tables or a similarly dense lowering, not more translation units or header machinery.
