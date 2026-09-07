@@ -969,6 +969,11 @@ fn runtime_prelude_size() {
     // Widened on 2026-09-06 at 39,526 lines: the await continuation, the header-based cell
     // release, the builtin-receiver method cache and the concurrency work of the same day each
     // added a screen or two, none of them a block emitted twice. 41,000 for now.
+    //
+    // Widened again the same day, at 39,767 lines (band already at 41,000): the JSON runtime work (a raw-value stringify
+    // walker over shapes and elements with no per-member builder or `toJSON` probe on a plain
+    // object, an interned-key/shape-transition parser, and the Clinger fast paths for an integer
+    // and for the common number grammar) added a few hundred lines to `runtime/json.c` alone.
     const FLOOR_LINES: usize = 27_100;
     const CEILING_LINES: usize = 41_000;
 

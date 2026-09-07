@@ -67,6 +67,83 @@ static int kiln_c99_json_quote(kiln_text *text, const char *bytes, size_t len) {
     return kiln_c99_text_append(text, "\"", 1);
 }
 
+/* True when no object in `value`'s own store or its prototype chain owns a property named
+ * "toJSON" -- the common case for a plain object literal, whose chain is just Object.prototype.
+ * `JSON.stringify`'s real question is `IsCallable(GetV(value, "toJSON"))`, and `GetV` walks every
+ * level looking only for a property with that name (accessor or not, enumerable or not); this
+ * answers the same walk without the call, the boundary round trips, or the prototype-chain code
+ * shared with every other named read, because the answer here only ever needs "is the name
+ * there", never the value.
+ *
+ * A shape's keys are always the interned canonical pointer for their spelling (every writer that
+ * builds one -- `kiln_c99_define_named_fast`, `kiln_c99_json_define` below, the generic
+ * `kiln_c99_put` -- interns before it transitions), so a shaped level compares by pointer against
+ * one interned lookup of "toJSON" and never touches the bytes. A dictionary-mode level has no such
+ * guarantee (a computed key can be heap bytes nobody interned) and is scanned by content instead,
+ * which is why `kiln_c99_same_key` -- not a pointer compare -- is what a dictionary level uses.
+ *
+ * Anything other than a plain object at the end of the chain -- a proxy, a function, a class
+ * standing in as someone's prototype -- answers conservatively (0, "cannot promise it lacks one")
+ * rather than guess, and the caller falls back to the real `kiln_c99_get` walk exactly as before. */
+static int kiln_c99_json_lacks_tojson(kiln_value value) {
+    const char *tojson_ikey = kiln_c99_interned("toJSON", 6);
+    int hops = 0;
+    for (;;) {
+        kiln_object *object;
+        size_t index;
+        if (value.tag == KILN_VALUE_NULL || value.tag == KILN_VALUE_UNDEFINED) {
+            return 1;
+        }
+        if (value.tag != KILN_VALUE_OBJECT) {
+            return 0;
+        }
+        if (++hops > KILN_C99_MAX_PROTOTYPE_DEPTH) {
+            return 0;
+        }
+        object = kiln_c99_object_of(value);
+        if (object->shape != NULL) {
+            if (tojson_ikey != NULL) {
+                for (index = 0; index < object->shape->property_count; ++index) {
+                    if (object->shape->keys[index] == tojson_ikey) return 0;
+                }
+            }
+        } else {
+            for (index = 0; index < object->count; ++index) {
+                if (kiln_c99_same_key(&object->properties[index], "toJSON", 6)) return 0;
+            }
+        }
+        value = object->prototype;
+    }
+}
+
+/* Appends the decimal spelling of `magnitude` (< 2^64) with no leading zero, for the integer fast
+ * path below: digits come out least-significant first into a stack buffer sized for the largest
+ * 64-bit value, then go to the builder in the order they are actually spelled, in the one append
+ * every other literal in this file already uses. */
+static int kiln_c99_json_append_uint(kiln_text *text, uint64_t magnitude) {
+    char digits[20];
+    size_t count = 0;
+    if (magnitude == 0) {
+        return kiln_c99_text_append(text, "0", 1);
+    }
+    while (magnitude != 0) {
+        digits[count++] = (char)('0' + (magnitude % 10));
+        magnitude /= 10;
+    }
+    {
+        size_t low = 0;
+        size_t high = count - 1;
+        while (low < high) {
+            char tmp = digits[low];
+            digits[low] = digits[high];
+            digits[high] = tmp;
+            ++low;
+            --high;
+        }
+    }
+    return kiln_c99_text_append(text, digits, count);
+}
+
 /* `serialised` is 0 when the value has no JSON spelling at all -- undefined, a function -- which
  * drops it from an object and turns it into null in an array. */
 static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value value,
@@ -87,10 +164,10 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
      * is nowhere for one to have been put -- and asking would reach the array method table,
      * which reports an unknown name as an error rather than as absence. A Date is asked because
      * carrying one is the whole reason the step exists. */
-    if (value.tag == KILN_VALUE_OBJECT || value.tag == KILN_VALUE_DATE ||
-        value.tag == KILN_VALUE_TEMPORAL ||
+    if (value.tag == KILN_VALUE_DATE || value.tag == KILN_VALUE_TEMPORAL ||
         (value.tag == KILN_VALUE_PROXY &&
-         kiln_c99_proxy_inner(value).tag == KILN_VALUE_OBJECT)) {
+         kiln_c99_proxy_inner(value).tag == KILN_VALUE_OBJECT) ||
+        (value.tag == KILN_VALUE_OBJECT && !kiln_c99_json_lacks_tojson(value))) {
         kiln_value method;
         status = kiln_c99_get(host, value, "toJSON", 6, &method, depth, thrown);
         if (status != KILN_C99_OK) {
@@ -123,6 +200,22 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
         kiln_value shown;
         if (!isfinite(number)) {
             return kiln_c99_text_append_c(text, "null");
+        }
+        /* An integer under 2^53 spells exactly in decimal from its bit pattern with no rounding
+         * question to ask, so it is formatted here with a plain C conversion instead of a call
+         * across the FFI into the Rust number formatter -- the common case for a counter, an id,
+         * an index, or (as `-0.0 < 0.0` is false) `-0`, which this prints as "0" for the same
+         * reason `kiln_c99_text`'s FFI path already does. Anything wider, fractional, or
+         * non-finite keeps going through that formatter, which is the one place that knows the
+         * full `Number::toString` grammar (exponential notation, the shortest round-tripping
+         * decimal, and so on). */
+        if (floor(number) == number && fabs(number) < 9007199254740992.0 /* 2^53 */) {
+            if (number < 0.0) {
+                return kiln_c99_text_append(text, "-", 1) != KILN_C99_OK
+                           ? KILN_C99_OUT_OF_MEMORY
+                           : kiln_c99_json_append_uint(text, (uint64_t)(-number));
+            }
+            return kiln_c99_json_append_uint(text, (uint64_t)number);
         }
         shown = kiln_c99_text(value);
         if (shown.tag != KILN_VALUE_STRING) {
@@ -171,14 +264,14 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
 
 #define KILN_JSON_OPEN(bracket)                                                                   \
     do {                                                                                          \
-        if (kiln_c99_text_append_c(text, bracket) != KILN_C99_OK) {                                \
+        if (kiln_c99_text_append(text, bracket, 1) != KILN_C99_OK) {                               \
             free(nested.bytes);                                                                    \
             return KILN_C99_OUT_OF_MEMORY;                                                          \
         }                                                                                          \
     } while (0)
 #define KILN_JSON_BREAK(first)                                                                    \
     do {                                                                                          \
-        if (!(first) && kiln_c99_text_append_c(text, ",") != KILN_C99_OK) {                        \
+        if (!(first) && kiln_c99_text_append(text, ",", 1) != KILN_C99_OK) {                       \
             free(nested.bytes);                                                                    \
             return KILN_C99_OUT_OF_MEMORY;                                                          \
         }                                                                                          \
@@ -248,7 +341,7 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
             }
             KILN_JSON_BREAK(index == 0);
             if (kiln_c99_json_quote(text, digits, (size_t)written) != KILN_C99_OK ||
-                kiln_c99_text_append_c(text, indent_len != 0 ? ": " : ":") != KILN_C99_OK) {
+                (indent_len != 0 ? kiln_c99_text_append(text, ": ", 2) : kiln_c99_text_append(text, ":", 1)) != KILN_C99_OK) {
                 free(nested.bytes);
                 return KILN_C99_OUT_OF_MEMORY;
             }
@@ -318,42 +411,43 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
             kiln_value key = is_array ? kiln_c99_text(kiln_c99_number((double)index))
                                       : kiln_val_to_boundary(kiln_c99_array_of(keys)->elements[index]);
             kiln_value member;
-            kiln_text member_text = {NULL, 0, 0};
+            /* Written straight into the parent builder now, not a per-member buffer: the
+             * separator and the key are speculative, and a member with no JSON spelling rolls
+             * all three back to `mark` in one assignment instead of freeing a scratch
+             * allocation this loop no longer makes. An array position never rolls back -- its
+             * `null` replaces the value in place of the roll back, since a position is kept
+             * either way. */
+            size_t mark = text->len;
             int wrote;
             status = kiln_c99_get_computed(host, value, key, &member, depth, thrown);
             if (status != KILN_C99_OK) {
                 free(nested.bytes);
                 return status;
             }
-            status = kiln_c99_json_value(host, &member_text, member, indent, indent_len,
-                                         nested.bytes, nested.len, &wrote, depth, &frame, thrown);
-            if (status != KILN_C99_OK) {
-                free(nested.bytes);
-                free(member_text.bytes);
-                return status;
-            }
-            /* An element with no JSON spelling holds its position as null; a *member* with none
-             * is dropped, separator and all, which is why the member is built aside first. */
-            if (!wrote && !is_array) {
-                free(member_text.bytes);
-                continue;
-            }
             KILN_JSON_BREAK(written == 0);
-            written += 1;
             if (!is_array && (kiln_c99_json_quote(text, key.ptr, key.len) != KILN_C99_OK ||
-                              kiln_c99_text_append_c(text, indent_len != 0 ? ": " : ":") !=
+                              (indent_len != 0 ? kiln_c99_text_append(text, ": ", 2) : kiln_c99_text_append(text, ":", 1)) !=
                                   KILN_C99_OK)) {
                 free(nested.bytes);
-                free(member_text.bytes);
                 return KILN_C99_OUT_OF_MEMORY;
             }
-            if ((wrote ? kiln_c99_text_append(text, member_text.bytes, member_text.len)
-                       : kiln_c99_text_append_c(text, "null")) != KILN_C99_OK) {
+            status = kiln_c99_json_value(host, text, member, indent, indent_len, nested.bytes,
+                                         nested.len, &wrote, depth, &frame, thrown);
+            if (status != KILN_C99_OK) {
                 free(nested.bytes);
-                free(member_text.bytes);
-                return KILN_C99_OUT_OF_MEMORY;
+                return status;
             }
-            free(member_text.bytes);
+            if (!wrote) {
+                if (!is_array) {
+                    text->len = mark;
+                    continue;
+                }
+                if (kiln_c99_text_append_c(text, "null") != KILN_C99_OK) {
+                    free(nested.bytes);
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+            }
+            written += 1;
         }
         if (indent_len != 0 && written != 0 &&
             (kiln_c99_text_append_c(text, "\n") != KILN_C99_OK ||
@@ -380,34 +474,40 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
         frame.container = (const void *)object;
         KILN_JSON_OPEN("{");
         if (object->properties == NULL && object->shape != NULL) {
+            /* The shaped fast path: every member is read straight out of `elements`/`slots`
+             * with no `kiln_c99_own_keys` array of copied key strings and no `get_computed` by
+             * boundary key, and every member is written straight into the parent builder with
+             * no buffer of its own -- the separator and the (already-known-length) key are
+             * written speculatively at `mark`, and a member with no JSON spelling rolls all
+             * three back in one assignment rather than freeing a scratch allocation that no
+             * longer exists. */
             if (object->elements != NULL) {
                 for (index = 0; index < object->element_count; ++index) {
-                    if (object->elements[index] == KILN_VAL_HOLE) continue;
                     char num_buf[32];
-                    int nlen = kiln_number_to_js_string((double)index, num_buf, sizeof num_buf);
-                    kiln_value member = kiln_val_to_boundary(object->elements[index]);
-                    kiln_text member_text = {NULL, 0, 0};
+                    int nlen;
+                    kiln_value member;
+                    size_t mark;
                     int wrote;
-                    status = kiln_c99_json_value(host, &member_text, member, indent, indent_len,
+                    if (object->elements[index] == KILN_VAL_HOLE) continue;
+                    nlen = kiln_number_to_js_string((double)index, num_buf, sizeof num_buf);
+                    member = kiln_val_to_boundary(object->elements[index]);
+                    mark = text->len;
+                    KILN_JSON_BREAK(written == 0);
+                    if (kiln_c99_json_quote(text, num_buf, (size_t)nlen) != KILN_C99_OK ||
+                        (indent_len != 0 ? kiln_c99_text_append(text, ": ", 2) : kiln_c99_text_append(text, ":", 1)) != KILN_C99_OK) {
+                        free(nested.bytes);
+                        return KILN_C99_OUT_OF_MEMORY;
+                    }
+                    status = kiln_c99_json_value(host, text, member, indent, indent_len,
                                                  nested.bytes, nested.len, &wrote, depth, &frame, thrown);
                     if (status != KILN_C99_OK) {
                         free(nested.bytes);
-                        free(member_text.bytes);
                         return status;
                     }
                     if (!wrote) {
-                        free(member_text.bytes);
+                        text->len = mark;
                         continue;
                     }
-                    KILN_JSON_BREAK(written == 0);
-                    if (kiln_c99_json_quote(text, num_buf, (size_t)nlen) != KILN_C99_OK ||
-                        kiln_c99_text_append_c(text, indent_len != 0 ? ": " : ":") != KILN_C99_OK ||
-                        kiln_c99_text_append(text, member_text.bytes, member_text.len) != KILN_C99_OK) {
-                        free(nested.bytes);
-                        free(member_text.bytes);
-                        return KILN_C99_OUT_OF_MEMORY;
-                    }
-                    free(member_text.bytes);
                     written += 1;
                 }
             }
@@ -416,7 +516,7 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
                 const char *skey = object->shape->keys[index];
                 size_t key_len = strlen(skey);
                 kiln_value member;
-                kiln_text member_text = {NULL, 0, 0};
+                size_t mark;
                 int wrote;
                 if (key_len >= 2 && skey[0] == '@' && skey[1] == '@') {
                     continue;
@@ -424,26 +524,23 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
                 member = (object->slots != NULL && index < object->slot_capacity)
                              ? kiln_val_to_boundary(object->slots[index])
                              : kiln_c99_undefined();
-                status = kiln_c99_json_value(host, &member_text, member, indent, indent_len,
+                mark = text->len;
+                KILN_JSON_BREAK(written == 0);
+                if (kiln_c99_json_quote(text, skey, key_len) != KILN_C99_OK ||
+                    (indent_len != 0 ? kiln_c99_text_append(text, ": ", 2) : kiln_c99_text_append(text, ":", 1)) != KILN_C99_OK) {
+                    free(nested.bytes);
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+                status = kiln_c99_json_value(host, text, member, indent, indent_len,
                                              nested.bytes, nested.len, &wrote, depth, &frame, thrown);
                 if (status != KILN_C99_OK) {
                     free(nested.bytes);
-                    free(member_text.bytes);
                     return status;
                 }
                 if (!wrote) {
-                    free(member_text.bytes);
+                    text->len = mark;
                     continue;
                 }
-                KILN_JSON_BREAK(written == 0);
-                if (kiln_c99_json_quote(text, skey, key_len) != KILN_C99_OK ||
-                    kiln_c99_text_append_c(text, indent_len != 0 ? ": " : ":") != KILN_C99_OK ||
-                    kiln_c99_text_append(text, member_text.bytes, member_text.len) != KILN_C99_OK) {
-                    free(nested.bytes);
-                    free(member_text.bytes);
-                    return KILN_C99_OUT_OF_MEMORY;
-                }
-                free(member_text.bytes);
                 written += 1;
             }
         } else {
@@ -453,7 +550,7 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
             length = object->count;
             for (index = 0; index < length && index < object->count; ++index) {
             kiln_value member;
-            kiln_text member_text = {NULL, 0, 0};
+            size_t mark;
             int wrote;
             if (!object->properties[index].enumerable) {
                 continue;
@@ -471,29 +568,27 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
             } else {
                 member = object->properties[index].value;
             }
-            /* Serialised into a buffer of its own first: a member with no JSON spelling is
-             * *dropped*, so its separator must not have been written yet. */
-            status = kiln_c99_json_value(host, &member_text, member, indent, indent_len,
-                                         nested.bytes, nested.len, &wrote, depth, &frame, thrown);
-            if (status != KILN_C99_OK) {
-                free(nested.bytes);
-                free(member_text.bytes);
-                return status;
-            }
-            if (!wrote) {
-                free(member_text.bytes);
-                continue;
-            }
+            /* Written straight into `text` at `mark`: a member with no JSON spelling is
+             * *dropped*, so on that answer the separator and key just written are rolled back
+             * along with it rather than never written in the first place. */
+            mark = text->len;
             KILN_JSON_BREAK(written == 0);
             if (kiln_c99_json_quote(text, object->properties[index].key,
                                     object->properties[index].key_len) != KILN_C99_OK ||
-                kiln_c99_text_append_c(text, indent_len != 0 ? ": " : ":") != KILN_C99_OK ||
-                kiln_c99_text_append(text, member_text.bytes, member_text.len) != KILN_C99_OK) {
+                (indent_len != 0 ? kiln_c99_text_append(text, ": ", 2) : kiln_c99_text_append(text, ":", 1)) != KILN_C99_OK) {
                 free(nested.bytes);
-                free(member_text.bytes);
                 return KILN_C99_OUT_OF_MEMORY;
             }
-            free(member_text.bytes);
+            status = kiln_c99_json_value(host, text, member, indent, indent_len, nested.bytes,
+                                         nested.len, &wrote, depth, &frame, thrown);
+            if (status != KILN_C99_OK) {
+                free(nested.bytes);
+                return status;
+            }
+            if (!wrote) {
+                text->len = mark;
+                continue;
+            }
             written += 1;
         }
     }
@@ -699,6 +794,164 @@ static int kiln_c99_json_string(kiln_json_reader *reader, kiln_value *out) {
     KILN_C99_REFUSE_INTERNAL("JSON.parse converts a reader refusal into a SyntaxError");
 }
 
+/* A property key for the object case below, returned as an already-interned C string rather
+ * than a materialized value: a parsed key never survives past the `kiln_c99_json_define` call
+ * that follows it, so building a GC string only to have the object store intern its bytes a
+ * second time was two copies paid for a value nothing keeps. The scan is
+ * `kiln_c99_json_string`'s own fast path, repeated here rather than shared, because an object key
+ * is exactly as likely to be a plain run of bytes with no escape as any other JSON string; a key
+ * that needs the escape machinery rewinds to the opening quote and falls back to that function
+ * unchanged, interning what it produces instead of a second allocation's worth of bytes. */
+static int kiln_c99_json_object_key(kiln_json_reader *reader, const char **out_ikey) {
+    size_t open = reader->at;
+    size_t start;
+    size_t scan;
+    reader->at += 1;
+    start = reader->at;
+    scan = start;
+    while (scan < reader->len) {
+        unsigned char byte = (unsigned char)reader->bytes[scan];
+        if (byte == '"') {
+            const char *ikey = kiln_c99_intern(reader->bytes + start, scan - start);
+            if (ikey == NULL) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            *out_ikey = ikey;
+            reader->at = scan + 1;
+            return KILN_C99_OK;
+        }
+        if (byte == '\\' || byte < 0x20) {
+            break;
+        }
+        ++scan;
+    }
+    {
+        kiln_value materialized;
+        int status;
+        reader->at = open;
+        status = kiln_c99_json_string(reader, &materialized);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        *out_ikey = kiln_c99_intern(materialized.ptr, materialized.len);
+        return *out_ikey == NULL ? KILN_C99_OUT_OF_MEMORY : KILN_C99_OK;
+    }
+}
+
+/* Defines `member` on `built` under the already-interned `ikey`, taking the shape transition
+ * directly (the same pattern `kiln_c99_define_named_fast` uses for an object literal) rather than
+ * going through `kiln_c99_put`'s general assignment semantics. That distinction is not just
+ * speed: `kiln_c99_put_mode` treats a key spelled `__proto__` as a request to relink the
+ * prototype, which is the rule an object literal and a plain assignment both follow -- but
+ * `JSON.parse`'s own step here is CreateDataProperty, so `{"__proto__":{}}` must parse to an
+ * object with an *own property* named `__proto__`, not a relinked one. Going straight to the
+ * shape sidesteps that rule entirely, which is what makes this correct and not only fast.
+ *
+ * `built` is always the reader's own freshly created object -- shape-based, extensible, no
+ * accessors, exactly `kiln_c99_new_object`'s starting state -- so the fast-property paths below
+ * are the only ones a freshly parsed object can need; a document with more distinct keys on one
+ * object than the shape tree allows falls back to `kiln_c99_put`, which switches it to
+ * dictionary mode exactly as any other object growing past the same limit would. A repeated key
+ * is `find_slot` overwriting the earlier value in place, which is JSON.parse's last-one-wins rule
+ * for free. */
+static int kiln_c99_json_define(kiln_value built, const char *ikey, kiln_value member) {
+    kiln_object *object = kiln_c99_object_of(built);
+    uint32_t slot;
+    kiln_shape *next;
+    if (object->shape != NULL) {
+        if (kiln_c99_shape_find_slot(object->shape, ikey, &slot) && slot < object->slot_capacity) {
+            object->slots[slot] = kiln_val_from_boundary(member);
+            return KILN_C99_OK;
+        }
+        if (kiln_c99_shape_transition(object->shape, ikey, &next)) {
+            if ((size_t)next->slot_index >= object->slot_capacity) {
+                int grown = kiln_c99_grow_slots(object, (size_t)next->slot_index + 1);
+                if (grown != KILN_C99_OK) {
+                    return grown;
+                }
+            }
+            object->slots[next->slot_index] = kiln_val_from_boundary(member);
+            object->shape = next;
+            return KILN_C99_OK;
+        }
+    }
+    return kiln_c99_put(NULL, built, ikey, strlen(ikey), member, 0, NULL);
+}
+
+/* Clinger's fast path for the common decimal grammar: when the mantissa fits exactly in a double
+ * (at most fifteen significant digits) and the decimal exponent is one a power of ten also
+ * represents exactly (|k| <= 22 -- 5^22 needs under 53 bits, so 10^22 = 5^22 * 2^22 is exact, and
+ * every smaller power of ten more so), `mantissa * 10^k` or `mantissa / 10^k` is a single
+ * correctly-rounded IEEE operation on two exact operands, which is the same double the
+ * arbitrary-precision conversion below would produce. Outside that range -- more digits, a wider
+ * exponent -- this says so truthfully by returning 0, and the caller keeps using the FFI parser,
+ * which is what every number able to defeat this shortcut still needs.
+ *
+ * Sign is applied last, as a negation rather than a conditional skip, which is what keeps "-0"
+ * `-0`: negating a zero magnitude produces negative zero exactly, the same way `-0.0` is spelled
+ * in C. */
+static const double kiln_c99_json_pow10[23] = {
+    1e0,  1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e7,  1e8,  1e9,  1e10, 1e11,
+    1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+};
+
+static int kiln_c99_json_fast_number(const char *bytes, size_t len, double *out) {
+    size_t i = 0;
+    int negative = 0;
+    uint64_t mantissa = 0;
+    int mantissa_digits = 0;
+    int seen_dot = 0;
+    int fraction_digits = 0;
+    int exponent = 0;
+    int exponent_negative = 0;
+    int decimal_exponent;
+    double value;
+
+    if (i < len && bytes[i] == '-') {
+        negative = 1;
+        ++i;
+    }
+    for (; i < len; ++i) {
+        char c = bytes[i];
+        if (c == '.') {
+            if (seen_dot) return 0;
+            seen_dot = 1;
+            continue;
+        }
+        if (c == 'e' || c == 'E') break;
+        if (mantissa_digits >= 15) {
+            /* More significant digits than a double can hold exactly: outside the range this
+             * shortcut can answer for, so it defers rather than round the wrong digit away. */
+            return 0;
+        }
+        mantissa = mantissa * 10 + (uint64_t)(c - '0');
+        ++mantissa_digits;
+        if (seen_dot) ++fraction_digits;
+    }
+    if (i < len && (bytes[i] == 'e' || bytes[i] == 'E')) {
+        ++i;
+        if (i < len && (bytes[i] == '+' || bytes[i] == '-')) {
+            exponent_negative = bytes[i] == '-';
+            ++i;
+        }
+        for (; i < len; ++i) {
+            if (exponent > 1000) return 0; /* absurd; let the FFI's own bound decide */
+            exponent = exponent * 10 + (bytes[i] - '0');
+        }
+    }
+    decimal_exponent = (exponent_negative ? -exponent : exponent) - fraction_digits;
+    if (decimal_exponent < -22 || decimal_exponent > 22) return 0;
+    value = (double)mantissa;
+    if (decimal_exponent >= 0) {
+        value *= kiln_c99_json_pow10[decimal_exponent];
+    } else {
+        value /= kiln_c99_json_pow10[-decimal_exponent];
+    }
+    if (negative) value = -value;
+    *out = value;
+    return 1;
+}
+
 static int kiln_c99_json_read(kiln_json_reader *reader, kiln_value *out) {
     int status;
     if (reader->depth >= KILN_C99_MAX_CALL_DEPTH) {
@@ -784,13 +1037,13 @@ static int kiln_c99_json_read(kiln_json_reader *reader, kiln_value *out) {
             return KILN_C99_OK;
         }
         for (;;) {
-            kiln_value key;
+            const char *ikey;
             kiln_value member;
             kiln_c99_json_space(reader);
             if (reader->at >= reader->len || reader->bytes[reader->at] != '"') {
                 KILN_C99_REFUSE_INTERNAL("JSON.parse converts a reader refusal into a SyntaxError");
             }
-            status = kiln_c99_json_string(reader, &key);
+            status = kiln_c99_json_object_key(reader, &ikey);
             if (status != KILN_C99_OK) {
                 return status;
             }
@@ -805,7 +1058,7 @@ static int kiln_c99_json_read(kiln_json_reader *reader, kiln_value *out) {
             if (status != KILN_C99_OK) {
                 return status;
             }
-            status = kiln_c99_put(NULL, built, key.ptr, key.len, member, 0, NULL);
+            status = kiln_c99_json_define(built, ikey, member);
             if (status != KILN_C99_OK) {
                 return status;
             }
@@ -880,9 +1133,12 @@ static int kiln_c99_json_read(kiln_json_reader *reader, kiln_value *out) {
             }
         }
         {
-            double number = kiln_string_to_number(reader->bytes + start, reader->at - start);
-            if (isnan(number)) {
-                KILN_C99_REFUSE_INTERNAL("JSON.parse converts a reader refusal into a SyntaxError");
+            double number;
+            if (!kiln_c99_json_fast_number(reader->bytes + start, reader->at - start, &number)) {
+                number = kiln_string_to_number(reader->bytes + start, reader->at - start);
+                if (isnan(number)) {
+                    KILN_C99_REFUSE_INTERNAL("JSON.parse converts a reader refusal into a SyntaxError");
+                }
             }
             *out = kiln_c99_number(number);
             return KILN_C99_OK;
