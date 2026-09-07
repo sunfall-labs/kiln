@@ -21242,12 +21242,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if let Some((method, brand_only)) = native.typed_array_prototype_method() {
                     self.validate_typed_array(&this_value, method, brand_only)?;
                     if let Native::TypedArrayGeneric(method) = native {
-                        return self.call_value_inner(
+                        // The flag is what tells the shared implementation which of the two
+                        // tables the program reached it through, and it is set here as well as
+                        // in `invoke_dispatch` because a method reached by `call`, `apply`,
+                        // `bind` or `Reflect.apply` arrives on this path instead. Without it,
+                        // `%TypedArray%.prototype.map.call(view, f)` built its result the way
+                        // `Array.prototype.map` does and answered an ordinary array.
+                        let outer = std::mem::replace(&mut self.typed_array_method, true);
+                        let dispatched = self.call_value_inner(
                             &array_property(method),
                             this_value,
                             arguments,
                             instruction,
                         );
+                        self.typed_array_method = outer;
+                        return dispatched;
                     }
                 }
                 // A method that changes its array, given a proxy, has to change what is behind
@@ -21261,8 +21270,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         instruction,
                     );
                 }
+                // The same tail `invoke_dispatch` gives a native: a view that reached a copying
+                // method gets a view of its own kind back, and one that reached an in-place
+                // method gets its own elements rearranged rather than a snapshot's. Both paths
+                // reach one `%TypedArray%.prototype` implementation, so both owe it the same
+                // ending; this one used to drop the receiver's kind on the floor, which is why
+                // `%TypedArray%.prototype.slice.call(view)` answered an ordinary array.
+                let original = this_value.clone();
                 let this_value = self.as_array_like(callee, this_value, instruction)?;
-                self.dispatch_native(*native, &this_value, &arguments, instruction)
+                let produced =
+                    self.dispatch_native(*native, &this_value, &arguments, instruction)?;
+                self.typed_result(
+                    &original,
+                    produced,
+                    native.rearranges_in_place(),
+                    native.returns_a_new_array(),
+                    instruction,
+                )
             }
             // `resolve` and `reject` from a promise executor. Calling one settles its promise
             // and evaluates to undefined, however many times the program calls it.
@@ -28582,7 +28606,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             return Ok(original.clone());
         }
-        if new_array {
+        // Only for a method reached *as* a `%TypedArray%.prototype` one, the same distinction
+        // `array_like_length` draws. `%TypedArray%.prototype.map` builds its result with
+        // `TypedArraySpeciesCreate`, so a view of the receiver's kind; `Array.prototype.map`
+        // builds its result with `ArraySpeciesCreate`, which answers a plain array for any
+        // receiver that is not one -- and a view is not one. Borrowing the generic method onto a
+        // view (`Array.prototype.map.call(view, f)`) therefore answers an ordinary array, which
+        // is what node answers and what the native backend already answered.
+        if new_array && self.typed_array_method {
             let elements = dense_items(&items.borrow());
             return self.typed_array_species_create(original, kind, elements, instruction);
         }
