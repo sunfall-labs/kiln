@@ -214,6 +214,7 @@ static kiln_array *kiln_c99_array_of(kiln_value value);
 static kiln_typed_buffer *kiln_c99_typed_buffer_of(kiln_value value);
 static kiln_typed_array *kiln_c99_typed_array_of(kiln_value value);
 static kiln_data_view *kiln_c99_data_view_of(kiln_value value);
+static void *kiln_c99_gc_alloc(uint32_t kind, size_t size);
 static double kiln_c99_as_number(kiln_value value);
 static int kiln_c99_to_number_checked(kiln_host *host, kiln_value value, double *out, int depth,
                                       kiln_value *thrown);
@@ -423,6 +424,9 @@ static int kiln_c99_node_dns_lookup(kiln_host *host, kiln_value *out,
                                     kiln_value *thrown);
 static int kiln_c99_node_path(kiln_value *out, uint64_t code,
                               const kiln_value *args, size_t argc, kiln_value *thrown);
+static int kiln_c99_node_ffi(kiln_host *host, kiln_value *out, uint64_t code,
+                             kiln_value receiver, const kiln_value *args, size_t argc,
+                             int depth, kiln_value *thrown);
 static int kiln_c99_node_stream(kiln_host *host, kiln_value *out, uint64_t code,
                                 kiln_value receiver, const kiln_value *args, size_t argc,
                                 int depth, kiln_value *thrown);
@@ -567,7 +571,7 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
                                const char *indent, size_t indent_len, const char *current,
                                size_t current_len, int *serialised, int depth,
                                const kiln_json_frame *parents, kiln_value *thrown);
-static int kiln_c99_json_document(const char *bytes, size_t len, kiln_val *out);
+int kiln_c99_json_document(const char *bytes, size_t len, kiln_val *out);
 static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
                          kiln_value receiver, const kiln_value *args, size_t argc, int depth,
                          kiln_value *thrown);
@@ -865,6 +869,611 @@ static int kiln_c99_node_path(kiln_value *result, uint64_t code,
 done:
     free(joined.bytes);
     return status;
+}
+
+/* Low-level dynamic-call machinery for source-backed runtime modules. This owns no Node policy:
+ * it translates scalar values, ArrayBuffer storage and callbacks across the provider ABI. */
+#define KILN_C99_FFI_DYNAMIC_BASE UINT64_C(0x80000000)
+#define KILN_C99_FFI_DYNAMIC_MASK UINT64_C(0x7fffffff)
+#define KILN_C99_FFI_VOID 0u
+#define KILN_C99_FFI_I8 1u
+#define KILN_C99_FFI_U8 2u
+#define KILN_C99_FFI_I16 3u
+#define KILN_C99_FFI_U16 4u
+#define KILN_C99_FFI_I32 5u
+#define KILN_C99_FFI_U32 6u
+#define KILN_C99_FFI_I64 7u
+#define KILN_C99_FFI_U64 8u
+#define KILN_C99_FFI_F32 9u
+#define KILN_C99_FFI_F64 10u
+#define KILN_C99_FFI_POINTER 11u
+
+typedef struct kiln_ffi_function_meta {
+    uint64_t handle;
+    uint64_t library;
+    uint32_t result;
+    size_t argc;
+    uint32_t *arguments;
+    struct kiln_ffi_function_meta *next;
+} kiln_ffi_function_meta;
+
+typedef struct kiln_ffi_callback_meta {
+    uint64_t pointer;
+    uint64_t library;
+    kiln_value *root;
+    kiln_host *host;
+    kiln_value *thrown;
+    int depth;
+    uint32_t result;
+    struct kiln_ffi_callback_meta *next;
+} kiln_ffi_callback_meta;
+
+static kiln_ffi_function_meta *kiln_c99_ffi_functions;
+static kiln_ffi_callback_meta *kiln_c99_ffi_callbacks;
+static uint32_t kiln_c99_ffi_next_root = UINT32_C(0x80000000);
+static int kiln_c99_ffi_callback_status;
+
+static int kiln_c99_ffi_raise(kiln_value *thrown) {
+    const uint8_t *bytes = NULL;
+    uint64_t len = 0;
+    kiln_value error;
+    kiln_value message;
+    int status = kiln_ffi_last_error(&bytes, &len);
+    if (status != KILN_C99_OK || (len != 0 && bytes == NULL))
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_ERROR,
+                                    "node:ffi provider refused the operation");
+    message = kiln_c99_copy_text((const char *)bytes, (size_t)len);
+    if (message.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+    status = kiln_c99_new_error(&error, KILN_C99_BUILTIN_ERROR, message);
+    if (status == KILN_C99_OK && thrown != NULL) *thrown = error;
+    return status == KILN_C99_OK ? KILN_C99_HOST_ERROR : status;
+}
+
+static int kiln_c99_ffi_u64(kiln_value value, uint64_t *out, kiln_value *thrown) {
+    if (value.tag == KILN_VALUE_BIGINT) {
+        int64_t high = 0;
+        uint64_t low = 0;
+        if (kiln_bigint_to_i128((const void *)(uintptr_t)value.bits, &high, &low) != 0 ||
+            high != 0)
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                        "node:ffi pointer is outside uint64 range");
+        *out = low;
+        return KILN_C99_OK;
+    }
+    if (value.tag == KILN_VALUE_NUMBER) {
+        double number = kiln_c99_as_number(value);
+        if (!isfinite(number) || number < 0.0 || floor(number) != number ||
+            number > 9007199254740991.0)
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                        "node:ffi pointer must be a non-negative safe integer");
+        *out = (uint64_t)number;
+        return KILN_C99_OK;
+    }
+    return kiln_c99_throw_not_a(thrown, value, "BigInt pointer");
+}
+
+static int kiln_c99_ffi_bigint(uint64_t value, kiln_value *out) {
+    char digits[32];
+    char reversed[32];
+    void *handle = NULL;
+    size_t len = 0;
+    size_t index;
+    do {
+        reversed[len++] = (char)('0' + value % 10);
+        value /= 10;
+    } while (value != 0);
+    for (index = 0; index < len; ++index) digits[index] = reversed[len - index - 1];
+    if (kiln_bigint_parse((const unsigned char *)digits, len, 10, &handle) != 0)
+        return KILN_C99_OUT_OF_MEMORY;
+    *out = kiln_c99_bigint_value(handle);
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_ffi_type(kiln_value value, int result, uint32_t *out,
+                              kiln_value *thrown) {
+    const char *name;
+    size_t len;
+    if (value.tag != KILN_VALUE_STRING)
+        return kiln_c99_throw_not_a(thrown, value, "node:ffi type string");
+    name = value.ptr;
+    len = value.len;
+#define KILN_FFI_TYPE(text, code) \
+    if (kiln_c99_same_name(name, len, text)) { *out = code; return KILN_C99_OK; }
+    KILN_FFI_TYPE("void", KILN_C99_FFI_VOID)
+    KILN_FFI_TYPE("char", KILN_C99_FFI_I8)
+    KILN_FFI_TYPE("i8", KILN_C99_FFI_I8)
+    KILN_FFI_TYPE("u8", KILN_C99_FFI_U8)
+    KILN_FFI_TYPE("bool", KILN_C99_FFI_U8)
+    KILN_FFI_TYPE("i16", KILN_C99_FFI_I16)
+    KILN_FFI_TYPE("u16", KILN_C99_FFI_U16)
+    KILN_FFI_TYPE("i32", KILN_C99_FFI_I32)
+    KILN_FFI_TYPE("u32", KILN_C99_FFI_U32)
+    KILN_FFI_TYPE("i64", KILN_C99_FFI_I64)
+    KILN_FFI_TYPE("u64", KILN_C99_FFI_U64)
+    KILN_FFI_TYPE("f32", KILN_C99_FFI_F32)
+    KILN_FFI_TYPE("f64", KILN_C99_FFI_F64)
+    KILN_FFI_TYPE("pointer", KILN_C99_FFI_POINTER)
+    if (!result && (kiln_c99_same_name(name, len, "string") ||
+                    kiln_c99_same_name(name, len, "buffer"))) {
+        *out = KILN_C99_FFI_POINTER;
+        return KILN_C99_OK;
+    }
+#undef KILN_FFI_TYPE
+    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                "node:ffi received an unsupported type");
+}
+
+static int kiln_c99_ffi_signature(kiln_host *host, kiln_value definition,
+                                  uint32_t **out_arguments, size_t *out_count,
+                                  uint32_t *out_result, int depth, kiln_value *thrown) {
+    kiln_value arguments;
+    kiln_value returns;
+    kiln_array *array;
+    uint32_t *types = NULL;
+    size_t index;
+    int status;
+    if (definition.tag != KILN_VALUE_OBJECT)
+        return kiln_c99_throw_not_a(thrown, definition, "node:ffi function definition");
+    status = kiln_c99_get(host, definition, "arguments", 9, &arguments, depth, thrown);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_get(host, definition, "return", 6, &returns, depth, thrown);
+    if (status != KILN_C99_OK) return status;
+    if (arguments.tag != KILN_VALUE_ARRAY)
+        return kiln_c99_throw_not_a(thrown, arguments, "node:ffi arguments array");
+    array = kiln_c99_array_of(arguments);
+    if (array->count != 0) {
+        types = (uint32_t *)malloc(array->count * sizeof *types);
+        if (types == NULL) return KILN_C99_OUT_OF_MEMORY;
+    }
+    for (index = 0; index < array->count; ++index) {
+        kiln_value type = array->elements[index] == KILN_VAL_HOLE
+                              ? kiln_c99_undefined()
+                              : kiln_val_to_boundary(array->elements[index]);
+        status = kiln_c99_ffi_type(type, 0, &types[index], thrown);
+        if (status != KILN_C99_OK) {
+            free(types);
+            return status;
+        }
+    }
+    status = kiln_c99_ffi_type(returns, 1, out_result, thrown);
+    if (status != KILN_C99_OK) {
+        free(types);
+        return status;
+    }
+    *out_arguments = types;
+    *out_count = array->count;
+    return KILN_C99_OK;
+}
+
+static kiln_ffi_function_meta *kiln_c99_ffi_function_find(uint64_t handle) {
+    kiln_ffi_function_meta *entry;
+    for (entry = kiln_c99_ffi_functions; entry != NULL; entry = entry->next)
+        if (entry->handle == handle) return entry;
+    return NULL;
+}
+
+static int kiln_c99_ffi_library_handle(kiln_host *host, kiln_value receiver,
+                                       uint64_t *out, int depth, kiln_value *thrown) {
+    kiln_value value;
+    int status;
+    if (receiver.tag != KILN_VALUE_OBJECT)
+        return kiln_c99_throw_not_a(thrown, receiver, "node:ffi library");
+    status = kiln_c99_get(host, receiver, "__kilnFfiLibrary", 16, &value, depth, thrown);
+    if (status != KILN_C99_OK) return status;
+    return kiln_c99_ffi_u64(value, out, thrown);
+}
+
+static int kiln_c99_ffi_argument(kiln_value value, uint32_t kind, kiln_ffi_value *out,
+                                  void **owned, kiln_value *thrown) {
+    double number;
+    uint64_t bits = 0;
+    *owned = NULL;
+    if (kind == KILN_C99_FFI_POINTER) {
+        if (value.tag == KILN_VALUE_NULL || value.tag == KILN_VALUE_UNDEFINED) bits = 0;
+        else if (value.tag == KILN_VALUE_BIGINT || value.tag == KILN_VALUE_NUMBER) {
+            int status = kiln_c99_ffi_u64(value, &bits, thrown);
+            if (status != KILN_C99_OK) return status;
+        } else if (value.tag == KILN_VALUE_STRING) {
+            char *copy = (char *)malloc(value.len + 1);
+            if (copy == NULL) return KILN_C99_OUT_OF_MEMORY;
+            memcpy(copy, value.ptr, value.len);
+            copy[value.len] = '\0';
+            *owned = copy;
+            bits = (uint64_t)(uintptr_t)copy;
+        } else if (value.tag == KILN_VALUE_ARRAY_BUFFER) {
+            bits = (uint64_t)(uintptr_t)kiln_c99_typed_buffer_of(value)->bytes;
+        } else if (value.tag == KILN_VALUE_TYPED_ARRAY) {
+            kiln_typed_array *view = kiln_c99_typed_array_of(value);
+            bits = (uint64_t)(uintptr_t)(view->buffer->bytes + view->byte_offset);
+        } else if (value.tag == KILN_VALUE_DATA_VIEW) {
+            kiln_data_view *view = kiln_c99_data_view_of(value);
+            bits = (uint64_t)(uintptr_t)(view->buffer->bytes + view->byte_offset);
+        } else return kiln_c99_throw_not_a(thrown, value, "node:ffi pointer argument");
+    } else if (kind == KILN_C99_FFI_I64 || kind == KILN_C99_FFI_U64) {
+        if (value.tag == KILN_VALUE_BIGINT) {
+            int64_t high = 0;
+            if (kiln_bigint_to_i128((const void *)(uintptr_t)value.bits, &high, &bits) != 0 ||
+                (kind == KILN_C99_FFI_U64 ? high != 0 : (high != 0 && high != -1)))
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                            "node:ffi integer is outside 64-bit range");
+        } else {
+            int status = kiln_c99_to_number_checked(NULL, value, &number, 0, thrown);
+            if (status != KILN_C99_OK) return status;
+            bits = kind == KILN_C99_FFI_I64 ? (uint64_t)(int64_t)number : (uint64_t)number;
+        }
+    } else {
+        int status = kiln_c99_to_number_checked(NULL, value, &number, 0, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (kind == KILN_C99_FFI_F64) memcpy(&bits, &number, sizeof bits);
+        else if (kind == KILN_C99_FFI_F32) {
+            float narrowed = (float)number;
+            uint32_t word;
+            memcpy(&word, &narrowed, sizeof word);
+            bits = word;
+        } else bits = (uint64_t)(int64_t)number;
+    }
+    out->kind = kind;
+    out->reserved = 0;
+    out->bits = bits;
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_ffi_result(const kiln_ffi_value *value, kiln_value *out) {
+    double number;
+    switch (value->kind) {
+    case KILN_C99_FFI_VOID:
+        *out = kiln_c99_undefined();
+        return value->reserved == 0 ? KILN_C99_OK : KILN_C99_INVALID_ARGUMENT;
+    case KILN_C99_FFI_I64:
+    case KILN_C99_FFI_U64:
+    case KILN_C99_FFI_POINTER: return kiln_c99_ffi_bigint(value->bits, out);
+    case KILN_C99_FFI_F32: {
+        uint32_t word = (uint32_t)value->bits;
+        float narrowed;
+        memcpy(&narrowed, &word, sizeof word);
+        *out = kiln_c99_number((double)narrowed);
+        return KILN_C99_OK;
+    }
+    case KILN_C99_FFI_F64:
+        memcpy(&number, &value->bits, sizeof number);
+        *out = kiln_c99_number(number);
+        return KILN_C99_OK;
+    case KILN_C99_FFI_I8: *out = kiln_c99_number((double)(int8_t)value->bits); return KILN_C99_OK;
+    case KILN_C99_FFI_U8: *out = kiln_c99_number((double)(uint8_t)value->bits); return KILN_C99_OK;
+    case KILN_C99_FFI_I16: *out = kiln_c99_number((double)(int16_t)value->bits); return KILN_C99_OK;
+    case KILN_C99_FFI_U16: *out = kiln_c99_number((double)(uint16_t)value->bits); return KILN_C99_OK;
+    case KILN_C99_FFI_I32: *out = kiln_c99_number((double)(int32_t)value->bits); return KILN_C99_OK;
+    case KILN_C99_FFI_U32: *out = kiln_c99_number((double)(uint32_t)value->bits); return KILN_C99_OK;
+    default: return KILN_C99_INVALID_ARGUMENT;
+    }
+}
+
+static int32_t kiln_c99_ffi_callback_dispatch(void *opaque,
+                                               const kiln_ffi_value *arguments,
+                                               uint64_t argument_count,
+                                               kiln_ffi_value *out_result) {
+    kiln_ffi_callback_meta *callback = (kiln_ffi_callback_meta *)opaque;
+    kiln_value inline_args[16];
+    kiln_value *args = inline_args;
+    kiln_value result;
+    uint64_t index;
+    int status;
+    if (callback == NULL || out_result == NULL || callback->root == NULL) return -8;
+    if (argument_count > 16) {
+        args = (kiln_value *)malloc((size_t)argument_count * sizeof *args);
+        if (args == NULL) return -8;
+    }
+    for (index = 0; index < argument_count; ++index) {
+        status = kiln_c99_ffi_result(&arguments[index], &args[index]);
+        if (status != KILN_C99_OK) goto done;
+    }
+    status = kiln_c99_call(callback->host, &result, *callback->root, kiln_c99_undefined(), args,
+                           (size_t)argument_count, callback->depth + 1, callback->thrown);
+    if (status == KILN_C99_OK) {
+        void *owned = NULL;
+        status = callback->result == KILN_C99_FFI_VOID
+                     ? KILN_C99_OK
+                     : kiln_c99_ffi_argument(result, callback->result, out_result, &owned,
+                                             callback->thrown);
+        free(owned);
+        if (callback->result == KILN_C99_FFI_VOID) {
+            out_result->kind = KILN_C99_FFI_VOID;
+            out_result->reserved = 0;
+            out_result->bits = 0;
+        }
+    }
+done:
+    if (args != inline_args) free(args);
+    if (status != KILN_C99_OK) kiln_c99_ffi_callback_status = status;
+    return status == KILN_C99_OK ? 0 : -8;
+}
+
+static void kiln_c99_ffi_remove_callbacks(uint64_t library, uint64_t only_pointer) {
+    kiln_ffi_callback_meta **link = &kiln_c99_ffi_callbacks;
+    while (*link != NULL) {
+        kiln_ffi_callback_meta *entry = *link;
+        if (entry->library == library && (only_pointer == 0 || entry->pointer == only_pointer)) {
+            (void)kiln_ffi_unregister_callback(entry->pointer);
+            if (entry->root != NULL) *entry->root = kiln_c99_undefined();
+            *link = entry->next;
+            free(entry);
+            if (only_pointer != 0) return;
+        } else link = &entry->next;
+    }
+}
+
+static void kiln_c99_ffi_remove_functions(uint64_t library) {
+    kiln_ffi_function_meta **link = &kiln_c99_ffi_functions;
+    while (*link != NULL) {
+        kiln_ffi_function_meta *entry = *link;
+        if (entry->library == library) {
+            *link = entry->next;
+            free(entry->arguments);
+            free(entry);
+        } else link = &entry->next;
+    }
+}
+
+static int kiln_c99_node_ffi(kiln_host *host, kiln_value *out, uint64_t code,
+                             kiln_value receiver, const kiln_value *args, size_t argc,
+                             int depth, kiln_value *thrown) {
+    int status;
+    if ((code & KILN_C99_FFI_DYNAMIC_BASE) != 0) {
+        uint64_t handle = code & KILN_C99_FFI_DYNAMIC_MASK;
+        kiln_ffi_function_meta *function = kiln_c99_ffi_function_find(handle);
+        kiln_ffi_value inline_values[16];
+        void *inline_owned[16];
+        kiln_ffi_value *values = inline_values;
+        void **owned = inline_owned;
+        kiln_ffi_value result;
+        size_t index;
+        if (function == NULL)
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_ERROR,
+                                        "node:ffi function belongs to a closed library");
+        if (argc != function->argc)
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "node:ffi function argument count does not match");
+        if (argc > 16) {
+            values = (kiln_ffi_value *)malloc(argc * sizeof *values);
+            owned = (void **)malloc(argc * sizeof *owned);
+            if (values == NULL || owned == NULL) {
+                free(values); free(owned); return KILN_C99_OUT_OF_MEMORY;
+            }
+        }
+        for (index = 0; index < argc; ++index) owned[index] = NULL;
+        for (index = 0; index < argc; ++index) {
+            status = kiln_c99_ffi_argument(args[index], function->arguments[index], &values[index],
+                                            &owned[index], thrown);
+            if (status != KILN_C99_OK) goto call_done;
+        }
+        kiln_c99_ffi_callback_status = KILN_C99_OK;
+        status = kiln_ffi_call(handle, values, (uint64_t)argc, &result);
+        if (status != KILN_C99_OK) status = kiln_c99_ffi_raise(thrown);
+        else if (kiln_c99_ffi_callback_status != KILN_C99_OK)
+            status = kiln_c99_ffi_callback_status;
+        else status = kiln_c99_ffi_result(&result, out);
+call_done:
+        for (index = 0; index < argc; ++index) free(owned[index]);
+        if (values != inline_values) { free(values); free(owned); }
+        return status;
+    }
+    if (code == KILN_C99_METHOD_NODE_FFI_GET_RAW_POINTER) {
+        kiln_value value = argc > 0 ? args[0] : kiln_c99_undefined();
+        if (value.tag != KILN_VALUE_ARRAY_BUFFER)
+            return kiln_c99_throw_not_a(thrown, value, "ArrayBuffer");
+        return kiln_c99_ffi_bigint((uint64_t)(uintptr_t)kiln_c99_typed_buffer_of(value)->bytes,
+                                   out);
+    }
+    if (code == KILN_C99_METHOD_NODE_FFI_TO_ARRAY_BUFFER) {
+        uint64_t pointer;
+        size_t length;
+        kiln_typed_buffer *buffer;
+        status = kiln_c99_ffi_u64(argc > 0 ? args[0] : kiln_c99_undefined(), &pointer, thrown);
+        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_to_index(argc > 1 ? args[1] : kiln_c99_undefined(), &length, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (pointer == 0 && length != 0)
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                        "node:ffi cannot view a null pointer with nonzero length");
+        if (argc > 2 && kiln_c99_truthy(args[2])) {
+            status = kiln_c99_new_typed_buffer(out, length);
+            if (status == KILN_C99_OK && length != 0)
+                memcpy(kiln_c99_typed_buffer_of(*out)->bytes, (const void *)(uintptr_t)pointer,
+                       length);
+            return status;
+        }
+        buffer = (kiln_typed_buffer *)kiln_c99_gc_alloc(KILN_GC_TYPED_BUFFER, sizeof *buffer);
+        if (buffer == NULL) return KILN_C99_OUT_OF_MEMORY;
+        buffer->bytes = (uint8_t *)(uintptr_t)pointer;
+        buffer->byte_length = length;
+        buffer->owns_bytes = 0;
+        *out = kiln_c99_value(KILN_VALUE_ARRAY_BUFFER, (uint64_t)(uintptr_t)buffer, NULL, 0);
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_NODE_FFI_DLOPEN) {
+        kiln_value path = argc > 0 ? args[0] : kiln_c99_undefined();
+        kiln_value definitions = argc > 1 ? args[1] : kiln_c99_undefined();
+        kiln_value keys, functions, library_object, answer;
+        kiln_array *key_array;
+        uint64_t library;
+        size_t index;
+        if (path.tag != KILN_VALUE_STRING)
+            return kiln_c99_throw_not_a(thrown, path, "node:ffi library path");
+        if (definitions.tag != KILN_VALUE_OBJECT)
+            return kiln_c99_throw_not_a(thrown, definitions, "node:ffi definitions object");
+        status = kiln_ffi_open((const uint8_t *)path.ptr, (uint64_t)path.len, &library);
+        if (status != KILN_C99_OK) return kiln_c99_ffi_raise(thrown);
+        status = kiln_c99_new_object(&functions);
+        if (status == KILN_C99_OK) status = kiln_c99_new_object(&library_object);
+        if (status == KILN_C99_OK) status = kiln_c99_own_keys(host, definitions, &keys, depth, thrown);
+        if (status != KILN_C99_OK) goto open_fail;
+        key_array = kiln_c99_array_of(keys);
+        for (index = 0; index < key_array->count; ++index) {
+            kiln_value key = kiln_val_to_boundary(key_array->elements[index]);
+            kiln_value definition;
+            uint32_t *types = NULL;
+            size_t type_count = 0;
+            uint32_t result_type = 0;
+            uint64_t function_handle = 0;
+            kiln_ffi_function_meta *metadata;
+            if (key.tag != KILN_VALUE_STRING) continue;
+            status = kiln_c99_get(host, definitions, key.ptr, key.len, &definition, depth, thrown);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_ffi_signature(host, definition, &types, &type_count,
+                                                 &result_type, depth, thrown);
+            if (status == KILN_C99_OK)
+                status = kiln_ffi_prepare(library, (const uint8_t *)key.ptr, (uint64_t)key.len,
+                                          types, (uint64_t)type_count, result_type,
+                                          &function_handle);
+            if (status != KILN_C99_OK) {
+                free(types);
+                if (status < 0 && (thrown == NULL || thrown->tag == KILN_VALUE_UNDEFINED))
+                    status = kiln_c99_ffi_raise(thrown);
+                goto open_fail;
+            }
+            if (function_handle == 0 || function_handle > KILN_C99_FFI_DYNAMIC_MASK) {
+                free(types);
+                status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                              "node:ffi exhausted dynamic callable identities");
+                goto open_fail;
+            }
+            metadata = (kiln_ffi_function_meta *)malloc(sizeof *metadata);
+            if (metadata == NULL) { free(types); status = KILN_C99_OUT_OF_MEMORY; goto open_fail; }
+            metadata->handle = function_handle;
+            metadata->library = library;
+            metadata->result = result_type;
+            metadata->argc = type_count;
+            metadata->arguments = types;
+            metadata->next = kiln_c99_ffi_functions;
+            kiln_c99_ffi_functions = metadata;
+            status = kiln_c99_put(host, functions, key.ptr, key.len,
+                                  kiln_c99_method(KILN_C99_FFI_DYNAMIC_BASE | function_handle),
+                                  depth, thrown);
+            if (status != KILN_C99_OK) goto open_fail;
+        }
+        status = kiln_c99_ffi_bigint(library, &answer);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(host, library_object, "__kilnFfiLibrary", 16, answer, depth,
+                                  thrown);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(host, library_object, "registerCallback", 16,
+                                  kiln_c99_method(KILN_C99_METHOD_NODE_FFI_REGISTER_CALLBACK),
+                                  depth, thrown);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(host, library_object, "unregisterCallback", 18,
+                                  kiln_c99_method(KILN_C99_METHOD_NODE_FFI_UNREGISTER_CALLBACK),
+                                  depth, thrown);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(host, library_object, "close", 5,
+                                  kiln_c99_method(KILN_C99_METHOD_NODE_FFI_CLOSE), depth, thrown);
+        if (status == KILN_C99_OK) status = kiln_c99_new_object(&answer);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(host, answer, "lib", 3, library_object, depth, thrown);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(host, answer, "functions", 9, functions, depth, thrown);
+        if (status == KILN_C99_OK) { *out = answer; return KILN_C99_OK; }
+open_fail:
+        kiln_c99_ffi_remove_callbacks(library, 0);
+        kiln_c99_ffi_remove_functions(library);
+        (void)kiln_ffi_close(library);
+        return status;
+    }
+    if (code == KILN_C99_METHOD_NODE_FFI_REGISTER_CALLBACK) {
+        uint64_t library;
+        uint32_t *types = NULL;
+        size_t count = 0;
+        uint32_t result_type = 0;
+        uint64_t pointer = 0;
+        void *slot = NULL;
+        kiln_ffi_callback_meta *callback;
+        kiln_value function = argc > 1 ? args[1] : kiln_c99_undefined();
+        status = kiln_c99_ffi_library_handle(host, receiver, &library, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (!kiln_c99_is_callable(function))
+            return kiln_c99_throw_not_a(thrown, function, "node:ffi callback");
+        status = kiln_c99_ffi_signature(host, argc > 0 ? args[0] : kiln_c99_undefined(),
+                                         &types, &count, &result_type, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        callback = (kiln_ffi_callback_meta *)calloc(1, sizeof *callback);
+        if (callback == NULL) { free(types); return KILN_C99_OUT_OF_MEMORY; }
+        status = kiln_realm_value_slot(kiln_c99_ffi_next_root++, &slot);
+        if (status != KILN_C99_OK || slot == NULL) {
+            free(types); free(callback); return status == KILN_C99_OK ? KILN_C99_OUT_OF_MEMORY : status;
+        }
+        callback->root = (kiln_value *)slot;
+        *callback->root = function;
+        callback->library = library;
+        callback->host = host;
+        callback->thrown = thrown;
+        callback->depth = depth;
+        callback->result = result_type;
+        status = kiln_ffi_register_callback(types, (uint64_t)count, result_type,
+                                             kiln_c99_ffi_callback_dispatch, callback, &pointer);
+        free(types);
+        if (status != KILN_C99_OK) {
+            *callback->root = kiln_c99_undefined(); free(callback); return kiln_c99_ffi_raise(thrown);
+        }
+        callback->pointer = pointer;
+        callback->next = kiln_c99_ffi_callbacks;
+        kiln_c99_ffi_callbacks = callback;
+        return kiln_c99_ffi_bigint(pointer, out);
+    }
+    if (code == KILN_C99_METHOD_NODE_FFI_UNREGISTER_CALLBACK) {
+        uint64_t library, pointer;
+        status = kiln_c99_ffi_library_handle(host, receiver, &library, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_ffi_u64(argc > 0 ? args[0] : kiln_c99_undefined(), &pointer, thrown);
+        if (status != KILN_C99_OK) return status;
+        kiln_c99_ffi_remove_callbacks(library, pointer);
+        *out = kiln_c99_undefined();
+        return status;
+    }
+    if (code == KILN_C99_METHOD_NODE_FFI_CLOSE) {
+        uint64_t library;
+        status = kiln_c99_ffi_library_handle(host, receiver, &library, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        kiln_c99_ffi_remove_callbacks(library, 0);
+        status = kiln_ffi_close(library);
+        if (status != KILN_C99_OK) return kiln_c99_ffi_raise(thrown);
+        kiln_c99_ffi_remove_functions(library);
+        *out = kiln_c99_undefined();
+        return status;
+    }
+    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_ERROR,
+                                "node:ffi operation is not implemented");
+}
+
+/* `createRequire()` is constructed at runtime and therefore cannot borrow the ESM export array
+ * emitted for a statically imported builtin. Keep its node:ffi projection on the same method
+ * identities as that export array instead of making the CommonJS loader reimplement FFI. */
+static int kiln_c99_node_ffi_commonjs(kiln_host *host, kiln_value *out,
+                                      kiln_value *thrown) {
+    kiln_value namespace;
+    kiln_value dlopen = kiln_c99_method(KILN_C99_METHOD_NODE_FFI_DLOPEN);
+    kiln_value get_raw_pointer = kiln_c99_method(KILN_C99_METHOD_NODE_FFI_GET_RAW_POINTER);
+    kiln_value to_array_buffer = kiln_c99_method(KILN_C99_METHOD_NODE_FFI_TO_ARRAY_BUFFER);
+#if defined(_WIN32)
+    kiln_value suffix = kiln_c99_copy_text(".dll", 4);
+#elif defined(__APPLE__)
+    kiln_value suffix = kiln_c99_copy_text(".dylib", 6);
+#else
+    kiln_value suffix = kiln_c99_copy_text(".so", 3);
+#endif
+    int status = kiln_c99_new_object(&namespace);
+    if (status != KILN_C99_OK) return status;
+#define KILN_C99_FFI_EXPORT(name, len, value)                                      \
+    do {                                                                            \
+        status = kiln_c99_put(host, namespace, (name), (len), (value), 0, thrown);  \
+        if (status != KILN_C99_OK) return status;                                   \
+    } while (0)
+    KILN_C99_FFI_EXPORT("default", 7, namespace);
+    KILN_C99_FFI_EXPORT("dlopen", 6, dlopen);
+    KILN_C99_FFI_EXPORT("getRawPointer", 13, get_raw_pointer);
+    KILN_C99_FFI_EXPORT("suffix", 6, suffix);
+    KILN_C99_FFI_EXPORT("toArrayBuffer", 13, to_array_buffer);
+#undef KILN_C99_FFI_EXPORT
+    *out = namespace;
+    return KILN_C99_OK;
 }
 
 static kiln_value kiln_c99_undefined(void) {

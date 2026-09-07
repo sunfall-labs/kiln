@@ -56,6 +56,17 @@ const BUILTINS: &[BuiltinAbi] = &[
         },
     },
     BuiltinAbi {
+        specifier: "node:ffi",
+        exports: &[
+            "default",
+            "dlopen",
+            "getRawPointer",
+            "suffix",
+            "toArrayBuffer",
+        ],
+        commonjs: CommonJsProjection::Namespace,
+    },
+    BuiltinAbi {
         // `require("node:buffer")` is *both* the module and the `Buffer` constructor here: the
         // interpreter answers it with a value whose members are `Buffer`'s own statics, so
         // `require("node:buffer").from` is a function there. Declaring only `Buffer`, `constants`
@@ -331,6 +342,7 @@ pub const SPECIFIERS: &[&str] = &[
     "node:crypto",
     "node:dns",
     "node:events",
+    "node:ffi",
     "node:fs/promises",
     "node:fs",
     "node:net",

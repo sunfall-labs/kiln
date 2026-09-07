@@ -1596,6 +1596,36 @@ int kiln_node_path_relative(const uint8_t *from, uint64_t from_len, const uint8_
     *out_len = 0;
     return KILN_C99_INVALID_ARGUMENT;
 }
+int kiln_ffi_open(const uint8_t *path, uint64_t path_len, uint64_t *out_library) {
+    (void)path; (void)path_len; (void)out_library; return KILN_C99_INVALID_ARGUMENT;
+}
+int kiln_ffi_close(uint64_t library) { (void)library; return KILN_C99_INVALID_ARGUMENT; }
+int kiln_ffi_prepare(uint64_t library, const uint8_t *symbol, uint64_t symbol_len,
+                     const uint32_t *argument_types, uint64_t argument_count,
+                     uint32_t result_type, uint64_t *out_function) {
+    (void)library; (void)symbol; (void)symbol_len; (void)argument_types;
+    (void)argument_count; (void)result_type; (void)out_function;
+    return KILN_C99_INVALID_ARGUMENT;
+}
+int kiln_ffi_call(uint64_t function, const kiln_ffi_value *arguments,
+                  uint64_t argument_count, kiln_ffi_value *out_result) {
+    (void)function; (void)arguments; (void)argument_count; (void)out_result;
+    return KILN_C99_INVALID_ARGUMENT;
+}
+int kiln_ffi_register_callback(const uint32_t *argument_types, uint64_t argument_count,
+                               uint32_t result_type, kiln_ffi_dispatch_fn dispatch,
+                               void *context, uint64_t *out_pointer) {
+    (void)argument_types; (void)argument_count; (void)result_type; (void)dispatch;
+    (void)context; (void)out_pointer; return KILN_C99_INVALID_ARGUMENT;
+}
+int kiln_ffi_unregister_callback(uint64_t pointer) {
+    (void)pointer; return KILN_C99_INVALID_ARGUMENT;
+}
+int kiln_ffi_last_error(const uint8_t **out_bytes, uint64_t *out_len) {
+    if (out_bytes != NULL) *out_bytes = NULL;
+    if (out_len != NULL) *out_len = 0;
+    return KILN_C99_OK;
+}
 int kiln_realm_symbol_for(const uint8_t *key, uint64_t key_len, uint64_t *out_id) {
     if (!kiln_test_realm_active || out_id == NULL || key_len > sizeof kiln_test_symbol_key) {
         return KILN_C99_INVALID_ARGUMENT;

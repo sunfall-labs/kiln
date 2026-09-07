@@ -266,6 +266,7 @@ static int kiln_c99_new_typed_buffer_ex(kiln_value *out, size_t byte_length, int
         return KILN_C99_OUT_OF_MEMORY;
     }
     buffer->byte_length = byte_length;
+    buffer->owns_bytes = 1;
     *out = kiln_c99_value(KILN_VALUE_ARRAY_BUFFER, (uint64_t)(uintptr_t)buffer, NULL, 0);
     return KILN_C99_OK;
 }

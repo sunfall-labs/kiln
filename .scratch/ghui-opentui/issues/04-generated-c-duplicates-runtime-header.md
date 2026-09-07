@@ -51,3 +51,11 @@ fills all 16 CPUs, so reducing one straggler does not reduce its roughly 185 CPU
 A correctly guarded PCH saves about 30 ms on an otherwise-empty unit and nothing on a large unit.
 The next reduction must therefore remove syntax and AST work across the entire graph: compact
 operation tables or a similarly dense lowering, not more translation units or header machinery.
+
+A function-level status slow path was also tested and rejected. It reduced the largest unit's
+isolated syntax check from 3.65 to 3.58 seconds and made the whole application object about 12 MB
+smaller, but added 1.7 MB of generated C; adjacent full cold compiles remained in the same noisy
+15--17 second band. Rearranging equivalent C control flow is not the required order-of-magnitude
+change. The graph itself still contains both React reconciler variants (11.4 MB development and
+6.4 MB production) and pulls 10.5 MB of `fast-check` through Effect's `sideEffects: false` graph.
+Removing unused modules and declarations before C emission is the next high-leverage boundary.

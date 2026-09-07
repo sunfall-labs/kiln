@@ -374,7 +374,19 @@ typedef enum kiln_typed_kind {
 typedef struct kiln_typed_buffer {
     uint8_t *bytes;
     size_t byte_length;
+    /* A borrowed FFI view points into a loaded native library's memory. Ordinary ArrayBuffers
+     * own their allocation; borrowed ones must never feed that pointer to free(). */
+    int owns_bytes;
 } kiln_typed_buffer;
+
+/* The scalar-only dynamic-call ABI. Its layout is pinned by the Rust provider's repr(C) type. */
+typedef struct kiln_ffi_value {
+    uint32_t kind;
+    uint32_t reserved;
+    uint64_t bits;
+} kiln_ffi_value;
+typedef int32_t (*kiln_ffi_dispatch_fn)(void *context, const kiln_ffi_value *arguments,
+                                        uint64_t argument_count, kiln_ffi_value *out_result);
 
 typedef struct kiln_typed_array {
     kiln_typed_buffer *buffer;

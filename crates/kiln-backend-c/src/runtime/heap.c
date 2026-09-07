@@ -2420,8 +2420,10 @@ static void kiln_c99_gc_finalize(kiln_gc_block *block) {
         free(((kiln_collection *)payload)->hash_table);
         break;
     case KILN_GC_TYPED_BUFFER:
-        kiln_c99_bytes_retire(((kiln_typed_buffer *)payload)->bytes,
-                              ((kiln_typed_buffer *)payload)->byte_length);
+        if (((kiln_typed_buffer *)payload)->owns_bytes) {
+            kiln_c99_bytes_retire(((kiln_typed_buffer *)payload)->bytes,
+                                  ((kiln_typed_buffer *)payload)->byte_length);
+        }
         break;
     case KILN_GC_REGEXP:
         /* The compiled pattern is the provider's, and this is the only place it is handed back. */
