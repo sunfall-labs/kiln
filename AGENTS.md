@@ -66,7 +66,10 @@ that caused it, exactly as `update-baseline.sh` intends for the performance base
 
 Two things the gate does that a hand-rolled one keeps getting wrong. It asserts on the *summary
 line* of the crate tests rather than on an exit code, because a broken test build leaves a working
-release binary and a suite that never ran. And it re-execs itself under a bash 4 or newer: macOS
+release binary and a suite that never ran. It prints one total for the workspace (`crate tests: N suites,
+M passed, F failed`) and refuses below `KILN_GATE_MIN_PASSED` (500; the workspace runs about 1,440),
+because the last three summary lines it used to print are empty doc-test targets and read as a
+suite that never ran. And it re-execs itself under a bash 4 or newer: macOS
 ships 3.2, `mise run` finds it, and under 3.2 `thirdparty.sh` loses `BASHPID` and its cleanup trap
 deletes the shared results directory instead of its own -- every bundle then reports "missing" and
 the change under test takes the blame.
