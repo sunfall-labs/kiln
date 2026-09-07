@@ -1130,6 +1130,31 @@ static int kiln_c99_generator_step(kiln_host *host, kiln_value produced, int don
     return KILN_C99_OK;
 }
 
+static int kiln_c99_default_require(void *context, kiln_host *host, kiln_value specifier,
+                                    kiln_value *result, kiln_value *thrown) {
+    (void)context;
+    (void)host;
+    (void)result;
+    if (specifier.tag == KILN_VALUE_STRING && specifier.ptr != NULL) {
+        kiln_text text = {0};
+        int status;
+        if (kiln_c99_text_append_c(&text, "Cannot find module '") != KILN_C99_OK ||
+            kiln_c99_text_append(&text, specifier.ptr, specifier.len) != KILN_C99_OK ||
+            kiln_c99_text_append_c(&text, "'") != KILN_C99_OK) {
+            free(text.bytes);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        kiln_value message = kiln_c99_text_value(&text);
+        kiln_value error;
+        status = kiln_c99_new_error(&error, KILN_C99_BUILTIN_ERROR, message);
+        if (status == KILN_C99_OK && thrown != NULL) {
+            *thrown = error;
+        }
+        return KILN_C99_HOST_ERROR;
+    }
+    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_ERROR, "Cannot find module");
+}
+
 static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, uint64_t code,
                                            kiln_value receiver, const kiln_value *args,
                                            size_t argc, int depth, kiln_value *thrown) {
@@ -1330,9 +1355,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             "node:worker_threads requires an isolated realm worker capability");
     }
     if (code == KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE) {
-        return kiln_c99_throw_error(
-            thrown, KILN_C99_BUILTIN_ERROR,
-            "node:module createRequire requires the captured graph resolution index");
+        return kiln_c99_commonjs_require_value(result, kiln_c99_default_require, NULL);
     }
     /* The `Module` class `require("node:module")` hands back. It exists so that `typeof` and
      * `module.createRequire` answer -- which is the whole of what a program reads off it here --

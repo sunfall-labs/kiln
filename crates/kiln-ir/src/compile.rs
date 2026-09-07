@@ -899,6 +899,12 @@ struct Compiler {
     /// `LoadCell`. That costs no new instruction, and -- what matters more -- the C backend
     /// refuses nothing and implements nothing new, so the two cannot disagree about it.
     this_binding: Option<String>,
+    /// Whether `return` belongs to a derived constructor itself.
+    ///
+    /// Kept separate from `this_binding` because an arrow nested in a derived constructor
+    /// inherits that binding for lexical `this` and `super()`, but remains an ordinary function:
+    /// `return 1` returns `1` from the arrow and falling off its end returns `undefined`.
+    derived_constructor: bool,
     /// Monotonic, for the reason `home_binding_count` is.
     this_binding_count: usize,
     /// Whether the code being compiled is a class field initialiser or a `static {}` block.
@@ -1000,6 +1006,7 @@ impl Compiler {
             in_function: false,
             super_property: false,
             this_binding: None,
+            derived_constructor: false,
             this_binding_count: 0,
             next_is_method: false,
             field_initialiser: false,
@@ -5975,6 +5982,10 @@ impl Compiler {
         let outer_super_property = self.super_property;
         let outer_field_initialiser = self.field_initialiser;
         let outer_this_binding = self.this_binding.take();
+        let outer_derived_constructor = std::mem::replace(
+            &mut self.derived_constructor,
+            class.as_ref().is_some_and(|class| class.derived),
+        );
         if !function.arrow {
             self.in_function = true;
             self.super_property =
@@ -6144,9 +6155,14 @@ impl Compiler {
         // here without having called `super()`. Emitted unconditionally rather than only when
         // the body cannot fall through: proving that needs flow analysis, and an unreachable
         // epilogue costs two instructions.
-        match self.this_binding.clone() {
-            Some(binding) => self.load_this_binding(&binding),
-            None => self.push_constant(Constant::Undefined),
+        if self.derived_constructor {
+            let binding = self
+                .this_binding
+                .clone()
+                .expect("a derived constructor has a hidden `this` binding");
+            self.load_this_binding(&binding);
+        } else {
+            self.push_constant(Constant::Undefined);
         }
         self.code.push(Instruction::Return);
 
@@ -6161,6 +6177,7 @@ impl Compiler {
         self.super_property = outer_super_property;
         self.field_initialiser = outer_field_initialiser;
         self.this_binding = outer_this_binding;
+        self.derived_constructor = outer_derived_constructor;
         let parameter_types: Vec<Option<TypeAnnotation>> = function
             .parameters
             .iter()
@@ -6220,7 +6237,7 @@ impl Compiler {
         // does it -- *after* the cleanups -- because a `finally` is allowed to be where `super()`
         // is called: `constructor() { try { return; } finally { super(); } }` constructs, and
         // reading `this` at the `return` would have refused it.
-        let deferred_this = value.is_none() && self.this_binding.is_some();
+        let deferred_this = value.is_none() && self.derived_constructor;
         match value {
             Some(value) => self.expression(value),
             None if deferred_this => {}
@@ -6249,8 +6266,12 @@ impl Compiler {
                 .clone()
                 .expect("a deferred `this` has a binding to read");
             self.load_this_binding(&binding);
-        } else if let Some(binding) = self.this_binding.clone() {
+        } else if self.derived_constructor {
             // `return v` in a derived constructor, where the value is not simply handed back.
+            let binding = self
+                .this_binding
+                .clone()
+                .expect("a derived constructor has a hidden `this` binding");
             self.guard_derived_return(&binding);
         }
         self.code.push(Instruction::Return);
@@ -7281,10 +7302,17 @@ impl Compiler {
             return None;
         }
 
-        let mut source = Upvalue::ParentLocal(local.slot);
+        let name_index = self.constant_index(Constant::String(name.to_owned()));
+        let mut source = Upvalue::NamedParentLocal {
+            slot: local.slot,
+            name: name_index,
+        };
         for level in (owner + 1)..=self.enclosing.len() {
             let index = self.add_upvalue(level, name, source);
-            source = Upvalue::ParentUpvalue(index);
+            source = Upvalue::NamedParentUpvalue {
+                index,
+                name: name_index,
+            };
         }
         // The last index added belongs to the function being compiled.
         self.upvalue_names.get(name).copied()

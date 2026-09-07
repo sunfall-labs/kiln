@@ -83,7 +83,9 @@ pub enum Native {
     NodeFsSync,
     NodeFsReadFile,
     NodeFsWriteFile,
+    NodeFsAppendFile,
     NodeFsStat,
+    NodeFsMkdir,
     NodeStatIsFile,
     NodeStatIsDirectory,
     NodeEvents,
@@ -1197,6 +1199,9 @@ impl Native {
             // `realpathSync.native` is the only member any of these publishes, and it is the
             // same refusal reached one level down.
             (Self::NodeFsSync, "native") => Some(Value::Native(Self::NodeFsSync, RealmId::PRIMARY)),
+            (Self::NodeFsPromises, "appendFile") => {
+                Some(Value::Native(Self::NodeFsAppendFile, RealmId::PRIMARY))
+            }
             (Self::NodeFsPromises, "readFile") => {
                 Some(Value::Native(Self::NodeFsReadFile, RealmId::PRIMARY))
             }
@@ -1205,6 +1210,9 @@ impl Native {
             }
             (Self::NodeFsPromises, "stat") => {
                 Some(Value::Native(Self::NodeFsStat, RealmId::PRIMARY))
+            }
+            (Self::NodeFsPromises, "mkdir") => {
+                Some(Value::Native(Self::NodeFsMkdir, RealmId::PRIMARY))
             }
             (Self::AbortSignalConstructor, "abort") => {
                 Some(Value::Native(Self::AbortSignalAbort, RealmId::PRIMARY))

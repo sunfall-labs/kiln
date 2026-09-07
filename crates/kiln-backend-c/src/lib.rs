@@ -448,7 +448,17 @@ pub use verifier::{VerifierError, verify_function_graph};
 /// silently let its values cross unconverted. That is exactly what happened: the list named
 /// `MakeFunction` and `LoadBuiltin`, so `console.log([1])` -- a program with neither -- handed
 /// the host a raw array and failed with no diagnostic.
+fn has_top_level_await(program: &Program) -> bool {
+    program
+        .code
+        .iter()
+        .any(|instruction| matches!(instruction, Instruction::Await | Instruction::Yield))
+}
+
 fn produces_references(program: &Program) -> bool {
+    if has_top_level_await(program) {
+        return true;
+    }
     let scalar_only = |code: &[Instruction]| {
         code.iter().all(|instruction| {
             matches!(
@@ -539,7 +549,9 @@ fn uses_module_scope(program: &Program) -> bool {
             )
         })
     };
-    reaches(&program.code) || program.functions.iter().any(|proto| reaches(&proto.code))
+    has_top_level_await(program)
+        || reaches(&program.code)
+        || program.functions.iter().any(|proto| reaches(&proto.code))
 }
 
 /// Local slots this body treats as cells without ever creating one.
@@ -563,7 +575,9 @@ fn slots_read_as_cells(code: &[Instruction], functions: &[FunctionProto]) -> Has
             Instruction::MakeFunction(proto) => {
                 if let Some(target) = functions.get(*proto as usize) {
                     for upvalue in &target.upvalues {
-                        if let Upvalue::ParentLocal(slot) = upvalue {
+                        if let Upvalue::ParentLocal(slot) | Upvalue::NamedParentLocal { slot, .. } =
+                            upvalue
+                        {
                             needed.insert(*slot);
                         }
                     }
@@ -1309,7 +1323,7 @@ fn graph_for(
 /// starting undefined, and nothing captured.
 fn entry_proto(program: &Program) -> FunctionProto {
     FunctionProto {
-        asynchronous: false,
+        asynchronous: has_top_level_await(program),
         name: None,
         arrow: false,
         generator: false,
@@ -1405,6 +1419,149 @@ fn render_entry(
     calls: &direct::CallPlan,
     policy: &EmissionPolicy,
 ) -> Result<(), EmitError> {
+    if body.asynchronous {
+        emit_graph::emit_async_entry_body(
+            output,
+            graph,
+            body,
+            program,
+            symbol,
+            diagnostic_site,
+            &plan.functions,
+            strict_functions,
+            calls,
+            policy.type_profile_record,
+        );
+
+        let _callables = true;
+        let entry_symbol = format!("{symbol}_body");
+        let linkage = "static ";
+        match module {
+            None => writeln!(
+                output,
+                "{linkage}int {entry_symbol}(kiln_host *host, kiln_value *result) {{"
+            )
+            .unwrap(),
+            Some(_) => writeln!(
+                output,
+                "{linkage}int {entry_symbol}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count) {{"
+            )
+            .unwrap(),
+        }
+        writeln!(
+            output,
+            "    (void)kiln_realm_gc_register_roots({symbol}_gc_roots, NULL, 0);"
+        )
+        .unwrap();
+        render_key_prologue(output, symbol, keyed);
+        if policy.type_profile_record {
+            writeln!(output, "    (void)atexit({symbol}_dump_type_profile);").unwrap();
+        }
+        output.push_str("    kiln_val receiver = KILN_VAL_UNDEFINED; (void)receiver;\n");
+        output.push_str("    int depth = 0;\n");
+        output.push_str("    kiln_value thrown_value = kiln_c99_undefined();\n");
+        output.push_str("    kiln_value *thrown = &thrown_value;\n");
+        let locals = usize::try_from(program.local_count).unwrap().max(1);
+        writeln!(output, "    kiln_val *locals = {symbol}_globals;").unwrap();
+        output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
+
+        if let Some((module_prog, is_commonjs)) = module {
+            let export_count = if is_commonjs {
+                1
+            } else {
+                module_prog.exports.len()
+            };
+            writeln!(
+                output,
+                "    if (import_count != (size_t){} || (import_count != 0 && imports == NULL)) return KILN_C99_INVALID_ARGUMENT;",
+                module_prog.imports.len()
+            )
+            .unwrap();
+            writeln!(
+                output,
+                "    if (export_count != (size_t){export_count} || (export_count != 0 && exports == NULL)) return KILN_C99_INVALID_ARGUMENT;"
+            )
+            .unwrap();
+        }
+
+        writeln!(
+            output,
+            "    for (size_t slot = 0; slot < (size_t){locals}; ++slot) locals[slot] = KILN_VAL_UNDEFINED;"
+        )
+        .unwrap();
+
+        if let Some((module_prog, _)) = module {
+            let boxed_imports = slots_read_as_cells(&program.code, &program.functions);
+            for (index, binding) in module_prog.imports.iter().enumerate() {
+                let slot = binding.local_slot;
+                writeln!(
+                    output,
+                    "    locals[{slot}] = kiln_val_from_boundary(imports[{index}]);"
+                )
+                .unwrap();
+                if boxed_imports.contains(&slot) {
+                    writeln!(
+                        output,
+                        "    if ((locals[{slot}] & KILN_TAG_MASK) != KILN_TAG_CELL_PREFIX && kiln_c99_val_make_cell(&locals[{slot}]) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;"
+                    )
+                    .unwrap();
+                }
+            }
+        }
+
+        let frame_stack = plan.body.max(1);
+        let frame_handlers = program.code.len().max(1);
+        let diagnostic_source = c_string(diagnostic_site);
+        writeln!(
+            output,
+            r#"    kiln_value entry_closure;
+    int status = kiln_c99_make_closure(
+        &entry_closure,
+        {symbol}_entry_body,
+        "<entry>", 7,
+        "<entry>", 7,
+        {diagnostic_source},
+        0, 0,
+        1, 1, 0, 0, 0, 1,
+        KILN_VAL_UNDEFINED,
+        KILN_VAL_UNDEFINED,
+        UINT32_C({locals}),
+        UINT32_C({frame_stack}),
+        UINT32_C({frame_handlers}),
+        0, NULL, 0
+    );
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_call(host, result, entry_closure, kiln_c99_undefined(), NULL, 0, depth, thrown);
+    if (status == KILN_C99_THROWN) {{
+        *result = kiln_c99_text(*thrown);
+        return KILN_C99_THROWN;
+    }}
+    if (status != KILN_C99_OK) return status;"#
+        )
+        .unwrap();
+
+        if let Some((module_prog, is_commonjs)) = module {
+            if is_commonjs {
+                writeln!(
+                    output,
+                    "    {{ kiln_val mod_val = locals[2]; kiln_val module_val = (mod_val & KILN_TAG_MASK) == KILN_TAG_CELL_PREFIX ? *(kiln_val *)KILN_VAL_PTR(mod_val) : mod_val; int export_status = kiln_c99_get(host, kiln_val_to_boundary(module_val), \"exports\", 7, &exports[0], depth, thrown); if (export_status != KILN_C99_OK) return export_status; }}"
+                )
+                .unwrap();
+            } else {
+                for (index, binding) in module_prog.exports.iter().enumerate() {
+                    writeln!(
+                        output,
+                        "    exports[{index}] = kiln_val_to_boundary(locals[{}]);",
+                        binding.local_slot
+                    )
+                    .unwrap();
+                }
+            }
+        }
+        output.push_str("    return KILN_C99_OK;\n}\n");
+        return Ok(());
+    }
+
     let callables = produces_references(program);
     let entry_symbol = if callables {
         format!("{symbol}_body")
@@ -3033,11 +3190,11 @@ fn hash_function_proto(hash: &mut u64, function: &FunctionProto) {
     word(hash, function.upvalues.len() as u64);
     for upvalue in &function.upvalues {
         match upvalue {
-            Upvalue::ParentLocal(index) => {
+            Upvalue::ParentLocal(index) | Upvalue::NamedParentLocal { slot: index, .. } => {
                 byte(hash, 0);
                 word(hash, u64::from(*index));
             }
-            Upvalue::ParentUpvalue(index) => {
+            Upvalue::ParentUpvalue(index) | Upvalue::NamedParentUpvalue { index, .. } => {
                 byte(hash, 1);
                 word(hash, u64::from(*index));
             }

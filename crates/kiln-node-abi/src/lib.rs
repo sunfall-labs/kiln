@@ -126,7 +126,7 @@ const BUILTINS: &[BuiltinAbi] = &[
     },
     BuiltinAbi {
         specifier: "node:fs/promises",
-        exports: &["readFile", "stat", "writeFile"],
+        exports: &["appendFile", "mkdir", "readFile", "stat", "writeFile"],
         commonjs: CommonJsProjection::Namespace,
     },
     BuiltinAbi {

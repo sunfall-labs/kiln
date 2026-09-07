@@ -2584,6 +2584,47 @@ fn a_marked_local_read_throws_a_reference_error() {
 }
 
 #[test]
+fn a_captured_dead_zone_read_names_its_source_binding() {
+    let program = Program {
+        source: "".into(),
+        template_sites: Vec::new(),
+        version: kiln_ir::BYTECODE_VERSION,
+        constants: vec![Constant::String("later".to_owned())],
+        code: vec![
+            Instruction::NewCell(0),
+            Instruction::MarkUninitialized(0),
+            Instruction::MakeFunction(0),
+            Instruction::Call { argc: 0 },
+            Instruction::Return,
+        ],
+        local_count: 1,
+        functions: vec![kiln_ir::FunctionProto {
+            span: kiln_ir::Span::default(),
+            prologue_end: 0,
+            asynchronous: false,
+            name: Some("readTooEarly".to_owned()),
+            arrow: false,
+            generator: false,
+            async_generator: false,
+            is_method: false,
+            parameter_count: 0,
+            declared_length: 0,
+            mapped_arguments: false,
+            local_count: 0,
+            code: vec![Instruction::LoadUpvalue(0), Instruction::Return],
+            upvalues: vec![Upvalue::NamedParentLocal { slot: 0, name: 0 }],
+            type_annotations: None,
+        }],
+    };
+
+    assert!(matches!(
+        run(&program),
+        Err(ExecutionError::Uncaught { message, .. })
+            if message == "ReferenceError: cannot access binding `later` before its declaration"
+    ));
+}
+
+#[test]
 fn conditional_jumps_consume_conditions() {
     let program = program(
         vec![Constant::Boolean(false), number(1.0), number(2.0)],
@@ -4465,4 +4506,120 @@ fn dynamic_import_with_unsupported_loader_rejects_with_type_error() {
         }
         other => panic!("expected unhandled rejection from dynamic import, got {other:?}"),
     }
+}
+
+#[test]
+fn node_module_create_require_returns_callable_require() {
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: std::collections::VecDeque::new(),
+        timezone: None,
+        locale: None,
+    };
+    let module_val = node_builtin_commonjs_value("node:module").expect("node:module value");
+    let create_require = match &module_val {
+        Value::Native(n, _) => n.property("createRequire"),
+        Value::Function(f) => f.properties.borrow().get("createRequire"),
+        Value::Object(o) => o.borrow().get_own("createRequire").cloned(),
+        _ => None,
+    }
+    .expect("createRequire property");
+
+    let program = Program {
+        source: "".into(),
+        template_sites: Vec::new(),
+        version: kiln_ir::BYTECODE_VERSION,
+        constants: vec![
+            Constant::String("import.meta.url".to_owned()),
+            Constant::String("node:path".to_owned()),
+        ],
+        code: vec![
+            Instruction::LoadCell(0),
+            Instruction::Const(0),
+            Instruction::Call { argc: 1 },
+            Instruction::Const(1),
+            Instruction::Call { argc: 1 },
+            Instruction::Return,
+        ],
+        local_count: 1,
+        functions: Vec::new(),
+    };
+    let module_prog = ModuleProgram {
+        program,
+        dependencies: Vec::new(),
+        imports: vec![kiln_ir::ImportBinding {
+            source: "".into(),
+            imported: "".into(),
+            local: "createRequire".into(),
+            local_slot: 0,
+        }],
+        exports: Vec::new(),
+        ..Default::default()
+    };
+    let result = execute_module(
+        &module_prog,
+        &[create_require],
+        &mut host,
+        ExecutionLimits::default(),
+        ExecutionCapabilities::default(),
+    )
+    .expect("execute module calling createRequire");
+    assert!(matches!(
+        result.execution.value,
+        Value::Native(Native::NodePath, _)
+    ));
+}
+
+#[test]
+fn process_object_is_event_emitter() {
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: std::collections::VecDeque::new(),
+        timezone: None,
+        locale: None,
+    };
+    let program = Program {
+        source: "".into(),
+        template_sites: Vec::new(),
+        version: kiln_ir::BYTECODE_VERSION,
+        constants: vec![
+            Constant::String("on".to_owned()),
+            Constant::String("exit".to_owned()),
+        ],
+        code: vec![
+            Instruction::LoadBuiltin(Builtin::Process),
+            Instruction::Const(1),
+            Instruction::MakeFunction(0),
+            Instruction::CallMethod { name: 0, argc: 2 },
+            Instruction::Return,
+        ],
+        local_count: 0,
+        functions: vec![kiln_ir::FunctionProto {
+            span: kiln_ir::Span::default(),
+            prologue_end: 0,
+            asynchronous: false,
+            name: None,
+            arrow: false,
+            generator: false,
+            async_generator: false,
+            is_method: false,
+            parameter_count: 0,
+            declared_length: 0,
+            mapped_arguments: false,
+            local_count: 0,
+            code: vec![Instruction::Return],
+            upvalues: Vec::new(),
+            type_annotations: None,
+        }],
+    };
+    let result = execute(
+        Rc::new(program),
+        &mut host,
+        ExecutionLimits::default(),
+        ExecutionCapabilities::default(),
+    )
+    .expect("process.on succeeds");
+    assert!(matches!(result.value, Value::Object(_)));
 }

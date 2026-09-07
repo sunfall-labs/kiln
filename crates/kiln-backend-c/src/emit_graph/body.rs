@@ -439,6 +439,71 @@ pub fn emit_entry_from_graph_with_profile(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn emit_async_entry_body(
+    output: &mut String,
+    graph: &FunctionGraph,
+    proto: &FunctionProto,
+    program: &Program,
+    symbol: &str,
+    diagnostic_site: &str,
+    frame_stacks: &[usize],
+    strict_functions: &[bool],
+    plan: &CallPlan,
+    type_profile_record: bool,
+) {
+    writeln!(
+        output,
+        "static inline int {symbol}_entry_body(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc) {{"
+    )
+    .unwrap();
+    output.push_str("    kiln_host *host = ctx->host; (void)host;\n");
+    output.push_str("    kiln_value *thrown = ctx->thrown; (void)thrown;\n");
+    output.push_str("    kiln_generator *frame = ctx->frame;\n");
+    output.push_str("    int depth = ctx->depth; (void)depth;\n");
+    output.push_str(
+        "    kiln_val receiver = receiver_ptr ? *receiver_ptr : KILN_VAL_UNDEFINED; (void)receiver;\n",
+    );
+    output.push_str("    (void)receiver_ptr; (void)upvalues; (void)args; (void)argc;\n");
+    output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
+    writeln!(output, "    kiln_val *locals = {symbol}_globals;").unwrap();
+    output.push_str("    if (frame->started) {\n        switch (frame->resume) {\n");
+    for block in &graph.blocks {
+        if let Terminator::Suspend { pc, .. } = block.terminator {
+            writeln!(output, "        case {pc}: goto kiln_resume_{pc};").unwrap();
+        }
+    }
+    if let Some(seam) = graph.seam_block {
+        writeln!(
+            output,
+            "        case {}: goto kiln_block_{};",
+            proto.code.len(),
+            seam.0
+        )
+        .unwrap();
+    }
+    output.push_str("        default: return KILN_C99_CONTROL_ERROR;\n        }\n    }\n");
+    let array_slots = (0..proto.local_count).collect::<HashSet<u32>>();
+    emit_blocks(
+        output,
+        graph,
+        proto,
+        program,
+        symbol,
+        false,
+        diagnostic_site,
+        frame_stacks,
+        strict_functions,
+        &array_slots,
+        &Site::AsyncEntry,
+        plan,
+        EntryKind::Boxed,
+        None,
+        type_profile_record,
+    );
+    output.push_str("}\n");
+}
+
 fn emit_ssa_declarations(
     output: &mut String,
     graph: &FunctionGraph,
@@ -594,7 +659,7 @@ fn emit_block_sequence(
     };
     let self_index = match site {
         Site::Function { index } => Some(*index),
-        Site::Entry { .. } => None,
+        Site::Entry { .. } | Site::AsyncEntry => None,
     };
     // A pure read nothing consumes is not emitted: it would only name something -- an upvalue
     // table, a slot -- that the body then appears to need. The callee read a direct self-call
@@ -1287,6 +1352,22 @@ fn emit_blocks(
                 output.push_str("    return KILN_C99_CONTROL_ERROR;\n");
             }
         }
+        Site::AsyncEntry => {
+            let body = &output[body_start..];
+            let unwinds = body.contains("goto kiln_unwind;");
+            let refuses = body.contains("goto kiln_refusal;");
+            if unwinds {
+                output.push_str("kiln_unwind:;\n");
+                output.push_str("    return KILN_C99_THROWN;\n");
+            }
+            if refuses {
+                output.push_str("kiln_refusal:;\n");
+                output.push_str(
+                    "    *result = kiln_val_from_boundary(kiln_c99_control_diagnostic());\n",
+                );
+                output.push_str("    return KILN_C99_CONTROL_ERROR;\n");
+            }
+        }
         Site::Entry { .. } => {
             // Nothing above the entry point catches, so a throw that reaches here is uncaught:
             // it leaves as text in `*result`, the site it was refused at appended when there is
@@ -1377,6 +1458,14 @@ fn emit_terminator(
                         )
                         .unwrap();
                     }
+                    output.push_str("    *result = KILN_VAL_UNDEFINED; return KILN_C99_OK;\n");
+                }
+            },
+            Site::AsyncEntry => match value {
+                Some(val) => {
+                    writeln!(output, "    *result = v{}; return KILN_C99_OK;", val.0).unwrap();
+                }
+                None => {
                     output.push_str("    *result = KILN_VAL_UNDEFINED; return KILN_C99_OK;\n");
                 }
             },

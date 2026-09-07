@@ -12,8 +12,8 @@ mod ops;
 mod sites;
 
 pub use body::{
-    emit_entry_from_graph, emit_entry_from_graph_with_profile, emit_function_from_graph,
-    emit_function_from_graph_with_profile,
+    emit_async_entry_body, emit_entry_from_graph, emit_entry_from_graph_with_profile,
+    emit_function_from_graph, emit_function_from_graph_with_profile,
 };
 pub use clones::{emit_fast_clone, emit_restartable};
 pub(crate) use sites::{method_candidates, this_site_count};
@@ -139,6 +139,8 @@ pub enum Site<'a> {
         /// A CommonJS unit: its one export is `module.exports`, read from the `module` slot.
         commonjs: bool,
     },
+    /// An asynchronous unit entry body: runs top-level await using a generator frame.
+    AsyncEntry,
 }
 
 /// The typed entry's declaration: the result in a register, `double` where the plan proved

@@ -3,27 +3,27 @@ source: crates/kiln-backend-c/tests/emitted_c.rs
 assertion_line: 1315
 expression: body(&unit)
 ---
-/* Program hash: 483df3b2f47c389f; bytecode version: 3. */
-static const struct { kiln_string header; char bytes[2]; } kiln_module_483df3b2f47c389fe9a9acd903c410fe_string_0 = { { 1, 1, kiln_module_483df3b2f47c389fe9a9acd903c410fe_string_0.bytes }, "a" };
-#define kiln_module_483df3b2f47c389fe9a9acd903c410fe_constant_0 (kiln_module_483df3b2f47c389fe9a9acd903c410fe_string_0.bytes)
-static const struct { kiln_string header; char bytes[2]; } kiln_module_483df3b2f47c389fe9a9acd903c410fe_string_2 = { { 1, 1, kiln_module_483df3b2f47c389fe9a9acd903c410fe_string_2.bytes }, "b" };
-#define kiln_module_483df3b2f47c389fe9a9acd903c410fe_constant_2 (kiln_module_483df3b2f47c389fe9a9acd903c410fe_string_2.bytes)
-static const char *kiln_module_483df3b2f47c389fe9a9acd903c410fe_key_0;
-static const char *kiln_module_483df3b2f47c389fe9a9acd903c410fe_key_2;
-static int kiln_module_483df3b2f47c389fe9a9acd903c410fe_keys_ready;
-static int kiln_module_483df3b2f47c389fe9a9acd903c410fe_intern_keys(void) {
-    if ((kiln_module_483df3b2f47c389fe9a9acd903c410fe_key_0 = kiln_c99_intern_static(kiln_module_483df3b2f47c389fe9a9acd903c410fe_constant_0, 1)) == NULL) return KILN_C99_OUT_OF_MEMORY;
-    if ((kiln_module_483df3b2f47c389fe9a9acd903c410fe_key_2 = kiln_c99_intern_static(kiln_module_483df3b2f47c389fe9a9acd903c410fe_constant_2, 1)) == NULL) return KILN_C99_OUT_OF_MEMORY;
-    kiln_module_483df3b2f47c389fe9a9acd903c410fe_keys_ready = 1;
+/* Program hash: 355422a375b44758; bytecode version: 4. */
+static const struct { kiln_string header; char bytes[2]; } kiln_module_355422a375b44758b956957b0de0ff69_string_0 = { { 1, 1, kiln_module_355422a375b44758b956957b0de0ff69_string_0.bytes }, "a" };
+#define kiln_module_355422a375b44758b956957b0de0ff69_constant_0 (kiln_module_355422a375b44758b956957b0de0ff69_string_0.bytes)
+static const struct { kiln_string header; char bytes[2]; } kiln_module_355422a375b44758b956957b0de0ff69_string_2 = { { 1, 1, kiln_module_355422a375b44758b956957b0de0ff69_string_2.bytes }, "b" };
+#define kiln_module_355422a375b44758b956957b0de0ff69_constant_2 (kiln_module_355422a375b44758b956957b0de0ff69_string_2.bytes)
+static const char *kiln_module_355422a375b44758b956957b0de0ff69_key_0;
+static const char *kiln_module_355422a375b44758b956957b0de0ff69_key_2;
+static int kiln_module_355422a375b44758b956957b0de0ff69_keys_ready;
+static int kiln_module_355422a375b44758b956957b0de0ff69_intern_keys(void) {
+    if ((kiln_module_355422a375b44758b956957b0de0ff69_key_0 = kiln_c99_intern_static(kiln_module_355422a375b44758b956957b0de0ff69_constant_0, 1)) == NULL) return KILN_C99_OUT_OF_MEMORY;
+    if ((kiln_module_355422a375b44758b956957b0de0ff69_key_2 = kiln_c99_intern_static(kiln_module_355422a375b44758b956957b0de0ff69_constant_2, 1)) == NULL) return KILN_C99_OUT_OF_MEMORY;
+    kiln_module_355422a375b44758b956957b0de0ff69_keys_ready = 1;
     return KILN_C99_OK;
 }
-static void kiln_module_483df3b2f47c389fe9a9acd903c410fe_gc_roots(void *heap, void *context, int phase) {
-    if (phase == KILN_GC_PHASE_RESET) kiln_module_483df3b2f47c389fe9a9acd903c410fe_keys_ready = 0;
+static void kiln_module_355422a375b44758b956957b0de0ff69_gc_roots(void *heap, void *context, int phase) {
+    if (phase == KILN_GC_PHASE_RESET) kiln_module_355422a375b44758b956957b0de0ff69_keys_ready = 0;
     kiln_c99_gc_unit_roots(heap, context, phase);
 }
-static int kiln_module_483df3b2f47c389fe9a9acd903c410fe_body(kiln_host *host, kiln_value *result) {
-    (void)kiln_realm_gc_register_roots(kiln_module_483df3b2f47c389fe9a9acd903c410fe_gc_roots, NULL, 0);
-    if (!kiln_module_483df3b2f47c389fe9a9acd903c410fe_keys_ready) { int keyed = kiln_module_483df3b2f47c389fe9a9acd903c410fe_intern_keys(); if (keyed != KILN_C99_OK) return keyed; }
+static int kiln_module_355422a375b44758b956957b0de0ff69_body(kiln_host *host, kiln_value *result) {
+    (void)kiln_realm_gc_register_roots(kiln_module_355422a375b44758b956957b0de0ff69_gc_roots, NULL, 0);
+    if (!kiln_module_355422a375b44758b956957b0de0ff69_keys_ready) { int keyed = kiln_module_355422a375b44758b956957b0de0ff69_intern_keys(); if (keyed != KILN_C99_OK) return keyed; }
     kiln_val receiver = KILN_VAL_UNDEFINED; (void)receiver;
     int depth = 0;
     kiln_value thrown_value = kiln_c99_undefined();
@@ -46,11 +46,11 @@ static int kiln_module_483df3b2f47c389fe9a9acd903c410fe_body(kiln_host *host, ki
 kiln_block_0:;
     v0 = KILN_VAL_UNDEFINED;
     v1 = KILN_VAL_UNDEFINED;
-    v2 = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_module_483df3b2f47c389fe9a9acd903c410fe_string_0);
+    v2 = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_module_355422a375b44758b956957b0de0ff69_string_0);
     v3 = UINT64_C(4607182418800017408);
     memcpy(&d3, &v3, sizeof(d3));
     i3 = 1LL;
-    v4 = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_module_483df3b2f47c389fe9a9acd903c410fe_string_2);
+    v4 = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_module_355422a375b44758b956957b0de0ff69_string_2);
     v5 = UINT64_C(4611686018427387904);
     memcpy(&d5, &v5, sizeof(d5));
     i5 = 2LL;
@@ -76,14 +76,14 @@ kiln_block_0:;
     v13 = UINT64_C(4607182418800017408);
     memcpy(&d13, &v13, sizeof(d13));
     i13 = 1LL;
-    { static kiln_c99_site site = {KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}; int handled = 0; if (!handled && KILN_LIKELY((v10 & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_NUMBER(v13))) { void *ptr = KILN_VAL_PTR(v10); if (site.has_cached_method == 1 || kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) { site.has_cached_method = 1; double idx; memcpy(&idx, &v13, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; const kiln_array *arr = (const kiln_array *)ptr; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < arr->count && arr->elements[slot] != KILN_VAL_HOLE)) { v14 = arr->elements[slot]; handled = 1; } } } else if (KILN_VAL_IS_STRING(v10) && KILN_VAL_IS_NUMBER(v13)) { double idx; memcpy(&idx, &v13, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; const kiln_string *str = (const kiln_string *)KILN_VAL_PTR(v10); if (KILN_LIKELY(str != NULL && idx >= 0.0 && idx == (double)slot && slot < str->length && str->length == str->byte_len)) { v14 = kiln_c99_val_single_char((unsigned char)str->bytes[slot]); handled = 1; } } if (!handled) { int status = kiln_c99_val_read_element(host, v10, v13, depth, thrown, &kiln_out); v14 = kiln_out; if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(kiln_val_to_boundary(v10), kiln_val_to_boundary(v13)); if (status == KILN_C99_THROWN) goto kiln_unwind; if (status == KILN_C99_CONTROL_ERROR) { kiln_c99_note_refusal("kiln_module_483df3b2f47c389fe9a9acd903c410fe", (size_t)15, "GetComputed", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; } }
+    { static kiln_c99_site site = {KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}; int handled = 0; if (!handled && KILN_LIKELY((v10 & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_NUMBER(v13))) { void *ptr = KILN_VAL_PTR(v10); if (site.has_cached_method == 1 || kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) { site.has_cached_method = 1; double idx; memcpy(&idx, &v13, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; const kiln_array *arr = (const kiln_array *)ptr; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < arr->count && arr->elements[slot] != KILN_VAL_HOLE)) { v14 = arr->elements[slot]; handled = 1; } } } else if (KILN_VAL_IS_STRING(v10) && KILN_VAL_IS_NUMBER(v13)) { double idx; memcpy(&idx, &v13, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; const kiln_string *str = (const kiln_string *)KILN_VAL_PTR(v10); if (KILN_LIKELY(str != NULL && idx >= 0.0 && idx == (double)slot && slot < str->length && str->length == str->byte_len)) { v14 = kiln_c99_val_single_char((unsigned char)str->bytes[slot]); handled = 1; } } if (!handled) { int status = kiln_c99_val_read_element(host, v10, v13, depth, thrown, &kiln_out); v14 = kiln_out; if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(kiln_val_to_boundary(v10), kiln_val_to_boundary(v13)); if (status == KILN_C99_THROWN) goto kiln_unwind; if (status == KILN_C99_CONTROL_ERROR) { kiln_c99_note_refusal("kiln_module_355422a375b44758b956957b0de0ff69", (size_t)15, "GetComputed", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; } }
     v15 = UINT64_C(4607182418800017408);
     memcpy(&d15, &v15, sizeof(d15));
     i15 = 1LL;
     v16 = UINT64_C(4611686018427387904);
     memcpy(&d16, &v16, sizeof(d16));
     i16 = 2LL;
-    { static kiln_c99_site site = {KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}; int handled = 0; if (KILN_LIKELY((v10 & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_NUMBER(v15))) { void *ptr = KILN_VAL_PTR(v10); if (site.has_cached_method == 1 || kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) { site.has_cached_method = 1; double idx; memcpy(&idx, &v15, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; kiln_array *arr = (kiln_array *)ptr; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < arr->count && !arr->frozen)) { if (arr->is_numeric && !KILN_VAL_IS_NUMBER(v16)) arr->is_numeric = 0; arr->elements[slot] = v16; v17 = v16; handled = 1; } } } if (!handled) { int status = kiln_c99_val_write_element(host, v10, v15, v16, 0, depth, thrown); if (status == KILN_C99_THROWN) goto kiln_unwind; if (status == KILN_C99_CONTROL_ERROR) { kiln_c99_note_refusal("kiln_module_483df3b2f47c389fe9a9acd903c410fe", (size_t)20, "SetComputed", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; v17 = v16; } }
+    { static kiln_c99_site site = {KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}; int handled = 0; if (KILN_LIKELY((v10 & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_NUMBER(v15))) { void *ptr = KILN_VAL_PTR(v10); if (site.has_cached_method == 1 || kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) { site.has_cached_method = 1; double idx; memcpy(&idx, &v15, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; kiln_array *arr = (kiln_array *)ptr; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < arr->count && !arr->frozen)) { if (arr->is_numeric && !KILN_VAL_IS_NUMBER(v16)) arr->is_numeric = 0; arr->elements[slot] = v16; v17 = v16; handled = 1; } } } if (!handled) { int status = kiln_c99_val_write_element(host, v10, v15, v16, 0, depth, thrown); if (status == KILN_C99_THROWN) goto kiln_unwind; if (status == KILN_C99_CONTROL_ERROR) { kiln_c99_note_refusal("kiln_module_355422a375b44758b956957b0de0ff69", (size_t)20, "SetComputed", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; v17 = v16; } }
     v18 = UINT64_C(4611686018427387904);
     memcpy(&d18, &v18, sizeof(d18));
     i18 = 2LL;
@@ -102,36 +102,36 @@ kiln_refusal:;
     return KILN_C99_CONTROL_ERROR;
 }
 
-typedef struct kiln_module_483df3b2f47c389fe9a9acd903c410fe_realm_context {
+typedef struct kiln_module_355422a375b44758b956957b0de0ff69_realm_context {
     kiln_host *host;
     kiln_value *result;
-} kiln_module_483df3b2f47c389fe9a9acd903c410fe_realm_context;
+} kiln_module_355422a375b44758b956957b0de0ff69_realm_context;
 
-static int kiln_module_483df3b2f47c389fe9a9acd903c410fe_gc_result_entry(void *result) {
+static int kiln_module_355422a375b44758b956957b0de0ff69_gc_result_entry(void *result) {
     return kiln_realm_gc_register_roots(kiln_c99_gc_result_roots, result,
                                         KILN_GC_ROOT_SURVIVES_TEARDOWN);
 }
 
-static int kiln_module_483df3b2f47c389fe9a9acd903c410fe_realm_entry(void *opaque) {
-    kiln_module_483df3b2f47c389fe9a9acd903c410fe_realm_context *context = (kiln_module_483df3b2f47c389fe9a9acd903c410fe_realm_context *)opaque;
+static int kiln_module_355422a375b44758b956957b0de0ff69_realm_entry(void *opaque) {
+    kiln_module_355422a375b44758b956957b0de0ff69_realm_context *context = (kiln_module_355422a375b44758b956957b0de0ff69_realm_context *)opaque;
     if (context == NULL) return KILN_C99_INVALID_ARGUMENT;
-    return kiln_module_483df3b2f47c389fe9a9acd903c410fe_body(context->host, context->result);
+    return kiln_module_355422a375b44758b956957b0de0ff69_body(context->host, context->result);
 }
 
-int kiln_module_483df3b2f47c389fe9a9acd903c410fe(kiln_host *host, kiln_value *result) {
-    kiln_module_483df3b2f47c389fe9a9acd903c410fe_realm_context context;
+int kiln_module_355422a375b44758b956957b0de0ff69(kiln_host *host, kiln_value *result) {
+    kiln_module_355422a375b44758b956957b0de0ff69_realm_context context;
     uint64_t realm = 0;
     int status;
     int destroy_status;
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
-    if (kiln_realm_is_active()) return kiln_module_483df3b2f47c389fe9a9acd903c410fe_body(host, result);
+    if (kiln_realm_is_active()) return kiln_module_355422a375b44758b956957b0de0ff69_body(host, result);
     context.host = host;
     context.result = result;
     status = kiln_realm_create(&realm);
     if (status == KILN_C99_OK)
-        status = kiln_realm_enter(realm, kiln_module_483df3b2f47c389fe9a9acd903c410fe_gc_result_entry, result);
+        status = kiln_realm_enter(realm, kiln_module_355422a375b44758b956957b0de0ff69_gc_result_entry, result);
     if (status == KILN_C99_OK)
-        status = kiln_realm_enter(realm, kiln_module_483df3b2f47c389fe9a9acd903c410fe_realm_entry, &context);
+        status = kiln_realm_enter(realm, kiln_module_355422a375b44758b956957b0de0ff69_realm_entry, &context);
     if (status == KILN_C99_OK)
         status = kiln_realm_drive(realm, host, result);
     if (realm != 0) {
