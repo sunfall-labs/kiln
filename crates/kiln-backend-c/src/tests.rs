@@ -1498,6 +1498,36 @@ fn compact_literals_use_shared_nan_boxed_builders() {
     assert!(runtime_prelude_header().contains("kiln_c99_val_new_object_literal"));
 }
 
+#[test]
+fn compact_closure_source_unions_live_ranges_and_remaps_nested_spans() {
+    let mut program = program(vec![], vec![Instruction::Return], 0);
+    program.source = "xxabcYYdefZZ".into();
+    program.functions = vec![
+        function(vec![Instruction::Return]),
+        function(vec![Instruction::Return]),
+        function(vec![Instruction::Return]),
+    ];
+    program.functions[0].span = kiln_ir::Span { start: 2, end: 5 };
+    program.functions[1].span = kiln_ir::Span { start: 7, end: 10 };
+    program.functions[2].span = kiln_ir::Span { start: 3, end: 4 };
+
+    compact_closure_source(&mut program, None);
+
+    assert_eq!(&*program.source, "abcdef");
+    assert_eq!(
+        program.functions[0].span,
+        kiln_ir::Span { start: 0, end: 3 }
+    );
+    assert_eq!(
+        program.functions[1].span,
+        kiln_ir::Span { start: 3, end: 6 }
+    );
+    assert_eq!(
+        program.functions[2].span,
+        kiln_ir::Span { start: 1, end: 2 }
+    );
+}
+
 /// The engine half of the provider ABI, for tests that link the vendored C number runtime.
 ///
 /// `kiln-native-number`'s C is a *test fixture*: production links the Rust provider archive,
