@@ -668,6 +668,10 @@ typedef struct kiln_c99_pic_entry {
 } kiln_c99_pic_entry;
 
 typedef struct kiln_c99_site {
+    /* Dictionary indices are biased by one: zero is the all-zero, not-yet-learned state and a
+     * learned property at index n is stored as n + 1.  Shape/PIC entries use their own
+     * `pic_count` state and are not part of this encoding.  Keep the representation in sync with
+     * the generated site's zero initializer and the decode at the two dictionary consumers. */
     uint32_t own;
     uint32_t proto;
     /* Slow-path answers that taught the site nothing: a name answered from a builtin table or a
@@ -818,6 +822,16 @@ __attribute__((noinline, cold)) static double kiln_c99_int_slow(double value) {
 
 #define KILN_C99_SITE_NONE 0xFFFFFFFFu
 #define KILN_C99_SITE_GIVE_UP 8u
+
+static inline uint32_t kiln_c99_site_encode_dictionary_index(size_t index) {
+    return index < (size_t)KILN_C99_SITE_NONE ? (uint32_t)index + UINT32_C(1) : 0;
+}
+
+static inline uint32_t kiln_c99_site_decode_dictionary_index(uint32_t encoded) {
+    /* Zero is deliberately decoded as UINT32_MAX: existing bounds checks then reject the empty
+     * state without a second branch. */
+    return encoded - UINT32_C(1);
+}
 
 /* A proxy's two halves.
  *

@@ -22,7 +22,9 @@ pub const C_ABI_VERSION: u32 = 1;
 /// This is deliberately independent from [`C_ABI_VERSION`]: diagnostics and private helper code
 /// can change emitted object bytes without changing the public embedding layout. Native artifact
 /// keys include this revision so those objects are never reused across generator changes.
-pub const C_GENERATOR_VERSION: u32 = 30;
+// Epoch 31 changes the private dictionary-cache index encoding. Old sentinel-initialized
+// modules must not be reused beside the zero-backed runtime, despite the unchanged C layout.
+pub const C_GENERATOR_VERSION: u32 = 31;
 
 /// Realm policy that changes observable native execution.
 ///

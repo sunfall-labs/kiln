@@ -1568,8 +1568,8 @@ static int kiln_c99_site_learn(kiln_c99_site *site, const kiln_object *object, c
     }
     for (index = 0; index < object->count && object->properties != NULL; ++index) {
         if (object->properties[index].key == key) {
-            site->own = index < KILN_C99_SITE_NONE ? (uint32_t)index : KILN_C99_SITE_NONE;
-            site->proto = KILN_C99_SITE_NONE;
+            site->own = kiln_c99_site_encode_dictionary_index(index);
+            site->proto = 0;
             return 1;
         }
     }
@@ -1577,8 +1577,8 @@ static int kiln_c99_site_learn(kiln_c99_site *site, const kiln_object *object, c
         const kiln_object *parent = kiln_c99_object_of(object->prototype);
         for (index = 0; index < parent->count && parent->properties != NULL; ++index) {
             if (parent->properties[index].key == key) {
-                site->own = KILN_C99_SITE_NONE;
-                site->proto = index < KILN_C99_SITE_NONE ? (uint32_t)index : KILN_C99_SITE_NONE;
+                site->own = 0;
+                site->proto = kiln_c99_site_encode_dictionary_index(index);
                 return 1;
             }
         }
@@ -1650,20 +1650,20 @@ static int kiln_c99_get_site(kiln_host *host, kiln_value target, const char *key
                 }
             }
         }
-        uint32_t own = site->own;
+        uint32_t own = kiln_c99_site_decode_dictionary_index(site->own);
         if (own < object->count && object->properties != NULL && object->properties[own].key == key) {
             if (!object->properties[own].accessor) {
                 *out = object->properties[own].value;
                 return KILN_C99_OK;
             }
-        } else if (site->proto != KILN_C99_SITE_NONE &&
+        } else if (site->proto != 0 &&
                    object->prototype.tag == KILN_VALUE_OBJECT) {
             size_t index = 0;
             while (index < object->count && object->properties != NULL &&
                    object->properties[index].key != key) ++index;
             if (index == object->count) {
                 const kiln_object *parent = kiln_c99_object_of(object->prototype);
-                uint32_t at = site->proto;
+                uint32_t at = kiln_c99_site_decode_dictionary_index(site->proto);
                 if (parent->properties != NULL && at < parent->count &&
                     parent->properties[at].key == key && !parent->properties[at].accessor) {
                     *out = parent->properties[at].value;
