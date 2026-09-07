@@ -79,4 +79,31 @@ These changes remove demonstrably redundant generated work, make repeat builds f
 
 Ghui's preexisting OpenTUI initialization failure still prevents a valid interactive throughput/frame-rate comparison. The stack/copy reductions are real, but are not reported as an application frame-rate gain. A working interactive baseline and profile should precede the next substantial runtime optimization.
 
-Logs and retained artifacts are under `results/` and `tmp/`. The implementation remains in this owned worktree for review; no merge or publication was performed.
+Logs and retained artifacts from the investigation are under `results/` and `tmp/` in the original performance worktree. The measurements above compare the original feature-branch base with the performance changes; the current-main validation below is separate.
+
+## Mainline integration, 2026-09-07
+
+The prerequisites were already on remote `main`. Applied the remaining performance commit to `41c4e22e` in the owned `kiln-ghui-land-main` worktree, producing `ff2c6c12`. No prerequisite commits were duplicated. Current main also contains fixes for the earlier snapshot and native-parity failures.
+
+Validation of this exact integration:
+
+- Workspace: 75 suites, 1,485 passed, zero failures.
+- Native parity: 157 matched, seven expected refusals, zero divergences.
+- Both new regression fixtures also matched with `KILN_GC_STRESS=1`.
+- Third-party parity: all 17 available bundles matched in both engines; five bundles absent.
+- Facts baseline: all 31 targets passed. Node/server/regress: 35/5/12 passed.
+- Test262: 96,412 passing, no regressions across 122 chunks, six chunks gained.
+- Full gate failed only the historical third-party timing baseline, on postcss, rxjs, semver and vue-reactivity. The committed timing baseline was not changed.
+
+To distinguish existing mainline timings from a patch regression, built the same four release bundles using untouched main (`41c4e22e`) and the integration (`ff2c6c12`). After the gate and all builds finished, ran eleven baseline/current/current/baseline rounds, yielding 22 samples per version per bundle after five warmups. Every stdout matched Node. Median whole-process milliseconds:
+
+| Bundle | Untouched main | Integration |
+| --- | ---: | ---: |
+| postcss | 15.810 | 14.808 |
+| rxjs | 21.194 | 21.170 |
+| semver | 11.717 | 11.733 |
+| vue-reactivity | 6.655 | 6.576 |
+
+All four already exceed the historical thresholds on untouched main. This comparison shows no material additional slowdown from the patch; it does not resolve main's existing runtime-performance issues. See `.scratch/native-perf/thirdparty-baseline-stale.md` and `.scratch/native-perf/release-lost-its-optimisation.md`.
+
+Full logs, the comparison script, individual samples and retained binaries are in the original performance worktree's `results/current-main-gate-short.log` and `results/main-bundle-comparison/`. Two earlier validation attempts were invalidated by scratch storage and Unix socket path constraints; the completed run used the owned short scratch path `/home/candrewlee/kg.4eIMhy` and a 6 GiB memory / 4 GiB swap cap.
