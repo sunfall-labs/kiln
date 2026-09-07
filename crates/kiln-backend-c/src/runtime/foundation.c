@@ -353,6 +353,10 @@ static int kiln_c99_install_server_response_methods(kiln_value target);
 static int kiln_c99_to_units(kiln_value value, uint16_t **out, size_t *count);
 static kiln_value kiln_c99_from_units(const uint16_t *units, size_t count);
 static const char *kiln_c99_method_name(uint64_t code);
+/* One past the highest method code the unit declares, from the generated code list: the bound
+ * an own-keys walk over a prototype table uses, so a member numbered on the append-only tail is
+ * listed like one numbered in a block. Defined beside the method index, after the list closes. */
+static uint64_t kiln_c99_method_code_end(void);
 static const char *kiln_c99_builtin_name(uint64_t builtin);
 static int kiln_c99_is_namespace(uint64_t builtin);
 static int kiln_c99_changes_length(uint64_t code);

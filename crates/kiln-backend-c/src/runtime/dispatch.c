@@ -5598,6 +5598,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
     if (receiver.tag == KILN_VALUE_TYPED_ARRAY) {
         kiln_typed_array *view = kiln_c99_typed_array_of(receiver);
         if (code == KILN_C99_METHOD_ARRAY_GENERIC_MAP ||
+            code == KILN_C99_METHOD_ARRAY_PARALLEL_MAP ||
             code == KILN_C99_METHOD_ARRAY_GENERIC_FILTER) {
             /* A method borrowed from Array.prototype is generic: its result is an ordinary
              * Array, even when the receiver is a typed view. Keep the original receiver in the
@@ -5625,7 +5626,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 if (status != KILN_C99_OK) {
                     return status;
                 }
-                if (code == KILN_C99_METHOD_ARRAY_GENERIC_MAP) {
+                if (code != KILN_C99_METHOD_ARRAY_GENERIC_FILTER) {
                     status = kiln_c99_array_push(built, produced);
                 } else if (kiln_c99_truthy(produced)) {
                     status = kiln_c99_array_push(built, visit[0]);
@@ -6254,6 +6255,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
     case KILN_C99_METHOD_ARRAY_FLAT_MAP:
     case KILN_C99_METHOD_MAP:
     case KILN_C99_METHOD_ARRAY_GENERIC_MAP:
+    case KILN_C99_METHOD_ARRAY_PARALLEL_MAP:
     case KILN_C99_METHOD_FILTER:
     case KILN_C99_METHOD_ARRAY_GENERIC_FILTER:
     case KILN_C99_METHOD_FOR_EACH: {
@@ -6261,7 +6263,8 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         kiln_value callback = argc > 0 ? args[0] : kiln_c99_undefined();
         kiln_value self_value = argc > 1 ? args[1] : kiln_c99_undefined();
         kiln_val vcallee = kiln_val_from_boundary(callback);
-        if (code == KILN_C99_METHOD_MAP && KILN_VAL_IS_CLOSURE(vcallee) && self_value.tag == KILN_VALUE_UNDEFINED) {
+        if ((code == KILN_C99_METHOD_MAP || code == KILN_C99_METHOD_ARRAY_PARALLEL_MAP) &&
+            KILN_VAL_IS_CLOSURE(vcallee) && self_value.tag == KILN_VALUE_UNDEFINED) {
             kiln_value built_val;
             status = kiln_c99_new_array_with_capacity(&built_val, array->count, array->is_numeric);
             if (status != KILN_C99_OK) return status;
@@ -6333,7 +6336,8 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                  * shift everything after it. */
                 if (array->elements[index] == KILN_VAL_HOLE) {
                     if (code == KILN_C99_METHOD_MAP ||
-                        code == KILN_C99_METHOD_ARRAY_GENERIC_MAP) {
+                        code == KILN_C99_METHOD_ARRAY_GENERIC_MAP ||
+                        code == KILN_C99_METHOD_ARRAY_PARALLEL_MAP) {
                         status = kiln_c99_array_push(built, kiln_c99_hole());
                         if (status != KILN_C99_OK) {
                             return status;
@@ -6350,6 +6354,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 }
                 if (code == KILN_C99_METHOD_MAP ||
                     code == KILN_C99_METHOD_ARRAY_GENERIC_MAP ||
+                    code == KILN_C99_METHOD_ARRAY_PARALLEL_MAP ||
                     code == KILN_C99_METHOD_ARRAY_FLAT_MAP) {
                     status = kiln_c99_array_push(built, produced);
                 } else if ((code == KILN_C99_METHOD_FILTER ||

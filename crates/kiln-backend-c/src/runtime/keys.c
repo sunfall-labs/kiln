@@ -99,9 +99,19 @@ static int kiln_c99_builtin_own_keys(uint64_t builtin, kiln_value *out) {
     if (status != KILN_C99_OK) {
         return status;
     }
-    for (code = 1; code < 256; ++code) {
+    /* Every code the unit declares, in numeric order. This stopped at 256 once, which is where
+     * the prototype blocks ended when it was written; the append-only tail (ADR 0043) has
+     * carried array members since -- `toSorted`, `toReversed`, `toSpliced`, `with`,
+     * `parallelMap` -- and each was a member a read answered, `in` confirmed, and this list
+     * omitted, so `hasOwnProperty` refused it by name. */
+    for (code = 1; code < kiln_c99_method_code_end(); ++code) {
         const char *name = kiln_c99_method_name(code);
         size_t len;
+        if (code >= KILN_C99_METHOD_DATA_VIEW_GET_INT8 && code <= KILN_C99_METHOD_DATA_VIEW_SET_BIG_UINT64) {
+            /* Listed by the block below, unconditionally: these are accessors the namespace
+             * lookup does not answer as methods. */
+            continue;
+        }
         if (name == NULL || name[0] == '@') {
             /* A `@@` name is a reserved slot reached through a Symbol, not a string key. */
             continue;
