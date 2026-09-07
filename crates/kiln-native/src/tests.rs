@@ -6515,7 +6515,8 @@ fn executable_graph_omits_unused_modules_only_with_package_permission() {
     )
     .expect("source graph compiles");
 
-    let selected = native_executable_graph(&graph).expect("select executable modules");
+    let selected =
+        native_executable_graph(&graph, NativeProfile::Release).expect("select executable modules");
     let names = selected
         .modules
         .iter()
@@ -6558,7 +6559,8 @@ fn executable_graph_keeps_unused_import_without_package_permission() {
     )
     .expect("source graph compiles");
 
-    let selected = native_executable_graph(&graph).expect("select executable modules");
+    let selected =
+        native_executable_graph(&graph, NativeProfile::Release).expect("select executable modules");
     assert_eq!(selected.modules.len(), 2);
     assert!(
         selected
@@ -6566,6 +6568,170 @@ fn executable_graph_keeps_unused_import_without_package_permission() {
             .iter()
             .any(|node| node.path.ends_with("node_modules/example/index.js"))
     );
+}
+
+#[test]
+fn executable_graph_demands_only_statically_read_namespace_members() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let project = TestDirectory::new("kiln-native-static-namespace-graph");
+    let package = project.path.join("node_modules/example");
+    fs::create_dir_all(&package).expect("create package");
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"example","type":"module","main":"index.js","sideEffects":false}"#,
+    )
+    .expect("write package metadata");
+    fs::write(
+        package.join("index.js"),
+        "export * as helpers from './helpers.js';",
+    )
+    .expect("write namespace barrel");
+    fs::write(
+        package.join("helpers.js"),
+        "export function used() { return 42; } export function unused() { return 7; }",
+    )
+    .expect("write namespace provider");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "import { helpers } from 'example'; console.log(helpers.used());",
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("source graph compiles");
+
+    let selected =
+        native_executable_graph(&graph, NativeProfile::Release).expect("select executable graph");
+    let helpers = fs::canonicalize(package.join("helpers.js")).expect("canonical helpers");
+    let helper_node = graph.module(&helpers).expect("helpers node");
+    let used = helper_node
+        .program
+        .exports
+        .iter()
+        .find(|binding| binding.exported == "used")
+        .expect("used export");
+    let unused = helper_node
+        .program
+        .exports
+        .iter()
+        .find(|binding| binding.exported == "unused")
+        .expect("unused export");
+    let demanded = selected
+        .live_export_slots
+        .get(&helpers)
+        .expect("namespace provider demands");
+    assert!(demanded.contains(&used.local_slot));
+    assert!(!demanded.contains(&unused.local_slot));
+}
+
+#[test]
+fn executable_graph_full_namespace_demand_overrides_a_partial_demand() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let project = TestDirectory::new("kiln-native-full-beats-partial-namespace");
+    fs::write(project.path.join("package.json"), r#"{"type":"module"}"#)
+        .expect("write package metadata");
+    let helpers = project.path.join("helpers.js");
+    fs::write(
+        &helpers,
+        "export function used() { return 42; } export function captured() { return 7; }",
+    )
+    .expect("write namespace provider");
+    fs::write(
+        project.path.join("capturing.js"),
+        "import * as helpers from './helpers.js'; globalThis.invoke = () => helpers.captured();",
+    )
+    .expect("write capturing importer");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "import * as helpers from './helpers.js'; import './capturing.js'; console.log(helpers.used());",
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("source graph compiles");
+
+    let selected =
+        native_executable_graph(&graph, NativeProfile::Release).expect("select executable graph");
+    let helpers = fs::canonicalize(helpers).expect("canonical helpers");
+    let helper_node = graph.module(&helpers).expect("helpers node");
+    let demanded = selected
+        .live_export_slots
+        .get(&helpers)
+        .expect("namespace provider demands");
+    for export in &helper_node.program.exports {
+        assert!(demanded.contains(&export.local_slot));
+    }
+    assert!(!selected.partial_namespace_members.contains_key(&helpers));
+}
+
+#[test]
+fn release_graph_selects_the_production_arm_of_an_exact_commonjs_dispatcher() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let project = TestDirectory::new("kiln-native-production-dispatch");
+    let entry = project.path.join("main.cjs");
+    fs::write(&entry, "module.exports = require('./dispatch.cjs');").expect("write entry");
+    fs::write(
+        project.path.join("dispatch.cjs"),
+        r#"'use strict';
+if (process.env.NODE_ENV === 'production') {
+  module.exports = require('./production.cjs');
+} else {
+  module.exports = require('./development.cjs');
+}
+"#,
+    )
+    .expect("write dispatcher");
+    fs::write(
+        project.path.join("production.cjs"),
+        "module.exports = 'production';",
+    )
+    .expect("write production module");
+    fs::write(
+        project.path.join("development.cjs"),
+        "module.exports = 'development';",
+    )
+    .expect("write development module");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("source graph compiles");
+
+    let release =
+        native_executable_graph(&graph, NativeProfile::Release).expect("select release graph");
+    let release_names = release
+        .modules
+        .iter()
+        .filter_map(|node| node.path.file_name())
+        .collect::<BTreeSet<_>>();
+    assert!(release_names.contains(std::ffi::OsStr::new("production.cjs")));
+    assert!(!release_names.contains(std::ffi::OsStr::new("development.cjs")));
+    assert_eq!(release.inactive_commonjs_dependencies.len(), 1);
+
+    let dev = native_executable_graph(&graph, NativeProfile::Dev).expect("select dev graph");
+    let dev_names = dev
+        .modules
+        .iter()
+        .filter_map(|node| node.path.file_name())
+        .collect::<BTreeSet<_>>();
+    assert!(dev_names.contains(std::ffi::OsStr::new("production.cjs")));
+    assert!(dev_names.contains(std::ffi::OsStr::new("development.cjs")));
+    assert!(dev.inactive_commonjs_dependencies.is_empty());
 }
 
 #[test]

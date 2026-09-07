@@ -1698,12 +1698,13 @@ fn emit_terminator(
                     )
                     .unwrap();
                 }
-                // The slot is handed over exactly as it stands, box included: a mutable export
-                // *is* its cell, which is what makes an import a live view of the binding.
+                // `kiln_val_to_boundary` dereferences a cell because the public ABI has no cell
+                // tag. The graph evaluates dependencies before importers and refuses binding
+                // cycles, so the initialized value is the observable answer here.
                 for (index, binding) in exports.iter().flat_map(|e| e.iter()).enumerate() {
                     writeln!(
                         output,
-                        "    exports[{index}] = kiln_val_to_boundary(locals[{}]);",
+                        "    exports[{index}] = kiln_val_binding_to_boundary(locals[{}]);",
                         binding.local_slot
                     )
                     .unwrap();

@@ -225,6 +225,7 @@ extern int kiln_c99_read_element(kiln_host *host, kiln_value target, kiln_value 
 extern int kiln_c99_write_element(kiln_host *host, kiln_value target, kiln_value key, kiln_value value, int strict, int depth, kiln_value *thrown);
 extern uint32_t kiln_c99_gc_kind_of_ptr(const void *ptr);
 extern kiln_value kiln_val_to_boundary(kiln_val v);
+extern kiln_value kiln_val_binding_to_boundary(kiln_val v);
 
 #ifndef KILN_C99_CACHED_METHOD_MATCHES_DEFINED
 #define KILN_C99_CACHED_METHOD_MATCHES_DEFINED

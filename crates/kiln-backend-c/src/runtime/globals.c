@@ -99,6 +99,11 @@ static int kiln_c99_process_object(kiln_value *out) {
     if (status == KILN_C99_OK) status = kiln_c99_new_array(&argv);
     if (status == KILN_C99_OK) status = kiln_c99_new_array(&exec_argv);
     if (status == KILN_C99_OK) status = kiln_c99_new_object(&versions);
+#if defined(KILN_NODE_ENV_PRODUCTION)
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, env, "NODE_ENV", 8,
+                              kiln_c99_copy_text("production", 10), 0, NULL);
+#endif
     if (status == KILN_C99_OK)
         status = kiln_c99_put(NULL, versions, "node", 4,
                               kiln_c99_copy_text("22.0.0", 6), 0, NULL);

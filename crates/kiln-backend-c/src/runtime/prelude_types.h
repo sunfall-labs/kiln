@@ -238,6 +238,7 @@ extern kiln_val kiln_c99_val_from_text(const char *bytes, size_t len);
 #else
 static kiln_val kiln_c99_val_from_text(const char *bytes, size_t len);
 static kiln_value kiln_val_to_boundary(kiln_val v);
+static kiln_value kiln_val_binding_to_boundary(kiln_val v);
 #endif
 
 static inline kiln_val kiln_val_from_boundary(kiln_value v) {
