@@ -1826,6 +1826,8 @@ static int kiln_c99_define_private(kiln_value target, const char *key, size_t ke
 static int kiln_c99_define_method(kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_json_needs_escape(const char *bytes, size_t len) {
 static int kiln_c99_json_quote(kiln_text *text, const char *bytes, size_t len) {
+static int kiln_c99_json_lacks_tojson(kiln_value value) {
+static int kiln_c99_json_append_uint(kiln_text *text, uint64_t magnitude) {
 static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value value,
 #define KILN_JSON_OPEN(bracket)                                                                   \
 #define KILN_JSON_BREAK(first)                                                                    \
@@ -1835,6 +1837,10 @@ static int kiln_c99_json_read(kiln_json_reader *reader, kiln_value *out);
 static void kiln_c99_json_space(kiln_json_reader *reader) {
 static int kiln_c99_json_literal(kiln_json_reader *reader, const char *word) {
 static int kiln_c99_json_string(kiln_json_reader *reader, kiln_value *out) {
+static int kiln_c99_json_object_key(kiln_json_reader *reader, const char **out_ikey) {
+static int kiln_c99_json_define(kiln_value built, const char *ikey, kiln_value member) {
+static const double kiln_c99_json_pow10[23] = {
+static int kiln_c99_json_fast_number(const char *bytes, size_t len, double *out) {
 static int kiln_c99_json_read(kiln_json_reader *reader, kiln_value *out) {
 static int kiln_c99_json_document(const char *bytes, size_t len, kiln_value *out) {
 static void kiln_c99_civil_from_days(int64_t days, int64_t *year, int *month, int *day) {
