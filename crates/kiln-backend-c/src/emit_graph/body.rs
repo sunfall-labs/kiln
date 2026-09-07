@@ -546,6 +546,52 @@ fn emit_block_sequence(
     } else {
         None
     };
+    // A second read of the same `this` slot in a block, with nothing between the two that could
+    // run code or write a property, reads what the first read. Only the row path copies -- an
+    // accessor puts its object in dictionary mode, and a dictionary object has no row -- so the
+    // generic path below it still calls a getter twice, as the language does.
+    let this_copies: std::collections::HashMap<ValueId, ValueId> = {
+        let mut copies = std::collections::HashMap::new();
+        for block in &graph.blocks {
+            let mut last: std::collections::HashMap<usize, ValueId> = std::collections::HashMap::new();
+            for (vid, op) in &block.operations {
+                let pure = match op {
+                    GraphOp::Const { .. }
+                    | GraphOp::LoadLocal(_)
+                    | GraphOp::StoreLocal { .. }
+                    | GraphOp::LoadCell(_)
+                    | GraphOp::StoreCell { .. }
+                    | GraphOp::LoadUpvalue(_)
+                    | GraphOp::StoreUpvalue { .. }
+                    | GraphOp::LoadBuiltin(_)
+                    | GraphOp::LoadThis
+                    | GraphOp::LoadGlobal(_)
+                    | GraphOp::MarkUninitialized(_)
+                    | GraphOp::CheckTdz { .. }
+                    | GraphOp::GetProperty { .. }
+                    | GraphOp::Phi { .. }
+                    | GraphOp::MakeCell(_) => true,
+                    GraphOp::Unary { value, .. } => numbers.contains(value),
+                    GraphOp::Binary { left, right, .. } => numbers.contains(left) && numbers.contains(right),
+                    _ => false,
+                };
+                if let (GraphOp::GetProperty { .. }, Some(col)) = (op, this_sites.get(vid)) {
+                    match last.get(col) {
+                        Some(prev) => {
+                            copies.insert(*vid, *prev);
+                        }
+                        None => {
+                            last.insert(*col, *vid);
+                        }
+                    }
+                }
+                if !pure {
+                    last.clear();
+                }
+            }
+        }
+        copies
+    };
     let self_index = match site {
         Site::Function { index } => Some(*index),
         Site::Entry { .. } => None,
@@ -712,6 +758,7 @@ fn emit_block_sequence(
                 kind,
                 self_index,
                 this_sites.get(&vid).copied(),
+                this_copies.get(&vid).copied(),
                 spec,
             );
             if kind.restarts() {
@@ -1004,12 +1051,14 @@ fn emit_blocks(
         for vid in &spec_calls {
             candidate_assumptions.insert(*vid, Proven::Number);
         }
-        // An array's `length` is a number.
+        // An array's `length` is an integer below 2^32; any other read of a guarded array is
+        // a number, as before.
         for (vid, op) in &ops {
-            if let GraphOp::GetProperty { object, .. } = op
+            if let GraphOp::GetProperty { object, name, .. } = op
                 && spec_arrays.contains(object)
             {
-                candidate_assumptions.insert(*vid, Proven::Number);
+                let is_length = matches!(program.constants.get(*name as usize), Some(Constant::String(s)) if s == "length");
+                candidate_assumptions.insert(*vid, if is_length { Proven::Int } else { Proven::Number });
             }
         }
         let speculative_numbers = proven_numbers_with_assumptions(graph, &candidate_assumptions);

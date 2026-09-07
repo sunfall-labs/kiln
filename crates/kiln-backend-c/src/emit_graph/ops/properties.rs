@@ -106,6 +106,13 @@ pub(super) fn emit_get_property(
     // A read of `this`: the function's receiver-shape cache answers with one indexed
     // load when the receiver's shape has a row, which was filled whole from the shape.
     let (receiver_tier, receiver_learn) = match (this_site, self_index) {
+        (Some(_), Some(_)) if ctx.this_copy.is_some() => (
+            format!(
+                "if (recv_row != NULL) {{ v{v} = v{prev}; handled = 1; }} ",
+                prev = ctx.this_copy.unwrap().0
+            ),
+            String::new(),
+        ),
         (Some(i), Some(_)) => (
             format!(
                 "if (recv_row != NULL) {{ v{v} = recv_obj->slots[recv_row[{i}]]; handled = 1; }} "
@@ -141,7 +148,14 @@ pub(super) fn emit_get_property(
                 }}{receiver_learn} }}\
                 {typed_sync}",
                 o = object.0,
-                typed_sync = if typed { format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));") } else { String::new() }
+                typed_sync = if ctx.ints.contains(&vid) {
+                    // An array's length, proven an integer: exact below 2^53, so the cast is the value.
+                    format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v})); i{v} = (int64_t)d{v};")
+                } else if typed {
+                    format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));")
+                } else {
+                    String::new()
+                }
             )
             .unwrap();
 }

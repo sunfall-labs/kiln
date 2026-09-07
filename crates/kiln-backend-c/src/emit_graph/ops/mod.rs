@@ -43,6 +43,9 @@ pub(super) struct OpContext<'a> {
     pub kind: EntryKind,
     pub self_index: Option<u32>,
     pub this_site: Option<usize>,
+    /// An earlier read of the same `this` slot in this block, with nothing between that could
+    /// have changed it: on the row path this read is a copy of it.
+    pub this_copy: Option<ValueId>,
     pub spec: &'a Speculation,
     /// Emitting the parallel clone of a typed entry; see `emit_graph::parallel_clone`.
     pub parallel: bool,
@@ -189,6 +192,7 @@ pub(super) fn emit_graph_op(
     kind: EntryKind,
     self_index: Option<u32>,
     this_site: Option<usize>,
+    this_copy: Option<ValueId>,
     spec: &Speculation,
 ) {
     let v = vid.0;
@@ -220,6 +224,7 @@ pub(super) fn emit_graph_op(
         kind,
         self_index,
         this_site,
+        this_copy,
         spec,
     };
     match op {
