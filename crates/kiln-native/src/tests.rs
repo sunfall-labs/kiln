@@ -7,6 +7,39 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Barrier};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[test]
+fn release_prelude_compile_only_disables_vectorizers() {
+    let mut options = CompileOptions::default();
+    configure_release_prelude_compile(&mut options);
+    let arguments = options
+        .extra_args
+        .iter()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        arguments,
+        ["-fno-vectorize", "-fno-slp-vectorize"],
+        "scalar inlining is runtime-significant and must stay enabled"
+    );
+}
+
+#[test]
+fn release_prelude_compile_policy_has_a_distinct_object_key() {
+    let base = Digest::hash(b"ordinary compiler options");
+    assert_ne!(
+        prelude_object_options(base, NativeProfile::Release),
+        base,
+        "release prelude objects must not reuse objects built under the old flags"
+    );
+    for profile in [
+        NativeProfile::Dev,
+        NativeProfile::Check,
+        NativeProfile::Profile,
+    ] {
+        assert_eq!(prelude_object_options(base, profile), base);
+    }
+}
+
 struct OxcFrontend;
 
 #[test]

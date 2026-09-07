@@ -47,6 +47,28 @@ use rayon::prelude::*;
 static WORK_COUNTER: AtomicU64 = AtomicU64::new(0);
 static MATERIALIZE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+const RELEASE_PRELUDE_COMPILE_IDENTITY: &[u8] = b"vectorize=off\0slp-vectorize=off";
+
+fn configure_release_prelude_compile(options: &mut CompileOptions) {
+    // Vectorizing this branch-heavy runtime unit accounts for seconds of cold compile time while
+    // its generated numeric loops live in application units. Leave scalar inlining enabled: it
+    // materially improves collection-heavy runtime workloads.
+    options
+        .extra_args
+        .extend(["-fno-vectorize".into(), "-fno-slp-vectorize".into()]);
+}
+
+fn prelude_object_options(base: Digest, profile: NativeProfile) -> Digest {
+    if profile != NativeProfile::Release {
+        return base;
+    }
+    let mut identity =
+        Vec::with_capacity(base.as_bytes().len() + RELEASE_PRELUDE_COMPILE_IDENTITY.len());
+    identity.extend_from_slice(base.as_bytes());
+    identity.extend_from_slice(RELEASE_PRELUDE_COMPILE_IDENTITY);
+    Digest::hash(&identity)
+}
+
 fn prelude_header_digest() -> Digest {
     Digest::hash(runtime_prelude_header().as_bytes())
 }
@@ -470,7 +492,7 @@ impl NativeBuilder {
             &runtime_abi,
             &target,
             profile.cache(),
-            object_options,
+            prelude_object_options(object_options, profile),
             [prelude_source_digest],
         );
         let runtime_key = key(
@@ -564,6 +586,10 @@ impl NativeBuilder {
             march_native: options.march_native,
             ..CompileOptions::default()
         };
+        let mut prelude_compile_options = compile_options.clone();
+        if profile == NativeProfile::Release {
+            configure_release_prelude_compile(&mut prelude_compile_options);
+        }
         let compile_started = Instant::now();
         let (((application_result, prelude_result), runtime_result), launcher_result) = rayon::join(
             || {
@@ -588,7 +614,7 @@ impl NativeBuilder {
                                         &prelude_bytes,
                                         &paths.prelude_c,
                                         &paths.prelude_o,
-                                        &compile_options,
+                                        &prelude_compile_options,
                                     )
                                 })
                             },
@@ -1763,6 +1789,9 @@ impl NativeBuilder {
                 .extra_args
                 .push("-DKILN_NODE_ENV_PRODUCTION=1".into());
         }
+        if profile == NativeProfile::Release {
+            configure_release_prelude_compile(&mut prelude_compile_options);
+        }
         let mut module_compile_options = compile_options.clone();
         if profile == NativeProfile::Release {
             // Large bundles spend nearly all cold-build time optimizing generated application
@@ -1811,7 +1840,7 @@ impl NativeBuilder {
             &runtime_abi,
             &target,
             profile.cache(),
-            object_options,
+            prelude_object_options(object_options, profile),
             [prelude_source_digest],
         );
         let runtime_key = key(
@@ -2239,6 +2268,16 @@ impl NativeBuilder {
                 let report = self
                     .toolchain
                     .compile_c(source_path, object_path, options)?;
+                if std::env::var_os("KILN_NATIVE_TRACE_COMPILE").is_some() {
+                    eprintln!(
+                        "kiln: C compile {}ms {}",
+                        report.elapsed.as_millis(),
+                        source_path
+                            .file_name()
+                            .unwrap_or(source_path.as_os_str())
+                            .to_string_lossy()
+                    );
+                }
                 let bytes = read(object_path, "read native object")?;
                 let stored = self.cache.put(key, &bytes)?;
                 Ok((bytes, stored.digest, false, report.elapsed))
