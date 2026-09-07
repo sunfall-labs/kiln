@@ -533,6 +533,46 @@ fn node_dependency_top_level_await_finishes_before_importer() {
 }
 
 #[test]
+fn node_dependency_dynamic_import_job_resumes_top_level_await_before_importer() {
+    let project = TempProject::new();
+    project.write(
+        "dep.mjs",
+        r#"
+            async function attemptImport() {
+                try {
+                    await import('missing-package');
+                } catch {}
+            }
+            await attemptImport();
+            class Ready {}
+            export function makeReady() { return new Ready(); }
+        "#,
+    );
+    let entry = project.write(
+        "main.mjs",
+        "import { makeReady } from './dep.mjs'; console.log(makeReady().constructor.name);",
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build dynamic-import top-level await graph");
+
+    let mut host = kiln_runtime::CaptureHost::new();
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("dynamic import job must resume dependency before its importer runs");
+    assert_eq!(host.into_stdout(), "Ready\n");
+}
+
+#[test]
 fn node_dependency_top_level_await_rejection_stops_importer() {
     let project = TempProject::new();
     project.write(

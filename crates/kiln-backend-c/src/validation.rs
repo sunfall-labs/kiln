@@ -18,19 +18,6 @@ pub(crate) fn validate_program(program: &Program) -> Result<StackPlan, EmitError
             message: "program has no instructions".into(),
         });
     }
-    // The entry point runs once on an automatic frame and has nowhere to suspend: a module
-    // that awaits at its top level needs the frame a generator keeps, which the entry does not
-    // have. Refused by name; until 2026-09-05 it reached the C compiler as an undeclared
-    // `frame` and failed there.
-    if let Some(pc) = program
-        .code
-        .iter()
-        .position(|instruction| matches!(instruction, Instruction::Await | Instruction::Yield))
-    {
-        return Err(EmitError::Unsupported {
-            feature: format!("top-level await at instruction {pc}"),
-        });
-    }
     for proto in &program.functions {
         // A generator does not run when it is called: it builds an object that runs in pieces,
         // each resumption picking up where the last left off. That is a suspended frame, which
@@ -213,8 +200,14 @@ pub(crate) fn validate_code(
                 };
                 for upvalue in &target.upvalues {
                     let ok = match upvalue {
-                        Upvalue::ParentLocal(slot) => u64::from(*slot) < u64::from(local_count),
-                        Upvalue::ParentUpvalue(slot) => (*slot as usize) < upvalue_count,
+                        Upvalue::ParentLocal(slot)
+                        | Upvalue::NamedParentLocal { slot, .. } => {
+                            u64::from(*slot) < u64::from(local_count)
+                        }
+                        Upvalue::ParentUpvalue(slot)
+                        | Upvalue::NamedParentUpvalue { index: slot, .. } => {
+                            (*slot as usize) < upvalue_count
+                        }
                     };
                     if !ok {
                         return Err(invalid(
@@ -378,19 +371,11 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         // there is nothing at run time to resolve a specifier against or to compile what it
         // names. Refused rather than answered with a rejected promise, which would be a wrong
         // answer wearing the right shape.
-        Instruction::DynamicImport => Err(EmitError::Unsupported {
-            feature: "a dynamic `import()` in the native backend".to_owned(),
-        }),
-        // `with (x) { ... }` puts an object in front of the scope chain, so every name in the
-        // body is resolved at run time against whatever properties that object turns out to
-        // have -- and against `Symbol.unscopables`, which can hide one. The backend resolves
-        // names when it emits, into slots; there is no scope left at run time for an object to
-        // sit in front of. Both halves are refused together, because half of a `with` is not a
-        // smaller feature but a wrong one.
         Instruction::ToObject | Instruction::WithHas(_) => Err(EmitError::Unsupported {
             feature: "a `with` statement in the native backend".to_owned(),
         }),
-        Instruction::Const(_)
+        Instruction::DynamicImport
+        | Instruction::Const(_)
         | Instruction::LoadTemplateObject(_)
         | Instruction::LoadLocal(_)
         | Instruction::StoreLocal(_)

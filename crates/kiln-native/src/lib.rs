@@ -2208,6 +2208,9 @@ fn native_builtin_supported_exports(
     use kiln_module_resolver::NodeBuiltin;
 
     match builtin {
+        NodeBuiltin::Console => &[
+            "Console", "debug", "default", "error", "info", "log", "warn",
+        ],
         NodeBuiltin::Events => &["EventEmitter", "default"],
         NodeBuiltin::Net => &["connect", "createConnection", "createServer", "default"],
         // `METHODS` is a constant array rather than a function, so it costs nothing to answer and
@@ -2244,7 +2247,14 @@ fn native_builtin_supported_exports(
         // not functions, which makes them the two that a refusal would serve worst. `os.EOL` is
         // read far more often than it is called, `text.split(os.EOL)` being the whole of why, and
         // it had been answering `undefined` here against the interpreter's "\n".
-        NodeBuiltin::Os => &["EOL", "default", "devNull", "hostname", "networkInterfaces"],
+        NodeBuiltin::Os => &[
+            "EOL",
+            "default",
+            "devNull",
+            "homedir",
+            "hostname",
+            "networkInterfaces",
+        ],
         NodeBuiltin::Tty => &["default", "isatty"],
         NodeBuiltin::Stream => &[
             "Readable",
@@ -2254,8 +2264,15 @@ fn native_builtin_supported_exports(
             "finished",
         ],
         NodeBuiltin::PerfHooks => &["default", "performance"],
-        NodeBuiltin::FsPromises => &["readFile", "stat", "writeFile"],
-        NodeBuiltin::Fs => &["default", "existsSync", "promises"],
+        NodeBuiltin::FsPromises => &["appendFile", "mkdir", "readFile", "stat", "writeFile"],
+        NodeBuiltin::Fs => &[
+            "appendFileSync",
+            "default",
+            "existsSync",
+            "promises",
+            "readFileSync",
+            "writeFileSync",
+        ],
         NodeBuiltin::Path => &[
             "basename",
             "default",
@@ -2264,6 +2281,7 @@ fn native_builtin_supported_exports(
             "extname",
             "isAbsolute",
             "join",
+            "parse",
             "posix",
             "relative",
             "resolve",
@@ -2421,6 +2439,52 @@ exports[7] = request;"#,
 fn native_builtin_body(builtin: kiln_module_resolver::NodeBuiltin) -> Option<&'static str> {
     use kiln_module_resolver::NodeBuiltin;
     match builtin {
+        NodeBuiltin::Console => Some(
+            r#"kiln_value console_ctor = kiln_c99_method(KILN_C99_METHOD_NODE_BUILTIN_UNMATERIALIZED);
+kiln_value log = kiln_c99_method(KILN_C99_METHOD_CONSOLE_LOG);
+kiln_value error = kiln_c99_method(KILN_C99_METHOD_CONSOLE_ERROR);
+kiln_value namespace;
+int status = kiln_c99_new_object(&namespace);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "Console", 7, console_ctor, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "default", 7, namespace, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "debug", 5, log, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "error", 5, error, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "info", 4, log, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "log", 3, log, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "warn", 4, error, 0, NULL);
+if (status != KILN_C99_OK) return status;
+exports[0] = console_ctor;
+exports[1] = kiln_c99_undefined();
+exports[2] = kiln_c99_undefined();
+exports[3] = kiln_c99_undefined();
+exports[4] = kiln_c99_undefined();
+exports[5] = log;
+exports[6] = namespace;
+exports[7] = kiln_c99_undefined();
+exports[8] = kiln_c99_undefined();
+exports[9] = error;
+exports[10] = kiln_c99_undefined();
+exports[11] = kiln_c99_undefined();
+exports[12] = kiln_c99_undefined();
+exports[13] = log;
+exports[14] = log;
+exports[15] = kiln_c99_undefined();
+exports[16] = kiln_c99_undefined();
+exports[17] = kiln_c99_undefined();
+exports[18] = kiln_c99_undefined();
+exports[19] = kiln_c99_undefined();
+exports[20] = kiln_c99_undefined();
+exports[21] = kiln_c99_undefined();
+exports[22] = kiln_c99_undefined();
+exports[23] = error;"#,
+        ),
         NodeBuiltin::Events => Some(
             r#"kiln_value constructor = kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_EMITTER);
 exports[0] = constructor;
@@ -2545,7 +2609,8 @@ exports[0] = namespace;
 exports[1] = lookup;"#,
         ),
         NodeBuiltin::Os => Some(
-            r#"kiln_value hostname = kiln_c99_method(KILN_C99_METHOD_NODE_OS_HOSTNAME);
+            r#"kiln_value unmaterialized = kiln_c99_method(KILN_C99_METHOD_NODE_BUILTIN_UNMATERIALIZED);
+kiln_value hostname = kiln_c99_method(KILN_C99_METHOD_NODE_OS_HOSTNAME);
 kiln_value network_interfaces = kiln_c99_method(KILN_C99_METHOD_NODE_OS_NETWORK_INTERFACES);
 kiln_value namespace;
 int status = kiln_c99_new_object(&namespace);
@@ -2558,6 +2623,8 @@ status = kiln_c99_put(host, namespace, "EOL", 3, kiln_c99_copy_text("\n", 1), 0,
 if (status != KILN_C99_OK) return status;
 status = kiln_c99_put(host, namespace, "devNull", 7, kiln_c99_copy_text("/dev/null", 9), 0, NULL);
 if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "homedir", 7, unmaterialized, 0, NULL);
+if (status != KILN_C99_OK) return status;
 exports[0] = kiln_c99_copy_text("\n", 1);
 exports[1] = kiln_c99_undefined();
 exports[2] = kiln_c99_undefined();
@@ -2566,7 +2633,7 @@ exports[4] = namespace;
 exports[5] = kiln_c99_copy_text("/dev/null", 9);
 exports[6] = kiln_c99_undefined();
 exports[7] = kiln_c99_undefined();
-exports[8] = kiln_c99_undefined();
+exports[8] = unmaterialized;
 exports[9] = hostname;
 exports[10] = kiln_c99_undefined();
 exports[11] = kiln_c99_undefined();
@@ -2626,15 +2693,19 @@ exports[0] = namespace;
 exports[1] = performance;"#,
         ),
         NodeBuiltin::FsPromises => Some(
-            r#"kiln_value read_file = kiln_c99_method(KILN_C99_METHOD_NODE_FS_READ_FILE);
+            r#"kiln_value unmaterialized = kiln_c99_method(KILN_C99_METHOD_NODE_BUILTIN_UNMATERIALIZED);
+kiln_value read_file = kiln_c99_method(KILN_C99_METHOD_NODE_FS_READ_FILE);
 kiln_value stat = kiln_c99_method(KILN_C99_METHOD_NODE_FS_STAT);
 kiln_value write_file = kiln_c99_method(KILN_C99_METHOD_NODE_FS_WRITE_FILE);
-exports[0] = read_file;
-exports[1] = stat;
-exports[2] = write_file;"#,
+exports[0] = unmaterialized;
+exports[1] = unmaterialized;
+exports[2] = read_file;
+exports[3] = stat;
+exports[4] = write_file;"#,
         ),
         NodeBuiltin::Fs => Some(
-            r#"kiln_value exists_sync = kiln_c99_method(KILN_C99_METHOD_NODE_FS_EXISTS_SYNC);
+            r#"kiln_value unmaterialized = kiln_c99_method(KILN_C99_METHOD_NODE_BUILTIN_UNMATERIALIZED);
+kiln_value exists_sync = kiln_c99_method(KILN_C99_METHOD_NODE_FS_EXISTS_SYNC);
 kiln_value promises;
 int status = kiln_c99_new_object(&promises);
 if (status != KILN_C99_OK) return status;
@@ -2647,12 +2718,18 @@ if (status != KILN_C99_OK) return status;
 kiln_value namespace;
 status = kiln_c99_new_object(&namespace);
 if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "appendFileSync", 14, unmaterialized, 0, NULL);
+if (status != KILN_C99_OK) return status;
 status = kiln_c99_put(host, namespace, "existsSync", 10, exists_sync, 0, NULL);
 if (status != KILN_C99_OK) return status;
 status = kiln_c99_put(host, namespace, "promises", 8, promises, 0, NULL);
 if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "readFileSync", 12, unmaterialized, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "writeFileSync", 13, unmaterialized, 0, NULL);
+if (status != KILN_C99_OK) return status;
 exports[0] = kiln_c99_undefined();
-exports[1] = kiln_c99_undefined();
+exports[1] = unmaterialized;
 exports[2] = kiln_c99_undefined();
 exports[3] = kiln_c99_undefined();
 exports[4] = namespace;
@@ -2661,7 +2738,7 @@ exports[6] = kiln_c99_undefined();
 exports[7] = kiln_c99_undefined();
 exports[8] = kiln_c99_undefined();
 exports[9] = promises;
-exports[10] = kiln_c99_undefined();
+exports[10] = unmaterialized;
 exports[11] = kiln_c99_undefined();
 exports[12] = kiln_c99_undefined();
 exports[13] = kiln_c99_undefined();
@@ -2670,10 +2747,11 @@ exports[15] = kiln_c99_undefined();
 exports[16] = kiln_c99_undefined();
 exports[17] = kiln_c99_undefined();
 exports[18] = kiln_c99_undefined();
-exports[19] = kiln_c99_undefined();"#,
+exports[19] = unmaterialized;"#,
         ),
         NodeBuiltin::Path => Some(
-            r#"kiln_value basename = kiln_c99_method(KILN_C99_METHOD_NODE_PATH_BASENAME);
+            r#"kiln_value unmaterialized = kiln_c99_method(KILN_C99_METHOD_NODE_BUILTIN_UNMATERIALIZED);
+kiln_value basename = kiln_c99_method(KILN_C99_METHOD_NODE_PATH_BASENAME);
 kiln_value dirname = kiln_c99_method(KILN_C99_METHOD_NODE_PATH_DIRNAME);
 kiln_value extname = kiln_c99_method(KILN_C99_METHOD_NODE_PATH_EXTNAME);
 kiln_value is_absolute = kiln_c99_method(KILN_C99_METHOD_NODE_PATH_IS_ABSOLUTE);
@@ -2699,6 +2777,8 @@ status = kiln_c99_put(host, namespace, "isAbsolute", 10, is_absolute, 0, NULL);
 if (status != KILN_C99_OK) return status;
 status = kiln_c99_put(host, namespace, "join", 4, join, 0, NULL);
 if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "parse", 5, unmaterialized, 0, NULL);
+if (status != KILN_C99_OK) return status;
 status = kiln_c99_put(host, namespace, "posix", 5, namespace, 0, NULL);
 if (status != KILN_C99_OK) return status;
 status = kiln_c99_put(host, namespace, "relative", 8, relative, 0, NULL);
@@ -2716,7 +2796,7 @@ exports[5] = kiln_c99_undefined();
 exports[6] = is_absolute;
 exports[7] = join;
 exports[8] = kiln_c99_undefined();
-exports[9] = kiln_c99_undefined();
+exports[9] = unmaterialized;
 exports[10] = namespace;
 exports[11] = relative;
 exports[12] = resolve;

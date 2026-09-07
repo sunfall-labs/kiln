@@ -124,8 +124,12 @@ pub enum AsyncHostOp {
     ReadFile { path: String },
     /// Replace or create a file with the supplied bytes.
     WriteFile { path: String, data: Vec<u8> },
+    /// Append bytes to a file, creating it if it does not exist.
+    AppendFile { path: String, data: Vec<u8> },
     /// Read metadata without opening a persistent file resource.
     Stat { path: String },
+    /// Create a directory, optionally recursively.
+    Mkdir { path: String, recursive: bool },
     /// Close a persistent host resource.
     CloseResource { resource: ResourceId },
     /// Change whether a persistent resource keeps its realm alive.

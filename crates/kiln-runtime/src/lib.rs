@@ -2053,6 +2053,17 @@ impl TokioHost {
                 self.insert_immediate(request, sequence, referenced, result);
                 return request;
             }
+            AsyncHostOp::Mkdir { path, recursive } => {
+                let result = if recursive {
+                    std::fs::create_dir_all(&path)
+                } else {
+                    std::fs::create_dir(&path)
+                }
+                .map(|()| AsyncHostValue::Undefined)
+                .map_err(|error| io_error("mkdir", path, error));
+                self.insert_immediate(request, sequence, referenced, result);
+                return request;
+            }
             AsyncHostOp::WriteFile { path, data } => {
                 const MAX_REALM_WRITE_SIZE: usize = 64 * 1024; // 65,536 bytes
                 if data.len() <= MAX_REALM_WRITE_SIZE {
@@ -2063,6 +2074,21 @@ impl TokioHost {
                     return request;
                 }
                 AsyncHostOp::WriteFile { path, data }
+            }
+            AsyncHostOp::AppendFile { path, data } => {
+                const MAX_REALM_WRITE_SIZE: usize = 64 * 1024; // 65,536 bytes
+                if data.len() <= MAX_REALM_WRITE_SIZE {
+                    let result = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&path)
+                        .and_then(|mut file| std::io::Write::write_all(&mut file, &data))
+                        .map(|()| AsyncHostValue::Undefined)
+                        .map_err(|error| io_error("open", path, error));
+                    self.insert_immediate(request, sequence, referenced, result);
+                    return request;
+                }
+                AsyncHostOp::AppendFile { path, data }
             }
             AsyncHostOp::TcpListen { host, port } => {
                 self.spawn_task(request, sequence, referenced, async move {
@@ -2726,6 +2752,21 @@ async fn execute_async_host_op(operation: AsyncHostOp) -> Result<AsyncHostValue,
             .await
             .map(|()| AsyncHostValue::Undefined)
             .map_err(|error| io_error("open", path, error)),
+        AsyncHostOp::AppendFile { path, data } => {
+            let res = async {
+                let mut file = tokio::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                    .await?;
+                file.write_all(&data).await?;
+                Ok::<(), std::io::Error>(())
+            }
+            .await
+            .map(|()| AsyncHostValue::Undefined)
+            .map_err(|error| io_error("open", path, error));
+            res
+        }
         AsyncHostOp::Stat { path } => tokio::fs::metadata(&path)
             .await
             .map(|metadata| {
@@ -2736,6 +2777,15 @@ async fn execute_async_host_op(operation: AsyncHostOp) -> Result<AsyncHostValue,
                 })
             })
             .map_err(|error| io_error("stat", path, error)),
+        AsyncHostOp::Mkdir { path, recursive } => {
+            let res = if recursive {
+                tokio::fs::create_dir_all(&path).await
+            } else {
+                tokio::fs::create_dir(&path).await
+            };
+            res.map(|()| AsyncHostValue::Undefined)
+                .map_err(|error| io_error("mkdir", path, error))
+        }
         AsyncHostOp::CloseResource { .. }
         | AsyncHostOp::SetResourceReferenced { .. }
         | AsyncHostOp::ResourceState { .. }

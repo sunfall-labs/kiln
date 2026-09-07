@@ -614,7 +614,13 @@ fn a_captured_local_is_boxed_and_the_capture_points_at_its_slot() {
         .find(|proto| proto.name.as_deref() == Some("inner"))
         .expect("inner proto");
     assert_eq!(inner.upvalues.len(), 1);
-    assert!(matches!(inner.upvalues[0], Upvalue::ParentLocal(_)));
+    let Upvalue::NamedParentLocal { name, .. } = inner.upvalues[0] else {
+        panic!("a compiled capture keeps its source binding name");
+    };
+    assert_eq!(
+        program.constants[name as usize],
+        Constant::String("captured".into())
+    );
     assert!(inner.code.contains(&Instruction::LoadUpvalue(0)));
 }
 
@@ -675,11 +681,17 @@ fn a_two_level_capture_threads_through_the_function_between() {
         .expect("inner proto");
 
     assert!(
-        matches!(middle.upvalues.as_slice(), [Upvalue::ParentLocal(_)]),
+        matches!(
+            middle.upvalues.as_slice(),
+            [Upvalue::NamedParentLocal { .. }]
+        ),
         "middle captures outer's boxed parameter directly"
     );
     assert!(
-        matches!(inner.upvalues.as_slice(), [Upvalue::ParentUpvalue(0)]),
+        matches!(
+            inner.upvalues.as_slice(),
+            [Upvalue::NamedParentUpvalue { index: 0, .. }]
+        ),
         "inner captures what middle had already captured"
     );
 }

@@ -1242,7 +1242,8 @@ pub fn bridge_effect(instruction: &Instruction) -> Option<(usize, u8)> {
         | Instruction::IterableToArray
         | Instruction::LoadSuperProperty(_)
         | Instruction::DeleteProperty(_)
-        | Instruction::DeletePropertyStrict { .. } => (1, 1),
+        | Instruction::DeletePropertyStrict { .. }
+        | Instruction::DynamicImport => (1, 1),
         Instruction::SuperCall { argc } => (usize::from(*argc) + 1, 1),
         Instruction::CallComputed { argc } => (usize::from(*argc) + 2, 1),
         Instruction::ToPropertyKey => (2, 2),
@@ -2191,7 +2192,9 @@ pub fn array_slots(graph: &FunctionGraph, program: &Program) -> HashSet<u32> {
                 GraphOp::MakeFunction { index, .. } => {
                     // A closure copies its captured boxes out of the array.
                     for upvalue in &program.functions[*index as usize].upvalues {
-                        if let Upvalue::ParentLocal(slot) = upvalue {
+                        if let Upvalue::ParentLocal(slot) | Upvalue::NamedParentLocal { slot, .. } =
+                            upvalue
+                        {
                             slots.insert(*slot);
                         }
                     }

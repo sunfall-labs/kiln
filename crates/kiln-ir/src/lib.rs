@@ -10,7 +10,7 @@ pub use kiln_hir::{Span, TypeAnnotation, VariableKind};
 pub use kiln_host_abi::HostOp;
 
 /// Version of the bytecode contract produced by this crate.
-pub const BYTECODE_VERSION: u16 = 3;
+pub const BYTECODE_VERSION: u16 = 4;
 
 /// A constant embedded in a [`Program`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -957,6 +957,10 @@ pub enum Upvalue {
     ParentLocal(u32),
     /// A cell the enclosing closure had already captured, threaded one level further in.
     ParentUpvalue(u32),
+    /// A local cell plus the constant-table index of its source binding name, for diagnostics.
+    NamedParentLocal { slot: u32, name: u32 },
+    /// A threaded cell plus the constant-table index of its source binding name.
+    NamedParentUpvalue { index: u32, name: u32 },
 }
 
 /// Where a binding visible at a direct `eval` call site lives in the running frame.

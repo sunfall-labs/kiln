@@ -851,10 +851,11 @@ pub(super) fn emit_graph_op(
                 setup.push_str(&format!(" kiln_val captured[{}];", captures.len()));
                 for (position, upvalue) in captures.iter().enumerate() {
                     match upvalue {
-                        Upvalue::ParentLocal(slot) => {
+                        Upvalue::ParentLocal(slot) | Upvalue::NamedParentLocal { slot, .. } => {
                             setup.push_str(&format!(" captured[{position}] = locals[{slot}];"))
                         }
-                        Upvalue::ParentUpvalue(slot) => {
+                        Upvalue::ParentUpvalue(slot)
+                        | Upvalue::NamedParentUpvalue { index: slot, .. } => {
                             setup.push_str(&format!(" captured[{position}] = upvalues[{slot}];"))
                         }
                     }

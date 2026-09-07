@@ -10540,7 +10540,36 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 };
                 AsyncHostOp::WriteFile { path, data }
             }
+            Native::NodeFsAppendFile => {
+                let data = match arguments.get(1) {
+                    Some(Value::String(data)) => data.as_bytes().to_vec(),
+                    Some(Value::TypedArray(data)) => data.bytes(),
+                    value => {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: format!(
+                                "data must be a string or typed array, received {}",
+                                value.map_or("undefined", Value::type_name)
+                            ),
+                        });
+                    }
+                };
+                AsyncHostOp::AppendFile { path, data }
+            }
             Native::NodeFsStat => AsyncHostOp::Stat { path },
+            Native::NodeFsMkdir => {
+                let recursive = arguments.get(1).map_or(false, |opt| {
+                    if let Value::Object(obj) = opt {
+                        obj.borrow()
+                            .get_own("recursive")
+                            .map_or(false, Value::is_truthy)
+                    } else if let Value::Boolean(b) = opt {
+                        *b
+                    } else {
+                        false
+                    }
+                });
+                AsyncHostOp::Mkdir { path, recursive }
+            }
             _ => {
                 return Err(ExecutionError::Host {
                     instruction,
@@ -11773,7 +11802,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     match self.import_specifier(&specifier, current)? {
                         Ok(text) => {
                             let scheduled = self.scheduled(Job::Import(Rc::clone(&promise), text));
-                            self.realm.queue_microtask(scheduled);
+                            self.with_realm_mut(|realm| realm.queue_microtask(scheduled));
                         }
                         Err(thrown) => self.settle(&promise, &Settled::Rejected(thrown)),
                     }
@@ -12760,11 +12789,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Instruction::LoadUpvalue(index) => {
                     let value = self.upvalue(*index)?.borrow().clone();
                     if matches!(value, Value::Native(Native::Uninitialized, _)) {
-                        self.throw_error(
-                            ErrorKind::Reference,
-                            "cannot access a binding before its declaration".to_owned(),
-                            current,
-                        )?;
+                        let message = self.upvalue_name(*index).map_or_else(
+                            || "cannot access a binding before its declaration".to_owned(),
+                            |name| format!("cannot access binding `{name}` before its declaration"),
+                        );
+                        self.throw_error(ErrorKind::Reference, message, current)?;
                         continue;
                     }
                     self.stack.push(value);
@@ -14129,7 +14158,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         if matches!(
             native,
-            Native::NodeFsReadFile | Native::NodeFsWriteFile | Native::NodeFsStat
+            Native::NodeFsReadFile
+                | Native::NodeFsWriteFile
+                | Native::NodeFsAppendFile
+                | Native::NodeFsStat
+                | Native::NodeFsMkdir
         ) {
             return self.dispatch_node_native(native, arguments, instruction);
         }
@@ -14538,12 +14571,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 });
             }
             Native::NodeModuleCreateRequire => {
-                return Err(ExecutionError::Host {
-                    instruction,
-                    message:
-                        "node:module createRequire requires the captured graph resolution index"
-                            .to_owned(),
-                });
+                let require = CommonJsRequire::new([]);
+                return Ok(Value::CommonJsRequire(Rc::new(require)));
             }
             // Thrown as a JavaScript error rather than reported as a host failure, because node
             // throws from these too -- `ENOENT` and friends are ordinary catchable errors -- and
@@ -21334,6 +21363,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .first()
                     .map(Value::to_display_string)
                     .unwrap_or_default();
+                if let Some(builtin) = node_builtin_commonjs_value(&specifier) {
+                    return Ok(builtin);
+                }
                 if require.target_cell(&specifier).is_none() {
                     self.throw_error(
                         ErrorKind::Error,
@@ -21355,15 +21387,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .first()
                     .map(Value::to_display_string)
                     .unwrap_or_default();
-                require
-                    .resolve(&specifier)
-                    .map(Value::String)
-                    .ok_or_else(|| ExecutionError::Host {
-                        instruction,
-                        message: format!(
-                            "CommonJS resolve target `{specifier}` is not in the captured graph"
-                        ),
-                    })
+                if let Some(target) = require.resolve(&specifier) {
+                    return Ok(Value::String(target));
+                }
+                if kiln_node_abi::builtin_abi(&specifier).is_some() {
+                    return Ok(Value::String(specifier));
+                }
+                self.throw_error(
+                    ErrorKind::Error,
+                    format!("Cannot find module '{specifier}'"),
+                    instruction,
+                )?;
+                return Ok(Value::Undefined);
             }
             Value::Function(closure) => {
                 let depth = self.frames.len();
@@ -25570,6 +25605,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return existing.clone();
         }
         let mut process = ObjectData::default();
+        process.set_prototype(Value::Native(
+            Native::PrototypeOf(PrototypeTable::EventEmitter),
+            RealmId::PRIMARY,
+        ));
+        process.node_events = Some(Vec::new());
         // Empty and writable: a program that sets `process.env.X` finds it again, and one that
         // reads an unset flag gets undefined, which is what a production build wants.
         process.set(
@@ -27367,8 +27407,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let mut upvalues = Vec::with_capacity(proto.upvalues.len());
         for descriptor in &proto.upvalues {
             let cell = match descriptor {
-                Upvalue::ParentLocal(slot) => self.cell(*slot as usize)?,
-                Upvalue::ParentUpvalue(index) => {
+                Upvalue::ParentLocal(slot) | Upvalue::NamedParentLocal { slot, .. } => {
+                    self.cell(*slot as usize)?
+                }
+                Upvalue::ParentUpvalue(index) | Upvalue::NamedParentUpvalue { index, .. } => {
                     let Some(current) = &self.function else {
                         // Only a nested function has a parent closure to capture from, and the
                         // compiler never emits ParentUpvalue at module level.
@@ -32544,6 +32586,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             .and_then(|closure| closure.upvalues.get(index as usize))
             .cloned()
             .ok_or(ExecutionError::MissingUpvalue { index })
+    }
+
+    /// The source binding captured at an upvalue index, when the compiler recorded one.
+    fn upvalue_name(&self, index: u32) -> Option<String> {
+        let closure = self.function.as_ref()?;
+        let proto = closure.program.functions.get(closure.function as usize)?;
+        let name = match proto.upvalues.get(index as usize)? {
+            Upvalue::NamedParentLocal { name, .. } | Upvalue::NamedParentUpvalue { name, .. } => {
+                *name
+            }
+            Upvalue::ParentLocal(_) | Upvalue::ParentUpvalue(_) => return None,
+        };
+        match closure.program.constants.get(name as usize) {
+            Some(Constant::String(name)) => Some(name.clone()),
+            _ => None,
+        }
     }
 
     /// The cell held in a local slot, for capture.
@@ -38080,7 +38138,9 @@ fn call_native(
         | Native::TextEncoderEncode
         | Native::NodeFsReadFile
         | Native::NodeFsWriteFile
+        | Native::NodeFsAppendFile
         | Native::NodeFsStat
+        | Native::NodeFsMkdir
         | Native::NodeStatIsFile
         | Native::NodeStatIsDirectory
         | Native::NodeEventOn

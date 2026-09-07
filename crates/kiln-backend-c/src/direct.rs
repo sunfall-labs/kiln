@@ -694,11 +694,15 @@ fn known_callees(program: &Program, graphs: &[FunctionGraph], entry: &FunctionGr
             .upvalues
             .get(index as usize)?
         {
-            Upvalue::ParentLocal(slot) => Some(Binding { owner, slot: *slot }),
-            Upvalue::ParentUpvalue(next) => match owner {
-                Owner::Function(p) => resolve(program, parent, p, *next),
-                Owner::Entry => None,
-            },
+            Upvalue::ParentLocal(slot) | Upvalue::NamedParentLocal { slot, .. } => {
+                Some(Binding { owner, slot: *slot })
+            }
+            Upvalue::ParentUpvalue(next) | Upvalue::NamedParentUpvalue { index: next, .. } => {
+                match owner {
+                    Owner::Function(p) => resolve(program, parent, p, *next),
+                    Owner::Entry => None,
+                }
+            }
         }
     }
     let cell_slots = |owner: Owner| -> HashSet<u32> {

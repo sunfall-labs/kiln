@@ -487,6 +487,13 @@ pub(crate) fn emit_tail_instruction(
                 writeln!(output, "    {{ kiln_value host_result; kiln_value host_args[{argc}]; for (size_t i = 0; i < (size_t){argc}; i++) {{ host_args[i] = kiln_val_to_boundary(stack[sp - {argc} + i]); }} if (host == NULL || host->call == NULL || host->call(host->context, UINT16_C({}), UINT16_C({argc}), host_args, &host_result) != 0) return KILN_C99_HOST_ERROR; sp -= {argc}; stack[sp++] = kiln_val_from_boundary(host_result); }}", host_op_code(*op)).unwrap()
             }
         }
+        Instruction::DynamicImport => {
+            writeln!(
+                output,
+                "    {{ kiln_value err = kiln_c99_undefined(); (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, \"no module loader is installed\"); kiln_value promise; int status = kiln_c99_invoke_method(host, &promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_val_from_boundary(promise); }}"
+            )
+            .unwrap();
+        }
         other => unreachable!("the graph lowers {other:?} itself; only the tail comes here"),
     }
     // A refusal from a helper is noted against this instruction and routed through the body's
