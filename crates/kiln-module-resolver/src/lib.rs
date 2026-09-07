@@ -448,11 +448,23 @@ impl fmt::Display for ResolveError {
                 specifier,
                 importer,
                 message,
-            } => write!(
-                formatter,
-                "could not resolve package request `{specifier}` from {}: {message}",
-                display_path(importer)
-            ),
+            } => {
+                let request_kind = if specifier == "."
+                    || specifier == ".."
+                    || specifier.starts_with("./")
+                    || specifier.starts_with("../")
+                    || specifier.starts_with('/')
+                {
+                    "module"
+                } else {
+                    "package"
+                };
+                write!(
+                    formatter,
+                    "could not resolve {request_kind} request `{specifier}` from {}: {message}",
+                    display_path(importer)
+                )
+            }
         }
     }
 }
@@ -571,6 +583,29 @@ impl NodePackageResolver {
                 .iter()
                 .map(|extension| format!(".{extension}"))
                 .collect(),
+            extension_alias: vec![
+                (
+                    ".js".to_owned(),
+                    vec![
+                        ".ts".to_owned(),
+                        ".tsx".to_owned(),
+                        ".js".to_owned(),
+                        ".jsx".to_owned(),
+                    ],
+                ),
+                (
+                    ".mjs".to_owned(),
+                    vec![".mts".to_owned(), ".mjs".to_owned()],
+                ),
+                (
+                    ".cjs".to_owned(),
+                    vec![".cts".to_owned(), ".cjs".to_owned()],
+                ),
+                (
+                    ".jsx".to_owned(),
+                    vec![".tsx".to_owned(), ".jsx".to_owned()],
+                ),
+            ],
             // Node's package and directory fallback when no `exports` or `main` target wins.
             main_files: vec!["index".to_owned()],
             node_path: false,
@@ -1081,6 +1116,21 @@ fn map_package_error(
     importer: &Path,
     error: oxc_resolver::ResolveError,
 ) -> ResolveError {
+    let is_explicit = specifier == "."
+        || specifier == ".."
+        || specifier.starts_with("./")
+        || specifier.starts_with("../")
+        || specifier.starts_with('/');
+    if is_explicit {
+        return ResolveError::PackageResolution {
+            specifier: specifier.to_owned(),
+            importer: importer.to_path_buf(),
+            message: match &error {
+                oxc_resolver::ResolveError::NotFound(_) => "target not found".to_owned(),
+                _ => error.to_string(),
+            },
+        };
+    }
     let package = package_name(specifier);
     match error {
         oxc_resolver::ResolveError::NotFound(_) => ResolveError::PackageNotFound {
@@ -1497,6 +1547,41 @@ mod tests {
             .resolve("@scope/name", &importer)
             .expect("resolve scoped package root");
         assert_eq!(resolved.path, fs::canonicalize(scoped_entry).unwrap());
+    }
+
+    #[test]
+    fn resolves_typescript_extension_aliases_under_node_policy() {
+        let project = TempProject::new();
+        let importer = project.write("src/main.ts", "import './dep.js'; import './ui.js';");
+        let target_ts = project.write("src/dep.ts", "export const answer = 42;");
+        let target_tsx = project.write("src/ui.tsx", "export const Widget = () => null;");
+        let resolver = NodePackageResolver::new(&project.root).expect("valid project root");
+
+        let resolved_ts = resolver
+            .resolve("./dep.js", &importer)
+            .expect("resolve .js to .ts");
+        assert_eq!(resolved_ts.kind, ResolutionKind::Relative);
+        assert_eq!(resolved_ts.path, fs::canonicalize(target_ts).unwrap());
+
+        let resolved_tsx = resolver
+            .resolve("./ui.js", &importer)
+            .expect("resolve .js to .tsx");
+        assert_eq!(resolved_tsx.kind, ResolutionKind::Relative);
+        assert_eq!(resolved_tsx.path, fs::canonicalize(target_tsx).unwrap());
+
+        // A missing relative module reports as module resolution failure, not package not found
+        let err = resolver
+            .resolve("./nonexistent.js", &importer)
+            .expect_err("nonexistent module fails");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("could not resolve module request `./nonexistent.js`"),
+            "expected module error, got: {msg}"
+        );
+        assert!(
+            !msg.contains("package `.`"),
+            "must not format as package `.`, got: {msg}"
+        );
     }
 
     #[test]
