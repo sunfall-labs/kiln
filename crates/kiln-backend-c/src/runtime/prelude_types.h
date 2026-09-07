@@ -1345,12 +1345,22 @@ typedef struct kiln_node_fs_completion {
 } kiln_node_fs_completion;
 
 /* A cursor over JSON source, moved forward as text is consumed. */
-typedef struct kiln_json_reader {
-    const char *bytes;
-    size_t len;
-    size_t at;
-    int depth;
-} kiln_json_reader;
+/* One entry of the tape `kiln_json_parse` answers with -- the same struct as `kiln_json::Node` in
+ * the provider archive. `len` is a string's byte length or a container's child count; `value` is
+ * a string's offset into the decoded text or the bits of a number's double. */
+typedef struct kiln_json_node {
+    uint32_t tag;
+    uint32_t len;
+    uint64_t value;
+} kiln_json_node;
+
+#define KILN_JSON_NULL 0
+#define KILN_JSON_FALSE 1
+#define KILN_JSON_TRUE 2
+#define KILN_JSON_NUMBER 3
+#define KILN_JSON_STRING 4
+#define KILN_JSON_ARRAY 5
+#define KILN_JSON_OBJECT 6
 
 /* A growable byte buffer, for the operations that build a string rather than slice one. */
 typedef struct kiln_text {

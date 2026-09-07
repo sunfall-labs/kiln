@@ -383,7 +383,7 @@ fn build_from_source(identity: &ToolIdentity) -> Result<NumberProvider, NumberPr
             // The semantic cores remain feature-gated; the default `realm` feature adds the Tokio
             // runtime that now owns native entry as well as interpreted entry.
             OsString::from("--features"),
-            OsString::from("regexp,bigint,temporal"),
+            OsString::from("regexp,bigint,temporal,json"),
             OsString::from("--profile"),
             OsString::from(PROVIDER_PROFILE),
             OsString::from("--target"),
@@ -495,6 +495,10 @@ fn source_digest(root: &Path) -> Result<Digest, NumberProviderError> {
         // to warn about, which is the worst kind.
         "crates/kiln-temporal/Cargo.toml",
         "crates/kiln-temporal/src/lib.rs",
+        // `JSON.parse`'s reader, compiled into the archive under the `json` feature and linked by
+        // the interpreter directly, for the same reason as the two above.
+        "crates/kiln-json/Cargo.toml",
+        "crates/kiln-json/src/lib.rs",
         "crates/kiln-runtime/Cargo.toml",
         "crates/kiln-runtime/src/concurrency.rs",
         "crates/kiln-runtime/src/http_body.rs",
@@ -744,6 +748,8 @@ mod tests {
             ("crates/kiln-node-path/src/lib.rs", b"node-path\n"),
             ("crates/kiln-temporal/Cargo.toml", b"[package]\n"),
             ("crates/kiln-temporal/src/lib.rs", b"temporal\n"),
+            ("crates/kiln-json/Cargo.toml", b"[package]\n"),
+            ("crates/kiln-json/src/lib.rs", b"json\n"),
             ("crates/kiln-runtime/Cargo.toml", b"[package]\n"),
             ("crates/kiln-runtime/src/concurrency.rs", b"concurrency\n"),
             ("crates/kiln-runtime/src/http_body.rs", b"body\n"),
@@ -767,7 +773,7 @@ mod tests {
 
         assert_eq!(
             source_digest(&root.0).expect("hash source identity fixture"),
-            Digest::from_hex("1a4fdb47acac5a5a4b0ca1b34b2e2a1af930ba89167a69e34f416f2bc7697552")
+            Digest::from_hex("d519ed4dbd555c38deb64915b97347f1e17117cd6f9539c4641f6ad5daf0ebcb")
                 .expect("fixture digest")
         );
     }

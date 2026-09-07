@@ -6371,14 +6371,7 @@ pub fn own_data_property(value: &Value, name: &str) -> Option<Value> {
 /// number semantics, insertion order, duplicate-key behavior, and object identity identical to
 /// language-level parsing.
 pub fn parse_json_module(source: &str) -> Result<Value, ExecutionError> {
-    let mut reader = JsonReader { rest: source };
-    reader.skip_whitespace();
-    let value = reader.value()?;
-    reader.skip_whitespace();
-    if !reader.rest.is_empty() {
-        return Err(ExecutionError::InvalidJson);
-    }
-    Ok(value)
+    parse_json_text(source)
 }
 
 fn diagnostics_channel() -> Value {
@@ -39123,11 +39116,7 @@ fn build_raw_json(text: &str) -> Result<Value, ExecutionError> {
     {
         return Err(ExecutionError::InvalidJson);
     }
-    let mut reader = JsonReader { rest: text };
-    let parsed = reader.value()?;
-    if !reader.rest.is_empty() {
-        return Err(ExecutionError::InvalidJson);
-    }
+    let parsed = parse_json_text(text)?;
     if !matches!(
         parsed,
         Value::Null | Value::Boolean(_) | Value::Number(_) | Value::String(_)
@@ -40180,14 +40169,8 @@ fn join(items: &[Value], separator: &str) -> Result<String, ExecutionError> {
 /// Separate from either caller because there are two: the pure built-in, and the machine's
 /// route for a call that carries a reviver.
 fn parse_json_text(text: &str) -> Result<Value, ExecutionError> {
-    let mut reader = JsonReader { rest: text };
-    reader.skip_whitespace();
-    let value = reader.value()?;
-    reader.skip_whitespace();
-    if !reader.rest.is_empty() {
-        return Err(ExecutionError::InvalidJson);
-    }
-    Ok(value)
+    kiln_json::parse(text.as_bytes(), json_value_from_tape)
+        .map_err(|_| ExecutionError::InvalidJson)?
 }
 
 fn delete_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
@@ -40798,192 +40781,111 @@ fn relative_index(argument: Option<&Value>, length: usize, default: usize) -> us
 
 /// A reader over JSON text.
 ///
-/// Hand-written rather than delegating to serde: the output is a `Value` graph with JavaScript's
-/// own rules -- every number is an `f64`, objects keep insertion order, and duplicate keys take
-/// the last value -- and going through an intermediate representation would mean translating all
-/// three back afterwards.
-struct JsonReader<'text> {
-    rest: &'text str,
-}
-
-impl JsonReader<'_> {
-    fn skip_whitespace(&mut self) {
-        // JSON's whitespace is exactly these four; anything else is a token.
-        self.rest = self.rest.trim_start_matches([' ', '\t', '\n', '\r']);
+/// Build the `Value` graph `JSON.parse` answers with from the tape the shared reader produced.
+///
+/// The reader is `kiln-json`, the same crate the native provider archive links, so the two engines
+/// cannot disagree about the grammar (ADR 0025). What is left here is the part only this engine
+/// can do: make its own strings, arrays and objects. Iterative over an explicit stack, as the
+/// reader is, so a document's nesting is bounded by its length rather than by the machine's
+/// stack. Duplicate keys take the last value in the first position and `__proto__` is an
+/// ordinary own property, both because `ObjectData::set` does exactly that.
+fn json_value_from_tape(document: &kiln_json::Tape<'_>) -> Result<Value, ExecutionError> {
+    enum Frame {
+        Array {
+            items: Vec<Value>,
+            remaining: usize,
+        },
+        Object {
+            data: ObjectData,
+            remaining: usize,
+            key: Option<String>,
+        },
     }
-
-    /// Consume `token` if it is next.
-    fn eat(&mut self, token: char) -> bool {
-        match self.rest.strip_prefix(token) {
-            Some(rest) => {
-                self.rest = rest;
-                true
-            }
-            None => false,
-        }
-    }
-
-    fn value(&mut self) -> Result<Value, ExecutionError> {
-        self.skip_whitespace();
-        let Some(next) = self.rest.chars().next() else {
-            return Err(ExecutionError::InvalidJson);
-        };
-        match next {
-            '{' => self.object(),
-            '[' => self.array(),
-            '"' => self.string().map(Value::String),
-            't' | 'f' | 'n' => self.keyword(),
-            _ => self.number(),
-        }
-    }
-
-    fn keyword(&mut self) -> Result<Value, ExecutionError> {
-        for (word, value) in [
-            ("true", Value::Boolean(true)),
-            ("false", Value::Boolean(false)),
-            ("null", Value::Null),
-        ] {
-            if let Some(rest) = self.rest.strip_prefix(word) {
-                self.rest = rest;
-                return Ok(value);
-            }
-        }
-        Err(ExecutionError::InvalidJson)
-    }
-
-    fn number(&mut self) -> Result<Value, ExecutionError> {
-        let end = self
-            .rest
-            .find(|character: char| !matches!(character, '0'..='9' | '-' | '+' | '.' | 'e' | 'E'))
-            .unwrap_or(self.rest.len());
-        let (text, rest) = self.rest.split_at(end);
-        // `f64::from_str` accepts more than JSON does -- "inf", "NaN", a leading "+" -- so the
-        // characters were bounded above first and the spellings JSON forbids are rejected here.
-        let number: f64 = text.parse().map_err(|_| ExecutionError::InvalidJson)?;
-        if !number.is_finite() || text.starts_with('+') || text.starts_with(".") {
+    let mut stack: Vec<Frame> = Vec::new();
+    let mut root = None;
+    for node in document.nodes() {
+        if root.is_some() {
             return Err(ExecutionError::InvalidJson);
         }
-        self.rest = rest;
-        Ok(Value::Number(number))
-    }
-
-    fn string(&mut self) -> Result<String, ExecutionError> {
-        if !self.eat('"') {
-            return Err(ExecutionError::InvalidJson);
-        }
-        let mut text = String::new();
-        loop {
-            let mut characters = self.rest.chars();
-            let Some(character) = characters.next() else {
-                return Err(ExecutionError::InvalidJson);
-            };
-            self.rest = characters.as_str();
-            match character {
-                '"' => return Ok(text),
-                '\\' => text.push(self.escape()?),
-                // A raw control character is not allowed in a JSON string; it has to be escaped.
-                control if control < ' ' => return Err(ExecutionError::InvalidJson),
-                other => text.push(other),
-            }
-        }
-    }
-
-    /// The four hex digits after a `\u`, consumed.
-    fn code_unit(&mut self) -> Result<u32, ExecutionError> {
-        let (digits, rest) = self
-            .rest
-            .split_at_checked(4)
-            .ok_or(ExecutionError::InvalidJson)?;
-        let code = u32::from_str_radix(digits, 16).map_err(|_| ExecutionError::InvalidJson)?;
-        self.rest = rest;
-        Ok(code)
-    }
-
-    fn escape(&mut self) -> Result<char, ExecutionError> {
-        let mut characters = self.rest.chars();
-        let Some(marker) = characters.next() else {
-            return Err(ExecutionError::InvalidJson);
-        };
-        self.rest = characters.as_str();
-        Ok(match marker {
-            '"' => '"',
-            '\\' => '\\',
-            '/' => '/',
-            'b' => '\u{8}',
-            'f' => '\u{c}',
-            'n' => '\n',
-            'r' => '\r',
-            't' => '\t',
-            'u' => {
-                let code = self.code_unit()?;
-                // A pair is two escapes and one character. Decoding each half on its own gave
-                // two replacement characters for every emoji that arrived escaped, which is how
-                // a JSON document written by any other engine spells one outside the BMP.
-                if (0xD800..0xDC00).contains(&code)
-                    && let Some(rest) = self.rest.strip_prefix("\\u")
-                {
-                    let saved = self.rest;
-                    self.rest = rest;
-                    let low = self.code_unit()?;
-                    if (0xDC00..0xE000).contains(&low) {
-                        let combined = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
-                        return Ok(char::from_u32(combined).unwrap_or(char::REPLACEMENT_CHARACTER));
-                    }
-                    // Not a low half after all, so the second escape is not ours to consume.
-                    self.rest = saved;
+        let count = node.len as usize;
+        let mut value = match node.tag {
+            kiln_json::TAG_NULL => Value::Null,
+            kiln_json::TAG_FALSE => Value::Boolean(false),
+            kiln_json::TAG_TRUE => Value::Boolean(true),
+            kiln_json::TAG_NUMBER => Value::Number(node.as_number().unwrap_or(0.0)),
+            kiln_json::TAG_STRING => Value::String(
+                document
+                    .string(node)
+                    .ok_or(ExecutionError::InvalidJson)?
+                    .to_owned(),
+            ),
+            kiln_json::TAG_ARRAY => {
+                if count != 0 {
+                    stack.push(Frame::Array {
+                        items: Vec::with_capacity(count),
+                        remaining: count,
+                    });
+                    continue;
                 }
-                // A lone surrogate has no scalar value. Replacing it keeps the string readable
-                // rather than failing the whole parse over one unpaired half.
-                char::from_u32(code).unwrap_or(char::REPLACEMENT_CHARACTER)
+                Value::Array(ArrayData::new(Vec::new()))
+            }
+            kiln_json::TAG_OBJECT => {
+                if count != 0 {
+                    stack.push(Frame::Object {
+                        data: ObjectData::default(),
+                        remaining: count,
+                        key: None,
+                    });
+                    continue;
+                }
+                Value::Object(Rc::new(RefCell::new(ObjectData::default())))
             }
             _ => return Err(ExecutionError::InvalidJson),
-        })
-    }
-
-    fn array(&mut self) -> Result<Value, ExecutionError> {
-        self.eat('[');
-        let mut items = Vec::new();
-        self.skip_whitespace();
-        if self.eat(']') {
-            return Ok(Value::Array(ArrayData::new(items)));
-        }
+        };
+        // Deliver the value to the container it belongs to, and every container that completes
+        // with it to the one above.
         loop {
-            items.push(self.value()?);
-            self.skip_whitespace();
-            if self.eat(']') {
-                return Ok(Value::Array(ArrayData::new(items)));
+            let Some(frame) = stack.last_mut() else {
+                root = Some(value);
+                break;
+            };
+            match frame {
+                Frame::Array { items, remaining } => {
+                    items.push(value);
+                    *remaining -= 1;
+                    if *remaining != 0 {
+                        break;
+                    }
+                }
+                Frame::Object {
+                    data,
+                    remaining,
+                    key,
+                } => match key.take() {
+                    None => {
+                        let Value::String(name) = value else {
+                            return Err(ExecutionError::InvalidJson);
+                        };
+                        *key = Some(name);
+                        break;
+                    }
+                    Some(name) => {
+                        data.set(&name, value);
+                        *remaining -= 1;
+                        if *remaining != 0 {
+                            break;
+                        }
+                    }
+                },
             }
-            if !self.eat(',') {
-                return Err(ExecutionError::InvalidJson);
-            }
+            value = match stack.pop() {
+                Some(Frame::Array { items, .. }) => Value::Array(ArrayData::new(items)),
+                Some(Frame::Object { data, .. }) => Value::Object(Rc::new(RefCell::new(data))),
+                None => return Err(ExecutionError::InvalidJson),
+            };
         }
     }
-
-    fn object(&mut self) -> Result<Value, ExecutionError> {
-        self.eat('{');
-        let mut data = ObjectData::default();
-        self.skip_whitespace();
-        if self.eat('}') {
-            return Ok(Value::Object(Rc::new(RefCell::new(data))));
-        }
-        loop {
-            self.skip_whitespace();
-            let key = self.string()?;
-            self.skip_whitespace();
-            if !self.eat(':') {
-                return Err(ExecutionError::InvalidJson);
-            }
-            let value = self.value()?;
-            data.set(&key, value);
-            self.skip_whitespace();
-            if self.eat('}') {
-                return Ok(Value::Object(Rc::new(RefCell::new(data))));
-            }
-            if !self.eat(',') {
-                return Err(ExecutionError::InvalidJson);
-            }
-        }
-    }
+    root.ok_or(ExecutionError::InvalidJson)
 }
 
 /// Render a value the way a console does.

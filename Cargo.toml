@@ -33,6 +33,7 @@ kiln-native-runtime = { path = "crates/kiln-native-runtime" }
 kiln-number-core = { path = "crates/kiln-number-core" }
 kiln-runtime = { path = "crates/kiln-runtime" }
 kiln-temporal = { path = "crates/kiln-temporal" }
+kiln-json = { path = "crates/kiln-json" }
 kiln-intl = { path = "crates/kiln-intl" }
 kiln-native-toolchain = { path = "crates/kiln-native-toolchain" }
 kiln-node-abi = { path = "crates/kiln-node-abi" }

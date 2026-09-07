@@ -11,6 +11,7 @@ kiln-host-abi = { workspace = true }
 kiln-ir = { workspace = true }
 kiln-runtime = { workspace = true }
 kiln-temporal = { workspace = true }
+kiln-json = { workspace = true }
 kiln-intl = { workspace = true }
 kiln-node-abi = { workspace = true }
 kiln-node-path = { workspace = true }

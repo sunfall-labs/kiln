@@ -1,0 +1,10 @@
+[package]
+name = "kiln-json"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# No dependencies: the reader is `src/scalar.rs`. simd-json was the reader first and was measured
+# against the scalar pass before being dropped; the table is in `src/lib.rs`.
+[dependencies]
