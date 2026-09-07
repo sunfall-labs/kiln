@@ -28,9 +28,18 @@ once per build workspace. Runtime-provided modules obey the same emission policy
 Compact graph emission now also omits speculative clones, direct-call expansions, numeric shadow
 paths, receiver-cache tables, compiled regular-expression clones, and repeated object/array/phi
 statements. Inline-cache sites are grouped into arrays, module emission is bounded and parallel,
-and release application glue is O0 while the shared runtime remains O3. The current cold ghui
-result is 150,144,132 bytes of C; emission takes 1.54 seconds and compilation takes 15.59 seconds,
-down from a 222-second O3 baseline.
+and release application glue is O0 while the shared runtime remains O3. A missed initializer
+spelling had left compact-mode property and method sites as thousands of independent C statics;
+grouping those too reduced the current cold ghui result to 145,298,364 bytes of C, 157,110,824
+bytes of application objects, and a 106,148,232-byte executable. Emission takes 1.64 seconds and
+compilation takes 15.95 seconds, down from a 222-second O3 baseline.
+
+The declarations header also contained the complete method-group classifier even though generated
+modules never call it. Keeping that implementation only in the shared prelude reduced the header
+from 185,495 to 155,069 bytes, about 14 MB of repeated input over ghui's 474 modules. Adjacent cold
+builds showed no compile-time win from that reduction: 16.89 seconds before compact-site grouping
+and 15.95 seconds after it are still in the same band as the earlier 15.59-second result. The
+cleanup is valid, but it confirms that parsing generated function bodies controls the build.
 
 The remaining outcome is a few-second cold compile. A real-codegen experiment split the largest
 15.4 MB translation unit into five function-body shards: parallel clang time fell from 7.17 to

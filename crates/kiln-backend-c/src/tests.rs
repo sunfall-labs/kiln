@@ -187,6 +187,14 @@ fn decoupled_modules_include_one_external_runtime_header() {
         emitted.source.len() < runtime_prelude_header().len(),
         "a decoupled module must not carry a copy of the runtime header"
     );
+    assert!(
+        !runtime_prelude_header().contains("static uint32_t kiln_c99_method_groups("),
+        "the runtime-only method classifier must not be parsed by every module"
+    );
+    assert!(
+        runtime_prelude_source().contains("uint32_t kiln_c99_method_groups("),
+        "the shared prelude must retain the method classifier implementation"
+    );
 }
 
 #[test]

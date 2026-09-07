@@ -46,14 +46,20 @@ pub(crate) fn method_candidates(
 /// -- and only the boxed clone, emitted first, declares them. Returns the body with the sites
 /// renamed and how many there were.
 pub(super) fn share_sites(body: &str, prefix: &str) -> (String, usize) {
-    const DECLARATION: &str = "static kiln_c99_site site = {0}; ";
+    const DECLARATIONS: &[&str] = &[
+        "static kiln_c99_site site = {0}; ",
+        "static kiln_c99_site site = {KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}; ",
+    ];
     let mut out = String::with_capacity(body.len());
     let mut count = 0usize;
     for line in body.split_inclusive('\n') {
-        if let Some(at) = line.find(DECLARATION) {
+        if let Some((at, declaration)) = DECLARATIONS
+            .iter()
+            .find_map(|declaration| line.find(declaration).map(|at| (at, *declaration)))
+        {
             let name = format!("{prefix}[{count}]");
             count += 1;
-            let stripped = format!("{}{}", &line[..at], &line[at + DECLARATION.len()..]);
+            let stripped = format!("{}{}", &line[..at], &line[at + declaration.len()..]);
             // `site` as a token of its own: `site.`, `&site`, `(site` -- never inside an
             // identifier such as `kiln_c99_site` or `diagnostic_site`.
             let mut renamed = String::with_capacity(stripped.len() + 64);
@@ -89,7 +95,7 @@ mod tests {
     #[test]
     fn zero_backed_sites_are_shared_without_renaming_other_identifiers() {
         let body = "{ static kiln_c99_site site = {0}; use(&site, site.pic_count, diagnostic_site); }\n\
-                    { static kiln_c99_site site = {0}; use(&site); }\n";
+                    { static kiln_c99_site site = {KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}; use(&site); }\n";
         let (shared, count) = share_sites(body, "fn_0_site");
         assert_eq!(count, 2);
         assert!(!shared.contains("static kiln_c99_site"));

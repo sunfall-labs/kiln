@@ -3433,6 +3433,7 @@ enum kiln_value_tag {
 #define KILN_C99_GROUP_NODE_PATH UINT32_C(524288)
 #define KILN_C99_GROUP_MATH_NUMBER UINT32_C(1048576)
 
+/* KILN_RUNTIME_ONLY_METHOD_GROUPS_BEGIN */
 static uint32_t kiln_c99_method_groups(uint64_t code) {
     /* Four `Temporal` families are *ranges* rather than lists. `from`, `compare` and `Now.x` are
      * one code per kind and the twenty-three operations are one code each, all contiguous, so the
@@ -3473,6 +3474,7 @@ static uint32_t kiln_c99_method_groups(uint64_t code) {
 static int kiln_c99_method_in_group(uint64_t code, uint32_t group) {
     return (kiln_c99_method_groups(code) & group) != 0;
 }
+/* KILN_RUNTIME_ONLY_METHOD_GROUPS_END */
 "#,
             include_str!("runtime/prelude_types.h"),
             kiln_native_number_abi::provider_abi_registry!(provider_c_declaration),
@@ -4048,7 +4050,7 @@ pub fn runtime_prelude_header() -> &'static str {
     // defines for the prelude unit; a definition in every unit would give each its own copy.
     static FOR_UNITS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     FOR_UNITS.get_or_init(|| {
-        let text = PRELUDE_HEADER.replace(
+        let mut text = PRELUDE_HEADER.replace(
             "static uint64_t kiln_c99_proto_epoch;",
             "extern uint64_t kiln_c99_proto_epoch __attribute__((visibility(\"hidden\")));",
         );
@@ -4056,6 +4058,16 @@ pub fn runtime_prelude_header() -> &'static str {
             text != PRELUDE_HEADER,
             "the prototype epoch's definition moved"
         );
+        const RUNTIME_ONLY_BEGIN: &str = "/* KILN_RUNTIME_ONLY_METHOD_GROUPS_BEGIN */";
+        const RUNTIME_ONLY_END: &str = "/* KILN_RUNTIME_ONLY_METHOD_GROUPS_END */";
+        let begin = text
+            .find(RUNTIME_ONLY_BEGIN)
+            .expect("runtime-only method groups begin marker moved");
+        let end = text
+            .find(RUNTIME_ONLY_END)
+            .expect("runtime-only method groups end marker moved")
+            + RUNTIME_ONLY_END.len();
+        text.replace_range(begin..end, "");
         text
     })
 }
