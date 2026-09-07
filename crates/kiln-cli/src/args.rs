@@ -89,6 +89,10 @@ pub enum Command {
     },
     Daemon(DaemonAction),
     Cache(CacheAction),
+    Exec {
+        binary: String,
+        args: Vec<String>,
+    },
 }
 
 /// What `kiln cache` was asked to do. One action today, spelled as an action rather than as a
@@ -367,6 +371,13 @@ where
             };
             Command::Cache(action)
         }
+        "x" | "exec" => {
+            let Some(binary) = positional.next() else {
+                return Err(Error::usage("no binary specified for `kiln x`"));
+            };
+            let args = positional.collect();
+            Command::Exec { binary, args }
+        }
         other => {
             return Err(Error::usage(format!("unknown command `{other}`")));
         }
@@ -493,6 +504,7 @@ commands:
     watch <file>       run <file> now and rerun it whenever its bytes change on disk
     daemon <action>    start | stop | status | serve
     cache <action>     gc
+    x <binary> [args]  execute a package binary from node_modules/.bin or PATH
 
 options:
     --one-shot         run the pipeline in this process; never contact a daemon.

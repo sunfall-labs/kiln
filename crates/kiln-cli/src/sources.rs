@@ -370,6 +370,14 @@ pub(crate) fn include_reachable_dependencies(
         if let Some(format) = importer_format {
             node_formats.insert(importer.clone(), to_wire_node_format(format));
         }
+        if importer
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(kiln_data_formats::is_data_extension)
+        {
+            // Data files (JSON, JSON5, JSONC, YAML, TOML) are leaf nodes in the module graph.
+            continue;
+        }
         let commonjs = importer_format == Some(ResolverNodeModuleFormat::CommonJs);
         let request = if commonjs {
             NodeRequestKind::Require
@@ -495,6 +503,94 @@ fn to_wire_node_format(format: ResolverNodeModuleFormat) -> NodeModuleFormat {
         ResolverNodeModuleFormat::EsModule => NodeModuleFormat::EsModule,
         ResolverNodeModuleFormat::CommonJs => NodeModuleFormat::CommonJs,
     }
+}
+
+/// Audit reachable package resolutions against the root `package.json`.
+/// Emits diagnostic notes for "phantom dependencies" (packages imported by project code
+/// that resolved from `node_modules` but are not declared in root `package.json`).
+pub(crate) fn audit_phantom_dependencies(
+    project_root: &Path,
+    resolutions: &[PackageResolution],
+) -> Vec<String> {
+    let manifest_path = project_root.join("package.json");
+    let Ok(manifest_bytes) = std::fs::read(&manifest_path) else {
+        return Vec::new();
+    };
+    let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(&manifest_bytes) else {
+        return Vec::new();
+    };
+
+    let mut declared_deps = HashSet::new();
+    for section in [
+        "dependencies",
+        "devDependencies",
+        "peerDependencies",
+        "optionalDependencies",
+    ] {
+        if let Some(obj) = manifest.get(section).and_then(|v| v.as_object()) {
+            for key in obj.keys() {
+                declared_deps.insert(key.clone());
+            }
+        }
+    }
+
+    let mut notes = Vec::new();
+    let mut seen = HashSet::new();
+
+    for res in resolutions {
+        let specifier = &res.specifier;
+        if specifier.starts_with('.')
+            || specifier.starts_with('/')
+            || specifier.starts_with('#')
+            || kiln_module_resolver::NodeBuiltin::parse(specifier).is_some()
+        {
+            continue;
+        }
+
+        let importer_path = Path::new(&res.importer);
+        if importer_path
+            .components()
+            .any(|c| c.as_os_str() == "node_modules")
+        {
+            continue;
+        }
+
+        let pkg_name = if specifier.starts_with('@') {
+            let mut parts = specifier.split('/');
+            let scope = parts.next().unwrap_or("");
+            let name = parts.next().unwrap_or("");
+            if scope.is_empty() || name.is_empty() {
+                continue;
+            }
+            format!("{scope}/{name}")
+        } else {
+            specifier.split('/').next().unwrap_or("").to_string()
+        };
+
+        if pkg_name.is_empty() {
+            continue;
+        }
+
+        let target_path = Path::new(&res.target);
+        let is_in_node_modules = target_path
+            .components()
+            .any(|c| c.as_os_str() == "node_modules");
+
+        if is_in_node_modules
+            && !declared_deps.contains(&pkg_name)
+            && seen.insert((pkg_name.clone(), res.importer.clone()))
+        {
+            let display_importer = importer_path
+                .strip_prefix(project_root)
+                .unwrap_or(importer_path)
+                .display();
+            notes.push(format!(
+                "phantom dependency: '{pkg_name}' is imported by '{display_importer}' but not declared in package.json"
+            ));
+        }
+    }
+
+    notes
 }
 
 fn collect_with_limit(root: &Path, max_files: usize) -> Result<Walk> {
@@ -954,6 +1050,108 @@ mod tests {
         assert_eq!(node_formats.len(), 2);
     }
 
+    #[test]
+    fn node_resolves_tsconfig_paths_imports() {
+        let tree = Tree::new("tsconfig-paths");
+        tree.file("package.json");
+        std::fs::write(tree.0.join("package.json"), r#"{"type":"module"}"#)
+            .expect("write package.json");
+        tree.file("tsconfig.json");
+        std::fs::write(
+            tree.0.join("tsconfig.json"),
+            r#"{
+                "compilerOptions": {
+                    "baseUrl": ".",
+                    "paths": {
+                        "@/*": ["src/*"]
+                    }
+                }
+            }"#,
+        )
+        .expect("write tsconfig.json");
+        tree.file("src/main.ts");
+        tree.file("src/utils/math.ts");
+        let entry = tree.0.join("src/main.ts");
+        let math = tree.0.join("src/utils/math.ts");
+        std::fs::write(
+            &entry,
+            "import { answer } from '@/utils/math'; console.log(answer);",
+        )
+        .expect("write entry");
+        std::fs::write(&math, "export const answer = 42;").expect("write math");
+
+        let canonical_entry = entry.canonicalize().expect("canonical entry");
+        let canonical_math = math.canonicalize().expect("canonical math");
+        let mut texts = vec![(
+            canonical_entry.to_string_lossy().into_owned(),
+            std::fs::read_to_string(&entry).expect("read entry"),
+        )];
+
+        let (resolutions, node_formats) = include_reachable_dependencies(
+            &tree.0,
+            canonical_entry.to_str().expect("UTF-8 entry"),
+            &mut texts,
+            true,
+        )
+        .expect("resolves tsconfig path alias under node policy");
+
+        assert_eq!(resolutions.len(), 1);
+        assert_eq!(resolutions[0].specifier, "@/utils/math");
+        assert_eq!(resolutions[0].target, canonical_math.to_string_lossy());
+        assert_eq!(texts.len(), 2);
+        assert_eq!(node_formats.len(), 2);
+    }
+
+    #[test]
+    fn node_resolves_and_loads_data_formats_imports() {
+        let tree = Tree::new("data-formats-imports");
+        tree.file("package.json");
+        std::fs::write(
+            tree.0.join("package.json"),
+            r#"{"name": "app", "type": "module"}"#,
+        )
+        .expect("write package.json");
+
+        tree.file("src/main.ts");
+        tree.file("data/config.yaml");
+        tree.file("data/settings.toml");
+
+        let entry = tree.0.join("src/main.ts");
+        let yaml = tree.0.join("data/config.yaml");
+        let toml = tree.0.join("data/settings.toml");
+
+        std::fs::write(
+            &entry,
+            "import config from '../data/config.yaml';\nimport settings from '../data/settings.toml';\nconsole.log(config, settings);\n",
+        )
+        .expect("write entry");
+        std::fs::write(&yaml, "name: kiln\nport: 8080\n").expect("write yaml");
+        std::fs::write(&toml, "[database]\nhost = \"localhost\"\n").expect("write toml");
+
+        let canonical_entry = entry.canonicalize().expect("canonical entry");
+        let canonical_yaml = yaml.canonicalize().expect("canonical yaml");
+        let canonical_toml = toml.canonicalize().expect("canonical toml");
+
+        let mut texts = vec![(
+            canonical_entry.to_string_lossy().into_owned(),
+            std::fs::read_to_string(&entry).expect("read entry"),
+        )];
+
+        let (resolutions, _) = include_reachable_dependencies(
+            &tree.0,
+            canonical_entry.to_str().expect("UTF-8 entry"),
+            &mut texts,
+            true,
+        )
+        .expect("resolves yaml and toml imports without attempting to parse as JS");
+
+        assert_eq!(resolutions.len(), 2);
+        let targets: HashSet<_> = resolutions.into_iter().map(|r| r.target).collect();
+        assert!(targets.contains(canonical_yaml.to_str().unwrap()));
+        assert!(targets.contains(canonical_toml.to_str().unwrap()));
+        assert_eq!(texts.len(), 3);
+    }
+
     /// The loop `read_all` replaced: one `realpath` and one read per file.
     fn read_each_file_separately(files: &[PathBuf]) -> Vec<(String, String)> {
         files
@@ -1138,5 +1336,65 @@ mod tests {
             is_discoverable(&tree.0, &tree.0.join("linked.js")),
             "a deletion event must still trigger authoritative reconciliation"
         );
+    }
+
+    #[test]
+    fn audits_phantom_dependencies_not_declared_in_package_json() {
+        let tree = Tree::new("phantom-deps-audit");
+        tree.file("package.json");
+        std::fs::write(
+            tree.0.join("package.json"),
+            r#"{
+                "name": "my-app",
+                "dependencies": {
+                    "declared-pkg": "^1.0.0"
+                }
+            }"#,
+        )
+        .expect("write package.json");
+
+        let resolutions = vec![
+            PackageResolution {
+                importer: tree.0.join("src/index.ts").to_string_lossy().into_owned(),
+                specifier: "declared-pkg".to_string(),
+                target: tree
+                    .0
+                    .join("node_modules/declared-pkg/index.js")
+                    .to_string_lossy()
+                    .into_owned(),
+                condition: kiln_proto::NodeRequestKind::Import,
+                package_json: None,
+                package_json_hash: None,
+            },
+            PackageResolution {
+                importer: tree.0.join("src/index.ts").to_string_lossy().into_owned(),
+                specifier: "phantom-pkg".to_string(),
+                target: tree
+                    .0
+                    .join("node_modules/phantom-pkg/index.js")
+                    .to_string_lossy()
+                    .into_owned(),
+                condition: kiln_proto::NodeRequestKind::Import,
+                package_json: None,
+                package_json_hash: None,
+            },
+            PackageResolution {
+                importer: tree.0.join("src/index.ts").to_string_lossy().into_owned(),
+                specifier: "@scoped/phantom".to_string(),
+                target: tree
+                    .0
+                    .join("node_modules/@scoped/phantom/index.js")
+                    .to_string_lossy()
+                    .into_owned(),
+                condition: kiln_proto::NodeRequestKind::Import,
+                package_json: None,
+                package_json_hash: None,
+            },
+        ];
+
+        let notes = audit_phantom_dependencies(&tree.0, &resolutions);
+        assert_eq!(notes.len(), 2);
+        assert!(notes[0].contains("phantom dependency: 'phantom-pkg'"));
+        assert!(notes[1].contains("phantom dependency: '@scoped/phantom'"));
     }
 }

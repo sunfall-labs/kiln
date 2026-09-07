@@ -619,9 +619,14 @@ fn snapshot_module_payload(
                 message: "source is not synchronized".to_owned(),
             })?;
     if source_kind == kiln_module_graph::ModuleSource::Json {
-        return Ok(kiln_module_graph::ModulePayload::JsonText(
-            source.text.clone(),
-        ));
+        let json_text =
+            kiln_data_formats::parse_data_to_json(path, &source.text).map_err(|err| {
+                kiln_module_graph::ModuleGraphError::Source {
+                    path: path.to_path_buf(),
+                    message: err.to_string(),
+                }
+            })?;
+        return Ok(kiln_module_graph::ModulePayload::JsonText(json_text));
     }
     let path_string =
         path.to_str()
@@ -1008,12 +1013,15 @@ fn module_payload<E: QueryEngine>(
         });
     }
     if source_kind == kiln_module_graph::ModuleSource::Json {
-        return Ok(kiln_module_graph::ModulePayload::JsonText(
-            engine
-                .source(module_file)
-                .expect("source checked above")
-                .to_owned(),
-        ));
+        let raw_text = engine.source(module_file).expect("source checked above");
+        let json_text =
+            kiln_data_formats::parse_data_to_json(module_path, raw_text).map_err(|err| {
+                kiln_module_graph::ModuleGraphError::Source {
+                    path: module_path.to_path_buf(),
+                    message: err.to_string(),
+                }
+            })?;
+        return Ok(kiln_module_graph::ModulePayload::JsonText(json_text));
     }
     if source_kind == kiln_module_graph::ModuleSource::CommonJs {
         let source = engine.source(module_file).expect("source checked above");

@@ -8,6 +8,7 @@ repository.workspace = true
 [dependencies]
 kiln-proto = { workspace = true }
 serde_json = { workspace = true }
+kiln-data-formats = { workspace = true }
 kiln-daemon = { workspace = true }
 kiln-host-abi = { workspace = true }
 kiln-native-runtime = { workspace = true }

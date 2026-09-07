@@ -12,7 +12,9 @@ mod args;
 mod backend;
 mod client;
 mod commands;
+mod env;
 mod error;
+mod exec;
 mod lifecycle;
 mod oneshot;
 mod render;
@@ -47,7 +49,25 @@ fn main() {
 }
 
 fn run() -> Result<i32> {
-    match args::parse(utf8_args(std::env::args_os().skip(1))?)? {
+    let mut raw_args = utf8_args(std::env::args_os())?;
+    let program = raw_args
+        .first()
+        .and_then(|p| Path::new(p).file_name()?.to_str())
+        .unwrap_or("");
+    let is_kilnx = program == "kilnx" || program.starts_with("kilnx-");
+    let args = if is_kilnx {
+        if raw_args.len() > 1 {
+            raw_args.remove(0);
+            raw_args.insert(0, "x".to_string());
+            raw_args
+        } else {
+            vec!["--help".to_string()]
+        }
+    } else {
+        raw_args.into_iter().skip(1).collect()
+    };
+
+    match args::parse(args)? {
         Parsed::Help => {
             emit(args::HELP)?;
             Ok(0)
@@ -139,7 +159,11 @@ fn find_project_root(target: Option<&Path>) -> Result<PathBuf> {
     let mut current = Some(start_dir.as_path());
 
     while let Some(dir) = current {
-        if dir.join("package.json").is_file() || dir.join("node_modules").is_dir() {
+        if dir.join("package.json").is_file()
+            || dir.join("tsconfig.json").is_file()
+            || dir.join("jsconfig.json").is_file()
+            || dir.join("node_modules").is_dir()
+        {
             return Ok(dir.to_path_buf());
         }
         // A repository is a project boundary, and the search stops at one rather than treating
@@ -170,8 +194,15 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
     let socket = client::socket_path(invocation.socket, &root)?;
     let one_shot = invocation.one_shot;
 
+    let is_test = matches!(invocation.command, Command::Test { .. });
+    env::load_project_env(&root, is_test);
+
     let auto_node = |explicit: bool| -> bool {
-        explicit || root.join("package.json").is_file() || root.join("node_modules").is_dir()
+        explicit
+            || root.join("package.json").is_file()
+            || root.join("tsconfig.json").is_file()
+            || root.join("jsconfig.json").is_file()
+            || root.join("node_modules").is_dir()
     };
 
     match invocation.command {
@@ -348,6 +379,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             lifecycle::serve(&socket)?;
             Ok(0)
         }
+        Command::Exec { binary, args } => exec::run_exec(&binary, &args, &root),
     }
 }
 
@@ -430,6 +462,7 @@ mod tests {
             "watch",
             "daemon",
             "cache",
+            "x",
             "--one-shot",
             "--socket",
             "--interval",
@@ -459,7 +492,8 @@ mod tests {
         assert_eq!(
             commands,
             [
-                "run", "build", "check", "test", "project", "stats", "watch", "daemon", "cache"
+                "run", "build", "check", "test", "project", "stats", "watch", "daemon", "cache",
+                "x"
             ]
         );
     }
@@ -506,6 +540,27 @@ mod tests {
 
         let found = find_project_root(Some(&target_file)).expect("discover root");
         assert_eq!(found, repo_dir.canonicalize().expect("canonical repo_dir"));
+
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[test]
+    fn find_project_root_locates_ancestor_tsconfig_json() {
+        let fixture =
+            std::env::temp_dir().join(format!("kiln-test-tsconfig-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&fixture);
+        let project_dir = fixture.join("ts-project");
+        let sub_dir = project_dir.join("src/nested");
+        std::fs::create_dir_all(&sub_dir).expect("create test directories");
+        std::fs::write(project_dir.join("tsconfig.json"), "{}").expect("write tsconfig.json");
+        let target_file = sub_dir.join("app.ts");
+        std::fs::write(&target_file, "console.log(1);").expect("write file");
+
+        let found = find_project_root(Some(&target_file)).expect("discover root");
+        assert_eq!(
+            found,
+            project_dir.canonicalize().expect("canonical project_dir")
+        );
 
         let _ = std::fs::remove_dir_all(&fixture);
     }

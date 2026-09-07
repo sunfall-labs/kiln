@@ -732,7 +732,10 @@ fn sync_project_sources_with_override(
         // Starting from an empty snapshot makes this read the entry and its closure and nothing
         // else; every module it reaches is absent from `texts` and so is read on the same terms
         // the entry always was.
-        sources::include_reachable_dependencies(root, entry, &mut texts, node)?
+        let (resolutions, formats) =
+            sources::include_reachable_dependencies(root, entry, &mut texts, node)?;
+        notes.extend(sources::audit_phantom_dependencies(root, &resolutions));
+        (resolutions, formats)
     } else {
         (Vec::new(), Vec::new())
     };

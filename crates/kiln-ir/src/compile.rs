@@ -6882,7 +6882,8 @@ impl Compiler {
             self.optional_call(callee, arguments, span);
             return;
         }
-        let is_console_log = matches!(self.resolve("console"), Resolution::Unresolved)
+        let is_console_log = !Self::has_spread(arguments)
+            && matches!(self.resolve("console"), Resolution::Unresolved)
             && matches!(
                 &callee.kind,
                 ExpressionKind::StaticMember { object, property, optional: false }
@@ -6895,18 +6896,8 @@ impl Compiler {
         }
 
         if is_console_log {
-            // Still a compile-time shape rather than a value. `console` becomes an ordinary
-            // object once there are objects to hold it; until then this is the only way to
-            // reach stdout, and turning it into a real call would mean inventing a callable
-            // with no object model underneath it.
-            if Self::has_spread(arguments) {
-                // `HostCall` carries its arity in the bytecode, and a spread does not have one
-                // until it runs. Refused rather than flattened into a single array argument,
-                // which would print `[1, 2]` where the program asked for `1 2`.
-                self.error(Some(span), "spread into `console.log` is not supported yet");
-                self.push_constant(Constant::Undefined);
-                return;
-            }
+            // Still a fast compile-time intrinsic when there are no spreads. When spreading,
+            // the call falls through to the normal method dispatch on the `console` object.
             let argc = self.emit_arguments(arguments);
             self.code.push(Instruction::HostCall {
                 op: HostOp::WriteStdout,
