@@ -4070,6 +4070,16 @@ pub fn runtime_prelude_header() -> &'static str {
             text != PRELUDE_HEADER,
             "the prototype epoch's definition moved"
         );
+        let json_document =
+            "static int kiln_c99_json_document(const char *bytes, size_t len, kiln_val *out);";
+        assert!(
+            text.contains(json_document),
+            "the JSON document bridge declaration moved"
+        );
+        text = text.replace(
+            json_document,
+            "extern int kiln_c99_json_document(const char *bytes, size_t len, kiln_val *out);",
+        );
         const RUNTIME_ONLY_BEGIN: &str = "/* KILN_RUNTIME_ONLY_METHOD_GROUPS_BEGIN */";
         const RUNTIME_ONLY_END: &str = "/* KILN_RUNTIME_ONLY_METHOD_GROUPS_END */";
         let begin = text
