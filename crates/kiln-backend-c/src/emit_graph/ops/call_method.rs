@@ -466,6 +466,18 @@ pub(super) fn emit_call_method(
     // 1. Math.* intrinsic if closed_world
     let math_intrinsic = if closed_world {
         match (key_str, argc) {
+            ("resolve", 1) => Some(format!(
+                "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_PROMISE)) {{ \
+                             kiln_val kiln_resolved; \
+                             if (kiln_c99_val_promise_resolve(v{a0}, &kiln_resolved) == KILN_C99_OK) {{ \
+                                 v{v} = kiln_resolved; \
+                                 handled = 1; \
+                             }} \
+                         }}",
+                o = object.0,
+                a0 = args[0].0,
+                v = v
+            )),
             ("sqrt", 1) => Some(format!(
                 "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
                              if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}))) {{ \
@@ -598,6 +610,11 @@ pub(super) fn emit_call_method(
     } else {
         None
     };
+    // A builtin's static method is what the table says only while no own property has been
+    // written onto any builtin: `Math.max = f` and `Promise.resolve = f` move the store epoch,
+    // and every intrinsic above then takes the general call, which finds the override.
+    let math_intrinsic = math_intrinsic
+        .map(|text| format!("if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0)) {{ {text} }}"));
 
     // 2. Array push intrinsic
     let push_intrinsic = if key_str == "push" && argc == 1 {

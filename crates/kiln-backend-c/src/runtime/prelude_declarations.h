@@ -91,6 +91,8 @@ extern int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
 extern int kiln_c99_define_named_fast(kiln_val target, kiln_val key, kiln_val value, int *status,
                                       kiln_c99_site *site);
 extern int kiln_c99_spread_object_fast(kiln_val target, kiln_val source, int *status);
+extern int kiln_c99_val_promise_resolve(kiln_val value, kiln_val *out);
+extern uint64_t kiln_c99_builtin_store_epoch;
 extern int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len, kiln_property **out);
 extern kiln_value kiln_c99_method(uint64_t code);
 extern int kiln_c99_commonjs_require_value(kiln_value *out, kiln_commonjs_require_fn call, void *context);

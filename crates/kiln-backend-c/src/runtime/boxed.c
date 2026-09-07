@@ -92,6 +92,26 @@ static kiln_value kiln_val_to_boundary(kiln_val v) {
     }
 }
 
+/* `Promise.resolve(v)` for the builtin constructor: a promise is answered as itself, anything
+ * else gets a promise already fulfilled with it. The dispatch case does the same through two
+ * boundary conversions and the method switch; the emitted C calls this behind the builtin
+ * store epoch, so a program that reassigns `Promise.resolve` takes the general path. */
+static int kiln_c99_val_promise_resolve(kiln_val value, kiln_val *out) {
+    kiln_value promise;
+    int status;
+    if ((KILN_VAL_IS_OBJECT(value) || (value & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX) &&
+        kiln_c99_gc_kind_of_ptr(KILN_VAL_PTR(value)) == KILN_GC_PROMISE) {
+        *out = value;
+        return KILN_C99_OK;
+    }
+    status = kiln_c99_new_promise(&promise);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_settle(promise, kiln_val_to_boundary(value), 0);
+    if (status != KILN_C99_OK) return status;
+    *out = kiln_val_from_boundary(promise);
+    return KILN_C99_OK;
+}
+
 static size_t kiln_c99_val_string_length(kiln_val v) {
     if (KILN_LIKELY(KILN_VAL_IS_STRING(v))) {
         const kiln_string *s = (const kiln_string *)KILN_VAL_PTR(v);

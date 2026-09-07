@@ -1,6 +1,6 @@
 # `Math.max = f` is not seen by a call site the emitter lowered to an intrinsic
 
-**Status:** open
+**Status:** fixed 2026-09-06 -- every builtin intrinsic the emitter inlines is guarded by `kiln_c99_builtin_store_epoch == 0`, so a write onto any builtin sends the site to the general call; probe `conformance/native/builtin-intrinsics-see-overrides.js`. The `delete Object.keys` case below stays open.
 
 Found 2026-09-06 while proving the builtin-receiver method cache (`kiln_c99_cached_method_matches`,
 `KILN_VALUE_BUILTIN` arm) sees an own property written onto a builtin. It does -- `Object.keys`

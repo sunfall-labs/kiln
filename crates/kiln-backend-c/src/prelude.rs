@@ -3988,6 +3988,7 @@ fn build_runtime_prelude_source(src: &str) -> String {
         "kiln_c99_globals",
         "kiln_c99_process",
         "kiln_c99_atomics",
+        "kiln_c99_builtin_store_epoch",
     ];
 
     for line in src.lines() {

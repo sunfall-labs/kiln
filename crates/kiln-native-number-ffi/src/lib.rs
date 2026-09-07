@@ -227,6 +227,54 @@ mod realm {
     #[derive(Clone)]
     struct NativeWork(Rc<WorkOwner>);
 
+    /// A microtask or next-tick job: the same owner as `NativeWork`, held inline. The
+    /// microtask lanes move a job exactly once, from the queue to the drain, so the `Rc` that
+    /// lets a timer be re-armed would be a malloc and a free per job for nothing -- and a
+    /// promise-heavy loop queues one job per `await`.
+    struct NativeMicrotask(WorkOwner);
+
+    impl NativeMicrotask {
+        fn new(pointer: *mut c_void, run: Option<RunWork>, drop: Option<DropWork>) -> Option<Self> {
+            Self::with_roots(pointer, run, drop, WorkRoots::Block)
+        }
+
+        fn with_roots(
+            pointer: *mut c_void,
+            run: Option<RunWork>,
+            drop: Option<DropWork>,
+            roots: WorkRoots,
+        ) -> Option<Self> {
+            let (Some(run), Some(drop)) = (run, drop) else {
+                return None;
+            };
+            if pointer.is_null() {
+                return None;
+            }
+            Some(Self(WorkOwner {
+                pointer,
+                run,
+                drop,
+                roots,
+            }))
+        }
+
+        fn mark_roots(&self, marker: &GcMarker) {
+            match self.0.roots {
+                WorkRoots::Block => marker.block(self.0.pointer),
+                WorkRoots::Completion => {
+                    let work = unsafe { &*self.0.pointer.cast::<CompletionWork>() };
+                    if let Some(continuation) = &work.continuation {
+                        marker.block(continuation.pointer);
+                    }
+                }
+            }
+        }
+
+        fn run(&self, host: *mut c_void, thrown: *mut c_void) -> i32 {
+            unsafe { (self.0.run)(self.0.pointer, host, thrown) }
+        }
+    }
+
     impl NativeWork {
         fn new(pointer: *mut c_void, run: Option<RunWork>, drop: Option<DropWork>) -> Option<Self> {
             Self::with_roots(pointer, run, drop, WorkRoots::Block)
@@ -546,7 +594,7 @@ mod realm {
 
     struct NativeRealm {
         runtime: RefCell<RealmRuntime>,
-        work: RefCell<Realm<NativeWork, NativeWork>>,
+        work: RefCell<Realm<NativeMicrotask, NativeWork>>,
         continuations: RefCell<HashMap<RequestId, AsyncContinuation>>,
         http_connections: RefCell<HashMap<kiln_host_abi::ResourceId, NativeHttpConnection>>,
         next_http_client_request_id: Cell<u64>,
@@ -1154,7 +1202,7 @@ mod realm {
                 if matches!(realm.clock.get(), NativeClock::Virtual) {
                     runtime.pause_time();
                 }
-                runtime.ready_turn::<NativeWork, NativeWork>()
+                runtime.ready_turn::<NativeMicrotask, NativeWork>()
             };
             match turn {
                 Some(RuntimeTurn::Completion(completion)) => {
@@ -1163,7 +1211,7 @@ mod realm {
                     }
                     while let Some(RuntimeTurn::Completion(next)) = {
                         let mut runtime = realm.runtime.borrow_mut();
-                        runtime.ready_turn::<NativeWork, NativeWork>()
+                        runtime.ready_turn::<NativeMicrotask, NativeWork>()
                     } {
                         if let Some(status) = route_completion(realm, next) {
                             return status;
@@ -1313,7 +1361,7 @@ mod realm {
         });
         realm.queued.borrow_mut().insert(completion.request);
         let pointer = Box::into_raw(completion_work).cast::<c_void>();
-        let Some(work) = NativeWork::with_roots(
+        let Some(work) = NativeMicrotask::with_roots(
             pointer,
             Some(run_completion),
             Some(drop_completion),
@@ -2236,7 +2284,7 @@ mod realm {
             let Ok(mut queue) = realm.work.try_borrow_mut() else {
                 return RUNTIME_ERROR;
             };
-            let Some(work) = NativeWork::new(work, run, drop) else {
+            let Some(work) = NativeMicrotask::new(work, run, drop) else {
                 return INVALID_ARGUMENT;
             };
             queue.queue_microtask(work);
@@ -2265,7 +2313,7 @@ mod realm {
             let Ok(mut queue) = realm.work.try_borrow_mut() else {
                 return RUNTIME_ERROR;
             };
-            let Some(work) = NativeWork::new(work, run, drop) else {
+            let Some(work) = NativeMicrotask::new(work, run, drop) else {
                 return INVALID_ARGUMENT;
             };
             queue.queue_next_tick(work);
