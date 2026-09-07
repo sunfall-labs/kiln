@@ -1024,6 +1024,9 @@ static int kiln_c99_super_call_val(kiln_host *host, kiln_val *produced, kiln_val
 static int kiln_c99_store_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char *key,
 static int kiln_c99_array_reserve(kiln_array *array, size_t needed);
+static void kiln_c99_bytes_retire(uint8_t *bytes, size_t size);
+static void kiln_c99_gc_note_external(size_t size);
+static int kiln_c99_typed_alloc_ex(kiln_value *out, kiln_typed_kind kind, size_t count, int zeroed);
 static int kiln_c99_array_push(kiln_value target, kiln_value value);
 static int kiln_c99_array_push_val(kiln_value target, kiln_val value);
 static int kiln_c99_prototype_object(kiln_value function, kiln_value *out);
@@ -1312,6 +1315,7 @@ static void kiln_c99_gc_collect(void *opaque, int force);
 static void kiln_c99_gc_collect_mid_turn(kiln_gc_heap *heap) {
 static int kiln_c99_nursery_fresh_chunk(kiln_gc_heap *heap) {
 static void kiln_c99_nursery_turn_chunk(kiln_gc_heap *heap) {
+static void kiln_c99_gc_note_external(size_t size) {
 static void *kiln_c99_gc_alloc_ex(uint32_t kind, size_t size, int zero_payload) {
 static void *kiln_c99_gc_alloc(uint32_t kind, size_t size) {
 static void *kiln_c99_gc_alloc_pointer_free(uint32_t kind, size_t size) {
@@ -1395,11 +1399,18 @@ static int kiln_c99_builtin_typed_kind(uint64_t builtin, kiln_typed_kind *kind) 
 static uint64_t kiln_c99_typed_constructor(kiln_typed_kind kind) {
 static uint64_t kiln_c99_typed_prototype(kiln_typed_kind kind) {
 static int kiln_c99_typed_prototype_kind(uint64_t builtin, kiln_typed_kind *kind) {
+#define KILN_C99_BYTES_CACHE 8
+#define KILN_C99_BYTES_CACHE_MIN ((size_t)64 * 1024)
+typedef struct kiln_bytes_entry {
+static kiln_bytes_entry kiln_c99_bytes_cache[KILN_C99_BYTES_CACHE];
+static void kiln_c99_bytes_retire(uint8_t *bytes, size_t size) {
+static int kiln_c99_new_typed_buffer_ex(kiln_value *out, size_t byte_length, int zeroed) {
 static int kiln_c99_new_typed_buffer(kiln_value *out, size_t byte_length) {
 static int kiln_c99_to_index(kiln_value value, size_t *out, kiln_value *thrown) {
 static double kiln_c99_typed_get(kiln_typed_array *view, size_t index) {
 static void kiln_c99_typed_set(kiln_typed_array *view, size_t index, double value) {
 static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
+static int kiln_c99_typed_alloc_ex(kiln_value *out, kiln_typed_kind kind, size_t count, int zeroed) {
 static int kiln_c99_typed_alloc(kiln_value *out, kiln_typed_kind kind, size_t count) {
 static int kiln_c99_new_data_view(kiln_value *out, kiln_value source, size_t byte_offset,
 static int kiln_c99_data_view_at(kiln_data_view *view, size_t offset, size_t width,

@@ -77,7 +77,8 @@ static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value rec
                                             "Buffer.concat entries must be typed arrays");
             total += view->length;
         }
-        status = kiln_c99_typed_alloc(out, KILN_TYPED_UINT8, total);
+        /* Every byte of the result is written below. */
+        status = kiln_c99_typed_alloc_ex(out, KILN_TYPED_UINT8, total, 0);
         if (status != KILN_C99_OK) return status;
         for (at = 0; at < items->count; ++at) {
             kiln_typed_array *view = kiln_c99_val_typed_array(items->elements[at]);

@@ -1373,6 +1373,13 @@ static void kiln_c99_nursery_turn_chunk(kiln_gc_heap *heap) {
     (void)kiln_c99_nursery_fresh_chunk(heap);
 }
 
+/* Memory a cell owns outside the heap -- a typed buffer's bytes -- counts toward the next
+ * collection like the cell itself. */
+static void kiln_c99_gc_note_external(size_t size) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    if (heap != NULL) heap->since_collection += size;
+}
+
 static void *kiln_c99_gc_alloc_ex(uint32_t kind, size_t size, int zero_payload) {
     kiln_gc_heap *heap = kiln_c99_gc_heap();
     size_t payload = size == 0 ? 1 : size;
@@ -2218,7 +2225,8 @@ static void kiln_c99_gc_finalize(kiln_gc_block *block) {
         free(((kiln_collection *)payload)->hash_table);
         break;
     case KILN_GC_TYPED_BUFFER:
-        free(((kiln_typed_buffer *)payload)->bytes);
+        kiln_c99_bytes_retire(((kiln_typed_buffer *)payload)->bytes,
+                              ((kiln_typed_buffer *)payload)->byte_length);
         break;
     case KILN_GC_REGEXP:
         /* The compiled pattern is the provider's, and this is the only place it is handed back. */

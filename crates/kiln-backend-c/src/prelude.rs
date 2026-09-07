@@ -4077,6 +4077,7 @@ pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     // Per thread, and trusted only under the realm generation it was filled under.
     ("kiln_c99_realm_cached", C99StateOwner::Realm),
     ("kiln_c99_builtin_store_epoch", C99StateOwner::Realm),
+    ("kiln_c99_bytes_cache", C99StateOwner::Realm),
     ("kiln_c99_gc_stress_checks", C99StateOwner::Process),
     ("kiln_c99_introspect_pending", C99StateOwner::Process),
     ("kiln_c99_introspect_armed", C99StateOwner::Process),
