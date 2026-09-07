@@ -978,6 +978,7 @@ static int kiln_c99_is_reference(kiln_value value);
 static int kiln_c99_has_intrinsic_text(kiln_value value);
 static int kiln_c99_crosses_boundary(kiln_value value);
 static kiln_value kiln_c99_text(kiln_value value);
+static size_t kiln_c99_double_to_js(double value, char out[32]);
 static kiln_value kiln_c99_copy_text(const char *text, size_t len);
 static kiln_value kiln_c99_inspect(kiln_value value);
 static int kiln_c99_reserve(void **items, size_t *capacity, size_t needed, size_t item_size);
@@ -1495,6 +1496,15 @@ static int kiln_c99_url_construct(kiln_value *out, const kiln_value *args, size_
 static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,
 static int kiln_c99_form_decode(const char *bytes, size_t len, kiln_value *out) {
 static int kiln_c99_node_querystring_parse(kiln_value *out, const kiln_value *args, size_t argc) {
+static const uint64_t kiln_c99_ryu_pow5_inv[292][2] = {
+static const uint64_t kiln_c99_ryu_pow5[326][2] = {
+static uint32_t kiln_c99_ryu_log10_pow2(uint32_t e) { return (e * UINT32_C(78913)) >> 18; }
+static uint32_t kiln_c99_ryu_log10_pow5(uint32_t e) { return (e * UINT32_C(732923)) >> 20; }
+static uint32_t kiln_c99_ryu_pow5_bits(uint32_t e) { return ((e * UINT32_C(1217359)) >> 19) + 1; }
+static uint64_t kiln_c99_ryu_mul_shift(uint64_t m, const uint64_t *multiplier, int32_t shift) {
+static uint32_t kiln_c99_ryu_pow5_factor(uint64_t value) {
+static uint64_t kiln_c99_ryu_shortest(uint64_t bits, int32_t *exponent) {
+static size_t kiln_c99_double_to_js(double value, char out[32]) {
 static size_t kiln_c99_exact_digits(double value, unsigned char *digits, size_t capacity,
 static int kiln_c99_to_fixed(kiln_value *out, double value, int places) {
 static void kiln_c99_significant_digits(double value, size_t count, char *mantissa,
@@ -1886,7 +1896,6 @@ static int kiln_c99_define_method(kiln_value target, const char *key, size_t key
 static int kiln_c99_json_needs_escape(const char *bytes, size_t len) {
 static int kiln_c99_json_quote(kiln_text *text, const char *bytes, size_t len) {
 static int kiln_c99_json_lacks_tojson(kiln_value value) {
-static int kiln_c99_json_append_uint(kiln_text *text, uint64_t magnitude) {
 static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value value,
 #define KILN_JSON_OPEN(bracket)                                                                   \
 #define KILN_JSON_BREAK(first)                                                                    \

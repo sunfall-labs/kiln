@@ -42,8 +42,8 @@ static double kiln_c99_key_index(const char *key, size_t key_len) {
     if (!(number >= 0.0) || floor(number) != number || number > 4294967294.0) {
         return -1.0;
     }
-    length = kiln_number_to_js_string(number, buffer, sizeof(buffer));
-    if (length < 0 || (size_t)length != key_len || memcmp(buffer, key, key_len) != 0) {
+    length = kiln_c99_double_to_js(number, buffer);
+    if (length != key_len || memcmp(buffer, key, key_len) != 0) {
         return -1.0;
     }
     return number;

@@ -442,8 +442,8 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
             for (index = 0; index < object->element_count; ++index) {
                 if (object->elements[index] == KILN_VAL_HOLE) continue;
                 char num_buf[32];
-                int nlen = kiln_number_to_js_string((double)index, num_buf, sizeof num_buf);
-                int status = kiln_c99_put(host, target, num_buf, (size_t)nlen, kiln_val_to_boundary(object->elements[index]), depth, thrown);
+                size_t nlen = kiln_c99_double_to_js((double)index, num_buf);
+                int status = kiln_c99_put(host, target, num_buf, nlen, kiln_val_to_boundary(object->elements[index]), depth, thrown);
                 if (status != KILN_C99_OK) return status;
             }
         }

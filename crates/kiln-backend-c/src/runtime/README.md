@@ -2,8 +2,13 @@
 
 `prelude_runtime.c` and `prelude_core.c` used to be two files of 8.2k and 27k lines. They have
 been split into the domain files listed below, as a pure move: the concatenation of each group,
-in the order listed, is byte-identical to the original single file it replaced. No behaviour
+in the order listed, was byte-identical to the original single file it replaced. No behaviour
 changed.
+
+One file has been added since: `ryu_tables.c`, which is generated and holds only data. A file
+added here is a decision about the *shape* of the prelude rather than an ordinary edit -- the
+default place for new C is one of the domain files below -- and this one earns its own because
+it is 636 lines nobody reads and nobody hand-edits.
 
 **Order is load-bearing.** C needs a declaration before its use, so the parts of each original
 file are concatenated in exactly the order below (see `runtime_parts!` and `core_parts!` in
@@ -29,7 +34,8 @@ split.
 | `generators.c` | generator objects |
 | `methods.c` | method tables and names, array prototype methods, CommonJS require |
 | `web.c` | entropy, hex, UTF-8 validation, URL, URLSearchParams, querystring |
-| `numbers.c` | number formatting: fixed, precision, exponential, radix |
+| `ryu_tables.c` | GENERATED (`scripts/gen-ryu-tables.py`): Ryu's two 128-bit multiplier tables, read only by `numbers.c` |
+| `numbers.c` | number formatting: the shortest-round-trip `Number::toString`, fixed, precision, exponential, radix |
 | `builtins.c` | built-in names, regexp replacement expansion, arguments objects |
 | `globals.c` | the global object, console, process, Atomics, global bindings |
 | `bigint.c` | BigInt values |

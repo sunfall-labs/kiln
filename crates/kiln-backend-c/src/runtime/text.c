@@ -472,13 +472,9 @@ static kiln_value kiln_c99_text(kiln_value value) {
     case KILN_VALUE_STRING:
         return value;
     case KILN_VALUE_NUMBER: {
-        char buffer[64];
+        char buffer[32];
         double number = kiln_c99_as_number(value);
-        int len = kiln_number_to_js_string(number, buffer, sizeof(buffer));
-        if (len < 0 || (size_t)len >= sizeof(buffer)) {
-            return kiln_c99_undefined();
-        }
-        return kiln_c99_copy_text(buffer, (size_t)len);
+        return kiln_c99_copy_text(buffer, kiln_c99_double_to_js(number, buffer));
     }
     case KILN_VALUE_OBJECT: {
         static const char object_text[] = "[object Object]";

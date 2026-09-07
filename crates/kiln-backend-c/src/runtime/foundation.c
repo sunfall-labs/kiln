@@ -225,6 +225,9 @@ static int kiln_c99_is_reference(kiln_value value);
 static int kiln_c99_has_intrinsic_text(kiln_value value);
 static int kiln_c99_crosses_boundary(kiln_value value);
 static kiln_value kiln_c99_text(kiln_value value);
+/* `runtime/numbers.c` -- declared here because the files that spell an array index as an
+ * object key (`shapes.c`, `properties.c`, `stores.c`) are concatenated before it. */
+static size_t kiln_c99_double_to_js(double value, char out[32]);
 static kiln_value kiln_c99_copy_text(const char *text, size_t len);
 static kiln_value kiln_c99_inspect(kiln_value value);
 static int kiln_c99_reserve(void **items, size_t *capacity, size_t needed, size_t item_size);

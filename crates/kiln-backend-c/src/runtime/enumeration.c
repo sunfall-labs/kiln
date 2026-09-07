@@ -554,8 +554,8 @@ static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out
                 for (index = 0; index < object->element_count; ++index) {
                     if (object->elements[index] == KILN_VAL_HOLE) continue;
                     char num_buf[32];
-                    int nlen = kiln_number_to_js_string((double)index, num_buf, sizeof num_buf);
-                    status = kiln_c99_array_push(built, kiln_c99_copy_text(num_buf, (size_t)nlen));
+                    size_t nlen = kiln_c99_double_to_js((double)index, num_buf);
+                    status = kiln_c99_array_push(built, kiln_c99_copy_text(num_buf, nlen));
                     if (status != KILN_C99_OK) return status;
                 }
             }
@@ -692,8 +692,8 @@ static int kiln_c99_enumerate_keys(kiln_host *host, kiln_value target, kiln_valu
                 for (index = 0; index < object->element_count; ++index) {
                     if (object->elements[index] == KILN_VAL_HOLE) continue;
                     char num_buf[32];
-                    int nlen = kiln_number_to_js_string((double)index, num_buf, sizeof num_buf);
-                    status = kiln_c99_array_push(shadowed, kiln_c99_copy_text(num_buf, (size_t)nlen));
+                    size_t nlen = kiln_c99_double_to_js((double)index, num_buf);
+                    status = kiln_c99_array_push(shadowed, kiln_c99_copy_text(num_buf, nlen));
                     if (status != KILN_C99_OK) return status;
                 }
             }
@@ -729,8 +729,7 @@ static int kiln_c99_enumerate_keys(kiln_host *host, kiln_value target, kiln_valu
                 for (index = 0; index < object->element_count; ++index) {
                     if (object->elements[index] == KILN_VAL_HOLE) continue;
                     char num_buf[32];
-                    int nlen = kiln_number_to_js_string((double)index, num_buf, sizeof num_buf);
-                    size_t key_len = (size_t)nlen;
+                    size_t key_len = kiln_c99_double_to_js((double)index, num_buf);
                     if (kiln_c99_keys_contain(shadowed, num_buf, key_len)) continue;
                     status = kiln_c99_array_push(shadowed, kiln_c99_copy_text(num_buf, key_len));
                     if (status != KILN_C99_OK) return status;

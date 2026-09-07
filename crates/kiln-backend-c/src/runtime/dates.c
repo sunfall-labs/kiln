@@ -85,7 +85,7 @@ static int kiln_c99_new_date(kiln_value *out, double time) {
 }
 
 /* Fixed-width decimal, because every field of an ISO instant is written to its own width and
- * `kiln_number_to_js_string` writes the shortest form instead. */
+ * `kiln_c99_double_to_js` writes the shortest form instead. */
 static int kiln_c99_pad_number(kiln_text *text, int64_t value, int width) {
     char digits[24];
     int at = (int)sizeof digits;

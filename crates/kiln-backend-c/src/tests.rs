@@ -2295,10 +2295,13 @@ fn generated_numeric_conversion_ignores_the_embedding_process_locale() {
     assert!(!generated.source.contains("kiln_c99_strtod_c"));
     assert!(generated.source.contains("KILN_NUMBER_FORMAT_VERSION 1"));
     assert!(generated.source.contains("KILN_NUMBER_PARSE_VERSION 1"));
+    // The spelling is `kiln_c99_double_to_js`, in the prelude's own C, rather than the provider
+    // call this used to name: nothing it does consults `localeconv`, and the executable below
+    // proves that under a comma-decimal locale rather than only asserting it.
     assert!(
         generated
             .source
-            .contains("kiln_number_to_js_string(number, buffer, sizeof(buffer))")
+            .contains("kiln_c99_double_to_js(number, buffer)")
     );
     assert!(!generated.source.contains("snprintf("));
     assert!(!generated.source.contains("setlocale("));

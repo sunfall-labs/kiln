@@ -3145,8 +3145,8 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     for (index = 0; index < object->element_count && status == KILN_C99_OK; ++index) {
                         if (object->elements[index] == KILN_VAL_HOLE) continue;
                         char num_buf[32];
-                        int nlen = kiln_number_to_js_string((double)index, num_buf, sizeof num_buf);
-                        kiln_value key = kiln_c99_copy_text(num_buf, (size_t)nlen);
+                        size_t nlen = kiln_c99_double_to_js((double)index, num_buf);
+                        kiln_value key = kiln_c99_copy_text(num_buf, nlen);
                         kiln_value val = kiln_val_to_boundary(object->elements[index]);
                         if (code == KILN_C99_METHOD_OBJECT_KEYS) {
                             status = kiln_c99_array_push(built, key);
@@ -3264,8 +3264,8 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                         for (index = 0; index < source->element_count; ++index) {
                             if (source->elements[index] == KILN_VAL_HOLE) continue;
                             char num_buf[32];
-                            int nlen = kiln_number_to_js_string((double)index, num_buf, sizeof num_buf);
-                            status = kiln_c99_put(host, target, num_buf, (size_t)nlen, kiln_val_to_boundary(source->elements[index]), depth, thrown);
+                            size_t nlen = kiln_c99_double_to_js((double)index, num_buf);
+                            status = kiln_c99_put(host, target, num_buf, nlen, kiln_val_to_boundary(source->elements[index]), depth, thrown);
                             if (status != KILN_C99_OK) return status;
                         }
                     }
@@ -5249,12 +5249,10 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 }
                 for (index = 0; index < length; ++index) {
                     char key[32];
-                    int key_len = kiln_number_to_js_string((double)index, key, sizeof key);
+                    size_t key_len = kiln_c99_double_to_js((double)index, key);
                     kiln_value value;
                     kiln_value produced;
-                    if (key_len < 0 || (size_t)key_len >= sizeof key)
-                        KILN_C99_REFUSE("an array-like index with no string spelling");
-                    status = kiln_c99_get(host, source, key, (size_t)key_len, &value, depth, thrown);
+                    status = kiln_c99_get(host, source, key, key_len, &value, depth, thrown);
                     if (status != KILN_C99_OK) return status;
                     if (mapper.tag != KILN_VALUE_UNDEFINED) {
                         kiln_value visit[2] = {value, kiln_c99_number((double)index)};

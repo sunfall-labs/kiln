@@ -13,9 +13,8 @@ static double kiln_c99_array_index(kiln_value key) {
         if (!isfinite(number) || number < 0.0 || floor(number) != number) {
             return -1.0;
         }
-        length = kiln_number_to_js_string(number, buffer, sizeof(buffer));
-        if (length < 0 || (size_t)length != key.len ||
-            memcmp(buffer, key.ptr, key.len) != 0) {
+        length = kiln_c99_double_to_js(number, buffer);
+        if (length != key.len || memcmp(buffer, key.ptr, key.len) != 0) {
             return -1.0;
         }
         return number;

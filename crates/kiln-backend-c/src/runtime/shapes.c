@@ -151,10 +151,10 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
         for (i = 0; i < object->element_count; ++i) {
             if (object->elements[i] == KILN_VAL_HOLE) continue;
             char num_buf[32];
-            int nlen = kiln_number_to_js_string((double)i, num_buf, sizeof num_buf);
-            const char *ikey = kiln_c99_intern(num_buf, (size_t)nlen);
+            size_t nlen = kiln_c99_double_to_js((double)i, num_buf);
+            const char *ikey = kiln_c99_intern(num_buf, nlen);
             object->properties[pos].key = ikey;
-            object->properties[pos].key_len = (size_t)nlen;
+            object->properties[pos].key_len = nlen;
             object->properties[pos].enumerable = 1;
             object->properties[pos].writable = 1;
             object->properties[pos].configurable = 1;
