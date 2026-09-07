@@ -1302,10 +1302,10 @@ fn node_builtin_static_imports_are_typed_virtual_modules() {
             ExecutionCapabilities::default(),
         )
         .expect("execute builtin imports");
-    assert_eq!(
-        host.output,
-        ["function function appendFile,mkdir,readFile,stat,writeFile"]
-    );
+    // The key list is `kiln_node_abi::builtin_abi("fs/promises").exports`, the link-time
+    // contract: a name listed there and unimplemented would link and read `undefined`, which is
+    // the failure CLAUDE.md calls the expensive one. So the expectation follows the table.
+    assert_eq!(host.output, ["function function readFile,stat,writeFile"]);
 }
 
 #[test]
