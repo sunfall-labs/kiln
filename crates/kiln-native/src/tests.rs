@@ -6478,6 +6478,92 @@ fn resolver_and_node_abi_cover_the_same_builtin_set() {
 }
 
 #[test]
+fn executable_graph_omits_unused_modules_only_with_package_permission() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let project = TestDirectory::new("kiln-native-side-effect-free-graph");
+    let package = project.path.join("node_modules/example");
+    fs::create_dir_all(&package).expect("create package");
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"example","type":"module","main":"index.js","sideEffects":false}"#,
+    )
+    .expect("write package metadata");
+    fs::write(
+        package.join("index.js"),
+        "export { used } from './used.js'; export { unused } from './unused.js';",
+    )
+    .expect("write package barrel");
+    fs::write(package.join("used.js"), "export const used = 42;").expect("write used module");
+    fs::write(
+        package.join("unused.js"),
+        "console.log('must be removable'); export const unused = 7;",
+    )
+    .expect("write unused module");
+    let entry = project.path.join("main.mjs");
+    fs::write(&entry, "import { used } from 'example'; console.log(used);").expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("source graph compiles");
+
+    let selected = native_executable_graph(&graph).expect("select executable modules");
+    let names = selected
+        .modules
+        .iter()
+        .filter_map(|node| node.path.file_name())
+        .collect::<BTreeSet<_>>();
+    assert!(names.contains(std::ffi::OsStr::new("main.mjs")));
+    assert!(names.contains(std::ffi::OsStr::new("used.js")));
+    assert!(!names.contains(std::ffi::OsStr::new("index.js")));
+    assert!(!names.contains(std::ffi::OsStr::new("unused.js")));
+}
+
+#[test]
+fn executable_graph_keeps_unused_import_without_package_permission() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let project = TestDirectory::new("kiln-native-side-effectful-graph");
+    let package = project.path.join("node_modules/example");
+    fs::create_dir_all(&package).expect("create package");
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"example","type":"module","main":"index.js"}"#,
+    )
+    .expect("write package metadata");
+    fs::write(
+        package.join("index.js"),
+        "console.log('observable'); export const unused = 7;",
+    )
+    .expect("write package module");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "import { unused } from 'example'; console.log('entry');",
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("source graph compiles");
+
+    let selected = native_executable_graph(&graph).expect("select executable modules");
+    assert_eq!(selected.modules.len(), 2);
+    assert!(
+        selected
+            .modules
+            .iter()
+            .any(|node| node.path.ends_with("node_modules/example/index.js"))
+    );
+}
+
+#[test]
 fn native_build_with_march_native_opt_in_succeeds() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
