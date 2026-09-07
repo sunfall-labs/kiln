@@ -1133,9 +1133,9 @@ static int kiln_c99_generator_step(kiln_host *host, kiln_value produced, int don
 static int kiln_c99_default_require(void *context, kiln_host *host, kiln_value specifier,
                                     kiln_value *result, kiln_value *thrown) {
     (void)context;
-    (void)host;
-    (void)result;
     if (specifier.tag == KILN_VALUE_STRING && specifier.ptr != NULL) {
+        if (specifier.len == 8 && memcmp(specifier.ptr, "node:ffi", 8) == 0)
+            return kiln_c99_node_ffi_commonjs(host, result, thrown);
         kiln_text text = {0};
         int status;
         if (kiln_c99_text_append_c(&text, "Cannot find module '") != KILN_C99_OK ||
@@ -1161,6 +1161,14 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
     kiln_array *array;
     size_t index;
     int status;
+    if ((code & KILN_C99_FFI_DYNAMIC_BASE) != 0 ||
+        code == KILN_C99_METHOD_NODE_FFI_DLOPEN ||
+        code == KILN_C99_METHOD_NODE_FFI_GET_RAW_POINTER ||
+        code == KILN_C99_METHOD_NODE_FFI_TO_ARRAY_BUFFER ||
+        code == KILN_C99_METHOD_NODE_FFI_REGISTER_CALLBACK ||
+        code == KILN_C99_METHOD_NODE_FFI_UNREGISTER_CALLBACK ||
+        code == KILN_C99_METHOD_NODE_FFI_CLOSE)
+        return kiln_c99_node_ffi(host, result, code, receiver, args, argc, depth, thrown);
     /* `kiln_c99_method_groups` is a generated switch over every method code this backend knows,
      * and every group test below used to run it again from scratch just to AND one bit out of
      * its answer -- a code that reaches its group late in this chain (an ordinary node:http

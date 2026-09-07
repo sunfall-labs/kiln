@@ -110,6 +110,27 @@ macro_rules! provider_c_declaration {
     ($group:ident, $name:ident, node_path_relative) => {
         concat!("int ", stringify!($name), "(const uint8_t *from, uint64_t from_len, const uint8_t *to, uint64_t to_len, uint8_t *out, uint64_t capacity, uint64_t *out_len);\n")
     };
+    ($group:ident, $name:ident, ffi_open) => {
+        concat!("int ", stringify!($name), "(const uint8_t *path, uint64_t path_len, uint64_t *out_library);\n")
+    };
+    ($group:ident, $name:ident, ffi_close) => {
+        concat!("int ", stringify!($name), "(uint64_t library);\n")
+    };
+    ($group:ident, $name:ident, ffi_prepare) => {
+        concat!("int ", stringify!($name), "(uint64_t library, const uint8_t *symbol, uint64_t symbol_len, const uint32_t *argument_types, uint64_t argument_count, uint32_t result_type, uint64_t *out_function);\n")
+    };
+    ($group:ident, $name:ident, ffi_call) => {
+        concat!("int ", stringify!($name), "(uint64_t function, const kiln_ffi_value *arguments, uint64_t argument_count, kiln_ffi_value *out_result);\n")
+    };
+    ($group:ident, $name:ident, ffi_register_callback) => {
+        concat!("int ", stringify!($name), "(const uint32_t *argument_types, uint64_t argument_count, uint32_t result_type, kiln_ffi_dispatch_fn dispatch, void *context, uint64_t *out_pointer);\n")
+    };
+    ($group:ident, $name:ident, ffi_unregister_callback) => {
+        concat!("int ", stringify!($name), "(uint64_t pointer);\n")
+    };
+    ($group:ident, $name:ident, ffi_last_error) => {
+        concat!("int ", stringify!($name), "(const uint8_t **out_bytes, uint64_t *out_len);\n")
+    };
     ($group:ident, $name:ident, realm_argv_at) => {
         concat!("int ", stringify!($name), "(uint64_t index, const uint8_t **out_bytes, uint64_t *out_len);\n")
     };

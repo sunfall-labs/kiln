@@ -107,9 +107,31 @@ static int kiln_c99_process_object(kiln_value *out) {
         status = kiln_c99_put(NULL, *process, "argv", 4, argv, 0, NULL);
     if (status == KILN_C99_OK)
         status = kiln_c99_put(NULL, *process, "execArgv", 8, exec_argv, 0, NULL);
-    if (status == KILN_C99_OK)
-        status = kiln_c99_put(NULL, *process, "platform", 8,
-                              kiln_c99_copy_text("kiln", 4), 0, NULL);
+    /* A native executable with node:ffi is running against the target OS ABI: platform and arch
+     * select the library it can actually load, so reporting the compiler target is now the honest
+     * capability answer. The interpreter keeps "kiln" because it exposes no dynamic loader. */
+    if (status == KILN_C99_OK) {
+#if defined(__linux__)
+        kiln_value platform = kiln_c99_copy_text("linux", 5);
+#elif defined(__APPLE__)
+        kiln_value platform = kiln_c99_copy_text("darwin", 6);
+#elif defined(_WIN32)
+        kiln_value platform = kiln_c99_copy_text("win32", 5);
+#else
+        kiln_value platform = kiln_c99_copy_text("kiln", 4);
+#endif
+        status = kiln_c99_put(NULL, *process, "platform", 8, platform, 0, NULL);
+    }
+    if (status == KILN_C99_OK) {
+#if defined(__x86_64__) || defined(_M_X64)
+        kiln_value arch = kiln_c99_copy_text("x64", 3);
+#elif defined(__aarch64__) || defined(_M_ARM64)
+        kiln_value arch = kiln_c99_copy_text("arm64", 5);
+#else
+        kiln_value arch = kiln_c99_copy_text("unknown", 7);
+#endif
+        status = kiln_c99_put(NULL, *process, "arch", 4, arch, 0, NULL);
+    }
     if (status == KILN_C99_OK)
         status = kiln_c99_put(NULL, *process, "version", 7,
                               kiln_c99_copy_text("kiln", 4), 0, NULL);

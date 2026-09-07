@@ -2269,6 +2269,13 @@ fn native_builtin_supported_exports(
             "Console", "debug", "default", "error", "info", "log", "warn",
         ],
         NodeBuiltin::Events => &["EventEmitter", "default"],
+        NodeBuiltin::Ffi => &[
+            "default",
+            "dlopen",
+            "getRawPointer",
+            "suffix",
+            "toArrayBuffer",
+        ],
         NodeBuiltin::Net => &["connect", "createConnection", "createServer", "default"],
         // `METHODS` is a constant array rather than a function, so it costs nothing to answer and
         // a placeholder served it worst: the unmaterialized-callable fallback made
@@ -2553,6 +2560,34 @@ exports[23] = error;"#,
             r#"kiln_value constructor = kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_EMITTER);
 exports[0] = constructor;
 exports[1] = constructor;"#,
+        ),
+        NodeBuiltin::Ffi => Some(
+            r#"kiln_value dlopen = kiln_c99_method(KILN_C99_METHOD_NODE_FFI_DLOPEN);
+kiln_value get_raw_pointer = kiln_c99_method(KILN_C99_METHOD_NODE_FFI_GET_RAW_POINTER);
+kiln_value to_array_buffer = kiln_c99_method(KILN_C99_METHOD_NODE_FFI_TO_ARRAY_BUFFER);
+#if defined(_WIN32)
+kiln_value suffix = kiln_c99_copy_text(".dll", 4);
+#elif defined(__APPLE__)
+kiln_value suffix = kiln_c99_copy_text(".dylib", 6);
+#else
+kiln_value suffix = kiln_c99_copy_text(".so", 3);
+#endif
+kiln_value namespace;
+int status = kiln_c99_new_object(&namespace);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "dlopen", 6, dlopen, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "getRawPointer", 13, get_raw_pointer, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "suffix", 6, suffix, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "toArrayBuffer", 13, to_array_buffer, 0, NULL);
+if (status != KILN_C99_OK) return status;
+exports[0] = namespace;
+exports[1] = dlopen;
+exports[2] = get_raw_pointer;
+exports[3] = suffix;
+exports[4] = to_array_buffer;"#,
         ),
         NodeBuiltin::Net => Some(
             r#"kiln_value connect = kiln_c99_method(KILN_C99_METHOD_NODE_NET_CONNECT);
