@@ -242,9 +242,9 @@ static size_t kiln_c99_double_to_js(double value, char out[32]) {
     uint32_t ieee_exponent;
     uint64_t output;
     int32_t exponent;
-    char digits[24];
-    size_t k = 0;
-    size_t index;
+    char digit_buf[24];
+    char *digits;
+    size_t k;
     int32_t n;
     size_t length = 0;
 
@@ -292,14 +292,27 @@ static size_t kiln_c99_double_to_js(double value, char out[32]) {
         }
     }
 
-    do {
-        digits[k++] = (char)('0' + (int)(output % 10));
-        output /= 10;
-    } while (output != 0);
-    for (index = 0; index < k / 2; ++index) {
-        char held = digits[index];
-        digits[index] = digits[k - 1 - index];
-        digits[k - 1 - index] = held;
+    /* The digits, written from the least significant backwards into the end of the buffer, so
+     * `digits` simply points at the first one and the reversal pass this used to make is gone.
+     * A shortest decimal is at most seventeen digits and nearly always fewer than ten, so the
+     * common case divides a 32-bit value -- which on this platform is a multiply and a shift
+     * where the 64-bit division was a wider multiply, a subtract and a second multiply. */
+    {
+        char *tail = digit_buf + sizeof digit_buf;
+        if (output <= UINT32_C(0xFFFFFFFF)) {
+            uint32_t small = (uint32_t)output;
+            do {
+                *--tail = (char)('0' + (int)(small % 10u));
+                small /= 10u;
+            } while (small != 0);
+        } else {
+            do {
+                *--tail = (char)('0' + (int)(output % 10));
+                output /= 10;
+            } while (output != 0);
+        }
+        digits = tail;
+        k = (size_t)((digit_buf + sizeof digit_buf) - tail);
     }
     n = exponent + (int32_t)k;
 
