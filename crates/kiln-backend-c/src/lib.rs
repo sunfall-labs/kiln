@@ -22,9 +22,9 @@ pub const C_ABI_VERSION: u32 = 1;
 /// This is deliberately independent from [`C_ABI_VERSION`]: diagnostics and private helper code
 /// can change emitted object bytes without changing the public embedding layout. Native artifact
 /// keys include this revision so those objects are never reused across generator changes.
-// Epoch 31 changes the private dictionary-cache index encoding. Old sentinel-initialized
-// modules must not be reused beside the zero-backed runtime, despite the unchanged C layout.
-pub const C_GENERATOR_VERSION: u32 = 38;
+// Epoch 31 changed the private dictionary-cache index encoding. Epoch 39 indexes SSA values in
+// compact bodies once they reach 512 entries; earlier objects used distinct locals until 4,096.
+pub const C_GENERATOR_VERSION: u32 = 39;
 
 /// Stable basename used by decoupled translation units for the shared runtime declarations.
 ///
