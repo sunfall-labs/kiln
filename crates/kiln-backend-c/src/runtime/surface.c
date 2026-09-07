@@ -250,6 +250,18 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
         kiln_c99_same_name(key, key_len, "@@iterator")) {
         return KILN_C99_METHOD_ARRAY_VALUES;
     }
+    /* `values` is the same function `@@iterator` hands out, and an array *instance* has said so
+     * since the iteration protocol was written down (`read.c`, beside the `@@iterator` case).
+     * The prototype object did not: `values` is numbered in the generic group rather than the
+     * array-lookup one, so `kiln_c99_array_method` never answered it here. That made
+     * `Array.prototype.values` a refusal where `[].values` is a function, and -- because the
+     * own-keys walk lists a code only when the name it carries leads back to it -- left `values`
+     * out of `Object.getOwnPropertyNames(Array.prototype)`, one name short of the interpreter.
+     * `String.prototype` reaches the same code through `kiln_c99_string_method` already. */
+    if (builtin == KILN_C99_BUILTIN_ARRAY_PROTOTYPE &&
+        kiln_c99_same_name(key, key_len, "values")) {
+        return KILN_C99_METHOD_ARRAY_VALUES;
+    }
     /* Every prototype that has one shares the generic `toLocaleString`, which invokes the
      * receiver's own `toString` -- so an array's answer is its join, which is what the
      * interpreter gives. A bundled `mobx` reads `Array.prototype.toLocaleString` by name. */
