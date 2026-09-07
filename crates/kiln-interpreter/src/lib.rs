@@ -45005,6 +45005,7 @@ const OBJECT_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::Named
 ]);
 const ARRAY_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
     "map",
+    "parallelMap",
     "forEach",
     "filter",
     "reduce",

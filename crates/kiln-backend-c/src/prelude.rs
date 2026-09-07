@@ -1045,6 +1045,12 @@ method_ids! {
     (KILN_C99_METHOD_NODE_ALS_EXIT, 491, Direct),
     (KILN_C99_METHOD_NODE_ALS_DISABLE, 492, Direct),
     (KILN_C99_METHOD_STRING_FROM_CODE_POINT, 493, Generic),
+    /* `parallelMap` (ADR 0058, application 2). A member of `Array.prototype` on both engines,
+     * so a *read* answers a callable and a feature test takes the same branch as on the
+     * interpreter; called through a read value it is `map` under its own name, generic like
+     * the one borrowed from `Array.prototype`. The pooled walk is a direct-call-site lowering
+     * and never reaches this code. */
+    (KILN_C99_METHOD_ARRAY_PARALLEL_MAP, 494, ArrayLookup),
 }
 
 /// The hook a host installs when it lets a program make a second realm.
@@ -3122,6 +3128,7 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_NODE_ALS_EXIT),
     emit_method_define!(KILN_C99_METHOD_NODE_ALS_DISABLE),
     emit_method_define!(KILN_C99_METHOD_STRING_FROM_CODE_POINT),
+    emit_method_define!(KILN_C99_METHOD_ARRAY_PARALLEL_MAP),
     emit_method_define!(KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE),
     emit_method_define!(KILN_C99_METHOD_NODE_QUERYSTRING_PARSE),
     r#"
@@ -3486,6 +3493,16 @@ typedef struct kiln_method_entry {
  * is how this prelude spells a method id, and the guard that checks every id is nameable reads
  * them by prefix. A macro named like an id that is not one is a trap for that reader. */
 static kiln_method_entry kiln_c99_method_index[sizeof kiln_c99_method_codes / sizeof *kiln_c99_method_codes];
+
+static uint64_t kiln_c99_method_code_end(void) {
+    static uint64_t end = 0;
+    size_t index;
+    if (end != 0) return end;
+    for (index = 0; index < sizeof kiln_c99_method_codes / sizeof *kiln_c99_method_codes; ++index) {
+        if ((uint64_t)kiln_c99_method_codes[index] >= end) end = (uint64_t)kiln_c99_method_codes[index] + 1;
+    }
+    return end;
+}
 static size_t kiln_c99_method_index_len;
 static int kiln_c99_method_index_ready;
 
@@ -3652,9 +3669,10 @@ static int kiln_c99_is_array_member(const char *key, size_t key_len) {
     static const char *const members[] = {
         "at", "concat", "constructor", "copyWithin", "entries", "every", "fill", "filter", "find",
         "findIndex", "findLast", "findLastIndex", "flat", "flatMap", "forEach", "includes",
-        "indexOf", "join", "keys", "lastIndexOf", "length", "map", "pop", "push", "reduce",
-        "reduceRight", "reverse", "shift", "slice", "some", "sort", "splice", "toLocaleString",
-        "toReversed", "toSorted", "toSpliced", "toString", "unshift", "values", "with"};
+        "indexOf", "join", "keys", "lastIndexOf", "length", "map", "parallelMap", "pop", "push",
+        "reduce", "reduceRight", "reverse", "shift", "slice", "some", "sort", "splice",
+        "toLocaleString", "toReversed", "toSorted", "toSpliced", "toString", "unshift", "values",
+        "with"};
     size_t index;
     for (index = 0; index < sizeof members / sizeof *members; ++index) {
         if (kiln_c99_same_name(key, key_len, members[index])) {
