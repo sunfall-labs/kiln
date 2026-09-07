@@ -5357,3 +5357,54 @@ Two things found on the way, both fixed here:
   path; the call-method fast paths under it read the hoisted flag that only the other prologues
   emit, so `conformance/native/top-level-await-refuses.js` failed to *compile*, and with it
   everything after it in `scripts/native.sh`. One `push_str`, and the corpus runs whole again.
+
+---
+
+## What a property read costs when nothing knows its type (2026-09-07)
+
+A shape records which slots an object has. It records nothing about what is in them, so a
+property read was proven nothing, and that turned out to be the largest single cost in the
+compiled backend's object code.
+
+`p.x * p.x` therefore ran boxed. Worse, the result was unproven too, so an accumulator summing
+over objects was never proven either: each turn tested two tags, copied two doubles out of their
+boxes, added, and canonicalised the NaN of the box it built. Reading one field of one object in
+a loop cost 11 cycles a turn against node's 1.5.
+
+Both bodies now guess that a property feeding arithmetic holds a number, and each checks the
+guess the way its own shape allows -- the versioned body by leaving for the generic clone beside
+it, the restartable typed entry by taking the restart it already takes on a cache miss. The
+guess is narrower in the typed entry: only operators no string accepts, never `+`, because a
+body that concatenated a property would restart on every call and never use the entry again.
+`xs[i].x` summed over a thousand objects went 1.70 ms to 0.78, and one object's field in a loop
+1.61 ms to 0.52.
+
+### Three things measured on the way that were not what they looked like
+
+**The accumulator's register moves were not the bottleneck.** The loop moved the sum between the
+integer and floating registers twice a turn, which reads like a critical path. Skipping the tag
+test for operands already proven numbers, and reading their twins directly, removed the moves
+and bought about 3%. The tests were not what cost; not knowing the type was.
+
+**Nor was the inline cache's shape.** Our emitted read loads the shape and the slot from a
+mutable per-site struct every turn, where a real engine bakes them into the code. A standalone C
+model of both forms measured them identical at 2.2 cycles a turn -- the loads are not the
+problem, and the model at 2.2 cycles against our 11 is what pointed at the types.
+
+**And a cache miss that leaves for the generic clone bought nothing.** The reasoning was that a
+fast clone whose loop holds no call at all lets the compiler hoist everything it reads out of
+the loop. Implemented over reads and calls it made class-poly 40% *slower* -- a polymorphic call
+site leaves too often -- and restricted to reads alone it measured nothing at all, four rows
+within noise. Reverted. If someone tries this again, the missing piece is that the guard has to
+be hoisted out of the loop, not merely made hoistable.
+
+### Where class-poly's remaining 2.9x is
+
+Not in `dist()`, which now multiplies and adds in registers throughout, and not in the
+polymorphism: the same loop over one class rather than two is within 5%. It is the per-call
+guard chain -- shape, prototype epoch, prototype tag, prototype identity, upvalues, row, five of
+them loads from statics a call could write -- plus the array element read. node spends about two
+cycles a call where we spend five, and it gets there by checking the shape once for the loop
+rather than once per element. Folding the prototype into the shape identity would remove two or
+three of those loads; winning the row outright needs the loop-level guard, which is a larger
+piece of work than anything here.
