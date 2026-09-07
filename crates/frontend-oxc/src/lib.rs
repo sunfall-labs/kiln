@@ -26,8 +26,9 @@ use oxc_ast::{
     ast::{
         Argument, ArrowFunctionBody, ArrowFunctionExpression, AssignmentTarget, BindingPattern,
         Class, ClassElement, Declaration, Directive, ExportDefaultDeclarationKind, Expression,
-        FormalParameters, Function, MethodDefinitionKind, ObjectExpression, ObjectPropertyKind,
-        PropertyKind, Statement, VariableDeclaration, VariableDeclarationKind,
+        FormalParameters, Function, ImportDeclarationSpecifier, MethodDefinitionKind,
+        ObjectExpression, ObjectPropertyKind, PropertyKind, Statement, VariableDeclaration,
+        VariableDeclarationKind,
     },
 };
 use oxc_diagnostics::OxcDiagnostic;
@@ -40,6 +41,7 @@ use oxc_syntax::module_record::{
 };
 use oxc_syntax::operator::UpdateOperator;
 use oxc_syntax::operator::{AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator};
+use oxc_transformer::{JsxOptions, JsxRuntime, TransformOptions, Transformer};
 
 /// Parse one JavaScript or TypeScript module and lower its module-level structure into Kiln HIR.
 ///
@@ -53,7 +55,7 @@ pub fn parse(path: &str, source: &str) -> Module {
     if !path.ends_with(".cjs") {
         source_type = source_type.with_module(true);
     }
-    parse_source(source, source_type)
+    parse_source(Some(path), source, source_type)
 }
 
 /// Parse with an explicit ECMAScript goal, independent of Oxc's extension convention.
@@ -66,7 +68,7 @@ pub fn parse_with_goal(path: &str, source: &str, goal: SourceGoal) -> Module {
         SourceGoal::Script => inferred.with_script(true),
         SourceGoal::Module => inferred.with_module(true),
     };
-    parse_source(source, source_type)
+    parse_source(Some(path), source, source_type)
 }
 
 /// What the code around a direct `eval` makes legal inside it.
@@ -120,7 +122,7 @@ impl EvalSyntax {
 /// nothing else.
 pub fn parse_eval(path: &str, source: &str, allow: &EvalSyntax) -> Module {
     let inferred = SourceType::from_path(Path::new(path)).unwrap_or_default();
-    parse_source_in_context(source, inferred.with_script(true), Some(allow))
+    parse_source_in_context(Some(path), source, inferred.with_script(true), Some(allow))
 }
 
 /// Parse a CommonJS file with Oxc's explicit wrapper-aware goal while preserving the owned HIR
@@ -129,7 +131,7 @@ pub fn parse_eval(path: &str, source: &str, allow: &EvalSyntax) -> Module {
 /// `new.target` while continuing to reject top-level `await`.
 pub fn parse_commonjs(path: &str, source: &str) -> Module {
     let inferred = SourceType::from_path(Path::new(path)).unwrap_or_default();
-    parse_source(source, inferred.with_commonjs(true))
+    parse_source(Some(path), source, inferred.with_commonjs(true))
 }
 
 /// Parse CommonJS and return the literal dependencies identified by Oxc's own scope graph.
@@ -138,20 +140,214 @@ pub fn parse_commonjs(path: &str, source: &str) -> Module {
 /// Kiln HIR. Only owned strings cross the frontend boundary; Oxc nodes and arena lifetimes do not.
 pub fn parse_commonjs_with_requires(path: &str, source: &str) -> (Module, Vec<String>) {
     let inferred = SourceType::from_path(Path::new(path)).unwrap_or_default();
-    parse_source_with_commonjs_requires(source, inferred.with_commonjs(true))
+    parse_source_with_commonjs_requires(Some(path), source, inferred.with_commonjs(true))
+}
+
+fn strip_jsonc_comments(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = 0;
+    let mut in_string = false;
+    let mut escape = false;
+
+    while i < chars.len() {
+        if in_string {
+            out.push(chars[i]);
+            if escape {
+                escape = false;
+            } else if chars[i] == '\\' {
+                escape = true;
+            } else if chars[i] == '"' {
+                in_string = false;
+            }
+            i += 1;
+        } else {
+            if chars[i] == '"' {
+                in_string = true;
+                out.push(chars[i]);
+                i += 1;
+            } else if i + 1 < chars.len() && chars[i] == '/' && chars[i + 1] == '/' {
+                i += 2;
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+            } else if i + 1 < chars.len() && chars[i] == '/' && chars[i + 1] == '*' {
+                i += 2;
+                while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+                    if chars[i] == '\n' {
+                        out.push('\n');
+                    }
+                    i += 1;
+                }
+                if i + 1 < chars.len() && chars[i] == '*' && chars[i + 1] == '/' {
+                    i += 2;
+                } else {
+                    i = chars.len();
+                }
+            } else {
+                out.push(chars[i]);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+fn strip_trailing_commas(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = 0;
+    let mut in_string = false;
+    let mut escape = false;
+
+    while i < chars.len() {
+        if in_string {
+            out.push(chars[i]);
+            if escape {
+                escape = false;
+            } else if chars[i] == '\\' {
+                escape = true;
+            } else if chars[i] == '"' {
+                in_string = false;
+            }
+            i += 1;
+        } else {
+            if chars[i] == '"' {
+                in_string = true;
+                out.push(chars[i]);
+                i += 1;
+            } else if chars[i] == ',' {
+                let mut j = i + 1;
+                while j < chars.len() && chars[j].is_whitespace() {
+                    j += 1;
+                }
+                if j < chars.len() && (chars[j] == '}' || chars[j] == ']') {
+                    i += 1;
+                } else {
+                    out.push(',');
+                    i += 1;
+                }
+            } else {
+                out.push(chars[i]);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+fn parse_tsconfig_jsx(content: &str) -> Option<JsxOptions> {
+    let stripped = strip_trailing_commas(&strip_jsonc_comments(content));
+    let value: serde_json::Value = serde_json::from_str(&stripped).ok()?;
+    let compiler_options = value.get("compilerOptions")?;
+
+    let jsx_mode = compiler_options.get("jsx").and_then(|v| v.as_str());
+    let import_source = compiler_options
+        .get("jsxImportSource")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let pragma = compiler_options
+        .get("jsxFactory")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let pragma_frag = compiler_options
+        .get("jsxFragmentFactory")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    if jsx_mode.is_none() && import_source.is_none() && pragma.is_none() && pragma_frag.is_none() {
+        return None;
+    }
+
+    let (runtime, development) = match jsx_mode {
+        Some("react") => (JsxRuntime::Classic, false),
+        Some("react-jsx") => (JsxRuntime::Automatic, false),
+        Some("react-jsxdev") => (JsxRuntime::Automatic, true),
+        Some("preserve") => (JsxRuntime::Automatic, false),
+        _ => (JsxRuntime::Automatic, false),
+    };
+
+    Some(JsxOptions {
+        jsx_plugin: true,
+        runtime,
+        development,
+        import_source,
+        pragma,
+        pragma_frag,
+        ..JsxOptions::default()
+    })
+}
+
+fn resolve_jsx_options(path: Option<&str>) -> JsxOptions {
+    if let Some(path_str) = path {
+        let p = Path::new(path_str);
+        let full_path = if p.is_absolute() {
+            p.to_path_buf()
+        } else if let Ok(cwd) = std::env::current_dir() {
+            cwd.join(p)
+        } else {
+            p.to_path_buf()
+        };
+
+        let mut current_dir = full_path.parent();
+        while let Some(dir) = current_dir {
+            let tsconfig = dir.join("tsconfig.json");
+            if let Some(options) = std::fs::read_to_string(&tsconfig)
+                .ok()
+                .and_then(|c| parse_tsconfig_jsx(&c))
+            {
+                return options;
+            }
+            let jsconfig = dir.join("jsconfig.json");
+            if let Some(options) = std::fs::read_to_string(&jsconfig)
+                .ok()
+                .and_then(|c| parse_tsconfig_jsx(&c))
+            {
+                return options;
+            }
+            current_dir = dir.parent();
+        }
+    }
+
+    JsxOptions {
+        jsx_plugin: true,
+        runtime: JsxRuntime::Automatic,
+        ..JsxOptions::default()
+    }
+}
+
+fn resolve_transform_options(path: Option<&str>) -> TransformOptions {
+    TransformOptions {
+        jsx: resolve_jsx_options(path),
+        ..TransformOptions::default()
+    }
 }
 
 fn parse_source_with_commonjs_requires(
+    path: Option<&str>,
     source: &str,
     source_type: SourceType,
 ) -> (Module, Vec<String>) {
     let allocator = Allocator::default();
-    let parsed = Parser::new(&allocator, source, source_type)
+    let mut parsed = Parser::new(&allocator, source, source_type)
         .with_options(ParseOptions {
             parse_regular_expression: true,
             ..ParseOptions::default()
         })
         .parse();
+
+    if source_type.is_jsx() && !parsed.panicked && parsed.diagnostics.is_empty() {
+        let semantic = SemanticBuilder::new().build(&parsed.program).semantic;
+        let scoping = semantic.into_scoping();
+        let transform_options = resolve_transform_options(path);
+        let source_path = path
+            .map(Path::new)
+            .unwrap_or_else(|| Path::new("inline.tsx"));
+        let ret = Transformer::new(&allocator, source_path, &transform_options)
+            .build_with_scoping(scoping, &mut parsed.program);
+        parsed.diagnostics.extend(ret.diagnostics);
+    }
+
     let requires = if parsed.panicked || !parsed.diagnostics.is_empty() {
         Vec::new()
     } else {
@@ -186,14 +382,15 @@ fn parse_source_with_commonjs_requires(
             .filter_map(|(_, value)| seen.insert(value.clone()).then_some(value))
             .collect()
     };
-    (lower_parsed(&parsed, source, source_type), requires)
+    (lower_parsed(path, &parsed, source, source_type), requires)
 }
 
-fn parse_source(source: &str, source_type: SourceType) -> Module {
-    parse_source_in_context(source, source_type, None)
+fn parse_source(path: Option<&str>, source: &str, source_type: SourceType) -> Module {
+    parse_source_in_context(path, source, source_type, None)
 }
 
 fn parse_source_in_context(
+    path: Option<&str>,
     source: &str,
     source_type: SourceType,
     allow: Option<&EvalSyntax>,
@@ -205,25 +402,39 @@ fn parse_source_in_context(
     // any code runs, so they have to be decided here rather than when the regexp is first
     // constructed.  Pattern errors are raised through the parser's own error channel, so they
     // arrive in `parsed.diagnostics` and need no separate fold.
-    let parsed = Parser::new(&allocator, source, source_type)
+    let mut parsed = Parser::new(&allocator, source, source_type)
         .with_options(ParseOptions {
             parse_regular_expression: true,
             ..ParseOptions::default()
         })
         .parse();
 
-    lower_parsed_in_context(&parsed, source, source_type, allow)
+    if source_type.is_jsx() && !parsed.panicked && parsed.diagnostics.is_empty() {
+        let semantic = SemanticBuilder::new().build(&parsed.program).semantic;
+        let scoping = semantic.into_scoping();
+        let transform_options = resolve_transform_options(path);
+        let source_path = path
+            .map(Path::new)
+            .unwrap_or_else(|| Path::new("inline.tsx"));
+        let ret = Transformer::new(&allocator, source_path, &transform_options)
+            .build_with_scoping(scoping, &mut parsed.program);
+        parsed.diagnostics.extend(ret.diagnostics);
+    }
+
+    lower_parsed_in_context(path, &parsed, source, source_type, allow)
 }
 
 fn lower_parsed(
+    path: Option<&str>,
     parsed: &oxc_parser::ParserReturn<'_>,
     source: &str,
     source_type: SourceType,
 ) -> Module {
-    lower_parsed_in_context(parsed, source, source_type, None)
+    lower_parsed_in_context(path, parsed, source, source_type, None)
 }
 
 fn lower_parsed_in_context(
+    path: Option<&str>,
     parsed: &oxc_parser::ParserReturn<'_>,
     source: &str,
     source_type: SourceType,
@@ -250,15 +461,6 @@ fn lower_parsed_in_context(
                 .collect(),
         })
         .collect::<Vec<_>>();
-    requested_modules.sort_by_key(|request| {
-        request
-            .occurrences
-            .first()
-            .map(|occurrence| occurrence.statement_span)
-            .unwrap_or_default()
-            .start
-    });
-
     let mut imports = parsed
         .module_record
         .import_entries
@@ -272,6 +474,85 @@ fn lower_parsed_in_context(
             statement_span: span(entry.statement_span),
         })
         .collect::<Vec<_>>();
+
+    for stmt in &parsed.program.body {
+        if let Statement::ImportDeclaration(decl) = stmt {
+            let specifier = decl.source.value.as_str();
+            let is_type = decl.import_kind.is_type();
+
+            if let Some(req) = requested_modules
+                .iter_mut()
+                .find(|r| r.specifier == specifier)
+            {
+                if req.occurrences.is_empty() {
+                    req.occurrences.push(ModuleRequestOccurrence {
+                        statement_span: span(decl.span),
+                        specifier_span: span(decl.source.span),
+                        type_only: is_type,
+                        kind: ModuleRequestKind::Import,
+                    });
+                }
+            } else {
+                requested_modules.push(RequestedModule {
+                    specifier: specifier.to_string(),
+                    occurrences: vec![ModuleRequestOccurrence {
+                        statement_span: span(decl.span),
+                        specifier_span: span(decl.source.span),
+                        type_only: is_type,
+                        kind: ModuleRequestKind::Import,
+                    }],
+                });
+            }
+
+            if let Some(specifiers) = &decl.specifiers {
+                for spec in specifiers {
+                    let (imported, local, type_only, spec_span) = match spec {
+                        ImportDeclarationSpecifier::ImportSpecifier(s) => (
+                            ImportName::Name(s.imported.name().to_string()),
+                            s.local.name.to_string(),
+                            is_type || s.import_kind.is_type(),
+                            s.span,
+                        ),
+                        ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => (
+                            ImportName::Default,
+                            s.local.name.to_string(),
+                            is_type,
+                            s.span,
+                        ),
+                        ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => (
+                            ImportName::Namespace,
+                            s.local.name.to_string(),
+                            is_type,
+                            s.span,
+                        ),
+                    };
+
+                    if !imports
+                        .iter()
+                        .any(|i| i.source == specifier && i.local == local)
+                    {
+                        imports.push(Import {
+                            source: specifier.to_string(),
+                            imported,
+                            local,
+                            type_only,
+                            span: span(spec_span),
+                            statement_span: span(decl.span),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    requested_modules.sort_by_key(|request| {
+        request
+            .occurrences
+            .first()
+            .map(|occurrence| occurrence.statement_span)
+            .unwrap_or_default()
+            .start
+    });
     imports.sort_by_key(|entry| (entry.statement_span.start, entry.span.start));
 
     // Use the spec-shaped entries rather than `exported_bindings`: the latter intentionally
@@ -308,7 +589,7 @@ fn lower_parsed_in_context(
         }
         diagnostics.extend(early);
     }
-    let mut lowerer = Lowerer { text: source };
+    let mut lowerer = Lowerer { text: source, path };
     let body = lowerer.statements(&parsed.program.body);
 
     let mut module = Module {
@@ -493,6 +774,7 @@ struct Lowerer<'a> {
     /// that `Function.prototype.toString` must answer with does not include it. Finding where the
     /// keyword ends means looking at the text.
     text: &'a str,
+    path: Option<&'a str>,
 }
 
 impl Lowerer<'_> {
@@ -1400,7 +1682,61 @@ impl Lowerer<'_> {
                 return self.unsupported_expression("private-in expression", expression_span);
             }
             Expression::ImportMeta(_) => {
-                return self.unsupported_expression("import.meta expression", expression_span);
+                let (url, dirname, filename) = if let Some(p) = self.path {
+                    let path_buf = Path::new(p);
+                    let abs_path = if path_buf.is_absolute() {
+                        path_buf.to_path_buf()
+                    } else if let Ok(cwd) = std::env::current_dir() {
+                        cwd.join(path_buf)
+                    } else {
+                        path_buf.to_path_buf()
+                    };
+                    let filename_str = abs_path.to_string_lossy().into_owned();
+                    let dirname_str = abs_path
+                        .parent()
+                        .map(|parent| parent.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let url_str = format!("file://{filename_str}");
+                    (url_str, dirname_str, filename_str)
+                } else {
+                    (
+                        "file:///unknown".to_string(),
+                        String::new(),
+                        "unknown".to_string(),
+                    )
+                };
+
+                HirExpressionKind::Object {
+                    members: vec![
+                        kiln_hir::ObjectMember::Property(kiln_hir::ObjectProperty {
+                            key: kiln_hir::ObjectKey::Static("url".to_string()),
+                            value: HirExpression {
+                                kind: HirExpressionKind::Literal(HirLiteral::String(url)),
+                                span: expression_span,
+                            },
+                            form: kiln_hir::PropertyForm::KeyValue,
+                            span: expression_span,
+                        }),
+                        kiln_hir::ObjectMember::Property(kiln_hir::ObjectProperty {
+                            key: kiln_hir::ObjectKey::Static("dirname".to_string()),
+                            value: HirExpression {
+                                kind: HirExpressionKind::Literal(HirLiteral::String(dirname)),
+                                span: expression_span,
+                            },
+                            form: kiln_hir::PropertyForm::KeyValue,
+                            span: expression_span,
+                        }),
+                        kiln_hir::ObjectMember::Property(kiln_hir::ObjectProperty {
+                            key: kiln_hir::ObjectKey::Static("filename".to_string()),
+                            value: HirExpression {
+                                kind: HirExpressionKind::Literal(HirLiteral::String(filename)),
+                                span: expression_span,
+                            },
+                            form: kiln_hir::PropertyForm::KeyValue,
+                            span: expression_span,
+                        }),
+                    ],
+                }
             }
             Expression::NewTarget(_) => HirExpressionKind::NewTarget,
             Expression::JSXElement(_) | Expression::JSXFragment(_) => {
@@ -2926,13 +3262,10 @@ mod tests {
         // falling into a catch-all reporting the bare word "expression". A third of the guard
         // corpus was once hidden behind exactly that, which is why it is worth a test at all.
         // If a case here starts failing, the construct was implemented: delete the line.
-        let cases = [
-            ("const value = import.meta;", "import.meta expression"),
-            (
-                "const value = import.defer(\"./x.js\");",
-                "phased dynamic import expression",
-            ),
-        ];
+        let cases = [(
+            "const value = import.defer(\"./x.js\");",
+            "phased dynamic import expression",
+        )];
         for (source, expected) in cases {
             let module = parse("module.js", source);
             let HirStatementKind::Variable { declarations, .. } = &module.body[0].kind else {
@@ -3570,5 +3903,68 @@ mod tests {
             Some(TypeAnnotation::Any)
         );
         assert_eq!(custom_fn.return_type, Some(TypeAnnotation::Other));
+    }
+
+    #[test]
+    fn test_parse_jsx_module() {
+        let source = "const x = <div id=\"test\"><span>hello</span><>{123}</></div>;\nexport function App() { return <h1>Title</h1>; }";
+        let module = parse("test.tsx", source);
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        assert!(
+            module
+                .requested_modules
+                .iter()
+                .any(|r| r.specifier == "react/jsx-runtime")
+        );
+        assert!(
+            module
+                .imports
+                .iter()
+                .any(|i| i.source == "react/jsx-runtime" && i.local == "_jsx")
+        );
+        assert!(
+            module
+                .imports
+                .iter()
+                .any(|i| i.source == "react/jsx-runtime" && i.local == "_Fragment")
+        );
+        assert_eq!(module.source_kind, SourceKind::Tsx);
+        assert!(!module.body.is_empty());
+    }
+
+    #[test]
+    fn test_parse_jsx_commonjs() {
+        let source = "const x = <div id=\"test\">hello</div>;\n";
+        let (module, requires) = parse_commonjs_with_requires("test.tsx", source);
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        assert!(
+            requires.contains(&"react/jsx-runtime".to_string()),
+            "expected react/jsx-runtime in requires: {:?}",
+            requires
+        );
+    }
+
+    #[test]
+    fn test_tsconfig_jsonc_cleaning() {
+        let tsconfig = r#"{
+            // Single line comment
+            "compilerOptions": {
+                /* Multi-line
+                   comment */
+                "jsx": "react-jsx",
+                "jsxImportSource": "@opentui/react",
+            },
+        }"#;
+        let options = parse_tsconfig_jsx(tsconfig).expect("valid tsconfig");
+        assert_eq!(options.runtime, JsxRuntime::Automatic);
+        assert_eq!(options.import_source.as_deref(), Some("@opentui/react"));
+    }
+
+    #[test]
+    fn test_parse_import_meta() {
+        let source = "const url = import.meta.url;\nconst dir = import.meta.dirname;\n";
+        let module = parse("/path/to/module.js", source);
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        assert_eq!(module.body.len(), 2);
     }
 }

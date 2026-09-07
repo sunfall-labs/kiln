@@ -2433,10 +2433,10 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
         .request(&Request::SetSource {
             source_view: SourceView(0),
             path: path.clone(),
-            // Any construct lowering still refuses works here; `import.meta` is one that
+            // Any construct lowering still refuses works here; phased dynamic import is one that
             // parses cleanly, so the diagnostic comes from lowering with a span attached rather
             // than from the parser.
-            text: "const value = import.meta.url;\n".into(),
+            text: "const value = import.defer(\"./x.js\");\n".into(),
         })
         .expect("set unsupported source");
     let Response::Ran(failed) = client
@@ -2458,7 +2458,7 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.start.is_some()
-                && diagnostic.message.contains("import.meta")),
+                && diagnostic.message.contains("phased dynamic import")),
         "{:?}",
         failed.diagnostics
     );

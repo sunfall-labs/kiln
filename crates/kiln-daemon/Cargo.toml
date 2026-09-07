@@ -10,6 +10,7 @@ kiln-proto = { workspace = true }
 kiln-backend-c = { workspace = true }
 kiln-digest = { workspace = true }
 serde_json = { workspace = true }
+kiln-data-formats = { workspace = true }
 kiln-db = { workspace = true }
 frontend-oxc = { workspace = true }
 kiln-interpreter = { workspace = true }

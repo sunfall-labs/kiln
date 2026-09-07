@@ -154,6 +154,19 @@ pub fn run(
                     .iter()
                     .flat_map(|event| event.paths.iter())
                     .any(|event_path| is_package_resolution_metadata(&project_dir, event_path));
+                let env_changed =
+                    batch
+                        .iter()
+                        .flat_map(|event| event.paths.iter())
+                        .any(|event_path| {
+                            event_path
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .is_some_and(|name| name.starts_with(".env"))
+                        });
+                if env_changed {
+                    crate::env::load_project_env(project_root, false);
+                }
                 let dependency_paths = batch
                     .iter()
                     .flat_map(|event| event.paths.iter())
@@ -177,6 +190,7 @@ pub fn run(
                     && dependency_paths.is_empty()
                     && !source_tree_removed
                     && !resolution_metadata_changed
+                    && !env_changed
                 {
                     continue;
                 }

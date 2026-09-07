@@ -512,7 +512,14 @@ impl ModuleGraph {
                     path: path.to_path_buf(),
                 })?;
             if source_kind == ModuleSource::Json {
-                return Ok(ModulePayload::JsonText(source));
+                let json_text =
+                    kiln_data_formats::parse_data_to_json(path, &source).map_err(|err| {
+                        ModuleGraphError::Source {
+                            path: path.to_path_buf(),
+                            message: err.to_string(),
+                        }
+                    })?;
+                return Ok(ModulePayload::JsonText(json_text));
             }
             let commonjs = (source_kind == ModuleSource::CommonJs)
                 .then(|| frontend.parse_commonjs(path_string, &source));
@@ -1441,14 +1448,20 @@ impl ModuleGraph {
                     imports.push(kiln_interpreter::namespace_object(entries));
                     continue;
                 }
-                let value = provider.get(&import.imported).ok_or_else(|| {
-                    ModuleGraphError::MissingExport {
+                let value = provider
+                    .get(&import.imported)
+                    .cloned()
+                    .or_else(|| {
+                        provider.get("default").and_then(|default_val| {
+                            own_data_property(default_val, &import.imported)
+                        })
+                    })
+                    .ok_or_else(|| ModuleGraphError::MissingExport {
                         importer: path.clone(),
                         provider: dependency.target.clone(),
                         name: import.imported.clone(),
-                    }
-                })?;
-                imports.push(value.clone());
+                    })?;
+                imports.push(value);
             }
 
             if total_steps >= limits.max_steps {
@@ -1734,10 +1747,27 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
                 .get(path)
                 .expect("cache entry checked above");
             *cache.borrow_mut() = final_exports.clone();
-            (&mut *self.values).insert(
-                path.to_path_buf(),
-                HashMap::from([("default".to_owned(), final_exports)]),
-            );
+            let mut exports_map = HashMap::from([("default".to_owned(), final_exports.clone())]);
+            if let Value::Object(object) = &final_exports {
+                let object_ref = object.borrow();
+                for key in object_ref.keys() {
+                    if key != "default"
+                        && let Some(val) = object_ref.get_own(key)
+                    {
+                        exports_map.insert(key.to_owned(), val.clone());
+                    }
+                }
+            } else if let Value::Function(closure) = &final_exports {
+                let properties_ref = closure.properties.borrow();
+                for key in properties_ref.keys() {
+                    if key != "default"
+                        && let Some(val) = properties_ref.get_own(key)
+                    {
+                        exports_map.insert(key.to_owned(), val.clone());
+                    }
+                }
+            }
+            (&mut *self.values).insert(path.to_path_buf(), exports_map);
             (&mut *self.states).insert(path.to_path_buf(), CommonJsExecutionState::Done);
             if path == self.graph.entry {
                 *self.entry_result = Some(result.execution);
@@ -1834,8 +1864,10 @@ where
                         let source = match source {
                             ModuleSource::Source if !self.typed_sources => ModuleSource::Source,
                             ModuleSource::Source => {
-                                if path.extension().and_then(|extension| extension.to_str())
-                                    == Some("json")
+                                if path
+                                    .extension()
+                                    .and_then(|extension| extension.to_str())
+                                    .is_some_and(kiln_data_formats::is_data_extension)
                                 {
                                     ModuleSource::Json
                                 } else {
@@ -1921,7 +1953,7 @@ where
                                 .path
                                 .extension()
                                 .and_then(|extension| extension.to_str())
-                                == Some("json")
+                                .is_some_and(kiln_data_formats::is_data_extension)
                             {
                                 ModuleSource::Json
                             } else if self.resolver.node_format(&resolved).map_err(|error| {
@@ -2101,6 +2133,11 @@ fn validate_links(
             // A namespace import names no export, so there is nothing to check: it takes
             // whatever the provider has, including nothing.
             if import.imported != kiln_ir::NAMESPACE_IMPORT {
+                if let Some(target_node) = modules.get(&dependency.target)
+                    && target_node.source == ModuleSource::CommonJs
+                {
+                    continue;
+                }
                 match export_resolutions
                     .get(&dependency.target)
                     .and_then(|resolutions| resolutions.get(&import.imported))
@@ -2192,6 +2229,23 @@ impl<'graph> ExportResolver<'graph> {
             .filter_map(|export| export.exported.strip_prefix(kiln_ir::STAR_REEXPORT_PREFIX))
     }
 
+    fn reexports_star(&self, from: &Path, target: &Path, visited: &mut HashSet<PathBuf>) -> bool {
+        if !visited.insert(from.to_path_buf()) {
+            return false;
+        }
+        let Some(node) = self.modules.get(from) else {
+            return false;
+        };
+        for specifier in self.star_sources(node) {
+            if let Some(dep) = self.dependency(node, specifier)
+                && (dep.path == target || self.reexports_star(&dep.path, target, visited))
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     /// The names a module offers, `export *` included. `default` never arrives through a star.
     fn exported_names(&self, path: &Path, visited: &mut HashSet<PathBuf>) -> Vec<String> {
         if !visited.insert(path.to_path_buf()) {
@@ -2203,8 +2257,23 @@ impl<'graph> ExportResolver<'graph> {
         let mut names = Vec::new();
         // Node's ESM bridge exposes the final `module.exports` value as the default export. The
         // value is materialized by CommonJS execution; the linker only needs its typed shape.
+        // It also provides any named export requested from it by an importer in the graph.
         if node.source == ModuleSource::CommonJs {
             names.push("default".to_owned());
+            for other in self.modules.values() {
+                for import in &other.program.imports {
+                    if import.imported != kiln_ir::NAMESPACE_IMPORT
+                        && !names.contains(&import.imported)
+                        && other.dependencies.iter().any(|dep| {
+                            dep.specifier == import.source
+                                && (dep.target == *path
+                                    || self.reexports_star(&dep.target, path, &mut HashSet::new()))
+                        })
+                    {
+                        names.push(import.imported.clone());
+                    }
+                }
+            }
         }
         for export in &node.program.exports {
             if !export.exported.starts_with(kiln_ir::STAR_REEXPORT_PREFIX)
@@ -2241,7 +2310,7 @@ impl<'graph> ExportResolver<'graph> {
         let Some(node) = self.modules.get(path) else {
             return Resolution::None;
         };
-        if node.source == ModuleSource::CommonJs && name == "default" {
+        if node.source == ModuleSource::CommonJs {
             return Resolution::Found(ResolvedExport::Local {
                 module: path.to_path_buf(),
                 local_slot: 0,

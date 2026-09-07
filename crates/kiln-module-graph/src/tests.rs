@@ -437,6 +437,44 @@ fn node_executes_commonjs_require_and_esm_default_interop() {
 }
 
 #[test]
+fn node_executes_commonjs_named_export_and_reexport_interop() {
+    let project = TempProject::new();
+    project.write("package.json", r#"{"type":"module"}"#);
+    fs::create_dir_all(project.root.join("pkg")).unwrap();
+    project.write("pkg/package.json", r#"{"type":"commonjs"}"#);
+    project.write(
+        "pkg/dep.js",
+        "exports.Fragment = 'fragment-value'; exports.jsx = (tag) => `<${tag}/>`;",
+    );
+    project.write(
+        "bridge.mjs",
+        "export { Fragment, jsx } from './pkg/dep.js';",
+    );
+    let entry = project.write(
+        "main.mjs",
+        "import { Fragment, jsx } from './bridge.mjs'; console.log(Fragment, jsx('div'));",
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build mixed graph with CJS named exports");
+    let mut host = kiln_runtime::CaptureHost::new();
+    let execution = graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute mixed graph");
+    assert_eq!(host.into_stdout(), "fragment-value <div/>\n");
+    assert_eq!(execution.value, Value::Undefined);
+}
+
+#[test]
 fn node_executes_top_level_await_before_finishing_module() {
     let project = TempProject::new();
     let entry = project.write(
@@ -1264,7 +1302,10 @@ fn node_builtin_static_imports_are_typed_virtual_modules() {
             ExecutionCapabilities::default(),
         )
         .expect("execute builtin imports");
-    assert_eq!(host.output, ["function function readFile,stat,writeFile"]);
+    assert_eq!(
+        host.output,
+        ["function function appendFile,mkdir,readFile,stat,writeFile"]
+    );
 }
 
 #[test]

@@ -13,8 +13,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 /// Source extensions understood by the initial filesystem resolver.
-pub const SUPPORTED_EXTENSIONS: &[&str] =
-    &["js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx", "json"];
+pub const SUPPORTED_EXTENSIONS: &[&str] = &[
+    "js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx", "json", "json5", "jsonc", "yaml", "yml",
+    "toml",
+];
 
 /// Whether a resolved request was written as an explicit relative or absolute specifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -573,15 +575,34 @@ pub struct NodePackageResolver {
 impl NodePackageResolver {
     pub fn new(project_root: impl AsRef<Path>) -> Result<Self, ResolveError> {
         let explicit = ModuleResolver::new(project_root)?;
+        let tsconfig_path = explicit.project_root().join("tsconfig.json");
+        let jsconfig_path = explicit.project_root().join("jsconfig.json");
+        let tsconfig_file = if tsconfig_path.is_file() {
+            Some(tsconfig_path)
+        } else if jsconfig_path.is_file() {
+            Some(jsconfig_path)
+        } else {
+            None
+        };
+        let tsconfig = tsconfig_file.map(|config_file| {
+            oxc_resolver::TsconfigDiscovery::Manual(oxc_resolver::TsconfigOptions {
+                config_file,
+                references: oxc_resolver::TsconfigReferences::Auto,
+            })
+        });
         Ok(Self {
             explicit,
-            import_packages: Self::package_resolver("import"),
-            require_packages: Self::package_resolver("require"),
+            import_packages: Self::package_resolver("import", tsconfig.clone()),
+            require_packages: Self::package_resolver("require", tsconfig),
         })
     }
 
-    fn package_resolver(condition: &str) -> oxc_resolver::Resolver {
+    fn package_resolver(
+        condition: &str,
+        tsconfig: Option<oxc_resolver::TsconfigDiscovery>,
+    ) -> oxc_resolver::Resolver {
         let options = oxc_resolver::ResolveOptions {
+            tsconfig,
             condition_names: vec!["node".to_owned(), condition.to_owned()],
             extensions: SUPPORTED_EXTENSIONS
                 .iter()
@@ -2176,6 +2197,94 @@ mod tests {
             node_module_format(Path::new("x.js"), None).unwrap(),
             NodeModuleFormat::CommonJs
         );
+    }
+
+    #[test]
+    fn resolves_tsconfig_paths_and_base_url() {
+        let project = TempProject::new();
+        let importer = project.write(
+            "src/nested/app.ts",
+            "import '@/utils/math'; import '@components/button';",
+        );
+        let target_math = project.write("src/utils/math.ts", "export const add = 1;");
+        let target_button = project.write("src/components/button.tsx", "export const Button = 2;");
+        project.write(
+            "tsconfig.json",
+            r#"{
+                "compilerOptions": {
+                    "baseUrl": ".",
+                    "paths": {
+                        "@/*": ["src/*"],
+                        "@components/*": ["src/components/*"]
+                    }
+                }
+            }"#,
+        );
+        let resolver = NodePackageResolver::new(&project.root).expect("valid project root");
+
+        let resolved = resolver
+            .resolve("@/utils/math", &importer)
+            .expect("resolve tsconfig path alias");
+        assert_eq!(resolved.path, fs::canonicalize(target_math).unwrap());
+
+        let resolved = resolver
+            .resolve("@components/button", &importer)
+            .expect("resolve components alias");
+        assert_eq!(resolved.path, fs::canonicalize(target_button).unwrap());
+    }
+
+    #[test]
+    fn resolves_tsconfig_with_extends() {
+        let project = TempProject::new();
+        let importer = project.write("src/app.ts", "import '@/services/api';");
+        let target_api = project.write("src/services/api.ts", "export const api = 1;");
+        project.write(
+            "tsconfig.base.json",
+            r#"{
+                "compilerOptions": {
+                    "baseUrl": ".",
+                    "paths": {
+                        "@/*": ["src/*"]
+                    }
+                }
+            }"#,
+        );
+        project.write(
+            "tsconfig.json",
+            r#"{
+                "extends": "./tsconfig.base.json"
+            }"#,
+        );
+        let resolver = NodePackageResolver::new(&project.root).expect("valid project root");
+
+        let resolved = resolver
+            .resolve("@/services/api", &importer)
+            .expect("resolve tsconfig path alias via extends");
+        assert_eq!(resolved.path, fs::canonicalize(target_api).unwrap());
+    }
+
+    #[test]
+    fn resolves_jsconfig_paths_fallback() {
+        let project = TempProject::new();
+        let importer = project.write("src/app.js", "import '@/helpers/format';");
+        let target = project.write("src/helpers/format.js", "export const format = () => '';");
+        project.write(
+            "jsconfig.json",
+            r#"{
+                "compilerOptions": {
+                    "baseUrl": ".",
+                    "paths": {
+                        "@/*": ["src/*"]
+                    }
+                }
+            }"#,
+        );
+        let resolver = NodePackageResolver::new(&project.root).expect("valid project root");
+
+        let resolved = resolver
+            .resolve("@/helpers/format", &importer)
+            .expect("resolve jsconfig path alias");
+        assert_eq!(resolved.path, fs::canonicalize(target).unwrap());
     }
 
     // Small lexical path-difference helper kept local to tests so the crate stays dependency-free.
