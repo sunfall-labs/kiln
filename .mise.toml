@@ -55,3 +55,6 @@ run = "./scripts/facts-baseline.sh --check"
 description = "Regenerate the whole-program facts baseline (deliberate: the diff is the record)"
 run = "./scripts/facts-baseline.sh --update"
 
+[tools]
+rust = "latest"
+
