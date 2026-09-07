@@ -913,6 +913,70 @@ pub(crate) fn closure_construction(
     )
 }
 
+/// Pack the source ranges observable through live closures and rewrite their spans into the pack.
+///
+/// A bundled module's original source commonly contains large top-level tables and functions that
+/// closed-world emission removed. Keeping all of it as one escaped C string makes the C compiler
+/// parse dead JavaScript. Ranges are unioned before copying because nested closures overlap their
+/// parent's source; copying once per function would grow precisely the modules this is for.
+fn compact_closure_source(program: &mut Program, reachable: Option<&HashSet<usize>>) {
+    if program.source.is_empty() || program.functions.is_empty() {
+        return;
+    }
+    let original = std::mem::take(&mut program.source);
+    let mut intervals = program
+        .functions
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| reachable.is_none_or(|live| live.contains(index)))
+        .filter_map(|(_, function)| {
+            let start = function.span.start as usize;
+            let end = function.span.end as usize;
+            (start <= end && original.get(start..end).is_some()).then_some((start, end))
+        })
+        .collect::<Vec<_>>();
+    intervals.sort_unstable();
+    let mut merged = Vec::<(usize, usize)>::with_capacity(intervals.len());
+    for (start, end) in intervals {
+        match merged.last_mut() {
+            Some((_, previous_end)) if start <= *previous_end => {
+                *previous_end = (*previous_end).max(end);
+            }
+            _ => merged.push((start, end)),
+        }
+    }
+
+    let mut packed =
+        String::with_capacity(merged.iter().map(|(start, end)| end - start).sum::<usize>());
+    let mut packed_intervals = Vec::with_capacity(merged.len());
+    for (start, end) in merged {
+        let packed_start = packed.len();
+        packed.push_str(&original[start..end]);
+        packed_intervals.push((start, end, packed_start));
+    }
+    for (index, function) in program.functions.iter_mut().enumerate() {
+        let start = function.span.start as usize;
+        let end = function.span.end as usize;
+        let mapped = reachable
+            .is_none_or(|live| live.contains(&index))
+            .then(|| {
+                packed_intervals.iter().find_map(|&(from, to, at)| {
+                    (from <= start && end <= to).then_some((at + start - from, at + end - from))
+                })
+            })
+            .flatten();
+        if let Some((start, end)) = mapped {
+            function.span.start = start as u32;
+            function.span.end = end as u32;
+        } else {
+            // Preserve the old invalid-span answer (`NULL`, length zero) against the new source.
+            function.span.start = 1;
+            function.span.end = 0;
+        }
+    }
+    program.source = packed.into();
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_functions(
     output: &mut String,
@@ -2415,6 +2479,14 @@ fn render(
     policy: &EmissionPolicy,
 ) -> Result<String, EmitError> {
     let plan = validate_program(program).expect("render called after validation");
+    let mut compacted;
+    let program = if policy.compact {
+        compacted = program.clone();
+        compact_closure_source(&mut compacted, None);
+        &compacted
+    } else {
+        program
+    };
     // A bare `Program` arrives with no goal and no strictness table: it is a scalar unit, and
     // every one this backend is handed came from a Module goal. Strict throughout keeps its
     // emitted bytes exactly what they were.
@@ -3033,7 +3105,17 @@ fn render_module(
             }
         }
     }
-    let emitted_program = liveness.as_ref().map_or(program, |_| &pruned);
+    if policy.compact {
+        compact_closure_source(
+            &mut pruned,
+            liveness.as_ref().map(|(reachable, _, _)| reachable),
+        );
+    }
+    let emitted_program = if policy.compact || liveness.is_some() {
+        &pruned
+    } else {
+        program
+    };
     let (graphs, body, entry_graph, mut direct) =
         plan_unit(emitted_program, diagnostic_site, policy.compact)?;
     let reachable = liveness.as_ref().map(|(reachable, _, _)| reachable);
