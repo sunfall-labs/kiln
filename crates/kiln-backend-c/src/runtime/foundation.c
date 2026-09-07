@@ -887,6 +887,7 @@ done:
 #define KILN_C99_FFI_F32 9u
 #define KILN_C99_FFI_F64 10u
 #define KILN_C99_FFI_POINTER 11u
+#define KILN_C99_FFI_BOOL 12u
 
 typedef struct kiln_ffi_function_meta {
     uint64_t handle;
@@ -901,9 +902,6 @@ typedef struct kiln_ffi_callback_meta {
     uint64_t pointer;
     uint64_t library;
     kiln_value *root;
-    kiln_host *host;
-    kiln_value *thrown;
-    int depth;
     uint32_t result;
     struct kiln_ffi_callback_meta *next;
 } kiln_ffi_callback_meta;
@@ -912,6 +910,10 @@ static kiln_ffi_function_meta *kiln_c99_ffi_functions;
 static kiln_ffi_callback_meta *kiln_c99_ffi_callbacks;
 static uint32_t kiln_c99_ffi_next_root = UINT32_C(0x80000000);
 static int kiln_c99_ffi_callback_status;
+static kiln_host *kiln_c99_ffi_callback_host;
+static kiln_value *kiln_c99_ffi_callback_thrown;
+static int kiln_c99_ffi_callback_depth;
+static uint32_t kiln_c99_ffi_callback_active;
 
 static int kiln_c99_ffi_raise(kiln_value *thrown) {
     const uint8_t *bytes = NULL;
@@ -952,17 +954,21 @@ static int kiln_c99_ffi_u64(kiln_value value, uint64_t *out, kiln_value *thrown)
     return kiln_c99_throw_not_a(thrown, value, "BigInt pointer");
 }
 
-static int kiln_c99_ffi_bigint(uint64_t value, kiln_value *out) {
+static int kiln_c99_ffi_bigint(uint64_t value, int negative, kiln_value *out) {
     char digits[32];
     char reversed[32];
     void *handle = NULL;
     size_t len = 0;
     size_t index;
+    if (negative) value = UINT64_C(0) - value;
     do {
         reversed[len++] = (char)('0' + value % 10);
         value /= 10;
     } while (value != 0);
-    for (index = 0; index < len; ++index) digits[index] = reversed[len - index - 1];
+    if (negative) digits[0] = '-';
+    for (index = 0; index < len; ++index)
+        digits[index + (negative ? 1u : 0u)] = reversed[len - index - 1];
+    len += negative ? 1u : 0u;
     if (kiln_bigint_parse((const unsigned char *)digits, len, 10, &handle) != 0)
         return KILN_C99_OUT_OF_MEMORY;
     *out = kiln_c99_bigint_value(handle);
@@ -983,7 +989,7 @@ static int kiln_c99_ffi_type(kiln_value value, int result, uint32_t *out,
     KILN_FFI_TYPE("char", KILN_C99_FFI_I8)
     KILN_FFI_TYPE("i8", KILN_C99_FFI_I8)
     KILN_FFI_TYPE("u8", KILN_C99_FFI_U8)
-    KILN_FFI_TYPE("bool", KILN_C99_FFI_U8)
+    KILN_FFI_TYPE("bool", KILN_C99_FFI_BOOL)
     KILN_FFI_TYPE("i16", KILN_C99_FFI_I16)
     KILN_FFI_TYPE("u16", KILN_C99_FFI_U16)
     KILN_FFI_TYPE("i32", KILN_C99_FFI_I32)
@@ -1089,16 +1095,29 @@ static int kiln_c99_ffi_argument(kiln_value value, uint32_t kind, kiln_ffi_value
             kiln_data_view *view = kiln_c99_data_view_of(value);
             bits = (uint64_t)(uintptr_t)(view->buffer->bytes + view->byte_offset);
         } else return kiln_c99_throw_not_a(thrown, value, "node:ffi pointer argument");
+    } else if (kind == KILN_C99_FFI_BOOL) {
+        if (value.tag != KILN_VALUE_BOOLEAN)
+            return kiln_c99_throw_not_a(thrown, value, "node:ffi boolean argument");
+        bits = value.bits != 0;
     } else if (kind == KILN_C99_FFI_I64 || kind == KILN_C99_FFI_U64) {
         if (value.tag == KILN_VALUE_BIGINT) {
             int64_t high = 0;
             if (kiln_bigint_to_i128((const void *)(uintptr_t)value.bits, &high, &bits) != 0 ||
-                (kind == KILN_C99_FFI_U64 ? high != 0 : (high != 0 && high != -1)))
+                (kind == KILN_C99_FFI_U64
+                     ? high != 0
+                     : !((high == 0 && bits <= UINT64_C(0x7fffffffffffffff)) ||
+                         (high == -1 && bits >= UINT64_C(0x8000000000000000)))))
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
                                             "node:ffi integer is outside 64-bit range");
         } else {
             int status = kiln_c99_to_number_checked(NULL, value, &number, 0, thrown);
             if (status != KILN_C99_OK) return status;
+            if (!isfinite(number) || floor(number) != number ||
+                (kind == KILN_C99_FFI_I64
+                     ? number < -9007199254740991.0 || number > 9007199254740991.0
+                     : number < 0.0 || number > 9007199254740991.0))
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                            "node:ffi integer number must be a safe integer");
             bits = kind == KILN_C99_FFI_I64 ? (uint64_t)(int64_t)number : (uint64_t)number;
         }
     } else {
@@ -1125,8 +1144,12 @@ static int kiln_c99_ffi_result(const kiln_ffi_value *value, kiln_value *out) {
         *out = kiln_c99_undefined();
         return value->reserved == 0 ? KILN_C99_OK : KILN_C99_INVALID_ARGUMENT;
     case KILN_C99_FFI_I64:
+        return kiln_c99_ffi_bigint(value->bits, (int64_t)value->bits < 0, out);
     case KILN_C99_FFI_U64:
-    case KILN_C99_FFI_POINTER: return kiln_c99_ffi_bigint(value->bits, out);
+    case KILN_C99_FFI_POINTER: return kiln_c99_ffi_bigint(value->bits, 0, out);
+    case KILN_C99_FFI_BOOL:
+        *out = kiln_c99_boolean(value->bits != 0);
+        return KILN_C99_OK;
     case KILN_C99_FFI_F32: {
         uint32_t word = (uint32_t)value->bits;
         float narrowed;
@@ -1158,7 +1181,9 @@ static int32_t kiln_c99_ffi_callback_dispatch(void *opaque,
     kiln_value result;
     uint64_t index;
     int status;
-    if (callback == NULL || out_result == NULL || callback->root == NULL) return -8;
+    if (callback == NULL || out_result == NULL || callback->root == NULL ||
+        kiln_c99_ffi_callback_active == 0)
+        return -8;
     if (argument_count > 16) {
         args = (kiln_value *)malloc((size_t)argument_count * sizeof *args);
         if (args == NULL) return -8;
@@ -1167,14 +1192,15 @@ static int32_t kiln_c99_ffi_callback_dispatch(void *opaque,
         status = kiln_c99_ffi_result(&arguments[index], &args[index]);
         if (status != KILN_C99_OK) goto done;
     }
-    status = kiln_c99_call(callback->host, &result, *callback->root, kiln_c99_undefined(), args,
-                           (size_t)argument_count, callback->depth + 1, callback->thrown);
+    status = kiln_c99_call(kiln_c99_ffi_callback_host, &result, *callback->root,
+                           kiln_c99_undefined(), args, (size_t)argument_count,
+                           kiln_c99_ffi_callback_depth + 1, kiln_c99_ffi_callback_thrown);
     if (status == KILN_C99_OK) {
         void *owned = NULL;
         status = callback->result == KILN_C99_FFI_VOID
                      ? KILN_C99_OK
                      : kiln_c99_ffi_argument(result, callback->result, out_result, &owned,
-                                             callback->thrown);
+                                             kiln_c99_ffi_callback_thrown);
         free(owned);
         if (callback->result == KILN_C99_FFI_VOID) {
             out_result->kind = KILN_C99_FFI_VOID;
@@ -1188,18 +1214,27 @@ done:
     return status == KILN_C99_OK ? 0 : -8;
 }
 
-static void kiln_c99_ffi_remove_callbacks(uint64_t library, uint64_t only_pointer) {
+static int kiln_c99_ffi_remove_callbacks(uint64_t library, uint64_t only_pointer,
+                                         kiln_value *thrown) {
     kiln_ffi_callback_meta **link = &kiln_c99_ffi_callbacks;
+    int found = 0;
     while (*link != NULL) {
         kiln_ffi_callback_meta *entry = *link;
         if (entry->library == library && (only_pointer == 0 || entry->pointer == only_pointer)) {
-            (void)kiln_ffi_unregister_callback(entry->pointer);
+            int status;
+            found = 1;
+            status = kiln_ffi_unregister_callback(entry->pointer);
+            if (status != KILN_C99_OK) return kiln_c99_ffi_raise(thrown);
             if (entry->root != NULL) *entry->root = kiln_c99_undefined();
             *link = entry->next;
             free(entry);
-            if (only_pointer != 0) return;
+            if (only_pointer != 0) return KILN_C99_OK;
         } else link = &entry->next;
     }
+    if (only_pointer != 0 && !found)
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                    "node:ffi callback does not belong to this library");
+    return KILN_C99_OK;
 }
 
 static void kiln_c99_ffi_remove_functions(uint64_t library) {
@@ -1226,6 +1261,12 @@ static int kiln_c99_node_ffi(kiln_host *host, kiln_value *out, uint64_t code,
         kiln_ffi_value *values = inline_values;
         void **owned = inline_owned;
         kiln_ffi_value result;
+        kiln_host *prior_callback_host;
+        kiln_value *prior_callback_thrown;
+        int prior_callback_depth;
+        int prior_callback_status;
+        uint32_t prior_callback_active;
+        int callback_status;
         size_t index;
         if (function == NULL)
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_ERROR,
@@ -1246,11 +1287,25 @@ static int kiln_c99_node_ffi(kiln_host *host, kiln_value *out, uint64_t code,
                                             &owned[index], thrown);
             if (status != KILN_C99_OK) goto call_done;
         }
+        prior_callback_host = kiln_c99_ffi_callback_host;
+        prior_callback_thrown = kiln_c99_ffi_callback_thrown;
+        prior_callback_depth = kiln_c99_ffi_callback_depth;
+        prior_callback_status = kiln_c99_ffi_callback_status;
+        prior_callback_active = kiln_c99_ffi_callback_active;
+        kiln_c99_ffi_callback_host = host;
+        kiln_c99_ffi_callback_thrown = thrown;
+        kiln_c99_ffi_callback_depth = depth;
         kiln_c99_ffi_callback_status = KILN_C99_OK;
+        kiln_c99_ffi_callback_active = 1;
         status = kiln_ffi_call(handle, values, (uint64_t)argc, &result);
+        callback_status = kiln_c99_ffi_callback_status;
+        kiln_c99_ffi_callback_host = prior_callback_host;
+        kiln_c99_ffi_callback_thrown = prior_callback_thrown;
+        kiln_c99_ffi_callback_depth = prior_callback_depth;
+        kiln_c99_ffi_callback_status = prior_callback_status;
+        kiln_c99_ffi_callback_active = prior_callback_active;
         if (status != KILN_C99_OK) status = kiln_c99_ffi_raise(thrown);
-        else if (kiln_c99_ffi_callback_status != KILN_C99_OK)
-            status = kiln_c99_ffi_callback_status;
+        else if (callback_status != KILN_C99_OK) status = callback_status;
         else status = kiln_c99_ffi_result(&result, out);
 call_done:
         for (index = 0; index < argc; ++index) free(owned[index]);
@@ -1262,7 +1317,7 @@ call_done:
         if (value.tag != KILN_VALUE_ARRAY_BUFFER)
             return kiln_c99_throw_not_a(thrown, value, "ArrayBuffer");
         return kiln_c99_ffi_bigint((uint64_t)(uintptr_t)kiln_c99_typed_buffer_of(value)->bytes,
-                                   out);
+                                   0, out);
     }
     if (code == KILN_C99_METHOD_NODE_FFI_TO_ARRAY_BUFFER) {
         uint64_t pointer;
@@ -1351,7 +1406,7 @@ call_done:
                                   depth, thrown);
             if (status != KILN_C99_OK) goto open_fail;
         }
-        status = kiln_c99_ffi_bigint(library, &answer);
+        status = kiln_c99_ffi_bigint(library, 0, &answer);
         if (status == KILN_C99_OK)
             status = kiln_c99_put(host, library_object, "__kilnFfiLibrary", 16, answer, depth,
                                   thrown);
@@ -1373,7 +1428,7 @@ call_done:
             status = kiln_c99_put(host, answer, "functions", 9, functions, depth, thrown);
         if (status == KILN_C99_OK) { *out = answer; return KILN_C99_OK; }
 open_fail:
-        kiln_c99_ffi_remove_callbacks(library, 0);
+        (void)kiln_c99_ffi_remove_callbacks(library, 0, thrown);
         kiln_c99_ffi_remove_functions(library);
         (void)kiln_ffi_close(library);
         return status;
@@ -1403,9 +1458,6 @@ open_fail:
         callback->root = (kiln_value *)slot;
         *callback->root = function;
         callback->library = library;
-        callback->host = host;
-        callback->thrown = thrown;
-        callback->depth = depth;
         callback->result = result_type;
         status = kiln_ffi_register_callback(types, (uint64_t)count, result_type,
                                              kiln_c99_ffi_callback_dispatch, callback, &pointer);
@@ -1416,7 +1468,7 @@ open_fail:
         callback->pointer = pointer;
         callback->next = kiln_c99_ffi_callbacks;
         kiln_c99_ffi_callbacks = callback;
-        return kiln_c99_ffi_bigint(pointer, out);
+        return kiln_c99_ffi_bigint(pointer, 0, out);
     }
     if (code == KILN_C99_METHOD_NODE_FFI_UNREGISTER_CALLBACK) {
         uint64_t library, pointer;
@@ -1424,7 +1476,8 @@ open_fail:
         if (status != KILN_C99_OK) return status;
         status = kiln_c99_ffi_u64(argc > 0 ? args[0] : kiln_c99_undefined(), &pointer, thrown);
         if (status != KILN_C99_OK) return status;
-        kiln_c99_ffi_remove_callbacks(library, pointer);
+        status = kiln_c99_ffi_remove_callbacks(library, pointer, thrown);
+        if (status != KILN_C99_OK) return status;
         *out = kiln_c99_undefined();
         return status;
     }
@@ -1432,7 +1485,8 @@ open_fail:
         uint64_t library;
         status = kiln_c99_ffi_library_handle(host, receiver, &library, depth, thrown);
         if (status != KILN_C99_OK) return status;
-        kiln_c99_ffi_remove_callbacks(library, 0);
+        status = kiln_c99_ffi_remove_callbacks(library, 0, thrown);
+        if (status != KILN_C99_OK) return status;
         status = kiln_ffi_close(library);
         if (status != KILN_C99_OK) return kiln_c99_ffi_raise(thrown);
         kiln_c99_ffi_remove_functions(library);
