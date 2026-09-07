@@ -919,7 +919,8 @@ mod tests {
     fn node_resolves_typescript_extension_alias_imports() {
         let tree = Tree::new("ts-extension-alias");
         tree.file("package.json");
-        std::fs::write(tree.0.join("package.json"), r#"{"type":"module"}"#).expect("write package.json");
+        std::fs::write(tree.0.join("package.json"), r#"{"type":"module"}"#)
+            .expect("write package.json");
         tree.file("src/main.ts");
         tree.file("src/dep.ts");
         let entry = tree.0.join("src/main.ts");

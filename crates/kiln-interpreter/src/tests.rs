@@ -860,6 +860,7 @@ fn node_builtin_defaults_preserve_namespace_or_callable_shape() {
     for specifier in [
         "async_hooks",
         "buffer",
+        "console",
         "crypto",
         "fs",
         "http",
@@ -884,6 +885,54 @@ fn node_builtin_defaults_preserve_namespace_or_callable_shape() {
             .expect("builtin advertises a default export");
         assert_eq!(default.type_name(), "function", "node:{specifier}");
     }
+}
+
+#[test]
+fn node_console_exports_and_methods() {
+    let program = Program {
+        source: "".into(),
+        template_sites: Vec::new(),
+        version: kiln_ir::BYTECODE_VERSION,
+        constants: Vec::new(),
+        code: Vec::new(),
+        local_count: 0,
+        functions: Vec::new(),
+    };
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: std::collections::VecDeque::new(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+
+    assert_eq!(
+        Native::NodeConsole.property("Console"),
+        Some(Value::Native(Native::ConsoleConstructor, RealmId::PRIMARY))
+    );
+    let names = node_builtin_export_names("node:console").expect("console builtin exists");
+    assert!(names.contains(&"Console"));
+    assert!(names.contains(&"log"));
+    assert!(names.contains(&"error"));
+    assert!(names.contains(&"warn"));
+    assert!(names.contains(&"info"));
+    assert!(names.contains(&"debug"));
+    assert!(names.contains(&"default"));
+    assert_eq!(names.len(), 24);
+
+    // new Console requires a writable stream for stdout
+    let err = vm.construct_console(&[], 0).unwrap_err();
+    assert!(matches!(err, ExecutionError::TypeErrorMessage { .. }));
+
+    // Global console has Console constructor
+    let globals = vm.global_object();
+    let global_console = vm.read_property(&globals, "console", 0).unwrap();
+    let console_ctor = vm.read_property(&global_console, "Console", 0).unwrap();
+    assert_eq!(
+        console_ctor,
+        Value::Native(Native::ConsoleConstructor, RealmId::PRIMARY)
+    );
 }
 
 #[test]
@@ -4112,6 +4161,7 @@ fn every_prototype_table() -> Vec<PrototypeTable> {
         P::EventEmitter,
         P::Readable,
         P::Writable,
+        P::Console,
     ]
 }
 
