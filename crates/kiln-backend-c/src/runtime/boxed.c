@@ -1268,9 +1268,12 @@ static int kiln_c99_val_call_method(kiln_host *host, kiln_val receiver, const ki
                         remembered.holder_shape = step->shape;
                         remembered.holder_key = holder_key;
                         remembered.holder_slot = slot;
+                        remembered.epoch = kiln_c99_proto_epoch;
+                        ((kiln_object *)step)->cache_holder = 1;
                         if (via != NULL) {
                             remembered.via = via;
                             remembered.via_shape = via->shape;
+                            ((kiln_object *)via)->cache_holder = 1;
                         }
                     }
                 }

@@ -530,26 +530,12 @@ fn emit_block_sequence(
     spec: &Speculation,
 ) {
     // A proven number nothing reads boxed is never boxed: its box statement is dropped from
-    // the operation's text, and its twin is all that lives. In a versioned body the fast clone
-    // proves more numbers than the generic one, and the generic one reads those boxed after a
-    // speculation exit; so the fast clone boxes every number it alone holds as a twin at each
-    // of its exits to the generic clone, and nowhere else. An exit is a guard failure, rare by
-    // construction; a definition is every iteration.
-    let boxed = Some(boxed_uses(graph, numbers, booleans, array_slots, kind));
-    let exit_boxing: Option<String> = if block_prefix == "kiln_fast_block_" {
-        let boxed_set = boxed.as_ref().unwrap();
-        let mut twins: Vec<u32> = numbers
-            .iter()
-            .filter(|v| !boxed_set.contains(v))
-            .map(|v| v.0)
-            .collect();
-        twins.sort_unstable();
-        Some(
-            twins
-                .iter()
-                .map(|k| format!("v{k} = kiln_c99_val_from_double(d{k}); "))
-                .collect(),
-        )
+    // the operation's text, and its twin is all that lives. Only in a body with one clone --
+    // a versioned body's clones share every value, and the generic one reads them boxed. (A
+    // fast clone that boxed only at its exits was tried on 2026-09-06: it measured nothing,
+    // and a bundled `marked` answered wrongly under it.)
+    let boxed = if block_prefix == "kiln_block_" {
+        Some(boxed_uses(graph, numbers, booleans, array_slots, kind))
     } else {
         None
     };
@@ -684,10 +670,8 @@ fn emit_block_sequence(
             .unwrap();
             writeln!(
                 output,
-                "    if (KILN_UNLIKELY(kiln_c99_guard_should_exit_in(kiln_spec_mode, &kiln_loop_guard_{}))) {{ {}goto kiln_generic_block_{}; }}",
-                block.id.0,
-                exit_boxing.as_deref().unwrap_or(""),
-                block.id.0
+                "    if (KILN_UNLIKELY(kiln_c99_guard_should_exit_in(kiln_spec_mode, &kiln_loop_guard_{}))) goto kiln_generic_block_{};",
+                block.id.0, block.id.0
             )
             .unwrap();
         }
@@ -735,9 +719,6 @@ fn emit_block_sequence(
                     " ",
                 );
             }
-            if let Some(boxing) = &exit_boxing {
-                op_text = box_before_exits(&op_text, boxing);
-            }
             output.push_str(&op_text);
             // A boolean's twin follows from its box: one compare, and a branch or a phi then
             // reads the twin.
@@ -779,42 +760,6 @@ fn booleans_with(
         .into_iter()
         .filter_map(|(v, kind)| (kind == Proven::Boolean).then_some(v))
         .collect()
-}
-
-/// `text` with `boxing` placed before every `goto` that leaves the fast clone for the generic
-/// one: a block label, a generic block label, or a speculation resume label.
-fn box_before_exits(text: &str, boxing: &str) -> String {
-    const EXITS: [&str; 3] = [
-        "goto kiln_block_",
-        "goto kiln_generic_block_",
-        "goto kiln_generic_resume_",
-    ];
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    loop {
-        let next = EXITS
-            .iter()
-            .filter_map(|prefix| rest.find(prefix).map(|at| (at, *prefix)))
-            .min_by_key(|(at, _)| *at);
-        let Some((at, prefix)) = next else {
-            out.push_str(rest);
-            return out;
-        };
-        let after = &rest[at + prefix.len()..];
-        let digits = after.bytes().take_while(u8::is_ascii_digit).count();
-        if digits == 0 || after.as_bytes().get(digits) != Some(&b';') {
-            out.push_str(&rest[..at + prefix.len()]);
-            rest = after;
-            continue;
-        }
-        out.push_str(&rest[..at]);
-        out.push_str("{ ");
-        out.push_str(boxing);
-        out.push_str(prefix);
-        out.push_str(&after[..digits + 1]);
-        out.push_str(" }");
-        rest = &after[digits + 1..];
-    }
 }
 
 /// The values some operation reads boxed. Arithmetic and comparison on two proven numbers

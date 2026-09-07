@@ -16,6 +16,7 @@ static int kiln_c99_has_computed(kiln_host *host, kiln_value target, kiln_value 
 
 static int kiln_c99_delete_computed(kiln_host *host, kiln_value target, kiln_value key,
                                     int *answer, int depth, kiln_value *thrown) {
+    if (target.tag == KILN_VALUE_OBJECT) kiln_c99_prototype_touched(kiln_c99_object_of(target));
     kiln_value name;
     if (target.tag == KILN_VALUE_PROXY) {
         return kiln_c99_proxy_delete(host, target, key, answer, depth, thrown);

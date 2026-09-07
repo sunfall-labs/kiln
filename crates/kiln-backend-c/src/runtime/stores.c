@@ -145,6 +145,7 @@ static void kiln_c99_drop_callable_store(void *pointer) {
  * pass with `create` clear and do not move it. */
 static uint64_t kiln_c99_builtin_store_epoch;
 
+
 static int kiln_c99_callable_store(kiln_value callable, kiln_value *out, int create) {
     kiln_method_store *entry;
     if (callable.tag == KILN_VALUE_FUNCTION) {

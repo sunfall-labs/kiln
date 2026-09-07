@@ -105,6 +105,7 @@ static int kiln_c99_shape_transition(kiln_shape *current, const char *ikey, kiln
 }
 
 static int kiln_c99_ensure_dictionary(kiln_object *object) {
+    kiln_c99_prototype_touched(object);
     kiln_shape *shape;
     size_t i;
     int status;
@@ -201,6 +202,7 @@ static int kiln_c99_new_object(kiln_value *out) {
     object->module_namespace = 0;
     object->arguments_brand = 0;
     object->error_brand = 0;
+    object->cache_holder = 0;
     object->accessor_count = 0;
     object->read_only_seen = 0;
     object->shape = &kiln_c99_root_shape;
@@ -260,6 +262,7 @@ static int kiln_c99_new_object_tenured(kiln_value *out) {
     object->module_namespace = 0;
     object->arguments_brand = 0;
     object->error_brand = 0;
+    object->cache_holder = 0;
     object->accessor_count = 0;
     object->read_only_seen = 0;
     object->shape = &kiln_c99_root_shape;

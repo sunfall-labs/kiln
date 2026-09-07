@@ -8,6 +8,7 @@
  * ordinary property and is enumerated, a class body's is not. */
 static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t key_len,
                                     kiln_value getter, kiln_value setter, int enumerable) {
+    if (target.tag == KILN_VALUE_OBJECT) kiln_c99_prototype_touched(kiln_c99_object_of(target));
     kiln_object *object;
     kiln_property *property;
     size_t index;
@@ -126,6 +127,7 @@ static int kiln_c99_descriptor_field(kiln_host *host, kiln_value descriptor, con
 static int kiln_c99_define_property(kiln_host *host, kiln_value target, const char *key,
                                     size_t key_len, kiln_value descriptor, int depth,
                                     kiln_value *thrown) {
+    if (target.tag == KILN_VALUE_OBJECT) kiln_c99_prototype_touched(kiln_c99_object_of(target));
     kiln_value store;
     kiln_property *slot;
     kiln_value getter;
@@ -951,6 +953,7 @@ static int kiln_c99_set_function_name(kiln_value function, kiln_value key, const
  * the `set #x` written beside it -- two definitions describing one element. */
 static int kiln_c99_define_private(kiln_value target, const char *key, size_t key_len,
                                    kiln_value function, int kind) {
+    if (target.tag == KILN_VALUE_OBJECT) kiln_c99_prototype_touched(kiln_c99_object_of(target));
     kiln_property *slot;
     int status;
     if (kind != 0) {
@@ -973,6 +976,7 @@ static int kiln_c99_define_private(kiln_value target, const char *key, size_t ke
 
 static int kiln_c99_define_method(kiln_value target, const char *key, size_t key_len,
                                   kiln_value method) {
+    if (target.tag == KILN_VALUE_OBJECT) kiln_c99_prototype_touched(kiln_c99_object_of(target));
     kiln_object *object;
     size_t index;
     int status;

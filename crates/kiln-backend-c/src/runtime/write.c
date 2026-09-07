@@ -6,6 +6,7 @@
 static int kiln_c99_put_site(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                              kiln_value value, int strict, int depth, kiln_value *thrown,
                              kiln_c99_site *site) {
+    if (target.tag == KILN_VALUE_OBJECT) kiln_c99_prototype_touched(kiln_c99_object_of(target));
     int status;
     if (site == NULL || target.tag != KILN_VALUE_OBJECT) {
         return kiln_c99_put_mode(host, target, key, key_len, value, strict, depth, thrown);
@@ -272,6 +273,7 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
 static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_value key,
                                       kiln_value value, int strict, int depth,
                                       kiln_value *thrown) {
+    if (target.tag == KILN_VALUE_OBJECT) kiln_c99_prototype_touched(kiln_c99_object_of(target));
     double index;
     {
         int reduced = kiln_c99_reduce_key(host, target, key, &key, depth, thrown);
@@ -504,6 +506,7 @@ static int kiln_c99_set_computed(kiln_host *host, kiln_value target, kiln_value 
  * Only an object literal reaches this, so only an ordinary object is handled; anything else is
  * the caller having built something this cannot be asked about. */
 static int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_value value) {
+    if (target.tag == KILN_VALUE_OBJECT) kiln_c99_prototype_touched(kiln_c99_object_of(target));
     kiln_value text = kiln_c99_property_key(key);
     kiln_object *object;
     kiln_property *slot;

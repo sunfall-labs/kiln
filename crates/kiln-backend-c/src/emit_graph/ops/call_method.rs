@@ -396,7 +396,7 @@ pub(super) fn emit_call_method(
                         (
                             String::new(),
                             format!(
-                                " if (obj->shape != kiln_typed_shape_{i}) {{ kiln_typed_shape_{i} = obj->shape; kiln_typed_row_{i} = kiln_c99_recv_row({symbol}_fn_{i}_recv_shape, &{symbol}_fn_{i}_recv_slot[0][0], {columns}, obj->shape); }}"
+                                " if (obj->shape != kiln_typed_shape_{i}) {{ kiln_typed_shape_{i} = obj->shape; kiln_typed_row_{i} = kiln_c99_recv_row({symbol}_fn_{i}_recv_shape, &{symbol}_fn_{i}_recv_slot[0][0], {columns}, obj->shape); }} kiln_typed_proto_{i} = obj->prototype.tag == KILN_VALUE_OBJECT ? obj->prototype.bits : 0; kiln_typed_epoch_{i} = kiln_c99_site_callee_is_inherited(&site, obj) ? kiln_c99_proto_epoch : UINT64_MAX; kiln_typed_upvalues_{i} = plain->upvalues;"
                             ),
                         )
                     } else {
@@ -434,12 +434,56 @@ pub(super) fn emit_call_method(
                 .iter()
                 .map(|i| {
                     if plan.typed_needs[*i as usize].row {
-                        format!("static kiln_val kiln_typed_fn_{i} = 0; static const kiln_shape *kiln_typed_shape_{i} = NULL; static const uint32_t *kiln_typed_row_{i} = NULL; ")
+                        format!("static kiln_val kiln_typed_fn_{i} = 0; static const kiln_shape *kiln_typed_shape_{i} = NULL; static const uint32_t *kiln_typed_row_{i} = NULL; static uint64_t kiln_typed_proto_{i} = 0; static uint64_t kiln_typed_epoch_{i} = UINT64_MAX; static kiln_val *kiln_typed_upvalues_{i} = NULL; ")
                     } else {
                         format!("static kiln_val kiln_typed_fn_{i} = 0; ")
                     }
                 })
                 .collect();
+    // The shape-first entry. Once the generic arm below has entered a typed candidate for a
+    // receiver shape -- through the site's validated cache -- the shape, the receiver's own
+    // prototype link and the prototype epoch of that moment name the callee outright: the same
+    // three facts the cache's own hit checks, without the entry walk, the closure checks or the
+    // callee compare. A mutation anywhere a cache reads through moves the epoch and sends the
+    // site back through the generic arm, which restamps.
+    let typed_fast: String = typed_candidates
+        .iter()
+        .copied()
+        .filter(|&i| plan.typed_needs[i as usize].row)
+        .map(|i| {
+            let needs = plan.typed_needs[i as usize];
+            let mut call_args = String::from("depth + 1");
+            if needs.upvalues {
+                call_args.push_str(&format!(", kiln_typed_upvalues_{i}"));
+            }
+            if needs.receiver {
+                call_args.push_str(&format!(", v{}", object.0));
+            }
+            call_args.push_str(&format!(", kiln_typed_row_{i}"));
+            if needs.runtime {
+                call_args.push_str(", host, thrown");
+            }
+            for a in args {
+                call_args.push_str(&format!(", d{}", a.0));
+            }
+            let failed = format!(
+                "{{ int status = kiln_c99_typed_status; if (status == KILN_C99_THROWN) *thrown = kiln_c99_typed_thrown; {diag} {typed_check} }}"
+            );
+            let guard = format!(
+                "if (!handled && obj->shape != NULL && obj->shape == kiln_typed_shape_{i} && kiln_typed_epoch_{i} == kiln_c99_proto_epoch && obj->prototype.tag == KILN_VALUE_OBJECT && obj->prototype.bits == kiln_typed_proto_{i} && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH)"
+            );
+            if plan.typed_returns[i as usize] {
+                let twin = if typed { format!(" d{v} = kiln_typed_d;") } else { String::new() };
+                format!(
+                    "{guard} {{ double kiln_typed_d = {symbol}_fn_{i}_t({call_args}); if (KILN_UNLIKELY(kiln_c99_typed_failed(kiln_typed_d))) {failed} else {{ v{v} = kiln_c99_val_from_double(kiln_typed_d);{twin} }} handled = 1; }} "
+                )
+            } else {
+                format!(
+                    "{guard} {{ kiln_val kiln_typed_r = {symbol}_fn_{i}_t({call_args}); if (KILN_UNLIKELY(kiln_typed_r == KILN_VAL_TYPED_FAIL)) {failed} else {{ v{v} = kiln_typed_r; }} handled = 1; }} "
+                )
+            }
+        })
+        .collect();
     let by_name: String = candidates
                 .iter()
                 .filter(|i| !typed_candidates.contains(i))
@@ -1455,7 +1499,8 @@ pub(super) fn emit_call_method(
                 {math_s}{push_s}{regex_s}{map_s}{parallel_map_s}{filter_s}{reduce_s}{slice_s}{join_s}{split_s}{index_of_s}{substring_s}{collection_s}{json_s}{sort_s}{array_extra_s}{string_extra_s}{iterator_s} \
                 if (!handled && site.pic_count > 0 && KILN_VAL_IS_OBJECT(v{o})) {{ \
                     const kiln_object *obj = (const kiln_object *)KILN_VAL_PTR(v{o}); \
-                    kiln_val cached_fn = kiln_c99_site_cached_callee(&site, obj); \
+                    {typed_fast}\
+                    kiln_val cached_fn = handled ? 0 : kiln_c99_site_cached_callee(&site, obj); \
                     if (cached_fn != 0 && KILN_VAL_IS_CLOSURE(cached_fn)) {{ \
                         kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(cached_fn); \
                         {typed_chain}if (!plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH) {{ \

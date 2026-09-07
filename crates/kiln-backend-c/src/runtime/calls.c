@@ -705,6 +705,7 @@ static int kiln_c99_can_be_prototype(kiln_value value) {
  * finds a method of `C`, and the *constructors*, so `D` finds a static of `C`. The second is
  * what makes this take a function as well as an object. */
 static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype) {
+    if (target.tag == KILN_VALUE_OBJECT) kiln_c99_prototype_touched(kiln_c99_object_of(target));
     if (target.tag == KILN_VALUE_OBJECT) {
         if (kiln_c99_object_of(target)->module_namespace) {
             KILN_C99_REFUSE("setting the prototype of a module namespace");

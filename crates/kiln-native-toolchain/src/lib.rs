@@ -1080,6 +1080,13 @@ impl Toolchain {
         for flag in options.profile.compile_flags() {
             args.push(OsString::from(flag));
         }
+        // `KILN_IC_CHECK` in the build's environment compiles the inline-cache oracle in: every
+        // prototype-epoch hit is re-validated the long way and a disagreement traps. It is a
+        // build-time define rather than a runtime flag so the ordinary build pays nothing on the
+        // hit path; the corpora are run under it before a change to property writes lands.
+        if std::env::var_os("KILN_IC_CHECK").is_some_and(|v| !v.is_empty() && v != "0") {
+            args.push(OsString::from("-DKILN_IC_CHECK=1"));
+        }
         if options.march_native {
             args.push(OsString::from("-march=native"));
         }

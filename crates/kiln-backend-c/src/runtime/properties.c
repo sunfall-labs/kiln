@@ -159,6 +159,7 @@ static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key
 static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char *key,
                                   size_t key_len, const char *ikey, kiln_value value, int strict,
                                   int depth, kiln_value *thrown) {
+    if (target.tag == KILN_VALUE_OBJECT) kiln_c99_prototype_touched(kiln_c99_object_of(target));
     kiln_object *object;
     size_t index;
     int status;
@@ -649,6 +650,7 @@ static const char *kiln_c99_hot_key(int id) {
 /* `kiln_c99_put` for one of those keys, so a fresh object's members skip the hash too. */
 static int kiln_c99_put_hot_key(kiln_host *host, kiln_value target, int id, kiln_value value,
                                 int depth, kiln_value *thrown) {
+    if (target.tag == KILN_VALUE_OBJECT) kiln_c99_prototype_touched(kiln_c99_object_of(target));
     return kiln_c99_put_mode_ikey(host, target, kiln_c99_hot_key_text[id], kiln_c99_hot_key_len[id],
                                   kiln_c99_hot_key(id), value, 0, depth, thrown);
 }
