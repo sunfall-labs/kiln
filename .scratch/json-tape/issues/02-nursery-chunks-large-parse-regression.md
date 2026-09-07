@@ -71,3 +71,34 @@ worktree, against the unmodified compiler at ac301325:
 | small payload, warm median | 0.404 us | 0.409 us |
 
 Checksums equal on both probes under `KILN_GC_STRESS=1` (small) and `=200` (large).
+
+## Three-way measurement after the fix (2026-09-06, later)
+
+Fixed-count slope (20 vs 40 parses of the 2.2 MB probe inside one turn, so the harness's batch
+choice cannot differ between binaries), five interleaved rounds, best / p25 / median, plus the
+harness's cold first parse and the small payload. Load average 6 throughout; checksums equal.
+
+| build | slope ms/parse | cold ms | small us | collections per 20 parses |
+| --- | --- | --- | --- | --- |
+| parent c7d71dc9 (single-region nursery, C reader) | 5.74 / 6.55 / 6.62 | 5.52 / 5.63 / 5.64 | 0.40 | 8-10 |
+| origin/main with 9d96e4a8 reverted (single-region nursery, Rust reader, everything else) | 6.29 / 6.57 / 6.76 | 6.08 / 6.09 / 6.15 | 0.40 | 9 |
+| origin/main as landed (chunks, masked lookup d7428e9a) | 18.33 / 20.53 / 22.03 | 13.36 / 14.41 / 14.70 | 0.40 | 81 |
+| origin/main + adaptive chunk budget (branch `fix/nursery-lookup-2`, not landed) | 6.94 / 7.20 / 7.43 | 6.06 / 6.11 / 6.24 | 0.40 | 13 |
+
+The revert row is at parity with the parent, so the reader and every other commit since
+c7d71dc9 cost nothing per parse; the whole residual is 9d96e4a8's nursery. The masked lookup
+removed the walk (52% of the profile, first parse 111 ms) but main as landed is still 3x the
+parent per parse, and the collector's own trace says why: the chunk-budget trigger makes a
+collection due every 4 MB of filled chunks whatever the last pass found, so a parse whose result
+is all live is collected four times as it grows and marks its own result each time -- 81
+collections for twenty parses against 8. An earlier two-way that reported 21 ms for main was
+taken while another agent ran an all-core benchmark; this run repeats it at the same load as
+the parent and the number stands.
+
+The adaptive budget (a pass whose chunks mostly promoted doubles the wait for the next one, up
+to eight budgets; a pass that mostly reset brings it straight back) takes main to 13
+collections and within 10-13% of the parent on the slope and 1% of the revert on cold. What
+remains after it is the design: a hash probe per traced pointer (`kiln_c99_gc_lookup_nursery`
+16% of the profile against 6-7% before 9d96e4a8, when the nursery was one range check) and the
+per-chunk settle walk. Closing that needs the chunks in one reserved address range so the
+lookup is a range check again, which is a design decision, not a fix.
