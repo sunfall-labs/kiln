@@ -1223,6 +1223,11 @@ typedef struct kiln_gc_block {
 #define KILN_GC_SLOT_FREE ((size_t)-1) /* block->size sentinel: this slot is on the free list */
 typedef struct kiln_gc_slab {
 typedef struct kiln_gc_ptrset {
+static int kiln_c99_gc_ptrset_insert(kiln_gc_ptrset *set, void *pointer);
+static void kiln_c99_gc_ptrset_remove(kiln_gc_ptrset *set, const void *pointer);
+static int kiln_c99_gc_ptrset_contains(const kiln_gc_ptrset *set, const void *pointer);
+static void *kiln_c99_gc_aligned_alloc(size_t alignment, size_t size);
+static void kiln_c99_gc_aligned_free(void *aligned);
 typedef struct kiln_key_entry {
 typedef struct kiln_key_table {
 #define KILN_C99_HOT_KEYS(X)                     \
@@ -1242,8 +1247,13 @@ static const kiln_gc_hooks kiln_c99_gc_hooks;
 static kiln_gc_heap kiln_c99_gc_fallback;
 static inline void kiln_c99_gc_bound(kiln_gc_heap *heap, const void *base, size_t size) {
 static int kiln_c99_gc_stress_checks;
+#define KILN_NURSERY_HEADER ((sizeof(kiln_nursery_chunk) + 63) & ~(size_t)63)
+static kiln_nursery_chunk *kiln_c99_nursery_new_region(kiln_gc_nursery *nursery) {
+static void kiln_c99_nursery_free_region(kiln_gc_nursery *nursery, kiln_nursery_chunk *chunk) {
+static void kiln_c99_nursery_use(kiln_gc_nursery *nursery, kiln_nursery_chunk *chunk) {
+static kiln_nursery_chunk *kiln_c99_nursery_seal(kiln_gc_nursery *nursery) {
 static void kiln_c99_nursery_init(kiln_gc_nursery *nursery) {
-static void kiln_c99_nursery_free_list(kiln_nursery_chunk *chunk) {
+static void kiln_c99_nursery_free_list(kiln_gc_nursery *nursery, kiln_nursery_chunk *chunk) {
 static void kiln_c99_nursery_destroy(kiln_gc_nursery *nursery) {
 static void kiln_c99_gc_heap_init(kiln_gc_heap *heap) {
 static void kiln_c99_gc_trace_text(const char *text) { fputs(text, stderr); }
