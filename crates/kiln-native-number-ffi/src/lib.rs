@@ -2267,6 +2267,33 @@ mod realm {
         })
     }
 
+    /// Writes the active Realm's monotonic elapsed clock in milliseconds.
+    ///
+    /// A virtual realm begins at zero and advances with its scheduled work. A wall-clock realm
+    /// measures from the instant it was enabled, never from the Unix epoch; this is the clock
+    /// exposed as `performance.now()`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_performance_now(out_milliseconds: *mut f64) -> i32 {
+        ffi(|| {
+            if out_milliseconds.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            let Some(realm) = active_realm() else {
+                return INVALID_ARGUMENT;
+            };
+            let elapsed = match realm.clock.get() {
+                NativeClock::Virtual => realm.work.try_borrow().ok().map(|work| work.now()),
+                NativeClock::Wall { started, .. } => Some(started.elapsed()),
+            };
+            let Some(elapsed) = elapsed else {
+                return RUNTIME_ERROR;
+            };
+            // SAFETY: null was rejected and the caller supplies a writable slot.
+            unsafe { out_milliseconds.write(elapsed.as_secs_f64() * 1_000.0) };
+            0
+        })
+    }
+
     /// Writes the active Realm's deterministic clock in whole epoch nanoseconds.
     ///
     /// Split in two because C99 has no portable 128-bit integer: `out_high` takes the signed top
@@ -4485,6 +4512,11 @@ mod realm {
             unsafe { kiln_realm_now(context.cast::<f64>()) }
         }
 
+        unsafe extern "C" fn reads_performance_clock(context: *mut c_void) -> i32 {
+            // SAFETY: the test supplies one live `f64` slot while this callback runs.
+            unsafe { kiln_realm_performance_now(context.cast::<f64>()) }
+        }
+
         unsafe extern "C" fn allocates_http_request_id(context: *mut c_void) -> i32 {
             // SAFETY: the test supplies one live `u64` slot while this callback runs.
             unsafe { kiln_realm_http_client_request_id_active(context.cast::<u64>()) }
@@ -5486,6 +5518,7 @@ mod realm {
         fn wall_clock_realm_reads_the_host_and_fires_timers_on_it() -> Result<(), Box<dyn Error>> {
             let mut handle = 0;
             let mut now = f64::NAN;
+            let mut performance_now = f64::NAN;
             let mut fired: Option<std::time::Instant> = None;
             // SAFETY: every slot outlives the calls that use it.
             assert_eq!(unsafe { kiln_realm_create(&raw mut handle) }, 0);
@@ -5507,6 +5540,20 @@ mod realm {
             assert!(
                 now >= before,
                 "wall clock {now} reads before the test started {before}"
+            );
+            assert_eq!(
+                unsafe {
+                    kiln_realm_enter(
+                        handle,
+                        Some(reads_performance_clock),
+                        (&raw mut performance_now).cast::<c_void>(),
+                    )
+                },
+                0
+            );
+            assert!(
+                (0.0..10_000.0).contains(&performance_now),
+                "performance clock must be elapsed time, got {performance_now}"
             );
             let armed = std::time::Instant::now();
             assert_eq!(
@@ -5716,6 +5763,9 @@ mod realm {
         };
         (realm, kiln_realm_now, realm_now) => {
             const _: unsafe extern "C" fn(*mut f64) -> i32 = kiln_realm_now;
+        };
+        (realm, kiln_realm_performance_now, realm_now) => {
+            const _: unsafe extern "C" fn(*mut f64) -> i32 = kiln_realm_performance_now;
         };
         (realm, kiln_realm_now_nanoseconds, realm_now_nanoseconds) => {
             const _: unsafe extern "C" fn(*mut i64, *mut u64) -> i32 = kiln_realm_now_nanoseconds;

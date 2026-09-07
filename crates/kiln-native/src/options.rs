@@ -168,6 +168,7 @@ impl NativeRealmPolicy {
             compact: false,
             type_profile_record: false,
             type_profile: None,
+            live_module_slots: None,
         }
     }
 

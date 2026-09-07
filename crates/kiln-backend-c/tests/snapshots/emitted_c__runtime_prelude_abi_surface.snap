@@ -894,6 +894,7 @@ int kiln_realm_argv_at(uint64_t index, const uint8_t **out_bytes, uint64_t *out_
 int kiln_realm_entropy_word(uint64_t seed, uint64_t *out_word);
 int kiln_realm_runtime_report(uint64_t *out_fields, uint64_t capacity, uint64_t *out_count);
 int kiln_realm_now(double *out_milliseconds);
+int kiln_realm_performance_now(double *out_milliseconds);
 int kiln_realm_now_nanoseconds(int64_t *out_high, uint64_t *out_low);
 int kiln_realm_queue_microtask(kiln_realm_work_fn run, kiln_realm_drop_fn drop, void *work);
 int kiln_realm_queue_next_tick(kiln_realm_work_fn run, kiln_realm_drop_fn drop, void *work);

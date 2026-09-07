@@ -1740,6 +1740,9 @@ int kiln_realm_now(double *out_milliseconds) {
     *out_milliseconds = 0.0;
     return KILN_C99_OK;
 }
+int kiln_realm_performance_now(double *out_milliseconds) {
+    return kiln_realm_now(out_milliseconds);
+}
 int kiln_realm_now_nanoseconds(int64_t *out_high, uint64_t *out_low) {
     if (!kiln_test_realm_active || out_high == NULL || out_low == NULL) {
         return KILN_C99_INVALID_ARGUMENT;
@@ -5403,6 +5406,129 @@ fn value_graph_does_not_protect_an_operation_before_try() {
     assert_eq!(handler_by_call_pc[&1], None);
     assert!(handler_by_call_pc[&5].is_some());
     assert!(verify_function_graph(&graph).is_ok());
+}
+
+#[test]
+fn closed_world_module_omits_an_unread_exported_function_body() {
+    let function = || FunctionProto {
+        span: kiln_ir::Span::default(),
+        prologue_end: 0,
+        declared_length: 0,
+        name: None,
+        parameter_count: 0,
+        local_count: 0,
+        code: vec![Instruction::Const(0), Instruction::Return],
+        arrow: false,
+        generator: false,
+        asynchronous: false,
+        async_generator: false,
+        is_method: false,
+        mapped_arguments: false,
+        upvalues: Vec::new(),
+        type_annotations: None,
+    };
+    let module = module(
+        Program {
+            source: "".into(),
+            version: BYTECODE_VERSION,
+            constants: vec![Constant::Undefined],
+            code: vec![
+                Instruction::MakeFunction(0),
+                Instruction::StoreLocal(0),
+                Instruction::MakeFunction(1),
+                Instruction::StoreLocal(1),
+                Instruction::Const(0),
+                Instruction::Return,
+            ],
+            local_count: 2,
+            functions: vec![function(), function()],
+            template_sites: Vec::new(),
+        },
+        Vec::new(),
+        vec![
+            kiln_ir::ExportBinding {
+                exported: "kept".into(),
+                local_slot: 0,
+            },
+            kiln_ir::ExportBinding {
+                exported: "dropped".into(),
+                local_slot: 1,
+            },
+        ],
+    );
+    let emitted = emit_module_with_logical_path_and_policy(
+        &module,
+        "fixture.js",
+        EmissionPolicy {
+            compact: true,
+            live_module_slots: Some(std::sync::Arc::new([0].into_iter().collect())),
+            ..EmissionPolicy::default()
+        },
+    )
+    .expect("closed-world module emits");
+
+    assert!(emitted.source.contains("ku_fn_0("));
+    assert!(!emitted.source.contains("ku_fn_1("));
+}
+
+#[test]
+fn closed_world_module_keeps_a_declaration_captured_by_a_live_function() {
+    let function = |upvalues| FunctionProto {
+        span: kiln_ir::Span::default(),
+        prologue_end: 0,
+        declared_length: 0,
+        name: None,
+        parameter_count: 0,
+        local_count: 0,
+        code: vec![Instruction::Const(0), Instruction::Return],
+        arrow: false,
+        generator: false,
+        asynchronous: false,
+        async_generator: false,
+        is_method: false,
+        mapped_arguments: false,
+        upvalues,
+        type_annotations: None,
+    };
+    let module = module(
+        Program {
+            source: "".into(),
+            version: BYTECODE_VERSION,
+            constants: vec![Constant::Undefined],
+            code: vec![
+                Instruction::MakeFunction(0),
+                Instruction::StoreLocal(0),
+                Instruction::MakeFunction(1),
+                Instruction::StoreLocal(1),
+                Instruction::Const(0),
+                Instruction::Return,
+            ],
+            local_count: 2,
+            functions: vec![
+                function(Vec::new()),
+                function(vec![Upvalue::ParentLocal(0)]),
+            ],
+            template_sites: Vec::new(),
+        },
+        Vec::new(),
+        vec![kiln_ir::ExportBinding {
+            exported: "capturing".into(),
+            local_slot: 1,
+        }],
+    );
+    let emitted = emit_module_with_logical_path_and_policy(
+        &module,
+        "fixture.js",
+        EmissionPolicy {
+            compact: true,
+            live_module_slots: Some(std::sync::Arc::new([1].into_iter().collect())),
+            ..EmissionPolicy::default()
+        },
+    )
+    .expect("closed-world module emits");
+
+    assert!(emitted.source.contains("ku_fn_0("));
+    assert!(emitted.source.contains("ku_fn_1("));
 }
 
 #[test]

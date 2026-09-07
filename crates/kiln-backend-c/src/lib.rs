@@ -5,7 +5,11 @@
 //! using the numeric [`kiln_host_abi::HostOp`] value.  In particular, it never writes stdout (or
 //! otherwise bakes CLI policy into an object file).
 
-use std::{collections::HashSet, fmt::Write as _, sync::Arc};
+use std::{
+    collections::{BTreeSet, HashSet},
+    fmt::Write as _,
+    sync::Arc,
+};
 
 use kiln_host_abi::{HOST_ABI_VERSION, HostOp};
 use kiln_ir::{
@@ -64,6 +68,9 @@ pub struct EmissionPolicy {
     pub compact: bool,
     pub type_profile_record: bool,
     pub type_profile: Option<std::sync::Arc<graph::TypeProfile>>,
+    /// Module slots whose exported values can be observed by this closed-world executable.
+    /// `None` preserves the public module emitter's complete export surface.
+    pub live_module_slots: Option<Arc<BTreeSet<u32>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -910,6 +917,7 @@ fn render_functions(
     graphs: &[FunctionGraph],
     direct: &mut direct::DirectPlan,
     policy: &EmissionPolicy,
+    reachable: Option<&HashSet<usize>>,
 ) {
     if policy.type_profile_record {
         output.push_str(
@@ -1168,6 +1176,9 @@ fn render_functions(
         }
     }
     for (index, &has_fast) in fast.iter().enumerate() {
+        if reachable.is_some_and(|set| !set.contains(&index)) {
+            continue;
+        }
         writeln!(
             output,
             "static inline int {symbol}_fn_{index}(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc);"
@@ -1201,6 +1212,9 @@ fn render_functions(
         }
     }
     for (index, proto) in program.functions.iter().enumerate() {
+        if reachable.is_some_and(|set| !set.contains(&index)) {
+            continue;
+        }
         if let Some(name) = &proto.name {
             writeln!(
                 output,
@@ -1223,6 +1237,9 @@ fn render_functions(
         .unwrap();
     }
     for (index, proto) in program.functions.iter().enumerate() {
+        if reachable.is_some_and(|set| !set.contains(&index)) {
+            continue;
+        }
         let scalar_proto = !proto_produces_references(proto, program);
         let func_profile = policy.type_profile.as_ref().and_then(|p| p.function(index));
         emit_graph::emit_function_from_graph_with_profile(
@@ -2449,6 +2466,7 @@ fn render(
         &graphs,
         &mut direct,
         policy,
+        None,
     );
     render_entry(
         &mut output,
@@ -2468,6 +2486,126 @@ fn render(
         render_scalar_realm_wrapper(&mut output, symbol);
     }
     Ok(output)
+}
+
+/// Functions a closed-world module can instantiate, and the dead declaration stores that made
+/// the others unreachable. This deliberately recognizes only the compiler's simplest declaration
+/// shape: `MakeFunction; Store*`. Class methods and functions installed into objects remain live.
+fn closed_world_function_liveness(
+    program: &Program,
+    demanded: &BTreeSet<u32>,
+    direct_eval: bool,
+) -> (HashSet<usize>, HashSet<u32>, BTreeSet<u32>) {
+    if direct_eval {
+        return (
+            (0..program.functions.len()).collect(),
+            HashSet::new(),
+            (0..program.local_count).collect(),
+        );
+    }
+    let mut live_slots = demanded.clone();
+    for instruction in &program.code {
+        if let Instruction::LoadLocal(slot)
+        | Instruction::LoadCell(slot)
+        | Instruction::LoadGlobal(slot) = instruction
+        {
+            live_slots.insert(*slot);
+        }
+    }
+
+    let mut declarations = std::collections::HashMap::<u32, Vec<usize>>::new();
+    let mut reachable = HashSet::new();
+    let mut queue = std::collections::VecDeque::new();
+    let mark = |index: usize,
+                reachable: &mut HashSet<usize>,
+                queue: &mut std::collections::VecDeque<usize>| {
+        if reachable.insert(index) {
+            queue.push_back(index);
+        }
+    };
+    for (pc, instruction) in program.code.iter().enumerate() {
+        let Instruction::MakeFunction(index) = instruction else {
+            continue;
+        };
+        match program.code.get(pc + 1) {
+            Some(Instruction::StoreLocal(slot))
+            | Some(Instruction::StoreCell(slot))
+            | Some(Instruction::StoreGlobal(slot)) => {
+                declarations.entry(*slot).or_default().push(*index as usize);
+            }
+            _ => mark(*index as usize, &mut reachable, &mut queue),
+        }
+    }
+    for slot in &live_slots {
+        if let Some(indices) = declarations.get(slot) {
+            for &index in indices {
+                mark(index, &mut reachable, &mut queue);
+            }
+        }
+    }
+    while let Some(index) = queue.pop_front() {
+        let Some(function) = program.functions.get(index) else {
+            continue;
+        };
+        for upvalue in &function.upvalues {
+            let slot = match upvalue {
+                Upvalue::ParentLocal(slot) | Upvalue::NamedParentLocal { slot, .. } => Some(*slot),
+                _ => None,
+            };
+            if let Some(slot) = slot
+                && live_slots.insert(slot)
+                && let Some(indices) = declarations.get(&slot)
+            {
+                for &index in indices {
+                    mark(index, &mut reachable, &mut queue);
+                }
+            }
+        }
+        for instruction in &function.code {
+            match instruction {
+                Instruction::MakeFunction(index) => {
+                    mark(*index as usize, &mut reachable, &mut queue);
+                }
+                Instruction::LoadGlobal(slot) if live_slots.insert(*slot) => {
+                    if let Some(indices) = declarations.get(slot) {
+                        for &index in indices {
+                            mark(index, &mut reachable, &mut queue);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut dead_pcs = HashSet::new();
+    for (pc, instruction) in program.code.iter().enumerate() {
+        let Instruction::MakeFunction(index) = instruction else {
+            continue;
+        };
+        let dead_declaration = match program.code.get(pc + 1) {
+            Some(Instruction::StoreLocal(slot))
+            | Some(Instruction::StoreCell(slot))
+            | Some(Instruction::StoreGlobal(slot)) => !live_slots.contains(slot),
+            _ => false,
+        };
+        if dead_declaration && !reachable.contains(&(*index as usize)) {
+            dead_pcs.insert(pc as u32);
+            dead_pcs.insert((pc + 1) as u32);
+        }
+    }
+    (reachable, dead_pcs, live_slots)
+}
+
+/// Module slots read by evaluation or by a function reachable from a demanded export.
+///
+/// This is the linker-facing half of the same conservative analysis used during emission.
+pub fn closed_world_module_live_slots(
+    program: &Program,
+    demanded: &BTreeSet<u32>,
+    direct_eval: bool,
+) -> BTreeSet<u32> {
+    closed_world_function_liveness(program, demanded, direct_eval).2
 }
 
 fn render_module(
@@ -2555,8 +2693,21 @@ fn render_module(
         !keys.is_empty(),
         program.template_sites.len(),
     );
-    let (graphs, body, entry_graph, mut direct) =
+    let (graphs, body, mut entry_graph, mut direct) =
         plan_unit(program, diagnostic_site, policy.compact)?;
+    let reachable = policy.live_module_slots.as_ref().map(|demanded| {
+        let (reachable, dead_pcs, _) =
+            closed_world_function_liveness(program, demanded, module.link_facts.direct_eval);
+        for block in &mut entry_graph.blocks {
+            block.operations.retain(|(value, _)| {
+                !entry_graph
+                    .origins
+                    .get(value)
+                    .is_some_and(|origin| dead_pcs.contains(&origin.pc))
+            });
+        }
+        reachable
+    });
     render_functions(
         &mut output,
         program,
@@ -2567,6 +2718,7 @@ fn render_module(
         &graphs,
         &mut direct,
         policy,
+        reachable.as_ref(),
     );
     render_entry(
         &mut output,
@@ -2858,6 +3010,16 @@ fn hash_program_with_policy_and_seed(program: &Program, policy: &EmissionPolicy,
     }
     hash_string_policy(&mut hash, &policy.timezone);
     hash_string_policy(&mut hash, &policy.locale);
+    if let Some(slots) = &policy.live_module_slots {
+        hash ^= 0x74;
+        hash = hash.wrapping_mul(0x100000001b3);
+        for slot in slots.iter() {
+            for value in slot.to_le_bytes() {
+                hash ^= u64::from(value);
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+        }
+    }
     hash
 }
 
@@ -3361,6 +3523,16 @@ fn hash_module_with_policy_and_seed(
         if let Ok(json) = prof.to_json() {
             for b in json.as_bytes() {
                 hash ^= u64::from(*b);
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+        }
+    }
+    if let Some(slots) = &policy.live_module_slots {
+        hash ^= 0x74;
+        hash = hash.wrapping_mul(0x100000001b3);
+        for slot in slots.iter() {
+            for value in slot.to_le_bytes() {
+                hash ^= u64::from(value);
                 hash = hash.wrapping_mul(0x100000001b3);
             }
         }

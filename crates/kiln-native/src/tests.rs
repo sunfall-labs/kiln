@@ -5868,6 +5868,11 @@ fn native_host_clock_is_explicit_while_default_date_stays_at_epoch() {
         .as_ref()
         .and_then(HostValue::as_number)
         .expect("Date.now returns a number");
+    assert_eq!(
+        observed,
+        observed.trunc(),
+        "Date.now must return integral milliseconds"
+    );
     assert!(
         observed >= before && observed <= after,
         "host Date.now {observed} outside build/run interval {before}..={after}"

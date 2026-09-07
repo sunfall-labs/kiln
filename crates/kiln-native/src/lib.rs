@@ -30,7 +30,7 @@ use kiln_backend_c::{
 };
 use kiln_host_abi::HOST_ABI_VERSION;
 pub use kiln_host_abi::HostValue;
-use kiln_ir::{ExportBinding, Instruction, ModuleProgram, Program};
+use kiln_ir::{ExportBinding, ModuleProgram, Program};
 use kiln_module_graph::{ModuleGraph, ModuleGraphError, ModuleSource, ResolvedExport};
 use kiln_native_runtime::{
     EMBEDDING_C_ABI_VERSION, EMBEDDING_HOST_ABI_VERSION, EMBEDDING_MODULE_API_VERSION,
@@ -1587,7 +1587,18 @@ impl NativeBuilder {
         let emitted_modules = emit_indexed(nodes.len(), "graph module emission", |index| {
             let node = nodes[index];
             let logical_path = logical_module_path(graph.project_root(), &node.path)?;
-            let emitted = emit_native_graph_module_with_policy(node, &logical_path, &emission)?;
+            let mut module_emission = emission.clone();
+            if node.source == ModuleSource::Source {
+                module_emission.live_module_slots = Some(Arc::new(
+                    selected
+                        .live_export_slots
+                        .get(&node.path)
+                        .cloned()
+                        .unwrap_or_default(),
+                ));
+            }
+            let emitted =
+                emit_native_graph_module_with_policy(node, &logical_path, &module_emission)?;
             Ok((logical_path, emitted))
         })?;
         let mut modules = Vec::with_capacity(nodes.len());
@@ -3568,29 +3579,7 @@ enum NativeGraphImport {
 struct NativeExecutableGraph<'a> {
     modules: Vec<&'a kiln_module_graph::ModuleNode>,
     live_imports: BTreeSet<(PathBuf, usize)>,
-}
-
-fn program_reads_module_slot(program: &Program, slot: u32) -> bool {
-    program.code.iter().any(|instruction| {
-        matches!(
-            instruction,
-            Instruction::LoadLocal(found)
-                | Instruction::LoadCell(found)
-                | Instruction::LoadGlobal(found)
-                if *found == slot
-        )
-    }) || program.functions.iter().any(|function| {
-        function.code.iter().any(
-            |instruction| matches!(instruction, Instruction::LoadGlobal(found) if *found == slot),
-        ) || function.upvalues.iter().any(|upvalue| {
-            matches!(
-                upvalue,
-                kiln_ir::Upvalue::ParentLocal(found)
-                    | kiln_ir::Upvalue::NamedParentLocal { slot: found, .. }
-                    if *found == slot
-            )
-        })
-    })
+    live_export_slots: BTreeMap<PathBuf, BTreeSet<u32>>,
 }
 
 /// Whether the nearest package boundary explicitly licenses removing unused modules.
@@ -3632,6 +3621,7 @@ fn package_declares_no_side_effects(path: &Path, project_root: &Path) -> bool {
 fn native_executable_graph(graph: &ModuleGraph) -> Result<NativeExecutableGraph<'_>, NativeError> {
     let mut live = BTreeSet::new();
     let mut live_imports = BTreeSet::new();
+    let mut live_export_slots: BTreeMap<PathBuf, BTreeSet<u32>> = BTreeMap::new();
     let mut namespace_demands = BTreeSet::new();
     let mut queue = VecDeque::new();
     let mut side_effect_free = BTreeMap::new();
@@ -3648,6 +3638,12 @@ fn native_executable_graph(graph: &ModuleGraph) -> Result<NativeExecutableGraph<
             NativeError::Graph(ModuleGraphError::InternalMissingModule { path: path.clone() })
         })?;
         let direct_eval = node.program.link_facts.direct_eval;
+        let demanded = live_export_slots.get(&path).cloned().unwrap_or_default();
+        let live_slots = kiln_backend_c::closed_world_module_live_slots(
+            &node.program.program,
+            &demanded,
+            direct_eval || node.source == ModuleSource::CommonJs,
+        );
 
         for dependency in &node.dependencies {
             let removable = *side_effect_free
@@ -3664,8 +3660,7 @@ fn native_executable_graph(graph: &ModuleGraph) -> Result<NativeExecutableGraph<
             if node.source == ModuleSource::CommonJs && import.source == "*commonjs-wrapper*" {
                 continue;
             }
-            if !direct_eval && !program_reads_module_slot(&node.program.program, import.local_slot)
-            {
+            if !live_slots.contains(&import.local_slot) {
                 continue;
             }
             live_imports.insert((node.path.clone(), import_index));
@@ -3685,8 +3680,15 @@ fn native_executable_graph(graph: &ModuleGraph) -> Result<NativeExecutableGraph<
                 continue;
             }
             match graph.resolved_export(&dependency.target, &import.imported) {
-                Some(ResolvedExport::Local { module, .. }) => {
+                Some(ResolvedExport::Local { module, local_slot }) => {
+                    let newly_demanded = live_export_slots
+                        .entry(module.clone())
+                        .or_default()
+                        .insert(*local_slot);
                     mark_live(module, &mut live, &mut queue);
+                    if newly_demanded {
+                        queue.push_back(module.clone());
+                    }
                 }
                 Some(ResolvedExport::Namespace { module }) => {
                     namespace_demands.insert(module.clone());
@@ -3708,8 +3710,17 @@ fn native_executable_graph(graph: &ModuleGraph) -> Result<NativeExecutableGraph<
             })?;
             for name in names {
                 match graph.resolved_export(&path, &name) {
-                    Some(ResolvedExport::Local { module, .. })
-                    | Some(ResolvedExport::Namespace { module }) => {
+                    Some(ResolvedExport::Local { module, local_slot }) => {
+                        let newly_demanded = live_export_slots
+                            .entry(module.clone())
+                            .or_default()
+                            .insert(*local_slot);
+                        mark_live(module, &mut live, &mut queue);
+                        if newly_demanded {
+                            queue.push_back(module.clone());
+                        }
+                    }
+                    Some(ResolvedExport::Namespace { module }) => {
                         mark_live(module, &mut live, &mut queue);
                     }
                     Some(ResolvedExport::Ambiguous) | None => {}
@@ -3724,6 +3735,7 @@ fn native_executable_graph(graph: &ModuleGraph) -> Result<NativeExecutableGraph<
             .filter(|node| live.contains(&node.path))
             .collect(),
         live_imports,
+        live_export_slots,
     })
 }
 
