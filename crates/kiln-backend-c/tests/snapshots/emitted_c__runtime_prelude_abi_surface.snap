@@ -1,5 +1,6 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
+assertion_line: 803
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -725,6 +726,7 @@ extern kiln_val kiln_c99_val_from_text(const char *bytes, size_t len);
 #else
 static kiln_val kiln_c99_val_from_text(const char *bytes, size_t len);
 static kiln_value kiln_val_to_boundary(kiln_val v);
+static kiln_value kiln_val_binding_to_boundary(kiln_val v);
 #endif
 static inline kiln_val kiln_val_from_boundary(kiln_value v) {
 static inline kiln_val kiln_c99_val_from_double(double d) {
@@ -1641,6 +1643,8 @@ static int kiln_c99_realm_value_slot(uint32_t key, kiln_value **out) {
 static int kiln_c99_atomics_object(kiln_value *out) {
 static int kiln_c99_console_object(kiln_value *out) {
 static int kiln_c99_process_object(kiln_value *out) {
+#if defined(KILN_NODE_ENV_PRODUCTION)
+#endif
 #if defined(__linux__)
 #elif defined(__APPLE__)
 #elif defined(_WIN32)
@@ -2190,6 +2194,7 @@ static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_val
 static kiln_val kiln_c99_string_constant(void **cached, const char *bytes, size_t len) {
 static inline void kiln_c99_site_stamp_builtin(kiln_c99_site *site, uint32_t builtin) {
 static kiln_value kiln_val_to_boundary(kiln_val v) {
+static kiln_value kiln_val_binding_to_boundary(kiln_val v) {
 static int kiln_c99_val_promise_resolve(kiln_val value, kiln_val *out) {
 static size_t kiln_c99_val_string_length(kiln_val v) {
 static int kiln_c99_val_array_push_fast(kiln_val receiver, kiln_val arg, kiln_val *out) {

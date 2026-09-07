@@ -296,6 +296,11 @@ static void kiln_c99_forget_handled_throw(void) {
 
 static void kiln_c99_note_refusal(const char *site, size_t instruction,
                                   const char *operation, size_t depth) {
+    /* Runtime helpers do not own a bytecode instruction and deliberately pass no site. The
+     * generated caller will attribute a propagated throw/refusal to its real instruction. In an
+     * active realm, forwarding this partial record would also ask the diagnostic bridge to
+     * measure a null C string. */
+    if (site == NULL || operation == NULL) return;
     int replaces_body_fallback =
         kiln_c99_diagnostic_operation != NULL &&
         strcmp(kiln_c99_diagnostic_operation, "FunctionBody") == 0;

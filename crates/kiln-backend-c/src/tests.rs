@@ -1349,6 +1349,31 @@ int main(void) {
     );
 }
 
+#[test]
+fn an_unowned_runtime_failure_does_not_publish_a_null_diagnostic_site() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("diagnostic ownership probe emits");
+    let wrapper = r#"
+int main(void) {
+    uint64_t realm;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
+    kiln_test_realm_active = 1;
+    kiln_c99_diagnostic_detail = "nested helper threw";
+    kiln_c99_note_refusal(NULL, 0, NULL, 1);
+    if (kiln_c99_diagnostic_site != NULL || kiln_c99_diagnostic_operation != NULL) return 2;
+    kiln_test_realm_active = 0;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 3;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "unowned-runtime-diagnostic");
+    assert!(
+        run.status.success(),
+        "unowned runtime diagnostic failed ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
 fn program(constants: Vec<Constant>, code: Vec<Instruction>, local_count: u32) -> Program {
     Program {
         source: "".into(),
