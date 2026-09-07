@@ -35,6 +35,23 @@
 #define KILN_GC_HOOKS_VERSION 2u
 #define KILN_GC_DEFAULT_FLOOR ((size_t)256 * 1024)
 #define KILN_GC_MID_TURN_FLOOR ((size_t)4 * 1024 * 1024)
+/* The nursery's chunk budget: filled chunks are collected inside a turn once this many bytes of
+ * them wait, while the live heap is small next to it (`KILN_NURSERY_SMALL_LIVE_BUDGETS`).
+ * `KILN_NURSERY_KIB` overrides it. */
+#define KILN_NURSERY_BUDGET ((size_t)4 * 1024 * 1024)
+/* Chunk collections run only while the live heap is at most this many budgets: a large live
+ * heap makes every mark expensive, and there the chunks wait for the size-based trigger. */
+#define KILN_NURSERY_SMALL_LIVE_BUDGETS 8
+/* A pass whose chunks mostly promoted says the turn is building a structure, not churning;
+ * collecting again after one more budget would mark that structure again for nothing. The
+ * next chunk collection then waits this many times longer, up to `KILN_NURSERY_BUDGET_CAP`
+ * budgets; a pass whose chunks mostly reset brings the wait straight back to one budget.
+ * Measured on a 2.2 MB JSON.parse, ten thousand rows all live until the parse returns, twenty
+ * parses in one turn: a fixed budget collected each parse four times as it grew and marked its
+ * own result each time -- 81 collections and 22.0 ms per parse; with this growth, 13
+ * collections and 7.4 ms, against 6.6 ms for the single-region nursery before 9d96e4a8. */
+#define KILN_NURSERY_BUDGET_GROWTH 2
+#define KILN_NURSERY_BUDGET_CAP 8
 /* What the `introspect` hook reports back, as a bitmask. `ARMED` is what tells the drive to keep
  * its park short enough to notice a signal; `DUMPED` says a request was pending and was served. */
 #define KILN_C99_INTROSPECT_ARMED 1
@@ -202,6 +219,13 @@ typedef struct kiln_gc_nursery {
     kiln_nursery_chunk *full;
     size_t full_bytes;
     size_t budget;
+    /* The budget the next chunk collection waits for. A pass whose chunks mostly promoted says
+     * the turn is building a structure, not churning; collecting again after one more budget
+     * would mark that structure again for nothing, so the wait doubles, up to eight budgets.
+     * A pass whose chunks mostly reset brings it straight back to `budget`. Without this, a
+     * 2.2 MB JSON.parse was collected four times as it grew and marked its own result each
+     * time: 81 collections for twenty parses where the single-region nursery took 8. */
+    size_t budget_now;
     /* Emptied chunks kept for reuse, with their bitmaps, up to a budget's worth. */
     kiln_nursery_chunk *spare;
     size_t spare_count;
@@ -363,13 +387,14 @@ static void kiln_c99_nursery_init(kiln_gc_nursery *nursery) {
      * nothing in it survived or promoted on its own when something did. `KILN_NURSERY_KIB`
      * sets the budget; the chunk stays a size a few thousand blocks fill. */
     nursery->capacity = (size_t)256 * 1024;
-    nursery->budget = (size_t)4 * 1024 * 1024;
+    nursery->budget = KILN_NURSERY_BUDGET;
     setting = getenv("KILN_NURSERY_KIB");
     if (setting != NULL && setting[0] >= '0' && setting[0] <= '9') {
         size_t kib = (size_t)strtoul(setting, NULL, 10);
         if (kib > 0 && kib <= 1024 * 1024) nursery->budget = kib * 1024;
     }
     if (nursery->budget < nursery->capacity) nursery->capacity = nursery->budget;
+    nursery->budget_now = nursery->budget;
     /* A region is found by masking, so its size is a power of two; and it is no smaller than a
      * slab, so a small budget still gives a chunk a few thousand blocks fill. */
     {
@@ -1445,8 +1470,8 @@ static void *kiln_c99_gc_alloc_ex(uint32_t kind, size_t size, int zero_payload) 
          * pass over them either resets a chunk, and allocation stays a bump into hot memory, or
          * promotes it alone. A large live heap makes every mark expensive; there the chunks
          * wait for the size-based trigger above. */
-        if (!due && heap->nursery.full_bytes >= heap->nursery.budget &&
-            heap->survived <= heap->nursery.budget * 8) {
+        if (!due && heap->nursery.full_bytes >= heap->nursery.budget_now &&
+            heap->survived <= heap->nursery.budget * KILN_NURSERY_SMALL_LIVE_BUDGETS) {
             due = 1;
         }
         if (heap->stress_every != 0 && --heap->stress_countdown == 0) {
@@ -2554,22 +2579,34 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
          * once the nursery is full, are swept below. */
         if (nursery_has_allocs) {
             kiln_nursery_chunk *chunk = heap->nursery.full;
+            size_t reset_bytes = 0;
+            size_t promoted_bytes = 0;
             heap->nursery.full = NULL;
             heap->nursery.full_bytes = 0;
             while (chunk != NULL) {
                 kiln_nursery_chunk *next = chunk->next;
+                size_t filled = (size_t)(chunk->limit - chunk->base);
                 size_t survivors = kiln_c99_nursery_settle(heap, chunk->base, chunk->limit,
                                                            chunk->bitmap, chunk->bitmap_words);
                 if (survivors == 0) {
+                    reset_bytes += filled;
                     heap->nursery.resets++;
                     kiln_c99_nursery_spare(heap, chunk);
                 } else {
+                    promoted_bytes += filled;
                     chunk->live_count = survivors;
                     chunk->next = heap->nursery.promoted;
                     heap->nursery.promoted = chunk;
                     heap->nursery.promotions += survivors;
                 }
                 chunk = next;
+            }
+            if (promoted_bytes > reset_bytes) {
+                if (heap->nursery.budget_now < heap->nursery.budget * KILN_NURSERY_BUDGET_CAP) {
+                    heap->nursery.budget_now *= KILN_NURSERY_BUDGET_GROWTH;
+                }
+            } else {
+                heap->nursery.budget_now = heap->nursery.budget;
             }
             if (heap->nursery.bump > heap->nursery.base) {
                 size_t survivors = kiln_c99_nursery_settle(heap, heap->nursery.base, heap->nursery.bump,

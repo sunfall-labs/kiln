@@ -83,7 +83,7 @@ harness's cold first parse and the small payload. Load average 6 throughout; che
 | parent c7d71dc9 (single-region nursery, C reader) | 5.74 / 6.55 / 6.62 | 5.52 / 5.63 / 5.64 | 0.40 | 8-10 |
 | origin/main with 9d96e4a8 reverted (single-region nursery, Rust reader, everything else) | 6.29 / 6.57 / 6.76 | 6.08 / 6.09 / 6.15 | 0.40 | 9 |
 | origin/main as landed (chunks, masked lookup d7428e9a) | 18.33 / 20.53 / 22.03 | 13.36 / 14.41 / 14.70 | 0.40 | 81 |
-| origin/main + adaptive chunk budget (branch `fix/nursery-lookup-2`, not landed) | 6.94 / 7.20 / 7.43 | 6.06 / 6.11 / 6.24 | 0.40 | 13 |
+| origin/main + adaptive chunk budget (landed; re-measured after the gate at load 6.5: parent 6.37 / 6.56 / 6.58, main as landed 18.45 / 19.80 / 19.83) | 7.03 / 7.26 / 7.34 | 5.94 / 5.98 / 6.28 | 0.40 | 13 |
 
 The revert row is at parity with the parent, so the reader and every other commit since
 c7d71dc9 cost nothing per parse; the whole residual is 9d96e4a8's nursery. The masked lookup
@@ -95,7 +95,7 @@ collections for twenty parses against 8. An earlier two-way that reported 21 ms 
 taken while another agent ran an all-core benchmark; this run repeats it at the same load as
 the parent and the number stands.
 
-The adaptive budget (a pass whose chunks mostly promoted doubles the wait for the next one, up
+The adaptive budget, now landed (a pass whose chunks mostly promoted doubles the wait for the next one, up
 to eight budgets; a pass that mostly reset brings it straight back) takes main to 13
 collections and within 10-13% of the parent on the slope and 1% of the revert on cold. What
 remains after it is the design: a hash probe per traced pointer (`kiln_c99_gc_lookup_nursery`

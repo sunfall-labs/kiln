@@ -1207,6 +1207,10 @@ static kiln_data_view *kiln_c99_data_view_of(kiln_value value) {
 #define KILN_GC_HOOKS_VERSION 2u
 #define KILN_GC_DEFAULT_FLOOR ((size_t)256 * 1024)
 #define KILN_GC_MID_TURN_FLOOR ((size_t)4 * 1024 * 1024)
+#define KILN_NURSERY_BUDGET ((size_t)4 * 1024 * 1024)
+#define KILN_NURSERY_SMALL_LIVE_BUDGETS 8
+#define KILN_NURSERY_BUDGET_GROWTH 2
+#define KILN_NURSERY_BUDGET_CAP 8
 #define KILN_C99_INTROSPECT_ARMED 1
 #define KILN_C99_INTROSPECT_DUMPED 2
 #define KILN_GC_KIND_MASK ((uint32_t)0x07FFFFFFu)
