@@ -5249,3 +5249,68 @@ Operational: `.kiln/cache` in the worktree reached 70 GB after a day of gates an
 disk mid-gate, which failed six crates' tests with "No space left on device"; the gate script
 now ends with `kiln cache gc`. A gate whose crate tests fail while its corpora pass has had its
 tree or its disk changed under it, and the answer is to rerun the phase, not to read the failures.
+
+## A prototype epoch, and what a method call costs after it (2026-09-06, Claude `work/fastest-native`)
+
+**class-poly 2.34 → 1.41 ms** (node 0.50; from 4.7x to 2.8x), in five commits, each measured.
+
+The hold on the prototype-write epoch was lifted, and the question was how to make it sound
+without instrumenting the hundred and forty mutation sites the audit counted. The answer is a
+flag: an object is marked `cache_holder` the moment an inline cache records a property read
+through it, and only a mutation of a flagged object moves `kiln_c99_proto_epoch`. That puts the
+bump at the mutation *primitives* -- put, define, delete, set-prototype, the conversion to
+dictionary mode, the raw-value writes in boxed.c, the emitted store hit paths -- fourteen
+places, not a hundred and forty, because an object under construction is never flagged. A
+site's cached prototype method is then valid while the epoch it was validated under holds and
+the receiver's own prototype link is the one remembered (two shapes can be equal under
+different prototypes); the objects further up the chain are flagged, so the epoch covers
+their links. A shaped holder's method is read from its slot on the hit, since the epoch says
+the shape is the one remembered; a list holder's is the value remembered with its record.
+
+What made it trustworthy is the oracle: a build with `KILN_IC_CHECK` in its environment
+defines the macro, and every epoch hit is re-validated the long way and traps, naming the
+holder, on disagreement. Run over the corpora it found three things in an afternoon: the
+first version defined the epoch in the types header, which every module unit compiles, so
+each unit had an epoch of its own that never moved (the definition now lives in the prelude,
+and the header a module unit compiles declares it `extern`, hidden, so the read is PC-relative
+and not a load through the GOT); the two raw-value write paths in boxed.c stored into a slot
+and took a transition on a hit without moving the epoch; and the shaped-holder hit answered
+the entry's empty value. `rxjs` caught the last two. `conformance/native/prototype-mutation-paths.js`
+mutates a cached chain through every path the runtime has and matches node under the oracle.
+The oracle is a build-time define rather than a runtime flag because a runtime flag was a load
+through the GOT on every cached call, which cost what the epoch had saved.
+
+On top of the epoch the call site dispatches on the receiver's shape first: the shape, the
+link and the epoch of the moment the generic arm last entered a typed candidate name the
+callee outright, without the entry walk, the closure checks or the callee compare -- and only
+for a callee held on a prototype, because a method held on the instance is a different closure
+on every instance of the shape, which a bundled `marked` demonstrated (the agent-style
+version that armed for own-slot callees printed `<strong>mphasi</strong>`).
+
+Then three cuts to what remained: one dispatch guard per site instead of one per arm; a
+guarded array's `length` proven an integer, so the loop compares and indexes with integers
+(and the property read owes its integer twin, which the first version forgot: the fast clone
+answered 0 for the whole benchmark while the generic clone was right -- `KILN_SPECULATE=exit`
+is the check that catches a clone disagreeing with its twin); and a second read of the same
+`this` field in a block copies the first on the shaped row path, where an accessor is
+impossible because an accessor puts its object in dictionary mode.
+
+Two things tried and removed. Reading `kiln_c99_inheriting_new_target` once per body instead
+of through the GOT at every site measured nothing (kept, it is tidier). Boxing the fast
+clone's twins only at its exits to the generic clone measured nothing either, and `marked`
+answered wrongly under it; it was reverted without finding the hole, because a change that
+does not pay for itself is not worth the debugging.
+
+What the loop costs now, from an annotated disassembly: about 90 instructions a call,
+executed at close to the machine's full width, so the time is the instruction count and
+nothing else. Node's is about fifteen. The remaining instructions are the NaN-box checks on
+the four slot reads, the boxing of the accumulator across the loop, the two shape guards, the
+element read's bounds and tag checks, and the typed-failure check on the result. The cut that
+would matter next is unboxed double fields, which is a representation change across the
+runtime, not a call-site change.
+
+Also on main this evening and not this branch's doing: `kiln-module-graph`'s
+`node_builtin_static_imports_are_typed_virtual_modules` fails (node:fs gained `appendFile` and
+`mkdir` in one place and not the other), and `conformance/differential/inherited-setters.js`
+throws where node ignores a write to an inherited read-only property; both reproduce on
+`ac301325` before any commit here.
