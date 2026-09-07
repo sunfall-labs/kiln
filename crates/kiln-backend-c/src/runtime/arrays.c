@@ -20,6 +20,40 @@ static int kiln_c99_new_array(kiln_value *out) {
 /* A capacity of eight or fewer fits the array's own `inline_elements` -- the shape
  * `kiln_c99_val_array_push_fast` (boxed.c) already grows out of and the GC already knows not to
  * free, both by checking `elements == inline_elements` first. */
+/* Grow an array's element storage to hold `needed`. The one place that knows an array may be
+ * using its own `inline_elements`: the general `kiln_c99_reserve` would hand that pointer to
+ * `realloc`, which is exactly the crash a bundled `ajv` produced the day small arrays were first
+ * given their inline storage. Every element growth in the runtime goes through here. */
+static int kiln_c99_array_reserve(kiln_array *array, size_t needed) {
+    size_t grown;
+    kiln_val *moved;
+    if (needed <= array->capacity) {
+        return KILN_C99_OK;
+    }
+    grown = array->capacity == 0 ? 4 : array->capacity;
+    while (grown < needed) {
+        if (grown > ((size_t)-1) / 2 / sizeof(kiln_val)) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        grown *= 2;
+    }
+    if (array->elements == array->inline_elements) {
+        moved = (kiln_val *)malloc(grown * sizeof(kiln_val));
+        if (moved == NULL) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        memcpy(moved, array->inline_elements, array->capacity * sizeof(kiln_val));
+    } else {
+        moved = (kiln_val *)realloc(array->elements, grown * sizeof(kiln_val));
+        if (moved == NULL) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+    }
+    array->elements = moved;
+    array->capacity = grown;
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_new_array_with_capacity(kiln_value *out, size_t capacity, int is_numeric) {
     kiln_array *array = (kiln_array *)kiln_c99_gc_alloc(KILN_GC_ARRAY, sizeof *array);
     if (array == NULL) {
@@ -40,7 +74,7 @@ static int kiln_c99_new_array_with_capacity(kiln_value *out, size_t capacity, in
             array->elements = array->inline_elements;
             array->capacity = inline_capacity;
         } else {
-            int status = kiln_c99_reserve((void **)&array->elements, &array->capacity, capacity, sizeof *array->elements);
+            int status = kiln_c99_array_reserve(array, capacity);
             if (status != KILN_C99_OK) return status;
         }
     }

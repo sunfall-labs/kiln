@@ -123,7 +123,7 @@ static int kiln_c99_val_array_push_fast(kiln_val receiver, kiln_val arg, kiln_va
                     arr->elements = moved;
                     arr->capacity = new_cap;
                 } else {
-                    int status = kiln_c99_reserve((void **)&arr->elements, &arr->capacity, arr->count + 1, sizeof *arr->elements);
+                    int status = kiln_c99_array_reserve(arr, arr->count + 1);
                     if (KILN_UNLIKELY(status != KILN_C99_OK)) return status;
                 }
                 arr->elements[arr->count] = arg;
@@ -217,8 +217,7 @@ static int kiln_c99_val_regexp_exec_fast(kiln_val receiver, kiln_val arg, kiln_v
                         arr->elements = arr->inline_elements;
                         arr->capacity = sizeof(arr->inline_elements) / sizeof(arr->inline_elements[0]);
                     } else {
-                        status = kiln_c99_reserve((void **)&arr->elements, &arr->capacity, groups,
-                                                  sizeof *arr->elements);
+                        status = kiln_c99_array_reserve(arr, groups);
                         if (KILN_UNLIKELY(status != KILN_C99_OK)) return status;
                     }
                     int can_reuse = (regexp->cached_group_count == groups);

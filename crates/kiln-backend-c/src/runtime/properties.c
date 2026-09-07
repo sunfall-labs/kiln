@@ -240,8 +240,7 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
                 array->elements = moved;
                 array->capacity = grown;
             } else {
-                status = kiln_c99_reserve((void **)&array->elements, &array->capacity, (size_t)wanted,
-                                          sizeof *array->elements);
+                status = kiln_c99_array_reserve(array, (size_t)wanted);
                 if (status != KILN_C99_OK) {
                     return status;
                 }

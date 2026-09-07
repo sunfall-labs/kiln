@@ -70,8 +70,7 @@ static int kiln_c99_array_constructor(kiln_value *out, const kiln_value *args, s
             return status;
         }
         array = kiln_c99_array_of(built);
-        status = kiln_c99_reserve((void **)&array->elements, &array->capacity, (size_t)length,
-                                  sizeof *array->elements);
+        status = kiln_c99_array_reserve(array, (size_t)length);
         if (status != KILN_C99_OK) {
             return status;
         }

@@ -2775,8 +2775,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 if (status == KILN_C99_OK) {
                     kiln_array *arr = kiln_c99_array_of(built);
                     if (groups > 0) {
-                        status = kiln_c99_reserve((void **)&arr->elements, &arr->capacity, groups,
-                                                  sizeof *arr->elements);
+                        status = kiln_c99_array_reserve(arr, groups);
                     }
                     int can_reuse = (regexp->cached_group_count == groups);
                     if (can_reuse) {
@@ -6162,8 +6161,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         if (status != KILN_C99_OK) {
             return status;
         }
-        status = kiln_c99_reserve((void **)&array->elements, &array->capacity,
-                                  array->count - removing + inserting, sizeof *array->elements);
+        status = kiln_c99_array_reserve(array, array->count - removing + inserting);
         if (status != KILN_C99_OK) {
             return status;
         }
@@ -6619,8 +6617,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
     }
     case KILN_C99_METHOD_ARRAY_UNSHIFT: {
         size_t added;
-        status = kiln_c99_reserve((void **)&array->elements, &array->capacity,
-                                  array->count + argc, sizeof *array->elements);
+        status = kiln_c99_array_reserve(array, array->count + argc);
         if (status != KILN_C99_OK) {
             return status;
         }
