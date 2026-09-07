@@ -1766,6 +1766,47 @@ fn polymorphic_inline_cache_prelude_surface() {
 }
 
 #[test]
+fn emitted_cache_sites_are_zero_backed() {
+    let mut p = program(
+        vec![Constant::String("x".into())],
+        vec![Instruction::MakeFunction(0), Instruction::Return],
+        0,
+    );
+    p.functions.push(function(
+        "read",
+        1,
+        1,
+        vec![
+            Instruction::LoadLocal(0),
+            Instruction::GetProperty(0),
+            Instruction::Return,
+        ],
+        Vec::new(),
+    ));
+    let unit = emit(&p).expect("property read emits");
+    let sites: Vec<_> = unit
+        .source
+        .lines()
+        .filter(|line| line.contains("static kiln_c99_site "))
+        .collect();
+    assert!(
+        !sites.is_empty(),
+        "the test must exercise an actual cache site"
+    );
+    for site in sites {
+        assert!(
+            site.contains("= {0};"),
+            "cache storage must be zero-backed: {site}"
+        );
+    }
+    assert!(
+        !unit
+            .source
+            .contains("{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}")
+    );
+}
+
+#[test]
 fn nan_boxed_kiln_val_prelude_surface() {
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

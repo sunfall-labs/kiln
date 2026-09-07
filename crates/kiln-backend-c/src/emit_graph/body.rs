@@ -348,7 +348,7 @@ pub fn emit_function_from_graph_with_profile(
         for k in 0..shared_sites {
             writeln!(
                 declarations,
-                "static kiln_c99_site {symbol}_fn_{index}_site_{k} = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}};"
+                "static kiln_c99_site {symbol}_fn_{index}_site_{k} = {{0}};"
             )
             .unwrap();
         }

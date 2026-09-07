@@ -123,7 +123,7 @@ pub(super) fn emit_get_property(
     };
     writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; \
+                "    {{ static kiln_c99_site site = {{0}}; \
                 int handled = 0; \
                 {receiver_tier}{length_check}{size_check}\
                 if (!handled && KILN_VAL_IS_OBJECT(v{o})) {{ \
@@ -226,7 +226,7 @@ pub(super) fn emit_set_property(
     let check = status_check(diagnostic_site, pc, label, unwind);
     writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; \
+                "    {{ static kiln_c99_site site = {{0}}; \
                 int handled = 0; \
                 if (KILN_VAL_IS_OBJECT(v{o})) {{ \
                     kiln_object *obj = (kiln_object *)KILN_VAL_PTR(v{o}); \
@@ -324,7 +324,7 @@ pub(super) fn emit_get_computed(
     };
     writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; \
+                "    {{ static kiln_c99_site site = {{0}}; \
                 int handled = 0; {array_tier}\
                 if (!handled && KILN_LIKELY((v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_NUMBER(v{k}))) {{ \
                     void *ptr = KILN_VAL_PTR(v{o}); \
@@ -424,7 +424,7 @@ pub(super) fn emit_set_computed(
     let check = status_check(diagnostic_site, pc, label, unwind);
     writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; \
+                "    {{ static kiln_c99_site site = {{0}}; \
                 int handled = 0; \
                 if (KILN_LIKELY((v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_NUMBER(v{k}))) {{ \
                     void *ptr = KILN_VAL_PTR(v{o}); \

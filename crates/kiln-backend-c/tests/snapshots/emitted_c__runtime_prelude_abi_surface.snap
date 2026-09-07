@@ -760,6 +760,8 @@ static inline kiln_val kiln_c99_site_cached_callee(const kiln_c99_site *site, co
 __attribute__((noinline, cold)) static double kiln_c99_int_slow(double value) {
 #define KILN_C99_SITE_NONE 0xFFFFFFFFu
 #define KILN_C99_SITE_GIVE_UP 8u
+static inline uint32_t kiln_c99_site_encode_dictionary_index(size_t index) {
+static inline uint32_t kiln_c99_site_decode_dictionary_index(uint32_t encoded) {
 typedef struct kiln_proxy {
 typedef enum kiln_gc_kind {
 static inline const uint32_t *kiln_c99_recv_row(const kiln_shape **shapes, const uint32_t *slots,

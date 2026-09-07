@@ -1601,7 +1601,7 @@ pub(super) fn emit_call_method(
 
     writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; \
+                "    {{ static kiln_c99_site site = {{0}}; \
                 kiln_val call_args[{n}] = {{ {init} }}; \
                 int handled = 0; int kiln_twin = 0; (void)kiln_twin; {typed_remembered}\
                 {math_s}{push_s}{regex_s}{map_s}{parallel_pool_s}{parallel_map_s}{filter_s}{reduce_s}{slice_s}{join_s}{split_s}{index_of_s}{substring_s}{collection_s}{json_s}{sort_s}{array_extra_s}{string_extra_s}{iterator_s} \

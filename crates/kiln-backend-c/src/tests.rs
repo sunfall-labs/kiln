@@ -3352,6 +3352,40 @@ fn unreachable_weak_map_builtin_is_still_rendered_consistently() {
     assert!(result.source.contains("KILN_C99_BUILTIN_WEAK_MAP"));
 }
 
+#[test]
+fn dictionary_cache_index_encoding_preserves_empty_and_extreme_indices() {
+    let generated = emit(&program(
+        vec![Constant::Undefined],
+        vec![Instruction::Const(0), Instruction::Return],
+        0,
+    ))
+    .expect("minimal program emits");
+    let run = run_with_main(
+        &generated,
+        r#"
+int main(void) {
+    static kiln_c99_site site = {0};
+    if (kiln_c99_site_decode_dictionary_index(site.own) != UINT32_MAX) return 1;
+    if (kiln_c99_site_decode_dictionary_index(site.proto) != UINT32_MAX) return 2;
+    if (kiln_c99_site_encode_dictionary_index(0) != 1) return 3;
+    if (kiln_c99_site_encode_dictionary_index(1) != 2) return 4;
+    if (kiln_c99_site_decode_dictionary_index(1) != 0) return 5;
+    if (kiln_c99_site_decode_dictionary_index(2) != 1) return 6;
+    if (kiln_c99_site_encode_dictionary_index((size_t)UINT32_MAX - 1) != UINT32_MAX) return 7;
+    if (kiln_c99_site_decode_dictionary_index(UINT32_MAX) != UINT32_MAX - 1) return 8;
+    if (kiln_c99_site_encode_dictionary_index((size_t)UINT32_MAX) != 0) return 9;
+    return 0;
+}
+"#,
+        "dictionary-cache-indices",
+    );
+    assert!(
+        run.status.success(),
+        "index encoding failed: {:?}",
+        run.status
+    );
+}
+
 /// Compile one emitted unit with a `main` of the caller's choosing and report its exit code.
 fn run_with_main(generated: &CModule, wrapper: &str, label: &str) -> std::process::Output {
     let executable = std::env::temp_dir().join(format!(

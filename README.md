@@ -111,6 +111,11 @@ families keep their existing linker policy. When Zig is selected, Kiln keeps DWA
 than risk Zig's current strip flag alias removing the normal symbol table; use Clang or GCC for the
 debug-only stripping.
 
+Generated inline caches start entirely zero-filled, so their storage belongs in BSS instead of
+inflating the executable with initialized records. Dictionary slot indices use a private biased
+encoding to preserve the empty-cache state. This reduces shipped bytes without removing runtime
+features; the cache storage still occupies address space when the program runs.
+
 ## How it is built
 
 The priority order in `docs/design.md` is correctness, iteration speed, architectural

@@ -51,7 +51,7 @@ static int kiln_c99_put_site(kiln_host *host, kiln_value target, const char *key
                 }
             }
         }
-        uint32_t own = site->own;
+        uint32_t own = kiln_c99_site_decode_dictionary_index(site->own);
         if (own < object->count && object->properties != NULL &&
             object->properties[own].key == key && !object->frozen && !object->module_namespace) {
             kiln_property *property = &object->properties[own];
