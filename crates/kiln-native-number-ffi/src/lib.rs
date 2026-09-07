@@ -55,6 +55,10 @@ mod realm {
     type Entry = unsafe extern "C" fn(*mut c_void) -> i32;
     type RunWork = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> i32;
     type DropWork = unsafe extern "C" fn(*mut c_void);
+    /// The prelude's promise job lane (Phase 6.3): `run` drains it, `pending` says whether there
+    /// is anything in it, and the context is the heap the queue lives in.
+    type RunPromiseLane = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> i32;
+    type PromiseLanePending = unsafe extern "C" fn(*mut c_void) -> i32;
     type RunCompletion =
         unsafe extern "C" fn(*mut c_void, *const CompletionView, *mut c_void, *mut c_void) -> i32;
     type RunHttpEvent =
@@ -226,6 +230,33 @@ mod realm {
 
     #[derive(Clone)]
     struct NativeWork(Rc<WorkOwner>);
+
+    /// The promise job queue the prelude owns, registered once per realm heap.
+    ///
+    /// A promise reaction and an `await` resumption used to arrive here one work item at a time,
+    /// each a GC cell in the prelude's heap and one call across the private ABI. They never
+    /// needed anything this side owns -- no deadline, no cancellation, no virtual time -- only a
+    /// position in the drain, which is what stayed here. The realm asks `pending` and calls
+    /// `run`; the queue itself, and everything in it, is C.
+    #[derive(Clone, Copy)]
+    struct PromiseLane {
+        run: RunPromiseLane,
+        pending: PromiseLanePending,
+        context: *mut c_void,
+    }
+
+    impl PromiseLane {
+        fn pending(self) -> bool {
+            // SAFETY: registration recorded a live callback pair and the heap they read, and the
+            // prelude keeps that heap until the realm's collector tears it down.
+            unsafe { (self.pending)(self.context) != 0 }
+        }
+
+        fn run(self, host: *mut c_void, thrown: *mut c_void) -> i32 {
+            // SAFETY: as above; `host` and `thrown` are owned by the drive in progress.
+            unsafe { (self.run)(self.context, host, thrown) }
+        }
+    }
 
     /// A microtask or next-tick job: the same owner as `NativeWork`, held inline. The
     /// microtask lanes move a job exactly once, from the queue to the drain, so the `Rc` that
@@ -617,6 +648,9 @@ mod realm {
         /// Which clock this realm keeps (ADR 0044): the deterministic virtual clock unless the
         /// launcher asked for the host's wall clock before entering the realm.
         clock: Cell<NativeClock>,
+        /// The prelude's promise job queue, registered when its heap attached. `None` until
+        /// then, and for a realm whose generated C never asked for a heap.
+        promise_lane: Cell<Option<PromiseLane>>,
         /// Whether the prelude has a `SIGUSR1` handler installed, as of the last turn boundary.
         /// A wall-clock realm bounds its park when this is set, so an idle server answers a
         /// signal promptly instead of at its next request.
@@ -939,6 +973,7 @@ mod realm {
                 diagnostic: RefCell::new(RealmDiagnostic::default()),
                 drive_context: Cell::new((std::ptr::null_mut(), std::ptr::null_mut())),
                 clock: Cell::new(NativeClock::Virtual),
+                promise_lane: Cell::new(None),
                 introspect_armed: Cell::new(false),
                 gc: RefCell::new(GcState::default()),
             })
@@ -2321,6 +2356,42 @@ mod realm {
         })
     }
 
+    /// Registers the prelude's promise job lane with the active Realm (Phase 6.3).
+    ///
+    /// The prelude calls this when its collector heap attaches, which is once per realm, and the
+    /// context is that heap. The realm keeps the pair and calls it from the drain: promise jobs
+    /// run after `process.nextTick` and before the next host completion, which is where they ran
+    /// when each one arrived here as a separate work item.
+    ///
+    /// # Safety
+    ///
+    /// `run` and `pending` must stay callable, and `context` must stay readable by them, for as
+    /// long as the realm lives or until a later registration replaces them.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_set_promise_lane(
+        run: Option<RunPromiseLane>,
+        pending: Option<PromiseLanePending>,
+        context: *mut c_void,
+    ) -> i32 {
+        ffi(|| {
+            let Some(realm) = active_realm() else {
+                return INVALID_ARGUMENT;
+            };
+            let (Some(run), Some(pending)) = (run, pending) else {
+                return INVALID_ARGUMENT;
+            };
+            if context.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            realm.promise_lane.set(Some(PromiseLane {
+                run,
+                pending,
+                context,
+            }));
+            0
+        })
+    }
+
     /// Starts one asynchronous file read on the active Realm.
     ///
     /// The path is copied before this call returns. The continuation and its disposer are owned by
@@ -2485,15 +2556,31 @@ mod realm {
         unsafe { kiln_realm_cancel_request(handle, request) }
     }
 
-    /// Runs every queued next-tick and microtask. This is the checkpoint the drive performs
-    /// between turns and the one the HTTP engine performs after every direct callback (ADR
-    /// 0042); both are in context.
+    /// Runs every queued next-tick job, promise job and host completion. This is the checkpoint
+    /// the drive performs between turns and the one the HTTP engine performs after every direct
+    /// callback (ADR 0042); both are in context.
+    ///
+    /// Three lanes in one order, and the order is node's. `process.nextTick` outranks everything.
+    /// The promise lane is the prelude's own queue (Phase 6.3) and it is drained *whole* -- a job
+    /// that queues a job runs it in the same checkpoint, which is what makes a `then` chain
+    /// finish before anything else gets a turn -- and only then does a host completion run, so a
+    /// completion that settles a promise sees that promise's reactions run before the completion
+    /// after it rather than after both.
     fn drain_realm_queues(realm: &NativeRealm) -> i32 {
         let (host, thrown) = realm.drive_context.get();
         loop {
             let next_tick = realm.work.borrow_mut().pop_next_tick();
             if let Some(work) = next_tick {
                 let status = work.run(host, thrown);
+                if status != 0 {
+                    return status;
+                }
+                continue;
+            }
+            if let Some(lane) = realm.promise_lane.get()
+                && lane.pending()
+            {
+                let status = lane.run(host, thrown);
                 if status != 0 {
                     return status;
                 }
@@ -2509,6 +2596,14 @@ mod realm {
             }
             return 0;
         }
+    }
+
+    /// Whether a checkpoint would run anything: either lane the realm owns, or the prelude's.
+    fn realm_has_queued_work(realm: &NativeRealm) -> bool {
+        if realm.work.borrow().has_queued_work() {
+            return true;
+        }
+        realm.promise_lane.get().is_some_and(PromiseLane::pending)
     }
 
     /// The realm's side of a direct connection, server or client: protocol events become the
@@ -2604,7 +2699,7 @@ mod realm {
             let Some(realm) = self.realm.upgrade() else {
                 return INVALID_ARGUMENT;
             };
-            if !realm.work.borrow().has_queued_work() {
+            if !realm_has_queued_work(&realm) {
                 return 0;
             }
             drain_realm_queues(&realm)
@@ -5621,6 +5716,13 @@ mod realm {
         };
         (realm, kiln_realm_now_nanoseconds, realm_now_nanoseconds) => {
             const _: unsafe extern "C" fn(*mut i64, *mut u64) -> i32 = kiln_realm_now_nanoseconds;
+        };
+        (realm, kiln_realm_set_promise_lane, realm_set_promise_lane) => {
+            const _: unsafe extern "C" fn(
+                Option<RunPromiseLane>,
+                Option<PromiseLanePending>,
+                *mut c_void,
+            ) -> i32 = kiln_realm_set_promise_lane;
         };
         (realm, $name:ident, realm_queue_work) => {
             const _: unsafe extern "C" fn(Option<RunWork>, Option<DropWork>, *mut c_void) -> i32 = $name;

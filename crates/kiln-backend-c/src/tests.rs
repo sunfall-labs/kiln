@@ -1630,6 +1630,17 @@ int kiln_realm_queue_microtask(kiln_realm_work_fn run,
     if (drop != NULL) drop(work);
     return KILN_C99_OK;
 }
+/* The fixture drives nothing, so a registered lane is never drained: the prelude's ring holds
+ * what a unit test queues until the process exits, exactly as this fixture's microtask queue
+ * dropped it before. */
+int kiln_realm_set_promise_lane(kiln_realm_lane_run_fn run,
+                                kiln_realm_lane_pending_fn pending,
+                                void *context) {
+    (void)run;
+    (void)pending;
+    (void)context;
+    return KILN_C99_OK;
+}
 int kiln_realm_queue_next_tick(kiln_realm_work_fn run,
                                kiln_realm_drop_fn drop,
                                void *work) {

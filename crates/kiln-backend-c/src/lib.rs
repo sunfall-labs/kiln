@@ -145,6 +145,11 @@ macro_rules! provider_c_declaration {
     ($group:ident, $name:ident, realm_queue_work) => {
         concat!("int ", stringify!($name), "(kiln_realm_work_fn run, kiln_realm_drop_fn drop, void *work);\n")
     };
+    // The prelude owns the promise job queue and registers it once per realm heap; the realm
+    // calls `run` where a promise job belongs in its drain and `pending` to know there is one.
+    ($group:ident, $name:ident, realm_set_promise_lane) => {
+        concat!("int ", stringify!($name), "(kiln_realm_lane_run_fn run, kiln_realm_lane_pending_fn pending, void *context);\n")
+    };
     ($group:ident, $name:ident, realm_read_file) => {
         concat!("int ", stringify!($name), "(uint64_t realm, const uint8_t *path, uint64_t path_len, kiln_realm_completion_fn run, kiln_realm_drop_fn drop, void *work, uint64_t *out_request);\n")
     };
