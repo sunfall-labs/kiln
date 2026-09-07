@@ -763,15 +763,22 @@ static inline kiln_val kiln_c99_site_cached_callee(const kiln_c99_site *site, co
                 if (entry->epoch == kiln_c99_proto_epoch &&
                     obj->prototype.tag == KILN_VALUE_OBJECT &&
                     (const kiln_object *)(uintptr_t)obj->prototype.bits == first) {
+                    /* A shaped holder's method is read from its slot: the epoch says the
+                     * shape is the one remembered, so the slot is the one; a list holder's is
+                     * the value remembered with its record. */
+                    kiln_val answer = entry->holder_shape != NULL
+                                          ? entry->holder->slots[entry->holder_slot]
+                                          : entry->holder_val;
 #ifdef KILN_IC_CHECK
-                    if (kiln_c99_site_validate_holder(entry, obj) != entry->holder_val) {
+                    if (kiln_c99_site_validate_holder(entry, obj) != answer) {
+                        fputs("kiln: inline-cache oracle: a cached prototype method is stale under an unmoved epoch; a mutation path forgot kiln_c99_prototype_touched\n", stderr);
                         __builtin_trap();
                     }
 #endif
-                    return entry->holder_val;
+                    return answer;
                 }
                 slow = kiln_c99_site_validate_holder(entry, obj);
-                if (slow != 0 && slow == entry->holder_val) entry->epoch = kiln_c99_proto_epoch;
+                if (slow != 0) entry->epoch = kiln_c99_proto_epoch;
                 return slow;
             }
             if (site->entries[p].slot != UINT32_MAX && site->entries[p].slot < obj->slot_capacity) {

@@ -838,6 +838,7 @@ static int kiln_c99_write_property(kiln_host *host, kiln_value target,
         if (KILN_LIKELY(site->pic_count > 0 && target.tag == KILN_VALUE_OBJECT)) {
             kiln_object *object = kiln_c99_object_of(target);
             size_t p;
+            kiln_c99_prototype_touched(object);
             for (p = 0; p < site->pic_count; ++p) {
                 if (object->shape == site->entries[p].shape) {
                     if (site->entries[p].transition_to == NULL) {
@@ -933,6 +934,7 @@ static int kiln_c99_val_write_property(kiln_host *host, kiln_val target,
     if (KILN_LIKELY(site != NULL && site->pic_count > 0 && KILN_VAL_IS_OBJECT(target))) {
         kiln_object *object = (kiln_object *)KILN_VAL_PTR(target);
         size_t p;
+        kiln_c99_prototype_touched(object);
         for (p = 0; p < site->pic_count; ++p) {
             if (object->shape == site->entries[p].shape) {
                 if (site->entries[p].transition_to == NULL) {
