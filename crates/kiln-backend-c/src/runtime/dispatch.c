@@ -6203,10 +6203,19 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             memmove(array->elements + start + inserting, array->elements + start + removing,
                     tail * sizeof *array->elements);
         }
+        /* The gap is filled *under* the final count, not before it. `kiln_val_from_boundary`
+         * allocates for any string of more than one byte, and the collector traces an array's
+         * first `count` elements and no further -- so a value written past `count` is invisible
+         * to it, and the very next allocation in this loop collects the string just stored and
+         * hands its memory to something else. Publishing the count first requires the gap to
+         * hold a traceable value already, hence the fill. */
+        for (index = 0; index < inserting; ++index) {
+            array->elements[start + index] = KILN_VAL_UNDEFINED;
+        }
+        array->count = array->count - removing + inserting;
         for (index = 0; index < inserting; ++index) {
             array->elements[start + index] = kiln_val_from_boundary(args[index + 2]);
         }
-        array->count = array->count - removing + inserting;
         /* The removed elements, which is what makes `splice` usable as a queue read. */
         *result = removed;
         return KILN_C99_OK;
@@ -6653,10 +6662,15 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             return status;
         }
         memmove(array->elements + argc, array->elements, array->count * sizeof *array->elements);
+        /* Same ordering as `splice` above, and for the same reason: the opened gap is made
+         * traceable and the count published before any conversion allocates into it. */
+        for (added = 0; added < argc; ++added) {
+            array->elements[added] = KILN_VAL_UNDEFINED;
+        }
+        array->count += argc;
         for (added = 0; added < argc; ++added) {
             array->elements[added] = kiln_val_from_boundary(args[added]);
         }
-        array->count += argc;
         *result = kiln_c99_number((double)array->count);
         return KILN_C99_OK;
     }

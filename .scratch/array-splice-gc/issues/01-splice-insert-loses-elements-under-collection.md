@@ -1,6 +1,6 @@
 # Issue 01: `splice` inserting into a small array loses elements when a collection lands mid-insert
 
-Status: needs-triage
+Status: resolved
 Feature: array-splice-gc
 Governing ADR: ADR 0041
 
@@ -41,3 +41,19 @@ under stress.
   `array->elements` (or `object->slots`) held across an allocation. `kiln_c99_json_build_mirror`
   had exactly this shape and was corrected in the same change that added the stress task.
 - `mise run native-stress` reports `0 diverged`.
+
+## Resolved 2026-09-07
+
+`splice` and `unshift` filled the gap they had just opened *before* publishing the array's new
+`count`, and converting a string argument allocates (`kiln_val_from_boundary` calls
+`kiln_c99_val_from_text` for anything longer than one byte) -- so each conversion collected the
+string the previous one had stored, because the collector traces an array's first `count`
+elements and no further. Both now fill the gap with `KILN_VAL_UNDEFINED`, publish the final
+count, and only then convert. The regexp match array in `boxed.c` had the same shape and now
+publishes each group as it lands; it was safe only by the coincidence that its 32-entry cache
+held the same values.
+
+The invariant is written down at `kiln_c99_array_reserve` (`arrays.c`), which is the function
+that creates the untraced room, and pinned by `conformance/native/array-insert-gc.js` -- which
+passes without `KILN_GC_STRESS`, so only `mise run native-stress` makes it fail.
+

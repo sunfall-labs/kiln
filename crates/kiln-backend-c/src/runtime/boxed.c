@@ -275,6 +275,13 @@ static int kiln_c99_val_regexp_exec_fast(kiln_val receiver, kiln_val arg, kiln_v
                             }
                             kiln_val bval = kiln_val_from_boundary(val);
                             arr->elements[g] = bval;
+                            /* Published as each group lands, not after the loop: the next
+                             * iteration's `kiln_c99_copy_text` allocates, and the collector
+                             * traces an array's first `count` elements and no further, so a
+                             * group left above `count` is collected before it is read back.
+                             * Groups below 32 survive today only because the cache below holds
+                             * them too, which is a coincidence and not a root. */
+                            arr->count = g + 1;
                             if (g < 32) {
                                 regexp->cached_elements[g] = bval;
                                 regexp->cached_ranges[g * 2] = from;
