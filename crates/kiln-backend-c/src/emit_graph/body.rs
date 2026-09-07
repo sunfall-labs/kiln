@@ -970,7 +970,20 @@ fn emit_blocks(
         .iter()
         .flat_map(|b| b.operations.iter().map(|(v, op)| (*v, op)))
         .collect();
-    let ivs = find_induction_variables(graph);
+    // A read of `length` from a guarded array bounds a loop below 2^32.
+    let length_bounds: HashSet<ValueId> = ops
+        .iter()
+        .filter_map(|(vid, op)| match op {
+            GraphOp::GetProperty { object, name, .. }
+                if spec_arrays.contains(object)
+                    && matches!(program.constants.get(*name as usize), Some(Constant::String(s)) if s == "length") =>
+            {
+                Some(*vid)
+            }
+            _ => None,
+        })
+        .collect();
+    let ivs = find_induction_variables(graph, &length_bounds);
 
     if versioning {
         // The speculative proof starts from the plan's: what the plan proved by a typed call

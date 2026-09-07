@@ -531,7 +531,13 @@ pub fn as_safe_integer(constant: &Constant) -> Option<i64> {
 ///
 /// An induction variable starts at an integer `init`, is stepped in each iteration by an integer
 /// `step`, and is bounded by `bound` within safe integer range `[-2^53 + 1, 2^53 - 1]`.
-pub fn find_induction_variables(graph: &FunctionGraph) -> HashMap<ValueId, InductionVariable> {
+/// `length_bounds` are values known to be an array's `length`: a loop bounded by one runs at
+/// most 2^32 - 1 times, so an induction variable stepping toward it stays a safe integer and
+/// needs no overflow check, exactly as with a constant bound.
+pub fn find_induction_variables(
+    graph: &FunctionGraph,
+    length_bounds: &HashSet<ValueId>,
+) -> HashMap<ValueId, InductionVariable> {
     let mut result = HashMap::new();
     let defs: HashMap<ValueId, (BlockId, &GraphOp)> = graph
         .blocks
@@ -659,12 +665,18 @@ pub fn find_induction_variables(graph: &FunctionGraph) -> HashMap<ValueId, Induc
             };
 
             let bound_val = int_const(bound_vid);
+            // An array's length is below 2^32: the same arithmetic as a constant bound of that
+            // size, with the bound itself left symbolic for the comparison.
+            let effective_bound = bound_val.or_else(|| {
+                (step > 0 && length_bounds.contains(&resolve_alias(bound_vid)))
+                    .then_some(4_294_967_295i64)
+            });
             let mut valid = false;
             let mut min = init_val;
             let mut max = init_val;
             let mut non_neg = init_val >= 0;
 
-            if let Some(b_val) = bound_val {
+            if let Some(b_val) = effective_bound {
                 if step > 0 {
                     let continues_on_less = (is_phi_left
                         && matches!(cmp_op, BinaryOp::LessThan | BinaryOp::LessThanOrEqual))
@@ -778,7 +790,7 @@ pub fn proven_types_with(
     graph: &FunctionGraph,
     assumptions: &HashMap<ValueId, Proven>,
 ) -> HashMap<ValueId, Proven> {
-    let ivs = find_induction_variables(graph);
+    let ivs = find_induction_variables(graph, &HashSet::new());
     // A resume target's stack phis also take what a suspend spilled and what the caller sent,
     // neither of which is an input here, so they prove nothing.
     let resume_targets: std::collections::HashSet<BlockId> = graph
