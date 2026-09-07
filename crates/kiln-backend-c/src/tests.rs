@@ -288,6 +288,11 @@ int main(void) {{
         strcmp(kiln_c99_object_of(namespace_object)->properties[1].key, "z") != 0 ||
         strcmp(kiln_c99_object_of(namespace_object)->properties[2].key, "@@toStringTag") != 0)
         return 6;
+    if (kiln_c99_object_of(namespace_object)->properties[0].refused ||
+        kiln_c99_object_of(namespace_object)->properties[0].symbol_hidden ||
+        kiln_c99_object_of(namespace_object)->properties[1].refused ||
+        kiln_c99_object_of(namespace_object)->properties[1].symbol_hidden)
+        return 28;
     if (kiln_c99_get(NULL, namespace_object, "z", 1, &read, 0, &thrown) != KILN_C99_OK ||
         read.tag != KILN_VALUE_NUMBER || kiln_c99_as_number(read) != 9.0) return 7;
     if (kiln_c99_describe_property(NULL, namespace_object, "a", 1, &descriptor, &found, 0,
@@ -5529,6 +5534,168 @@ fn closed_world_module_keeps_a_declaration_captured_by_a_live_function() {
 
     assert!(emitted.source.contains("ku_fn_0("));
     assert!(emitted.source.contains("ku_fn_1("));
+    assert!(
+        emitted
+            .source
+            .contains("exports[0] = kiln_val_binding_to_boundary(locals[1]);")
+    );
+    let runtime = runtime_prelude_source();
+    assert!(runtime.contains("kiln_value kiln_val_binding_to_boundary(kiln_val v)"));
+    assert!(runtime.contains("v = *(const kiln_val *)KILN_VAL_PTR(v);"));
+}
+
+#[test]
+fn nested_parent_local_does_not_keep_an_unrelated_module_slot() {
+    let proto = |code, upvalues| FunctionProto {
+        span: kiln_ir::Span::default(),
+        prologue_end: 0,
+        declared_length: 0,
+        name: None,
+        parameter_count: 0,
+        local_count: 1,
+        code,
+        arrow: false,
+        generator: false,
+        asynchronous: false,
+        async_generator: false,
+        is_method: false,
+        mapped_arguments: false,
+        upvalues,
+        type_annotations: None,
+    };
+    let module = module(
+        Program {
+            source: "".into(),
+            version: BYTECODE_VERSION,
+            constants: vec![Constant::Undefined],
+            code: vec![
+                Instruction::MakeFunction(0),
+                Instruction::StoreLocal(0),
+                Instruction::MakeFunction(1),
+                Instruction::StoreLocal(1),
+                Instruction::Const(0),
+                Instruction::Return,
+            ],
+            local_count: 2,
+            functions: vec![
+                proto(vec![Instruction::Const(0), Instruction::Return], Vec::new()),
+                proto(
+                    vec![
+                        Instruction::MakeFunction(2),
+                        Instruction::StoreLocal(0),
+                        Instruction::LoadLocal(0),
+                        Instruction::Return,
+                    ],
+                    Vec::new(),
+                ),
+                proto(
+                    vec![Instruction::LoadUpvalue(0), Instruction::Return],
+                    vec![Upvalue::ParentLocal(0)],
+                ),
+            ],
+            template_sites: Vec::new(),
+        },
+        Vec::new(),
+        vec![kiln_ir::ExportBinding {
+            exported: "outer".into(),
+            local_slot: 1,
+        }],
+    );
+    let emitted = emit_module_with_logical_path_and_policy(
+        &module,
+        "fixture.js",
+        EmissionPolicy {
+            compact: true,
+            live_module_slots: Some(std::sync::Arc::new([1].into_iter().collect())),
+            ..EmissionPolicy::default()
+        },
+    )
+    .expect("closed-world module emits");
+
+    assert!(!emitted.source.contains("ku_fn_0("));
+    assert!(emitted.source.contains("ku_fn_1("));
+    assert!(emitted.source.contains("ku_fn_2("));
+}
+
+#[test]
+fn closed_world_namespace_records_named_reads_across_argument_evaluation() {
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants: vec![Constant::String("Literals".into()), Constant::Number(1)],
+        code: vec![
+            Instruction::LoadLocal(0),
+            Instruction::Const(1),
+            Instruction::NewArray { count: 1 },
+            Instruction::CallMethod { name: 0, argc: 1 },
+            Instruction::Pop,
+            Instruction::Const(1),
+            Instruction::Return,
+        ],
+        local_count: 1,
+        functions: Vec::new(),
+        template_sites: Vec::new(),
+    };
+
+    assert_eq!(
+        closed_world_namespace_members(&program, 0, false),
+        Some(["Literals".to_owned()].into_iter().collect())
+    );
+}
+
+#[test]
+fn closed_world_namespace_keeps_every_member_for_a_captured_module_binding() {
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants: vec![Constant::String("fromInputUnsafe".into())],
+        code: vec![
+            Instruction::MakeFunction(0),
+            Instruction::StoreLocal(1),
+            Instruction::Const(0),
+            Instruction::Return,
+        ],
+        local_count: 2,
+        functions: vec![FunctionProto {
+            span: kiln_ir::Span::default(),
+            prologue_end: 0,
+            declared_length: 0,
+            name: None,
+            parameter_count: 0,
+            local_count: 0,
+            code: vec![
+                Instruction::LoadUpvalue(0),
+                Instruction::CallMethod { name: 0, argc: 0 },
+                Instruction::Return,
+            ],
+            arrow: true,
+            generator: false,
+            asynchronous: false,
+            async_generator: false,
+            is_method: false,
+            mapped_arguments: false,
+            upvalues: vec![Upvalue::ParentLocal(0)],
+            type_annotations: None,
+        }],
+        template_sites: Vec::new(),
+    };
+
+    assert_eq!(closed_world_namespace_members(&program, 0, false), None);
+}
+
+#[test]
+fn closed_world_namespace_keeps_every_member_when_the_value_escapes() {
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants: Vec::new(),
+        code: vec![Instruction::LoadLocal(0), Instruction::Return],
+        local_count: 1,
+        functions: Vec::new(),
+        template_sites: Vec::new(),
+    };
+
+    assert_eq!(closed_world_namespace_members(&program, 0, false), None);
 }
 
 #[test]

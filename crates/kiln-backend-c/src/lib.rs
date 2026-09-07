@@ -1646,7 +1646,7 @@ fn render_entry(
                 for (index, binding) in module_prog.exports.iter().enumerate() {
                     writeln!(
                         output,
-                        "    exports[{index}] = kiln_val_to_boundary(locals[{}]);",
+                        "    exports[{index}] = kiln_val_binding_to_boundary(locals[{}]);",
                         binding.local_slot
                     )
                     .unwrap();
@@ -2330,10 +2330,12 @@ int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
         data->count += 1;
         slot->key_len = name_lengths[source];
         slot->value = value;
+        slot->symbol_hidden = 0;
         slot->writable = 1;
         slot->enumerable = 1;
         slot->configurable = 0;
         slot->accessor = 0;
+        slot->refused = 0;
         slot->getter = kiln_c99_undefined();
         slot->setter = kiln_c99_undefined();
     }}
@@ -2488,6 +2490,73 @@ fn render(
     Ok(output)
 }
 
+fn module_upvalue_slots(program: &Program) -> Vec<Vec<Option<u32>>> {
+    let mut parents = vec![Vec::<Option<usize>>::new(); program.functions.len()];
+    for instruction in &program.code {
+        if let Instruction::MakeFunction(index) = instruction
+            && let Some(found) = parents.get_mut(*index as usize)
+        {
+            found.push(None);
+        }
+    }
+    for (parent, function) in program.functions.iter().enumerate() {
+        for instruction in &function.code {
+            if let Instruction::MakeFunction(index) = instruction
+                && let Some(found) = parents.get_mut(*index as usize)
+            {
+                found.push(Some(parent));
+            }
+        }
+    }
+    let parents = parents
+        .into_iter()
+        .map(|mut found| {
+            found.sort_unstable();
+            found.dedup();
+            (found.len() == 1).then(|| found[0])
+        })
+        .collect::<Vec<_>>();
+    let mut module_upvalues = program
+        .functions
+        .iter()
+        .map(|function| vec![None; function.upvalues.len()])
+        .collect::<Vec<Vec<Option<u32>>>>();
+    for _ in 0..program.functions.len().max(1) {
+        let mut changed = false;
+        for (index, function) in program.functions.iter().enumerate() {
+            for (upvalue_index, upvalue) in function.upvalues.iter().enumerate() {
+                let resolved = match (parents[index], upvalue) {
+                    (
+                        Some(None),
+                        Upvalue::ParentLocal(slot) | Upvalue::NamedParentLocal { slot, .. },
+                    ) => Some(*slot),
+                    (
+                        Some(Some(parent)),
+                        Upvalue::ParentUpvalue(parent_index)
+                        | Upvalue::NamedParentUpvalue {
+                            index: parent_index,
+                            ..
+                        },
+                    ) => module_upvalues
+                        .get(parent)
+                        .and_then(|slots| slots.get(*parent_index as usize))
+                        .copied()
+                        .flatten(),
+                    _ => None,
+                };
+                if resolved.is_some() && module_upvalues[index][upvalue_index] != resolved {
+                    module_upvalues[index][upvalue_index] = resolved;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    module_upvalues
+}
+
 /// Functions a closed-world module can instantiate, and the dead declaration stores that made
 /// the others unreachable. This deliberately recognizes only the compiler's simplest declaration
 /// shape: `MakeFunction; Store*`. Class methods and functions installed into objects remain live.
@@ -2514,6 +2583,7 @@ fn closed_world_function_liveness(
     }
 
     let mut declarations = std::collections::HashMap::<u32, Vec<usize>>::new();
+    let module_upvalues = module_upvalue_slots(program);
     let mut reachable = HashSet::new();
     let mut queue = std::collections::VecDeque::new();
     let mark = |index: usize,
@@ -2547,14 +2617,9 @@ fn closed_world_function_liveness(
         let Some(function) = program.functions.get(index) else {
             continue;
         };
-        for upvalue in &function.upvalues {
-            let slot = match upvalue {
-                Upvalue::ParentLocal(slot) | Upvalue::NamedParentLocal { slot, .. } => Some(*slot),
-                _ => None,
-            };
-            if let Some(slot) = slot
-                && live_slots.insert(slot)
-                && let Some(indices) = declarations.get(&slot)
+        for slot in module_upvalues[index].iter().flatten() {
+            if live_slots.insert(*slot)
+                && let Some(indices) = declarations.get(slot)
             {
                 for &index in indices {
                     mark(index, &mut reachable, &mut queue);
@@ -2606,6 +2671,135 @@ pub fn closed_world_module_live_slots(
     direct_eval: bool,
 ) -> BTreeSet<u32> {
     closed_world_function_liveness(program, demanded, direct_eval).2
+}
+
+/// Statically named members read from one module namespace slot, or `None` when the namespace
+/// escapes and therefore needs its complete export surface.
+///
+/// The value graph supplies the stack provenance that bytecode alone does not: arguments may be
+/// evaluated between loading a namespace and calling its method. Aliases used only to carry the
+/// same value across TDZ checks, locals, or control-flow joins remain inspectable. Any other use
+/// is deliberately the conservative answer.
+pub fn closed_world_namespace_members(
+    program: &Program,
+    slot: u32,
+    direct_eval: bool,
+) -> Option<BTreeSet<String>> {
+    if direct_eval {
+        return None;
+    }
+    let module_upvalues = module_upvalue_slots(program);
+    // A captured namespace can be carried through function-local cells before it is read. The
+    // graph currently resolves direct upvalue chains but not a cell alias captured from an
+    // enclosing class/closure. Until that provenance is explicit, retain the complete namespace
+    // whenever any closure captures this slot; partial answers here are silent missing members.
+    if module_upvalues
+        .iter()
+        .flatten()
+        .any(|captured| *captured == Some(slot))
+    {
+        return None;
+    }
+    let entry = graph_for(
+        &entry_proto(program),
+        program,
+        "the module body",
+        "namespace liveness",
+    )
+    .ok()?;
+    let functions = program
+        .functions
+        .iter()
+        .enumerate()
+        .map(|(index, function)| {
+            graph_for(
+                function,
+                program,
+                &format!("function {index}"),
+                "namespace liveness",
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    let mut members = BTreeSet::new();
+    for (graph, function_index) in std::iter::once((&entry, None)).chain(
+        functions
+            .iter()
+            .enumerate()
+            .map(|(index, graph)| (graph, Some(index))),
+    ) {
+        let defs = graph
+            .blocks
+            .iter()
+            .flat_map(|block| block.operations.iter().map(|(value, op)| (*value, op)))
+            .collect::<std::collections::HashMap<_, _>>();
+        let roots = graph
+            .blocks
+            .iter()
+            .flat_map(|block| &block.operations)
+            .filter_map(|(value, op)| match op {
+                GraphOp::LoadGlobal(found) if *found == slot => Some(*value),
+                GraphOp::LoadLocal(found) | GraphOp::LoadCell(found)
+                    if function_index.is_none() && *found == slot =>
+                {
+                    Some(*value)
+                }
+                GraphOp::LoadUpvalue(index)
+                    if function_index.is_some_and(|function| {
+                        module_upvalues[function]
+                            .get(*index as usize)
+                            .is_some_and(|found| *found == Some(slot))
+                    }) =>
+                {
+                    Some(*value)
+                }
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        if roots.is_empty() {
+            continue;
+        }
+        let is_namespace = |value| roots.contains(&graph::resolve_root_alias(value, &defs));
+        for block in &graph.blocks {
+            for (_, op) in &block.operations {
+                let namespace_operands = op
+                    .operands()
+                    .into_iter()
+                    .filter(|value| is_namespace(*value))
+                    .collect::<Vec<_>>();
+                if namespace_operands.is_empty() {
+                    continue;
+                }
+                match op {
+                    GraphOp::GetProperty { object, name, .. }
+                    | GraphOp::CallMethod { object, name, .. }
+                        if is_namespace(*object) =>
+                    {
+                        let Some(Constant::String(name)) = program.constants.get(*name as usize)
+                        else {
+                            return None;
+                        };
+                        members.insert(name.clone());
+                    }
+                    GraphOp::CheckTdz { .. } | GraphOp::StoreLocal { .. } | GraphOp::Phi { .. } => {
+                    }
+                    _ => return None,
+                }
+            }
+            let escapes = match &block.terminator {
+                Terminator::Branch { condition, .. } => is_namespace(*condition),
+                Terminator::Return(Some(value)) | Terminator::Throw(value) => is_namespace(*value),
+                Terminator::Suspend { value, spilled, .. } => {
+                    is_namespace(*value) || spilled.iter().any(|value| is_namespace(*value))
+                }
+                Terminator::Jump(_) | Terminator::Return(None) | Terminator::Unreachable => false,
+            };
+            if escapes {
+                return None;
+            }
+        }
+    }
+    Some(members)
 }
 
 fn render_module(

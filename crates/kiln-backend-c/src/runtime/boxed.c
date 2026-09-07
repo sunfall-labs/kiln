@@ -92,6 +92,16 @@ static kiln_value kiln_val_to_boundary(kiln_val v) {
     }
 }
 
+/* An ESM export publishes a binding's value, not its internal cell. Keep this distinct from the
+ * general boundary conversion: runtime seams intentionally use KILN_VALUE_CELL to preserve a
+ * shared mutable binding across generated translation units. */
+static kiln_value kiln_val_binding_to_boundary(kiln_val v) {
+    if ((v & KILN_TAG_MASK) == KILN_TAG_CELL_PREFIX) {
+        v = *(const kiln_val *)KILN_VAL_PTR(v);
+    }
+    return kiln_val_to_boundary(v);
+}
+
 /* `Promise.resolve(v)` for the builtin constructor: a promise is answered as itself, anything
  * else gets a promise already fulfilled with it. The dispatch case does the same through two
  * boundary conversions and the method switch; the emitted C calls this behind the builtin
@@ -1482,4 +1492,3 @@ static void kiln_c99_gc_unit_roots(void *opaque, void *context, int phase) {
     kiln_c99_gc_mark_value(heap, &kiln_c99_frame_arguments_object);
     kiln_c99_gc_mark_value(heap, &kiln_c99_frame_callee);
 }
-

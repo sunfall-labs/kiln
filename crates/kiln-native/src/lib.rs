@@ -31,7 +31,7 @@ use kiln_backend_c::{
 use kiln_host_abi::HOST_ABI_VERSION;
 pub use kiln_host_abi::HostValue;
 use kiln_ir::{ExportBinding, ModuleProgram, Program};
-use kiln_module_graph::{ModuleGraph, ModuleGraphError, ModuleSource, ResolvedExport};
+use kiln_module_graph::{Dependency, ModuleGraph, ModuleGraphError, ModuleSource, ResolvedExport};
 use kiln_native_runtime::{
     EMBEDDING_C_ABI_VERSION, EMBEDDING_HOST_ABI_VERSION, EMBEDDING_MODULE_API_VERSION,
     NATIVE_RESULT_PATH_ENV, NATIVE_RUNTIME_VERSION, decode_native_result,
@@ -1582,13 +1582,13 @@ impl NativeBuilder {
         if let Some(profile) = resolve_type_profile(options, entry_module_path) {
             emission.type_profile = Some(std::sync::Arc::new(profile));
         }
-        let selected = native_executable_graph(graph)?;
+        let selected = native_executable_graph(graph, options.profile)?;
         let nodes = selected.modules;
         let emitted_modules = emit_indexed(nodes.len(), "graph module emission", |index| {
             let node = nodes[index];
             let logical_path = logical_module_path(graph.project_root(), &node.path)?;
             let mut module_emission = emission.clone();
-            if node.source == ModuleSource::Source {
+            if matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs) {
                 module_emission.live_module_slots = Some(Arc::new(
                     selected
                         .live_export_slots
@@ -1624,6 +1624,8 @@ impl NativeBuilder {
             &modules,
             &options.realm,
             Some(&selected.live_imports),
+            Some(&selected.inactive_commonjs_dependencies),
+            Some(&selected.partial_namespace_members),
             Some(&bootstrap),
         )?;
         let emit_elapsed = emit_started.elapsed();
@@ -1730,6 +1732,15 @@ impl NativeBuilder {
             march_native: options.march_native,
             ..CompileOptions::default()
         };
+        let mut prelude_compile_options = compile_options.clone();
+        if matches!(profile, NativeProfile::Release | NativeProfile::Profile) {
+            // Release CommonJS dispatchers are specialized to this same observable value below.
+            // Keep the runtime fact and graph selection one profile decision, or an omitted
+            // development arm could become reachable without its module being linked.
+            prelude_compile_options
+                .extra_args
+                .push("-DKILN_NODE_ENV_PRODUCTION=1".into());
+        }
         let mut module_compile_options = compile_options.clone();
         if profile == NativeProfile::Release {
             // Large bundles spend nearly all cold-build time optimizing generated application
@@ -1911,7 +1922,7 @@ impl NativeBuilder {
                                         &prelude_bytes,
                                         &paths.prelude_c,
                                         &paths.prelude_o,
-                                        &compile_options,
+                                        &prelude_compile_options,
                                     )
                                 })
                             },
@@ -3580,6 +3591,41 @@ struct NativeExecutableGraph<'a> {
     modules: Vec<&'a kiln_module_graph::ModuleNode>,
     live_imports: BTreeSet<(PathBuf, usize)>,
     live_export_slots: BTreeMap<PathBuf, BTreeSet<u32>>,
+    inactive_commonjs_dependencies: BTreeSet<(PathBuf, String)>,
+    partial_namespace_members: BTreeMap<PathBuf, BTreeSet<String>>,
+}
+
+/// The exact two-arm dispatcher used by React and similar CommonJS packages.
+///
+/// This intentionally accepts no general JavaScript. Matching the complete whitespace-free
+/// source makes the specialization semantic rather than filename-based: in a release realm the
+/// production arm is the only arm that can run, while any extra statement, condition, or third
+/// dependency falls back to the complete graph.
+fn commonjs_production_dispatch(
+    source: &str,
+    dependencies: &[Dependency],
+) -> Option<(String, String)> {
+    if dependencies.len() != 2 {
+        return None;
+    }
+    let compact = source
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .map(|character| if character == '"' { '\'' } else { character })
+        .collect::<String>();
+    for (production, development) in [
+        (&dependencies[0], &dependencies[1]),
+        (&dependencies[1], &dependencies[0]),
+    ] {
+        let expected = format!(
+            "'usestrict';if(process.env.NODE_ENV==='production'){{module.exports=require('{}');}}else{{module.exports=require('{}');}}",
+            production.specifier, development.specifier
+        );
+        if compact == expected {
+            return Some((production.specifier.clone(), development.specifier.clone()));
+        }
+    }
+    None
 }
 
 /// Whether the nearest package boundary explicitly licenses removing unused modules.
@@ -3614,15 +3660,60 @@ fn package_declares_no_side_effects(path: &Path, project_root: &Path) -> bool {
     false
 }
 
+fn demand_namespace_members(
+    graph: &ModuleGraph,
+    namespace: &Path,
+    members: &BTreeSet<String>,
+    live: &mut BTreeSet<PathBuf>,
+    live_export_slots: &mut BTreeMap<PathBuf, BTreeSet<u32>>,
+    namespace_demands: &mut BTreeSet<PathBuf>,
+    queue: &mut VecDeque<PathBuf>,
+) -> Result<(), NativeError> {
+    for name in members {
+        match graph.resolved_export(namespace, name) {
+            Some(ResolvedExport::Local { module, local_slot }) => {
+                let newly_live = live.insert(module.clone());
+                let newly_demanded = live_export_slots
+                    .entry(module.clone())
+                    .or_default()
+                    .insert(*local_slot);
+                if newly_live || newly_demanded {
+                    queue.push_back(module.clone());
+                }
+            }
+            Some(ResolvedExport::Namespace { module }) => {
+                namespace_demands.insert(module.clone());
+                if live.insert(module.clone()) {
+                    queue.push_back(module.clone());
+                }
+            }
+            Some(ResolvedExport::Ambiguous) | None => {
+                return Err(NativeError::Graph(ModuleGraphError::MissingExport {
+                    importer: namespace.to_path_buf(),
+                    provider: namespace.to_path_buf(),
+                    name: name.clone(),
+                }));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Select the source bodies an executable can observe after applying package side-effect facts.
 ///
 /// The complete graph is still linked first, so missing and ambiguous exports remain errors. This
 /// pass only removes evaluation work that package metadata explicitly declares unobservable.
-fn native_executable_graph(graph: &ModuleGraph) -> Result<NativeExecutableGraph<'_>, NativeError> {
+fn native_executable_graph(
+    graph: &ModuleGraph,
+    profile: NativeProfile,
+) -> Result<NativeExecutableGraph<'_>, NativeError> {
     let mut live = BTreeSet::new();
     let mut live_imports = BTreeSet::new();
     let mut live_export_slots: BTreeMap<PathBuf, BTreeSet<u32>> = BTreeMap::new();
     let mut namespace_demands = BTreeSet::new();
+    let mut namespace_member_cache = BTreeMap::new();
+    let mut partial_namespace_members: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
+    let mut inactive_commonjs_dependencies = BTreeSet::new();
     let mut queue = VecDeque::new();
     let mut side_effect_free = BTreeMap::new();
 
@@ -3642,10 +3733,24 @@ fn native_executable_graph(graph: &ModuleGraph) -> Result<NativeExecutableGraph<
         let live_slots = kiln_backend_c::closed_world_module_live_slots(
             &node.program.program,
             &demanded,
-            direct_eval || node.source == ModuleSource::CommonJs,
+            direct_eval,
         );
 
+        let production_dispatch =
+            matches!(profile, NativeProfile::Release | NativeProfile::Profile)
+                .then(|| {
+                    commonjs_production_dispatch(&node.program.program.source, &node.dependencies)
+                })
+                .flatten();
         for dependency in &node.dependencies {
+            if production_dispatch
+                .as_ref()
+                .is_some_and(|(_, inactive)| inactive == &dependency.specifier)
+            {
+                inactive_commonjs_dependencies
+                    .insert((node.path.clone(), dependency.specifier.clone()));
+                continue;
+            }
             let removable = *side_effect_free
                 .entry(dependency.target.clone())
                 .or_insert_with(|| {
@@ -3660,10 +3765,6 @@ fn native_executable_graph(graph: &ModuleGraph) -> Result<NativeExecutableGraph<
             if node.source == ModuleSource::CommonJs && import.source == "*commonjs-wrapper*" {
                 continue;
             }
-            if !live_slots.contains(&import.local_slot) {
-                continue;
-            }
-            live_imports.insert((node.path.clone(), import_index));
             let dependency = node
                 .dependencies
                 .iter()
@@ -3674,9 +3775,49 @@ fn native_executable_graph(graph: &ModuleGraph) -> Result<NativeExecutableGraph<
                         source: import.source.clone(),
                     })
                 })?;
+            // Namespace values are frequently captured through class/closure-local cells. Until
+            // that alias is represented in module-slot liveness, a missing load is not proof the
+            // import is dead. Keeping namespace-valued imports is conservative and prevents a
+            // live namespace local from being initialized to undefined.
+            let namespace_value = import.imported == kiln_ir::NAMESPACE_IMPORT
+                || matches!(
+                    graph.resolved_export(&dependency.target, &import.imported),
+                    Some(ResolvedExport::Namespace { .. })
+                );
+            if !live_slots.contains(&import.local_slot) && !namespace_value {
+                continue;
+            }
+            live_imports.insert((node.path.clone(), import_index));
             if import.imported == kiln_ir::NAMESPACE_IMPORT {
-                namespace_demands.insert(dependency.target.clone());
-                mark_live(&dependency.target, &mut live, &mut queue);
+                let static_members = namespace_member_cache
+                    .entry((node.path.clone(), import.local_slot))
+                    .or_insert_with(|| {
+                        kiln_backend_c::closed_world_namespace_members(
+                            &node.program.program,
+                            import.local_slot,
+                            direct_eval,
+                        )
+                    })
+                    .clone();
+                if let Some(members) = static_members {
+                    mark_live(&dependency.target, &mut live, &mut queue);
+                    partial_namespace_members
+                        .entry(dependency.target.clone())
+                        .or_default()
+                        .extend(members.iter().cloned());
+                    demand_namespace_members(
+                        graph,
+                        &dependency.target,
+                        &members,
+                        &mut live,
+                        &mut live_export_slots,
+                        &mut namespace_demands,
+                        &mut queue,
+                    )?;
+                } else {
+                    namespace_demands.insert(dependency.target.clone());
+                    mark_live(&dependency.target, &mut live, &mut queue);
+                }
                 continue;
             }
             match graph.resolved_export(&dependency.target, &import.imported) {
@@ -3691,8 +3832,35 @@ fn native_executable_graph(graph: &ModuleGraph) -> Result<NativeExecutableGraph<
                     }
                 }
                 Some(ResolvedExport::Namespace { module }) => {
-                    namespace_demands.insert(module.clone());
-                    mark_live(module, &mut live, &mut queue);
+                    let static_members = namespace_member_cache
+                        .entry((node.path.clone(), import.local_slot))
+                        .or_insert_with(|| {
+                            kiln_backend_c::closed_world_namespace_members(
+                                &node.program.program,
+                                import.local_slot,
+                                direct_eval,
+                            )
+                        })
+                        .clone();
+                    if let Some(members) = static_members {
+                        mark_live(module, &mut live, &mut queue);
+                        partial_namespace_members
+                            .entry(module.clone())
+                            .or_default()
+                            .extend(members.iter().cloned());
+                        demand_namespace_members(
+                            graph,
+                            module,
+                            &members,
+                            &mut live,
+                            &mut live_export_slots,
+                            &mut namespace_demands,
+                            &mut queue,
+                        )?;
+                    } else {
+                        namespace_demands.insert(module.clone());
+                        mark_live(module, &mut live, &mut queue);
+                    }
                 }
                 Some(ResolvedExport::Ambiguous) | None => {
                     return Err(NativeError::Graph(ModuleGraphError::MissingExport {
@@ -3729,6 +3897,10 @@ fn native_executable_graph(graph: &ModuleGraph) -> Result<NativeExecutableGraph<
         }
     }
 
+    // Namespace requirements are joined across every importer. One dynamic/escaping use requires
+    // the complete namespace even when another importer has a statically known subset.
+    partial_namespace_members.retain(|path, _| !namespace_demands.contains(path));
+
     Ok(NativeExecutableGraph {
         modules: graph
             .modules()
@@ -3736,6 +3908,8 @@ fn native_executable_graph(graph: &ModuleGraph) -> Result<NativeExecutableGraph<
             .collect(),
         live_imports,
         live_export_slots,
+        inactive_commonjs_dependencies,
+        partial_namespace_members,
     })
 }
 
@@ -3931,6 +4105,7 @@ fn graph_namespace_plans(
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
     indices: &std::collections::HashMap<PathBuf, usize>,
     live_imports: Option<&BTreeSet<(PathBuf, usize)>>,
+    partial_namespace_members: Option<&BTreeMap<PathBuf, BTreeSet<String>>>,
 ) -> Result<Vec<Option<Vec<NativeNamespaceEntry>>>, NativeError> {
     let mut required = vec![false; modules.len()];
     for (node, _) in modules {
@@ -3956,11 +4131,14 @@ fn graph_namespace_plans(
             continue;
         }
         let node = modules[module_index].0;
-        let names = graph.resolved_export_names(&node.path).ok_or_else(|| {
+        let mut names = graph.resolved_export_names(&node.path).ok_or_else(|| {
             NativeError::Graph(ModuleGraphError::InternalMissingModule {
                 path: node.path.clone(),
             })
         })?;
+        if let Some(members) = partial_namespace_members.and_then(|all| all.get(&node.path)) {
+            names.retain(|name| members.contains(name));
+        }
         let entries = names
             .into_iter()
             .map(|name| {
@@ -4303,7 +4481,7 @@ fn graph_launcher_source(
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
     policy: &NativeRealmPolicy,
 ) -> Result<String, NativeError> {
-    graph_launcher_source_with_imports(graph, modules, policy, None, None)
+    graph_launcher_source_with_imports(graph, modules, policy, None, None, None, None)
 }
 
 fn graph_launcher_source_with_imports(
@@ -4311,6 +4489,8 @@ fn graph_launcher_source_with_imports(
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
     policy: &NativeRealmPolicy,
     live_imports: Option<&BTreeSet<(PathBuf, usize)>>,
+    inactive_commonjs_dependencies: Option<&BTreeSet<(PathBuf, String)>>,
+    partial_namespace_members: Option<&BTreeMap<PathBuf, BTreeSet<String>>>,
     bootstrap: Option<&kiln_backend_c::CModule>,
 ) -> Result<String, NativeError> {
     if modules.is_empty() {
@@ -4331,7 +4511,13 @@ fn graph_launcher_source_with_imports(
     for (index, (node, _)) in modules.iter().enumerate() {
         indices.insert(node.path.clone(), index);
     }
-    let namespace_plans = graph_namespace_plans(graph, modules, &indices, live_imports)?;
+    let namespace_plans = graph_namespace_plans(
+        graph,
+        modules,
+        &indices,
+        live_imports,
+        partial_namespace_members,
+    )?;
     let mut output = String::with_capacity(2048 + modules.len() * 512);
     let mut evaluation = String::with_capacity(modules.len() * 512);
     output.push_str(
@@ -4553,6 +4739,11 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
         )
         .unwrap();
         for dependency in &node.dependencies {
+            if inactive_commonjs_dependencies.is_some_and(|inactive| {
+                inactive.contains(&(node.path.clone(), dependency.specifier.clone()))
+            }) {
+                continue;
+            }
             let provider_index = *indices.get(&dependency.target).ok_or_else(|| {
                 NativeError::Graph(ModuleGraphError::InternalMissingModule {
                     path: dependency.target.clone(),
@@ -5169,7 +5360,7 @@ fn graph_shared_wrapper_source(
     for (index, (node, _)) in modules.iter().enumerate() {
         indices.insert(node.path.clone(), index);
     }
-    let namespace_plans = graph_namespace_plans(graph, modules, &indices, None)?;
+    let namespace_plans = graph_namespace_plans(graph, modules, &indices, None, None)?;
     let entry_index = modules
         .iter()
         .position(|(node, _)| node.path == graph.entry())
