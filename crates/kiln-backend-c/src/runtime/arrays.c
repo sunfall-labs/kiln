@@ -34,7 +34,19 @@ static int kiln_c99_new_array(kiln_value *out) {
  * using storage the allocator never handed out -- its own `inline_elements`, or the run inside
  * its block: the general `kiln_c99_reserve` would hand either to `realloc`, which is exactly the
  * crash a bundled `ajv` produced the day small arrays were first given their inline storage.
- * Every element growth in the runtime goes through here. */
+ * Every element growth in the runtime goes through here.
+ *
+ * Capacity is not reachability. This raises `capacity`; it does not raise `count`, and the
+ * collector traces an array's first `count` elements and no further -- so anything a caller
+ * writes into the room this just made is invisible to the collector until `count` is published
+ * over it. A caller that fills such a gap with values whose conversion allocates (any string of
+ * more than one byte allocates, via `kiln_val_from_boundary`) must therefore make the gap
+ * traceable and publish `count` *before* the filling loop, not after it; otherwise the first
+ * conversion collects what the previous one stored. `splice` and `unshift` (dispatch.c) fill a
+ * gap with `KILN_VAL_UNDEFINED` and publish the final count before converting anything, and the
+ * regexp match array (boxed.c) publishes each group as it lands. This cost three wrong answers
+ * before it was written down; `conformance/native/array-insert-gc.js` pins it, and only
+ * `mise run native-stress` makes it fail. */
 static int kiln_c99_array_reserve(kiln_array *array, size_t needed) {
     size_t grown;
     kiln_val *moved;
