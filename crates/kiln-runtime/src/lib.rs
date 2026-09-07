@@ -2752,21 +2752,18 @@ async fn execute_async_host_op(operation: AsyncHostOp) -> Result<AsyncHostValue,
             .await
             .map(|()| AsyncHostValue::Undefined)
             .map_err(|error| io_error("open", path, error)),
-        AsyncHostOp::AppendFile { path, data } => {
-            let res = async {
-                let mut file = tokio::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&path)
-                    .await?;
-                file.write_all(&data).await?;
-                Ok::<(), std::io::Error>(())
-            }
-            .await
-            .map(|()| AsyncHostValue::Undefined)
-            .map_err(|error| io_error("open", path, error));
-            res
+        AsyncHostOp::AppendFile { path, data } => async {
+            let mut file = tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .await?;
+            file.write_all(&data).await?;
+            Ok::<(), std::io::Error>(())
         }
+        .await
+        .map(|()| AsyncHostValue::Undefined)
+        .map_err(|error| io_error("open", path, error)),
         AsyncHostOp::Stat { path } => tokio::fs::metadata(&path)
             .await
             .map(|metadata| {
