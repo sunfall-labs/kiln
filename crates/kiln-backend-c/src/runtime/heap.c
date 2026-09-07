@@ -102,6 +102,12 @@ typedef struct kiln_gc_ptrset {
     size_t count;
 } kiln_gc_ptrset;
 
+static int kiln_c99_gc_ptrset_insert(kiln_gc_ptrset *set, void *pointer);
+static void kiln_c99_gc_ptrset_remove(kiln_gc_ptrset *set, const void *pointer);
+static int kiln_c99_gc_ptrset_contains(const kiln_gc_ptrset *set, const void *pointer);
+static void *kiln_c99_gc_aligned_alloc(size_t alignment, size_t size);
+static void kiln_c99_gc_aligned_free(void *aligned);
+
 /* Interned property keys (ADR 0047). One entry per distinct key spelling the realm has ever
  * stored or registered, mapping the bytes to the one pointer every property with that name
  * carries -- so `property->key == key` is the whole of a key comparison and a linear scan never
@@ -203,6 +209,15 @@ typedef struct kiln_gc_nursery {
      * every word the conservative scan looks at -- is rejected before the chunk lists are walked. */
     const char *lo;
     const char *hi;
+    /* Every chunk is one region: an allocation of `capacity` bytes aligned to `capacity`, with
+     * the chunk header at its start and its bitmap after that. `ptr & ~(capacity - 1)` names
+     * the region a pointer would lie in, and `regions` -- the set of region bases this nursery
+     * has made and not freed -- says whether that name is one of ours before the header is
+     * read; the same arrangement the slabs use. The lookup is a mask and a hash probe whatever
+     * the number of chunks: walking the two lists per lookup made a 2.2 MB `JSON.parse` fifty
+     * times slower once it had filled a few hundred of them. `region` is the current chunk's. */
+    char *region;
+    kiln_gc_ptrset regions;
 } kiln_gc_nursery;
 
 typedef struct kiln_gc_heap {
@@ -285,6 +300,61 @@ static inline void kiln_c99_gc_bound(kiln_gc_heap *heap, const void *base, size_
  * where it is used rather than where its garbage kind is acted on. */
 static int kiln_c99_gc_stress_checks;
 
+#define KILN_NURSERY_HEADER ((sizeof(kiln_nursery_chunk) + 63) & ~(size_t)63)
+
+/* One new region: aligned to its own size, entered in the set of region bases, its header and
+ * bitmap laid out at its start and the payload beginning after them. NULL when memory is
+ * refused, with nothing entered. */
+static kiln_nursery_chunk *kiln_c99_nursery_new_region(kiln_gc_nursery *nursery) {
+    char *region = (char *)kiln_c99_gc_aligned_alloc(nursery->capacity, nursery->capacity);
+    kiln_nursery_chunk *chunk;
+    size_t bitmap_bytes;
+    if (region == NULL) return NULL;
+    if (kiln_c99_gc_ptrset_insert(&nursery->regions, region) != KILN_C99_OK) {
+        kiln_c99_gc_aligned_free(region);
+        return NULL;
+    }
+    chunk = (kiln_nursery_chunk *)region;
+    chunk->bitmap = (uint64_t *)(region + KILN_NURSERY_HEADER);
+    chunk->bitmap_words = nursery->bitmap_words;
+    memset(chunk->bitmap, 0, chunk->bitmap_words * sizeof(uint64_t));
+    bitmap_bytes = (chunk->bitmap_words * sizeof(uint64_t) + 15) & ~(size_t)15;
+    chunk->base = region + KILN_NURSERY_HEADER + bitmap_bytes;
+    chunk->limit = chunk->base;
+    chunk->live_count = 0;
+    chunk->next = NULL;
+    if (nursery->lo == NULL || region < nursery->lo) nursery->lo = region;
+    if (nursery->hi == NULL || region + nursery->capacity > nursery->hi) {
+        nursery->hi = region + nursery->capacity;
+    }
+    return chunk;
+}
+
+static void kiln_c99_nursery_free_region(kiln_gc_nursery *nursery, kiln_nursery_chunk *chunk) {
+    kiln_c99_gc_ptrset_remove(&nursery->regions, chunk);
+    kiln_c99_gc_aligned_free(chunk);
+}
+
+/* Make `chunk`'s region the one allocation bumps through. */
+static void kiln_c99_nursery_use(kiln_gc_nursery *nursery, kiln_nursery_chunk *chunk) {
+    nursery->region = (char *)chunk;
+    nursery->base = chunk->base;
+    nursery->bump = chunk->base;
+    nursery->limit = nursery->region + nursery->capacity;
+    nursery->bitmap = chunk->bitmap;
+    nursery->count = 0;
+    nursery->bytes = 0;
+}
+
+/* Write the current region's fill into its header, ready for one of the lists. */
+static kiln_nursery_chunk *kiln_c99_nursery_seal(kiln_gc_nursery *nursery) {
+    kiln_nursery_chunk *chunk = (kiln_nursery_chunk *)nursery->region;
+    chunk->limit = nursery->bump;
+    chunk->live_count = 0;
+    chunk->next = NULL;
+    return chunk;
+}
+
 static void kiln_c99_nursery_init(kiln_gc_nursery *nursery) {
     const char *setting;
     memset(nursery, 0, sizeof *nursery);
@@ -300,20 +370,19 @@ static void kiln_c99_nursery_init(kiln_gc_nursery *nursery) {
         if (kib > 0 && kib <= 1024 * 1024) nursery->budget = kib * 1024;
     }
     if (nursery->budget < nursery->capacity) nursery->capacity = nursery->budget;
-    nursery->base = (char *)malloc(nursery->capacity);
-    if (nursery->base != NULL) {
-        nursery->bump = nursery->base;
-        nursery->limit = nursery->base + nursery->capacity;
-        nursery->lo = nursery->base;
-        nursery->hi = nursery->limit;
-        nursery->bitmap_words = (nursery->capacity / 16 + 63) / 64;
-        nursery->bitmap = (uint64_t *)calloc(nursery->bitmap_words, sizeof(uint64_t));
-        if (nursery->bitmap != NULL) {
+    /* A region is found by masking, so its size is a power of two; and it is no smaller than a
+     * slab, so a small budget still gives a chunk a few thousand blocks fill. */
+    {
+        size_t rounded = KILN_GC_SLAB_SIZE;
+        while (rounded * 2 <= nursery->capacity) rounded *= 2;
+        nursery->capacity = rounded;
+    }
+    nursery->bitmap_words = (nursery->capacity / 16 + 63) / 64;
+    {
+        kiln_nursery_chunk *chunk = kiln_c99_nursery_new_region(nursery);
+        if (chunk != NULL) {
+            kiln_c99_nursery_use(nursery, chunk);
             nursery->active = 1;
-        } else {
-            free(nursery->base);
-            nursery->base = NULL;
-            nursery->active = 0;
         }
     }
     setting = getenv("KILN_NURSERY");
@@ -322,33 +391,33 @@ static void kiln_c99_nursery_init(kiln_gc_nursery *nursery) {
     }
 }
 
-static void kiln_c99_nursery_free_list(kiln_nursery_chunk *chunk) {
+static void kiln_c99_nursery_free_list(kiln_gc_nursery *nursery, kiln_nursery_chunk *chunk) {
     while (chunk != NULL) {
         kiln_nursery_chunk *next = chunk->next;
-        free(chunk->base);
-        free(chunk->bitmap);
-        free(chunk);
+        kiln_c99_nursery_free_region(nursery, chunk);
         chunk = next;
     }
 }
 
 static void kiln_c99_nursery_destroy(kiln_gc_nursery *nursery) {
-    if (nursery->base != NULL) {
-        free(nursery->base);
+    if (nursery->region != NULL) {
+        kiln_c99_nursery_free_region(nursery, (kiln_nursery_chunk *)nursery->region);
+        nursery->region = NULL;
         nursery->base = NULL;
-    }
-    if (nursery->bitmap != NULL) {
-        free(nursery->bitmap);
         nursery->bitmap = NULL;
     }
-    kiln_c99_nursery_free_list(nursery->promoted);
+    kiln_c99_nursery_free_list(nursery, nursery->promoted);
     nursery->promoted = NULL;
-    kiln_c99_nursery_free_list(nursery->full);
+    kiln_c99_nursery_free_list(nursery, nursery->full);
     nursery->full = NULL;
     nursery->full_bytes = 0;
-    kiln_c99_nursery_free_list(nursery->spare);
+    kiln_c99_nursery_free_list(nursery, nursery->spare);
     nursery->spare = NULL;
     nursery->spare_count = 0;
+    free(nursery->regions.table);
+    nursery->regions.table = NULL;
+    nursery->regions.capacity = 0;
+    nursery->regions.count = 0;
 }
 
 static void kiln_c99_gc_heap_init(kiln_gc_heap *heap) {
@@ -387,7 +456,7 @@ static void kiln_c99_gc_heap_init(kiln_gc_heap *heap) {
         heap->floor = kib * 1024;
     }
     kiln_c99_nursery_init(&heap->nursery);
-    if (heap->nursery.active) kiln_c99_gc_bound(heap, heap->nursery.base, heap->nursery.capacity);
+    if (heap->nursery.active) kiln_c99_gc_bound(heap, heap->nursery.region, heap->nursery.capacity);
 }
 
 /* Diagnostics stay off the locale-sensitive printf family (decision recorded beside
@@ -946,35 +1015,31 @@ static kiln_gc_block *kiln_c99_gc_lookup_slab(const kiln_gc_heap *heap, const vo
  * one -- as its base, its allocation limit and its bitmap. */
 static int kiln_c99_nursery_locate(const kiln_gc_heap *heap, const char *ptr, char **base,
                                    char **limit, uint64_t **bitmap, size_t *words) {
+    const kiln_gc_nursery *nursery;
     const kiln_nursery_chunk *chunk;
+    const char *region;
     if (heap == NULL || !heap->nursery.active || ptr == NULL) return 0;
-    if (ptr < heap->nursery.lo || ptr >= heap->nursery.hi) return 0;
-    if (ptr >= heap->nursery.base && ptr < heap->nursery.bump) {
-        *base = heap->nursery.base;
-        *limit = heap->nursery.bump;
-        *bitmap = heap->nursery.bitmap;
-        *words = heap->nursery.bitmap_words;
+    nursery = &heap->nursery;
+    if (ptr < nursery->lo || ptr >= nursery->hi) return 0;
+    if (ptr >= nursery->base && ptr < nursery->bump) {
+        *base = nursery->base;
+        *limit = nursery->bump;
+        *bitmap = nursery->bitmap;
+        *words = nursery->bitmap_words;
         return 1;
     }
-    for (chunk = heap->nursery.full; chunk != NULL; chunk = chunk->next) {
-        if (ptr >= chunk->base && ptr < chunk->limit) {
-            *base = chunk->base;
-            *limit = chunk->limit;
-            *bitmap = chunk->bitmap;
-            *words = chunk->bitmap_words;
-            return 1;
-        }
-    }
-    for (chunk = heap->nursery.promoted; chunk != NULL; chunk = chunk->next) {
-        if (ptr >= chunk->base && ptr < chunk->limit) {
-            *base = chunk->base;
-            *limit = chunk->limit;
-            *bitmap = chunk->bitmap;
-            *words = chunk->bitmap_words;
-            return 1;
-        }
-    }
-    return 0;
+    /* The region's base is the pointer masked to the chunk size; it is read as a header only
+     * once the set says this nursery made it. The current region past its bump holds nothing. */
+    region = (const char *)((uintptr_t)ptr & ~(uintptr_t)(nursery->capacity - 1));
+    if (region == nursery->region) return 0;
+    if (!kiln_c99_gc_ptrset_contains(&nursery->regions, region)) return 0;
+    chunk = (const kiln_nursery_chunk *)region;
+    if (ptr < chunk->base || ptr >= chunk->limit) return 0;
+    *base = chunk->base;
+    *limit = chunk->limit;
+    *bitmap = chunk->bitmap;
+    *words = chunk->bitmap_words;
+    return 1;
 }
 
 /* The live block that starts exactly at `candidate` inside a located region, or NULL. */
@@ -1321,20 +1386,15 @@ static void kiln_c99_gc_collect_mid_turn(kiln_gc_heap *heap) {
  * nursery goes inactive if memory is refused, and allocation continues in the slabs. */
 static int kiln_c99_nursery_fresh_chunk(kiln_gc_heap *heap) {
     kiln_gc_nursery *nursery = &heap->nursery;
-    char *base;
-    uint64_t *bitmap;
+    kiln_nursery_chunk *chunk;
     if (nursery->spare != NULL) {
-        kiln_nursery_chunk *spare = nursery->spare;
-        nursery->spare = spare->next;
+        chunk = nursery->spare;
+        nursery->spare = chunk->next;
         nursery->spare_count -= 1;
-        base = spare->base;
-        bitmap = spare->bitmap;
-        free(spare);
     } else {
-        base = (char *)malloc(nursery->capacity);
-        bitmap = base == NULL ? NULL : (uint64_t *)calloc(nursery->bitmap_words, sizeof(uint64_t));
-        if (bitmap == NULL) {
-            free(base);
+        chunk = kiln_c99_nursery_new_region(nursery);
+        if (chunk == NULL) {
+            nursery->region = NULL;
             nursery->base = NULL;
             nursery->bitmap = NULL;
             nursery->bump = NULL;
@@ -1343,15 +1403,8 @@ static int kiln_c99_nursery_fresh_chunk(kiln_gc_heap *heap) {
             return 0;
         }
     }
-    nursery->base = base;
-    nursery->bump = base;
-    nursery->limit = base + nursery->capacity;
-    nursery->bitmap = bitmap;
-    nursery->count = 0;
-    nursery->bytes = 0;
-    if (nursery->lo == NULL || base < nursery->lo) nursery->lo = base;
-    if (nursery->hi == NULL || base + nursery->capacity > nursery->hi) nursery->hi = base + nursery->capacity;
-    kiln_c99_gc_bound(heap, base, nursery->capacity);
+    kiln_c99_nursery_use(nursery, chunk);
+    kiln_c99_gc_bound(heap, nursery->region, nursery->capacity);
     return 1;
 }
 
@@ -1360,13 +1413,7 @@ static void kiln_c99_nursery_turn_chunk(kiln_gc_heap *heap) {
     kiln_gc_nursery *nursery = &heap->nursery;
     kiln_nursery_chunk *filled;
     if (nursery->bump == nursery->base) return;
-    filled = (kiln_nursery_chunk *)malloc(sizeof *filled);
-    if (filled == NULL) return;
-    filled->base = nursery->base;
-    filled->limit = nursery->bump;
-    filled->bitmap = nursery->bitmap;
-    filled->bitmap_words = nursery->bitmap_words;
-    filled->live_count = 0;
+    filled = kiln_c99_nursery_seal(nursery);
     filled->next = nursery->full;
     nursery->full = filled;
     nursery->full_bytes += (size_t)(nursery->bump - nursery->base);
@@ -2409,9 +2456,7 @@ static void kiln_c99_gc_sweep(kiln_gc_heap *heap, int orphan_marked) {
             chunk->live_count = live;
             if (orphan_marked || live == 0) {
                 *pchunk = chunk->next;
-                free(chunk->base);
-                free(chunk->bitmap);
-                free(chunk);
+                kiln_c99_nursery_free_region(&heap->nursery, chunk);
             } else {
                 pchunk = &chunk->next;
             }
@@ -2465,9 +2510,7 @@ static void kiln_c99_nursery_spare(kiln_gc_heap *heap, kiln_nursery_chunk *chunk
     if (used_words > chunk->bitmap_words) used_words = chunk->bitmap_words;
     memset(chunk->bitmap, 0, used_words * sizeof(uint64_t));
     if (nursery->spare_count >= nursery->budget / nursery->capacity + 2) {
-        free(chunk->base);
-        free(chunk->bitmap);
-        free(chunk);
+        kiln_c99_nursery_free_region(nursery, chunk);
         return;
     }
     chunk->limit = chunk->base;
@@ -2540,18 +2583,12 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
                     heap->nursery.bytes = 0;
                     heap->nursery.resets++;
                 } else {
-                    kiln_nursery_chunk *promoted = (kiln_nursery_chunk *)malloc(sizeof *promoted);
-                    if (promoted != NULL) {
-                        promoted->base = heap->nursery.base;
-                        promoted->limit = heap->nursery.bump;
-                        promoted->bitmap = heap->nursery.bitmap;
-                        promoted->bitmap_words = heap->nursery.bitmap_words;
-                        promoted->live_count = survivors;
-                        promoted->next = heap->nursery.promoted;
-                        heap->nursery.promoted = promoted;
-                        heap->nursery.promotions += survivors;
-                        (void)kiln_c99_nursery_fresh_chunk(heap);
-                    }
+                    kiln_nursery_chunk *promoted = kiln_c99_nursery_seal(&heap->nursery);
+                    promoted->live_count = survivors;
+                    promoted->next = heap->nursery.promoted;
+                    heap->nursery.promoted = promoted;
+                    heap->nursery.promotions += survivors;
+                    (void)kiln_c99_nursery_fresh_chunk(heap);
                 }
             }
         }

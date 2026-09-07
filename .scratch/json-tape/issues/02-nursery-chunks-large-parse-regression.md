@@ -1,6 +1,6 @@
 # Issue 02: 9d96e4a8 makes a 2.2 MB JSON.parse 50x slower on the native backend
 
-Status: needs-triage
+Status: resolved
 Feature: json-tape
 Governing ADR: ADR 0041
 
@@ -55,3 +55,19 @@ $ kiln build large.mjs --profile native-release -o large && ./large
 - `json/rust-tape` is based on ff22d23d and does not carry the change; once rebased onto main it
   will inherit it, because the walk allocates the same strings, arrays and objects that the C
   reader does. Its own numbers in NOTES.md are against ff22d23d for that reason.
+
+## Resolution (2026-09-06)
+
+Each chunk is now one region aligned to its own size with the header and bitmap at its start,
+and the nursery keeps a pointer set of region bases, the way the slabs do; a lookup is a mask and
+a hash probe whatever the number of chunks. Measured on the 2.2 MB probe, native, this
+worktree, against the unmodified compiler at ac301325:
+
+| measure | before | after |
+| --- | --- | --- |
+| cold first parse (harness) | 111-113 ms | 13.9-14.2 ms |
+| per parse, fixed loop of 20 vs 40 in one turn (slope) | 360-375 ms | 20.0-20.9 ms |
+| profile share of the chunk lookup | 52% | 16% (batch 8, heavier garbage; 6-7% before 9d96e4a8 at batch 1) |
+| small payload, warm median | 0.404 us | 0.409 us |
+
+Checksums equal on both probes under `KILN_GC_STRESS=1` (small) and `=200` (large).
