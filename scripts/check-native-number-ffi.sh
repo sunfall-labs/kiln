@@ -74,6 +74,8 @@ KILN_NUMBER_EXPECTED_SOURCE_DIGEST=$(
 		crates/kiln-node-path/src/lib.rs \
 		crates/kiln-temporal/Cargo.toml \
 		crates/kiln-temporal/src/lib.rs \
+		crates/kiln-json/Cargo.toml \
+		crates/kiln-json/src/lib.rs \
 		crates/kiln-runtime/Cargo.toml \
 		crates/kiln-runtime/src/concurrency.rs \
 		crates/kiln-runtime/src/http_body.rs \

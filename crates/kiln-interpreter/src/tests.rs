@@ -3068,14 +3068,7 @@ fn a_negative_slice_bound_counts_from_the_end() {
 }
 
 fn parse_json(text: &str) -> Result<Value, ExecutionError> {
-    let mut reader = JsonReader { rest: text };
-    let value = reader.value()?;
-    reader.skip_whitespace();
-    if reader.rest.is_empty() {
-        Ok(value)
-    } else {
-        Err(ExecutionError::InvalidJson)
-    }
+    parse_json_text(text)
 }
 
 #[test]

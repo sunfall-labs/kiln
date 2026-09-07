@@ -59,6 +59,13 @@ static int kiln_c99_node_client_attach(kiln_node_client_request *request,
     }
     return kiln_c99_node_client_try_start(request);
 }
+/* `JSON.parse`'s reader, linked from the provider archive as a tape (`crates/kiln-json`, ADR
+ * 0025). The interpreter links the same crate, so the two engines cannot disagree about the
+ * grammar; what is left here is the walk that makes this engine's strings, arrays and objects.
+ * The readback is a node array and a byte range -- scalars only -- lent from the reader's
+ * per-thread scratch until the next parse on this thread; nothing is freed here. */
+int32_t kiln_json_parse(const unsigned char *bytes, size_t len, const kiln_json_node **out_nodes,
+                        size_t *out_count, const unsigned char **out_text, size_t *out_text_len);
 int32_t kiln_regexp_compile(const unsigned char *pattern, size_t pattern_len,
                             const unsigned char *flags, size_t flags_len, void **out_handle);
 void kiln_regexp_free(void *handle);
@@ -553,9 +560,7 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
                                const char *indent, size_t indent_len, const char *current,
                                size_t current_len, int *serialised, int depth,
                                const kiln_json_frame *parents, kiln_value *thrown);
-static int kiln_c99_json_read(kiln_json_reader *reader, kiln_value *out);
 static int kiln_c99_json_document(const char *bytes, size_t len, kiln_value *out);
-static void kiln_c99_json_space(kiln_json_reader *reader);
 static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
                          kiln_value receiver, const kiln_value *args, size_t argc, int depth,
                          kiln_value *thrown);

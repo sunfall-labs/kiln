@@ -1,6 +1,5 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 803
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -792,7 +791,14 @@ static int kiln_c99_node_has_unended_response(const kiln_node_socket *socket) {
 static int kiln_c99_node_response_is_framed(const kiln_object *headers) {
 typedef struct kiln_node_completion {
 typedef struct kiln_node_fs_completion {
-typedef struct kiln_json_reader {
+typedef struct kiln_json_node {
+#define KILN_JSON_NULL 0
+#define KILN_JSON_FALSE 1
+#define KILN_JSON_TRUE 2
+#define KILN_JSON_NUMBER 3
+#define KILN_JSON_STRING 4
+#define KILN_JSON_ARRAY 5
+#define KILN_JSON_OBJECT 6
 typedef struct kiln_text {
 int kiln_number_to_js_string(double value, char *buffer, size_t capacity);
 double kiln_string_to_number(const char *bytes, size_t len);
@@ -884,6 +890,7 @@ int kiln_realm_http_response_end_active(uint64_t resource, uint64_t id,
 static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *event,
 static void kiln_c99_node_drop_http_connection(void *opaque);
 static int kiln_c99_node_client_attach(kiln_node_client_request *request,
+int32_t kiln_json_parse(const unsigned char *bytes, size_t len, const kiln_json_node **out_nodes,
 int32_t kiln_regexp_compile(const unsigned char *pattern, size_t pattern_len,
 void kiln_regexp_free(void *handle);
 int32_t kiln_regexp_search(void *handle, const uint16_t *subject, size_t subject_len, size_t start,
@@ -1170,9 +1177,7 @@ static double kiln_c99_key_index(const char *key, size_t key_len);
 static uint64_t kiln_c99_array_method(const char *key, size_t key_len);
 typedef struct kiln_json_frame {
 static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value value,
-static int kiln_c99_json_read(kiln_json_reader *reader, kiln_value *out);
 static int kiln_c99_json_document(const char *bytes, size_t len, kiln_value *out);
-static void kiln_c99_json_space(kiln_json_reader *reader);
 static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
 static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, uint64_t code,
@@ -1854,15 +1859,15 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
 #define KILN_JSON_BREAK(first)                                                                    \
 #undef KILN_JSON_OPEN
 #undef KILN_JSON_BREAK
-static int kiln_c99_json_read(kiln_json_reader *reader, kiln_value *out);
-static void kiln_c99_json_space(kiln_json_reader *reader) {
-static int kiln_c99_json_literal(kiln_json_reader *reader, const char *word) {
-static int kiln_c99_json_string(kiln_json_reader *reader, kiln_value *out) {
-static int kiln_c99_json_object_key(kiln_json_reader *reader, const char **out_ikey) {
 static int kiln_c99_json_define(kiln_value built, const char *ikey, kiln_value member) {
-static const double kiln_c99_json_pow10[23] = {
-static int kiln_c99_json_fast_number(const char *bytes, size_t len, double *out) {
-static int kiln_c99_json_read(kiln_json_reader *reader, kiln_value *out) {
+typedef struct kiln_json_build_frame {
+#define KILN_JSON_BUILD_LOCAL_FRAMES 32
+typedef struct kiln_json_build_stack {
+static int kiln_c99_json_build_mirror(kiln_json_build_stack *stack, size_t index, kiln_value value,
+static int kiln_c99_json_build_materialize_key(kiln_json_build_stack *stack, size_t index) {
+static int kiln_c99_json_build_open(kiln_json_build_stack *stack, kiln_value container,
+static void kiln_c99_json_build_release(kiln_json_build_stack *stack) {
+static int kiln_c99_json_build(const kiln_json_node *nodes, size_t count,
 static int kiln_c99_json_document(const char *bytes, size_t len, kiln_value *out) {
 static void kiln_c99_civil_from_days(int64_t days, int64_t *year, int *month, int *day) {
 static int64_t kiln_c99_days_from_civil(int64_t year, int64_t month, int64_t day) {

@@ -21,7 +21,7 @@
     clippy::unwrap_used
 )]
 
-#[cfg(any(feature = "regexp", feature = "bigint"))]
+#[cfg(any(feature = "regexp", feature = "bigint", feature = "json"))]
 extern crate alloc;
 
 const INVALID_ARGUMENT: i32 = -1;
@@ -7737,4 +7737,185 @@ mod temporal {
     }
 
     kiln_native_number_abi::provider_abi_registry!(assert_provider_export);
+}
+
+/// `JSON.parse`'s reader, as a tape (ADR 0025's shape: nothing but scalars and byte ranges cross).
+///
+/// The grammar lives in `kiln-json`, which the interpreter links directly; this archive links the
+/// same crate, so a generated program and the interpreter cannot disagree about what parses. The
+/// emitted C walks the tape once and does only what must touch its heap: make strings, arrays and
+/// objects, and define properties.
+///
+/// There is no handle and nothing to free. The tape and text live in the crate's per-thread
+/// scratch, which a parse overwrites in place, so a call hands back pointers into it that stay
+/// valid until the next parse on the same thread. One parse is in flight per thread by
+/// construction -- the C walk allocates but never parses -- and the crate asserts it.
+#[cfg(feature = "json")]
+mod json {
+    use super::INVALID_ARGUMENT;
+    use kiln_json::{Node, ParseError};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    /// The text is not JSON. The caller raises the SyntaxError the language specifies. Shares the
+    /// invalid-argument code deliberately: the two are the same answer to the emitted C, which
+    /// never passes a bad argument, and a refusal here must never read as a fault that stops the
+    /// program.
+    const SYNTAX_ERROR: i32 = -1;
+    /// The reader could not run at all: the text is longer than the tape indexes, or it panicked.
+    const READER_FAILED: i32 = -2;
+
+    /// Parse `len` bytes of UTF-8 at `bytes`.
+    ///
+    /// Returns 0 with the tape -- `out_count` nodes at `out_nodes`, in source order, whose string
+    /// offsets index the `out_text_len` bytes at `out_text` -- or -1 for text that is not JSON,
+    /// or -2 when the reader could not run. The four pointers stay valid until the next call on
+    /// this thread and belong to the reader; the caller reads them and does not free them.
+    ///
+    /// # Safety
+    ///
+    /// `bytes` must be readable for `len` bytes (null is accepted only with a length of zero), and
+    /// the four out pointers must be writable slots.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_json_parse(
+        bytes: *const u8,
+        len: usize,
+        out_nodes: *mut *const Node,
+        out_count: *mut usize,
+        out_text: *mut *const u8,
+        out_text_len: *mut usize,
+    ) -> i32 {
+        if (bytes.is_null() && len != 0)
+            || out_nodes.is_null()
+            || out_count.is_null()
+            || out_text.is_null()
+            || out_text_len.is_null()
+        {
+            return INVALID_ARGUMENT;
+        }
+        let source: &[u8] = if len == 0 {
+            &[]
+        } else {
+            // SAFETY: the caller contract guarantees `bytes` is readable for `len` bytes.
+            unsafe { core::slice::from_raw_parts(bytes, len) }
+        };
+        // A panic must not cross the C boundary: the archive's unwind policy makes one fatal to
+        // the process, and this is `JSON.parse`, which a program wraps in `try`.
+        let parsed = catch_unwind(AssertUnwindSafe(|| {
+            kiln_json::parse(source, |tape| {
+                let nodes = tape.nodes();
+                let text = tape.text();
+                (nodes.as_ptr(), nodes.len(), text.as_ptr(), text.len())
+            })
+        }));
+        match parsed {
+            Ok(Ok((nodes, count, text, text_len))) => {
+                // SAFETY: the four slots are writable by the caller contract. The pointers are
+                // into the crate's thread-local scratch, which outlives this call.
+                unsafe {
+                    out_nodes.write(nodes);
+                    out_count.write(count);
+                    out_text.write(text);
+                    out_text_len.write(text_len);
+                }
+                0
+            }
+            Ok(Err(ParseError::Syntax { .. })) => SYNTAX_ERROR,
+            Ok(Err(ParseError::TooLarge)) | Err(_) => READER_FAILED,
+        }
+    }
+
+    macro_rules! assert_provider_export {
+        ($(($group:ident, $name:ident, $signature:ident);)*) => {
+            $(assert_provider_export!($group, $name, $signature);)*
+        };
+        (json, kiln_json_parse, json_parse) => {
+            const _: unsafe extern "C" fn(*const u8, usize, *mut *const Node, *mut usize, *mut *const u8, *mut usize) -> i32 = kiln_json_parse;
+        };
+        ($group:ident, $name:ident, $signature:ident) => {};
+    }
+
+    kiln_native_number_abi::provider_abi_registry!(assert_provider_export);
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use kiln_json::{TAG_ARRAY, TAG_NUMBER, TAG_OBJECT, TAG_STRING};
+
+        struct Parsed {
+            status: i32,
+            tags: Vec<u32>,
+            key: Vec<u8>,
+        }
+
+        fn parse(text: &str) -> Parsed {
+            let mut nodes: *const Node = core::ptr::null();
+            let mut count = 0usize;
+            let mut arena: *const u8 = core::ptr::null();
+            let mut arena_len = 0usize;
+            let status = unsafe {
+                kiln_json_parse(
+                    text.as_ptr(),
+                    text.len(),
+                    &mut nodes,
+                    &mut count,
+                    &mut arena,
+                    &mut arena_len,
+                )
+            };
+            if status != 0 {
+                return Parsed {
+                    status,
+                    tags: Vec::new(),
+                    key: Vec::new(),
+                };
+            }
+            let tape = unsafe { core::slice::from_raw_parts(nodes, count) };
+            let text = unsafe { core::slice::from_raw_parts(arena, arena_len) };
+            let key = tape
+                .get(1)
+                .filter(|node| node.tag == TAG_STRING)
+                .and_then(|node| {
+                    text.get(node.value as usize..(node.value as usize + node.len as usize))
+                })
+                .map(<[u8]>::to_vec)
+                .unwrap_or_default();
+            Parsed {
+                status,
+                tags: tape.iter().map(|node| node.tag).collect(),
+                key,
+            }
+        }
+
+        #[test]
+        fn a_document_crosses_as_a_tape_into_this_threads_scratch() {
+            let parsed = parse(r#"{"a":[1,"x"]}"#);
+            assert_eq!(parsed.status, 0);
+            assert_eq!(
+                parsed.tags,
+                vec![TAG_OBJECT, TAG_STRING, TAG_ARRAY, TAG_NUMBER, TAG_STRING]
+            );
+            assert_eq!(parsed.key, b"a");
+            // The next parse overwrites the scratch in place; nothing was leaked or freed.
+            let again = parse("[2,3]");
+            assert_eq!(again.tags, vec![TAG_ARRAY, TAG_NUMBER, TAG_NUMBER]);
+        }
+
+        #[test]
+        fn refusals_and_bad_arguments_are_told_apart() {
+            assert_eq!(parse("{").status, SYNTAX_ERROR);
+            assert_eq!(parse("").status, SYNTAX_ERROR);
+            let mut nodes: *const Node = core::ptr::null();
+            let status = unsafe {
+                kiln_json_parse(
+                    core::ptr::null(),
+                    3,
+                    &mut nodes,
+                    core::ptr::null_mut(),
+                    core::ptr::null_mut(),
+                    core::ptr::null_mut(),
+                )
+            };
+            assert_eq!(status, INVALID_ARGUMENT);
+        }
+    }
 }

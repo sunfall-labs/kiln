@@ -57,7 +57,7 @@ split.
 | `enumeration.c` | iteration, has, delete, own keys, enumeration, proxy spread |
 | `spread.c` | object spread |
 | `definitions.c` | accessors, descriptors, defineProperty and friends, private names, methods |
-| `json.c` | JSON.stringify and JSON.parse |
+| `json.c` | JSON.stringify, and the walk that builds JSON.parse's answer from the tape the provider's reader (`crates/kiln-json`) hands back |
 | `dates.c` | Date |
 | `collections.c` | Map, Set, WeakMap, WeakSet, Proxy objects |
 | `iterators.c` | iterators and iterator helpers |

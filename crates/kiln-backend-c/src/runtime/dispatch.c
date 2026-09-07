@@ -4599,7 +4599,6 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         }
         case KILN_C99_METHOD_JSON_PARSE: {
             kiln_value source = argc > 0 ? kiln_c99_text(args[0]) : kiln_c99_undefined();
-            kiln_json_reader reader;
             kiln_value parsed;
             if (argc > 1 && args[1].tag != KILN_VALUE_UNDEFINED) {
                 /* A reviver rewrites the tree bottom-up; ignoring it would hand back a document
@@ -4609,11 +4608,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             if (source.tag != KILN_VALUE_STRING) {
                 KILN_C99_REFUSE("JSON.parse of a value with no string form");
             }
-            reader.bytes = source.ptr;
-            reader.len = source.len;
-            reader.at = 0;
-            reader.depth = 0;
-            status = kiln_c99_json_read(&reader, &parsed);
+            status = kiln_c99_json_document(source.ptr, source.len, &parsed);
             /* Malformed input is a `SyntaxError` the program catches, not a fault that stops it:
              * `try { JSON.parse(input) } catch {}` around text that came from outside is the most
              * ordinary code there is, and it was unwritable while this ended the process. Only the
@@ -4624,13 +4619,6 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             }
             if (status != KILN_C99_OK) {
                 return status;
-            }
-            /* Trailing text is a syntax error, not something to ignore: `JSON.parse("1 2")` has
-             * no answer. */
-            kiln_c99_json_space(&reader);
-            if (reader.at != reader.len) {
-                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
-                                            "Unexpected token in JSON");
             }
             *result = parsed;
             return KILN_C99_OK;

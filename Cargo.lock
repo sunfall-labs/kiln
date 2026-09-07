@@ -1221,6 +1221,7 @@ dependencies = [
  "kiln-host-abi",
  "kiln-intl",
  "kiln-ir",
+ "kiln-json",
  "kiln-node-abi",
  "kiln-node-path",
  "kiln-runtime",
@@ -1259,6 +1260,10 @@ dependencies = [
  "kiln-hir",
  "kiln-host-abi",
 ]
+
+[[package]]
+name = "kiln-json"
+version = "0.0.0"
 
 [[package]]
 name = "kiln-module-graph"
@@ -1325,6 +1330,7 @@ name = "kiln-native-number-ffi"
 version = "0.0.0"
 dependencies = [
  "kiln-host-abi",
+ "kiln-json",
  "kiln-native-number-abi",
  "kiln-node-path",
  "kiln-number-core",

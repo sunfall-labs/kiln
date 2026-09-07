@@ -1408,6 +1408,16 @@ int32_t kiln_temporal_last_error(int32_t *out_kind, unsigned char *buffer, size_
     (void)out_kind; (void)buffer; (void)capacity;
     return -1;
 }
+/* `JSON.parse`'s reader lives in the Rust provider archive too, and this host does not link it.
+ * Refusing every document is honest for the same reason the regexp stub is: no test here parses
+ * one, and a test that did would see a SyntaxError rather than a quiet wrong answer. */
+struct kiln_json_node;
+int32_t kiln_json_parse(const unsigned char *bytes, size_t len,
+                        const struct kiln_json_node **out_nodes, size_t *out_count,
+                        const unsigned char **out_text, size_t *out_text_len) {
+    (void)bytes; (void)len; (void)out_nodes; (void)out_count; (void)out_text; (void)out_text_len;
+    return -1;
+}
 "#;
 
 /// Link-only Realm provider for backend unit tests.

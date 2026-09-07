@@ -1693,19 +1693,14 @@ pub(crate) struct InternalRefusal {
 /// has to justify is how a gate stops meaning anything.
 pub(crate) const REFUSAL_INTERNAL_STATUS: &[InternalRefusal] = &[
     InternalRefusal {
-        function: "kiln_c99_json_string",
+        function: "kiln_c99_json_build",
         sites: 5,
-        converted_by: "kiln_c99_json_read, which hands it to JSON.parse's SyntaxError",
-    },
-    InternalRefusal {
-        function: "kiln_c99_json_read",
-        sites: 16,
         converted_by: "JSON.parse, which turns it into a SyntaxError the program can catch",
     },
     InternalRefusal {
         function: "kiln_c99_json_document",
         sites: 1,
-        converted_by: "the same reader status, propagated to a data module's materialization",
+        converted_by: "JSON.parse's SyntaxError, or a data module's materialization",
     },
 ];
 

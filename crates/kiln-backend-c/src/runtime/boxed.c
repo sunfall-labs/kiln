@@ -447,21 +447,12 @@ static int kiln_c99_val_json_parse_fast(kiln_host *host, kiln_val val, kiln_val 
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR, "Unexpected token in JSON");
     }
     const kiln_string *s = (const kiln_string *)KILN_VAL_PTR(val);
-    kiln_json_reader reader;
     kiln_value parsed;
-    reader.bytes = s ? s->bytes : "";
-    reader.len = s ? s->byte_len : 0;
-    reader.at = 0;
-    reader.depth = 0;
-    int status = kiln_c99_json_read(&reader, &parsed);
+    int status = kiln_c99_json_document(s ? s->bytes : "", s ? s->byte_len : 0, &parsed);
     if (status == KILN_C99_CONTROL_ERROR) {
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR, "Unexpected token in JSON");
     }
     if (status != KILN_C99_OK) return status;
-    kiln_c99_json_space(&reader);
-    if (reader.at != reader.len) {
-        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR, "Unexpected token in JSON");
-    }
     *out = kiln_val_from_boundary(parsed);
     return KILN_C99_OK;
 }

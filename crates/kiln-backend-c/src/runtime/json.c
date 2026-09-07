@@ -605,239 +605,6 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
 #undef KILN_JSON_BREAK
 }
 
-/* A recursive-descent JSON parser over the source bytes.
- *
- * `at` is the cursor, moved forward as text is consumed. A malformed document is a control error
- * rather than a partial value: JSON.parse either produces the whole thing or nothing. */
-
-static int kiln_c99_json_read(kiln_json_reader *reader, kiln_value *out);
-
-static void kiln_c99_json_space(kiln_json_reader *reader) {
-    while (reader->at < reader->len) {
-        char byte = reader->bytes[reader->at];
-        if (byte != ' ' && byte != '\t' && byte != '\n' && byte != '\r') {
-            return;
-        }
-        reader->at += 1;
-    }
-}
-
-static int kiln_c99_json_literal(kiln_json_reader *reader, const char *word) {
-    size_t len = strlen(word);
-    if (reader->len - reader->at < len || memcmp(reader->bytes + reader->at, word, len) != 0) {
-        return 0;
-    }
-    reader->at += len;
-    return 1;
-}
-
-static int kiln_c99_json_string(kiln_json_reader *reader, kiln_value *out) {
-    kiln_text text = {NULL, 0, 0};
-    uint16_t pending_high = 0;
-    reader->at += 1;
-    /* The common case by far -- a string with no escape and no embedded control byte -- copies in
-     * one allocation, at `kiln_c99_copy_text`, rather than growing a builder one
-     * `kiln_c99_text_append` call per byte and copying it again at the end. Same shape as
-     * `kiln_c99_json_needs_escape` on the stringify side: one pass of plain comparisons either
-     * finds the closing quote, or finds the reason (an escape, a control byte, unterminated
-     * input) this string needs the byte-by-byte path below, which is untouched and still owns
-     * every one of those cases exactly as before. */
-    {
-        size_t start = reader->at;
-        size_t scan = start;
-        while (scan < reader->len) {
-            unsigned char byte = (unsigned char)reader->bytes[scan];
-            if (byte == '"') {
-                *out = kiln_c99_copy_text(reader->bytes + start, scan - start);
-                reader->at = scan + 1;
-                return KILN_C99_OK;
-            }
-            if (byte == '\\' || byte < 0x20) {
-                break;
-            }
-            ++scan;
-        }
-    }
-    while (reader->at < reader->len) {
-        char byte = reader->bytes[reader->at];
-        if (byte == '"') {
-            reader->at += 1;
-            /* A high surrogate left unpaired at the end is written as the replacement
-             * character, for the same reason as everywhere else: this string cannot hold one. */
-            if (pending_high != 0 &&
-                kiln_c99_text_append_c(&text, "\xEF\xBF\xBD") != KILN_C99_OK) {
-                free(text.bytes);
-                return KILN_C99_OUT_OF_MEMORY;
-            }
-            *out = kiln_c99_text_value(&text);
-            return KILN_C99_OK;
-        }
-        if (byte != '\\') {
-            /* JSON strings may contain ordinary Unicode text, but the sixteen C0 control
-             * characters must be escaped.  Letting one through would make JSON.parse accept a
-             * JavaScript source string that the JSON grammar rejects. */
-            if ((unsigned char)byte < 0x20) {
-                free(text.bytes);
-                KILN_C99_REFUSE_INTERNAL("JSON.parse converts a reader refusal into a SyntaxError");
-            }
-            if (pending_high != 0) {
-                if (kiln_c99_text_append_c(&text, "\xEF\xBF\xBD") != KILN_C99_OK) {
-                    free(text.bytes);
-                    return KILN_C99_OUT_OF_MEMORY;
-                }
-                pending_high = 0;
-            }
-            if (kiln_c99_text_append(&text, &byte, 1) != KILN_C99_OK) {
-                free(text.bytes);
-                return KILN_C99_OUT_OF_MEMORY;
-            }
-            reader->at += 1;
-            continue;
-        }
-        reader->at += 1;
-        if (reader->at >= reader->len) {
-            break;
-        }
-        {
-            char escaped = reader->bytes[reader->at];
-            const char *literal = NULL;
-            reader->at += 1;
-            switch (escaped) {
-            case '"': literal = "\""; break;
-            case '\\': literal = "\\"; break;
-            case '/': literal = "/"; break;
-            case 'n': literal = "\n"; break;
-            case 't': literal = "\t"; break;
-            case 'r': literal = "\r"; break;
-            case 'b': literal = "\b"; break;
-            case 'f': literal = "\f"; break;
-            case 'u': {
-                uint16_t unit = 0;
-                uint16_t pair[2];
-                size_t digit;
-                if (reader->len - reader->at < 4) {
-                    free(text.bytes);
-                    KILN_C99_REFUSE_INTERNAL("JSON.parse converts a reader refusal into a "
-                                             "SyntaxError");
-                }
-                for (digit = 0; digit < 4; ++digit) {
-                    char hex = reader->bytes[reader->at + digit];
-                    unit = (uint16_t)(unit << 4);
-                    if (hex >= '0' && hex <= '9') {
-                        unit = (uint16_t)(unit | (uint16_t)(hex - '0'));
-                    } else if (hex >= 'a' && hex <= 'f') {
-                        unit = (uint16_t)(unit | (uint16_t)(hex - 'a' + 10));
-                    } else if (hex >= 'A' && hex <= 'F') {
-                        unit = (uint16_t)(unit | (uint16_t)(hex - 'A' + 10));
-                    } else {
-                        free(text.bytes);
-                        KILN_C99_REFUSE_INTERNAL("JSON.parse converts a reader refusal into a "
-                                                 "SyntaxError");
-                    }
-                }
-                reader->at += 4;
-                /* A surrogate pair is two escapes and one character, so the high half is held
-                 * until the low half arrives. */
-                if (unit >= 0xD800 && unit <= 0xDBFF) {
-                    pair[0] = unit;
-                    if (pending_high != 0) {
-                        kiln_value lone = kiln_c99_from_units(&pending_high, 1);
-                        if (kiln_c99_text_append(&text, lone.ptr, lone.len) != KILN_C99_OK) {
-                            free(text.bytes);
-                            return KILN_C99_OUT_OF_MEMORY;
-                        }
-                    }
-                    pending_high = pair[0];
-                    continue;
-                }
-                if (pending_high != 0) {
-                    pair[0] = pending_high;
-                    pair[1] = unit;
-                    pending_high = 0;
-                    {
-                        kiln_value combined = kiln_c99_from_units(pair, 2);
-                        if (kiln_c99_text_append(&text, combined.ptr, combined.len) !=
-                            KILN_C99_OK) {
-                            free(text.bytes);
-                            return KILN_C99_OUT_OF_MEMORY;
-                        }
-                    }
-                    continue;
-                }
-                {
-                    kiln_value single = kiln_c99_from_units(&unit, 1);
-                    if (kiln_c99_text_append(&text, single.ptr, single.len) != KILN_C99_OK) {
-                        free(text.bytes);
-                        return KILN_C99_OUT_OF_MEMORY;
-                    }
-                }
-                continue;
-            }
-            default:
-                free(text.bytes);
-                KILN_C99_REFUSE_INTERNAL("JSON.parse converts a reader refusal into a SyntaxError");
-            }
-            if (pending_high != 0) {
-                if (kiln_c99_text_append_c(&text, "\xEF\xBF\xBD") != KILN_C99_OK) {
-                    free(text.bytes);
-                    return KILN_C99_OUT_OF_MEMORY;
-                }
-                pending_high = 0;
-            }
-            if (kiln_c99_text_append_c(&text, literal) != KILN_C99_OK) {
-                free(text.bytes);
-                return KILN_C99_OUT_OF_MEMORY;
-            }
-        }
-    }
-    free(text.bytes);
-    KILN_C99_REFUSE_INTERNAL("JSON.parse converts a reader refusal into a SyntaxError");
-}
-
-/* A property key for the object case below, returned as an already-interned C string rather
- * than a materialized value: a parsed key never survives past the `kiln_c99_json_define` call
- * that follows it, so building a GC string only to have the object store intern its bytes a
- * second time was two copies paid for a value nothing keeps. The scan is
- * `kiln_c99_json_string`'s own fast path, repeated here rather than shared, because an object key
- * is exactly as likely to be a plain run of bytes with no escape as any other JSON string; a key
- * that needs the escape machinery rewinds to the opening quote and falls back to that function
- * unchanged, interning what it produces instead of a second allocation's worth of bytes. */
-static int kiln_c99_json_object_key(kiln_json_reader *reader, const char **out_ikey) {
-    size_t open = reader->at;
-    size_t start;
-    size_t scan;
-    reader->at += 1;
-    start = reader->at;
-    scan = start;
-    while (scan < reader->len) {
-        unsigned char byte = (unsigned char)reader->bytes[scan];
-        if (byte == '"') {
-            const char *ikey = kiln_c99_intern(reader->bytes + start, scan - start);
-            if (ikey == NULL) {
-                return KILN_C99_OUT_OF_MEMORY;
-            }
-            *out_ikey = ikey;
-            reader->at = scan + 1;
-            return KILN_C99_OK;
-        }
-        if (byte == '\\' || byte < 0x20) {
-            break;
-        }
-        ++scan;
-    }
-    {
-        kiln_value materialized;
-        int status;
-        reader->at = open;
-        status = kiln_c99_json_string(reader, &materialized);
-        if (status != KILN_C99_OK) {
-            return status;
-        }
-        *out_ikey = kiln_c99_intern(materialized.ptr, materialized.len);
-        return *out_ikey == NULL ? KILN_C99_OUT_OF_MEMORY : KILN_C99_OK;
-    }
-}
-
 /* Defines `member` on `built` under the already-interned `ikey`, taking the shape transition
  * directly (the same pattern `kiln_c99_define_named_fast` uses for an object literal) rather than
  * going through `kiln_c99_put`'s general assignment semantics. That distinction is not just
@@ -878,290 +645,306 @@ static int kiln_c99_json_define(kiln_value built, const char *ikey, kiln_value m
     return kiln_c99_put(NULL, built, ikey, strlen(ikey), member, 0, NULL);
 }
 
-/* Clinger's fast path for the common decimal grammar: when the mantissa fits exactly in a double
- * (at most fifteen significant digits) and the decimal exponent is one a power of ten also
- * represents exactly (|k| <= 22 -- 5^22 needs under 53 bits, so 10^22 = 5^22 * 2^22 is exact, and
- * every smaller power of ten more so), `mantissa * 10^k` or `mantissa / 10^k` is a single
- * correctly-rounded IEEE operation on two exact operands, which is the same double the
- * arbitrary-precision conversion below would produce. Outside that range -- more digits, a wider
- * exponent -- this says so truthfully by returning 0, and the caller keeps using the FFI parser,
- * which is what every number able to defeat this shortcut still needs.
+/* Building `JSON.parse`'s answer from the tape the linked reader produced.
  *
- * Sign is applied last, as a negation rather than a conditional skip, which is what keeps "-0"
- * `-0`: negating a zero magnitude produces negative zero exactly, the same way `-0.0` is spelled
- * in C. */
-static const double kiln_c99_json_pow10[23] = {
-    1e0,  1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e7,  1e8,  1e9,  1e10, 1e11,
-    1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
-};
+ * The grammar is not here. It is in `crates/kiln-json`, linked from the provider archive and
+ * walked by the interpreter too, so a document parses the same on both engines by construction
+ * rather than by testing (ADR 0025). What the reader hands back is a tape: the document's nodes
+ * in source order, a container carrying its child count, a string an offset and length into the
+ * decoded text, a number its double. Every escape, surrogate half and overflowing number has
+ * already been decided by then. This walk does only what has to touch this heap -- make the
+ * string, the array or the object, and define the property -- over an explicit stack, so a
+ * document's nesting is bounded by its length rather than by a call depth.
+ *
+ * An object's key never becomes a string of this heap: it is interned straight from the tape's
+ * text, and `kiln_c99_json_define` above takes the interned key. That is the same economy the
+ * reader this replaced had found, and the same rule -- a key spelled `__proto__` is data here,
+ * where `kiln_c99_put` would relink the prototype. */
 
-static int kiln_c99_json_fast_number(const char *bytes, size_t len, double *out) {
-    size_t i = 0;
-    int negative = 0;
-    uint64_t mantissa = 0;
-    int mantissa_digits = 0;
-    int seen_dot = 0;
-    int fraction_digits = 0;
-    int exponent = 0;
-    int exponent_negative = 0;
-    int decimal_exponent;
-    double value;
+typedef struct kiln_json_build_frame {
+    kiln_value container;
+    /* The key waiting for its value, in an object: interned while the frame is on the machine
+     * stack, where a pointer keeps the interned bytes alive through the collector's conservative
+     * scan, and a string of this heap once the frames have spilled, where only a traced hold
+     * can. Exactly one of the two is set while `has_key`. */
+    const char *ikey;
+    kiln_value key;
+    /* Elements, or key/value pairs, still to arrive. */
+    size_t remaining;
+    int is_object;
+    int has_key;
+} kiln_json_build_frame;
 
-    if (i < len && bytes[i] == '-') {
-        negative = 1;
-        ++i;
+/* How many open containers the walk keeps on the machine stack before spilling to the heap. */
+#define KILN_JSON_BUILD_LOCAL_FRAMES 32
+
+/* The collector may run on any allocation this walk makes, and it finds its roots by scanning
+ * the machine stack. So the frames live in a local array while the document is ordinarily deep,
+ * which is nearly always, and what they hold is traced for free. Past that the frames move to the
+ * heap, which the collector never looks at, and from then on every container and pending key is
+ * mirrored into `holds`, an array of this heap that a local variable keeps alive. */
+typedef struct kiln_json_build_stack {
+    kiln_json_build_frame local[KILN_JSON_BUILD_LOCAL_FRAMES];
+    kiln_json_build_frame *frames;
+    size_t depth;
+    size_t capacity;
+    kiln_value holds;
+    int spilled;
+} kiln_json_build_stack;
+
+static int kiln_c99_json_build_mirror(kiln_json_build_stack *stack, size_t index, kiln_value value,
+                                      int is_key) {
+    kiln_array *held;
+    size_t slot = 2 * index + (is_key ? 1 : 0);
+    if (!stack->spilled) {
+        return KILN_C99_OK;
     }
-    for (; i < len; ++i) {
-        char c = bytes[i];
-        if (c == '.') {
-            if (seen_dot) return 0;
-            seen_dot = 1;
-            continue;
-        }
-        if (c == 'e' || c == 'E') break;
-        if (mantissa_digits >= 15) {
-            /* More significant digits than a double can hold exactly: outside the range this
-             * shortcut can answer for, so it defers rather than round the wrong digit away. */
-            return 0;
-        }
-        mantissa = mantissa * 10 + (uint64_t)(c - '0');
-        ++mantissa_digits;
-        if (seen_dot) ++fraction_digits;
-    }
-    if (i < len && (bytes[i] == 'e' || bytes[i] == 'E')) {
-        ++i;
-        if (i < len && (bytes[i] == '+' || bytes[i] == '-')) {
-            exponent_negative = bytes[i] == '-';
-            ++i;
-        }
-        for (; i < len; ++i) {
-            if (exponent > 1000) return 0; /* absurd; let the FFI's own bound decide */
-            exponent = exponent * 10 + (bytes[i] - '0');
+    held = kiln_c99_array_of(stack->holds);
+    while (held->count <= slot) {
+        int status = kiln_c99_array_push(stack->holds, kiln_c99_undefined());
+        if (status != KILN_C99_OK) {
+            return status;
         }
     }
-    decimal_exponent = (exponent_negative ? -exponent : exponent) - fraction_digits;
-    if (decimal_exponent < -22 || decimal_exponent > 22) return 0;
-    value = (double)mantissa;
-    if (decimal_exponent >= 0) {
-        value *= kiln_c99_json_pow10[decimal_exponent];
-    } else {
-        value /= kiln_c99_json_pow10[-decimal_exponent];
-    }
-    if (negative) value = -value;
-    *out = value;
-    return 1;
+    held->elements[slot] = kiln_val_from_boundary(value);
+    return KILN_C99_OK;
 }
 
-static int kiln_c99_json_read(kiln_json_reader *reader, kiln_value *out) {
-    int status;
-    if (reader->depth >= KILN_C99_MAX_CALL_DEPTH) {
-        return KILN_C99_CALL_DEPTH_ERROR;
-    }
-    kiln_c99_json_space(reader);
-    if (reader->at >= reader->len) {
-        KILN_C99_REFUSE_INTERNAL("JSON.parse converts a reader refusal into a SyntaxError");
-    }
-    switch (reader->bytes[reader->at]) {
-    case 'n':
-        if (!kiln_c99_json_literal(reader, "null")) {
-            KILN_C99_REFUSE_INTERNAL("JSON.parse converts a reader refusal into a SyntaxError");
-        }
-        *out = kiln_c99_null();
+/* A pending key that was interned must become a string of this heap before its frame leaves the
+ * machine stack: the interned bytes are collector-owned and unmarked until a shape holds them. */
+static int kiln_c99_json_build_materialize_key(kiln_json_build_stack *stack, size_t index) {
+    kiln_json_build_frame *frame = &stack->frames[index];
+    if (!frame->has_key || frame->ikey == NULL) {
         return KILN_C99_OK;
-    case 't':
-        if (!kiln_c99_json_literal(reader, "true")) {
-            KILN_C99_REFUSE_INTERNAL("JSON.parse converts a reader refusal into a SyntaxError");
-        }
-        *out = kiln_c99_boolean(1);
-        return KILN_C99_OK;
-    case 'f':
-        if (!kiln_c99_json_literal(reader, "false")) {
-            KILN_C99_REFUSE_INTERNAL("JSON.parse converts a reader refusal into a SyntaxError");
-        }
-        *out = kiln_c99_boolean(0);
-        return KILN_C99_OK;
-    case '"':
-        return kiln_c99_json_string(reader, out);
-    case '[': {
-        kiln_value built;
-        reader->at += 1;
-        status = kiln_c99_new_array(&built);
-        if (status != KILN_C99_OK) {
-            return status;
-        }
-        kiln_c99_json_space(reader);
-        if (reader->at < reader->len && reader->bytes[reader->at] == ']') {
-            reader->at += 1;
-            *out = built;
-            return KILN_C99_OK;
-        }
-        for (;;) {
-            kiln_value element;
-            reader->depth += 1;
-            status = kiln_c99_json_read(reader, &element);
-            reader->depth -= 1;
-            if (status != KILN_C99_OK) {
-                return status;
-            }
-            status = kiln_c99_array_push(built, element);
-            if (status != KILN_C99_OK) {
-                return status;
-            }
-            kiln_c99_json_space(reader);
-            if (reader->at >= reader->len) {
-                KILN_C99_REFUSE_INTERNAL("JSON.parse converts a reader refusal into a SyntaxError");
-            }
-            if (reader->bytes[reader->at] == ',') {
-                reader->at += 1;
-                continue;
-            }
-            if (reader->bytes[reader->at] == ']') {
-                reader->at += 1;
-                *out = built;
-                return KILN_C99_OK;
-            }
-            KILN_C99_REFUSE_INTERNAL("JSON.parse converts a reader refusal into a SyntaxError");
-        }
     }
-    case '{': {
-        kiln_value built;
-        reader->at += 1;
-        status = kiln_c99_new_object(&built);
-        if (status != KILN_C99_OK) {
-            return status;
-        }
-        kiln_c99_json_space(reader);
-        if (reader->at < reader->len && reader->bytes[reader->at] == '}') {
-            reader->at += 1;
-            *out = built;
-            return KILN_C99_OK;
-        }
-        for (;;) {
-            const char *ikey;
-            kiln_value member;
-            kiln_c99_json_space(reader);
-            if (reader->at >= reader->len || reader->bytes[reader->at] != '"') {
-                KILN_C99_REFUSE_INTERNAL("JSON.parse converts a reader refusal into a SyntaxError");
-            }
-            status = kiln_c99_json_object_key(reader, &ikey);
+    frame->key = kiln_c99_copy_text(frame->ikey, strlen(frame->ikey));
+    frame->ikey = NULL;
+    return kiln_c99_json_build_mirror(stack, index, frame->key, 1);
+}
+
+static int kiln_c99_json_build_open(kiln_json_build_stack *stack, kiln_value container,
+                                    size_t remaining, int is_object) {
+    kiln_json_build_frame *frame;
+    if (stack->depth == stack->capacity) {
+        size_t grown = stack->capacity * 2;
+        kiln_json_build_frame *bigger;
+        size_t index;
+        if (!stack->spilled) {
+            /* Leaving the machine stack: from here on the collector cannot see the frames, so
+             * everything already open is mirrored into an array it can. */
+            int status = kiln_c99_new_array_with_capacity(&stack->holds, 2 * grown, 0);
             if (status != KILN_C99_OK) {
                 return status;
             }
-            kiln_c99_json_space(reader);
-            if (reader->at >= reader->len || reader->bytes[reader->at] != ':') {
-                KILN_C99_REFUSE_INTERNAL("JSON.parse converts a reader refusal into a SyntaxError");
-            }
-            reader->at += 1;
-            reader->depth += 1;
-            status = kiln_c99_json_read(reader, &member);
-            reader->depth -= 1;
-            if (status != KILN_C99_OK) {
-                return status;
-            }
-            status = kiln_c99_json_define(built, ikey, member);
-            if (status != KILN_C99_OK) {
-                return status;
-            }
-            kiln_c99_json_space(reader);
-            if (reader->at >= reader->len) {
-                KILN_C99_REFUSE_INTERNAL("JSON.parse converts a reader refusal into a SyntaxError");
-            }
-            if (reader->bytes[reader->at] == ',') {
-                reader->at += 1;
-                continue;
-            }
-            if (reader->bytes[reader->at] == '}') {
-                reader->at += 1;
-                *out = built;
-                return KILN_C99_OK;
-            }
-            KILN_C99_REFUSE_INTERNAL("JSON.parse converts a reader refusal into a SyntaxError");
-        }
-    }
-    default: {
-        /* A number. JSON's grammar is narrower than the language's, so the extent is measured
-         * here and the digits themselves are handed to the shared parser -- one place that knows
-         * how a decimal becomes a double. */
-        size_t start = reader->at;
-        size_t digits;
-        if (reader->bytes[reader->at] == '-') {
-            reader->at += 1;
-        }
-        if (reader->at >= reader->len) {
-            KILN_C99_REFUSE_INTERNAL("JSON.parse converts a reader refusal into a SyntaxError");
-        }
-        if (reader->bytes[reader->at] == '0') {
-            reader->at += 1;
-            /* JSON disallows leading zeroes; the following digit is not a new token. */
-            if (reader->at < reader->len && reader->bytes[reader->at] >= '0' &&
-                reader->bytes[reader->at] <= '9') {
-                KILN_C99_REFUSE_INTERNAL("JSON.parse converts a reader refusal into a SyntaxError");
-            }
-        } else if (reader->bytes[reader->at] >= '1' && reader->bytes[reader->at] <= '9') {
-            do {
-                reader->at += 1;
-            } while (reader->at < reader->len && reader->bytes[reader->at] >= '0' &&
-                     reader->bytes[reader->at] <= '9');
-        } else {
-            KILN_C99_REFUSE_INTERNAL("JSON.parse converts a reader refusal into a SyntaxError");
-        }
-        if (reader->at < reader->len && reader->bytes[reader->at] == '.') {
-            reader->at += 1;
-            digits = reader->at;
-            while (reader->at < reader->len && reader->bytes[reader->at] >= '0' &&
-                   reader->bytes[reader->at] <= '9') {
-                reader->at += 1;
-            }
-            if (reader->at == digits) {
-                KILN_C99_REFUSE_INTERNAL("JSON.parse converts a reader refusal into a SyntaxError");
-            }
-        }
-        if (reader->at < reader->len &&
-            (reader->bytes[reader->at] == 'e' || reader->bytes[reader->at] == 'E')) {
-            reader->at += 1;
-            if (reader->at < reader->len &&
-                (reader->bytes[reader->at] == '+' || reader->bytes[reader->at] == '-')) {
-                reader->at += 1;
-            }
-            digits = reader->at;
-            while (reader->at < reader->len && reader->bytes[reader->at] >= '0' &&
-                   reader->bytes[reader->at] <= '9') {
-                reader->at += 1;
-            }
-            if (reader->at == digits) {
-                KILN_C99_REFUSE_INTERNAL("JSON.parse converts a reader refusal into a SyntaxError");
-            }
-        }
-        {
-            double number;
-            if (!kiln_c99_json_fast_number(reader->bytes + start, reader->at - start, &number)) {
-                number = kiln_string_to_number(reader->bytes + start, reader->at - start);
-                if (isnan(number)) {
-                    KILN_C99_REFUSE_INTERNAL("JSON.parse converts a reader refusal into a SyntaxError");
+            stack->spilled = 1;
+            for (index = 0; index < stack->depth; ++index) {
+                status = kiln_c99_json_build_mirror(stack, index, stack->frames[index].container, 0);
+                if (status == KILN_C99_OK) {
+                    status = kiln_c99_json_build_materialize_key(stack, index);
+                }
+                if (status != KILN_C99_OK) {
+                    return status;
                 }
             }
-            *out = kiln_c99_number(number);
-            return KILN_C99_OK;
+            bigger = (kiln_json_build_frame *)malloc(grown * sizeof *bigger);
+            if (bigger != NULL) {
+                memcpy(bigger, stack->frames, stack->depth * sizeof *bigger);
+            }
+        } else {
+            bigger = (kiln_json_build_frame *)realloc(stack->frames, grown * sizeof *bigger);
+        }
+        if (bigger == NULL) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        stack->frames = bigger;
+        stack->capacity = grown;
+    }
+    if (stack->spilled) {
+        int status = kiln_c99_json_build_mirror(stack, stack->depth, container, 0);
+        if (status != KILN_C99_OK) {
+            return status;
         }
     }
+    frame = &stack->frames[stack->depth];
+    frame->container = container;
+    frame->ikey = NULL;
+    frame->key = kiln_c99_undefined();
+    frame->remaining = remaining;
+    frame->is_object = is_object;
+    frame->has_key = 0;
+    stack->depth += 1;
+    return KILN_C99_OK;
+}
+
+static void kiln_c99_json_build_release(kiln_json_build_stack *stack) {
+    if (stack->spilled) {
+        free(stack->frames);
+        kiln_c99_array_of(stack->holds)->count = 0;
     }
 }
 
-/* Parse one complete captured JSON module document. This is the same reader `JSON.parse` uses,
- * but data-module materialization has no JavaScript call frame or reviver and needs a direct
- * private entry point. */
-static int kiln_c99_json_document(const char *bytes, size_t len, kiln_value *out) {
-    kiln_json_reader reader;
-    int status;
-    reader.bytes = bytes;
-    reader.len = len;
-    reader.at = 0;
-    reader.depth = 0;
-    status = kiln_c99_json_read(&reader, out);
-    if (status != KILN_C99_OK) return status;
-    kiln_c99_json_space(&reader);
-    if (reader.at != reader.len) {
-        KILN_C99_REFUSE_INTERNAL("JSON.parse converts a reader refusal into a SyntaxError");
+static int kiln_c99_json_build(const kiln_json_node *nodes, size_t count,
+                               const unsigned char *text, size_t text_len, kiln_value *out) {
+    kiln_json_build_stack stack;
+    kiln_value root = kiln_c99_undefined();
+    int have_root = 0;
+    size_t index;
+    stack.frames = stack.local;
+    stack.depth = 0;
+    stack.capacity = KILN_JSON_BUILD_LOCAL_FRAMES;
+    stack.holds = kiln_c99_undefined();
+    stack.spilled = 0;
+    for (index = 0; index < count; ++index) {
+        const kiln_json_node *node = &nodes[index];
+        kiln_json_build_frame *top = stack.depth == 0 ? NULL : &stack.frames[stack.depth - 1];
+        kiln_value value = kiln_c99_undefined();
+        int status = KILN_C99_OK;
+        int opened = 0;
+        if (have_root) {
+            /* The root closed and the tape goes on: not a tape the reader produces. */
+            kiln_c99_json_build_release(&stack);
+            KILN_C99_REFUSE_INTERNAL("JSON.parse, which turns it into a SyntaxError the program can catch");
+        }
+        if (node->tag == KILN_JSON_STRING &&
+            (node->value > (uint64_t)text_len ||
+             (size_t)node->len > text_len - (size_t)node->value)) {
+            /* The offsets crossed an ABI; a lie there is a refusal, never a read past the text. */
+            kiln_c99_json_build_release(&stack);
+            KILN_C99_REFUSE_INTERNAL("JSON.parse, which turns it into a SyntaxError the program can catch");
+        }
+        if (top != NULL && top->is_object && !top->has_key) {
+            /* An object's key, taken from the tape's text without a string of this heap. */
+            if (node->tag != KILN_JSON_STRING) {
+                kiln_c99_json_build_release(&stack);
+                KILN_C99_REFUSE_INTERNAL("JSON.parse, which turns it into a SyntaxError the program can catch");
+            }
+            if (stack.spilled) {
+                top->key = kiln_c99_copy_text((const char *)text + (size_t)node->value,
+                                              (size_t)node->len);
+                status = kiln_c99_json_build_mirror(&stack, stack.depth - 1, top->key, 1);
+            } else {
+                top->ikey = kiln_c99_intern((const char *)text + (size_t)node->value,
+                                            (size_t)node->len);
+                if (top->ikey == NULL) {
+                    status = KILN_C99_OUT_OF_MEMORY;
+                }
+            }
+            if (status != KILN_C99_OK) {
+                kiln_c99_json_build_release(&stack);
+                return status;
+            }
+            top->has_key = 1;
+            continue;
+        }
+        switch (node->tag) {
+        case KILN_JSON_NULL:
+            value = kiln_c99_null();
+            break;
+        case KILN_JSON_FALSE:
+            value = kiln_c99_boolean(0);
+            break;
+        case KILN_JSON_TRUE:
+            value = kiln_c99_boolean(1);
+            break;
+        case KILN_JSON_NUMBER: {
+            double number;
+            memcpy(&number, &node->value, sizeof number);
+            value = kiln_c99_number(number);
+            break;
+        }
+        case KILN_JSON_STRING:
+            value = kiln_c99_copy_text((const char *)text + (size_t)node->value, (size_t)node->len);
+            break;
+        case KILN_JSON_ARRAY:
+            /* The count is known up front, so the array is allocated once at its final size. */
+            status = kiln_c99_new_array_with_capacity(&value, (size_t)node->len, 1);
+            opened = node->len != 0;
+            break;
+        case KILN_JSON_OBJECT:
+            status = kiln_c99_new_object(&value);
+            opened = node->len != 0;
+            break;
+        default:
+            kiln_c99_json_build_release(&stack);
+            KILN_C99_REFUSE_INTERNAL("JSON.parse, which turns it into a SyntaxError the program can catch");
+        }
+        if (status == KILN_C99_OK && opened) {
+            status = kiln_c99_json_build_open(&stack, value, (size_t)node->len,
+                                              node->tag == KILN_JSON_OBJECT);
+        }
+        if (status != KILN_C99_OK) {
+            kiln_c99_json_build_release(&stack);
+            return status;
+        }
+        if (opened) {
+            continue;
+        }
+        /* Deliver the value to the container it belongs to, and every container that completes
+         * with it to the one above. */
+        for (;;) {
+            kiln_json_build_frame *frame;
+            if (stack.depth == 0) {
+                root = value;
+                have_root = 1;
+                break;
+            }
+            frame = &stack.frames[stack.depth - 1];
+            if (frame->is_object) {
+                /* A repeated key overwrites in place, which keeps the first position and takes the
+                 * last value; `__proto__` is an own property; both are `kiln_c99_json_define`'s
+                 * doing. A spilled frame's key is a string, interned here at the last moment. */
+                const char *ikey = frame->ikey;
+                if (ikey == NULL) {
+                    ikey = kiln_c99_intern(frame->key.ptr, frame->key.len);
+                    if (ikey == NULL) {
+                        kiln_c99_json_build_release(&stack);
+                        return KILN_C99_OUT_OF_MEMORY;
+                    }
+                }
+                status = kiln_c99_json_define(frame->container, ikey, value);
+                frame->ikey = NULL;
+                frame->key = kiln_c99_undefined();
+                frame->has_key = 0;
+            } else {
+                status = kiln_c99_array_push(frame->container, value);
+            }
+            if (status != KILN_C99_OK) {
+                kiln_c99_json_build_release(&stack);
+                return status;
+            }
+            frame->remaining -= 1;
+            if (frame->remaining != 0) {
+                break;
+            }
+            value = frame->container;
+            stack.depth -= 1;
+        }
     }
+    kiln_c99_json_build_release(&stack);
+    if (!have_root || stack.depth != 0) {
+        KILN_C99_REFUSE_INTERNAL("JSON.parse, which turns it into a SyntaxError the program can catch");
+    }
+    *out = root;
     return KILN_C99_OK;
+}
+
+/* Parse one complete JSON text. `JSON.parse` and a data module's materialization both come here;
+ * the reader's refusal becomes the SyntaxError, and the reader has already rejected trailing
+ * text, so `JSON.parse("1 2")` has no answer here either. The tape is lent from the reader's
+ * per-thread scratch and is valid until the next parse on this thread, which is after the walk:
+ * the walk allocates on this heap and never parses. */
+static int kiln_c99_json_document(const char *bytes, size_t len, kiln_value *out) {
+    const kiln_json_node *nodes = NULL;
+    size_t count = 0;
+    const unsigned char *text = NULL;
+    size_t text_len = 0;
+    int32_t parsed =
+        kiln_json_parse((const unsigned char *)bytes, len, &nodes, &count, &text, &text_len);
+    if (parsed == -1) {
+        KILN_C99_REFUSE_INTERNAL("JSON.parse, which turns it into a SyntaxError the program can catch");
+    }
+    if (parsed != 0) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    return kiln_c99_json_build(nodes, count, text, text_len, out);
 }
