@@ -214,8 +214,12 @@ static int kiln_c99_then_continue(kiln_value promise, kiln_value generator) {
     return KILN_C99_OK;
 }
 
+/* A job that has run, or one dropped with its queue, is a cell in a nursery chunk that the next
+ * collection settles with everything else in the chunk; releasing it by hand was a lookup, a
+ * finaliser call and a free-list push per job, a tenth of an await loop, for a slot the chunk
+ * reset reclaims wholesale. */
 static void kiln_c99_drop_microtask(void *work) {
-    kiln_c99_gc_release_cell(work);
+    (void)work;
 }
 
 /* Give a refusal inside a turn somewhere to say what it was.
@@ -256,10 +260,6 @@ static int kiln_c99_run_microtask(void *work, void *host_pointer, void *thrown_p
                                                      task->rejected, 0, thrown)
                      : kiln_c99_async_step(host, task->handler, task->argument, task->rejected,
                                            0, thrown);
-        /* The step read the task's fields by value and the queue releases the cell after this
-         * returns; without the pin the cell is unreachable during the step, a collection inside
-         * it reclaims the slot, and the release that follows would free it twice. */
-        kiln_c99_gc_keep_alive(task);
         if (status == KILN_C99_THROWN) return KILN_C99_THROWN;
         kiln_c99_publish_turn_refusal(status, kiln_c99_undefined(), thrown);
         return status;
