@@ -1401,6 +1401,103 @@ fn module(
     }
 }
 
+#[test]
+fn compact_stack_tail_operations_use_shared_operation_helpers() {
+    use crate::tail::{TailContext, emit_tail_instruction};
+
+    let instructions = [
+        Instruction::DefineAccessor {
+            setter: false,
+            enumerable: true,
+        },
+        Instruction::DefineMethod,
+        Instruction::Apply,
+    ];
+    let render = |compact| {
+        let context = TailContext {
+            constants: &[],
+            symbol: "ku",
+            diagnostic_site: if compact {
+                super::COMPACT_DIAGNOSTIC_SITE
+            } else {
+                "fixture.js"
+            },
+            callables: true,
+            compact,
+        };
+        let mut output = String::new();
+        for (pc, instruction) in instructions.iter().enumerate() {
+            emit_tail_instruction(
+                &mut output,
+                instruction,
+                pc as u32,
+                &context,
+                "goto kiln_unwind;",
+            );
+        }
+        output
+    };
+
+    let compact = render(true);
+    assert!(compact.contains("kiln_c99_tail_define_accessor"));
+    assert!(compact.contains("kiln_c99_tail_define_method"));
+    assert!(compact.contains("kiln_c99_tail_apply"));
+    assert!(!compact.contains("kiln_value method ="));
+    assert!(!compact.contains("kiln_value list ="));
+
+    let ordinary = render(false);
+    assert!(!ordinary.contains("kiln_c99_tail_"));
+    assert!(ordinary.contains("kiln_value method ="));
+    assert!(ordinary.contains("kiln_value list ="));
+    assert!(runtime_prelude_source().contains("kiln_c99_tail_define_method"));
+    assert!(runtime_prelude_header().contains("kiln_c99_tail_define_method"));
+}
+
+#[test]
+fn compact_literals_use_shared_nan_boxed_builders() {
+    let policy = EmissionPolicy {
+        compact: true,
+        decoupled_prelude: true,
+        ..EmissionPolicy::default()
+    };
+    let object = emit_with_policy(
+        &program(
+            vec![
+                Constant::String("answer".to_owned()),
+                Constant::Number(42_f64.to_bits()),
+            ],
+            vec![
+                Instruction::Const(0),
+                Instruction::Const(1),
+                Instruction::NewObject { count: 1 },
+                Instruction::Return,
+            ],
+            0,
+        ),
+        policy.clone(),
+    )
+    .expect("compact object literal emits");
+    let array = emit_with_policy(
+        &program(
+            vec![Constant::Number(42_f64.to_bits())],
+            vec![
+                Instruction::Const(0),
+                Instruction::NewArray { count: 1 },
+                Instruction::Return,
+            ],
+            0,
+        ),
+        policy,
+    )
+    .expect("compact array literal emits");
+
+    assert!(object.source.contains("kiln_c99_val_new_object_literal"));
+    assert!(array.source.contains("kiln_c99_val_new_array_literal"));
+    assert!(!array.source.contains("kiln_array *arr ="));
+    assert!(runtime_prelude_source().contains("kiln_c99_val_new_object_literal"));
+    assert!(runtime_prelude_header().contains("kiln_c99_val_new_object_literal"));
+}
+
 /// The engine half of the provider ABI, for tests that link the vendored C number runtime.
 ///
 /// `kiln-native-number`'s C is a *test fixture*: production links the Rust provider archive,

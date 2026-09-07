@@ -47,9 +47,12 @@ static char kiln_c99_diagnostic_compose[128];
 static int kiln_c99_diagnostic_active_depth = 0;
 static int kiln_c99_refuse(const char *lacked) {
 static int kiln_c99_refuse_named(const char *lacked, const char *subject, size_t subject_len) {
+static void kiln_c99_note_refusal(const char *site, size_t instruction,
+static int kiln_c99_refuse_at(const char *site, size_t instruction,
 static int kiln_c99_internal_status(const char *converted_by) {
 #define KILN_C99_REFUSE(lacked) return kiln_c99_refuse(lacked)
 #define KILN_C99_REFUSE_NAMED(lacked, subject, subject_len) \
+#define KILN_C99_REFUSE_AT(site, instruction, operation, depth) \
 #define KILN_C99_REFUSE_INTERNAL(converted_by) return kiln_c99_internal_status(converted_by)
 static inline void kiln_c99_reset_diagnostics(void) {
 #define KILN_C99_ABSENT(why, out)      \
@@ -1759,6 +1762,9 @@ static int kiln_c99_val_make_cell(kiln_val *slot);
 static int kiln_c99_make_cell(kiln_value *slot) {
 static void kiln_c99_mark_uninitialized(kiln_value *slot) {
 static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char *name,
+static int kiln_c99_tail_define_accessor(kiln_val *stack, size_t *sp, int setter_half,
+static int kiln_c99_tail_define_method(kiln_val *stack, size_t *sp, const char *site,
+static int kiln_c99_tail_apply(kiln_host *host, kiln_val *stack, size_t *sp, int depth,
 static int kiln_c99_invoke_closure_body(kiln_host *host, kiln_val *result,
 static void kiln_c99_attribute_body_refusal(const kiln_closure *closure, int depth) {
 #if defined(__GNUC__) || defined(__clang__)
@@ -2190,6 +2196,8 @@ static int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int hint,
 static int kiln_c99_to_number_checked(kiln_host *host, kiln_value value, double *out, int depth,
 static int kiln_c99_unary_checked(uint16_t operation, kiln_host *host, kiln_value value,
 static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_value left,
+static int kiln_c99_val_new_array_literal(kiln_val *out, const kiln_val *elements,
+static int kiln_c99_val_new_object_literal(kiln_val *out, const kiln_val *pairs,
 static kiln_val kiln_c99_string_constant(void **cached, const char *bytes, size_t len) {
 static inline void kiln_c99_site_stamp_builtin(kiln_c99_site *site, uint32_t builtin) {
 static kiln_value kiln_val_to_boundary(kiln_val v) {
