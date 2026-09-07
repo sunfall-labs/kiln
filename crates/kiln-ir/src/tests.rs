@@ -2339,6 +2339,44 @@ fn compile_module_detects_direct_eval() {
 }
 
 #[test]
+fn compile_module_records_only_side_effect_free_declaration_ranges() {
+    let linked = compile_module(&module(vec![
+        declaration(
+            VariableKind::Const,
+            "helper",
+            Some(arrow(
+                &[],
+                vec![statement(StatementKind::Return(Some(number(42.0))))],
+            )),
+        ),
+        declaration(
+            VariableKind::Const,
+            "answer",
+            Some(call(identifier("makeAnswer"), Vec::new())),
+        ),
+    ]))
+    .expect("compilation succeeds");
+
+    let declarations = &linked.link_facts.removable_declarations;
+    assert_eq!(declarations.len(), 1);
+    let declaration = &declarations[0];
+    assert_eq!(declaration.local_slots.len(), 1);
+    assert!(declaration.pc_start < declaration.pc_end);
+    let range = &linked.program.code[declaration.pc_start as usize..declaration.pc_end as usize];
+    assert!(
+        range
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::MakeFunction(_)))
+    );
+    assert!(
+        !range
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::Call { .. })),
+        "the effectful initializer stays outside the removable range"
+    );
+}
+
+#[test]
 fn compile_module_detects_new_function() {
     let m = module(vec![statement(StatementKind::Expression(Expression {
         kind: ExpressionKind::New {

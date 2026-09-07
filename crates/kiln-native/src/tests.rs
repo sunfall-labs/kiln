@@ -6898,6 +6898,45 @@ fn executable_graph_demands_only_statically_read_namespace_members() {
 }
 
 #[test]
+fn executable_graph_keeps_a_namespace_import_captured_by_a_live_closure() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let project = TestDirectory::new("kiln-native-captured-namespace-import");
+    fs::write(project.path.join("package.json"), r#"{"type":"module"}"#)
+        .expect("write package metadata");
+    let helpers = project.path.join("helpers.js");
+    fs::write(
+        &helpers,
+        "export function used() { return 42; } export function unused() { return 7; }",
+    )
+    .expect("write namespace provider");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "import * as helpers from './helpers.js'; const invoke = () => helpers.used(); console.log(invoke());",
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("source graph compiles");
+
+    let selected =
+        native_executable_graph(&graph, NativeProfile::Release).expect("select executable graph");
+    let entry = fs::canonicalize(entry).expect("canonical entry");
+    assert!(selected.live_imports.contains(&(entry, 0)));
+    let helpers = fs::canonicalize(helpers).expect("canonical helpers");
+    let members = selected
+        .partial_namespace_members
+        .get(&helpers)
+        .expect("partial namespace demand");
+    assert_eq!(members, &["used".to_owned()].into_iter().collect());
+}
+
+#[test]
 fn executable_graph_full_namespace_demand_overrides_a_partial_demand() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
@@ -6912,7 +6951,7 @@ fn executable_graph_full_namespace_demand_overrides_a_partial_demand() {
     .expect("write namespace provider");
     fs::write(
         project.path.join("capturing.js"),
-        "import * as helpers from './helpers.js'; globalThis.invoke = () => helpers.captured();",
+        "import * as helpers from './helpers.js'; globalThis.invoke = () => helpers;",
     )
     .expect("write capturing importer");
     let entry = project.path.join("main.mjs");

@@ -560,6 +560,10 @@ pub(super) fn emit_binary_boxed(
     // is only for a body that cannot hold a reference (`scalar_proto`).
     let slow = if scalar_proto {
         format!("v{v} = kiln_c99_val_binary_fast({code}, v{l}, v{r});")
+    } else if crate::compact_diagnostic_site(diagnostic_site) {
+        format!(
+            "KU_BINARY(v{v}, {code}, v{l}, v{r}, {pc}, \"{label}\", {unwind}); /* goto kiln_refusal; */"
+        )
     } else {
         let check = status_check(diagnostic_site, pc, label, unwind);
         format!(

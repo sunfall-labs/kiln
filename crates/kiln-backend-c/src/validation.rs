@@ -452,6 +452,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::JumpIfTruthy(_)
         | Instruction::JumpIfNotNullish(_)
         | Instruction::HostCall { .. }
+        | Instruction::Nop
         | Instruction::Return => Ok(()),
     }
 }
@@ -904,5 +905,6 @@ pub(crate) fn stack_effect(
         // interpreter has always truncated rather than complained. Requiring an empty stack here
         // rejected that shape outright, which is a refusal the language does not licence.
         Instruction::Return => Ok((height, true)),
+        Instruction::Nop => Ok((height, false)),
     }
 }

@@ -14,7 +14,7 @@ use std::{
 use kiln_host_abi::{HOST_ABI_VERSION, HostOp};
 use kiln_ir::{
     BYTECODE_VERSION, BinaryOp, Constant, FunctionProto, Instruction, ModuleProgram, Program,
-    UnaryOp, Upvalue,
+    RemovableDeclaration, UnaryOp, Upvalue,
 };
 use kiln_native_number::{NUMBER_FORMAT_VERSION, NUMBER_PARSE_VERSION};
 
@@ -2497,7 +2497,7 @@ fn render(
     Ok(output)
 }
 
-fn module_upvalue_slots(program: &Program) -> Vec<Vec<Option<u32>>> {
+fn function_parent_candidates(program: &Program) -> Vec<Vec<Option<usize>>> {
     let mut parents = vec![Vec::<Option<usize>>::new(); program.functions.len()];
     for instruction in &program.code {
         if let Instruction::MakeFunction(index) = instruction
@@ -2515,13 +2515,20 @@ fn module_upvalue_slots(program: &Program) -> Vec<Vec<Option<u32>>> {
             }
         }
     }
-    let parents = parents
-        .into_iter()
-        .map(|mut found| {
-            found.sort_unstable();
-            found.dedup();
-            (found.len() == 1).then(|| found[0])
-        })
+    for found in &mut parents {
+        found.sort_unstable();
+        found.dedup();
+    }
+    parents
+}
+
+fn module_upvalue_slots_with_parents(
+    program: &Program,
+    parent_candidates: &[Vec<Option<usize>>],
+) -> Vec<Vec<Option<u32>>> {
+    let parents = parent_candidates
+        .iter()
+        .map(|found| (found.len() == 1).then(|| found[0]))
         .collect::<Vec<_>>();
     let mut module_upvalues = program
         .functions
@@ -2564,109 +2571,202 @@ fn module_upvalue_slots(program: &Program) -> Vec<Vec<Option<u32>>> {
     module_upvalues
 }
 
+fn captured_slot_owner(
+    program: &Program,
+    parents: &[Vec<Option<usize>>],
+    function: usize,
+    upvalue: usize,
+) -> Option<(Option<usize>, u32)> {
+    let mut function = function;
+    let mut upvalue = upvalue;
+    let mut seen = HashSet::new();
+    loop {
+        if !seen.insert((function, upvalue)) {
+            return None;
+        }
+        let parent = *parents.get(function)?.as_slice().first()?;
+        if parents[function].len() != 1 {
+            return None;
+        }
+        match *program.functions.get(function)?.upvalues.get(upvalue)? {
+            Upvalue::ParentLocal(slot) | Upvalue::NamedParentLocal { slot, .. } => {
+                return Some((parent, slot));
+            }
+            Upvalue::ParentUpvalue(index) | Upvalue::NamedParentUpvalue { index, .. } => {
+                function = parent?;
+                upvalue = index as usize;
+            }
+        }
+    }
+}
+
+fn stored_declaration(code: &[Instruction], pc: usize) -> Option<(u32, bool)> {
+    match code.get(pc + 1) {
+        Some(Instruction::StoreLocal(slot)) | Some(Instruction::StoreCell(slot)) => {
+            Some((*slot, false))
+        }
+        Some(Instruction::StoreGlobal(slot)) => Some((*slot, true)),
+        _ => None,
+    }
+}
+
 /// Functions a closed-world module can instantiate, and the dead declaration stores that made
-/// the others unreachable. This deliberately recognizes only the compiler's simplest declaration
-/// shape: `MakeFunction; Store*`. Class methods and functions installed into objects remain live.
+/// the others unreachable. The same analysis runs in every reachable lexical scope: bundled
+/// modules commonly put thousands of helper declarations inside one live wrapper, and treating
+/// every nested `MakeFunction` as live defeats closed-world linking almost completely.
+///
+/// Only the compiler's simplest declaration shape, `MakeFunction; Store*`, is removable. Class
+/// methods and functions installed into objects remain live. A hand-authored program whose
+/// capture parent is ambiguous falls back to the complete function table.
 fn closed_world_function_liveness(
     program: &Program,
     demanded: &BTreeSet<u32>,
     direct_eval: bool,
-) -> (HashSet<usize>, HashSet<u32>, BTreeSet<u32>) {
+    declarations: &[RemovableDeclaration],
+) -> (HashSet<usize>, Vec<HashSet<u32>>, BTreeSet<u32>) {
     if direct_eval {
         return (
             (0..program.functions.len()).collect(),
-            HashSet::new(),
+            vec![HashSet::new(); program.functions.len() + 1],
             (0..program.local_count).collect(),
         );
     }
-    let mut live_slots = demanded.clone();
-    for instruction in &program.code {
-        if let Instruction::LoadLocal(slot)
-        | Instruction::LoadCell(slot)
-        | Instruction::LoadGlobal(slot) = instruction
-        {
-            live_slots.insert(*slot);
-        }
-    }
-
-    let mut declarations = std::collections::HashMap::<u32, Vec<usize>>::new();
-    let module_upvalues = module_upvalue_slots(program);
+    let parents = function_parent_candidates(program);
+    let mut module_live = demanded.clone();
+    let mut function_live = vec![BTreeSet::<u32>::new(); program.functions.len()];
     let mut reachable = HashSet::new();
-    let mut queue = std::collections::VecDeque::new();
-    let mark = |index: usize,
-                reachable: &mut HashSet<usize>,
-                queue: &mut std::collections::VecDeque<usize>| {
-        if reachable.insert(index) {
-            queue.push_back(index);
-        }
-    };
-    for (pc, instruction) in program.code.iter().enumerate() {
-        let Instruction::MakeFunction(index) = instruction else {
+    let mut declaration_at_pc = vec![None; program.code.len()];
+    for (index, declaration) in declarations.iter().enumerate() {
+        let start = declaration.pc_start as usize;
+        let end = declaration.pc_end as usize;
+        if start > end || end > declaration_at_pc.len() {
             continue;
-        };
-        match program.code.get(pc + 1) {
-            Some(Instruction::StoreLocal(slot))
-            | Some(Instruction::StoreCell(slot))
-            | Some(Instruction::StoreGlobal(slot)) => {
-                declarations.entry(*slot).or_default().push(*index as usize);
-            }
-            _ => mark(*index as usize, &mut reachable, &mut queue),
+        }
+        for owner in &mut declaration_at_pc[start..end] {
+            *owner = Some(index);
         }
     }
-    for slot in &live_slots {
-        if let Some(indices) = declarations.get(slot) {
-            for &index in indices {
-                mark(index, &mut reachable, &mut queue);
-            }
-        }
-    }
-    while let Some(index) = queue.pop_front() {
-        let Some(function) = program.functions.get(index) else {
-            continue;
-        };
-        for slot in module_upvalues[index].iter().flatten() {
-            if live_slots.insert(*slot)
-                && let Some(indices) = declarations.get(slot)
+    let mut active_declarations = vec![false; declarations.len()];
+
+    loop {
+        let mut changed = false;
+        for (index, declaration) in declarations.iter().enumerate() {
+            if !active_declarations[index]
+                && declaration
+                    .local_slots
+                    .iter()
+                    .any(|slot| module_live.contains(slot))
             {
-                for &index in indices {
-                    mark(index, &mut reachable, &mut queue);
+                active_declarations[index] = true;
+                changed = true;
+            }
+        }
+        let live_owners = std::iter::once(None::<usize>)
+            .chain(reachable.iter().copied().map(Some))
+            .collect::<Vec<_>>();
+        for owner in live_owners {
+            let code = match owner {
+                None => program.code.as_slice(),
+                Some(index) => program.functions[index].code.as_slice(),
+            };
+            for (pc, instruction) in code.iter().enumerate() {
+                if owner.is_none()
+                    && declaration_at_pc[pc].is_some_and(|index| !active_declarations[index])
+                {
+                    continue;
+                }
+                match instruction {
+                    Instruction::LoadGlobal(slot) => changed |= module_live.insert(*slot),
+                    Instruction::LoadLocal(slot) | Instruction::LoadCell(slot) => match owner {
+                        None => changed |= module_live.insert(*slot),
+                        Some(index) => changed |= function_live[index].insert(*slot),
+                    },
+                    _ => {}
+                }
+            }
+            for (pc, instruction) in code.iter().enumerate() {
+                if owner.is_none()
+                    && declaration_at_pc[pc].is_some_and(|index| !active_declarations[index])
+                {
+                    continue;
+                }
+                let Instruction::MakeFunction(index) = instruction else {
+                    continue;
+                };
+                let target = *index as usize;
+                let is_live = match stored_declaration(code, pc) {
+                    Some((slot, true)) => module_live.contains(&slot),
+                    Some((slot, false)) => match owner {
+                        None => module_live.contains(&slot),
+                        Some(index) => function_live[index].contains(&slot),
+                    },
+                    None => true,
+                };
+                if is_live {
+                    changed |= reachable.insert(target);
                 }
             }
         }
-        for instruction in &function.code {
-            match instruction {
-                Instruction::MakeFunction(index) => {
-                    mark(*index as usize, &mut reachable, &mut queue);
+
+        let reachable_now = reachable.iter().copied().collect::<Vec<_>>();
+        for index in reachable_now {
+            let Some(function) = program.functions.get(index) else {
+                continue;
+            };
+            for upvalue in 0..function.upvalues.len() {
+                let Some((owner, slot)) = captured_slot_owner(program, &parents, index, upvalue)
+                else {
+                    return (
+                        (0..program.functions.len()).collect(),
+                        vec![HashSet::new(); program.functions.len() + 1],
+                        (0..program.local_count).collect(),
+                    );
+                };
+                match owner {
+                    None => changed |= module_live.insert(slot),
+                    Some(parent) => changed |= function_live[parent].insert(slot),
                 }
-                Instruction::LoadGlobal(slot) if live_slots.insert(*slot) => {
-                    if let Some(indices) = declarations.get(slot) {
-                        for &index in indices {
-                            mark(index, &mut reachable, &mut queue);
-                        }
-                    }
-                }
-                _ => {}
             }
+        }
+        if !changed {
+            break;
         }
     }
 
-    let mut dead_pcs = HashSet::new();
-    for (pc, instruction) in program.code.iter().enumerate() {
-        let Instruction::MakeFunction(index) = instruction else {
-            continue;
-        };
-        let dead_declaration = match program.code.get(pc + 1) {
-            Some(Instruction::StoreLocal(slot))
-            | Some(Instruction::StoreCell(slot))
-            | Some(Instruction::StoreGlobal(slot)) => !live_slots.contains(slot),
-            _ => false,
-        };
-        if dead_declaration && !reachable.contains(&(*index as usize)) {
-            dead_pcs.insert(pc as u32);
-            dead_pcs.insert((pc + 1) as u32);
+    let mut dead_pcs = vec![HashSet::new(); program.functions.len() + 1];
+    for (index, declaration) in declarations.iter().enumerate() {
+        if !active_declarations[index] {
+            dead_pcs[0].extend(declaration.pc_start..declaration.pc_end);
         }
     }
-    (reachable, dead_pcs, live_slots)
+    for (owner, code) in std::iter::once((None, program.code.as_slice())).chain(
+        program
+            .functions
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| reachable.contains(index))
+            .map(|(index, function)| (Some(index), function.code.as_slice())),
+    ) {
+        for (pc, instruction) in code.iter().enumerate() {
+            let Instruction::MakeFunction(index) = instruction else {
+                continue;
+            };
+            let dead = match stored_declaration(code, pc) {
+                Some((slot, true)) => !module_live.contains(&slot),
+                Some((slot, false)) => match owner {
+                    None => !module_live.contains(&slot),
+                    Some(index) => !function_live[index].contains(&slot),
+                },
+                None => false,
+            };
+            if dead && !reachable.contains(&(*index as usize)) {
+                let scope = owner.map_or(0, |index| index + 1);
+                dead_pcs[scope].insert(pc as u32);
+                dead_pcs[scope].insert((pc + 1) as u32);
+            }
+        }
+    }
+    (reachable, dead_pcs, module_live)
 }
 
 /// Module slots read by evaluation or by a function reachable from a demanded export.
@@ -2677,7 +2777,17 @@ pub fn closed_world_module_live_slots(
     demanded: &BTreeSet<u32>,
     direct_eval: bool,
 ) -> BTreeSet<u32> {
-    closed_world_function_liveness(program, demanded, direct_eval).2
+    closed_world_function_liveness(program, demanded, direct_eval, &[]).2
+}
+
+/// [`closed_world_module_live_slots`] with compiler-recorded pure declaration boundaries.
+pub fn closed_world_module_live_slots_with_declarations(
+    program: &Program,
+    demanded: &BTreeSet<u32>,
+    direct_eval: bool,
+    declarations: &[RemovableDeclaration],
+) -> BTreeSet<u32> {
+    closed_world_function_liveness(program, demanded, direct_eval, declarations).2
 }
 
 /// Statically named members read from one module namespace slot, or `None` when the namespace
@@ -2695,18 +2805,21 @@ pub fn closed_world_namespace_members(
     if direct_eval {
         return None;
     }
-    let module_upvalues = module_upvalue_slots(program);
-    // A captured namespace can be carried through function-local cells before it is read. The
-    // graph currently resolves direct upvalue chains but not a cell alias captured from an
-    // enclosing class/closure. Until that provenance is explicit, retain the complete namespace
-    // whenever any closure captures this slot; partial answers here are silent missing members.
-    if module_upvalues
+    let parent_candidates = function_parent_candidates(program);
+    // A compiler-produced function has one lexical creation site. Hand-authored IR can reuse a
+    // function prototype under multiple parents; an upvalue in that shape has no single module
+    // provenance, so a partial namespace answer would be unsound.
+    if program
+        .functions
         .iter()
-        .flatten()
-        .any(|captured| *captured == Some(slot))
+        .enumerate()
+        .any(|(index, function)| {
+            parent_candidates[index].len() > 1 && !function.upvalues.is_empty()
+        })
     {
         return None;
     }
+    let module_upvalues = module_upvalue_slots_with_parents(program, &parent_candidates);
     let entry = graph_for(
         &entry_proto(program),
         program,
@@ -2867,6 +2980,9 @@ fn render_module(
         )
         .unwrap();
         output.push_str("#define KU_STATUS(PC, OP, UNWIND) do { if (status == KILN_C99_THROWN) { UNWIND; } if (status == KILN_C99_CONTROL_ERROR) { kiln_c99_note_refusal(ku_site, (size_t)(PC), (OP), (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; } while (0)\n");
+        output.push_str("#define KU_LOAD_CELL(DST, CELL, THROWN, PC, OP, UNWIND) do { const kiln_val *ku_cell = (const kiln_val *)KILN_VAL_PTR(CELL); int status = kiln_c99_val_check_tdz(*ku_cell, (THROWN)); KU_STATUS((PC), (OP), UNWIND); (DST) = *ku_cell; } while (0)\n");
+        output.push_str("#define KU_BINARY(DST, CODE, LEFT, RIGHT, PC, OP, UNWIND) do { int status = KILN_C99_OK; (DST) = kiln_c99_val_binary((CODE), host, (LEFT), (RIGHT), &status, depth, thrown); KU_STATUS((PC), (OP), UNWIND); } while (0)\n");
+        output.push_str("#define KU_READ_PROPERTY(DST, OBJECT, KEY, KEY_LEN, SITE, PC, OP, UNWIND) do { int status = kiln_c99_val_read_property(host, (OBJECT), (KEY), (KEY_LEN), depth, thrown, (SITE), &(DST)); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(OBJECT)); KU_STATUS((PC), (OP), UNWIND); } while (0)\n");
         COMPACT_DIAGNOSTIC_SITE
     } else {
         diagnostic_site
@@ -2894,24 +3010,36 @@ fn render_module(
         !keys.is_empty(),
         program.template_sites.len(),
     );
-    let (graphs, body, mut entry_graph, mut direct) =
-        plan_unit(program, diagnostic_site, policy.compact)?;
-    let reachable = policy.live_module_slots.as_ref().map(|demanded| {
-        let (reachable, dead_pcs, _) =
-            closed_world_function_liveness(program, demanded, module.link_facts.direct_eval);
-        for block in &mut entry_graph.blocks {
-            block.operations.retain(|(value, _)| {
-                !entry_graph
-                    .origins
-                    .get(value)
-                    .is_some_and(|origin| dead_pcs.contains(&origin.pc))
-            });
-        }
-        reachable
+    let liveness = policy.live_module_slots.as_ref().map(|demanded| {
+        closed_world_function_liveness(
+            program,
+            demanded,
+            module.link_facts.direct_eval,
+            &module.link_facts.removable_declarations,
+        )
     });
+    let mut pruned = program.clone();
+    if let Some((_, dead_pcs, _)) = &liveness {
+        for (pc, instruction) in pruned.code.iter_mut().enumerate() {
+            if dead_pcs[0].contains(&(pc as u32)) {
+                *instruction = Instruction::Nop;
+            }
+        }
+        for (index, function) in pruned.functions.iter_mut().enumerate() {
+            for (pc, instruction) in function.code.iter_mut().enumerate() {
+                if dead_pcs[index + 1].contains(&(pc as u32)) {
+                    *instruction = Instruction::Nop;
+                }
+            }
+        }
+    }
+    let emitted_program = liveness.as_ref().map_or(program, |_| &pruned);
+    let (graphs, body, entry_graph, mut direct) =
+        plan_unit(emitted_program, diagnostic_site, policy.compact)?;
+    let reachable = liveness.as_ref().map(|(reachable, _, _)| reachable);
     render_functions(
         &mut output,
-        program,
+        emitted_program,
         &plan,
         unit_symbol,
         emission_diagnostic_site,
@@ -2919,11 +3047,11 @@ fn render_module(
         &graphs,
         &mut direct,
         policy,
-        reachable.as_ref(),
+        reachable,
     );
     render_entry(
         &mut output,
-        program,
+        emitted_program,
         &plan,
         unit_symbol,
         emission_diagnostic_site,
@@ -3550,6 +3678,7 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
                 word(&mut hash, u64::from(*argc));
             }
             Instruction::Return => byte(&mut hash, 12),
+            Instruction::Nop => byte(&mut hash, 196),
         }
     }
     word(&mut hash, u64::from(program.local_count));

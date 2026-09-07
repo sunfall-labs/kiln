@@ -516,6 +516,9 @@ pub enum Instruction {
     /// site yields the identical frozen object (`===`) on every evaluation within the realm.
     LoadTemplateObject(u32),
     Return,
+    /// A stack-neutral placeholder used by closed-world backends when a compiler-proven pure
+    /// declaration is omitted while preserving bytecode PCs and jump targets.
+    Nop,
 }
 
 /// A template literal site for canonical template object caching (ECMA-262 §13.2.8.5).
@@ -1148,6 +1151,19 @@ pub struct ModuleLinkFacts {
     pub new_function: bool,
     /// Dynamic import call sites and their targets.
     pub dynamic_imports: Vec<DynamicImportTarget>,
+    /// Top-level declaration evaluations that have no observable effect unless one of their
+    /// bindings is read. The compiler records bytecode and function-table ownership while the
+    /// HIR still preserves declaration boundaries; a closed-world backend may then omit a row
+    /// whose slots are not demanded without guessing those boundaries from flattened bytecode.
+    pub removable_declarations: Vec<RemovableDeclaration>,
+}
+
+/// One side-effect-free top-level declaration owned by a module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemovableDeclaration {
+    pub local_slots: Vec<u32>,
+    pub pc_start: u32,
+    pub pc_end: u32,
 }
 
 /// Linkage-aware bytecode for one module. [`Program`] stays parser- and graph-independent so the
