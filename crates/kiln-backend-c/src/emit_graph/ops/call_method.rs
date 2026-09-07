@@ -1080,13 +1080,14 @@ pub(super) fn emit_call_method(
                                      size_t total_len = 0; \
                                      for (size_t idx = 0; idx < arr->count; ++idx) {{ \
                                          if (idx > 0 && sep->byte_len > 0) {{ \
-                                             memcpy(dst, sep->bytes, sep->byte_len); \
+                                             if (sep->byte_len == 1) {{ *dst = sep->bytes[0]; }} \
+                                             else {{ kiln_c99_copy_short(dst, sep->bytes, sep->byte_len); }} \
                                              dst += sep->byte_len; \
                                              total_len += sep->length; \
                                          }} \
                                          const kiln_string *es = (const kiln_string *)KILN_VAL_PTR(arr->elements[idx]); \
                                          if (es && es->byte_len > 0) {{ \
-                                             memcpy(dst, es->bytes, es->byte_len); \
+                                             kiln_c99_copy_short(dst, es->bytes, es->byte_len); \
                                              dst += es->byte_len; \
                                              total_len += es->length; \
                                          }} \
@@ -1115,26 +1116,10 @@ pub(super) fn emit_call_method(
                          const kiln_string *src = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                          const kiln_string *sep = (const kiln_string *)KILN_VAL_PTR(v{a0}); \
                          if (src != NULL && sep != NULL && src->length == src->byte_len && sep->byte_len == 1) {{ \
-                             char ch = sep->bytes[0]; \
-                             size_t part_count = 1; \
-                             for (size_t i = 0; i < src->byte_len; ++i) {{ \
-                                 if (src->bytes[i] == ch) part_count++; \
-                             }} \
                              kiln_value built_val; \
-                             int status = kiln_c99_new_array_with_capacity(&built_val, part_count, 0); \
+                             int status = kiln_c99_split_ascii_byte(&built_val, src->bytes, src->byte_len, sep->bytes[0], (size_t)0xFFFFFFFFu); \
                              if (status == KILN_C99_OK) {{ \
-                                 kiln_array *arr = kiln_c99_array_of(built_val); \
-                                 const char *p = src->bytes; \
-                                 const char *end = src->bytes + src->byte_len; \
-                                 while (p <= end) {{ \
-                                     const char *next = (const char *)memchr(p, ch, (size_t)(end - p)); \
-                                     size_t piece_len = next ? (size_t)(next - p) : (size_t)(end - p); \
-                                     kiln_val piece_val = kiln_c99_val_from_ascii(p, piece_len); \
-                                     arr->elements[arr->count++] = piece_val; \
-                                     if (next == NULL) break; \
-                                     p = next + 1; \
-                                 }} \
-                                 v{v} = kiln_val_from_boundary(built_val); \
+                                 v{v} = KILN_VAL_TAG_PTR(KILN_TAG_BUFFER_PREFIX, (const void *)(uintptr_t)built_val.bits); \
                                  handled = 1; \
                              }} \
                          }} \

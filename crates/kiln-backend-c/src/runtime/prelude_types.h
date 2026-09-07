@@ -105,17 +105,130 @@ static inline kiln_val kiln_c99_val_single_char(unsigned char ch) {
     return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_c99_ascii_strings[ch]);
 }
 
+/* A short copy without the call. A `memcpy` of seventeen bytes is mostly the cost of getting to
+ * `memcpy`, through the dynamic linker's stub and its own length dispatch, and a `split` makes
+ * one per part. Anything long enough for that to stop being true goes to the real one. */
+/* Inlined whatever the optimiser thinks: the point of the thing is to not be a call. */
+#if defined(__GNUC__) || defined(__clang__)
+#define KILN_ALWAYS_INLINE __attribute__((always_inline))
+#else
+#define KILN_ALWAYS_INLINE
+#endif
+
+static inline void kiln_c99_copy_short(char *dst, const char *src, size_t len) {
+    size_t at = 0;
+    if (len > 64) {
+        memcpy(dst, src, len);
+        return;
+    }
+    while (at + 8 <= len) {
+        uint64_t word;
+        memcpy(&word, src + at, sizeof word);
+        memcpy(dst + at, &word, sizeof word);
+        at += 8;
+    }
+    while (at < len) {
+        dst[at] = src[at];
+        at += 1;
+    }
+}
+
+/* The next `sep` at or after `from`, eight bytes at a time.
+ *
+ * `memchr` is the better answer on a long haystack and this is not trying to beat it there. A
+ * split's spans are one field wide -- seventeen bytes on the log line this was measured on -- and
+ * over a span that short the call, the dynamic linker's stub in front of it and the setup inside
+ * it all cost more than the scan does. Nine of those per line was six percent of the benchmark.
+ *
+ * The word test is the classic one: exclusive-or against the byte repeated eight times leaves a
+ * zero byte exactly where the byte matched, and `(w - 0x01..01) & ~w & 0x80..80` is non-zero
+ * exactly when some byte of `w` is zero. Which byte it was is a count of trailing zeros where
+ * the byte order makes that the earliest byte, and a look at the eight otherwise. */
+/* Whether the lowest-addressed byte of a word is its least significant one, which is what makes
+ * a count of trailing zeros name the earliest matching byte below. Everything this repository
+ * targets says yes; the other branch is there so the answer never depends on it. */
+#if defined(__GNUC__) && defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#define KILN_C99_LOW_BYTE_FIRST 1
+#else
+#define KILN_C99_LOW_BYTE_FIRST 0
+#endif
+
+static inline const char *kiln_c99_find_byte(const char *from, const char *end, char sep) {
+    const uint64_t ones = UINT64_C(0x0101010101010101);
+    uint64_t broadcast = ones * (uint64_t)(unsigned char)sep;
+    while ((size_t)(end - from) >= 8) {
+        uint64_t word;
+        uint64_t zero;
+        memcpy(&word, from, sizeof word);
+        word ^= broadcast;
+        zero = (word - ones) & ~word & UINT64_C(0x8080808080808080);
+        if (zero != 0) {
+#if KILN_C99_LOW_BYTE_FIRST
+            /* The lowest set flag is the earliest byte, so trailing zeros name it directly. */
+            return from + ((size_t)__builtin_ctzll(zero) >> 3);
+#else
+            size_t at;
+            for (at = 0; at < 8; ++at) {
+                if (from[at] == sep) return from + at;
+            }
+#endif
+        }
+        from += 8;
+    }
+    while (from < end) {
+        if (*from == sep) return from;
+        from += 1;
+    }
+    return NULL;
+}
+
+
+/* Whether two runs of bytes are equal, without the call. The needles here are a word or two --
+ * "amount=" is seven bytes -- and over that length `memcmp` is mostly the cost of reaching
+ * `memcmp`, through the dynamic linker's stub and its own length dispatch. */
+static inline int kiln_c99_same_bytes(const char *left, const char *right, size_t len) {
+    size_t at = 0;
+    while (at + 8 <= len) {
+        uint64_t a;
+        uint64_t b;
+        memcpy(&a, left + at, sizeof a);
+        memcpy(&b, right + at, sizeof b);
+        if (a != b) return 0;
+        at += 8;
+    }
+    while (at < len) {
+        if (left[at] != right[at]) return 0;
+        at += 1;
+    }
+    return 1;
+}
+
+/* Find `needle` in `haystack`.
+ *
+ * The first byte is found by the word scan above rather than by `memchr`, and the rest is
+ * compared inline; between them a search makes no library call at all. The last byte is checked
+ * before the middle because it is the cheapest way to reject a candidate: searching a joined log
+ * line for "amount=" passes about ten "a"s on the way, and every one of them used to be a full
+ * `memcmp` call. */
 static inline const char *kiln_c99_memmem(const char *haystack, size_t haystack_len,
                                           const char *needle, size_t needle_len) {
+    const char *end;
+    const char *limit;
+    const char *p;
     if (needle_len == 0) return haystack;
     if (needle_len > haystack_len) return NULL;
-    if (needle_len == 1) return (const char *)memchr(haystack, needle[0], haystack_len);
-    const char *limit = haystack + haystack_len - needle_len;
-    for (const char *p = haystack; p <= limit; ) {
-        p = (const char *)memchr(p, needle[0], (size_t)(limit - p + 1));
-        if (!p) return NULL;
-        if (memcmp(p, needle, needle_len) == 0) return p;
-        p++;
+    end = haystack + haystack_len;
+    if (needle_len == 1) return kiln_c99_find_byte(haystack, end, needle[0]);
+    limit = end - needle_len;
+    p = haystack;
+    while (p <= limit) {
+        p = kiln_c99_find_byte(p, limit + 1, needle[0]);
+        if (p == NULL) return NULL;
+        if (p[needle_len - 1] == needle[needle_len - 1] &&
+            kiln_c99_same_bytes(p + 1, needle + 1, needle_len - 2)) {
+            return p;
+        }
+        p += 1;
     }
     return NULL;
 }
@@ -979,6 +1092,24 @@ typedef struct kiln_array {
     /* Whether this array is proven to contain only numbers (dense double backing, no holes). */
     int is_numeric;
 } kiln_array;
+
+/* Elements the array did not take from `malloc`, and so must never hand back to `free` or to
+ * `realloc`.
+ *
+ * There are two such runs and they are the same mistake. `inline_elements` is the array's own
+ * first eight, and the run past the end of the block is the room
+ * `kiln_c99_new_array_with_capacity` takes when the count is known and larger than eight -- a
+ * split into nine parts used to pay a `malloc` and a `free` for the ninth. Neither pointer came
+ * out of the allocator, so growing past either is a fresh `malloc` and a copy, exactly as it was
+ * for `inline_elements` alone; `realloc`ing one of them is the crash a bundled `ajv` produced the
+ * day small arrays were first given inline storage.
+ *
+ * The run is inside the array's own block, so the tracer reaches it through `elements` like any
+ * other and the collector frees it with the array. */
+static inline int kiln_c99_array_elements_owned(const kiln_array *array) {
+    return array->elements != NULL && array->elements != array->inline_elements &&
+           array->elements != (const kiln_val *)(array + 1);
+}
 
 /* A suspended body.
  *

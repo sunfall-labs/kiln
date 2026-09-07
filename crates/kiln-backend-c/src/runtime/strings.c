@@ -224,6 +224,127 @@ static size_t kiln_c99_unit_position(kiln_value value, size_t length, size_t fal
     return index > (double)length ? length : (size_t)index;
 }
 
+
+/* `split` on a one-byte separator over text whose code units are its bytes.
+ *
+ * Every string method has a shape it is asked for far more often than the rest, and for `split`
+ * it is this one: an ASCII line cut on a single ASCII byte. Both the emitted C's intrinsic and
+ * the dispatch below used to spell it out, and both spelled it out the expensive way -- a byte
+ * at a time to count the parts, then a fresh trip through the allocator per part, in one case
+ * through `kiln_c99_copy_text` and a second copy on top. Splitting a nine-field log line spent
+ * more of its time going in and out of the allocator than it spent copying bytes.
+ *
+ * One pass now: `kiln_c99_find_byte` finds every separator and the parts are recorded as they are
+ * found, so the count that sizes the array falls out of the scan rather than costing a scan of
+ * its own.
+ * The array's elements come out of the array's own block (`kiln_c99_new_array_with_capacity`),
+ * and the parts themselves out of one nursery reservation (`kiln_c99_gc_alloc_text_run`), so a
+ * split of nine takes two trips through the allocator rather than eleven.
+ *
+ * `limit` truncates: the tail after the last kept piece is dropped rather than merged into it,
+ * so the last kept piece is searched for like every other. A string with more parts than the
+ * scan buffer holds falls back to the growable path, which answers identically and is bounded by
+ * the array rather than by the stack. */
+static int kiln_c99_split_ascii_byte(kiln_value *result, const char *bytes, size_t byte_len,
+                                     char separator, size_t limit) {
+    enum { KILN_C99_SPLIT_SCAN = 64 };
+    const char *starts[KILN_C99_SPLIT_SCAN];
+    size_t lens[KILN_C99_SPLIT_SCAN];
+    size_t run_lens[KILN_C99_SPLIT_SCAN];
+    char *places[KILN_C99_SPLIT_SCAN];
+    const char *p = bytes;
+    const char *end = bytes + byte_len;
+    size_t count = 0;
+    size_t run_count = 0;
+    size_t placed = 0;
+    size_t taken = 0;
+    size_t index;
+    int exhausted = 0;
+    kiln_value built;
+    kiln_array *array;
+    int status;
+
+    /* A part of no bytes and a part of one byte both answer with a string that is already made
+     * and need no block, so the reservation is gathered here and covers only the parts that do. */
+    while (count < KILN_C99_SPLIT_SCAN && count < limit) {
+        const char *next = kiln_c99_find_byte(p, end, separator);
+        size_t len = next != NULL ? (size_t)(next - p) : (size_t)(end - p);
+        starts[count] = p;
+        lens[count] = len;
+        if (len > 1) run_lens[run_count++] = len;
+        count += 1;
+        if (next == NULL) {
+            exhausted = 1;
+            break;
+        }
+        p = next + 1;
+    }
+    if (!exhausted && count < limit) {
+        /* More parts than the scan buffer holds. Rare enough to be worth no second
+         * implementation: push into a growable array, which is where the piece count stops
+         * being a stack question. */
+        status = kiln_c99_new_array(&built);
+        if (status != KILN_C99_OK) return status;
+        array = kiln_c99_array_of(built);
+        array->is_numeric = 0;
+        p = bytes;
+        for (index = 0; index < limit; ++index) {
+            const char *next = kiln_c99_find_byte(p, end, separator);
+            size_t len = next != NULL ? (size_t)(next - p) : (size_t)(end - p);
+            kiln_val part;
+            /* Room first, then the part: the part's own allocation can collect, and a slot the
+             * count already covers would be traced before anything had been written into it. */
+            status = kiln_c99_array_reserve(array, array->count + 1);
+            if (status != KILN_C99_OK) return status;
+            part = kiln_c99_val_from_ascii(p, len);
+            if (part == KILN_VAL_UNDEFINED) return KILN_C99_OUT_OF_MEMORY;
+            array->elements[array->count] = part;
+            array->count += 1;
+            if (next == NULL) break;
+            p = next + 1;
+        }
+        *result = built;
+        return KILN_C99_OK;
+    }
+
+    status = kiln_c99_new_array_with_capacity(&built, count, 0);
+    if (status != KILN_C99_OK) return status;
+    array = kiln_c99_array_of(built);
+    if (run_count > 0) {
+        placed = kiln_c99_gc_alloc_text_run(run_count, run_lens, places);
+    }
+    {
+        kiln_val *slots = array->elements;
+        for (index = 0; index < count; ++index) {
+            kiln_val part;
+            size_t len = lens[index];
+            if (len > 1 && taken < placed) {
+                /* The reservation's blocks are handed out in the order they were asked for, so
+                 * the cursor and the parts that wanted one advance together. */
+                char *into = places[taken++];
+                kiln_c99_copy_short(into, starts[index], len);
+                part = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, ((kiln_string *)into) - 1);
+            } else if (len == 0) {
+                part = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_c99_empty_string);
+            } else if (len == 1) {
+                part = kiln_c99_val_single_char((unsigned char)starts[index][0]);
+            } else {
+                part = kiln_c99_val_from_ascii(starts[index], len);
+                if (part == KILN_VAL_UNDEFINED) {
+                    array->count = index;
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+            }
+            slots[index] = part;
+            /* The count follows the write, so a collection inside the fallback above never
+             * traces a slot nothing has been put in. */
+            array->count = index + 1;
+        }
+    }
+    *result = built;
+    return KILN_C99_OK;
+}
+
 /* The string methods.  Split out from the array ones because they share nothing but the dispatch
  * -- every one of these works on code units and every one of those works on elements. */
 static int kiln_c99_invoke_string_method(kiln_value *result, uint64_t code, kiln_value receiver,
@@ -308,6 +429,10 @@ static int kiln_c99_invoke_string_method(kiln_value *result, uint64_t code, kiln
                     *result = built;
                     return KILN_C99_OK;
                 }
+                if (shown.len == 1) {
+                    return kiln_c99_split_ascii_byte(result, receiver.ptr, receiver.len,
+                                                     shown.ptr[0], lim);
+                }
                 /* Counted first and written once, directly, never through the growable
                  * `kiln_c99_array_push`: that reallocs the array's element pointer, and an
                  * inline-capacity array's element pointer is not a heap block to realloc. */
@@ -316,9 +441,8 @@ static int kiln_c99_invoke_string_method(kiln_value *result, uint64_t code, kiln
                     const char *scan = receiver.ptr;
                     const char *scan_end = receiver.ptr + receiver.len;
                     while (scan <= scan_end && part_count < lim) {
-                        const char *next = shown.len == 1
-                            ? (const char *)memchr(scan, shown.ptr[0], (size_t)(scan_end - scan))
-                            : kiln_c99_memmem(scan, (size_t)(scan_end - scan), shown.ptr, shown.len);
+                        const char *next =
+                            kiln_c99_memmem(scan, (size_t)(scan_end - scan), shown.ptr, shown.len);
                         if (next == NULL) {
                             break;
                         }
@@ -329,23 +453,27 @@ static int kiln_c99_invoke_string_method(kiln_value *result, uint64_t code, kiln
                     if (st != KILN_C99_OK) return st;
                     {
                         /* A truncating limit drops the tail rather than merging it into the
-                         * last kept piece, so the last piece is searched for like every other. */
+                         * last kept piece, so the last piece is searched for like every other.
+                         *
+                         * `kiln_c99_val_from_ascii` rather than a boundary value: the boundary
+                         * form of a string is bytes and a length, and turning one back into a
+                         * value allocates and copies a *second* time -- every part of every
+                         * split through here was built twice. */
                         kiln_array *arr = kiln_c99_array_of(built);
                         const char *p = receiver.ptr;
                         const char *end = receiver.ptr + receiver.len;
                         while (arr->count < part_count) {
-                            const char *next = shown.len == 1
-                                ? (const char *)memchr(p, shown.ptr[0], (size_t)(end - p))
-                                : kiln_c99_memmem(p, (size_t)(end - p), shown.ptr, shown.len);
-                            if (next != NULL) {
-                                arr->elements[arr->count++] =
-                                    kiln_val_from_boundary(kiln_c99_copy_text(p, (size_t)(next - p)));
-                                p = next + shown.len;
-                            } else {
-                                arr->elements[arr->count++] =
-                                    kiln_val_from_boundary(kiln_c99_copy_text(p, (size_t)(end - p)));
-                                break;
-                            }
+                            const char *next =
+                                kiln_c99_memmem(p, (size_t)(end - p), shown.ptr, shown.len);
+                            size_t len = next != NULL ? (size_t)(next - p) : (size_t)(end - p);
+                            /* The part before the slot it goes in: building it can collect, and
+                             * a slot the count already covers would be traced unwritten. */
+                            kiln_val part = kiln_c99_val_from_ascii(p, len);
+                            if (part == KILN_VAL_UNDEFINED) return KILN_C99_OUT_OF_MEMORY;
+                            arr->elements[arr->count] = part;
+                            arr->count += 1;
+                            if (next == NULL) break;
+                            p = next + shown.len;
                         }
                     }
                     *result = built;
