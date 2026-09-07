@@ -750,10 +750,10 @@ static inline uint64_t kiln_c99_realm_generation(void) {
 /* Hand the realm this heap's promise lane and answer with the heap.
  *
  * Registering here rather than once at startup is what makes the lane per realm: a realm is a
- * heap, this is where a unit learns which heap it is in, and the registration a second realm
- * makes replaces the first realm's, whose ring died with its heap. Every unit's copy of the two
- * callbacks behaves identically -- they read the ring out of the context -- so it does not
- * matter which unit's copy the realm ends up holding. */
+ * heap, and this is where a unit learns which heap it is in. The registration is stored on the
+ * realm that is active, so two live realms on one thread each keep their own lane rather than
+ * one replacing the other. Every unit's copy of the two callbacks behaves identically -- they
+ * read the ring out of the context -- so it does not matter which unit's copy a realm holds. */
 static kiln_gc_heap *kiln_c99_gc_lane_attached(void *attached) {
     (void)kiln_realm_set_promise_lane(kiln_c99_run_promise_jobs, kiln_c99_promise_jobs_pending,
                                       attached);

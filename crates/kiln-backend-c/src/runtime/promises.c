@@ -12,6 +12,10 @@
  * promise jobs belong: after `process.nextTick`, before the next host completion. The lanes the
  * runtime still owns -- next tick, timers, completions -- are unchanged, because ordering
  * between lanes is the realm's to decide and only the promise lane's *contents* moved. */
+/* Room for one more job: the live span slides down to the front when there is space in front of
+ * it, and the array doubles when there is not. It never shrinks, so a realm that once fanned out
+ * a hundred thousand jobs keeps that array until it dies -- a few megabytes at the sizes we have
+ * measured, held against the burst happening again, and never a leak that grows with time. */
 static int kiln_c99_jobs_grow(kiln_gc_heap *heap) {
     size_t capacity;
     kiln_microtask *grown;
@@ -40,6 +44,13 @@ static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value 
     kiln_gc_heap *heap = kiln_c99_gc_heap();
     kiln_microtask *job;
     if (heap == NULL) return KILN_C99_OUT_OF_MEMORY;
+    /* The heapless fallback has no realm, so no lane was registered for it and nothing would
+     * ever drain this ring. Refusing names the situation where appending would instead leave a
+     * promise that never settles -- the failure this repository spends the most effort not
+     * having, because nothing stops and nothing says why. */
+    if (KILN_UNLIKELY(heap->fallback)) {
+        KILN_C99_REFUSE("a promise job queued outside any realm, where nothing would run it");
+    }
     if (KILN_UNLIKELY(heap->job_tail == heap->job_capacity)) {
         int status = kiln_c99_jobs_grow(heap);
         if (status != KILN_C99_OK) return status;
