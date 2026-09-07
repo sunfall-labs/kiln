@@ -108,15 +108,15 @@ static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
     static uint64_t next_serial;
     kiln_symbol *symbol = (kiln_symbol *)kiln_c99_gc_alloc(KILN_GC_SYMBOL, sizeof *symbol);
     kiln_text key = {NULL, 0, 0};
-    char digits[24];
-    int written;
+    char digits[32];
+    size_t written;
     if (symbol == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
     next_serial += 1;
-    written = kiln_number_to_js_string((double)next_serial, digits, sizeof digits);
-    if (written < 0 || kiln_c99_text_append_c(&key, "@@symbol:") != KILN_C99_OK ||
-        kiln_c99_text_append(&key, digits, (size_t)written) != KILN_C99_OK) {
+    written = kiln_c99_double_to_js((double)next_serial, digits);
+    if (kiln_c99_text_append_c(&key, "@@symbol:") != KILN_C99_OK ||
+        kiln_c99_text_append(&key, digits, written) != KILN_C99_OK) {
         free(key.bytes);
         kiln_c99_gc_release(symbol);
         return KILN_C99_OUT_OF_MEMORY;

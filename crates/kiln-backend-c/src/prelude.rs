@@ -2107,6 +2107,7 @@ macro_rules! runtime_parts {
             include_str!("runtime/generators.c"),
             include_str!("runtime/methods.c"),
             include_str!("runtime/web.c"),
+            include_str!("runtime/ryu_tables.c"),
             include_str!("runtime/numbers.c"),
             include_str!("runtime/builtins.c"),
             include_str!("runtime/globals.c"),

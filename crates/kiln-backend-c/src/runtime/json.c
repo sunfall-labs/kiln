@@ -116,34 +116,6 @@ static int kiln_c99_json_lacks_tojson(kiln_value value) {
     }
 }
 
-/* Appends the decimal spelling of `magnitude` (< 2^64) with no leading zero, for the integer fast
- * path below: digits come out least-significant first into a stack buffer sized for the largest
- * 64-bit value, then go to the builder in the order they are actually spelled, in the one append
- * every other literal in this file already uses. */
-static int kiln_c99_json_append_uint(kiln_text *text, uint64_t magnitude) {
-    char digits[20];
-    size_t count = 0;
-    if (magnitude == 0) {
-        return kiln_c99_text_append(text, "0", 1);
-    }
-    while (magnitude != 0) {
-        digits[count++] = (char)('0' + (magnitude % 10));
-        magnitude /= 10;
-    }
-    {
-        size_t low = 0;
-        size_t high = count - 1;
-        while (low < high) {
-            char tmp = digits[low];
-            digits[low] = digits[high];
-            digits[high] = tmp;
-            ++low;
-            --high;
-        }
-    }
-    return kiln_c99_text_append(text, digits, count);
-}
-
 /* `serialised` is 0 when the value has no JSON spelling at all -- undefined, a function -- which
  * drops it from an object and turns it into null in an array. */
 static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value value,
@@ -195,33 +167,23 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
     case KILN_VALUE_BOOLEAN:
         return kiln_c99_text_append_c(text, value.bits ? "true" : "false");
     case KILN_VALUE_NUMBER: {
-        /* NaN and both infinities have no JSON spelling, so they serialise as null. */
+        /* NaN and both infinities have no JSON spelling, so they serialise as null; every other
+         * number is JSON's number grammar and `Number::toString`'s at once, so the one formatter
+         * answers both.
+         *
+         * It carries the integer fast path this case used to hold separately -- a counter, an id,
+         * an index, or (as `String(-0)` is "0") a negative zero -- and measured on
+         * `bench/non-io/json.mjs`, whose documents are four integers and three fractions each,
+         * the two spell at the same speed: 40.4 ms against 40.5 ms, interleaved, on 2026-09-07.
+         * One formatter for the whole grammar is the version worth keeping at that price. */
         double number = kiln_c99_as_number(value);
-        kiln_value shown;
+        char spelled[32];
+        size_t written;
         if (!isfinite(number)) {
             return kiln_c99_text_append_c(text, "null");
         }
-        /* An integer under 2^53 spells exactly in decimal from its bit pattern with no rounding
-         * question to ask, so it is formatted here with a plain C conversion instead of a call
-         * across the FFI into the Rust number formatter -- the common case for a counter, an id,
-         * an index, or (as `-0.0 < 0.0` is false) `-0`, which this prints as "0" for the same
-         * reason `kiln_c99_text`'s FFI path already does. Anything wider, fractional, or
-         * non-finite keeps going through that formatter, which is the one place that knows the
-         * full `Number::toString` grammar (exponential notation, the shortest round-tripping
-         * decimal, and so on). */
-        if (floor(number) == number && fabs(number) < 9007199254740992.0 /* 2^53 */) {
-            if (number < 0.0) {
-                return kiln_c99_text_append(text, "-", 1) != KILN_C99_OK
-                           ? KILN_C99_OUT_OF_MEMORY
-                           : kiln_c99_json_append_uint(text, (uint64_t)(-number));
-            }
-            return kiln_c99_json_append_uint(text, (uint64_t)number);
-        }
-        shown = kiln_c99_text(value);
-        if (shown.tag != KILN_VALUE_STRING) {
-            KILN_C99_REFUSE("a number with no text form to serialise");
-        }
-        return kiln_c99_text_append(text, shown.ptr, shown.len);
+        written = kiln_c99_double_to_js(number, spelled);
+        return kiln_c99_text_append(text, spelled, written);
     }
     case KILN_VALUE_STRING:
         return kiln_c99_json_quote(text, value.ptr, value.len);
@@ -331,16 +293,12 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
         kiln_typed_array *view = kiln_c99_typed_array_of(value);
         KILN_JSON_OPEN("{");
         for (index = 0; index < view->length; ++index) {
-            char digits[24];
-            int written;
+            char digits[32];
+            size_t written;
             int wrote;
-            written = kiln_number_to_js_string((double)index, digits, sizeof digits);
-            if (written < 0) {
-                free(nested.bytes);
-                KILN_C99_REFUSE("a typed-array index with no string spelling");
-            }
+            written = kiln_c99_double_to_js((double)index, digits);
             KILN_JSON_BREAK(index == 0);
-            if (kiln_c99_json_quote(text, digits, (size_t)written) != KILN_C99_OK ||
+            if (kiln_c99_json_quote(text, digits, written) != KILN_C99_OK ||
                 (indent_len != 0 ? kiln_c99_text_append(text, ": ", 2) : kiln_c99_text_append(text, ":", 1)) != KILN_C99_OK) {
                 free(nested.bytes);
                 return KILN_C99_OUT_OF_MEMORY;
@@ -484,16 +442,16 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
             if (object->elements != NULL) {
                 for (index = 0; index < object->element_count; ++index) {
                     char num_buf[32];
-                    int nlen;
+                    size_t nlen;
                     kiln_value member;
                     size_t mark;
                     int wrote;
                     if (object->elements[index] == KILN_VAL_HOLE) continue;
-                    nlen = kiln_number_to_js_string((double)index, num_buf, sizeof num_buf);
+                    nlen = kiln_c99_double_to_js((double)index, num_buf);
                     member = kiln_val_to_boundary(object->elements[index]);
                     mark = text->len;
                     KILN_JSON_BREAK(written == 0);
-                    if (kiln_c99_json_quote(text, num_buf, (size_t)nlen) != KILN_C99_OK ||
+                    if (kiln_c99_json_quote(text, num_buf, nlen) != KILN_C99_OK ||
                         (indent_len != 0 ? kiln_c99_text_append(text, ": ", 2) : kiln_c99_text_append(text, ":", 1)) != KILN_C99_OK) {
                         free(nested.bytes);
                         return KILN_C99_OUT_OF_MEMORY;
