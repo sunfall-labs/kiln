@@ -207,12 +207,9 @@ static int kiln_c99_spread_object_fast(kiln_val target, kiln_val source, int *st
     }
     sshape = object->shape;
     scount = sshape->property_count;
-    for (k = 0; k < scount; ++k) {
-        const char *skey = sshape->keys[k];
-        if (skey != NULL && skey[0] == '@' && skey[1] == '@') {
-            /* A symbol key needs the validation kiln_c99_spread_object's per-key loop gives it. */
-            return 0;
-        }
+    if (sshape->has_symbol_key) {
+        /* A symbol key needs the validation kiln_c99_spread_object's per-key loop gives it. */
+        return 0;
     }
     if (scount > dest->slot_capacity) {
         int grown = kiln_c99_grow_slots(dest, scount);

@@ -174,15 +174,59 @@ static int kiln_c99_typed_prototype_kind(uint64_t builtin, kiln_typed_kind *kind
     }
 }
 
-static int kiln_c99_new_typed_buffer(kiln_value *out, size_t byte_length) {
+/* Byte blocks of typed buffers that died, kept for a buffer of the same size: a server or a
+ * `Buffer.concat` loop makes buffers of one size over and over, and a large block otherwise
+ * goes back to the allocator and returns through the kernel's page reclaim each time. */
+#define KILN_C99_BYTES_CACHE 8
+#define KILN_C99_BYTES_CACHE_MIN ((size_t)64 * 1024)
+typedef struct kiln_bytes_entry {
+    uint8_t *bytes;
+    size_t size;
+} kiln_bytes_entry;
+static kiln_bytes_entry kiln_c99_bytes_cache[KILN_C99_BYTES_CACHE];
+
+/* Called by the collector when a typed buffer dies: keep the block if it is worth keeping. */
+static void kiln_c99_bytes_retire(uint8_t *bytes, size_t size) {
+    size_t i;
+    if (bytes != NULL && size >= KILN_C99_BYTES_CACHE_MIN) {
+        for (i = 0; i < KILN_C99_BYTES_CACHE; ++i) {
+            if (kiln_c99_bytes_cache[i].bytes == NULL) {
+                kiln_c99_bytes_cache[i].bytes = bytes;
+                kiln_c99_bytes_cache[i].size = size;
+                return;
+            }
+        }
+    }
+    free(bytes);
+}
+
+/* `zeroed` clear means the caller writes every byte before anything can read one. */
+static int kiln_c99_new_typed_buffer_ex(kiln_value *out, size_t byte_length, int zeroed) {
     kiln_typed_buffer *buffer =
         (kiln_typed_buffer *)kiln_c99_gc_alloc(KILN_GC_TYPED_BUFFER, sizeof *buffer);
+    size_t i;
     if (buffer == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
-    /* The bytes stay malloc-backed: nothing but this buffer ever points at them, and the
-     * KILN_GC_TYPED_BUFFER finaliser is the one place they are released. */
-    buffer->bytes = (uint8_t *)calloc(byte_length == 0 ? 1 : byte_length, 1);
+    buffer->bytes = NULL;
+    if (byte_length >= KILN_C99_BYTES_CACHE_MIN) {
+        for (i = 0; i < KILN_C99_BYTES_CACHE; ++i) {
+            if (kiln_c99_bytes_cache[i].bytes != NULL && kiln_c99_bytes_cache[i].size == byte_length) {
+                buffer->bytes = kiln_c99_bytes_cache[i].bytes;
+                kiln_c99_bytes_cache[i].bytes = NULL;
+                if (zeroed) memset(buffer->bytes, 0, byte_length);
+                break;
+            }
+        }
+    }
+    if (buffer->bytes == NULL) {
+        buffer->bytes = zeroed ? (uint8_t *)calloc(byte_length == 0 ? 1 : byte_length, 1)
+                               : (uint8_t *)malloc(byte_length == 0 ? 1 : byte_length);
+        /* The block is the buffer's memory as much as the cell is: counted toward the next
+         * collection, or a loop of large buffers would run to hundreds of megabytes of dead
+         * blocks before the cells that own them were ever swept. */
+        kiln_c99_gc_note_external(byte_length);
+    }
     if (buffer->bytes == NULL) {
         kiln_c99_gc_release(buffer);
         return KILN_C99_OUT_OF_MEMORY;
@@ -190,6 +234,10 @@ static int kiln_c99_new_typed_buffer(kiln_value *out, size_t byte_length) {
     buffer->byte_length = byte_length;
     *out = kiln_c99_value(KILN_VALUE_ARRAY_BUFFER, (uint64_t)(uintptr_t)buffer, NULL, 0);
     return KILN_C99_OK;
+}
+
+static int kiln_c99_new_typed_buffer(kiln_value *out, size_t byte_length) {
+    return kiln_c99_new_typed_buffer_ex(out, byte_length, 1);
 }
 
 /* ECMAScript's ToIndex: missing/undefined/NaN become zero, but negative, infinite and unsafe
@@ -430,7 +478,8 @@ static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
  * `map`, `filter` and `slice` each answer with a *view of the receiver's kind* rather than with a
  * plain array: `new Uint8Array([3, 1, 2]).map(f)` is a `Uint8Array`, and an Array would lose both
  * the width and the wrapping that decide what the values mean. */
-static int kiln_c99_typed_alloc(kiln_value *out, kiln_typed_kind kind, size_t count) {
+/* `zeroed` clear means the caller writes every element before anything can read one. */
+static int kiln_c99_typed_alloc_ex(kiln_value *out, kiln_typed_kind kind, size_t count, int zeroed) {
     size_t width = kiln_c99_typed_width(kind);
     kiln_value buffer;
     kiln_typed_array *view;
@@ -438,7 +487,7 @@ static int kiln_c99_typed_alloc(kiln_value *out, kiln_typed_kind kind, size_t co
     if (count > ((size_t)-1) / width) {
         return KILN_C99_OUT_OF_MEMORY;
     }
-    status = kiln_c99_new_typed_buffer(&buffer, count * width);
+    status = kiln_c99_new_typed_buffer_ex(&buffer, count * width, zeroed);
     if (status != KILN_C99_OK) {
         return status;
     }
@@ -453,6 +502,10 @@ static int kiln_c99_typed_alloc(kiln_value *out, kiln_typed_kind kind, size_t co
     view->is_buffer = 0;
     *out = kiln_c99_value(KILN_VALUE_TYPED_ARRAY, (uint64_t)(uintptr_t)view, NULL, 0);
     return KILN_C99_OK;
+}
+
+static int kiln_c99_typed_alloc(kiln_value *out, kiln_typed_kind kind, size_t count) {
+    return kiln_c99_typed_alloc_ex(out, kind, count, 1);
 }
 
 /* `new DataView(buffer[, byteOffset[, byteLength]])`.

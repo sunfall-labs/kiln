@@ -76,6 +76,7 @@ static int kiln_c99_shape_transition(kiln_shape *current, const char *ikey, kiln
     kiln_c99_pin_interned_key(ikey);
     next_shape->parent = current;
     next_shape->ikey = ikey;
+    next_shape->has_symbol_key = current->has_symbol_key || (ikey[0] == '@' && ikey[1] == '@');
     next_shape->slot_index = current->property_count;
     next_shape->property_count = current->property_count + 1;
     next_shape->num_transitions = 0;

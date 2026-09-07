@@ -455,6 +455,9 @@ typedef struct kiln_shape {
     const char *inline_trans_ikey[2];
     struct kiln_shape *inline_trans_next[2];
     kiln_shape_transition *transitions;
+    /* Whether any key on the path from the root is a symbol (`@@` spelt): the one thing a spread
+     * of an object with this shape has to know before copying its slots wholesale. */
+    uint32_t has_symbol_key;
 } kiln_shape;
 
 /* A plain data object: own string-keyed properties, scanned linearly.

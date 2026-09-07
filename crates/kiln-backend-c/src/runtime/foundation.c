@@ -333,6 +333,9 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                                  size_t key_len, const char *ikey, kiln_value *out, int depth,
                                  kiln_value *thrown);
 static int kiln_c99_array_reserve(kiln_array *array, size_t needed);
+static void kiln_c99_bytes_retire(uint8_t *bytes, size_t size);
+static void kiln_c99_gc_note_external(size_t size);
+static int kiln_c99_typed_alloc_ex(kiln_value *out, kiln_typed_kind kind, size_t count, int zeroed);
 static int kiln_c99_array_push(kiln_value target, kiln_value value);
 static int kiln_c99_array_push_val(kiln_value target, kiln_val value);
 static int kiln_c99_prototype_object(kiln_value function, kiln_value *out);
