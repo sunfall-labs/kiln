@@ -514,7 +514,7 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
             length = object->shape->property_count;
             for (index = 0; index < length && object->shape != NULL && index < object->shape->property_count; ++index) {
                 const char *skey = object->shape->keys[index];
-                size_t key_len = strlen(skey);
+                size_t key_len = kiln_c99_key_len(skey);
                 kiln_value member;
                 size_t mark;
                 int wrote;
@@ -642,7 +642,7 @@ static int kiln_c99_json_define(kiln_value built, const char *ikey, kiln_value m
             return KILN_C99_OK;
         }
     }
-    return kiln_c99_put(NULL, built, ikey, strlen(ikey), member, 0, NULL);
+    return kiln_c99_put(NULL, built, ikey, kiln_c99_key_len(ikey), member, 0, NULL);
 }
 
 /* Building `JSON.parse`'s answer from the tape the linked reader produced.
@@ -717,7 +717,7 @@ static int kiln_c99_json_build_materialize_key(kiln_json_build_stack *stack, siz
     if (!frame->has_key || frame->ikey == NULL) {
         return KILN_C99_OK;
     }
-    frame->key = kiln_c99_copy_text(frame->ikey, strlen(frame->ikey));
+    frame->key = kiln_c99_copy_text(frame->ikey, kiln_c99_key_len(frame->ikey));
     frame->ikey = NULL;
     return kiln_c99_json_build_mirror(stack, index, frame->key, 1);
 }
