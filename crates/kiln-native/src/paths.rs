@@ -372,7 +372,7 @@ pub(crate) fn configure_shared_library_link(
         // passing it down, so a shared build under zig cannot use it. Nothing is lost: the version
         // script above ends in `local: *;`, which already hides every symbol not named in it, and
         // `--exclude-libs` was the second lock on the same door.
-        if compiler != CompilerKind::Zig {
+        if _compiler != CompilerKind::Zig {
             options.extra_args.push("-Wl,--exclude-libs,ALL".into());
         }
     }

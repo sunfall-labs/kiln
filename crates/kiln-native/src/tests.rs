@@ -5549,6 +5549,15 @@ int main(void) {{
 
 #[test]
 fn shared_graph_libraries_hide_path_symbols_and_cannot_interpose_each_other() {
+    shared_graph_libraries_hide_path_symbols_with_profile(NativeProfile::Dev);
+}
+
+#[test]
+fn shared_graph_libraries_hide_path_symbols_and_cannot_interpose_each_other_release() {
+    shared_graph_libraries_hide_path_symbols_with_profile(NativeProfile::Release);
+}
+
+fn shared_graph_libraries_hide_path_symbols_with_profile(profile: NativeProfile) {
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         eprintln!("skipping shared graph visibility integration on unsupported platform");
@@ -5596,7 +5605,7 @@ fn shared_graph_libraries_hide_path_symbols_and_cannot_interpose_each_other() {
                 } else {
                     "first.so"
                 }),
-                profile: NativeProfile::Dev,
+                profile,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
             },
@@ -5611,7 +5620,7 @@ fn shared_graph_libraries_hide_path_symbols_and_cannot_interpose_each_other() {
                 } else {
                     "second.so"
                 }),
-                profile: NativeProfile::Dev,
+                profile,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
             },

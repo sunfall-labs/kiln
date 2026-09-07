@@ -103,6 +103,14 @@ cargo run -p kiln-cli -- --one-shot build server.mjs --node --profile native-rel
 `kiln watch` re-runs an entry in the interpreter on every save. `kiln test <dir>` runs a
 conformance corpus; the corpora and the runner each one needs are listed in `AGENTS.md`.
 
+`native-release` keeps speed-focused optimizations while reducing shipped artifact size on Linux
+and macOS: it removes unreachable native sections and DWARF debug sections while retaining the
+normal symbol table and unwind information. `native-check` remains the debug/sanitizer profile and
+is unaffected, so use it when source-level diagnostics matter more than artifact size. Other target
+families keep their existing linker policy. When Zig is selected, Kiln keeps DWARF sections rather
+than risk Zig's current strip flag alias removing the normal symbol table; use Clang or GCC for the
+debug-only stripping.
+
 ## How it is built
 
 The priority order in `docs/design.md` is correctness, iteration speed, architectural

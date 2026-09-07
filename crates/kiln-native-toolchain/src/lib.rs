@@ -224,6 +224,11 @@ impl ToolIdentity {
             field(&self.kind.to_string()),
             field(&self.version),
             field(&self.target),
+            // This policy is part of the effective compiler/linker identity, even though the
+            // flags are selected by Kiln rather than reported by the driver. Bump it whenever
+            // release section/dead-strip/debug-strip policy changes so old objects and
+            // executables cannot be reused under a different size policy.
+            field("kiln-native-size-sections-v3"),
         ];
         if self.linker != LinkerKind::Default {
             parts.push(field(&self.linker.to_string()));
@@ -427,6 +432,52 @@ impl BuildProfile {
             Self::NativeRelease => &["-O3"],
             Self::NativeProfile => &["-O3", "-pg"],
         }
+    }
+}
+
+fn release_section_flags(
+    profile: BuildProfile,
+    platform: TargetPlatform,
+) -> &'static [&'static str] {
+    if profile == BuildProfile::NativeRelease
+        && matches!(platform, TargetPlatform::Linux | TargetPlatform::Macos)
+    {
+        &["-ffunction-sections", "-fdata-sections"]
+    } else {
+        &[]
+    }
+}
+
+fn release_dead_strip_flag(
+    profile: BuildProfile,
+    platform: TargetPlatform,
+) -> Option<&'static str> {
+    if profile != BuildProfile::NativeRelease {
+        return None;
+    }
+    match platform {
+        TargetPlatform::Linux => Some("-Wl,--gc-sections"),
+        TargetPlatform::Macos => Some("-Wl,-dead_strip"),
+        TargetPlatform::Windows | TargetPlatform::Other | TargetPlatform::Unknown => None,
+    }
+}
+
+fn release_debug_strip_flag(
+    profile: BuildProfile,
+    platform: TargetPlatform,
+    compiler: CompilerKind,
+) -> Option<&'static str> {
+    if profile != BuildProfile::NativeRelease || compiler == CompilerKind::Zig {
+        return None;
+    }
+    match platform {
+        // Keep the normal symbol table and unwind information; only DWARF/debug sections are
+        // removed from shipped release artifacts. Zig currently aliases its strip-debug driver
+        // option to strip-all, so it is intentionally excluded until Kiln can run a separate,
+        // verified objcopy stage (Zig 0.16.0 `src/main.zig`, strip option handling).
+        TargetPlatform::Linux => Some("-Wl,--strip-debug"),
+        TargetPlatform::Macos => Some("-Wl,-S"),
+        TargetPlatform::Windows | TargetPlatform::Other | TargetPlatform::Unknown => None,
     }
 }
 
@@ -1080,6 +1131,14 @@ impl Toolchain {
         for flag in options.profile.compile_flags() {
             args.push(OsString::from(flag));
         }
+        // Keep each generated function and data object independently discardable in release
+        // links. This is deliberately target-aware: the flags are useful to the ELF and Mach-O
+        // linkers below, while the Windows linker policy is not yet part of Kiln's target matrix.
+        // Do not put them on check/profile builds; those profiles are used for diagnostics and
+        // profiling, where changing section layout is needless noise.
+        for flag in release_section_flags(options.profile, self.identity.target_platform()) {
+            args.push(OsString::from(flag));
+        }
         // `KILN_IC_CHECK` in the build's environment compiles the inline-cache oracle in: every
         // prototype-epoch hit is re-validated the long way and a disagreement traps. It is a
         // build-time define rather than a runtime flag so the ordinary build pays nothing on the
@@ -1172,6 +1231,18 @@ impl Toolchain {
             args.push(OsString::from(flag));
         }
         for flag in options.profile.link_flags() {
+            args.push(OsString::from(flag));
+        }
+        if let Some(flag) =
+            release_dead_strip_flag(options.profile, self.identity.target_platform())
+        {
+            args.push(OsString::from(flag));
+        }
+        if let Some(flag) = release_debug_strip_flag(
+            options.profile,
+            self.identity.target_platform(),
+            self.identity.kind,
+        ) {
             args.push(OsString::from(flag));
         }
         args.extend(objects.iter().map(|object| object.as_os_str().to_owned()));
@@ -1690,6 +1761,7 @@ mod tests {
                 &source,
                 &object,
                 &CompileOptions {
+                    profile: BuildProfile::NativeRelease,
                     position_independent: true,
                     ..CompileOptions::default()
                 },
@@ -1699,7 +1771,10 @@ mod tests {
             .link_shared_library(
                 std::slice::from_ref(&object),
                 &library,
-                &LinkOptions::default(),
+                &LinkOptions {
+                    profile: BuildProfile::NativeRelease,
+                    ..LinkOptions::default()
+                },
             )
             .expect("shared link");
 
@@ -1712,6 +1787,18 @@ mod tests {
         let commands = runner_impl.commands();
         assert_eq!(commands.len(), 4);
         assert!(commands[2].args.iter().any(|argument| argument == "-fPIC"));
+        assert!(
+            commands[2]
+                .args
+                .iter()
+                .any(|argument| argument == "-ffunction-sections")
+        );
+        assert!(
+            commands[2]
+                .args
+                .iter()
+                .any(|argument| argument == "-fdata-sections")
+        );
         assert!(commands[3].args.iter().any(|argument| {
             shared_library_flags(
                 toolchain.identity().target_platform(),
@@ -1721,6 +1808,13 @@ mod tests {
             .iter()
             .any(|flag| argument == flag)
         }));
+        assert!(
+            commands[3]
+                .args
+                .iter()
+                .any(|argument| argument == "-Wl,-dead_strip")
+        );
+        assert!(commands[3].args.iter().any(|argument| argument == "-Wl,-S"));
         assert!(
             commands[3]
                 .args
@@ -2130,6 +2224,18 @@ mod tests {
         assert_ne!(identity_mold.stable_key(), identity_lld.stable_key());
         assert!(identity_mold.stable_key().contains("mold"));
         assert!(identity_lld.stable_key().contains("lld"));
+        assert!(
+            identity_default
+                .stable_key()
+                .contains("kiln-native-size-sections-v3")
+        );
+        let legacy_key = identity_default
+            .stable_key()
+            .split('|')
+            .filter(|field| !field.contains("kiln-native-size-sections-v3"))
+            .collect::<Vec<_>>()
+            .join("|");
+        assert_ne!(identity_default.stable_key(), legacy_key);
     }
 
     #[test]
@@ -2197,6 +2303,236 @@ mod tests {
             BuildProfile::NativeProfile.compile_flags(),
             &["-O3", "-ffp-contract=off", "-fno-math-errno", "-pg"]
         );
+    }
+
+    #[test]
+    fn release_linux_uses_discardable_sections_and_gc_sections() {
+        let directory = temp_dir("release-size-flags");
+        let source = directory.join("main.c");
+        let object = directory.join("main.o");
+        let executable = directory.join("main");
+        fs::write(&source, "int main(void) { return 0; }\n").expect("source");
+        let runner_impl = Arc::new(FakeRunner::new(
+            [
+                ProcessOutput::success("clang version 18.1\n", ""),
+                ProcessOutput::success("x86_64-linux-gnu\n", ""),
+                ProcessOutput::success("compile ok\n", ""),
+                ProcessOutput::success("link ok\n", ""),
+            ],
+            true,
+        ));
+        let runner: Arc<dyn ProcessRunner> = runner_impl.clone();
+        let toolchain =
+            Toolchain::from_compiler_with_runner("/opt/clang", runner).expect("compiler probe");
+        toolchain
+            .compile_c(
+                &source,
+                &object,
+                &CompileOptions {
+                    profile: BuildProfile::NativeRelease,
+                    ..CompileOptions::default()
+                },
+            )
+            .expect("compile");
+        toolchain
+            .link_executable(
+                std::slice::from_ref(&object),
+                &executable,
+                &LinkOptions {
+                    profile: BuildProfile::NativeRelease,
+                    ..LinkOptions::default()
+                },
+            )
+            .expect("link");
+
+        let commands = runner_impl.commands();
+        assert!(
+            commands[2]
+                .args
+                .iter()
+                .any(|argument| argument == "-ffunction-sections")
+        );
+        assert!(
+            commands[2]
+                .args
+                .iter()
+                .any(|argument| argument == "-fdata-sections")
+        );
+        assert!(
+            commands[3]
+                .args
+                .iter()
+                .any(|argument| argument == "-Wl,--gc-sections")
+        );
+        assert!(
+            commands[3]
+                .args
+                .iter()
+                .any(|argument| argument == "-Wl,--strip-debug")
+        );
+
+        fs::remove_dir_all(directory).expect("temporary directory cleanup");
+    }
+
+    #[test]
+    fn release_unknown_target_does_not_guess_dead_strip_policy() {
+        let directory = temp_dir("release-unknown-size-flags");
+        let source = directory.join("main.c");
+        let object = directory.join("main.o");
+        fs::write(&source, "int main(void) { return 0; }\n").expect("source");
+        let runner_impl = Arc::new(FakeRunner::new(
+            [
+                ProcessOutput::success("cc wrapper 1.0\n", ""),
+                ProcessOutput::success("unknown\n", ""),
+                ProcessOutput::success("compile ok\n", ""),
+            ],
+            true,
+        ));
+        let runner: Arc<dyn ProcessRunner> = runner_impl.clone();
+        let toolchain =
+            Toolchain::from_compiler_with_runner("/opt/custom-cc", runner).expect("compiler probe");
+        toolchain
+            .compile_c(
+                &source,
+                &object,
+                &CompileOptions {
+                    profile: BuildProfile::NativeRelease,
+                    ..CompileOptions::default()
+                },
+            )
+            .expect("compile");
+        let compile_args = &runner_impl.commands()[2].args;
+        assert!(
+            !compile_args
+                .iter()
+                .any(|argument| argument == "-ffunction-sections")
+        );
+        assert!(
+            !compile_args
+                .iter()
+                .any(|argument| argument == "-fdata-sections")
+        );
+
+        fs::remove_dir_all(directory).expect("temporary directory cleanup");
+    }
+
+    #[test]
+    fn size_flag_policy_is_release_only_and_target_specific() {
+        let platforms = [
+            (
+                TargetPlatform::Linux,
+                Some("-Wl,--gc-sections"),
+                Some("-Wl,--strip-debug"),
+            ),
+            (
+                TargetPlatform::Macos,
+                Some("-Wl,-dead_strip"),
+                Some("-Wl,-S"),
+            ),
+            (TargetPlatform::Windows, None, None),
+            (TargetPlatform::Other, None, None),
+            (TargetPlatform::Unknown, None, None),
+        ];
+        let nonrelease = [
+            BuildProfile::NativeDev,
+            BuildProfile::NativeCheck,
+            BuildProfile::NativeProfile,
+        ];
+
+        for (platform, link_flag, debug_flag) in platforms {
+            assert_eq!(
+                release_dead_strip_flag(BuildProfile::NativeRelease, platform),
+                link_flag
+            );
+            assert_eq!(
+                release_debug_strip_flag(
+                    BuildProfile::NativeRelease,
+                    platform,
+                    CompilerKind::Clang
+                ),
+                debug_flag
+            );
+            let sections = release_section_flags(BuildProfile::NativeRelease, platform);
+            if link_flag.is_some() {
+                assert_eq!(sections, &["-ffunction-sections", "-fdata-sections"]);
+            } else {
+                assert!(sections.is_empty());
+            }
+            for profile in nonrelease {
+                assert!(release_section_flags(profile, platform).is_empty());
+                assert_eq!(release_dead_strip_flag(profile, platform), None);
+                assert_eq!(
+                    release_debug_strip_flag(profile, platform, CompilerKind::Clang),
+                    None
+                );
+            }
+        }
+        assert_eq!(
+            release_debug_strip_flag(
+                BuildProfile::NativeRelease,
+                TargetPlatform::Macos,
+                CompilerKind::Zig,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn release_non_unix_commands_do_not_guess_size_linker_flags() {
+        for target in ["x86_64-pc-windows-msvc", "x86_64-unknown-haiku"] {
+            let directory = temp_dir("release-non-unix-size-flags");
+            let source = directory.join("main.c");
+            let object = directory.join("main.o");
+            let executable = directory.join("main");
+            fs::write(&source, "int main(void) { return 0; }\n").expect("source");
+            let runner_impl = Arc::new(FakeRunner::new(
+                [
+                    ProcessOutput::success("cc wrapper 1.0\n", ""),
+                    ProcessOutput::success(format!("{target}\n"), ""),
+                    ProcessOutput::success("compile ok\n", ""),
+                    ProcessOutput::success("link ok\n", ""),
+                ],
+                true,
+            ));
+            let runner: Arc<dyn ProcessRunner> = runner_impl.clone();
+            let toolchain = Toolchain::from_compiler_with_runner("/opt/custom-cc", runner)
+                .expect("compiler probe");
+            toolchain
+                .compile_c(
+                    &source,
+                    &object,
+                    &CompileOptions {
+                        profile: BuildProfile::NativeRelease,
+                        ..CompileOptions::default()
+                    },
+                )
+                .expect("compile");
+            toolchain
+                .link_executable(
+                    std::slice::from_ref(&object),
+                    &executable,
+                    &LinkOptions {
+                        profile: BuildProfile::NativeRelease,
+                        ..LinkOptions::default()
+                    },
+                )
+                .expect("link");
+            let commands = runner_impl.commands();
+            assert!(
+                commands[2]
+                    .args
+                    .iter()
+                    .all(|argument| argument != "-ffunction-sections"
+                        && argument != "-fdata-sections")
+            );
+            assert!(commands[3].args.iter().all(|argument| {
+                argument != "-Wl,--gc-sections"
+                    && argument != "-Wl,-dead_strip"
+                    && argument != "-Wl,--strip-debug"
+                    && argument != "-Wl,-S"
+            }));
+            fs::remove_dir_all(directory).expect("temporary directory cleanup");
+        }
     }
 
     #[test]
