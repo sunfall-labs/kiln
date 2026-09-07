@@ -1911,6 +1911,10 @@ pub const SPECULATION_INVARIANTS: &[SpeculationInvariant] = &[
         language_rule: "ECMA-262 §9.1.1.1 declarative environment records: a binding stored once holds that value at every later read, so an Array exotic object read from it at entry is the object read in the body",
     },
     SpeculationInvariant {
+        name: "property_number",
+        language_rule: "ECMA-262 §13.15.3 ApplyStringOrNumericBinaryOperator: an operand that is a Number takes the numeric branch; a property that answered anything else leaves for the generic clone at the read that answered it",
+    },
+    SpeculationInvariant {
         name: "spread_source_shaped",
         language_rule: "ECMA-262 §7.3.25 CopyDataProperties: a source whose own properties are all shaped data slots under string keys contributes exactly those slots' values; any other source leaves for the generic clone before the spread, with the literal rebuilt",
     },

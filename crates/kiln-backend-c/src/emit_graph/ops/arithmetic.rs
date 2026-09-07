@@ -570,15 +570,47 @@ pub(super) fn emit_binary_boxed(
     } else {
         None
     };
+    // An operand already proven a number is not tested again, and its twin is read rather than
+    // copied back out of its box. That matters most where it is loop-carried: an accumulator
+    // tested and unpacked on every pass moves between the integer and floating registers twice
+    // a turn, and the moves are the loop's critical path rather than the arithmetic.
+    let proven_operand =
+        |operand: &ValueId| ctx.numbers.contains(operand) && !ctx.ints.contains(operand);
+    let (l_proven, r_proven) = (proven_operand(left), proven_operand(right));
+    let mut tests: Vec<String> = Vec::new();
+    if !l_proven {
+        tests.push(format!("KILN_VAL_IS_NUMBER(v{l})"));
+    }
+    if !r_proven {
+        tests.push(format!("KILN_VAL_IS_NUMBER(v{r})"));
+    }
+    let guard = if tests.is_empty() {
+        "1".to_owned()
+    } else {
+        tests.join(" && ")
+    };
+    let bind = format!(
+        "{} {}",
+        if l_proven {
+            format!("double a = d{l};")
+        } else {
+            format!("double a; memcpy(&a, &v{l}, sizeof(a));")
+        },
+        if r_proven {
+            format!("double b = d{r};")
+        } else {
+            format!("double b; memcpy(&b, &v{r}, sizeof(b));")
+        }
+    );
     match (fast, raw) {
                 (Some(_), Some(raw)) => writeln!(
                     output,
-                    "    if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{l}) && KILN_VAL_IS_NUMBER(v{r}))) {{ double a; double b; memcpy(&a, &v{l}, sizeof(a)); memcpy(&b, &v{r}, sizeof(b)); d{v} = {raw}; v{v} = kiln_c99_val_from_double(d{v}); }} else {{ {slow} memcpy(&d{v}, &v{v}, sizeof(d{v})); }}"
+                    "    if (KILN_LIKELY({guard})) {{ {bind} d{v} = {raw}; v{v} = kiln_c99_val_from_double(d{v}); }} else {{ {slow} memcpy(&d{v}, &v{v}, sizeof(d{v})); }}"
                 )
                 .unwrap(),
                 (Some(fast), None) => writeln!(
                     output,
-                    "    if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{l}) && KILN_VAL_IS_NUMBER(v{r}))) {{ double a; double b; memcpy(&a, &v{l}, sizeof(a)); memcpy(&b, &v{r}, sizeof(b)); v{v} = {fast}; }} else {{ {slow} }}"
+                    "    if (KILN_LIKELY({guard})) {{ {bind} v{v} = {fast}; }} else {{ {slow} }}"
                 )
                 .unwrap(),
                 (None, _) => writeln!(output, "    {{ {slow} }}").unwrap(),

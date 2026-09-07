@@ -170,13 +170,39 @@ pub(super) fn emit_get_property(
                 }}{receiver_learn} }}\
                 {typed_sync}",
                 o = object.0,
-                typed_sync = if ctx.ints.contains(&vid) {
-                    // An array's length, proven an integer: exact below 2^53, so the cast is the value.
-                    format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v})); i{v} = (int64_t)d{v};")
-                } else if typed {
-                    format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));")
-                } else {
-                    String::new()
+                typed_sync = {
+                    // Guessed a number because it feeds arithmetic: checked here, and the guess
+                    // withdrawn by leaving for the generic clone, which reads it boxed as always.
+                    let restart_checked = if ctx.kind.restarts() && (typed || ctx.ints.contains(&vid)) {
+                        let invariant =
+                            crate::prelude::lookup_speculation_invariant("property_number");
+                        format!(
+                            "\n    /* Speculation exit [{}]: {} */ if (KILN_UNLIKELY(!KILN_VAL_IS_NUMBER(v{v}))) {{ {} }}",
+                            invariant.name, invariant.language_rule, super::super::clones::RESTART
+                        )
+                    } else {
+                        String::new()
+                    };
+                    let checked = if spec.exits && spec.fields.contains(&vid) {
+                        let invariant =
+                            crate::prelude::lookup_speculation_invariant("property_number");
+                        format!(
+                            "\n    /* Speculation exit [{}]: {} */ if (KILN_UNLIKELY(!KILN_VAL_IS_NUMBER(v{v}))) {{ {} goto kiln_generic_resume_{v}; }}",
+                            invariant.name,
+                            invariant.language_rule,
+                            super::materialize_all_sunk(graph, symbol, ctx.defs, ctx.array_slots)
+                        )
+                    } else {
+                        String::new()
+                    };
+                    if ctx.ints.contains(&vid) {
+                        // An array's length, proven an integer: exact below 2^53, so the cast is the value.
+                        format!("{checked}{restart_checked}\n    memcpy(&d{v}, &v{v}, sizeof(d{v})); i{v} = (int64_t)d{v};")
+                    } else if typed {
+                        format!("{checked}{restart_checked}\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));")
+                    } else {
+                        checked
+                    }
                 }
             )
             .unwrap();
