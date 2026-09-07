@@ -35,6 +35,10 @@ run = "./bench/compare.sh"
 description = "Native backend against node, probe by probe"
 run = "./scripts/native.sh"
 
+[tasks.native-stress]
+description = "The native corpus with the collector stressed on every allocation (minutes, not seconds)"
+run = "KILN_NATIVE_GC_STRESS=${KILN_NATIVE_GC_STRESS:-1} ./scripts/native.sh"
+
 [tasks.thirdparty]
 description = "Real library bundles, both engines"
 run = "./scripts/thirdparty.sh"

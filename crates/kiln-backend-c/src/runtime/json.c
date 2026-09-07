@@ -790,9 +790,15 @@ typedef struct kiln_json_build_frame {
     /* The key waiting for its value, in an object: interned while the frame is on the machine
      * stack, where a pointer keeps the interned bytes alive through the collector's conservative
      * scan, and a string of this heap once the frames have spilled, where only a traced hold
-     * can. Exactly one of the two is set while `has_key`. */
+     * can. Exactly one of the two is set while `has_key`.
+     *
+     * The spilled key is a `kiln_val` and not a boundary `kiln_value` because only the former
+     * names a block. A boundary string is bytes and a length with no heap identity, so mirroring
+     * one meant `kiln_val_from_boundary` allocating a *second* block and holding that: the block
+     * this frame actually points into stayed unrooted, was swept, and came back as a later key's
+     * bytes. */
     const char *ikey;
-    kiln_value key;
+    kiln_val key;
     /* Elements, or key/value pairs, still to arrive. */
     size_t remaining;
     int is_object;
@@ -816,7 +822,11 @@ typedef struct kiln_json_build_stack {
     int spilled;
 } kiln_json_build_stack;
 
-static int kiln_c99_json_build_mirror(kiln_json_build_stack *stack, size_t index, kiln_value value,
+/* Root `value` for as long as the frames are off the machine stack. The value arrives as a
+ * `kiln_val`, and is stored as it arrived: converting a boundary string here would allocate a
+ * fresh block and root that instead of the one the frame points into, which is exactly the
+ * use-after-free this walk had. */
+static int kiln_c99_json_build_mirror(kiln_json_build_stack *stack, size_t index, kiln_val value,
                                       int is_key) {
     kiln_array *held;
     size_t slot = 2 * index + (is_key ? 1 : 0);
@@ -829,8 +839,11 @@ static int kiln_c99_json_build_mirror(kiln_json_build_stack *stack, size_t index
         if (status != KILN_C99_OK) {
             return status;
         }
+        /* Each push may replace the elements block, so the array is read again rather than
+         * through a pointer taken before it grew. */
+        held = kiln_c99_array_of(stack->holds);
     }
-    held->elements[slot] = kiln_val_from_boundary(value);
+    held->elements[slot] = value;
     return KILN_C99_OK;
 }
 
@@ -841,7 +854,14 @@ static int kiln_c99_json_build_materialize_key(kiln_json_build_stack *stack, siz
     if (!frame->has_key || frame->ikey == NULL) {
         return KILN_C99_OK;
     }
-    frame->key = kiln_c99_copy_text(frame->ikey, kiln_c99_key_len(frame->ikey));
+    {
+        size_t len = kiln_c99_key_len(frame->ikey);
+        kiln_val key = kiln_c99_val_from_text(frame->ikey, len);
+        if (len != 0 && key == KILN_VAL_UNDEFINED) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        frame->key = key;
+    }
     frame->ikey = NULL;
     return kiln_c99_json_build_mirror(stack, index, frame->key, 1);
 }
@@ -862,7 +882,8 @@ static int kiln_c99_json_build_open(kiln_json_build_stack *stack, kiln_value con
             }
             stack->spilled = 1;
             for (index = 0; index < stack->depth; ++index) {
-                status = kiln_c99_json_build_mirror(stack, index, stack->frames[index].container, 0);
+                status = kiln_c99_json_build_mirror(stack, index,
+                                                    kiln_val_from_boundary(stack->frames[index].container), 0);
                 if (status == KILN_C99_OK) {
                     status = kiln_c99_json_build_materialize_key(stack, index);
                 }
@@ -884,7 +905,8 @@ static int kiln_c99_json_build_open(kiln_json_build_stack *stack, kiln_value con
         stack->capacity = grown;
     }
     if (stack->spilled) {
-        int status = kiln_c99_json_build_mirror(stack, stack->depth, container, 0);
+        int status =
+            kiln_c99_json_build_mirror(stack, stack->depth, kiln_val_from_boundary(container), 0);
         if (status != KILN_C99_OK) {
             return status;
         }
@@ -892,7 +914,7 @@ static int kiln_c99_json_build_open(kiln_json_build_stack *stack, kiln_value con
     frame = &stack->frames[stack->depth];
     frame->container = container;
     frame->ikey = NULL;
-    frame->key = kiln_c99_undefined();
+    frame->key = KILN_VAL_UNDEFINED;
     frame->remaining = remaining;
     frame->is_object = is_object;
     frame->has_key = 0;
@@ -957,9 +979,13 @@ static int kiln_c99_json_build(const kiln_json_node *nodes, size_t count,
                 KILN_C99_REFUSE_INTERNAL("JSON.parse, which turns it into a SyntaxError the program can catch");
             }
             if (stack.spilled) {
-                top->key = kiln_c99_copy_text((const char *)text + (size_t)node->value,
-                                              (size_t)node->len);
-                status = kiln_c99_json_build_mirror(&stack, stack.depth - 1, top->key, 1);
+                top->key = kiln_c99_val_from_text((const char *)text + (size_t)node->value,
+                                                  (size_t)node->len);
+                if (node->len != 0 && top->key == KILN_VAL_UNDEFINED) {
+                    status = KILN_C99_OUT_OF_MEMORY;
+                } else {
+                    status = kiln_c99_json_build_mirror(&stack, stack.depth - 1, top->key, 1);
+                }
             } else {
                 top->ikey = kiln_c99_intern((const char *)text + (size_t)node->value,
                                             (size_t)node->len);
@@ -1036,7 +1062,9 @@ static int kiln_c99_json_build(const kiln_json_node *nodes, size_t count,
                  * doing. A spilled frame's key is a string, interned here at the last moment. */
                 const char *ikey = frame->ikey;
                 if (ikey == NULL) {
-                    ikey = kiln_c99_intern(frame->key.ptr, frame->key.len);
+                    /* Free for a string: the bytes and length are read out of the block. */
+                    kiln_value spelling = kiln_val_to_boundary(frame->key);
+                    ikey = kiln_c99_intern(spelling.ptr, spelling.len);
                     if (ikey == NULL) {
                         kiln_c99_json_build_release(&stack);
                         return KILN_C99_OUT_OF_MEMORY;
@@ -1044,7 +1072,7 @@ static int kiln_c99_json_build(const kiln_json_node *nodes, size_t count,
                 }
                 status = kiln_c99_json_define(frame->container, ikey, value);
                 frame->ikey = NULL;
-                frame->key = kiln_c99_undefined();
+                frame->key = KILN_VAL_UNDEFINED;
                 frame->has_key = 0;
             } else {
                 status = kiln_c99_array_push_val(frame->container, value);
