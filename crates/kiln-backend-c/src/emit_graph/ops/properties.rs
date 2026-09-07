@@ -225,7 +225,7 @@ pub(super) fn emit_set_property(
                         else if (shape == site.entries[3].shape && site.entries[3].transition_to == NULL) slot = site.entries[3].slot; \
                     }} \
                     if (slot != UINT32_MAX && KILN_LIKELY(slot < obj->slot_capacity && !obj->frozen)) {{ \
-                        obj->slots[slot] = v{val}; \
+                        kiln_c99_prototype_touched(obj); obj->slots[slot] = v{val}; \
                         v{v} = v{val}; \
                         handled = 1; \
                     }} \

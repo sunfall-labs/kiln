@@ -1,5 +1,6 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
+assertion_line: 803
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -743,12 +744,18 @@ typedef struct kiln_shape {
 typedef struct kiln_property {
 #define KILN_C99_INLINE_SLOTS 8
 typedef struct kiln_object {
+static uint64_t kiln_c99_proto_epoch;
+static inline void kiln_c99_prototype_touched(const kiln_object *object) {
 #define KILN_C99_MAX_PROTOTYPE_DEPTH 10000
 #define KILN_C99_PIC_SIZE 4
 typedef struct kiln_c99_pic_entry {
 typedef struct kiln_c99_site {
 static inline uint32_t kiln_c99_site_slot_for(const kiln_c99_site *site, const kiln_shape *shape) {
+static inline kiln_val kiln_c99_site_validate_holder(const kiln_c99_pic_entry *entry, const kiln_object *obj) {
+static inline int kiln_c99_site_callee_is_inherited(const kiln_c99_site *site, const kiln_object *obj) {
 static inline kiln_val kiln_c99_site_cached_callee(const kiln_c99_site *site, const kiln_object *obj) {
+#ifdef KILN_IC_CHECK
+#endif
 __attribute__((noinline, cold)) static double kiln_c99_int_slow(double value) {
 #define KILN_C99_SITE_NONE 0xFFFFFFFFu
 #define KILN_C99_SITE_GIVE_UP 8u

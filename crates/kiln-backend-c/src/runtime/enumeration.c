@@ -409,6 +409,7 @@ static int kiln_c99_typed_prototype_own(kiln_value target, const char *key, size
  * true and why the answer is about the *end state* rather than about work done. */
 static int kiln_c99_delete(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                            int *answer, int depth, kiln_value *thrown) {
+    if (target.tag == KILN_VALUE_OBJECT) kiln_c99_prototype_touched(kiln_c99_object_of(target));
     kiln_object *object;
     size_t index;
     *answer = 1;

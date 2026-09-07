@@ -3948,7 +3948,17 @@ pub fn runtime_prelude_source() -> &'static str {
 
 /// Return the C11 declarations header for modules compiled against the standalone runtime prelude.
 pub fn runtime_prelude_header() -> &'static str {
-    PRELUDE_HEADER
+    // A module unit's copy of the header declares the program-wide mutable state the header
+    // defines for the prelude unit; a definition in every unit would give each its own copy.
+    static FOR_UNITS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    FOR_UNITS.get_or_init(|| {
+        let text = PRELUDE_HEADER.replace(
+            "static uint64_t kiln_c99_proto_epoch;",
+            "extern uint64_t kiln_c99_proto_epoch __attribute__((visibility(\"hidden\")));",
+        );
+        assert!(text != PRELUDE_HEADER, "the prototype epoch's definition moved");
+        text
+    })
 }
 
 fn build_runtime_prelude_source(src: &str) -> String {
@@ -3984,6 +3994,7 @@ fn build_runtime_prelude_source(src: &str) -> String {
         "kiln_c99_process",
         "kiln_c99_atomics",
         "kiln_c99_builtin_store_epoch",
+        "kiln_c99_proto_epoch",
     ];
 
     for line in src.lines() {
@@ -4074,6 +4085,7 @@ pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_realm_cached", C99StateOwner::Realm),
     ("kiln_c99_builtin_store_epoch", C99StateOwner::Realm),
     ("kiln_c99_bytes_cache", C99StateOwner::Realm),
+    ("kiln_c99_proto_epoch", C99StateOwner::Realm),
     ("kiln_c99_gc_stress_checks", C99StateOwner::Process),
     ("kiln_c99_introspect_pending", C99StateOwner::Process),
     ("kiln_c99_introspect_armed", C99StateOwner::Process),

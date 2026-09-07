@@ -2088,14 +2088,14 @@ fn render(
     let strict_functions = vec![true; program.functions.len()];
     let callables = produces_references(program);
     let header_len = if policy.decoupled_prelude {
-        PRELUDE_HEADER.len()
+        runtime_prelude_header().len()
     } else {
         HEADER.len()
     };
     let mut output = String::with_capacity(header_len + program.code.len() * 64);
     render_emission_policy(&mut output, policy);
     if policy.decoupled_prelude {
-        output.push_str(PRELUDE_HEADER);
+        output.push_str(runtime_prelude_header());
     } else {
         output.push_str(HEADER);
         output = output.replace(
@@ -2186,14 +2186,14 @@ fn render_module(
         })
         .collect();
     let header_len = if policy.decoupled_prelude {
-        PRELUDE_HEADER.len()
+        runtime_prelude_header().len()
     } else {
         HEADER.len()
     };
     let mut output = String::with_capacity(header_len + program.code.len() * 72);
     render_emission_policy(&mut output, policy);
     if policy.decoupled_prelude {
-        output.push_str(PRELUDE_HEADER);
+        output.push_str(runtime_prelude_header());
     } else {
         output.push_str(HEADER);
         output = output.replace(

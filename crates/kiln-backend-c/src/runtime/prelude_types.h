@@ -585,7 +585,32 @@ typedef struct kiln_object {
     kiln_val *elements;
     size_t element_count;
     size_t element_capacity;
+    /* Set the moment an inline cache records a property read through this object -- it is a
+     * holder or a step on a prototype chain some site remembers. A mutation of a flagged object
+     * moves `kiln_c99_proto_epoch`; an object nobody caches through costs nothing to mutate. */
+    uint8_t cache_holder;
 } kiln_object;
+
+/* Moved by every mutation of an object some inline cache reads a property through: an own
+ * property written, defined or deleted, a prototype link changed, a conversion to dictionary
+ * mode. A site's cached prototype method is valid while the epoch it was learned under holds
+ * and the receiver's own prototype link is the one remembered; the objects further up the
+ * chain are flagged, so their links are covered by the epoch. */
+/* One per program: the prelude unit defines it and exports it, and the copy of this header a
+ * decoupled module unit compiles declares it `extern` instead (`runtime_prelude_header`), since
+ * a definition in every unit would give each an epoch of its own that never moves. Hidden in
+ * that declaration, so a read is PC-relative rather than a load through the GOT: it sits on
+ * every cached method call.
+ *
+ * A build with `KILN_IC_CHECK` in its environment defines the macro of the same name, and then
+ * every epoch hit is re-validated the long way and a disagreement traps: the oracle for a
+ * mutation path that forgot to move the epoch. The corpora run that way before a change to
+ * anything that writes a property lands. */
+static uint64_t kiln_c99_proto_epoch;
+
+static inline void kiln_c99_prototype_touched(const kiln_object *object) {
+    if (KILN_UNLIKELY(object->cache_holder)) kiln_c99_proto_epoch += 1;
+}
 
 /* A prototype chain is built by the program, so its length is the program's business -- but the
  * walk is on the C stack, where running out aborts rather than reports. Bounded, like the
@@ -628,6 +653,8 @@ typedef struct kiln_c99_pic_entry {
      * holding anything else is a reassignment, and the site resolves again. */
     kiln_value holder_value;
     kiln_val holder_val;
+    /* The prototype epoch this holder was validated under. */
+    uint64_t epoch;
 } kiln_c99_pic_entry;
 
 typedef struct kiln_c99_site {
@@ -672,13 +699,11 @@ static inline uint32_t kiln_c99_site_slot_for(const kiln_c99_site *site, const k
  * every object on the way still has the shape it had: a shape is a key path and says nothing
  * about the prototype, so two classes with one field order share a shape, and only the chain
  * tells their methods apart. */
-static inline kiln_val kiln_c99_site_cached_callee(const kiln_c99_site *site, const kiln_object *obj) {
-    uint32_t p;
-    for (p = 0; p < site->pic_count; ++p) {
-        if (site->entries[p].shape == obj->shape) {
-            if (site->entries[p].holder != NULL) {
-                const kiln_c99_pic_entry *entry = &site->entries[p];
-                const kiln_object *step;
+/* The long validation of a holder entry: walk the receiver's chain by pointer, check each shape
+ * is the one remembered, and read the method where it was found; 0 when anything differs. */
+static inline kiln_val kiln_c99_site_validate_holder(const kiln_c99_pic_entry *entry, const kiln_object *obj) {
+    const kiln_object *step;
+    {
                 if (obj->prototype.tag != KILN_VALUE_OBJECT) {
                     return 0;
                 }
@@ -711,6 +736,43 @@ static inline kiln_val kiln_c99_site_cached_callee(const kiln_c99_site *site, co
                     }
                 }
                 return entry->holder_val;
+    }
+}
+
+/* Whether the entry this site holds for `obj`'s shape reads its method through a prototype:
+ * only such a callee is a function of the shape, the link and the epoch. A method held on the
+ * instance itself is a different closure on every instance of the shape. */
+static inline int kiln_c99_site_callee_is_inherited(const kiln_c99_site *site, const kiln_object *obj) {
+    uint32_t p;
+    for (p = 0; p < site->pic_count; ++p) {
+        if (site->entries[p].shape == obj->shape) return site->entries[p].holder != NULL;
+    }
+    return 0;
+}
+
+static inline kiln_val kiln_c99_site_cached_callee(const kiln_c99_site *site, const kiln_object *obj) {
+    uint32_t p;
+    for (p = 0; p < site->pic_count; ++p) {
+        if (site->entries[p].shape == obj->shape) {
+            if (site->entries[p].holder != NULL) {
+                kiln_c99_pic_entry *entry = (kiln_c99_pic_entry *)&site->entries[p];
+                const kiln_object *first = entry->via != NULL ? entry->via : entry->holder;
+                kiln_val slow;
+                /* The epoch hit: nothing any cache reads through has been mutated since this
+                 * holder was validated, and the receiver's own link still leads to it. */
+                if (entry->epoch == kiln_c99_proto_epoch &&
+                    obj->prototype.tag == KILN_VALUE_OBJECT &&
+                    (const kiln_object *)(uintptr_t)obj->prototype.bits == first) {
+#ifdef KILN_IC_CHECK
+                    if (kiln_c99_site_validate_holder(entry, obj) != entry->holder_val) {
+                        __builtin_trap();
+                    }
+#endif
+                    return entry->holder_val;
+                }
+                slow = kiln_c99_site_validate_holder(entry, obj);
+                if (slow != 0 && slow == entry->holder_val) entry->epoch = kiln_c99_proto_epoch;
+                return slow;
             }
             if (site->entries[p].slot != UINT32_MAX && site->entries[p].slot < obj->slot_capacity) {
                 return obj->slots[site->entries[p].slot];

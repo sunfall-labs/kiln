@@ -109,6 +109,7 @@ static int kiln_c99_define_named_fast(kiln_val target, kiln_val key, kiln_val va
         object->not_extensible || object->accessor_count != 0) {
         return 0;
     }
+    kiln_c99_prototype_touched(object);
     if (kiln_c99_define_named_cached(object, value, site)) {
         *status = KILN_C99_OK;
         return 1;
@@ -200,6 +201,7 @@ static int kiln_c99_spread_object_fast(kiln_val target, kiln_val source, int *st
         object->accessor_count != 0) {
         return 0;
     }
+    kiln_c99_prototype_touched(dest);
     if (dest->properties != NULL || dest->shape == NULL || dest->shape->property_count != 0 ||
         dest->elements != NULL || dest->frozen || dest->not_extensible ||
         dest->accessor_count != 0) {
