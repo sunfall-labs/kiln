@@ -25,6 +25,19 @@ static int kiln_c99_shape_find_slot(const kiln_shape *shape, const char *ikey, u
     return 0;
 }
 
+/* The slot of the key spelt `bytes` in `shape`, or UINT32_MAX when the shape has no such key. A
+ * spelling the key table has never seen is a key no shape holds, so the lookup never interns. A
+ * sunk spread (see `emit_sunk_bridge` in the emitter) learns its source's slots through this,
+ * once per shape it meets. */
+static uint32_t kiln_c99_shape_slot_named(const kiln_shape *shape, const char *bytes, size_t len) {
+    const char *ikey = kiln_c99_interned(bytes, len);
+    uint32_t slot;
+    if (ikey == NULL || !kiln_c99_shape_find_slot(shape, ikey, &slot)) {
+        return UINT32_MAX;
+    }
+    return slot;
+}
+
 static void kiln_c99_pin_interned_key(const char *ikey) {
     kiln_gc_heap *heap;
     kiln_key_entry *entry;

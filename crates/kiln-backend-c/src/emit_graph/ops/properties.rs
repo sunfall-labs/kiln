@@ -32,8 +32,22 @@ pub(super) fn emit_get_property(
         && let Some(scalar_obj) = graph.scalar_objects.get(&root)
     {
         let alloc = root.0;
+        // A field of a sunk literal guessed to be a number: checked, and the literal rebuilt for
+        // the generic clone when the guess was wrong.
+        let checked = spec.exits && spec.fields.contains(&vid);
         if let Some(&field_idx) = scalar_obj.field_by_name_index.get(name) {
             writeln!(output, "    v{v} = v{alloc}_f_{field_idx};").unwrap();
+            if checked {
+                let invariant = crate::prelude::lookup_speculation_invariant("spread_field_number");
+                writeln!(
+                    output,
+                    "    /* Speculation exit [{}]: {} */ if (KILN_UNLIKELY(!KILN_VAL_IS_NUMBER(v{v}))) {{ {} goto kiln_generic_resume_{v}; }}",
+                    invariant.name,
+                    invariant.language_rule,
+                    super::materialize_all_sunk(graph, symbol, ctx.defs, ctx.array_slots)
+                )
+                .unwrap();
+            }
             if typed {
                 writeln!(output, "    d{v} = d{alloc}_f_{field_idx};").unwrap();
             }
@@ -41,6 +55,14 @@ pub(super) fn emit_get_property(
                 writeln!(output, "    i{v} = i{alloc}_f_{field_idx};").unwrap();
             }
         } else {
+            if checked {
+                writeln!(
+                    output,
+                    "    {} goto kiln_generic_resume_{v};",
+                    super::materialize_all_sunk(graph, symbol, ctx.defs, ctx.array_slots)
+                )
+                .unwrap();
+            }
             writeln!(output, "    v{v} = KILN_VAL_UNDEFINED;").unwrap();
             if typed {
                 writeln!(output, "    d{v} = 0.0;").unwrap();

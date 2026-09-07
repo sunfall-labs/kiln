@@ -2405,3 +2405,59 @@ fn tagged_template_strings_compile_to_template_site_and_instruction() {
     );
     assert!(program.code.contains(&Instruction::LoadTemplateObject(0)));
 }
+
+/// `m.h = m.f` reads `m` in the value of a member write. Nothing nested is involved, so `m`
+/// stays a plain slot: walking the value as if it were inside a nested function boxed every
+/// local a member write read, which made each later use a heap read and hid the object from
+/// the native backend's scalar analysis.
+#[test]
+fn a_member_write_whose_value_reads_a_local_does_not_box_it() {
+    let read = |property: &str| Expression {
+        kind: ExpressionKind::StaticMember {
+            object: Box::new(identifier("m")),
+            property: property.to_owned(),
+            optional: false,
+        },
+        span: Span::default(),
+    };
+    let program = compile(&module(vec![function(
+        "outer",
+        &[],
+        vec![
+            declaration(
+                VariableKind::Const,
+                "m",
+                Some(Expression {
+                    kind: ExpressionKind::Object {
+                        members: Vec::new(),
+                    },
+                    span: Span::default(),
+                }),
+            ),
+            statement(StatementKind::Expression(Expression {
+                kind: ExpressionKind::MemberAssignment {
+                    operator: AssignmentOperator::Assign,
+                    object: Box::new(identifier("m")),
+                    property: "h".to_owned(),
+                    value: Box::new(read("f")),
+                },
+                span: Span::default(),
+            })),
+            statement(StatementKind::Return(Some(read("h")))),
+        ],
+    )]))
+    .expect("compiles");
+    let outer = program
+        .functions
+        .iter()
+        .find(|proto| proto.name.as_deref() == Some("outer"))
+        .expect("outer proto");
+    assert!(
+        !outer
+            .code
+            .iter()
+            .any(|i| matches!(i, Instruction::NewCell(_))),
+        "a local read by a member write's value is not captured: {:?}",
+        outer.code
+    );
+}

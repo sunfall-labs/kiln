@@ -9,8 +9,10 @@ use crate::direct::{CallPlan, direct_callable};
 use crate::graph::{
     FunctionGraph, GraphOp, InductionVariable, ValueId, as_safe_integer, resolve_const_string,
 };
+use crate::prelude::lookup_speculation_invariant;
 use crate::tail::{TailContext, emit_tail_instruction};
 use crate::{BuiltinLoad, builtin_load, closure_construction};
+use kiln_ir::Instruction;
 use kiln_ir::Upvalue;
 use kiln_ir::{BinaryOp, Constant, FunctionProto, Program, UnaryOp};
 use std::collections::HashSet;
@@ -404,6 +406,22 @@ pub(super) fn emit_graph_op(
                 "    kiln_c99_forget_handled_throw(); v{v} = kiln_val_from_boundary(*thrown);"
             )
             .unwrap();
+        }
+        GraphOp::Bridge {
+            instruction,
+            operands,
+            pushes: 1,
+        } if matches!(
+            instruction,
+            Instruction::SpreadObject | Instruction::DefineNamedProperty
+        ) && graph
+            .scalar_alias_map
+            .get(&operands[0])
+            .is_some_and(|root| graph.spread_sinks.contains_key(root)) =>
+        {
+            // A sunk literal's spread or define: the fast clone's graph alone carries it as a
+            // scalar object (`FunctionGraph::spread_sinks`).
+            emit_sunk_bridge(output, vid, instruction, operands, &ctx);
         }
         GraphOp::Bridge {
             instruction,
@@ -937,5 +955,181 @@ pub(super) fn emit_graph_op(
             // A phi is assigned on the edge into its block, by the predecessor's jump or
             // branch, or by the landing that comes in from the dispatch switch.
         }
+    }
+}
+
+/// The text that rebuilds a sunk literal on the heap, when the fast clone leaves for the generic
+/// clone after sinking it: an object with every named field from its scalar twins, stored into
+/// the allocation's value and every alias of it. The generic clone then reads a real object.
+///
+/// Only the named fields exist, in name order: the literal never escapes, so no other key,
+/// no order, and no presence is observable -- the same argument that let it be scalar.
+pub(super) fn materialize_sunk(
+    graph: &FunctionGraph,
+    symbol: &str,
+    defs: &std::collections::HashMap<ValueId, &GraphOp>,
+    array_slots: &HashSet<u32>,
+    root: ValueId,
+) -> String {
+    let scalar_obj = &graph.scalar_objects[&root];
+    let alloc = root.0;
+    let mut constant_of_field: std::collections::HashMap<usize, u32> =
+        std::collections::HashMap::new();
+    for (&constant, &field_idx) in &scalar_obj.field_by_name_index {
+        let slot = constant_of_field.entry(field_idx).or_insert(constant);
+        *slot = (*slot).min(constant);
+    }
+    let mut text = format!(
+        "{{ kiln_value kiln_mat; int kiln_mat_status = kiln_c99_new_object_with_capacity(&kiln_mat, (size_t){}); if (kiln_mat_status != KILN_C99_OK) return kiln_mat_status;",
+        scalar_obj.fields.len().max(1)
+    );
+    for &field_idx in scalar_obj.fields.values() {
+        let Some(constant) = constant_of_field.get(&field_idx) else {
+            continue;
+        };
+        text.push_str(&format!(
+            " kiln_mat_status = kiln_c99_define_computed(kiln_mat, kiln_val_to_boundary(KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &{symbol}_string_{constant})), kiln_val_to_boundary(v{alloc}_f_{field_idx})); if (kiln_mat_status != KILN_C99_OK) return kiln_mat_status;"
+        ));
+    }
+    text.push_str(&format!(" v{alloc} = kiln_val_from_boundary(kiln_mat);"));
+    let mut aliases: Vec<ValueId> = graph
+        .spread_alias_map
+        .iter()
+        .filter(|(_, r)| **r == root)
+        .map(|(a, _)| *a)
+        .collect();
+    aliases.sort();
+    for alias in aliases {
+        text.push_str(&format!(" v{} = v{alloc};", alias.0));
+        if let Some(GraphOp::StoreLocal { slot, .. }) = defs.get(&alias)
+            && array_slots.contains(slot)
+        {
+            text.push_str(&format!(" locals[{slot}] = v{alloc};"));
+        }
+    }
+    text.push_str(" }");
+    text
+}
+
+/// Every sunk literal of the fast clone's graph rebuilt, for an exit into the generic clone
+/// from anywhere after the entry guard. A literal whose allocation the exit precedes is rebuilt
+/// too, from its twins' current contents, and the generic clone's allocation then replaces it;
+/// the field twins are the literal's state at every point, so nothing is lost either way.
+pub(super) fn materialize_all_sunk(
+    graph: &FunctionGraph,
+    symbol: &str,
+    defs: &std::collections::HashMap<ValueId, &GraphOp>,
+    array_slots: &HashSet<u32>,
+) -> String {
+    let mut roots: Vec<ValueId> = graph
+        .spread_sinks
+        .keys()
+        .copied()
+        .filter(|root| graph.scalar_objects.contains_key(root))
+        .collect();
+    roots.sort();
+    roots
+        .into_iter()
+        .map(|root| materialize_sunk(graph, symbol, defs, array_slots, root))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// One field of a sunk literal takes a value: the box, and the twins the value has.
+fn emit_sunk_field_store(
+    output: &mut String,
+    alloc: u32,
+    field_idx: usize,
+    value: ValueId,
+    numbers: &HashSet<ValueId>,
+    ints: &HashSet<ValueId>,
+) {
+    let val = value.0;
+    writeln!(output, "    v{alloc}_f_{field_idx} = v{val};").unwrap();
+    if numbers.contains(&value) {
+        writeln!(output, "    d{alloc}_f_{field_idx} = d{val};").unwrap();
+    } else {
+        writeln!(
+            output,
+            "    memcpy(&d{alloc}_f_{field_idx}, &v{alloc}_f_{field_idx}, sizeof(double));"
+        )
+        .unwrap();
+    }
+    if ints.contains(&value) {
+        writeln!(output, "    i{alloc}_f_{field_idx} = i{val};").unwrap();
+    } else {
+        writeln!(output, "    i{alloc}_f_{field_idx} = 0;").unwrap();
+    }
+}
+
+/// A spread or a constant-key define onto a sunk literal, in the fast clone.
+///
+/// The define is a field store. The spread copies the source's slot for each named field, under
+/// the guard `kiln_c99_spread_object_fast` (spread.c) copies under: a shaped object without
+/// symbol keys, accessors, elements or a dictionary. The slot of each field in the source's
+/// shape is learnt once per shape at the site. A source that fails the guard is left to the
+/// generic clone, which spreads it itself into the literal rebuilt by `materialize_sunk`.
+fn emit_sunk_bridge(
+    output: &mut String,
+    vid: ValueId,
+    instruction: &Instruction,
+    operands: &[ValueId],
+    ctx: &OpContext,
+) {
+    let v = vid.0;
+    let graph = ctx.graph;
+    let root = graph.scalar_alias_map[&operands[0]];
+    let scalar_obj = &graph.scalar_objects[&root];
+    let alloc = root.0;
+    match instruction {
+        Instruction::DefineNamedProperty => {
+            let key = resolve_const_string(operands[1], ctx.defs, ctx.program)
+                .expect("a sunk define's key is a constant string: the escape analysis checked");
+            if let Some(&field_idx) = scalar_obj.fields.get(key) {
+                emit_sunk_field_store(output, alloc, field_idx, operands[2], ctx.numbers, ctx.ints);
+            }
+            writeln!(output, "    v{v} = KILN_VAL_UNDEFINED;").unwrap();
+        }
+        Instruction::SpreadObject => {
+            let source = operands[1].0;
+            let invariant = lookup_speculation_invariant("spread_source_shaped");
+            let count = scalar_obj.fields.len().max(1);
+            let materialize = materialize_all_sunk(graph, ctx.symbol, ctx.defs, ctx.array_slots);
+            writeln!(
+                output,
+                "    /* Speculation exit [{}]: {} */",
+                invariant.name, invariant.language_rule
+            )
+            .unwrap();
+            writeln!(
+                output,
+                "    {{ static const kiln_shape *kiln_sp_shape_{v} = NULL; static uint32_t kiln_sp_slot_{v}[{count}]; \
+                 kiln_object *kiln_sp_src = KILN_VAL_IS_OBJECT(v{source}) ? (kiln_object *)KILN_VAL_PTR(v{source}) : NULL; \
+                 if (KILN_UNLIKELY(kiln_sp_src == NULL || kiln_sp_src->shape == NULL || kiln_sp_src->properties != NULL || kiln_sp_src->elements != NULL || kiln_sp_src->accessor_count != 0 || kiln_sp_src->shape->has_symbol_key || kiln_c99_gc_kind_of_ptr(kiln_sp_src) != KILN_GC_OBJECT)) {{ {materialize} goto kiln_generic_resume_{v}; }}"
+            )
+            .unwrap();
+            let mut relearn = String::new();
+            for (name, &field_idx) in &scalar_obj.fields {
+                relearn.push_str(&format!(
+                    " kiln_sp_slot_{v}[{field_idx}] = kiln_c99_shape_slot_named(kiln_sp_src->shape, {}, {});",
+                    crate::string::c_string(name),
+                    name.len()
+                ));
+            }
+            writeln!(
+                output,
+                "    if (KILN_UNLIKELY(kiln_sp_src->shape != kiln_sp_shape_{v})) {{ kiln_sp_shape_{v} = kiln_sp_src->shape;{relearn} }}"
+            )
+            .unwrap();
+            for &field_idx in scalar_obj.fields.values() {
+                writeln!(
+                    output,
+                    "    if (kiln_sp_slot_{v}[{field_idx}] != UINT32_MAX) {{ v{alloc}_f_{field_idx} = kiln_sp_src->slots[kiln_sp_slot_{v}[{field_idx}]]; memcpy(&d{alloc}_f_{field_idx}, &v{alloc}_f_{field_idx}, sizeof(double)); i{alloc}_f_{field_idx} = 0; }}"
+                )
+                .unwrap();
+            }
+            writeln!(output, "    v{v} = KILN_VAL_UNDEFINED; }}").unwrap();
+        }
+        _ => unreachable!("only a spread or a named define targets a sunk literal"),
     }
 }

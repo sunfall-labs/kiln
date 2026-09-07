@@ -5314,3 +5314,46 @@ Also on main this evening and not this branch's doing: `kiln-module-graph`'s
 `mkdir` in one place and not the other), and `conformance/differential/inherited-setters.js`
 throws where node ignores a write to an inherited read-only property; both reproduce on
 `ac301325` before any commit here.
+
+---
+
+## A spread that never leaves the function (2026-09-07, `alee/fastest-native`)
+
+`{ ...base, f: i, g: i * 2 }` in a loop cost 0.883 ms against node's 0.324 on
+`bench/non-io/object-spread.mjs` — 2.73x, the worst row in the table. It now costs 0.0868 ms
+against 0.3164, which is 3.6x the other way, and nothing else in the table moved.
+
+The literal was allocated because the escape analysis stopped at `SpreadObject`: every `Bridge`
+operand escaped its object, so a literal built by a spread could never be scalar even when the
+function never let it out. Two things were needed to see through it.
+
+**The spread and the constant-key define are aliasing writes, not escapes.** `spread_bridge` in
+`graph.rs` recognises exactly those two bridges onto a literal, and `escape_analysis_with(…,
+with_spread)` runs the whole analysis a second time with them treated as writes. What that pass
+finds beyond the unconditional one is kept in `spread_scalar_objects` / `spread_sinks`, which
+only the *fast clone* consults: the source's shape is a run-time fact, so the sink is
+speculative and the generic clone still allocates.
+
+**The guard is the one `kiln_c99_spread_object_fast` already uses** — shaped, no dictionary, no
+elements, no accessors, no symbol key — checked inline at the site, and the slot of each named
+field is learnt once per source shape through the new `kiln_c99_shape_slot_named` (shapes.c).
+A field read that feeds arithmetic is guessed to be a number and checked. Any failed guess
+rebuilds the literal on the heap from the field twins (`materialize_all_sunk`) and jumps to the
+generic clone, which then runs the operation on a real object; `conformance/native/spread-literal-sunk.js`
+runs 30-odd shapes of that — getters, dictionaries, symbol keys, proxies, `null`, shape churn,
+key-before-spread, a field that changes type mid-loop, escaping literals — and matches node both
+normally and under `KILN_SPECULATE=exit`, where every guard fails on purpose.
+
+Two things found on the way, both fixed here:
+
+- **`m.h = m.f` boxed `m`.** `collect_identifiers` walked a `MemberAssignment`'s *value* with
+  `collecting = true`, which was meant to keep `Layer.prototype.match = function match () {}`
+  closing over its module. But the `Function` arm already collects a nested body whatever the
+  flag says, so the override only ever caught plain values — and a local read in one became
+  "captured", hence a cell, hence a heap read at every use and an escape to every scalar
+  analysis. Walking the value with the inherited flag keeps the Express shape working (its test
+  still passes) and unboxes the rest.
+- **`emit_async_entry_body` never declared `kiln_inheriting`.** `aa9c512c` added the async entry
+  path; the call-method fast paths under it read the hoisted flag that only the other prologues
+  emit, so `conformance/native/top-level-await-refuses.js` failed to *compile*, and with it
+  everything after it in `scripts/native.sh`. One `push_str`, and the corpus runs whole again.
