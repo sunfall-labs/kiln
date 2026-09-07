@@ -79,7 +79,7 @@ pub(super) fn emit_get_property(
     };
     let key_len = key_str.len();
     let check = status_check(diagnostic_site, pc, label, unwind);
-    if ctx.plan.compact {
+    if ctx.plan.generic_only {
         let typed_sync = if typed_int {
             format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v})); i{v} = (int64_t)d{v};")
         } else if typed {
@@ -297,7 +297,7 @@ pub(super) fn emit_set_property(
     let key_len = key_str.len();
     let strict = matches!(op, GraphOp::SetPropertyStrict { strict: true, .. }) as u8;
     let check = status_check(diagnostic_site, pc, label, unwind);
-    if ctx.plan.compact {
+    if ctx.plan.generic_only {
         writeln!(
             output,
             "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_val_write_property(host, v{o}, {symbol}_key_{name}, {key_len}, v{val}, {strict}, depth, thrown, &site); {check} v{v} = v{val}; }}{typed_sync}",
@@ -393,7 +393,7 @@ pub(super) fn emit_get_computed(
         return;
     }
     let check = status_check(diagnostic_site, pc, label, unwind);
-    if ctx.plan.compact {
+    if ctx.plan.generic_only {
         writeln!(
             output,
             "    {{ int status = kiln_c99_val_read_element(host, v{o}, v{k}, depth, thrown, &v{v}); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(kiln_val_to_boundary(v{o}), kiln_val_to_boundary(v{k})); {check} }}{typed_sync}",
@@ -525,7 +525,7 @@ pub(super) fn emit_set_computed(
     }
     let strict = matches!(op, GraphOp::SetComputedStrict { strict: true, .. }) as u8;
     let check = status_check(diagnostic_site, pc, label, unwind);
-    if ctx.plan.compact {
+    if ctx.plan.generic_only {
         writeln!(
             output,
             "    {{ int status = kiln_c99_val_write_element(host, v{o}, v{k}, v{val}, {strict}, depth, thrown); {check} v{v} = v{val}; }}{typed_sync}",

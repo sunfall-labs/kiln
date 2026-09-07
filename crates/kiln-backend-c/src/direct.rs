@@ -71,9 +71,11 @@ pub struct TypedNeeds {
 /// How one body's calls are emitted.
 #[derive(Default, Clone, Debug)]
 pub struct CallPlan {
+    /// Use terse generated operations and declarations.
+    pub compact: bool,
     /// Emit only the generic body; native-dev uses this to keep the edit/run loop proportional
     /// to the program instead of multiplying it by speculative clones.
-    pub compact: bool,
+    pub generic_only: bool,
     /// Call results whose callee is the closure of the named proto.
     pub known: HashMap<ValueId, u32>,
     /// Call results emitted against the callee's typed entry: every argument proven a number.
@@ -106,6 +108,9 @@ pub struct CallPlan {
     /// Per proto: whether a fast clone exists -- the body with every slow path replaced by a
     /// restart through the boxed entry, for a body that can be restarted.
     pub fast: Vec<bool>,
+    /// Per proto: whether its boxed body is present in this closed-world translation unit.
+    /// Empty means every body is available, preserving plans built outside module emission.
+    pub available: Vec<bool>,
     /// Per proto: whether a call into it must publish the per-frame context, from
     /// [`crate::compute_publishes_frame`]'s one whole-program fixpoint. Cloned into every
     /// function's plan the same way `typed_entries` is, so every user reads the same answer
@@ -130,7 +135,33 @@ impl DirectPlan {
         entry: &FunctionGraph,
         publishes_frame: &[bool],
         compact: bool,
+        generic_only: bool,
     ) -> Self {
+        if generic_only {
+            // None of the known-callee, numeric fixpoint, typed-entry, callback, or receiver
+            // analyses can affect a generic body. Large dependency modules choose this path
+            // specifically to keep emission proportional to their bytecode, so do not compute
+            // speculative facts only to erase them below.
+            let function_count = graphs.len();
+            let plan = || CallPlan {
+                compact,
+                generic_only: true,
+                typed_returns: vec![false; function_count],
+                typed_needs: vec![TypedNeeds::default(); function_count],
+                typed_entries: vec![false; function_count],
+                parallel_safe: vec![false; function_count],
+                receiver_columns: vec![0; function_count],
+                fast: vec![false; function_count],
+                available: vec![true; function_count],
+                publishes_frame: publishes_frame.to_vec(),
+                ..CallPlan::default()
+            };
+            return Self {
+                functions: (0..function_count).map(|_| plan()).collect(),
+                typed: vec![None; function_count],
+                entry: plan(),
+            };
+        }
         let known = known_callees(program, graphs, entry);
         let direct: Vec<bool> = program
             .functions
@@ -163,7 +194,7 @@ impl DirectPlan {
             .map(|((&direct, &has_rest), proto)| {
                 direct
                     && !has_rest
-                    && !compact
+                    && !generic_only
                     && proto.code.len() <= crate::MAX_SPECIALIZED_INSTRUCTIONS
             })
             .collect();
@@ -272,13 +303,14 @@ impl DirectPlan {
             );
             CallPlan {
                 compact,
-                known: if compact {
+                generic_only,
+                known: if generic_only {
                     HashMap::new()
                 } else {
                     known.known.clone()
                 },
                 typed_sites,
-                numbers: (!compact)
+                numbers: (!generic_only)
                     .then(|| {
                         proven
                             .iter()
@@ -286,7 +318,7 @@ impl DirectPlan {
                             .collect()
                     })
                     .unwrap_or_default(),
-                ints: (!compact)
+                ints: (!generic_only)
                     .then(|| {
                         proven
                             .into_iter()
@@ -302,6 +334,7 @@ impl DirectPlan {
                 parallel_safe: parallel_safe.clone(),
                 receiver_columns: vec![0; graphs.len()],
                 fast: vec![false; graphs.len()],
+                available: vec![true; graphs.len()],
                 publishes_frame: publishes_frame.to_vec(),
             }
         };
@@ -484,6 +517,21 @@ impl DirectPlan {
             .chain(std::iter::once(&mut self.entry))
         {
             plan.fast = fast.to_vec();
+        }
+    }
+
+    /// Restrict static dispatch and by-name specialization to bodies emitted in this unit.
+    pub fn set_available(&mut self, available: &[bool]) {
+        for plan in self
+            .functions
+            .iter_mut()
+            .chain(self.typed.iter_mut().flatten())
+            .chain(std::iter::once(&mut self.entry))
+        {
+            plan.available = available.to_vec();
+            for (index, typed) in plan.typed_entries.iter_mut().enumerate() {
+                *typed &= available.get(index).copied().unwrap_or(false);
+            }
         }
     }
 

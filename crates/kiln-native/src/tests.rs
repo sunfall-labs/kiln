@@ -40,6 +40,60 @@ fn release_prelude_compile_policy_has_a_distinct_object_key() {
     }
 }
 
+fn empty_function() -> FunctionProto {
+    FunctionProto {
+        span: kiln_ir::Span::default(),
+        prologue_end: 0,
+        asynchronous: false,
+        name: None,
+        arrow: false,
+        generator: false,
+        async_generator: false,
+        is_method: false,
+        parameter_count: 0,
+        declared_length: 0,
+        mapped_arguments: false,
+        local_count: 0,
+        code: vec![Instruction::Return],
+        upvalues: Vec::new(),
+        type_annotations: None,
+    }
+}
+
+#[test]
+fn release_module_specialization_budget_counts_all_instructions() {
+    let mut program = Program {
+        source: String::new().into(),
+        version: BYTECODE_VERSION,
+        constants: Vec::new(),
+        code: vec![Instruction::Return; MAX_RELEASE_SPECIALIZED_MODULE_INSTRUCTIONS],
+        local_count: 0,
+        functions: Vec::new(),
+        template_sites: Vec::new(),
+    };
+    assert!(!release_module_uses_generic_bodies(&program));
+
+    program.functions.push(empty_function());
+    assert!(release_module_uses_generic_bodies(&program));
+}
+
+#[test]
+fn release_module_specialization_budget_counts_functions() {
+    let mut program = Program {
+        source: String::new().into(),
+        version: BYTECODE_VERSION,
+        constants: Vec::new(),
+        code: vec![Instruction::Return],
+        local_count: 0,
+        functions: vec![empty_function(); MAX_RELEASE_SPECIALIZED_MODULE_FUNCTIONS],
+        template_sites: Vec::new(),
+    };
+    assert!(!release_module_uses_generic_bodies(&program));
+
+    program.functions.push(empty_function());
+    assert!(release_module_uses_generic_bodies(&program));
+}
+
 struct OxcFrontend;
 
 #[test]
@@ -2437,25 +2491,22 @@ fn graph_emission_cache_hits_persist_and_all_input_classes_invalidate() {
     let cache_path = project.path.join("emission-cache");
     let cache = ArtifactCache::new(&cache_path);
     let expected = emit_native_graph_module_with_policy(node, "main.js", &policy).unwrap();
-    let first = cached_graph_module(&cache, "test-target", node, "main.js", &policy, || {
-        Ok(expected.clone())
-    })
-    .unwrap();
+    let (first, first_hit) =
+        cached_graph_module(&cache, "test-target", node, "main.js", &policy, || {
+            Ok(expected.clone())
+        })
+        .unwrap();
+    assert!(!first_hit);
     assert_eq!(first, expected);
     // A fresh cache object must hit without entering the emitter at all.
     let reopened = ArtifactCache::new(&cache_path);
-    assert_eq!(
-        cached_graph_module(
-            &reopened,
-            "test-target",
-            node,
-            "main.js",
-            &policy,
-            || panic!("unchanged module was emitted again")
-        )
-        .unwrap(),
-        expected
-    );
+    let (cached, cache_hit) =
+        cached_graph_module(&reopened, "test-target", node, "main.js", &policy, || {
+            panic!("unchanged module was emitted again")
+        })
+        .unwrap();
+    assert!(cache_hit);
+    assert_eq!(cached, expected);
 
     let mut cases = Vec::new();
     let mut changed = node.clone();
@@ -2482,7 +2533,7 @@ fn graph_emission_cache_hits_persist_and_all_input_classes_invalidate() {
     cases.push((changed, policy.clone(), "main.js", "test-target"));
     cases.push((node.clone(), policy.clone(), "other.js", "test-target"));
     cases.push((node.clone(), policy.clone(), "main.js", "other-target"));
-    for change in 0..9 {
+    for change in 0..10 {
         let mut changed = policy.clone();
         match change {
             0 => changed.compact = false,
@@ -2494,17 +2545,19 @@ fn graph_emission_cache_hits_persist_and_all_input_classes_invalidate() {
             6 => changed.type_profile = Some(Arc::new(Default::default())),
             7 => changed.live_module_slots = Some(Arc::new(BTreeSet::new())),
             8 => changed.live_module_slots = Some(Arc::new(BTreeSet::from([0]))),
+            9 => changed.generic_only = true,
             _ => unreachable!(),
         }
         cases.push((node.clone(), changed, "main.js", "test-target"));
     }
     for (index, (node, policy, path, target)) in cases.iter().enumerate() {
         let calls = std::cell::Cell::new(0);
-        let actual = cached_graph_module(&cache, target, node, path, policy, || {
+        let (actual, cache_hit) = cached_graph_module(&cache, target, node, path, policy, || {
             calls.set(calls.get() + 1);
             Ok(expected.clone())
         })
         .unwrap();
+        assert!(!cache_hit, "input case {index} reported a cache hit");
         assert_eq!(calls.get(), 1, "input case {index} reused stale output");
         assert_eq!(actual, expected);
     }
@@ -3132,6 +3185,25 @@ fn native_graph_wiring_uses_resolved_star_export_origins() {
         1
     );
     assert!(!launcher.contains("kiln_graph_enter_module"));
+    let bootstrap = native_builtin_bootstrap_module(&NativeRealmPolicy::default().emission())
+        .expect("builtin bootstrap emits");
+    let bootstrapped = graph_launcher_source_with_imports(
+        &graph,
+        &modules,
+        &NativeRealmPolicy::default(),
+        None,
+        None,
+        None,
+        Some(&bootstrap),
+    )
+    .expect("bootstrapped launcher emits");
+    let bootstrap_call = bootstrapped
+        .find(&format!("status = {}(", bootstrap.symbol))
+        .expect("launcher calls the bootstrap");
+    let reset = bootstrapped
+        .find("kiln_c99_builtin_store_epoch = 0;")
+        .expect("launcher seals bootstrap writes before user code");
+    assert!(bootstrap_call < reset);
     // ADR 0044: only a host-clock launcher switches the realm to wall time, and it does so
     // between creating the realm and entering it.
     assert!(!launcher.contains("kiln_realm_use_wall_clock(realm)"));

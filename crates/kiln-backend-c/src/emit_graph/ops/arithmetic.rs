@@ -162,7 +162,7 @@ pub(super) fn emit_unary_boxed(
 
     let x = value.0;
     let code = unary_code(*op);
-    if ctx.plan.compact && !matches!(op, UnaryOp::Void | UnaryOp::Not | UnaryOp::TypeOf) {
+    if ctx.plan.generic_only && !matches!(op, UnaryOp::Void | UnaryOp::Not | UnaryOp::TypeOf) {
         let check = status_check(diagnostic_site, pc, label, unwind);
         if scalar_proto {
             writeln!(output, "    v{v} = kiln_c99_val_unary_fast({code}, v{x});").unwrap();
@@ -570,7 +570,7 @@ pub(super) fn emit_binary_boxed(
             "int status = KILN_C99_OK; v{v} = kiln_c99_val_binary({code}, host, v{l}, v{r}, &status, depth, thrown); {check}"
         )
     };
-    if ctx.plan.compact {
+    if ctx.plan.generic_only {
         writeln!(output, "    {{ {slow} }}").unwrap();
         return;
     }

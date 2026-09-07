@@ -48,6 +48,19 @@ static WORK_COUNTER: AtomicU64 = AtomicU64::new(0);
 static MATERIALIZE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const RELEASE_PRELUDE_COMPILE_IDENTITY: &[u8] = b"vectorize=off\0slp-vectorize=off";
+const MAX_RELEASE_SPECIALIZED_MODULE_INSTRUCTIONS: usize = 512;
+const MAX_RELEASE_SPECIALIZED_MODULE_FUNCTIONS: usize = 16;
+
+fn release_module_uses_generic_bodies(program: &Program) -> bool {
+    program.functions.len() > MAX_RELEASE_SPECIALIZED_MODULE_FUNCTIONS
+        || program.code.len()
+            + program
+                .functions
+                .iter()
+                .map(|function| function.code.len())
+                .sum::<usize>()
+            > MAX_RELEASE_SPECIALIZED_MODULE_INSTRUCTIONS
+}
 
 fn configure_release_prelude_compile(options: &mut CompileOptions) {
     // Vectorizing this branch-heavy runtime unit accounts for seconds of cold compile time while
@@ -56,6 +69,30 @@ fn configure_release_prelude_compile(options: &mut CompileOptions) {
     options
         .extra_args
         .extend(["-fno-vectorize".into(), "-fno-slp-vectorize".into()]);
+}
+
+fn configure_release_module_compile(options: &mut CompileOptions, generic_only: bool) {
+    if generic_only {
+        options.extra_args.push("-O0".into());
+        // Clang treats an explicit O0 as its Debug configuration and otherwise injects UBSan
+        // calls that the release link intentionally does not carry.
+        options.extra_args.push("-fno-sanitize=undefined".into());
+        // Closed-world liveness already removed unreachable bodies. Giving every remaining
+        // helper its own ELF/Mach-O section creates tens of thousands of section records only
+        // for the linker to retain them; one code/data section is cheaper to emit and link.
+        options.extra_args.push("-fno-function-sections".into());
+        options.extra_args.push("-fno-data-sections".into());
+    } else {
+        options.extra_args.push("-O2".into());
+    }
+}
+
+fn release_module_compile_identity(generic_only: bool) -> &'static str {
+    if generic_only {
+        "generic-o0-nosan-nosections"
+    } else {
+        "o2"
+    }
 }
 
 fn prelude_object_options(base: Digest, profile: NativeProfile) -> Digest {
@@ -388,6 +425,8 @@ impl NativeBuilder {
         let emit_started = Instant::now();
         let mut emission = options.realm.emission_executable();
         emission.compact = options.profile != NativeProfile::Profile;
+        emission.generic_only =
+            matches!(options.profile, NativeProfile::Dev | NativeProfile::Check);
         if options.profile == NativeProfile::Profile {
             emission.type_profile_record = true;
         }
@@ -766,6 +805,8 @@ impl NativeBuilder {
         let emit_started = Instant::now();
         let mut emission = options.realm.emission();
         emission.compact = options.profile != NativeProfile::Profile;
+        emission.generic_only =
+            matches!(options.profile, NativeProfile::Dev | NativeProfile::Check);
         let module = emit_with_policy(program, emission.clone())?;
         let module_api_symbol = embedding_module_api_symbol(&module.symbol)?;
         let module_wrapper = owned_result_wrapper_source(
@@ -1104,30 +1145,42 @@ impl NativeBuilder {
         validate_native_node_builtins(graph)?;
         let mut emission = options.realm.emission();
         emission.compact = options.profile != NativeProfile::Profile;
+        emission.generic_only =
+            matches!(options.profile, NativeProfile::Dev | NativeProfile::Check);
         let total_started = Instant::now();
         let emit_started = Instant::now();
+        let identity = self.toolchain.identity().clone();
+        let module_abi = module_abi_identity();
+        let target = target_identity(&identity);
         let nodes = graph.modules().collect::<Vec<_>>();
         let emitted_modules = emit_indexed(nodes.len(), "shared graph module emission", |index| {
             let node = nodes[index];
             let logical_path = logical_module_path(graph.project_root(), &node.path)?;
-            let emitted = cached_graph_module(
+            let mut module_emission = emission.clone();
+            if options.profile == NativeProfile::Release
+                && release_module_uses_generic_bodies(&node.program.program)
+            {
+                module_emission.generic_only = true;
+            }
+            cached_graph_module(
                 &self.cache,
-                &target_identity(self.toolchain.identity()),
+                &target,
                 node,
                 &logical_path,
-                &emission,
-                || emit_native_graph_module_with_policy(node, &logical_path, &emission),
-            )?;
-            Ok(emitted)
+                &module_emission,
+                || emit_native_graph_module_with_policy(node, &logical_path, &module_emission),
+            )
         })?;
         let mut modules = Vec::with_capacity(nodes.len());
+        let mut generated_c_hits = Vec::with_capacity(nodes.len());
         let mut symbols = std::collections::HashSet::with_capacity(graph.module_count());
-        for (node, emitted) in nodes.into_iter().zip(emitted_modules) {
+        for (node, (emitted, generated_c_hit)) in nodes.into_iter().zip(emitted_modules) {
             if !symbols.insert(emitted.symbol.clone()) {
                 return Err(NativeError::SymbolCollision {
                     symbol: emitted.symbol,
                 });
             }
+            generated_c_hits.push(generated_c_hit);
             modules.push((node, emitted));
         }
         if modules.is_empty() {
@@ -1168,28 +1221,21 @@ impl NativeBuilder {
             .map(|(_, emitted)| &emitted.symbol)
             .collect::<Vec<_>>();
         let paths = SharedGraphLibraryPaths::new(workspace.path(), &symbol_list);
-        let identity = self.toolchain.identity().clone();
         let profile = options.profile;
-        let module_abi = module_abi_identity();
         let embedding_abi = runtime_abi_identity();
-        let target = target_identity(&identity);
         let compiler = compiler_identity(&identity);
         let (number_provider, number_provider_digest, _) = self.cached_number_provider(&target)?;
-        let mut module_sources = Vec::with_capacity(modules.len());
-        for (_, module) in &modules {
-            let source_key = key(
-                ArtifactKind::GeneratedC,
-                format!("kiln-c-abi-{C_ABI_VERSION}-generator-{C_GENERATOR_VERSION}"),
-                Backend::C,
-                &module_abi,
-                &target,
-                CacheProfile::Debug,
-                // PIC affects the object identity below, not this byte-for-byte reusable C unit.
-                Digest::hash(b"deterministic-c11-module"),
-                [Digest::hash(module.source.as_bytes())],
-            );
-            module_sources.push(self.cached_payload(&source_key, module.source.as_bytes())?);
-        }
+        let module_sources = modules
+            .iter()
+            .zip(&generated_c_hits)
+            .map(|((_, module), &hit)| {
+                (
+                    module.source.as_bytes().to_vec(),
+                    Digest::hash(module.source.as_bytes()),
+                    hit,
+                )
+            })
+            .collect::<Vec<_>>();
         let wrapper_source_key = key(
             ArtifactKind::GeneratedC,
             format!(
@@ -1210,19 +1256,24 @@ impl NativeBuilder {
         } else {
             ""
         };
-        let module_object_options = Digest::hash(
-            format!(
-                "shared-graph\0pic\0c11\0visibility-hidden\0{}\0{}{march_opt}\0module-opt={}",
-                identity.kind,
-                profile.as_str(),
-                if profile == NativeProfile::Release {
-                    "o0-nosan"
-                } else {
-                    "profile-default"
-                }
-            )
-            .as_bytes(),
-        );
+        let module_object_options = modules
+            .iter()
+            .map(|(_, module)| {
+                Digest::hash(
+                    format!(
+                        "shared-graph\0pic\0c11\0visibility-hidden\0{}\0{}{march_opt}\0module-opt={}",
+                        identity.kind,
+                        profile.as_str(),
+                        if profile == NativeProfile::Release {
+                            release_module_compile_identity(module.generic_only)
+                        } else {
+                            "profile-default"
+                        }
+                    )
+                    .as_bytes(),
+                )
+            })
+            .collect::<Vec<_>>();
         let wrapper_object_options = Digest::hash(
             format!(
                 "shared-graph\0pic\0c11\0{}\0{}{march_opt}",
@@ -1235,23 +1286,22 @@ impl NativeBuilder {
         // contain the same logical path with different bytecode, so exporting those symbols lets
         // a dynamic loader interpose one library's module into another library's wrapper. Keep
         // the six-argument entries externally linkable inside this DSO but hidden outside it.
-        let mut module_compile_options = CompileOptions {
-            profile: profile.toolchain(),
-            position_independent: true,
-            march_native: options.march_native,
-            ..CompileOptions::default()
-        };
-        module_compile_options
-            .extra_args
-            .push("-fvisibility=hidden".into());
-        if profile == NativeProfile::Release {
-            module_compile_options.extra_args.push("-O0".into());
-            // See the release module compile below: `-O0` is Debug to `zig cc`, Debug turns the
-            // undefined-behavior sanitizer on, and the `-O3` release link brings no runtime for it.
-            module_compile_options
-                .extra_args
-                .push("-fno-sanitize=undefined".into());
-        }
+        let module_compile_options = modules
+            .iter()
+            .map(|(_, module)| {
+                let mut compile = CompileOptions {
+                    profile: profile.toolchain(),
+                    position_independent: true,
+                    march_native: options.march_native,
+                    ..CompileOptions::default()
+                };
+                compile.extra_args.push("-fvisibility=hidden".into());
+                if profile == NativeProfile::Release {
+                    configure_release_module_compile(&mut compile, module.generic_only);
+                }
+                compile
+            })
+            .collect::<Vec<_>>();
         let wrapper_compile_options = CompileOptions {
             profile: profile.toolchain(),
             position_independent: true,
@@ -1268,7 +1318,7 @@ impl NativeBuilder {
                 &module_abi,
                 &target,
                 profile.cache(),
-                module_object_options,
+                module_object_options[index],
                 [*source_digest, prelude_header_digest()],
             ));
         }
@@ -1433,7 +1483,7 @@ impl NativeBuilder {
                         &module_sources_ref[index].0,
                         &module_c_ref[index],
                         &module_o_ref[index],
-                        module_compile_options_ref,
+                        &module_compile_options_ref[index],
                     )
                     .map(|(object, digest, hit, _elapsed)| (object, digest, hit))
                 })
@@ -1617,6 +1667,8 @@ impl NativeBuilder {
         let emit_started = Instant::now();
         let mut emission = options.realm.emission_executable();
         emission.compact = options.profile != NativeProfile::Profile;
+        emission.generic_only =
+            matches!(options.profile, NativeProfile::Dev | NativeProfile::Check);
         if options.profile == NativeProfile::Profile {
             emission.type_profile_record = true;
         }
@@ -1624,12 +1676,20 @@ impl NativeBuilder {
         if let Some(profile) = resolve_type_profile(options, entry_module_path) {
             emission.type_profile = Some(std::sync::Arc::new(profile));
         }
+        let identity = self.toolchain.identity().clone();
+        let module_abi = module_abi_identity();
+        let target = target_identity(&identity);
         let selected = native_executable_graph(graph, options.profile)?;
         let nodes = selected.modules;
         let emitted_modules = emit_indexed(nodes.len(), "graph module emission", |index| {
             let node = nodes[index];
             let logical_path = logical_module_path(graph.project_root(), &node.path)?;
             let mut module_emission = emission.clone();
+            if options.profile == NativeProfile::Release
+                && release_module_uses_generic_bodies(&node.program.program)
+            {
+                module_emission.generic_only = true;
+            }
             if matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs) {
                 module_emission.live_module_slots = Some(Arc::new(
                     selected
@@ -1639,26 +1699,30 @@ impl NativeBuilder {
                         .unwrap_or_default(),
                 ));
             }
-            let emitted = cached_graph_module(
+            let (emitted, generated_c_hit) = cached_graph_module(
                 &self.cache,
-                &target_identity(self.toolchain.identity()),
+                &target,
                 node,
                 &logical_path,
                 &module_emission,
                 || emit_native_graph_module_with_policy(node, &logical_path, &module_emission),
             )?;
-            Ok((logical_path, emitted))
+            Ok((logical_path, emitted, generated_c_hit))
         })?;
         let mut modules = Vec::with_capacity(nodes.len());
         let mut logical_paths = Vec::with_capacity(nodes.len());
+        let mut generated_c_hits = Vec::with_capacity(nodes.len());
         let mut symbols = std::collections::HashSet::with_capacity(graph.module_count());
-        for (node, (logical_path, emitted)) in nodes.into_iter().zip(emitted_modules) {
+        for (node, (logical_path, emitted, generated_c_hit)) in
+            nodes.into_iter().zip(emitted_modules)
+        {
             if !symbols.insert(emitted.symbol.clone()) {
                 return Err(NativeError::SymbolCollision {
                     symbol: emitted.symbol,
                 });
             }
             logical_paths.push(logical_path);
+            generated_c_hits.push(generated_c_hit);
             modules.push((node, emitted));
         }
         let bootstrap = native_builtin_bootstrap_module(&emission)?;
@@ -1686,28 +1750,22 @@ impl NativeBuilder {
             .collect::<Vec<_>>();
         symbol_list.push(&bootstrap.symbol);
         let paths = GraphBuildPaths::new(workspace.path(), &symbol_list);
-        let identity = self.toolchain.identity().clone();
         let profile = options.profile;
-        let module_abi = module_abi_identity();
         let runtime_abi = runtime_abi_identity();
-        let target = target_identity(&identity);
         let compiler = compiler_identity(&identity);
         let (number_provider, number_provider_digest, _) = self.cached_number_provider(&target)?;
 
-        let mut module_sources = Vec::with_capacity(modules.len());
-        for (_, module) in &modules {
-            let source_key = key(
-                ArtifactKind::GeneratedC,
-                format!("kiln-c-abi-{C_ABI_VERSION}-generator-{C_GENERATOR_VERSION}"),
-                Backend::C,
-                &module_abi,
-                &target,
-                CacheProfile::Debug,
-                Digest::hash(b"deterministic-c11-module"),
-                [Digest::hash(module.source.as_bytes())],
-            );
-            module_sources.push(self.cached_payload(&source_key, module.source.as_bytes())?);
-        }
+        let mut module_sources = modules
+            .iter()
+            .zip(&generated_c_hits)
+            .map(|((_, module), &hit)| {
+                (
+                    module.source.as_bytes().to_vec(),
+                    Digest::hash(module.source.as_bytes()),
+                    hit,
+                )
+            })
+            .collect::<Vec<_>>();
         let bootstrap_source_key = key(
             ArtifactKind::GeneratedC,
             format!("kiln-c-abi-{C_ABI_VERSION}-generator-{C_GENERATOR_VERSION}"),
@@ -1792,32 +1850,40 @@ impl NativeBuilder {
         if profile == NativeProfile::Release {
             configure_release_prelude_compile(&mut prelude_compile_options);
         }
-        let mut module_compile_options = compile_options.clone();
-        if profile == NativeProfile::Release {
-            // Large bundles spend nearly all cold-build time optimizing generated application
-            // glue. The runtime and prelude remain O3, where the hot generic operations live.
-            module_compile_options.extra_args.push("-O0".into());
-            // `-O0` is Debug to `zig cc`, and Debug turns the undefined-behavior sanitizer on.
-            // The release *link* is `-O3`, which brings no sanitizer runtime, so every module
-            // object would reference `__ubsan_handle_*` and no link would resolve them. The
-            // intent here is to stop optimizing glue, not to instrument it.
-            module_compile_options
-                .extra_args
-                .push("-fno-sanitize=undefined".into());
-        }
-        let module_object_options = Digest::hash(
-            format!(
-                "c11\0{}\0{}\0generator-{C_GENERATOR_VERSION}{march_opt}\0module-opt={}",
-                identity.kind,
-                profile.as_str(),
+        let module_compile_options = modules
+            .iter()
+            .map(|(_, module)| module.generic_only)
+            .chain(std::iter::once(bootstrap.generic_only))
+            .map(|generic_only| {
+                let mut compile = compile_options.clone();
                 if profile == NativeProfile::Release {
-                    "o0-nosan"
-                } else {
-                    "profile-default"
+                    // Large generic units are compile-through glue. Small specialized units keep
+                    // scalar/direct lowering under O2; the shared runtime and prelude remain O3.
+                    configure_release_module_compile(&mut compile, generic_only);
                 }
-            )
-            .as_bytes(),
-        );
+                compile
+            })
+            .collect::<Vec<_>>();
+        let module_object_options = modules
+            .iter()
+            .map(|(_, module)| module.generic_only)
+            .chain(std::iter::once(bootstrap.generic_only))
+            .map(|generic_only| {
+                Digest::hash(
+                    format!(
+                        "c11\0{}\0{}\0generator-{C_GENERATOR_VERSION}{march_opt}\0module-opt={}",
+                        identity.kind,
+                        profile.as_str(),
+                        if profile == NativeProfile::Release {
+                            release_module_compile_identity(generic_only)
+                        } else {
+                            "profile-default"
+                        }
+                    )
+                    .as_bytes(),
+                )
+            })
+            .collect::<Vec<_>>();
         let compile_started = Instant::now();
         let mut module_keys = Vec::with_capacity(module_sources.len());
         for index in 0..module_sources.len() {
@@ -1829,7 +1895,7 @@ impl NativeBuilder {
                 &module_abi,
                 &target,
                 profile.cache(),
-                module_object_options,
+                module_object_options[index],
                 [*source_digest, prelude_header_digest()],
             ));
         }
@@ -1968,7 +2034,7 @@ impl NativeBuilder {
                         &module_sources_ref[index].0,
                         &module_c_ref[index],
                         &module_o_ref[index],
-                        compile_options_ref,
+                        &compile_options_ref[index],
                     )
                     .map(|(object, digest, hit, _elapsed)| (object, digest, hit))
                 })
@@ -2599,11 +2665,11 @@ fn cached_graph_module(
     logical_path: &str,
     policy: &EmissionPolicy,
     emit: impl FnOnce() -> Result<kiln_backend_c::CModule, NativeError>,
-) -> Result<kiln_backend_c::CModule, NativeError> {
+) -> Result<(kiln_backend_c::CModule, bool), NativeError> {
     if !policy.decoupled_prelude
         || !matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs)
     {
-        return emit();
+        return emit().map(|module| (module, false));
     }
     // These owned IR/policy types use derived Debug over ordered fields, Vecs and BTreeSets;
     // there are no addresses or unordered maps. Hash the complete representation so additions
@@ -2635,18 +2701,22 @@ fn cached_graph_module(
                     path: artifact.path,
                     reason: format!("invalid cached C module: {error}"),
                 })?;
-            Ok(kiln_backend_c::CModule {
-                program_hash,
-                symbol,
-                source,
-            })
+            Ok((
+                kiln_backend_c::CModule {
+                    program_hash,
+                    symbol,
+                    source,
+                    generic_only: policy.generic_only,
+                },
+                true,
+            ))
         }
         Lookup::Miss => {
             let module = emit()?;
             let bytes = serde_json::to_vec(&(module.program_hash, &module.symbol, &module.source))
                 .expect("C module contains only strings and an integer");
             cache.put(&cache_key, &bytes)?;
-            Ok(module)
+            Ok((module, false))
         }
     }
 }
@@ -4677,6 +4747,10 @@ typedef struct kiln_value {
     union { uint64_t bits; const char *ptr; };
 } kiln_value;
 
+/* The prelude owns this realm-local guard. The trusted builtin bootstrap may install methods;
+ * the launcher seals those writes before any user module can observe or mutate the realm. */
+extern uint64_t kiln_c99_builtin_store_epoch __attribute__((visibility("hidden")));
+
 static kiln_value kiln_graph_diagnostic(const char *phase, const char *module) {
     kiln_value value = { KILN_VALUE_STRING, 0, {0} };
     value.ptr = phase;
@@ -4934,7 +5008,7 @@ static int kiln_graph_enter(void *opaque) {
     if let Some(bootstrap) = bootstrap {
         writeln!(
             output,
-            "    status = {}(host, result, NULL, 0, NULL, 0);\n    if (status != 0) {{ if (result->tag != KILN_VALUE_STRING || result->len == 0) *result = kiln_graph_diagnostic(\"builtin-bootstrap\", \"@kiln/runtime-bootstrap\"); return status; }}",
+            "    status = {}(host, result, NULL, 0, NULL, 0);\n    if (status != 0) {{ if (result->tag != KILN_VALUE_STRING || result->len == 0) *result = kiln_graph_diagnostic(\"builtin-bootstrap\", \"@kiln/runtime-bootstrap\"); return status; }}\n    kiln_c99_builtin_store_epoch = 0;",
             bootstrap.symbol
         )
         .unwrap();

@@ -402,7 +402,8 @@ pub(super) fn emit_call_method(
         _ => "",
     };
     let key_len = key_str.len();
-    if plan.compact {
+    let diagnostic_source = diagnostic_source(diagnostic_site);
+    if plan.generic_only {
         let n = argc.max(1);
         let init = if args.is_empty() {
             "KILN_VAL_UNDEFINED".to_owned()
@@ -420,14 +421,17 @@ pub(super) fn emit_call_method(
             output,
             "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_val call_args[{n}] = {{ {init} }}; int status = kiln_c99_val_call_method(host, v{o}, call_args, (size_t){argc}, {symbol}_key_{name}, {key_len}, depth, thrown, &site, {diagnostic_source}, (size_t){pc}, \"{label}\", &v{v}); {check}{sync_number} }}",
             o = object.0,
-            diagnostic_source = diagnostic_source(diagnostic_site),
+            diagnostic_source = diagnostic_source,
         )
         .unwrap();
         return;
     }
     // The unit's own methods of this name: a cached callee whose body is one of them is
     // called by name, and the C compiler may inline it into this site.
-    let candidates = method_candidates(program, key_str, &plan.publishes_frame);
+    let candidates = method_candidates(program, key_str, &plan.publishes_frame)
+        .into_iter()
+        .filter(|&index| plan.available.get(index as usize).copied().unwrap_or(true))
+        .collect::<Vec<_>>();
     // A candidate with a typed entry, at a site that proved every argument a number,
     // is entered typed: the receiver is the object the cache matched, so what the
     // language decides about a method's `this` -- an arrow's captured one, a sloppy
@@ -445,7 +449,7 @@ pub(super) fn emit_call_method(
         })
         .collect();
     let diag = format!(
-        "if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) {{ if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = kiln_val_to_boundary(v{o}).tag; if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod invocation refused\"; kiln_c99_note_refusal(\"{diagnostic_site}\", (size_t){pc}, \"{label}\", (size_t)kiln_c99_diagnostic_active_depth); }} else if (KILN_UNLIKELY(status == KILN_C99_THROWN)) {{ if (kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = kiln_val_to_boundary(v{o}).tag; kiln_c99_diagnostic_detail = \"CallMethod invocation threw\"; }} kiln_c99_note_refusal(\"{diagnostic_site}\", (size_t){pc}, \"{label}\", (size_t)kiln_c99_diagnostic_active_depth); }}",
+        "if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) {{ if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = kiln_val_to_boundary(v{o}).tag; if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod invocation refused\"; kiln_c99_note_refusal({diagnostic_source}, (size_t){pc}, \"{label}\", (size_t)kiln_c99_diagnostic_active_depth); }} else if (KILN_UNLIKELY(status == KILN_C99_THROWN)) {{ if (kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = kiln_val_to_boundary(v{o}).tag; kiln_c99_diagnostic_detail = \"CallMethod invocation threw\"; }} kiln_c99_note_refusal({diagnostic_source}, (size_t){pc}, \"{label}\", (size_t)kiln_c99_diagnostic_active_depth); }}",
         o = object.0
     );
     let typed_check = status_check(diagnostic_site, pc, label, unwind);
@@ -1630,13 +1634,13 @@ pub(super) fn emit_call_method(
                             if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) {{ \
                                 if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = kiln_val_to_boundary(v{o}).tag; \
                                 if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod invocation refused\"; \
-                                kiln_c99_note_refusal(\"{diagnostic_site}\", (size_t){pc}, \"{label}\", (size_t)kiln_c99_diagnostic_active_depth); \
+                                kiln_c99_note_refusal({diagnostic_source}, (size_t){pc}, \"{label}\", (size_t)kiln_c99_diagnostic_active_depth); \
                             }} else if (KILN_UNLIKELY(status == KILN_C99_THROWN)) {{ \
                                 if (kiln_c99_diagnostic_detail == NULL) {{ \
                                     kiln_c99_diagnostic_receiver_tag = kiln_val_to_boundary(v{o}).tag; \
                                     kiln_c99_diagnostic_detail = \"CallMethod invocation threw\"; \
                                 }} \
-                                kiln_c99_note_refusal(\"{diagnostic_site}\", (size_t){pc}, \"{label}\", (size_t)kiln_c99_diagnostic_active_depth); \
+                                kiln_c99_note_refusal({diagnostic_source}, (size_t){pc}, \"{label}\", (size_t)kiln_c99_diagnostic_active_depth); \
                             }} \
                             {check} \
                             handled = 1; \
@@ -1663,7 +1667,7 @@ pub(super) fn emit_call_method(
                     handled = 1; \
                 }} \
                 if (!handled) {{ \
-                    int status = kiln_c99_val_call_method(host, v{o}, call_args, (size_t){argc}, {symbol}_key_{name}, {key_len}, depth, thrown, &site, \"{diagnostic_site}\", (size_t){pc}, \"{label}\", &v{v}); \
+                    int status = kiln_c99_val_call_method(host, v{o}, call_args, (size_t){argc}, {symbol}_key_{name}, {key_len}, depth, thrown, &site, {diagnostic_source}, (size_t){pc}, \"{label}\", &v{v}); \
                     {check} \
                 }} {typed_sync} }}",
                 o = object.0,
