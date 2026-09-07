@@ -1,6 +1,6 @@
 import assert from "node:assert";
 import { Effect, Context, Layer, Scope } from "effect";
-import { spawnActorLayer, isolate, transfer, forEachParallel, KilnWorkerPool, KilnNativeScheduler } from "./index.js";
+import { spawnActorLayer, isolate, transfer, forEachParallel } from "./index.js";
 
 // 1. Service Definition
 class MeshService extends Context.Service()("MeshService", {
@@ -54,11 +54,6 @@ async function run() {
     forEachParallel(items, (n) => Effect.succeed(n * 2), { concurrency: "native" })
   );
   assert.deepStrictEqual(mapped, [20, 40, 60]);
-
-  // Test KilnWorkerPool and KilnNativeScheduler exports
-  assert.ok(KilnWorkerPool.layer);
-  const sched = KilnNativeScheduler.make();
-  assert.strictEqual(typeof sched.scheduleTask, "function");
 
   console.log("All @kiln/effect tests passed!");
 }

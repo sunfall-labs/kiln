@@ -1,8 +1,10 @@
 # Issue 04: TypeScript Concurrency Surface & Effect v4 Integration
 
-Status: planned
+Status: wontfix
 Feature: rust-parallel-engine
 Governing ADR: ADR 0057, ADR 0058
+
+Reconciled 2026-09-06 to ADR 0058 (revised): `parallelMap` only, synchronous, lowered to a pool only for a callback the backend proves allocates nothing, else refused with the reason; no pinned ABI version (the archive was at 31 after the JSON reader, c963d4bc); `parallelReduce` and `parallelSort` are not defined anywhere and are out of scope; simd-json was measured against a scalar Rust reader for JSON and dropped (see `.scratch/json-tape/NOTES.md`).
 
 ## Context
 Developers writing concurrency pipelines need ergonomic, strictly-typed access to parallel reductions and sorting in `@kiln/concurrency` and `@kiln/effect`.

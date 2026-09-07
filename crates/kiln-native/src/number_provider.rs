@@ -500,7 +500,6 @@ fn source_digest(root: &Path) -> Result<Digest, NumberProviderError> {
         "crates/kiln-json/Cargo.toml",
         "crates/kiln-json/src/lib.rs",
         "crates/kiln-runtime/Cargo.toml",
-        "crates/kiln-runtime/src/concurrency.rs",
         "crates/kiln-runtime/src/http_body.rs",
         "crates/kiln-runtime/src/http_client.rs",
         "crates/kiln-runtime/src/http_engine.rs",
@@ -751,7 +750,6 @@ mod tests {
             ("crates/kiln-json/Cargo.toml", b"[package]\n"),
             ("crates/kiln-json/src/lib.rs", b"json\n"),
             ("crates/kiln-runtime/Cargo.toml", b"[package]\n"),
-            ("crates/kiln-runtime/src/concurrency.rs", b"concurrency\n"),
             ("crates/kiln-runtime/src/http_body.rs", b"body\n"),
             ("crates/kiln-runtime/src/http_client.rs", b"client\n"),
             ("crates/kiln-runtime/src/http_engine.rs", b"engine\n"),
@@ -773,7 +771,7 @@ mod tests {
 
         assert_eq!(
             source_digest(&root.0).expect("hash source identity fixture"),
-            Digest::from_hex("d519ed4dbd555c38deb64915b97347f1e17117cd6f9539c4641f6ad5daf0ebcb")
+            Digest::from_hex("9fd6ec46ddfc0fc686df9ae364207028434c11bb4f4f5d7c7c551e5976bdcceb")
                 .expect("fixture digest")
         );
     }

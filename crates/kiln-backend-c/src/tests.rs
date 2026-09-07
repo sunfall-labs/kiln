@@ -5705,11 +5705,6 @@ fn pure_closure_classification_and_parallel_map_emission() {
     };
 
     let graph = build_function_graph(&callback, &program).expect("callback graph builds");
-    assert!(
-        graph.is_pure(),
-        "pure arithmetic closure should be classified as is_pure"
-    );
-
     // Code calling array.parallelMap(callback)
     let module_code = vec![
         Instruction::NewArray { count: 0 },

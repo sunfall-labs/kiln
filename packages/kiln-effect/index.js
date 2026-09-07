@@ -1,18 +1,20 @@
 /**
  * @kiln/effect runtime implementation.
+ *
+ * Effect v4 spellings of `@kiln/concurrency`. `forEachParallel` is `Effect.forEach` with
+ * unbounded concurrency; `"native"` is accepted as a spelling of that so a program written for
+ * a pooled lowering keeps typechecking. The earlier `KilnWorkerPool` and `KilnNativeScheduler`
+ * were stubs over an engine hook no engine implemented, and are gone (ADR 0058, revised).
  */
 
-import { Effect, Layer, Scope } from "effect";
+import { Effect, Layer } from "effect";
 import { isolate as baseIsolate, transfer as baseTransfer } from "@kiln/concurrency";
 
 export function spawnActorLayer(service, factory) {
   return Layer.effect(
     service,
     Effect.gen(function* () {
-      // 1. Construct the shape inside the factory
       const instance = factory();
-      
-      // 2. Register finalizer on enclosing Scope to shut down realm
       yield* Effect.addFinalizer(() =>
         Effect.sync(() => {
           if (typeof instance.__shutdown === "function") {
@@ -20,7 +22,6 @@ export function spawnActorLayer(service, factory) {
           }
         })
       );
-
       return instance;
     })
   );
@@ -38,21 +39,3 @@ export function forEachParallel(elements, f, options) {
   const conc = options?.concurrency === "native" ? "unbounded" : (options?.concurrency ?? "unbounded");
   return Effect.forEach(elements, f, { concurrency: conc });
 }
-
-export const KilnWorkerPool = {
-  layer: Layer.empty,
-};
-
-export const KilnNativeScheduler = {
-  make(options) {
-    return {
-      scheduleTask(task) {
-        if (typeof globalThis.__kiln_schedule_task === "function") {
-          globalThis.__kiln_schedule_task(task);
-        } else {
-          queueMicrotask(task);
-        }
-      },
-    };
-  },
-};
