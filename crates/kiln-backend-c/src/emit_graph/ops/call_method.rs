@@ -464,7 +464,7 @@ pub(super) fn emit_call_method(
                     // cached callee equal to it is that closure: the site just read it live
                     // from where the method lives. Its body is then known without a load.
                     let matched = format!(
-                        "(cached_fn == kiln_typed_fn_{i} || (plain->body == (kiln_body_fn){symbol}_fn_{i} && (kiln_typed_fn_{i} = cached_fn) != 0)) && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH"
+                        "(cached_fn == kiln_typed_fn_{i} || (plain->body == (kiln_body_fn){symbol}_fn_{i} && (kiln_typed_fn_{i} = cached_fn) != 0)) && kiln_typed_ok"
                     );
                     if plan.typed_returns[i as usize] {
                         let twin = if typed { format!(" d{v} = kiln_typed_d;") } else { String::new() };
@@ -478,6 +478,13 @@ pub(super) fn emit_call_method(
                     }
                 })
                 .collect();
+    // One dispatch guard for every typed arm of the site: the constructor flag and the depth
+    // are the same for each, and `depth` is a local only where a typed arm can be entered.
+    let typed_guard_decl = if typed_candidates.is_empty() {
+        String::new()
+    } else {
+        "int kiln_typed_ok = !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH; (void)kiln_typed_ok; ".to_owned()
+    };
     let typed_remembered: String = typed_candidates
                 .iter()
                 .map(|i| {
@@ -488,6 +495,7 @@ pub(super) fn emit_call_method(
                     }
                 })
                 .collect();
+    let typed_remembered = format!("{typed_guard_decl}{typed_remembered}");
     // The shape-first entry. Once the generic arm below has entered a typed candidate for a
     // receiver shape -- through the site's validated cache -- the shape, the receiver's own
     // prototype link and the prototype epoch of that moment name the callee outright: the same
@@ -518,7 +526,7 @@ pub(super) fn emit_call_method(
                 "{{ int status = kiln_c99_typed_status; if (status == KILN_C99_THROWN) *thrown = kiln_c99_typed_thrown; {diag} {typed_check} }}"
             );
             let guard = format!(
-                "if (!handled && obj->shape != NULL && obj->shape == kiln_typed_shape_{i} && kiln_typed_epoch_{i} == kiln_c99_proto_epoch && obj->prototype.tag == KILN_VALUE_OBJECT && obj->prototype.bits == kiln_typed_proto_{i} && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH)"
+                "if (!handled && obj->shape != NULL && obj->shape == kiln_typed_shape_{i} && kiln_typed_epoch_{i} == kiln_c99_proto_epoch && obj->prototype.tag == KILN_VALUE_OBJECT && obj->prototype.bits == kiln_typed_proto_{i} && kiln_typed_ok)"
             );
             if plan.typed_returns[i as usize] {
                 let twin = if typed { format!(" d{v} = kiln_typed_d;") } else { String::new() };
