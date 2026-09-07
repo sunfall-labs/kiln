@@ -1,5 +1,6 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
+assertion_line: 1165
 expression: body(&unit)
 ---
 /* Program hash: bba595c709c88e0f; bytecode version: 3. */
@@ -16,6 +17,7 @@ static inline int kiln_module_bba595c709c88e0fb9ff50405bd0ae10_fn_0(kiln_call_co
     kiln_value *thrown = ctx->thrown;
     kiln_generator *frame = ctx->frame;
     int depth = ctx->depth;
+    const int kiln_inheriting = kiln_c99_inheriting_new_target; (void)kiln_inheriting;
     kiln_val receiver = receiver_ptr ? *receiver_ptr : KILN_VAL_UNDEFINED;
     (void)receiver_ptr;
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
@@ -36,6 +38,7 @@ kiln_refusal:;
 /* function 0: add, typed entry */
 static inline __attribute__((always_inline)) kiln_val kiln_module_bba595c709c88e0fb9ff50405bd0ae10_fn_0_t(int depth, kiln_val *upvalues, kiln_val receiver, kiln_host *host, kiln_value *thrown, double p0) {
     (void)depth;
+    const int kiln_inheriting = kiln_c99_inheriting_new_target; (void)kiln_inheriting;
     double d0 = 0.0, d3 = 0.0, d4 = 0.0;
     kiln_val v0 = KILN_VAL_UNDEFINED, v1 = KILN_VAL_UNDEFINED, v2 = KILN_VAL_UNDEFINED, v3 = KILN_VAL_UNDEFINED, v4 = KILN_VAL_UNDEFINED;
 kiln_block_0:;
@@ -51,6 +54,7 @@ kiln_block_0:;
 static inline __attribute__((always_inline)) int kiln_module_bba595c709c88e0fb9ff50405bd0ae10_fn_0_f(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc) {
     (void)upvalues;
     kiln_val receiver = receiver_ptr ? *receiver_ptr : KILN_VAL_UNDEFINED;
+    const int kiln_inheriting = kiln_c99_inheriting_new_target; (void)kiln_inheriting;
     double d3 = 0.0, d4 = 0.0;
     kiln_val v0 = KILN_VAL_UNDEFINED, v1 = KILN_VAL_UNDEFINED, v2 = KILN_VAL_UNDEFINED, v3 = KILN_VAL_UNDEFINED, v4 = KILN_VAL_UNDEFINED;
 kiln_block_0:;
@@ -72,6 +76,7 @@ static int kiln_module_bba595c709c88e0fb9ff50405bd0ae10_body(kiln_host *host, ki
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     kiln_c99_reset_diagnostics();
     for (size_t slot = 0; slot < (size_t)2; ++slot) locals[slot] = KILN_VAL_UNDEFINED;
+    const int kiln_inheriting = kiln_c99_inheriting_new_target; (void)kiln_inheriting;
     kiln_val kiln_out = KILN_VAL_UNDEFINED;
     int64_t i3 = 0, i4 = 0, i7 = 0;
     double d3 = 0.0, d4 = 0.0, d7 = 0.0;

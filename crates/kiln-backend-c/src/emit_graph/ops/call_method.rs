@@ -120,7 +120,7 @@ fn emit_map_typed(
              if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
                  kiln_array *arr = (kiln_array *)ptr; \
                  kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
-                 if (!kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                 if (!kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
                      kiln_val vrecv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; \
                      if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
                      if (arr->is_numeric && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
@@ -214,7 +214,7 @@ fn emit_filter_typed(
              if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
                  kiln_array *arr = (kiln_array *)ptr; \
                  kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
-                 if (!kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                 if (!kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
                      kiln_val vrecv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; \
                      if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
                      if (arr->is_numeric && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
@@ -284,7 +284,7 @@ fn emit_reduce_typed(
              if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
                  kiln_array *arr = (kiln_array *)ptr; \
                  kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
-                 if (!kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                 if (!kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
                      kiln_val vrecv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; \
                      if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
                      if (arr->is_numeric && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
@@ -416,7 +416,7 @@ pub(super) fn emit_call_method(
                     // cached callee equal to it is that closure: the site just read it live
                     // from where the method lives. Its body is then known without a load.
                     let matched = format!(
-                        "(cached_fn == kiln_typed_fn_{i} || (plain->body == (kiln_body_fn){symbol}_fn_{i} && (kiln_typed_fn_{i} = cached_fn) != 0)) && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH"
+                        "(cached_fn == kiln_typed_fn_{i} || (plain->body == (kiln_body_fn){symbol}_fn_{i} && (kiln_typed_fn_{i} = cached_fn) != 0)) && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH"
                     );
                     if plan.typed_returns[i as usize] {
                         let twin = if typed { format!(" d{v} = kiln_typed_d;") } else { String::new() };
@@ -683,7 +683,7 @@ pub(super) fn emit_call_method(
                          if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
                              kiln_array *arr = (kiln_array *)ptr; \
                              kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
-                             if (!plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                             if (!plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
                                  kiln_value built_val; \
                                  int status = kiln_c99_new_array_with_capacity(&built_val, arr->count, arr->is_numeric); \
                                  if (status != KILN_C99_OK) return status; \
@@ -731,7 +731,7 @@ pub(super) fn emit_call_method(
                          if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
                              kiln_array *arr = (kiln_array *)ptr; \
                              kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
-                             if (!plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                             if (!plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
                                  kiln_value built_val; \
                                  int status = kiln_c99_new_array_with_capacity(&built_val, arr->count, arr->is_numeric); \
                                  if (status != KILN_C99_OK) return status; \
@@ -781,7 +781,7 @@ pub(super) fn emit_call_method(
                          if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
                              kiln_array *arr = (kiln_array *)ptr; \
                              kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
-                             if (!plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                             if (!plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
                                  kiln_value built_val; \
                                  int status = kiln_c99_new_array_with_capacity(&built_val, arr->count, arr->is_numeric); \
                                  if (status != KILN_C99_OK) return status; \
@@ -833,7 +833,7 @@ pub(super) fn emit_call_method(
                          if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
                              kiln_array *arr = (kiln_array *)ptr; \
                              kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
-                             if (!plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                             if (!plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
                                  kiln_val vacc = v{a1}; \
                                  kiln_val vrecv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; \
                                  if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
@@ -1458,7 +1458,7 @@ pub(super) fn emit_call_method(
                     kiln_val cached_fn = kiln_c99_site_cached_callee(&site, obj); \
                     if (cached_fn != 0 && KILN_VAL_IS_CLOSURE(cached_fn)) {{ \
                         kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(cached_fn); \
-                        {typed_chain}if (!plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                        {typed_chain}if (!plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
                             kiln_val vreceiver = plain->arrow ? plain->captured_this : v{o}; \
                             if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vreceiver); \
                             v{v} = KILN_VAL_UNDEFINED; \
