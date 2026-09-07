@@ -12,7 +12,9 @@ use std::fmt::Write as _;
 
 use kiln_ir::{Constant, Instruction};
 
-use crate::{c_string, host_op_code, instruction_diagnostic, private_brand_key_of};
+use crate::{
+    c_string, diagnostic_source, host_op_code, instruction_diagnostic, private_brand_key_of,
+};
 
 pub(crate) struct TailContext<'a> {
     pub(crate) constants: &'a [Constant],
@@ -259,6 +261,17 @@ pub(crate) fn emit_tail_instruction(
             .unwrap();
         }
         Instruction::DefineAccessor { setter, enumerable } => {
+            if *compact {
+                writeln!(
+                    output,
+                    "    {{ int status = kiln_c99_tail_define_accessor(stack, &sp, {}, {}, {}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status != KILN_C99_OK) return status; }}",
+                    i32::from(*setter),
+                    i32::from(*enumerable),
+                    diagnostic_source(diagnostic_site),
+                )
+                .unwrap();
+                return;
+            }
             let half = if *setter { "setter" } else { "getter" };
             let other = if *setter { "getter" } else { "setter" };
             let prefix = if *setter { "set" } else { "get" };
@@ -308,6 +321,15 @@ pub(crate) fn emit_tail_instruction(
             .unwrap();
         }
         Instruction::DefineMethod => {
+            if *compact {
+                writeln!(
+                    output,
+                    "    {{ int status = kiln_c99_tail_define_method(stack, &sp, {}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status != KILN_C99_OK) return status; }}",
+                    diagnostic_source(diagnostic_site),
+                )
+                .unwrap();
+                return;
+            }
             writeln!(
                 output,
                 "    {{ kiln_value method = kiln_val_to_boundary(stack[--sp]); kiln_value key = kiln_val_to_boundary(stack[--sp]); kiln_value name = kiln_c99_property_key(key); if (name.tag != KILN_VALUE_STRING) {{ {direct_refusal} }} if (kiln_c99_set_function_name(method, key, NULL) != KILN_C99_OK) {{ {direct_refusal} }} if (kiln_c99_define_method(kiln_val_to_boundary(stack[sp - 1]), name.ptr, name.len, method) != KILN_C99_OK) {{ {direct_refusal} }} }}"
@@ -384,6 +406,15 @@ pub(crate) fn emit_tail_instruction(
         // The arity comes from an array the program built, so the arguments are read out of it
         // rather than off the stack.
         Instruction::Apply => {
+            if *compact {
+                writeln!(
+                    output,
+                    "    {{ int status = kiln_c99_tail_apply(host, stack, &sp, depth, thrown, {}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {{ {unwind} }} if (status != KILN_C99_OK) return status; }}",
+                    diagnostic_source(diagnostic_site),
+                )
+                .unwrap();
+                return;
+            }
             writeln!(
                 output,
                 "    {{ kiln_value list = kiln_val_to_boundary(stack[--sp]); kiln_val callee = stack[--sp]; kiln_val self_value = stack[sp - 1]; kiln_val call_result = KILN_VAL_UNDEFINED; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) {{ {direct_refusal} }} given = kiln_c99_array_of(list); status = kiln_c99_call_val(host, &call_result, callee, self_value, given->count == 0 ? NULL : given->elements, given->count, depth, thrown); if (status == KILN_C99_THROWN) {{ {unwind} }} if (status != KILN_C99_OK) return status; stack[sp - 1] = call_result; }}"

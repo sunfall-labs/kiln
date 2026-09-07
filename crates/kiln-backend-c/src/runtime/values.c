@@ -230,6 +230,69 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
     return KILN_C99_OK;
 }
 
+/* Stack-tail operations are outlined as operations, not as wrappers around operations. Compact
+ * generated bodies otherwise repeat the same conversion, validation, and diagnostic plumbing at
+ * every site, even though only the stack cursor and diagnostic coordinates vary. */
+static int kiln_c99_tail_define_accessor(kiln_val *stack, size_t *sp, int setter_half,
+                                          int enumerable, const char *site, size_t pc,
+                                          const char *operation, size_t diagnostic_depth) {
+    size_t cursor = *sp;
+    kiln_value half = kiln_val_to_boundary(stack[--cursor]);
+    kiln_value key = kiln_val_to_boundary(stack[--cursor]);
+    kiln_value other = kiln_c99_undefined();
+    kiln_value name = kiln_c99_property_key(key);
+    kiln_value getter = setter_half ? other : half;
+    kiln_value setter = setter_half ? half : other;
+    int status;
+    *sp = cursor;
+    if (name.tag != KILN_VALUE_STRING) {
+        KILN_C99_REFUSE_AT(site, pc, operation, diagnostic_depth);
+    }
+    status = kiln_c99_set_function_name(half, key, setter_half ? "set" : "get");
+    if (status != KILN_C99_OK) return status;
+    return kiln_c99_define_accessor(kiln_val_to_boundary(stack[cursor - 1]), name.ptr, name.len,
+                                    getter, setter, enumerable);
+}
+
+static int kiln_c99_tail_define_method(kiln_val *stack, size_t *sp, const char *site,
+                                        size_t pc, const char *operation,
+                                        size_t diagnostic_depth) {
+    size_t cursor = *sp;
+    kiln_value method = kiln_val_to_boundary(stack[--cursor]);
+    kiln_value key = kiln_val_to_boundary(stack[--cursor]);
+    kiln_value name = kiln_c99_property_key(key);
+    *sp = cursor;
+    if (name.tag != KILN_VALUE_STRING ||
+        kiln_c99_set_function_name(method, key, NULL) != KILN_C99_OK ||
+        kiln_c99_define_method(kiln_val_to_boundary(stack[cursor - 1]), name.ptr, name.len,
+                               method) != KILN_C99_OK) {
+        KILN_C99_REFUSE_AT(site, pc, operation, diagnostic_depth);
+    }
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_tail_apply(kiln_host *host, kiln_val *stack, size_t *sp, int depth,
+                                kiln_value *thrown, const char *site, size_t pc,
+                                const char *operation, size_t diagnostic_depth) {
+    size_t cursor = *sp;
+    kiln_value list = kiln_val_to_boundary(stack[--cursor]);
+    kiln_val callee = stack[--cursor];
+    kiln_val self_value = stack[cursor - 1];
+    kiln_val call_result = KILN_VAL_UNDEFINED;
+    kiln_array *given;
+    int status;
+    *sp = cursor;
+    if (list.tag != KILN_VALUE_ARRAY) {
+        KILN_C99_REFUSE_AT(site, pc, operation, diagnostic_depth);
+    }
+    given = kiln_c99_array_of(list);
+    status = kiln_c99_call_val(host, &call_result, callee, self_value,
+                               given->count == 0 ? NULL : given->elements,
+                               given->count, depth, thrown);
+    if (status == KILN_C99_OK) stack[cursor - 1] = call_result;
+    return status;
+}
+
 /* Recursion runs on the C stack here, so depth is carried explicitly and checked before the
  * frame is entered rather than discovered by crashing. */
 /* The receiver is `this` inside the body.  A plain call passes undefined, which is what `this`

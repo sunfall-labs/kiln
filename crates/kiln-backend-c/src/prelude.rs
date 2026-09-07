@@ -2327,7 +2327,7 @@ static size_t kiln_c99_diagnostic_function_len = 0;
 static char kiln_c99_diagnostic_compose[128];
 static int kiln_c99_diagnostic_active_depth = 0;
 
-/* THE THREE WAYS TO PRODUCE `KILN_C99_CONTROL_ERROR`, AND THERE ARE NO OTHERS.
+/* THE FOUR WAYS TO PRODUCE `KILN_C99_CONTROL_ERROR`, AND THERE ARE NO OTHERS.
  *
  * A refusal that names nothing sends the reader somewhere else. Four investigations in one day
  * went to the wrong place because the site that knew what was missing said nothing and let an
@@ -2383,6 +2383,18 @@ static int kiln_c99_refuse_named(const char *lacked, const char *subject, size_t
     return KILN_C99_CONTROL_ERROR;
 }
 
+static void kiln_c99_note_refusal(const char *site, size_t instruction,
+                                  const char *operation, size_t depth);
+
+/* Generated stack-tail sites already have the exact source coordinate and operation. Their
+ * outlined helpers use this form so the diagnostic remains owned by that instruction while the
+ * control status is still impossible to manufacture unnamed in runtime C. */
+static int kiln_c99_refuse_at(const char *site, size_t instruction,
+                              const char *operation, size_t depth) {
+    kiln_c99_note_refusal(site, instruction, operation, depth);
+    return KILN_C99_CONTROL_ERROR;
+}
+
 /* `KILN_C99_CONTROL_ERROR` is also an *internal* status: a reader hands it to a caller that
  * converts it into something the program sees, and no refusal is ever reported. `JSON.parse` on
  * `{bad` throws a `SyntaxError` in both engines, so the reader's twenty-two exits are not gaps and
@@ -2400,6 +2412,8 @@ static int kiln_c99_internal_status(const char *converted_by) {
 #define KILN_C99_REFUSE(lacked) return kiln_c99_refuse(lacked)
 #define KILN_C99_REFUSE_NAMED(lacked, subject, subject_len) \
     return kiln_c99_refuse_named((lacked), (subject), (subject_len))
+#define KILN_C99_REFUSE_AT(site, instruction, operation, depth) \
+    return kiln_c99_refuse_at((site), (instruction), (operation), (depth))
 #define KILN_C99_REFUSE_INTERNAL(converted_by) return kiln_c99_internal_status(converted_by)
 
 "#
@@ -2425,11 +2439,14 @@ extern int kiln_c99_diagnostic_active_depth;
 
 int kiln_c99_refuse(const char *lacked);
 int kiln_c99_refuse_named(const char *lacked, const char *subject, size_t subject_len);
+int kiln_c99_refuse_at(const char *site, size_t instruction, const char *operation, size_t depth);
 int kiln_c99_internal_status(const char *converted_by);
 
 #define KILN_C99_REFUSE(lacked) return kiln_c99_refuse(lacked)
 #define KILN_C99_REFUSE_NAMED(lacked, subject, subject_len) \
     return kiln_c99_refuse_named((lacked), (subject), (subject_len))
+#define KILN_C99_REFUSE_AT(site, instruction, operation, depth) \
+    return kiln_c99_refuse_at((site), (instruction), (operation), (depth))
 #define KILN_C99_REFUSE_INTERNAL(converted_by) return kiln_c99_internal_status(converted_by)
 
 "#

@@ -3,6 +3,37 @@
  * Outlined instruction operation helpers (compact scalar emission)
  * ========================================================================= */
 
+static int kiln_c99_val_new_array_literal(kiln_val *out, const kiln_val *elements,
+                                           size_t count, int is_numeric) {
+    kiln_value built;
+    int status = kiln_c99_new_array_with_capacity(&built, count, is_numeric);
+    if (status != KILN_C99_OK) return status;
+    if (count != 0) {
+        kiln_array *array = kiln_c99_array_of(built);
+        memcpy(array->elements, elements, count * sizeof *elements);
+        array->count = count;
+    }
+    *out = kiln_val_from_boundary(built);
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_val_new_object_literal(kiln_val *out, const kiln_val *pairs,
+                                            size_t count) {
+    kiln_value built;
+    size_t pair;
+    int status = count == 0
+        ? kiln_c99_new_object(&built)
+        : kiln_c99_new_object_with_capacity(&built, count);
+    if (status != KILN_C99_OK) return status;
+    for (pair = 0; pair < count; ++pair) {
+        status = kiln_c99_define_computed(built, kiln_val_to_boundary(pairs[pair * 2]),
+                                          kiln_val_to_boundary(pairs[pair * 2 + 1]));
+        if (status != KILN_C99_OK) return status;
+    }
+    *out = kiln_val_from_boundary(built);
+    return KILN_C99_OK;
+}
+
 static kiln_val kiln_c99_string_constant(void **cached, const char *bytes, size_t len) {
     if (KILN_UNLIKELY(*cached == NULL)) {
         kiln_value val = kiln_c99_copy_text(bytes, len);
