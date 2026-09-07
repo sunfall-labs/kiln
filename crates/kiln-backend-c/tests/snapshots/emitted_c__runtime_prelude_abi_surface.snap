@@ -1,6 +1,5 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 803
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -2036,7 +2035,7 @@ static int kiln_c99_json_define(kiln_value built, const char *ikey, kiln_val mem
 typedef struct kiln_json_build_frame {
 #define KILN_JSON_BUILD_LOCAL_FRAMES 32
 typedef struct kiln_json_build_stack {
-static int kiln_c99_json_build_mirror(kiln_json_build_stack *stack, size_t index, kiln_value value,
+static int kiln_c99_json_build_mirror(kiln_json_build_stack *stack, size_t index, kiln_val value,
 static int kiln_c99_json_build_materialize_key(kiln_json_build_stack *stack, size_t index) {
 static int kiln_c99_json_build_open(kiln_json_build_stack *stack, kiln_value container,
 static void kiln_c99_json_build_release(kiln_json_build_stack *stack) {

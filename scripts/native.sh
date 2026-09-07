@@ -49,6 +49,23 @@ cd "$(kiln_repo_root)"
 
 PROBES="${KILN_NATIVE_DIR:-conformance/native}"
 
+# Run the *native* side of each pair under the collector's stress mode.
+#
+# The ordinary corpus collects when the heap says to, which for most probes is never, so a value
+# the walk failed to root is swept only if a collection happens to land inside the window that
+# drops it. `conformance/native/json-shaped-build-edges.js` nests 200 deep and passed for as long
+# as it existed while `JSON.parse` was handing back one key's bytes under another key's name --
+# the collection never landed. Under stress it lands on every allocation and the same probes ask
+# a much sharper question: is every value this program builds reachable at every point it could
+# be collected?
+#
+# The interpreter stays ordinary. It is the oracle here (see above), and an oracle is worth
+# having only if it is the cheap, boring one.
+#
+# It is minutes rather than seconds, so it is a task of its own (`mise run native-stress`) and
+# not part of `gate-quick`.
+STRESS="${KILN_NATIVE_GC_STRESS:-}"
+
 KILN="${KILN_BIN:-}"
 if [[ -z $KILN ]]; then
 	if [[ -x "$(kiln_repo_root)/target/release/kiln" ]]; then
@@ -100,7 +117,11 @@ run_probe() {
 	local interpreted_status=0
 
 	local native native_status=0
-	native="$("$KILN" --one-shot ${adapter:+"$adapter"} run --native "$probe" 2>&1)" || native_status=$?
+	if [[ -n $STRESS ]]; then
+		native="$(KILN_GC_STRESS="$STRESS" "$KILN" --one-shot ${adapter:+"$adapter"} run --native "$probe" 2>&1)" || native_status=$?
+	else
+		native="$("$KILN" --one-shot ${adapter:+"$adapter"} run --native "$probe" 2>&1)" || native_status=$?
+	fi
 
 	if [[ $native == "$interpreted" ]] && ((native_status == interpreted_status)); then
 		touch "$WORK_DIR/$name.matched"
@@ -191,7 +212,7 @@ for probe in "$PROBES"/*.ts "$PROBES"/*.js "$PROBES"/*.cjs; do
 	fi
 done
 
-kiln_say "native: $matched matched, ${#REFUSALS[@]} refused, $diverged diverged"
+kiln_say "native: $matched matched, ${#REFUSALS[@]} refused, $diverged diverged${STRESS:+ (KILN_GC_STRESS=$STRESS)}"
 
 if ((${#REFUSALS[@]} > 0)); then
 	kiln_say ""

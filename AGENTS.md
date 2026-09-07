@@ -55,6 +55,7 @@ that assembly, in the repository, and `mise tasks` lists it beside the rest.
 | `mise run test262` | the Test262 baseline alone, chunk by chunk |
 | `mise run test262-update` | regenerate the baseline; deliberate, and the diff is the record |
 | `mise run test262-fetch` | fetch the pinned corpus into `~/.cache/kiln`, once per machine |
+| `mise run native-stress` | the native corpus again with the collector stressed on every allocation |
 
 `mise trust` once per checkout, or the tasks are invisible.
 
@@ -73,6 +74,17 @@ suite that never ran. And it re-execs itself under a bash 4 or newer: macOS
 ships 3.2, `mise run` finds it, and under 3.2 `thirdparty.sh` loses `BASHPID` and its cleanup trap
 deletes the shared results directory instead of its own -- every bundle then reports "missing" and
 the change under test takes the blame.
+
+`mise run native-stress` is the native corpus with `KILN_GC_STRESS` set for the native side of
+every pair. It is not in the gate and should not be: it is minutes rather than seconds, and it
+answers a different question. The ordinary corpus asks whether the two engines agree; this asks
+whether every value the native walk builds is reachable at every point a collection could happen,
+because a value that is merely *usually* reachable passes the ordinary run every time. A
+`JSON.parse` that returned one key's bytes under another key's name survived
+`conformance/native/json-shaped-build-edges.js` -- which nests two hundred deep -- for exactly
+that reason: the collection never landed inside the window. Run it after anything that touches
+allocation, rooting or the collector, and before believing a corpus that "already covers" the
+shape you changed.
 
 ### Run the gate once, at the end, not as a progress bar
 
