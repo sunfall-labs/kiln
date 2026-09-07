@@ -1344,8 +1344,19 @@ fn node_builtin_static_imports_are_typed_virtual_modules() {
         .expect("execute builtin imports");
     // The key list is `kiln_node_abi::builtin_abi("fs/promises").exports`, the link-time
     // contract: a name listed there and unimplemented would link and read `undefined`, which is
-    // the failure CLAUDE.md calls the expensive one. So the expectation follows the table.
-    assert_eq!(host.output, ["function function readFile,stat,writeFile"]);
+    // the failure CLAUDE.md calls the expensive one. So the expectation is read from the table
+    // rather than spelled here: this assertion was red twice in one day, once because the test
+    // named two functions the table lacked and once because the table gained them after the test
+    // had been pinned to its old spelling. A namespace object's keys are sorted, so the table is.
+    let mut exports = kiln_node_abi::builtin_abi("node:fs/promises")
+        .expect("fs/promises is a builtin")
+        .exports
+        .to_vec();
+    exports.sort_unstable();
+    assert_eq!(
+        host.output,
+        [format!("function function {}", exports.join(","))]
+    );
 }
 
 #[test]

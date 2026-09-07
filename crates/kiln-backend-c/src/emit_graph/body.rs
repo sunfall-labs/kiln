@@ -419,7 +419,9 @@ pub fn emit_entry_from_graph_with_profile(
     plan: &CallPlan,
     type_profile_record: bool,
 ) {
-    output.push_str("    const int kiln_inheriting = kiln_c99_inheriting_new_target; (void)kiln_inheriting;\n");
+    output.push_str(
+        "    const int kiln_inheriting = kiln_c99_inheriting_new_target; (void)kiln_inheriting;\n",
+    );
     emit_blocks(
         output,
         graph,
@@ -461,6 +463,11 @@ pub fn emit_async_entry_body(
     output.push_str("    kiln_value *thrown = ctx->thrown; (void)thrown;\n");
     output.push_str("    kiln_generator *frame = ctx->frame;\n");
     output.push_str("    int depth = ctx->depth; (void)depth;\n");
+    // Every call site reads `kiln_inheriting` (see `emit_entry_prologue`); an async module body
+    // is a body like any other and declares it too, or the module unit does not compile.
+    output.push_str(
+        "    const int kiln_inheriting = kiln_c99_inheriting_new_target; (void)kiln_inheriting;\n",
+    );
     output.push_str(
         "    kiln_val receiver = receiver_ptr ? *receiver_ptr : KILN_VAL_UNDEFINED; (void)receiver;\n",
     );
@@ -618,7 +625,8 @@ fn emit_block_sequence(
     let this_copies: std::collections::HashMap<ValueId, ValueId> = {
         let mut copies = std::collections::HashMap::new();
         for block in &graph.blocks {
-            let mut last: std::collections::HashMap<usize, ValueId> = std::collections::HashMap::new();
+            let mut last: std::collections::HashMap<usize, ValueId> =
+                std::collections::HashMap::new();
             for (vid, op) in &block.operations {
                 let pure = match op {
                     GraphOp::Const { .. }
@@ -637,7 +645,9 @@ fn emit_block_sequence(
                     | GraphOp::Phi { .. }
                     | GraphOp::MakeCell(_) => true,
                     GraphOp::Unary { value, .. } => numbers.contains(value),
-                    GraphOp::Binary { left, right, .. } => numbers.contains(left) && numbers.contains(right),
+                    GraphOp::Binary { left, right, .. } => {
+                        numbers.contains(left) && numbers.contains(right)
+                    }
                     _ => false,
                 };
                 if let (GraphOp::GetProperty { .. }, Some(col)) = (op, this_sites.get(vid)) {
@@ -1123,7 +1133,14 @@ fn emit_blocks(
                 && spec_arrays.contains(object)
             {
                 let is_length = matches!(program.constants.get(*name as usize), Some(Constant::String(s)) if s == "length");
-                candidate_assumptions.insert(*vid, if is_length { Proven::Int } else { Proven::Number });
+                candidate_assumptions.insert(
+                    *vid,
+                    if is_length {
+                        Proven::Int
+                    } else {
+                        Proven::Number
+                    },
+                );
             }
         }
         let speculative_numbers = proven_numbers_with_assumptions(graph, &candidate_assumptions);

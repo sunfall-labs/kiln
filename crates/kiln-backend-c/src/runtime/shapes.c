@@ -33,7 +33,7 @@ static void kiln_c99_pin_interned_key(const char *ikey) {
     if (ikey == NULL || ikey == kiln_c99_key_empty) return;
     heap = kiln_c99_gc_heap();
     if (heap == NULL) return;
-    len = strlen(ikey);
+    len = kiln_c99_key_len(ikey);
     entry = kiln_c99_key_probe(&heap->keys, ikey, len, kiln_c99_key_hash(ikey, len));
     if (entry != NULL) {
         entry->pinned = 1;
@@ -160,7 +160,7 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
     }
     for (i = 0; i < shape->property_count; ++i) {
         const char *key = shape->keys[i];
-        size_t key_len = strlen(key);
+        size_t key_len = kiln_c99_key_len(key);
         object->properties[pos].key = key;
         object->properties[pos].key_len = key_len;
         object->properties[pos].enumerable = !(key_len >= 2 && key[0] == '@' && key[1] == '@');

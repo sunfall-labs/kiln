@@ -450,7 +450,7 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
         size_t length = object->shape->property_count;
         for (index = 0; index < length && object->shape != NULL && index < object->shape->property_count; ++index) {
             const char *skey = object->shape->keys[index];
-            size_t skey_len = strlen(skey);
+            size_t skey_len = kiln_c99_key_len(skey);
             kiln_value sval;
             int status;
             if (skey_len >= 2 && skey[0] == '@' && skey[1] == '@') {

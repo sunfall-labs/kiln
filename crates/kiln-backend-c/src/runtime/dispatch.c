@@ -3018,7 +3018,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     if (extra->properties == NULL && extra->shape != NULL) {
                         for (index = 0; index < extra->shape->property_count && status == KILN_C99_OK; ++index) {
                             const char *skey = extra->shape->keys[index];
-                            size_t key_len = strlen(skey);
+                            size_t key_len = kiln_c99_key_len(skey);
                             kiln_value key;
                             kiln_value val;
                             if (key_len >= 2 && skey[0] == '@' && skey[1] == '@') {
@@ -3163,7 +3163,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 }
                 for (index = 0; index < object->shape->property_count && status == KILN_C99_OK; ++index) {
                     const char *skey = object->shape->keys[index];
-                    size_t key_len = strlen(skey);
+                    size_t key_len = kiln_c99_key_len(skey);
                     kiln_value key;
                     kiln_value val;
                     if (key_len >= 2 && skey[0] == '@' && skey[1] == '@') {
@@ -3271,7 +3271,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     }
                     for (index = 0; index < source->shape->property_count; ++index) {
                         const char *skey = source->shape->keys[index];
-                        size_t skey_len = strlen(skey);
+                        size_t skey_len = kiln_c99_key_len(skey);
                         kiln_value sval;
                         if (skey_len >= 2 && skey[0] == '@' && skey[1] == '@') {
                             kiln_value symbol;

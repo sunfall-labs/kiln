@@ -1,6 +1,5 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 803
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -1241,6 +1240,7 @@ static void kiln_c99_gc_ptrset_remove(kiln_gc_ptrset *set, const void *pointer);
 static int kiln_c99_gc_ptrset_contains(const kiln_gc_ptrset *set, const void *pointer);
 static void *kiln_c99_gc_aligned_alloc(size_t alignment, size_t size);
 static void kiln_c99_gc_aligned_free(void *aligned);
+static inline size_t kiln_c99_key_len(const char *ikey) {
 typedef struct kiln_key_entry {
 typedef struct kiln_key_table {
 #define KILN_C99_HOT_KEYS(X)                     \
@@ -1350,8 +1350,10 @@ static void *kiln_c99_gc_alloc(uint32_t kind, size_t size) {
 static void *kiln_c99_gc_alloc_pointer_free(uint32_t kind, size_t size) {
 static void *kiln_c99_gc_alloc_tenured(uint32_t kind, size_t size) {
 static void *kiln_c99_gc_calloc(uint32_t kind, size_t size) {
-static const char kiln_c99_key_empty[1] = "";
+static const struct kiln_c99_key_empty_storage {
+#define kiln_c99_key_empty (kiln_c99_key_empty_storage.bytes)
 static void kiln_c99_gc_mark_block(kiln_gc_heap *heap, const void *payload);
+static char *kiln_c99_gc_alloc_text_tenured(size_t len);
 static int kiln_c99_keys_check_mode = -1;
 static int kiln_c99_keys_checked(void) {
 static uint64_t kiln_c99_key_hash(const char *bytes, size_t len) {
