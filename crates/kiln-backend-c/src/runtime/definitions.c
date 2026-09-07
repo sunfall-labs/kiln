@@ -214,8 +214,7 @@ static int kiln_c99_define_property(kiln_host *host, kiln_value target, const ch
                 (has_configurable && !kiln_c99_truthy(configurable))) {
                 KILN_C99_REFUSE("an array index definition that is not a plain writable value");
             }
-            status = kiln_c99_reserve((void **)&array->elements, &array->capacity, slot + 1,
-                                      sizeof *array->elements);
+            status = kiln_c99_array_reserve(array, slot + 1);
             if (status != KILN_C99_OK) {
                 return status;
             }

@@ -303,8 +303,7 @@ static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_v
             array->elements = moved;
             array->capacity = grown;
         } else {
-            status = kiln_c99_reserve((void **)&array->elements, &array->capacity, slot + 1,
-                                      sizeof *array->elements);
+            status = kiln_c99_array_reserve(array, slot + 1);
             if (status != KILN_C99_OK) {
                 return status;
             }
@@ -623,8 +622,7 @@ static int kiln_c99_put_refused(kiln_value target, const char *key, size_t key_l
 
 static int kiln_c99_array_push(kiln_value target, kiln_value value) {
     kiln_array *array = kiln_c99_array_of(target);
-    int status = kiln_c99_reserve((void **)&array->elements, &array->capacity, array->count + 1,
-                                  sizeof *array->elements);
+    int status = kiln_c99_array_reserve(array, array->count + 1);
     if (status != KILN_C99_OK) {
         return status;
     }
@@ -639,8 +637,7 @@ static int kiln_c99_array_push(kiln_value target, kiln_value value) {
 
 static int kiln_c99_array_push_val(kiln_value target, kiln_val value) {
     kiln_array *array = kiln_c99_array_of(target);
-    int status = kiln_c99_reserve((void **)&array->elements, &array->capacity, array->count + 1,
-                                  sizeof *array->elements);
+    int status = kiln_c99_array_reserve(array, array->count + 1);
     if (status != KILN_C99_OK) {
         return status;
     }

@@ -5214,3 +5214,38 @@ so the decoupled module units can link against it, and keeps `static inline` int
 `static inline` on an exported function is an undefined symbol at the program's link, not at the
 tests. And editing the working tree while a gate runs in it invalidates the gate -- the backend
 tests compile the runtime from the tree at that moment -- which cost one full gate run today.
+
+## JSON without a builder per member; strings were already intrinsics (2026-09-06, Claude `work/fastest-native`)
+
+Two Sonnet agents, disjoint files, their own worktrees; reviewed and cherry-picked.
+
+**json 82.7 → 46.5 ms** (node 27). `kiln_c99_json_value` gave every member its own `kiln_text`
+(malloc, a doubling chain of reallocs, a copy into the parent, a free), asked every plain object
+for `toJSON` by name up the chain, formatted every number through the Rust provider, and the
+parser materialised each key as a string before re-interning it for a by-name `kiln_c99_put`.
+Now: members write into the parent builder and roll back to a length mark when a member has no
+JSON spelling; `kiln_c99_json_lacks_tojson` walks shapes and dictionaries for the one interned
+key and only falls back to `kiln_c99_get` when something on the chain is not a plain object;
+integers with |n| < 2^53 format in C; parsed keys intern from the input bytes and define
+through the shape transition (`kiln_c99_json_define`), which also fixes `JSON.parse('{"__proto__":...}')`
+relinking the prototype where the language creates an own property; and numbers with at most
+fifteen significant digits and a decimal exponent within ±22 parse by Clinger's exact path.
+Probe: `conformance/native/json-fast-path-edges.js`. What remains, by the agent's final profile,
+is the allocator and the collector at over 40%: the parse of a 150-byte document is a dozen
+allocations, and `kiln_number_to_js_string` for the non-integers.
+
+**string-ops 11.1 → 10.9 ms** (node 7.1), and a finding worth more than the number: every call in
+the benchmark -- `split`, `slice`, `join`, `indexOf`, `substring` -- is already an intrinsic the
+emitter inlines (`call_method.rs`: `split_intrinsic` and siblings), so `strings.c` never runs for
+it. The agent could reach `kiln_c99_new_array_with_capacity`, which malloc'd even for eight
+elements although the array carries eight inline (fixed), and the ASCII `split` path, which
+guessed a capacity and grew through the generic push (now counted first, written once) and had
+ignored `split`'s limit argument entirely (implemented, with `split-limit.js`). The rest of the
+gap is fifteen allocations an iteration through `kiln_c99_gc_alloc_ex` and the collections they
+cause, which is the generational item, not a string item. Filed by the agent, not fixed:
+`[obj].join()` does not call a shorthand-method `toString`.
+
+Operational: `.kiln/cache` in the worktree reached 70 GB after a day of gates and filled the
+disk mid-gate, which failed six crates' tests with "No space left on device"; the gate script
+now ends with `kiln cache gc`. A gate whose crate tests fail while its corpora pass has had its
+tree or its disk changed under it, and the answer is to rerun the phase, not to read the failures.
