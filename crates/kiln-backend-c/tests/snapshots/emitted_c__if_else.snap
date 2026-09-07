@@ -1,6 +1,6 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 1059
+assertion_line: 1069
 expression: body(&unit)
 ---
 /* Program hash: eefe509046ae914d; bytecode version: 3. */
@@ -14,6 +14,7 @@ int kiln_module_eefe509046ae914db2c05a6de8cadacc(kiln_host *host, kiln_value *re
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     kiln_c99_reset_diagnostics();
     for (size_t slot = 0; slot < (size_t)1; ++slot) locals[slot] = KILN_VAL_UNDEFINED;
+    const int kiln_inheriting = kiln_c99_inheriting_new_target; (void)kiln_inheriting;
     int b2 = 0;
     int64_t i3 = 0, i4 = 0, i5 = 0, i6 = 0;
     double d3 = 0.0, d4 = 0.0, d5 = 0.0, d6 = 0.0;
