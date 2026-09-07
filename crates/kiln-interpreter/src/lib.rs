@@ -1787,6 +1787,7 @@ pub enum PrototypeTable {
     DisposableStack,
     AsyncDisposableStack,
     EventEmitter,
+    Console,
     /// `node:stream`'s readable method table. It inherits EventEmitter and owns no transport:
     /// HTTP, TCP and in-memory producers all feed the same state machine through `push`.
     Readable,
@@ -4128,6 +4129,7 @@ fn node_builtin_namespace(specifier: &str) -> Option<Value> {
             "assert" | "assert/strict" => Native::NodeAssert,
             "buffer" => Native::NodeBuffer,
             "async_hooks" => Native::NodeAsyncHooks,
+            "console" => Native::NodeConsole,
             "crypto" => Native::NodeCrypto,
             "diagnostics_channel" => Native::NodeDiagnosticsChannel,
             "dns" => Native::NodeDns,
@@ -4165,6 +4167,7 @@ fn node_builtin_specifier(native: Native) -> Option<&'static str> {
         Native::NodeAssert => "node:assert",
         Native::NodeAsyncHooks => "node:async_hooks",
         Native::NodeBuffer => "node:buffer",
+        Native::NodeConsole => "node:console",
         Native::NodeCrypto => "node:crypto",
         Native::NodeDiagnosticsChannel => "node:diagnostics_channel",
         Native::NodeDns => "node:dns",
@@ -4330,6 +4333,7 @@ impl Value {
             Self::Native(
                 Native::NodeAsyncHooks
                 | Native::NodeBuffer
+                | Native::NodeConsole
                 | Native::NodeCrypto
                 | Native::NodeDiagnosticsChannel
                 | Native::NodeDns
@@ -4405,6 +4409,7 @@ impl Value {
             Self::Native(
                 Native::NodeAsyncHooks
                 | Native::NodeBuffer
+                | Native::NodeConsole
                 | Native::NodeCrypto
                 | Native::NodeDiagnosticsChannel
                 | Native::NodeDns
@@ -14197,29 +14202,65 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::NodeUtilFormat => {
                 return Ok(Value::String(node_util_format(arguments)));
             }
-            Native::ConsoleLog | Native::ConsoleError => {
-                let arguments = arguments
-                    .iter()
-                    .cloned()
-                    .map(HostValue::from)
-                    .collect::<Vec<_>>();
-                /* `console.error` and `console.warn` go to standard error, which is where every
-                 * engine a program is written against puts them. They shared the stdout operation
-                 * until the ABI had a second one, and the note at the console's own construction
-                 * said so; this is that note coming due. The stream is observable -- a caller that
-                 * redirects one and not the other sees it -- so sharing was a wrong answer that
-                 * only looked right under `2>&1`. */
-                let operation = if native == Native::ConsoleError {
-                    HostOp::WriteStderr
-                } else {
-                    HostOp::WriteStdout
-                };
-                self.host
-                    .call(operation, &arguments)
-                    .map_err(|error| ExecutionError::Host {
+            Native::ConsoleConstructor => {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "Class constructor Console cannot be invoked without 'new'".to_owned(),
+                });
+            }
+            Native::ConsoleLog
+            | Native::ConsoleInfo
+            | Native::ConsoleDebug
+            | Native::ConsoleDir
+            | Native::ConsoleTable => {
+                return self.write_console_output(receiver, false, arguments, instruction);
+            }
+            Native::ConsoleError | Native::ConsoleWarn => {
+                return self.write_console_output(receiver, true, arguments, instruction);
+            }
+            Native::ConsoleAssert => {
+                let condition = arguments.first().map(|v| v.is_truthy()).unwrap_or(false);
+                if !condition {
+                    let message = if arguments.len() > 1 {
+                        format!("Assertion failed: {}", node_util_format(&arguments[1..]))
+                    } else {
+                        "Assertion failed".to_owned()
+                    };
+                    return self.write_console_output(
+                        receiver,
+                        true,
+                        &[Value::String(message)],
                         instruction,
-                        message: error.to_string(),
-                    })?;
+                    );
+                }
+                return Ok(Value::Undefined);
+            }
+            Native::ConsoleTrace => {
+                let message = if !arguments.is_empty() {
+                    format!("Trace: {}", node_util_format(arguments))
+                } else {
+                    "Trace".to_owned()
+                };
+                return self.write_console_output(
+                    receiver,
+                    true,
+                    &[Value::String(message)],
+                    instruction,
+                );
+            }
+            Native::ConsoleClear
+            | Native::ConsoleCount
+            | Native::ConsoleCountReset
+            | Native::ConsoleGroup
+            | Native::ConsoleGroupEnd
+            | Native::ConsoleGroupCollapsed
+            | Native::ConsoleTime
+            | Native::ConsoleTimeEnd
+            | Native::ConsoleTimeLog
+            | Native::ConsoleDirxml
+            | Native::ConsoleTimeStamp
+            | Native::ConsoleProfile
+            | Native::ConsoleProfileEnd
+            | Native::NodeConsole => {
                 return Ok(Value::Undefined);
             }
             Native::NodeAssertOk => {
@@ -25431,14 +25472,46 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Native(Native::ClearImmediate, realm),
         );
         let mut console = ObjectData::default();
+        console.set_prototype(Value::Native(
+            Native::PrototypeOf(PrototypeTable::Console),
+            realm,
+        ));
+        console.set_non_enumerable("Console", Value::Native(Native::ConsoleConstructor, realm));
         console.set_non_enumerable("log", Value::Native(Native::ConsoleLog, realm));
+        console.set_non_enumerable("info", Value::Native(Native::ConsoleInfo, realm));
+        console.set_non_enumerable("debug", Value::Native(Native::ConsoleDebug, realm));
+        console.set_non_enumerable("dir", Value::Native(Native::ConsoleDir, realm));
         // Host ABI v3 exposes a captured standard-*error* operation beside the standard-output
         // one, so error delivery is no longer folded onto stdout. Both still cross the same
         // explicit boundary, which is what preserves the realm's no-ambient-I/O guarantee while
         // making console an ordinary cross-module value.
         console.set_non_enumerable("error", Value::Native(Native::ConsoleError, realm));
-        console.set_non_enumerable("warn", Value::Native(Native::ConsoleError, realm));
-        console.set_non_enumerable("info", Value::Native(Native::ConsoleLog, realm));
+        console.set_non_enumerable("warn", Value::Native(Native::ConsoleWarn, realm));
+        console.set_non_enumerable("assert", Value::Native(Native::ConsoleAssert, realm));
+        console.set_non_enumerable("clear", Value::Native(Native::ConsoleClear, realm));
+        console.set_non_enumerable("count", Value::Native(Native::ConsoleCount, realm));
+        console.set_non_enumerable(
+            "countReset",
+            Value::Native(Native::ConsoleCountReset, realm),
+        );
+        console.set_non_enumerable("group", Value::Native(Native::ConsoleGroup, realm));
+        console.set_non_enumerable("groupEnd", Value::Native(Native::ConsoleGroupEnd, realm));
+        console.set_non_enumerable(
+            "groupCollapsed",
+            Value::Native(Native::ConsoleGroupCollapsed, realm),
+        );
+        console.set_non_enumerable("table", Value::Native(Native::ConsoleTable, realm));
+        console.set_non_enumerable("time", Value::Native(Native::ConsoleTime, realm));
+        console.set_non_enumerable("timeEnd", Value::Native(Native::ConsoleTimeEnd, realm));
+        console.set_non_enumerable("timeLog", Value::Native(Native::ConsoleTimeLog, realm));
+        console.set_non_enumerable("trace", Value::Native(Native::ConsoleTrace, realm));
+        console.set_non_enumerable("dirxml", Value::Native(Native::ConsoleDirxml, realm));
+        console.set_non_enumerable("timeStamp", Value::Native(Native::ConsoleTimeStamp, realm));
+        console.set_non_enumerable("profile", Value::Native(Native::ConsoleProfile, realm));
+        console.set_non_enumerable(
+            "profileEnd",
+            Value::Native(Native::ConsoleProfileEnd, realm),
+        );
         globals.set_non_enumerable("console", Value::Object(Rc::new(RefCell::new(console))));
         // The three value properties of the global object are the only ones the specification
         // locks on every axis: `{ writable: false, enumerable: false, configurable: false }`.
@@ -25901,6 +25974,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 });
             }
             Native::NodeEventEmitter => node_event_emitter(),
+            Native::ConsoleConstructor => self.construct_console(arguments, current)?,
             Native::NodeStringDecoderConstructor => node_string_decoder(),
             Native::NodeReadable => node_readable(arguments, None),
             Native::NodeWritable => node_writable(arguments, None),
@@ -26099,6 +26173,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Value::Native(Native::NodeEventEmitter, _) => {
                 self.stack.push(node_event_emitter());
+            }
+            Value::Native(Native::ConsoleConstructor, _) => {
+                let built = self.construct_console(&arguments, current)?;
+                self.stack.push(built);
             }
             Value::Native(Native::NodeReadable, _) => {
                 self.stack.push(node_readable(&arguments, None));
@@ -26885,6 +26963,172 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             RealmId::PRIMARY,
         ));
         Ok(Value::Object(Rc::new(RefCell::new(data))))
+    }
+
+    /// `new Console(stdout, [stderr])` or `new Console({ stdout, stderr, ... })`.
+    fn construct_console(
+        &mut self,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let mut stdout = Value::Undefined;
+        let mut stderr = Value::Undefined;
+
+        if let Some(first) = arguments.first() {
+            if let Value::Object(_) = first {
+                let opt_stdout = self.read_property(first, "stdout", instruction)?;
+                if !matches!(opt_stdout, Value::Undefined) {
+                    stdout = opt_stdout;
+                    let opt_stderr = self.read_property(first, "stderr", instruction)?;
+                    stderr = if matches!(opt_stderr, Value::Undefined) {
+                        stdout.clone()
+                    } else {
+                        opt_stderr
+                    };
+                } else {
+                    stdout = first.clone();
+                    stderr = arguments.get(1).cloned().unwrap_or_else(|| stdout.clone());
+                }
+            } else if !matches!(first, Value::Undefined) {
+                stdout = first.clone();
+                stderr = arguments.get(1).cloned().unwrap_or_else(|| stdout.clone());
+            }
+        }
+
+        if matches!(stdout, Value::Undefined) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "Console expects a writable stream instance for stdout".to_owned(),
+            });
+        }
+
+        let mut data = ObjectData::default();
+        data.set_prototype(Value::Native(
+            Native::PrototypeOf(PrototypeTable::Console),
+            RealmId::PRIMARY,
+        ));
+        data.set("_stdout", stdout);
+        data.set("_stderr", stderr);
+        data.set("log", Value::Native(Native::ConsoleLog, RealmId::PRIMARY));
+        data.set("info", Value::Native(Native::ConsoleInfo, RealmId::PRIMARY));
+        data.set(
+            "debug",
+            Value::Native(Native::ConsoleDebug, RealmId::PRIMARY),
+        );
+        data.set("dir", Value::Native(Native::ConsoleDir, RealmId::PRIMARY));
+        data.set("warn", Value::Native(Native::ConsoleWarn, RealmId::PRIMARY));
+        data.set(
+            "error",
+            Value::Native(Native::ConsoleError, RealmId::PRIMARY),
+        );
+        data.set(
+            "assert",
+            Value::Native(Native::ConsoleAssert, RealmId::PRIMARY),
+        );
+        data.set(
+            "clear",
+            Value::Native(Native::ConsoleClear, RealmId::PRIMARY),
+        );
+        data.set(
+            "count",
+            Value::Native(Native::ConsoleCount, RealmId::PRIMARY),
+        );
+        data.set(
+            "countReset",
+            Value::Native(Native::ConsoleCountReset, RealmId::PRIMARY),
+        );
+        data.set(
+            "group",
+            Value::Native(Native::ConsoleGroup, RealmId::PRIMARY),
+        );
+        data.set(
+            "groupEnd",
+            Value::Native(Native::ConsoleGroupEnd, RealmId::PRIMARY),
+        );
+        data.set(
+            "groupCollapsed",
+            Value::Native(Native::ConsoleGroupCollapsed, RealmId::PRIMARY),
+        );
+        data.set(
+            "table",
+            Value::Native(Native::ConsoleTable, RealmId::PRIMARY),
+        );
+        data.set("time", Value::Native(Native::ConsoleTime, RealmId::PRIMARY));
+        data.set(
+            "timeEnd",
+            Value::Native(Native::ConsoleTimeEnd, RealmId::PRIMARY),
+        );
+        data.set(
+            "timeLog",
+            Value::Native(Native::ConsoleTimeLog, RealmId::PRIMARY),
+        );
+        data.set(
+            "trace",
+            Value::Native(Native::ConsoleTrace, RealmId::PRIMARY),
+        );
+        data.set(
+            "dirxml",
+            Value::Native(Native::ConsoleDirxml, RealmId::PRIMARY),
+        );
+        data.set(
+            "timeStamp",
+            Value::Native(Native::ConsoleTimeStamp, RealmId::PRIMARY),
+        );
+        data.set(
+            "profile",
+            Value::Native(Native::ConsoleProfile, RealmId::PRIMARY),
+        );
+        data.set(
+            "profileEnd",
+            Value::Native(Native::ConsoleProfileEnd, RealmId::PRIMARY),
+        );
+
+        Ok(Value::Object(Rc::new(RefCell::new(data))))
+    }
+
+    fn write_console_output(
+        &mut self,
+        receiver: &Value,
+        is_stderr: bool,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let stream = match receiver {
+            Value::Object(_) => {
+                let prop = if is_stderr { "_stderr" } else { "_stdout" };
+                self.read_property(receiver, prop, instruction)?
+            }
+            _ => Value::Undefined,
+        };
+        if !matches!(stream, Value::Undefined)
+            && let Ok(write_fn) = self.read_property(&stream, "write", instruction)
+            && is_callable(&write_fn)
+        {
+            let formatted = format!("{}\n", node_util_format(arguments));
+            self.call_value(
+                &write_fn,
+                stream.clone(),
+                vec![Value::String(formatted)],
+                instruction,
+            )?;
+            return Ok(Value::Undefined);
+        }
+        let host_args = arguments
+            .iter()
+            .cloned()
+            .map(HostValue::from)
+            .collect::<Vec<_>>();
+        let operation = if is_stderr {
+            HostOp::WriteStderr
+        } else {
+            HostOp::WriteStdout
+        };
+        self.host
+            .call(operation, &host_args)
+            .map_err(|error| ExecutionError::Host {
+                instruction,
+                message: error.to_string(),
+            })?;
+        Ok(Value::Undefined)
     }
 
     /// `new FinalizationRegistry(cleanupCallback)`.
@@ -37685,8 +37929,30 @@ fn call_native(
         | Native::NodeUtilDeprecate
         | Native::NodeUtilInspect
         | Native::NodeUtilFormat
+        | Native::ConsoleConstructor
         | Native::ConsoleLog
+        | Native::ConsoleInfo
+        | Native::ConsoleDebug
+        | Native::ConsoleDir
+        | Native::ConsoleWarn
         | Native::ConsoleError
+        | Native::ConsoleAssert
+        | Native::ConsoleClear
+        | Native::ConsoleCount
+        | Native::ConsoleCountReset
+        | Native::ConsoleGroup
+        | Native::ConsoleGroupEnd
+        | Native::ConsoleGroupCollapsed
+        | Native::ConsoleTable
+        | Native::ConsoleTime
+        | Native::ConsoleTimeEnd
+        | Native::ConsoleTimeLog
+        | Native::ConsoleTrace
+        | Native::ConsoleDirxml
+        | Native::ConsoleTimeStamp
+        | Native::ConsoleProfile
+        | Native::ConsoleProfileEnd
+        | Native::NodeConsole
         | Native::NodeAssert
         | Native::NodeAssertOk
         | Native::NodeAsyncHooks
@@ -43094,6 +43360,7 @@ fn native_is_constructor(native: Native) -> bool {
         // names the right reason.
         | Native::UrlConstructor
         | Native::IteratorConstructor
+        | Native::ConsoleConstructor
         | Native::NodeHttpServer
         | Native::NodeAsyncLocalStorage => true,
         // Each error kind's `prototype` is a per-realm object rather than a table, which the
@@ -44234,7 +44501,29 @@ const fn native_length(native: Native) -> Option<f64> {
         | N::AsyncDisposableStackConstructor
         | N::AsyncDisposableStackMove
         | N::AsyncDisposableStackDisposeAsync
-        | N::ProxyRevoke => 0.0,
+        | N::ProxyRevoke
+        | N::ConsoleLog
+        | N::ConsoleInfo
+        | N::ConsoleDebug
+        | N::ConsoleDir
+        | N::ConsoleWarn
+        | N::ConsoleError
+        | N::ConsoleAssert
+        | N::ConsoleClear
+        | N::ConsoleCount
+        | N::ConsoleCountReset
+        | N::ConsoleGroup
+        | N::ConsoleGroupEnd
+        | N::ConsoleGroupCollapsed
+        | N::ConsoleTable
+        | N::ConsoleTime
+        | N::ConsoleTimeEnd
+        | N::ConsoleTimeLog
+        | N::ConsoleTrace
+        | N::ConsoleDirxml
+        | N::ConsoleTimeStamp
+        | N::ConsoleProfile
+        | N::ConsoleProfileEnd => 0.0,
 
         // The two-argument ones. `Object.assign` is 2 because the specification counts the
         // target and one source; the rest of the sources are the rest parameter, which does not
@@ -45061,6 +45350,30 @@ const WRITABLE_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::Nam
     "removeAllListeners",
     "setMaxListeners",
 ]);
+const CONSOLE_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
+    "assert",
+    "clear",
+    "count",
+    "countReset",
+    "debug",
+    "dir",
+    "dirxml",
+    "error",
+    "group",
+    "groupCollapsed",
+    "groupEnd",
+    "info",
+    "log",
+    "profile",
+    "profileEnd",
+    "table",
+    "time",
+    "timeEnd",
+    "timeLog",
+    "timeStamp",
+    "trace",
+    "warn",
+]);
 
 /// The string-keyed members each built-in prototype lists.
 ///
@@ -45108,6 +45421,7 @@ fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'static [&'static
         PrototypeTable::EventEmitter => EVENT_EMITTER_MEMBERS.names(),
         PrototypeTable::Readable => READABLE_MEMBERS.names(),
         PrototypeTable::Writable => WRITABLE_MEMBERS.names(),
+        PrototypeTable::Console => CONSOLE_MEMBERS.names(),
     }
 }
 

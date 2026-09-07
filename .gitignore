@@ -46,3 +46,4 @@ node_modules/
 # stray files in everyone's `git status`.
 .scratch/bench-io-test.tmp
 .kiln-shape-keys-probe.tmp
+gmon.out
