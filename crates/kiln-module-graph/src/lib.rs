@@ -2046,6 +2046,7 @@ fn builtin_module_program(builtin: NodeBuiltin) -> ModuleProgram {
             direct_eval: false,
             new_function: false,
             dynamic_imports: vec![],
+            removable_declarations: vec![],
         },
     }
 }
@@ -2080,6 +2081,7 @@ fn json_module_program() -> ModuleProgram {
             direct_eval: false,
             new_function: false,
             dynamic_imports: vec![],
+            removable_declarations: vec![],
         },
     }
 }

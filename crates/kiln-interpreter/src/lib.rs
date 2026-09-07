@@ -12914,6 +12914,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let value = self.pop(current)?;
                     self.set_global(*slot as usize, value)?;
                 }
+                Instruction::Nop => {}
                 Instruction::Return => {
                     let mut value = self.stack.pop().unwrap_or(Value::Undefined);
                     let Some(frame) = self.frames.pop() else {

@@ -3830,10 +3830,11 @@ fn native_executable_graph(
         })?;
         let direct_eval = node.program.link_facts.direct_eval;
         let demanded = live_export_slots.get(&path).cloned().unwrap_or_default();
-        let live_slots = kiln_backend_c::closed_world_module_live_slots(
+        let live_slots = kiln_backend_c::closed_world_module_live_slots_with_declarations(
             &node.program.program,
             &demanded,
             direct_eval,
+            &node.program.link_facts.removable_declarations,
         );
 
         let production_dispatch =
@@ -3875,16 +3876,7 @@ fn native_executable_graph(
                         source: import.source.clone(),
                     })
                 })?;
-            // Namespace values are frequently captured through class/closure-local cells. Until
-            // that alias is represented in module-slot liveness, a missing load is not proof the
-            // import is dead. Keeping namespace-valued imports is conservative and prevents a
-            // live namespace local from being initialized to undefined.
-            let namespace_value = import.imported == kiln_ir::NAMESPACE_IMPORT
-                || matches!(
-                    graph.resolved_export(&dependency.target, &import.imported),
-                    Some(ResolvedExport::Namespace { .. })
-                );
-            if !live_slots.contains(&import.local_slot) && !namespace_value {
+            if !live_slots.contains(&import.local_slot) {
                 continue;
             }
             live_imports.insert((node.path.clone(), import_index));

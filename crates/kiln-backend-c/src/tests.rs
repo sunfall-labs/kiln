@@ -5568,6 +5568,151 @@ fn closed_world_module_keeps_a_declaration_captured_by_a_live_function() {
 }
 
 #[test]
+fn closed_world_module_omits_an_unread_declaration_inside_a_live_function() {
+    let function = |local_count, code| FunctionProto {
+        span: kiln_ir::Span::default(),
+        prologue_end: 0,
+        declared_length: 0,
+        name: None,
+        parameter_count: 0,
+        local_count,
+        code,
+        arrow: false,
+        generator: false,
+        asynchronous: false,
+        async_generator: false,
+        is_method: false,
+        mapped_arguments: false,
+        upvalues: Vec::new(),
+        type_annotations: None,
+    };
+    let module = module(
+        Program {
+            source: "".into(),
+            version: BYTECODE_VERSION,
+            constants: vec![Constant::Undefined],
+            code: vec![
+                Instruction::MakeFunction(0),
+                Instruction::StoreLocal(0),
+                Instruction::Const(0),
+                Instruction::Return,
+            ],
+            local_count: 1,
+            functions: vec![
+                function(
+                    1,
+                    vec![
+                        Instruction::MakeFunction(1),
+                        Instruction::StoreLocal(0),
+                        Instruction::Const(0),
+                        Instruction::Return,
+                    ],
+                ),
+                function(0, vec![Instruction::Const(0), Instruction::Return]),
+            ],
+            template_sites: Vec::new(),
+        },
+        Vec::new(),
+        vec![kiln_ir::ExportBinding {
+            exported: "outer".into(),
+            local_slot: 0,
+        }],
+    );
+    let emitted = emit_module_with_logical_path_and_policy(
+        &module,
+        "fixture.js",
+        EmissionPolicy {
+            compact: true,
+            live_module_slots: Some(std::sync::Arc::new([0].into_iter().collect())),
+            ..EmissionPolicy::default()
+        },
+    )
+    .expect("closed-world module emits");
+
+    assert!(emitted.source.contains("ku_fn_0("));
+    assert!(!emitted.source.contains("ku_fn_1("));
+}
+
+#[test]
+fn closed_world_module_keeps_a_nested_declaration_captured_by_a_live_sibling() {
+    let function = |local_count, code, upvalues| FunctionProto {
+        span: kiln_ir::Span::default(),
+        prologue_end: 0,
+        declared_length: 0,
+        name: None,
+        parameter_count: 0,
+        local_count,
+        code,
+        arrow: false,
+        generator: false,
+        asynchronous: false,
+        async_generator: false,
+        is_method: false,
+        mapped_arguments: false,
+        upvalues,
+        type_annotations: None,
+    };
+    let module = module(
+        Program {
+            source: "".into(),
+            version: BYTECODE_VERSION,
+            constants: vec![Constant::Undefined],
+            code: vec![
+                Instruction::MakeFunction(0),
+                Instruction::StoreLocal(0),
+                Instruction::Const(0),
+                Instruction::Return,
+            ],
+            local_count: 1,
+            functions: vec![
+                function(
+                    2,
+                    vec![
+                        Instruction::MakeFunction(1),
+                        Instruction::StoreLocal(0),
+                        Instruction::MakeFunction(2),
+                        Instruction::StoreLocal(1),
+                        Instruction::LoadLocal(1),
+                        Instruction::Return,
+                    ],
+                    Vec::new(),
+                ),
+                function(
+                    0,
+                    vec![Instruction::Const(0), Instruction::Return],
+                    Vec::new(),
+                ),
+                function(
+                    0,
+                    vec![Instruction::LoadUpvalue(0), Instruction::Return],
+                    vec![Upvalue::ParentLocal(0)],
+                ),
+            ],
+            template_sites: Vec::new(),
+        },
+        Vec::new(),
+        vec![kiln_ir::ExportBinding {
+            exported: "outer".into(),
+            local_slot: 0,
+        }],
+    );
+    let emitted = emit_module_with_logical_path_and_policy(
+        &module,
+        "fixture.js",
+        EmissionPolicy {
+            compact: true,
+            live_module_slots: Some(std::sync::Arc::new([0].into_iter().collect())),
+            ..EmissionPolicy::default()
+        },
+    )
+    .expect("closed-world module emits");
+
+    assert!(emitted.source.contains("ku_fn_0("));
+    assert!(emitted.source.contains("ku_fn_1("));
+    assert!(emitted.source.contains("ku_fn_2("));
+}
+
+#[test]
 fn nested_parent_local_does_not_keep_an_unrelated_module_slot() {
     let proto = |code, upvalues| FunctionProto {
         span: kiln_ir::Span::default(),
@@ -5667,7 +5812,7 @@ fn closed_world_namespace_records_named_reads_across_argument_evaluation() {
 }
 
 #[test]
-fn closed_world_namespace_keeps_every_member_for_a_captured_module_binding() {
+fn closed_world_namespace_traces_a_captured_module_binding() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
@@ -5691,6 +5836,45 @@ fn closed_world_namespace_keeps_every_member_for_a_captured_module_binding() {
                 Instruction::CallMethod { name: 0, argc: 0 },
                 Instruction::Return,
             ],
+            arrow: true,
+            generator: false,
+            asynchronous: false,
+            async_generator: false,
+            is_method: false,
+            mapped_arguments: false,
+            upvalues: vec![Upvalue::ParentLocal(0)],
+            type_annotations: None,
+        }],
+        template_sites: Vec::new(),
+    };
+
+    assert_eq!(
+        closed_world_namespace_members(&program, 0, false),
+        Some(["fromInputUnsafe".to_owned()].into_iter().collect())
+    );
+}
+
+#[test]
+fn closed_world_namespace_keeps_every_member_when_a_capture_escapes() {
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants: vec![Constant::Number(0)],
+        code: vec![
+            Instruction::MakeFunction(0),
+            Instruction::StoreLocal(1),
+            Instruction::Const(0),
+            Instruction::Return,
+        ],
+        local_count: 2,
+        functions: vec![FunctionProto {
+            span: kiln_ir::Span::default(),
+            prologue_end: 0,
+            declared_length: 0,
+            name: None,
+            parameter_count: 0,
+            local_count: 0,
+            code: vec![Instruction::LoadUpvalue(0), Instruction::Return],
             arrow: true,
             generator: false,
             asynchronous: false,

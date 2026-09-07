@@ -80,19 +80,28 @@ pub(super) fn emit_get_property(
     let key_len = key_str.len();
     let check = status_check(diagnostic_site, pc, label, unwind);
     if ctx.plan.compact {
-        writeln!(
-            output,
-            "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_val_read_property(host, v{o}, {symbol}_key_{name}, {key_len}, depth, thrown, &site, &v{v}); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(v{o})); {check} }}{typed_sync}",
-            o = object.0,
-            typed_sync = if typed_int {
-                format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v})); i{v} = (int64_t)d{v};")
-            } else if typed {
-                format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));")
-            } else {
-                String::new()
-            }
-        )
-        .unwrap();
+        let typed_sync = if typed_int {
+            format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v})); i{v} = (int64_t)d{v};")
+        } else if typed {
+            format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));")
+        } else {
+            String::new()
+        };
+        if crate::compact_diagnostic_site(diagnostic_site) {
+            writeln!(
+                output,
+                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; KU_READ_PROPERTY(v{v}, v{o}, {symbol}_key_{name}, {key_len}, &site, {pc}, \"{label}\", {unwind}); /* goto kiln_refusal; */ }}{typed_sync}",
+                o = object.0,
+            )
+            .unwrap();
+        } else {
+            writeln!(
+                output,
+                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_val_read_property(host, v{o}, {symbol}_key_{name}, {key_len}, depth, thrown, &site, &v{v}); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(v{o})); {check} }}{typed_sync}",
+                o = object.0,
+            )
+            .unwrap();
+        }
         return;
     }
     let length_check = if key_str == "length" && spec.arrays.contains(object) {

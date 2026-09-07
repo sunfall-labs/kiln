@@ -343,12 +343,20 @@ pub(super) fn emit_graph_op(
             // A body that cannot hold a reference has no `thrown` slot; a dead-zone read there
             // is refused by the helper, loudly, rather than crashing or answering `undefined`.
             let thrown = if scalar_proto { "NULL" } else { "thrown" };
-            let check = status_check(diagnostic_site, pc, label, unwind);
-            writeln!(
-                output,
-                "    {{ const kiln_val *cell = (const kiln_val *)KILN_VAL_PTR(locals[{slot}]); int status = kiln_c99_val_check_tdz(*cell, {thrown}); {check} v{v} = *cell; }}"
-            )
-            .unwrap();
+            if crate::compact_diagnostic_site(diagnostic_site) {
+                writeln!(
+                    output,
+                    "    KU_LOAD_CELL(v{v}, locals[{slot}], {thrown}, {pc}, \"{label}\", {unwind}); /* goto kiln_refusal; */"
+                )
+                .unwrap();
+            } else {
+                let check = status_check(diagnostic_site, pc, label, unwind);
+                writeln!(
+                    output,
+                    "    {{ const kiln_val *cell = (const kiln_val *)KILN_VAL_PTR(locals[{slot}]); int status = kiln_c99_val_check_tdz(*cell, {thrown}); {check} v{v} = *cell; }}"
+                )
+                .unwrap();
+            }
         }
         GraphOp::StoreCell { slot, value } => {
             writeln!(
@@ -368,12 +376,20 @@ pub(super) fn emit_graph_op(
         // An upvalue is a box the closure was handed; the load checks the temporal dead zone
         // the way a cell load does, and the store writes the box.
         GraphOp::LoadUpvalue(index) => {
-            let check = status_check(diagnostic_site, pc, label, unwind);
-            writeln!(
-                output,
-                "    {{ const kiln_val *cell = (const kiln_val *)KILN_VAL_PTR(upvalues[{index}]); int status = kiln_c99_val_check_tdz(*cell, thrown); {check} v{v} = *cell; }}"
-            )
-            .unwrap();
+            if crate::compact_diagnostic_site(diagnostic_site) {
+                writeln!(
+                    output,
+                    "    KU_LOAD_CELL(v{v}, upvalues[{index}], thrown, {pc}, \"{label}\", {unwind}); /* goto kiln_refusal; */"
+                )
+                .unwrap();
+            } else {
+                let check = status_check(diagnostic_site, pc, label, unwind);
+                writeln!(
+                    output,
+                    "    {{ const kiln_val *cell = (const kiln_val *)KILN_VAL_PTR(upvalues[{index}]); int status = kiln_c99_val_check_tdz(*cell, thrown); {check} v{v} = *cell; }}"
+                )
+                .unwrap();
+            }
         }
         GraphOp::StoreUpvalue { index, value } => {
             writeln!(

@@ -365,6 +365,7 @@ pub fn compile_module(module: &Module) -> Result<ModuleProgram, Vec<CompileDiagn
         direct_eval: body_contains_direct_eval(&module.body),
         new_function: body_contains_new_function(&module.body),
         dynamic_imports: collect_dynamic_imports(&module.body),
+        removable_declarations: compiler.removable_declarations.clone(),
     };
 
     compiler
@@ -445,6 +446,7 @@ pub fn compile_commonjs(module: &Module) -> Result<ModuleProgram, Vec<CompileDia
         direct_eval: body_contains_direct_eval(&module.body),
         new_function: body_contains_new_function(&module.body),
         dynamic_imports: collect_dynamic_imports(&module.body),
+        removable_declarations: Vec::new(),
     };
     compiler
         .finish_with_strictness()
@@ -671,6 +673,7 @@ struct Compiler {
     /// too and this is the interpreter's answer to one question: whether a refused write throws
     /// or is discarded. See [`Strictness`].
     strict_functions: Vec<bool>,
+    removable_declarations: Vec<RemovableDeclaration>,
     /// Enclosing function states, module body first. Empty while compiling the module body.
     enclosing: Vec<FunctionState>,
     upvalues: Vec<Upvalue>,
@@ -959,6 +962,7 @@ impl Compiler {
             functions: Vec::new(),
             template_sites: Vec::new(),
             strict_functions: Vec::new(),
+            removable_declarations: Vec::new(),
             enclosing: Vec::new(),
             upvalues: Vec::new(),
             upvalue_names: HashMap::new(),
@@ -1033,9 +1037,46 @@ impl Compiler {
         // Script code, so B.3.3.2 rather than B.3.2.1: there are no parameters to decline for.
         // A module body is strict and `hoist_annexb_function_names` returns immediately for it.
         self.hoist_annexb_function_names(&module.body, &HashSet::new());
-        self.plain_statements(&module.body);
+        if self.module_body {
+            self.plain_module_statements(&module.body);
+        } else {
+            self.plain_statements(&module.body);
+        }
         self.push_constant(Constant::Undefined);
         self.code.push(Instruction::Return);
+    }
+
+    fn plain_module_statements(&mut self, list: &[Statement]) {
+        let ordinary_classes = removable_class_names_in_order(list);
+        for statement in list {
+            self.hoist_names(statement);
+        }
+        for statement in list {
+            if let StatementKind::Function(function) = &statement.kind {
+                self.emit_function_declaration(function, statement.span);
+            }
+        }
+        for statement in list {
+            if matches!(statement.kind, StatementKind::Function(_)) {
+                continue;
+            }
+            let removable_names = removable_declaration_names(statement, &ordinary_classes);
+            let pc_start = self.code.len();
+            self.statement(statement);
+            if let Some(names) = removable_names {
+                let local_slots = names
+                    .iter()
+                    .filter_map(|name| self.resolve_module_local(name))
+                    .collect::<Vec<_>>();
+                if local_slots.len() == names.len() {
+                    self.removable_declarations.push(RemovableDeclaration {
+                        local_slots,
+                        pc_start: pc_start as u32,
+                        pc_end: self.code.len() as u32,
+                    });
+                }
+            }
+        }
     }
 
     /// The body of an eval program, which returns its completion value.
@@ -7414,6 +7455,91 @@ fn resource_declarations(list: &[Statement]) -> Vec<bool> {
         }
     }
     resources
+}
+
+fn removable_class_structure(class: &Class) -> bool {
+    class
+        .methods
+        .iter()
+        .all(|method| matches!(method.key, ObjectKey::Static(_) | ObjectKey::Private(_)))
+        && class
+            .initialisers
+            .iter()
+            .all(|initialiser| match initialiser {
+                ClassInitialiser::Field(field) => {
+                    !field.is_static
+                        && matches!(field.key, ObjectKey::Static(_) | ObjectKey::Private(_))
+                }
+                ClassInitialiser::StaticBlock(_) => false,
+            })
+}
+
+fn removable_class_evaluation(class: &Class, ordinary_classes: &HashSet<String>) -> bool {
+    removable_class_structure(class)
+        && match class.superclass.as_ref().map(|value| &value.kind) {
+            None => true,
+            Some(ExpressionKind::Identifier(name)) => ordinary_classes.contains(name),
+            _ => false,
+        }
+}
+
+fn removable_class_names_in_order(list: &[Statement]) -> HashSet<String> {
+    let mut ordinary = HashSet::new();
+    for statement in list {
+        let (name, class) = match &statement.kind {
+            StatementKind::Class(class) => (class.name.as_deref(), Some(class.as_ref())),
+            StatementKind::Variable { declarations, .. } if declarations.len() == 1 => {
+                let declaration = &declarations[0];
+                let class = declaration.initializer.as_ref().and_then(|value| {
+                    if let ExpressionKind::Class(class) = &value.kind {
+                        Some(class.as_ref())
+                    } else {
+                        None
+                    }
+                });
+                (declaration.pattern.as_identifier(), class)
+            }
+            _ => (None, None),
+        };
+        if let (Some(name), Some(class)) = (name, class)
+            && removable_class_evaluation(class, &ordinary)
+        {
+            ordinary.insert(name.to_owned());
+        }
+    }
+    ordinary
+}
+
+fn removable_declaration_names(
+    statement: &Statement,
+    ordinary_classes: &HashSet<String>,
+) -> Option<Vec<String>> {
+    match &statement.kind {
+        StatementKind::Class(class) if removable_class_evaluation(class, ordinary_classes) => {
+            class.name.clone().map(|name| vec![name])
+        }
+        StatementKind::Variable { kind, declarations }
+            if kind.disposal().is_none() && !declarations.is_empty() =>
+        {
+            let mut names = Vec::with_capacity(declarations.len());
+            for declaration in declarations {
+                let name = declaration.pattern.as_identifier()?.to_owned();
+                let removable = match declaration.initializer.as_ref().map(|value| &value.kind) {
+                    None | Some(ExpressionKind::Function(_)) => true,
+                    Some(ExpressionKind::Class(class)) => {
+                        removable_class_evaluation(class, ordinary_classes)
+                    }
+                    _ => false,
+                };
+                if !removable {
+                    return None;
+                }
+                names.push(name);
+            }
+            Some(names)
+        }
+        _ => None,
+    }
 }
 
 pub fn mutable_module_bindings(body: &[Statement]) -> HashSet<String> {

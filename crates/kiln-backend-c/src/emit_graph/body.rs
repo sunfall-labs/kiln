@@ -960,6 +960,7 @@ fn emit_block_sequence(
             symbol,
             type_profile_record,
             plan.compact && graph.next_value_id >= COMPACT_INDEXED_VALUE_THRESHOLD,
+            &used,
         );
     }
 }
@@ -1668,6 +1669,7 @@ fn emit_terminator(
     symbol: &str,
     type_profile_record: bool,
     indexed_values: bool,
+    used: &HashSet<ValueId>,
 ) {
     match terminator {
         Terminator::Return(value) => match site {
@@ -1792,6 +1794,7 @@ fn emit_terminator(
                 ints,
                 booleans,
                 indexed_values,
+                used,
             );
             writeln!(output, "    goto {block_prefix}{};", target.0).unwrap();
         }
@@ -1847,6 +1850,7 @@ fn emit_terminator(
                 ints,
                 booleans,
                 indexed_values,
+                used,
             );
             writeln!(output, "        goto {block_prefix}{};", true_block.0).unwrap();
             output.push_str("    } else {\n");
@@ -1859,6 +1863,7 @@ fn emit_terminator(
                 ints,
                 booleans,
                 indexed_values,
+                used,
             );
             writeln!(output, "        goto {block_prefix}{};", false_block.0).unwrap();
             output.push_str("    }\n");
@@ -1902,6 +1907,7 @@ fn emit_phi_assignments(
     ints: &HashSet<ValueId>,
     booleans: &HashSet<ValueId>,
     indexed_values: bool,
+    used: &HashSet<ValueId>,
 ) {
     // A parallel move: every input is read before any phi is written, so two phis that swap
     // values (`[a, b] = [b, a]` across a back edge) do not clobber each other.
@@ -1912,7 +1918,7 @@ fn emit_phi_assignments(
     for &(phi_vid, ref op) in &target_block.operations {
         if let GraphOp::Phi { inputs } = op {
             for &(pred, in_vid) in inputs {
-                if pred == from && in_vid != phi_vid {
+                if pred == from && in_vid != phi_vid && used.contains(&phi_vid) {
                     moves.push((phi_vid.0, in_vid.0));
                 }
             }
@@ -1922,6 +1928,46 @@ fn emit_phi_assignments(
         return;
     }
     if indexed_values && moves.len() >= 4 {
+        // Merge phis are allocated together, so their destination IDs are normally one
+        // contiguous run. Large bundled module initializers can have hundreds of locals and a
+        // branch for every `x ||= value`; spelling both ID arrays at every edge made those tiny
+        // branches account for megabytes of generated C. Copy consecutive source runs through
+        // the same temporary array instead. The temporary preserves parallel-move semantics even
+        // for a back edge whose source and destination ranges overlap.
+        let consecutive_destinations = moves.windows(2).all(|pair| pair[1].0 == pair[0].0 + 1);
+        if consecutive_destinations {
+            writeln!(output, "        {{ kiln_val phi_tmp[{}];", moves.len()).unwrap();
+            let mut start = 0usize;
+            while start < moves.len() {
+                let mut end = start + 1;
+                while end < moves.len() && moves[end].1 == moves[end - 1].1 + 1 {
+                    end += 1;
+                }
+                let len = end - start;
+                if len >= 3 {
+                    writeln!(
+                        output,
+                        "        memcpy(phi_tmp + {start}, v + {}, (size_t){len} * sizeof *phi_tmp);",
+                        moves[start].1
+                    )
+                    .unwrap();
+                } else {
+                    for (offset, &(_, source)) in moves[start..end].iter().enumerate() {
+                        writeln!(output, "        phi_tmp[{}] = v[{source}];", start + offset)
+                            .unwrap();
+                    }
+                }
+                start = end;
+            }
+            writeln!(
+                output,
+                "        memcpy(v + {}, phi_tmp, (size_t){} * sizeof *phi_tmp); }}",
+                moves[0].0,
+                moves.len()
+            )
+            .unwrap();
+            return;
+        }
         let from = moves
             .iter()
             .map(|(_, from)| from.to_string())
