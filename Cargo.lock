@@ -1338,6 +1338,7 @@ dependencies = [
  "kiln-temporal",
  "num-bigint 0.4.8",
  "num-traits",
+ "rayon",
  "regress",
  "tokio",
 ]

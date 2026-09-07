@@ -1,6 +1,6 @@
 # Issue 02: Bounded Rayon Compute Pool & Chunk Scheduler
 
-Status: planned
+Status: done
 Feature: rust-parallel-engine
 Governing ADR: ADR 0057, ADR 0058
 
@@ -19,3 +19,5 @@ Data-parallel loop execution in native binaries requires work-stealing across av
 ## Acceptance Criteria
 - `mbx test -p kiln-native-number-ffi` passes with unit tests for parallel map, reduce, and sort.
 - Memory safety verified: zero data races across chunk boundaries.
+
+* **2026-09-06:** landed with the commit titled "parallelMap runs its qualifying callback on a Rayon pool": `kiln_parallel_map` (ABI 32, feature `parallel`), the private Rayon pool with a measured floor of 16,384, the `parallel_safe` predicate and parallel clone in `kiln-backend-c`, `conformance/native/parallel-map.ts` and `bench/non-io/parallel-map-large.mjs`. See ADR 0058 application 2 for the numbers.

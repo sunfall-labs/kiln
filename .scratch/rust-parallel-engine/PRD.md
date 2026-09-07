@@ -1,6 +1,6 @@
 # PRD: Rust-Backed Native Concurrency and Runtime Engine
 
-## Status: Proposed (reconciled 2026-09-06 to ADR 0058 revised)
+## Status: resolved (landed 2026-09-06; ADR 0058 application 2)
 ## Champion: Antigravity & User
 ## Governing ADR: ADR 0018, ADR 0025, ADR 0057, ADR 0058
 

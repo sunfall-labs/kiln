@@ -164,8 +164,14 @@ pub fn emit_function_from_graph_with_profile(
             returns_number,
             restartable,
         } => {
-            let (result, params) =
-                typed_signature(proto, returns_number, plan.typed_needs[index]);
+            // The parallel clone takes its parameters and nothing else -- that is its contract,
+            // and `lib.rs` rejects the clone if its body reaches for more.
+            let needs = if super::parallel_clone() {
+                crate::direct::TypedNeeds::default()
+            } else {
+                plan.typed_needs[index]
+            };
+            let (result, params) = typed_signature(proto, returns_number, needs);
             // A restartable typed entry is the fast clone's body with a typed signature: no
             // runtime call survives in it, so it inlines where a method call enters it by
             // name, and the receiver the caller matched is the receiver it reads.
@@ -174,9 +180,10 @@ pub fn emit_function_from_graph_with_profile(
             } else {
                 "static inline"
             };
+            let suffix = if super::parallel_clone() { "_p" } else { "_t" };
             writeln!(
                 output,
-                "{inline} {result} {symbol}_fn_{index}_t({params}) {{"
+                "{inline} {result} {symbol}_fn_{index}{suffix}({params}) {{"
             )
             .unwrap();
         }

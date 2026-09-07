@@ -1,6 +1,6 @@
 # Issue 05: Conformance Verification & Multicore Benchmarking
 
-Status: planned
+Status: done
 Feature: rust-parallel-engine
 Governing ADR: ADR 0058
 
@@ -19,3 +19,5 @@ High-performance concurrency must be rigorously verified against mathematical co
 - `scripts/native.sh` passes all probes with zero divergence.
 - Multicore MapReduce shows linear scaling across available CPU cores.
 - Full gate pass (`mise run gate`).
+
+* **2026-09-06:** landed with the commit titled "parallelMap runs its qualifying callback on a Rayon pool": `kiln_parallel_map` (ABI 32, feature `parallel`), the private Rayon pool with a measured floor of 16,384, the `parallel_safe` predicate and parallel clone in `kiln-backend-c`, `conformance/native/parallel-map.ts` and `bench/non-io/parallel-map-large.mjs`. See ADR 0058 application 2 for the numbers.

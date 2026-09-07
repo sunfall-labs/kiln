@@ -706,6 +706,8 @@ static kiln_value kiln_val_to_boundary(kiln_val v);
 static inline kiln_val kiln_val_from_boundary(kiln_value v) {
 static inline kiln_val kiln_c99_val_from_double(double d) {
 int32_t kiln_bigint_is_zero(const void *handle);
+typedef void (*kiln_parallel_chunk_fn)(const void *in, void *out, size_t start, size_t end,
+int32_t kiln_parallel_map(const void *in, size_t count, void *out, kiln_parallel_chunk_fn chunk,
 static inline int kiln_c99_val_truthy(kiln_val v) {
 static int kiln_c99_speculate_mode = -2;
 static inline int kiln_c99_speculate_exit_active(void) {

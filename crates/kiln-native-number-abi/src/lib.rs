@@ -104,6 +104,7 @@ macro_rules! provider_abi_registry {
             (temporal, kiln_temporal_to_kind, temporal_to_kind);
             (temporal, kiln_temporal_last_error, temporal_last_error);
             (json, kiln_json_parse, json_parse);
+            (parallel, kiln_parallel_map, parallel_map);
         }
     };
 }
@@ -115,7 +116,7 @@ macro_rules! provider_export_names {
 }
 
 /// Version of the private provider ABI represented by [`provider_abi_registry!`].
-pub const PROVIDER_ABI_VERSION: u32 = 31;
+pub const PROVIDER_ABI_VERSION: u32 = 32;
 
 /// Canonical ordered export names required in a packaged provider manifest.
 pub const PROVIDER_EXPORTS: &[&str] = provider_abi_registry!(provider_export_names);
@@ -126,7 +127,9 @@ mod tests {
 
     #[test]
     fn registry_has_the_packaged_contract_shape() {
-        // 31, and 88 exports: `JSON.parse` moved into the archive as a tape (`kiln_json_parse`,
+        // 32, and 89 exports: `kiln_parallel_map` joined for `parallelMap` (ADR 0058, application
+        // 2): one call that runs an emitted chunk worker over index ranges on a private Rayon
+        // pool. Before that, 31 and 88: `JSON.parse` moved into the archive as a tape (`kiln_json_parse`,
         // one call that lends the reader's per-thread tape), so the emitted C stopped carrying a
         // reader of its own. Before that, 30 and 87: `kiln_realm_generation_slot` joined the contract when the prelude
         // learned to cache per-realm answers -- the heap pointer first -- behind a generation the
@@ -136,9 +139,9 @@ mod tests {
         // with what it is doing. A shipped archive built before either does not export the newer
         // symbol, and the version is how a resolver knows to rebuild rather than to fail at link
         // time.
-        assert_eq!(PROVIDER_ABI_VERSION, 31);
-        assert_eq!(PROVIDER_EXPORTS.len(), 88);
+        assert_eq!(PROVIDER_ABI_VERSION, 32);
+        assert_eq!(PROVIDER_EXPORTS.len(), 89);
         assert_eq!(PROVIDER_EXPORTS.first(), Some(&"kiln_realm_create"));
-        assert_eq!(PROVIDER_EXPORTS.last(), Some(&"kiln_json_parse"));
+        assert_eq!(PROVIDER_EXPORTS.last(), Some(&"kiln_parallel_map"));
     }
 }

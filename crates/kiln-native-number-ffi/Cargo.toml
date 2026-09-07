@@ -24,6 +24,9 @@ bigint = ["dep:num-bigint", "dep:num-traits"]
 temporal = ["dep:kiln-temporal"]
 # `JSON.parse` as a tape, from the same crate the interpreter walks (ADR 0025 again).
 json = ["dep:kiln-json"]
+# `parallelMap`'s fork-join: a private Rayon pool that runs an emitted C chunk worker over index
+# ranges (ADR 0058, application 2). Rust owns the pool, the chunk size and the sequential floor.
+parallel = ["dep:rayon"]
 
 [dependencies]
 kiln-native-number-abi = { workspace = true }
@@ -35,6 +38,7 @@ kiln-runtime = { workspace = true, optional = true }
 # signature -- which is what lets it cross a C ABI as scalars and an opaque handle.
 kiln-temporal = { workspace = true, optional = true }
 kiln-json = { workspace = true, optional = true }
+rayon = { workspace = true, optional = true }
 # The regexp engine's allocation-only shape. The interpreter links the same crate, which is the
 # whole point: two engines running one implementation cannot disagree about a backreference.
 regress = { version = "0.12", default-features = false, features = [

@@ -70,7 +70,10 @@ kiln leads hello world and trails bun on the small service by four percent while
 per request than either (23.7 microseconds of CPU against bun's 26.7).
 
 A realm owns its thread, so the way kiln uses the other fifteen cores is `KILN_WORKERS`, which
-forks that many realms over one `SO_REUSEPORT` listener. Setting `KILN_WORKERS=auto` detects the
+forks that many realms over one `SO_REUSEPORT` listener. Inside one realm, `Array.prototype.parallelMap` runs a callback the compiler can prove
+reads its numbers and returns a number on a private thread pool in the native binary (ADR 0058);
+`KILN_PARALLELISM=<n>` sizes that pool, defaulting to the machine's available parallelism, and
+`KILN_PARALLELISM=1` runs every such map inline on the realm thread. Setting `KILN_WORKERS=auto` detects the
 number of online CPU cores via `sysconf(_SC_NPROCESSORS_ONLN)` (clamped 1..1024) and forks one
 realm per core. With four of them the small service serves **51.8k**, ahead of bun, and ten client
 processes are needed before the load generator stops being the limit:

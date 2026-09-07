@@ -92,6 +92,11 @@ pub struct CallPlan {
     pub typed_needs: Vec<TypedNeeds>,
     /// Per proto: whether its typed entry exists in the unit.
     pub typed_entries: Vec<bool>,
+    /// Per proto: its body passes [`crate::parallel::parallel_safe`] and its typed entry returns
+    /// a number, so a `parallelMap` site whose callback is proven to be it may run the proto's
+    /// parallel clone on a worker thread -- once `set_parallel` has confirmed the clone's emitted
+    /// text reaches no host, receiver, upvalue or heap.
+    pub parallel_safe: Vec<bool>,
     /// Per proto: how many columns its receiver-shape cache has -- the names its body reads
     /// of `this` -- so a call site can look a row up in the callee's table.
     pub receiver_columns: Vec<usize>,
@@ -233,6 +238,15 @@ impl DirectPlan {
             }
         }
 
+        let parallel_safe: Vec<bool> = graphs
+            .iter()
+            .enumerate()
+            .map(|(i, g)| {
+                typed_eligible[i]
+                    && typed_returns[i]
+                    && crate::parallel::parallel_safe(g, &program.functions[i], program)
+            })
+            .collect();
         let plan_for = |graph: &FunctionGraph,
                         known: &KnownValues,
                         sites: &[Site],
@@ -262,6 +276,7 @@ impl DirectPlan {
                 typed_returns: typed_returns.clone(),
                 typed_needs: vec![TypedNeeds::default(); graphs.len()],
                 typed_entries: vec![false; graphs.len()],
+                parallel_safe: parallel_safe.clone(),
                 receiver_columns: vec![0; graphs.len()],
                 fast: vec![false; graphs.len()],
                 publishes_frame: publishes_frame.to_vec(),
@@ -334,6 +349,17 @@ impl DirectPlan {
                     let arities: &[u32] = match (key.as_str(), args.len()) {
                         ("map", 1) | ("filter", 1) => &[1, 2],
                         ("reduce", 2) => &[2],
+                        // `parallelMap`'s pooled lowering calls the typed entry from its chunk
+                        // worker (ADR 0058, application 2); the callback is referenced only when
+                        // its body may run there, so a non-qualifying one gets no dead entry.
+                        ("parallelMap", 1)
+                            if plan
+                                .known
+                                .get(&args[0])
+                                .is_some_and(|&t| parallel_safe[t as usize]) =>
+                        {
+                            &[1, 2]
+                        }
                         _ => continue,
                     };
                     if let Some(&target) = plan.known.get(&args[0])
@@ -458,6 +484,32 @@ impl DirectPlan {
             .chain(std::iter::once(&mut self.entry))
         {
             plan.typed_needs = needs.to_vec();
+        }
+    }
+
+    /// The typed entry of `index` may serve as a `parallelMap` chunk worker: it exists, returns a
+    /// number, needs nothing but its parameters, and its body passes
+    /// [`crate::parallel::parallel_safe`]. Read after `set_typed_needs`, which is what settles
+    /// the needs.
+    pub fn parallel_chunk(&self, index: u32) -> bool {
+        let i = index as usize;
+        self.has_typed_entry(index)
+            && self.entry.typed_returns.get(i).copied().unwrap_or(false)
+            && self.entry.parallel_safe.get(i).copied().unwrap_or(false)
+    }
+
+    /// Narrow `parallel_safe` to the protos whose parallel clone was emitted and scanned clean
+    /// (`lib.rs`), in every body's plan, so a `parallelMap` site anywhere reads the final answer.
+    pub fn set_parallel(&mut self, admitted: &[bool]) {
+        for plan in self
+            .functions
+            .iter_mut()
+            .chain(self.typed.iter_mut().flatten())
+            .chain(std::iter::once(&mut self.entry))
+        {
+            for (i, ok) in plan.parallel_safe.iter_mut().enumerate() {
+                *ok = *ok && admitted.get(i).copied().unwrap_or(false);
+            }
         }
     }
 

@@ -1,7 +1,7 @@
 use super::OpContext;
 use super::{method_candidates, status_check};
 use crate::direct::TypedNeeds;
-use crate::graph::ValueId;
+use crate::graph::{GraphOp, ValueId};
 use crate::prelude::lookup_speculation_invariant;
 use kiln_ir::Constant;
 use std::fmt::Write;
@@ -338,6 +338,54 @@ pub(super) fn emit_call_method(
     let symbol = ctx.symbol;
     let diagnostic_site = ctx.diagnostic_site;
     let numbers = ctx.numbers;
+    // In the parallel clone (ADR 0058, application 2) a `Math.<name>` call on the builtin
+    // itself, with every argument proven a number, is the bare libm call and nothing else: no
+    // generic fallback, because the clone runs on a thread with no realm to fall back to. The
+    // site that enters the clone has already checked `kiln_c99_builtin_store_epoch == 0` on the
+    // realm thread, so `Math.<name>` is the table's. `parallel::parallel_safe` admits only these
+    // calls into a clone, so any other `CallMethod` here would be a bug in that predicate; the
+    // generic lowering below then mentions `host`, and the clone is rejected by the scan.
+    if ctx.parallel
+        && matches!(
+            ctx.defs.get(object),
+            Some(GraphOp::LoadBuiltin(kiln_ir::Builtin::Math))
+        )
+        && args.iter().all(|a| numbers.contains(a))
+        && let Some(Constant::String(key)) = program.constants.get(*name as usize)
+        && crate::parallel::PARALLEL_MATH
+            .iter()
+            .any(|(k, n)| k == key && *n == args.len())
+    {
+        // The same expressions the guarded intrinsics below compute, so the clone and the
+        // sequential lowering agree bit for bit on every edge (`-0`, NaN, the sign of a zero).
+        let a = format!("d{}", args[0].0);
+        let b = args.get(1).map(|x| format!("d{}", x.0)).unwrap_or_default();
+        let call = match (key.as_str(), args.len()) {
+            ("sqrt", 1) => format!("sqrt({a})"),
+            ("abs", 1) => format!("fabs({a})"),
+            ("floor", 1) => format!("floor({a})"),
+            ("ceil", 1) => format!("ceil({a})"),
+            ("trunc", 1) => format!("trunc({a})"),
+            ("round", 1) => format!(
+                "({{ double r = isfinite({a}) ? floor({a} + 0.5) : {a}; if (r == 0.0 && signbit({a})) r = -0.0; r; }})"
+            ),
+            ("sign", 1) => format!("(isnan({a}) || {a} == 0.0 ? {a} : ({a} < 0.0 ? -1.0 : 1.0))"),
+            ("pow", 2) => format!("pow({a}, {b})"),
+            ("min", 2) => format!(
+                "((isnan({a}) || isnan({b})) ? NAN : (({a} < {b} || ({a} == 0.0 && {b} == 0.0 && signbit({a}))) ? {a} : {b}))"
+            ),
+            ("max", 2) => format!(
+                "((isnan({a}) || isnan({b})) ? NAN : (({a} > {b} || ({a} == 0.0 && {b} == 0.0 && !signbit({a}))) ? {a} : {b}))"
+            ),
+            _ => unreachable!("PARALLEL_MATH names only these"),
+        };
+        writeln!(
+            output,
+            "    d{v} = {call}; v{v} = kiln_c99_val_from_double(d{v});"
+        )
+        .unwrap();
+        return;
+    }
     let unwind = ctx.unwind;
     let plan = ctx.plan;
     let spec = ctx.spec;
@@ -767,6 +815,55 @@ pub(super) fn emit_call_method(
     } else {
         None
     };
+
+    // The pooled `parallelMap` (ADR 0058, application 2): the callback is this site's known proto,
+    // its body passes `parallel::parallel_safe`, its typed entry returns a double, and its
+    // parallel clone (`_p`) was emitted and scanned clean (`lib.rs`), so it can run on a provider
+    // pool thread that owns no realm. `kiln_c99_builtin_store_epoch == 0` is checked here, on the
+    // realm thread, because the clone calls `Math.<name>` as bare libm.
+    // Tried before the sequential lowering below and only when the receiver is a numeric array
+    // whose closure really is that proto; a typed entry that bails out, or a provider that could
+    // not run the pool, leaves `handled` clear and the sequential lowering answers -- the same
+    // answer, recomputed. Nothing is refused here.
+    let parallel_pool_intrinsic = (closed_world && key_str == "parallelMap" && argc == 1)
+        .then(|| typed_callback(plan, program, args[0], &[1, 2]))
+        .flatten()
+        .filter(|c| {
+            c.returns_double
+                && plan
+                    .parallel_safe
+                    .get(c.target as usize)
+                    .copied()
+                    .unwrap_or(false)
+        })
+        .map(|c| {
+            let target = c.target;
+            format!(
+                "if (!handled && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
+                     void *ptr = KILN_VAL_PTR(v{o}); \
+                     if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
+                         kiln_array *arr = (kiln_array *)ptr; \
+                         kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
+                         if (arr->is_numeric && kiln_c99_builtin_store_epoch == 0 && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
+                             size_t count0 = arr->count; \
+                             kiln_value built_val; \
+                             int status = kiln_c99_new_array_with_capacity(&built_val, count0, 1); \
+                             if (status != KILN_C99_OK) return status; \
+                             kiln_array *built_arr = kiln_c99_array_of(built_val); \
+                             int pmap_failed = 0; \
+                             if (kiln_parallel_map(arr->elements, count0, built_arr->elements, {symbol}_pmap_{target}, &pmap_failed) == 0 && !pmap_failed) {{ \
+                                 built_arr->count = count0; \
+                                 v{v} = kiln_val_from_boundary(built_val); \
+                                 handled = 1; \
+                             }} \
+                         }} \
+                     }} \
+                 }}",
+                o = object.0,
+                a0 = args[0].0,
+                v = v,
+            )
+        });
 
     let parallel_map_intrinsic = if key_str == "parallelMap" && argc >= 1 {
         Some(format!(
@@ -1460,6 +1557,9 @@ pub(super) fn emit_call_method(
     let parallel_map_s = parallel_map_intrinsic
         .map(|s| format!(" {s}"))
         .unwrap_or_default();
+    let parallel_pool_s = parallel_pool_intrinsic
+        .map(|s| format!(" {s}"))
+        .unwrap_or_default();
     let filter_s = filter_intrinsic
         .map(|s| format!(" {s}"))
         .unwrap_or_default();
@@ -1496,7 +1596,7 @@ pub(super) fn emit_call_method(
                 "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; \
                 kiln_val call_args[{n}] = {{ {init} }}; \
                 int handled = 0; int kiln_twin = 0; (void)kiln_twin; {typed_remembered}\
-                {math_s}{push_s}{regex_s}{map_s}{parallel_map_s}{filter_s}{reduce_s}{slice_s}{join_s}{split_s}{index_of_s}{substring_s}{collection_s}{json_s}{sort_s}{array_extra_s}{string_extra_s}{iterator_s} \
+                {math_s}{push_s}{regex_s}{map_s}{parallel_pool_s}{parallel_map_s}{filter_s}{reduce_s}{slice_s}{join_s}{split_s}{index_of_s}{substring_s}{collection_s}{json_s}{sort_s}{array_extra_s}{string_extra_s}{iterator_s} \
                 if (!handled && site.pic_count > 0 && KILN_VAL_IS_OBJECT(v{o})) {{ \
                     const kiln_object *obj = (const kiln_object *)KILN_VAL_PTR(v{o}); \
                     {typed_fast}\

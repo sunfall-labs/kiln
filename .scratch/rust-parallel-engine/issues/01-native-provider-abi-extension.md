@@ -1,6 +1,6 @@
 # Issue 01: Native Provider ABI Extension & Export Verification
 
-Status: planned
+Status: done
 Feature: rust-parallel-engine
 Governing ADR: ADR 0018, ADR 0025, ADR 0058
 
@@ -18,3 +18,5 @@ Reconciled 2026-09-06 to ADR 0058 (revised): `parallelMap` only, synchronous, lo
 ## Acceptance Criteria
 - `mbx test -p kiln-native-number-abi` passes cleanly.
 - `bash scripts/check-native-number-ffi.sh` verifies symbol presence and exits 0.
+
+* **2026-09-06:** landed with the commit titled "parallelMap runs its qualifying callback on a Rayon pool": `kiln_parallel_map` (ABI 32, feature `parallel`), the private Rayon pool with a measured floor of 16,384, the `parallel_safe` predicate and parallel clone in `kiln-backend-c`, `conformance/native/parallel-map.ts` and `bench/non-io/parallel-map-large.mjs`. See ADR 0058 application 2 for the numbers.

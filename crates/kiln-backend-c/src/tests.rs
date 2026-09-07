@@ -5705,6 +5705,9 @@ fn pure_closure_classification_and_parallel_map_emission() {
     };
 
     let graph = build_function_graph(&callback, &program).expect("callback graph builds");
+    // `x => x * 2` is a function of its double parameter: the pooled lowering may run it on a
+    // provider pool thread (ADR 0058, application 2).
+    assert!(crate::parallel::parallel_safe(&graph, &callback, &program));
     // Code calling array.parallelMap(callback)
     let module_code = vec![
         Instruction::NewArray { count: 0 },

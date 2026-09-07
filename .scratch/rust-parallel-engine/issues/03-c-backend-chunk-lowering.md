@@ -1,6 +1,6 @@
 # Issue 03: Emitted C Chunk Worker Lowering in `kiln-backend-c`
 
-Status: planned
+Status: done
 Feature: rust-parallel-engine
 Governing ADR: ADR 0058
 
@@ -20,3 +20,5 @@ Calling Rust across FFI on every array element introduces prohibitive indirect c
 - Emitted C units compile cleanly under `zig cc` without warnings.
 - `mbx test -p kiln-backend-c` passes all unit and emitted C tests.
 - Clang successfully auto-vectorizes the inner chunk loop.
+
+* **2026-09-06:** landed with the commit titled "parallelMap runs its qualifying callback on a Rayon pool": `kiln_parallel_map` (ABI 32, feature `parallel`), the private Rayon pool with a measured floor of 16,384, the `parallel_safe` predicate and parallel clone in `kiln-backend-c`, `conformance/native/parallel-map.ts` and `bench/non-io/parallel-map-large.mjs`. See ADR 0058 application 2 for the numbers.
