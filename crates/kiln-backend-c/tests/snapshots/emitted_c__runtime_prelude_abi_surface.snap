@@ -1231,8 +1231,10 @@ typedef struct kiln_gc_nursery {
 typedef struct kiln_gc_heap {
 static const kiln_gc_hooks kiln_c99_gc_hooks;
 static kiln_gc_heap kiln_c99_gc_fallback;
+static inline void kiln_c99_gc_bound(kiln_gc_heap *heap, const void *base, size_t size) {
 static int kiln_c99_gc_stress_checks;
 static void kiln_c99_nursery_init(kiln_gc_nursery *nursery) {
+static void kiln_c99_nursery_free_list(kiln_nursery_chunk *chunk) {
 static void kiln_c99_nursery_destroy(kiln_gc_nursery *nursery) {
 static void kiln_c99_gc_heap_init(kiln_gc_heap *heap) {
 static void kiln_c99_gc_trace_text(const char *text) { fputs(text, stderr); }
@@ -1278,6 +1280,8 @@ static void kiln_c99_gc_slab_unlink_all(kiln_gc_heap *heap, kiln_gc_slab *slab) 
 static void kiln_c99_gc_slab_maybe_destroy(kiln_gc_heap *heap, kiln_gc_slab *slab) {
 static kiln_gc_slab *kiln_c99_gc_slab_new(kiln_gc_heap *heap, int class_index) {
 static kiln_gc_block *kiln_c99_gc_lookup_slab(const kiln_gc_heap *heap, const void *payload,
+static int kiln_c99_nursery_locate(const kiln_gc_heap *heap, const char *ptr, char **base,
+static kiln_gc_block *kiln_c99_nursery_block_at(const char *base, const char *limit,
 static void kiln_c99_nursery_clear_bit(kiln_gc_heap *heap, const kiln_gc_block *block) {
 static kiln_gc_block *kiln_c99_gc_lookup_nursery(const kiln_gc_heap *heap, const void *payload) {
 static kiln_gc_block *kiln_c99_gc_lookup(const kiln_gc_heap *heap, const void *payload) {
@@ -1306,6 +1310,8 @@ static void kiln_c99_gc_register_site(kiln_c99_site *site) {
 static void kiln_c99_gc_clear_dead_sites(kiln_gc_heap *heap) {
 static void kiln_c99_gc_collect(void *opaque, int force);
 static void kiln_c99_gc_collect_mid_turn(kiln_gc_heap *heap) {
+static int kiln_c99_nursery_fresh_chunk(kiln_gc_heap *heap) {
+static void kiln_c99_nursery_turn_chunk(kiln_gc_heap *heap) {
 static void *kiln_c99_gc_alloc_ex(uint32_t kind, size_t size, int zero_payload) {
 static void *kiln_c99_gc_alloc(uint32_t kind, size_t size) {
 static void *kiln_c99_gc_alloc_pointer_free(uint32_t kind, size_t size) {
@@ -1344,6 +1350,8 @@ static void kiln_c99_gc_drain(kiln_gc_heap *heap) {
 static void kiln_c99_gc_begin(kiln_gc_heap *heap) {
 #define KILN_GC_SLAB_CLASSES \
 static void kiln_c99_gc_sweep(kiln_gc_heap *heap, int orphan_marked) {
+static size_t kiln_c99_nursery_settle(kiln_gc_heap *heap, char *base, char *limit,
+static void kiln_c99_nursery_spare(kiln_gc_heap *heap, kiln_nursery_chunk *chunk) {
 static void kiln_c99_gc_collect(void *opaque, int force) {
 static void kiln_c99_gc_teardown_begin(void *opaque) {
 static void kiln_c99_gc_teardown_end(void *opaque) {

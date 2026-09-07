@@ -185,7 +185,9 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
 }
 
 static int kiln_c99_new_object(kiln_value *out) {
-    kiln_object *object = (kiln_object *)kiln_c99_gc_alloc(KILN_GC_OBJECT, sizeof *object);
+    /* Every field is written below before anything can observe the object, so the block is
+     * taken unzeroed: the zeroing was a second pass over two hundred bytes per object. */
+    kiln_object *object = (kiln_object *)kiln_c99_gc_alloc_pointer_free(KILN_GC_OBJECT, sizeof *object);
     if (object == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
