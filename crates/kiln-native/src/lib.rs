@@ -1183,7 +1183,7 @@ impl NativeBuilder {
                 identity.kind,
                 profile.as_str(),
                 if profile == NativeProfile::Release {
-                    "o0"
+                    "o0-nosan"
                 } else {
                     "profile-default"
                 }
@@ -1213,6 +1213,11 @@ impl NativeBuilder {
             .push("-fvisibility=hidden".into());
         if profile == NativeProfile::Release {
             module_compile_options.extra_args.push("-O0".into());
+            // See the release module compile below: `-O0` is Debug to `zig cc`, Debug turns the
+            // undefined-behavior sanitizer on, and the `-O3` release link brings no runtime for it.
+            module_compile_options
+                .extra_args
+                .push("-fno-sanitize=undefined".into());
         }
         let wrapper_compile_options = CompileOptions {
             profile: profile.toolchain(),
@@ -1746,6 +1751,13 @@ impl NativeBuilder {
             // Large bundles spend nearly all cold-build time optimizing generated application
             // glue. The runtime and prelude remain O3, where the hot generic operations live.
             module_compile_options.extra_args.push("-O0".into());
+            // `-O0` is Debug to `zig cc`, and Debug turns the undefined-behavior sanitizer on.
+            // The release *link* is `-O3`, which brings no sanitizer runtime, so every module
+            // object would reference `__ubsan_handle_*` and no link would resolve them. The
+            // intent here is to stop optimizing glue, not to instrument it.
+            module_compile_options
+                .extra_args
+                .push("-fno-sanitize=undefined".into());
         }
         let module_object_options = Digest::hash(
             format!(
@@ -1753,7 +1765,7 @@ impl NativeBuilder {
                 identity.kind,
                 profile.as_str(),
                 if profile == NativeProfile::Release {
-                    "o0"
+                    "o0-nosan"
                 } else {
                     "profile-default"
                 }
