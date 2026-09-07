@@ -1074,7 +1074,7 @@ static int kiln_c99_json_build(const kiln_json_node *nodes, size_t count,
  * text, so `JSON.parse("1 2")` has no answer here either. The tape is lent from the reader's
  * per-thread scratch and is valid until the next parse on this thread, which is after the walk:
  * the walk allocates on this heap and never parses. */
-int kiln_c99_json_document(const char *bytes, size_t len, kiln_val *out) {
+static int kiln_c99_json_document(const char *bytes, size_t len, kiln_val *out) {
     const kiln_json_node *nodes = NULL;
     size_t count = 0;
     const unsigned char *text = NULL;

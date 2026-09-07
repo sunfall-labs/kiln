@@ -571,7 +571,7 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
                                const char *indent, size_t indent_len, const char *current,
                                size_t current_len, int *serialised, int depth,
                                const kiln_json_frame *parents, kiln_value *thrown);
-int kiln_c99_json_document(const char *bytes, size_t len, kiln_val *out);
+static int kiln_c99_json_document(const char *bytes, size_t len, kiln_val *out);
 static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
                          kiln_value receiver, const kiln_value *args, size_t argc, int depth,
                          kiln_value *thrown);

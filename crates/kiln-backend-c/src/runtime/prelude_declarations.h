@@ -30,7 +30,7 @@ extern void kiln_c99_gc_unit_roots(void *opaque, void *context, int phase);
 extern int kiln_c99_refuse(const char *lacked);
 extern int kiln_c99_refuse_named(const char *lacked, const char *subject, size_t subject_len);
 extern int kiln_c99_internal_status(const char *converted_by);
-extern int kiln_c99_json_document(const char *bytes, size_t len, kiln_val *out);
+static int kiln_c99_json_document(const char *bytes, size_t len, kiln_val *out);
 
 #define KILN_C99_REFUSE(lacked) return kiln_c99_refuse(lacked)
 #define KILN_C99_REFUSE_NAMED(lacked, subject, subject_len) \
