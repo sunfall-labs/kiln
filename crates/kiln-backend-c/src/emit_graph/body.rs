@@ -24,7 +24,8 @@ const COMPACT_INDEXED_VALUE_THRESHOLD: u32 = 512;
 ///
 /// Only these side-effect-free prologue declarations are candidates. Identifier matching is
 /// deliberately conservative: names in comments or strings also retain a declaration. The
-/// generated macros do not implicitly capture these locals. Noncompact clones are unchanged.
+/// The compact operation macros that implicitly capture locals are accounted for below.
+/// Noncompact clones are unchanged.
 fn retain_used_context(output: &mut String, context: std::ops::Range<usize>) {
     const LOCALS: [(&str, &str); 6] = [
         ("host", "    kiln_host *host = ctx->host;\n"),
@@ -42,12 +43,18 @@ fn retain_used_context(output: &mut String, context: std::ops::Range<usize>) {
     ];
     let mut used = [false; LOCALS.len()];
     let setup = &output[context.clone()];
+    let body = &output[context.end..];
+    if body.contains("KU_BINARY(") || body.contains("KU_READ_PROPERTY(") {
+        used[0] = true;
+        used[1] = true;
+        used[3] = true;
+    }
     // Do not count a declaration's own name (or ctx->field) as a use. All other setup,
     // including receiver caches and arguments/frame publication, participates in the scan.
     let remaining_setup = setup
         .split_inclusive('\n')
         .filter(|line| !LOCALS.iter().any(|(_, declaration)| line == declaration));
-    for text in remaining_setup.chain(std::iter::once(&output[context.end..])) {
+    for text in remaining_setup.chain(std::iter::once(body)) {
         for identifier in text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_') {
             match identifier {
                 "host" => used[0] = true,
@@ -2030,7 +2037,20 @@ fn emit_phi_assignments(
 
 #[cfg(test)]
 mod tests {
-    use super::index_large_ssa_values;
+    use super::{index_large_ssa_values, retain_used_context};
+
+    #[test]
+    fn compact_operation_macros_retain_the_context_their_expansions_capture() {
+        let setup = "    kiln_host *host = ctx->host;\n    kiln_value *thrown = ctx->thrown;\n    kiln_generator *frame = ctx->frame;\n    int depth = ctx->depth;\n    kiln_val receiver = receiver_ptr ? *receiver_ptr : KILN_VAL_UNDEFINED;\n";
+        let mut source =
+            format!("{setup}    KU_BINARY(v2, 1, v0, v1, 3, \"Binary\", goto kiln_unwind;);\n");
+        retain_used_context(&mut source, 0..setup.len());
+        assert!(source.contains("kiln_host *host = ctx->host;"));
+        assert!(source.contains("kiln_value *thrown = ctx->thrown;"));
+        assert!(source.contains("int depth = ctx->depth;"));
+        assert!(!source.contains("kiln_generator *frame = ctx->frame;"));
+        assert!(!source.contains("kiln_val receiver = receiver_ptr"));
+    }
 
     #[test]
     fn large_ssa_indexing_changes_only_c_identifiers() {
