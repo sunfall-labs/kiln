@@ -102,7 +102,18 @@ step "crate tests" "$BASH" -c '
 	# the only chance to read one.
 	printf "%s\n" "$output" | grep -E -A6 "^---- .* stdout" | head -60
 	printf "%s\n" "$output" | grep -E "^(test result: FAILED|error)" | head -10
-	printf "%s\n" "$output" | grep -E "^test result: ok" | tail -3
+	# One total rather than the last three summary lines. The last suites of a workspace run
+	# are doc-test targets with nothing in them, so a tail of "0 passed; 0 failed" three times
+	# reads as a suite that never ran -- two agents read it that way on 2026-09-06 and went
+	# looking for a test cache that does not exist. A total says what happened, and the floor
+	# below is the assertion the comment above promises: a build that produced no test binary
+	# prints no summary lines at all and would otherwise pass on "no FAILED".
+	printf "%s\n" "$output" | awk "/^test result:/ { suites++; passed += \$4; failed += \$6 } END { printf \"crate tests: %d suites, %d passed, %d failed\\n\", suites, passed, failed }"
+	total_passed="$(printf "%s\n" "$output" | awk "/^test result:/ { passed += \$4 } END { print passed + 0 }")"
+	if [[ $total_passed -lt ${KILN_GATE_MIN_PASSED:-500} ]]; then
+		echo "crate tests: only $total_passed tests passed, below the floor of ${KILN_GATE_MIN_PASSED:-500}: the suite did not run" >&2
+		exit 1
+	fi
 	! grep -qE "^error|FAILED" <<<"$output"
 '
 
