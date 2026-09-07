@@ -230,7 +230,11 @@ static uint64_t kiln_c99_ryu_shortest(uint64_t bits, int32_t *exponent) {
  * `%.17g` from the C library cannot stand in -- besides its answering to the process locale,
  * which is the whole reason nothing here reaches for stdio: the language switches to exponential
  * notation at thresholds of its own (21 digits above, six zeros below), spells the exponent with
- * a sign and no leading zeros, and drops the point entirely for a single digit. */
+ * a sign and no leading zeros, and drops the point entirely for a single digit.
+ *
+ * The answer is the returned length and nothing else: `out` is not NUL-terminated, and the byte
+ * past the answer is left as it was. Every caller passes the length on; none may call `strlen`
+ * on the buffer. (The provider call this replaced did terminate, and wanted room for it.) */
 static size_t kiln_c99_double_to_js(double value, char out[32]) {
     uint64_t bits;
     int negative;

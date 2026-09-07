@@ -474,7 +474,10 @@ static kiln_value kiln_c99_text(kiln_value value) {
     case KILN_VALUE_NUMBER: {
         char buffer[32];
         double number = kiln_c99_as_number(value);
-        return kiln_c99_copy_text(buffer, kiln_c99_double_to_js(number, buffer));
+        /* Spelt first, copied second: one statement passing `buffer` to both reads as though the
+         * two could interleave, though C sequences a call's arguments before its body. */
+        size_t length = kiln_c99_double_to_js(number, buffer);
+        return kiln_c99_copy_text(buffer, length);
     }
     case KILN_VALUE_OBJECT: {
         static const char object_text[] = "[object Object]";
