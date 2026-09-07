@@ -476,7 +476,8 @@ static int kiln_c99_run_timer(void *work, void *host, void *thrown);
 static void kiln_c99_drop_timer(void *work);
 static int kiln_c99_schedule(kiln_promise *promise, const kiln_reaction *reaction);
 static int kiln_c99_async_step(kiln_host *host, kiln_value generator, kiln_value sent,
-                               int rejected, int depth, kiln_value *thrown);
+                               int rejected, int depth, kiln_value *thrown,
+                               const kiln_val *args, size_t argc);
 static int kiln_c99_async_generator_step(kiln_host *host, kiln_value generator, kiln_value sent,
                                          int rejected, int depth, kiln_value *thrown);
 static int kiln_c99_async_generator_settle(kiln_host *host, kiln_value step, kiln_value value,

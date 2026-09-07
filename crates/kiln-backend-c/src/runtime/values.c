@@ -680,8 +680,14 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
         /* Calling a generator function does not run it: it builds the object that will. An
          * async function is compiled as one -- `await` suspends exactly as `yield` does -- and
          * differs only in who drives it, which is this rather than the program. */
+        /* The call's arguments as frame values, for whichever of the two entries below runs the
+         * prologue: a generator binds its parameters here, an async function binds them inside
+         * its first step. Both build `...rest` and `arguments` from this list, so both need it. */
+        kiln_val vargs[argc > 0 ? argc : 1];
         kiln_value built;
-        int status = kiln_c99_new_generator(&built, callee, receiver, args, argc);
+        int status;
+        for (size_t i = 0; i < argc; ++i) vargs[i] = kiln_val_from_boundary(args[i]);
+        status = kiln_c99_new_generator(&built, callee, receiver, args, argc);
         if (status != KILN_C99_OK) {
             return status;
         }
@@ -692,8 +698,6 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
          * before the object is handed over, and its throw leaves from here. */
         if (closure->prologue_resume != 0) {
             kiln_val vrec = kiln_val_from_boundary(receiver);
-            kiln_val vargs[argc > 0 ? argc : 1];
-            for (size_t i = 0; i < argc; ++i) vargs[i] = kiln_val_from_boundary(args[i]);
             status =
                 kiln_c99_bind_parameters(host, built, closure, vrec, argc > 0 ? vargs : NULL, argc, depth, thrown);
             if (status != KILN_C99_OK) {
@@ -715,8 +719,11 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
             }
             *result = frame->promise;
             /* The body starts *now*, synchronously, and runs until its first `await` -- which is
-             * what makes the code before the first one behave like an ordinary call. */
-            return kiln_c99_async_step(host, built, kiln_c99_undefined(), 0, depth, thrown);
+             * what makes the code before the first one behave like an ordinary call. It carries
+             * the call's arguments because this entry is also the one that runs the prologue:
+             * the caller's list is still alive here, and every later resumption is behind it. */
+            return kiln_c99_async_step(host, built, kiln_c99_undefined(), 0, depth, thrown,
+                                       argc > 0 ? vargs : NULL, argc);
         }
     }
     {
