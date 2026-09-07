@@ -222,6 +222,32 @@ fn guarded_numbers(graph: &FunctionGraph, program: &Program, plan: &CallPlan) ->
         .map(|&v| (v, Proven::Number))
         .chain(plan.ints.iter().map(|&v| (v, Proven::Int)))
         .collect();
+    // A property read that feeds an operator only numbers accept is one: a shape says which
+    // slots an object has and never what is in them, so without this every `p.x * p.x` runs
+    // boxed and nothing downstream of it is proven either. `+` is deliberately not in the list.
+    // It is the operator a string also takes, and a body that concatenates a property would
+    // then restart on every call and never use this entry again -- where the versioned body's
+    // guess costs a jump to the clone beside it and can afford `+`.
+    let numeric_only = |value: &ValueId| {
+        graph
+            .blocks
+            .iter()
+            .flat_map(|b| b.operations.iter())
+            .any(|(_, op)| match op {
+                GraphOp::Binary { op, left, right } => {
+                    (left == value || right == value)
+                        && matches!(
+                            op,
+                            BinaryOp::Subtract
+                                | BinaryOp::Multiply
+                                | BinaryOp::Divide
+                                | BinaryOp::Exponentiate
+                                | BinaryOp::Remainder
+                        )
+                }
+                _ => false,
+            })
+    };
     for (vid, op) in graph.blocks.iter().flat_map(|b| b.operations.iter()) {
         let guarded = match op {
             GraphOp::Binary { op, .. } => matches!(
@@ -234,6 +260,7 @@ fn guarded_numbers(graph: &FunctionGraph, program: &Program, plan: &CallPlan) ->
                     | BinaryOp::Remainder
             ),
             GraphOp::CallMethod { .. } => restartable(op, plan, *vid, graph, program),
+            GraphOp::GetProperty { .. } | GraphOp::GetComputed { .. } => numeric_only(vid),
             _ => false,
         };
         if guarded {

@@ -1,6 +1,6 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 1165
+assertion_line: 1172
 expression: body(&unit)
 ---
 /* Program hash: e7254e180d505d73; bytecode version: 4. */
@@ -26,7 +26,7 @@ kiln_block_0:;
     v0 = (size_t)0 < argc ? args[0] : KILN_VAL_UNDEFINED;
     v1 = KILN_VAL_UNDEFINED;
     v2 = *(const kiln_val *)KILN_VAL_PTR(upvalues[0]);
-    if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v2) && KILN_VAL_IS_NUMBER(v0))) { double a; double b; memcpy(&a, &v2, sizeof(a)); memcpy(&b, &v0, sizeof(b)); v3 = kiln_c99_val_from_double(a + b); } else { int status = KILN_C99_OK; v3 = kiln_c99_val_binary(1, host, v2, v0, &status, depth, thrown); if (status == KILN_C99_THROWN) goto kiln_unwind; if (status == KILN_C99_CONTROL_ERROR) { kiln_c99_note_refusal("kiln_module_e7254e180d505d7339b5d1ff0e603bdc", (size_t)2, "Binary", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; }
+    if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v2) && KILN_VAL_IS_NUMBER(v0))) { double a; memcpy(&a, &v2, sizeof(a)); double b; memcpy(&b, &v0, sizeof(b)); v3 = kiln_c99_val_from_double(a + b); } else { int status = KILN_C99_OK; v3 = kiln_c99_val_binary(1, host, v2, v0, &status, depth, thrown); if (status == KILN_C99_THROWN) goto kiln_unwind; if (status == KILN_C99_CONTROL_ERROR) { kiln_c99_note_refusal("kiln_module_e7254e180d505d7339b5d1ff0e603bdc", (size_t)2, "Binary", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; }
     v4 = v3;
     *result = v3; return KILN_C99_OK;
 kiln_unwind:;
@@ -45,7 +45,7 @@ kiln_block_0:;
     d0 = p0; v0 = kiln_c99_val_from_double(p0);
     v1 = KILN_VAL_UNDEFINED;
     v2 = *(const kiln_val *)KILN_VAL_PTR(upvalues[0]);
-    if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v2) && KILN_VAL_IS_NUMBER(v0))) { double a; double b; memcpy(&a, &v2, sizeof(a)); memcpy(&b, &v0, sizeof(b)); d3 = a + b; v3 = kiln_c99_val_from_double(d3); } else { { kiln_call_context kiln_restart_ctx = { host, thrown, NULL, depth }; kiln_val kiln_restart_args[1] = { kiln_c99_val_from_double(p0) }; kiln_val kiln_restart_out = KILN_VAL_UNDEFINED; int kiln_restart_status = kiln_module_e7254e180d505d7339b5d1ff0e603bdc_fn_0(&kiln_restart_ctx, &kiln_restart_out, upvalues, &receiver, kiln_restart_args, (size_t)1); if (KILN_UNLIKELY(kiln_restart_status != KILN_C99_OK)) { kiln_c99_typed_status = kiln_restart_status; if (kiln_restart_status == KILN_C99_THROWN) kiln_c99_typed_thrown = *thrown; return KILN_VAL_TYPED_FAIL; } return kiln_restart_out; } }
+    if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v2))) { double a; memcpy(&a, &v2, sizeof(a)); double b = d0; d3 = a + b; v3 = kiln_c99_val_from_double(d3); } else { { kiln_call_context kiln_restart_ctx = { host, thrown, NULL, depth }; kiln_val kiln_restart_args[1] = { kiln_c99_val_from_double(p0) }; kiln_val kiln_restart_out = KILN_VAL_UNDEFINED; int kiln_restart_status = kiln_module_e7254e180d505d7339b5d1ff0e603bdc_fn_0(&kiln_restart_ctx, &kiln_restart_out, upvalues, &receiver, kiln_restart_args, (size_t)1); if (KILN_UNLIKELY(kiln_restart_status != KILN_C99_OK)) { kiln_c99_typed_status = kiln_restart_status; if (kiln_restart_status == KILN_C99_THROWN) kiln_c99_typed_thrown = *thrown; return KILN_VAL_TYPED_FAIL; } return kiln_restart_out; } }
     v4 = v3;
     d4 = d3;
     return v3;
@@ -61,7 +61,7 @@ kiln_block_0:;
     v0 = (size_t)0 < argc ? args[0] : KILN_VAL_UNDEFINED;
     v1 = KILN_VAL_UNDEFINED;
     v2 = *(const kiln_val *)KILN_VAL_PTR(upvalues[0]);
-    if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v2) && KILN_VAL_IS_NUMBER(v0))) { double a; double b; memcpy(&a, &v2, sizeof(a)); memcpy(&b, &v0, sizeof(b)); d3 = a + b; v3 = kiln_c99_val_from_double(d3); } else { return kiln_module_e7254e180d505d7339b5d1ff0e603bdc_fn_0(ctx, result, upvalues, receiver_ptr, args, argc); }
+    if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v2) && KILN_VAL_IS_NUMBER(v0))) { double a; memcpy(&a, &v2, sizeof(a)); double b; memcpy(&b, &v0, sizeof(b)); d3 = a + b; v3 = kiln_c99_val_from_double(d3); } else { return kiln_module_e7254e180d505d7339b5d1ff0e603bdc_fn_0(ctx, result, upvalues, receiver_ptr, args, argc); }
     v4 = v3;
     d4 = d3;
     *result = v3; return KILN_C99_OK;

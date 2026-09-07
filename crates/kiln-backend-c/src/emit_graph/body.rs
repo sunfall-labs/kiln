@@ -1084,16 +1084,16 @@ fn emit_blocks(
         })
         .filter(feeds_arithmetic)
         .collect();
-    // A literal with a spread that never escapes is sunk by the fast clone alone, under a guard
-    // on its source; its field reads that feed arithmetic are guessed to be numbers, and checked.
+    // A property read whose answer feeds arithmetic is guessed to be a number and checked. An
+    // object's field has no type the graph can prove -- a shape says which slots exist, never
+    // what is in them -- so without this every `p.x * p.x` runs boxed, and so does everything
+    // downstream of it: the accumulator of a loop over objects is never proven, and each turn
+    // tests two tags and copies two doubles out of their boxes. The reads of a sunk literal
+    // (`FunctionGraph::spread_sinks`) are the same guess over scalars rather than slots.
     let spec_fields: HashSet<ValueId> = ops
         .iter()
         .filter_map(|(vid, op)| match op {
-            GraphOp::GetProperty { object, .. }
-                if !plan.numbers.contains(vid) && graph.spread_alias_map.contains_key(object) =>
-            {
-                Some(*vid)
-            }
+            GraphOp::GetProperty { .. } if !plan.numbers.contains(vid) => Some(*vid),
             _ => None,
         })
         .filter(feeds_arithmetic)
@@ -1110,6 +1110,7 @@ fn emit_blocks(
         && (!candidate_params.is_empty()
             || !spec_arrays.is_empty()
             || !spec_calls.is_empty()
+            || !spec_fields.is_empty()
             || !graph.spread_sinks.is_empty());
 
     let baseline_numbers = &plan.numbers;
