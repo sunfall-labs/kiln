@@ -28,6 +28,9 @@ const INVALID_ARGUMENT: i32 = -1;
 #[cfg(feature = "realm")]
 const RUNTIME_ERROR: i32 = -8;
 
+#[cfg(feature = "ffi")]
+mod ffi;
+
 /// The private native Realm ABI.
 ///
 /// Handles are process-unique integers rather than Rust pointers. The owning thread keeps the

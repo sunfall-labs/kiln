@@ -27,6 +27,9 @@ json = ["dep:kiln-json"]
 # `parallelMap`'s fork-join: a private Rayon pool that runs an emitted C chunk worker over index
 # ranges (ADR 0058, application 2). Rust owns the pool, the chunk size and the sequential floor.
 parallel = ["dep:rayon"]
+# Dynamic calls and same-thread callback closures for the native `node:ffi` capability. libffi is
+# linked into the one provider archive, never into compiler crates or generated application units.
+ffi = ["dep:libc", "dep:libffi"]
 
 [dependencies]
 kiln-native-number-abi = { workspace = true }
@@ -39,6 +42,8 @@ kiln-runtime = { workspace = true, optional = true }
 kiln-temporal = { workspace = true, optional = true }
 kiln-json = { workspace = true, optional = true }
 rayon = { workspace = true, optional = true }
+libc = { workspace = true, optional = true }
+libffi = { workspace = true, optional = true }
 # The regexp engine's allocation-only shape. The interpreter links the same crate, which is the
 # whole point: two engines running one implementation cannot disagree about a backreference.
 regress = { version = "0.12", default-features = false, features = [

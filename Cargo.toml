@@ -45,6 +45,7 @@ kiln-test-selector = { path = "crates/kiln-test-selector" }
 kiln-test262 = { path = "crates/kiln-test262" }
 frontend-oxc = { path = "crates/frontend-oxc" }
 libc = { version = "0.2", default-features = false }
+libffi = { version = "5.2", default-features = false }
 oxc_allocator = { version = "0.147.0", default-features = false }
 oxc_ast = { version = "0.147.0", default-features = false }
 oxc_parser = { version = "0.147.0", default-features = false }
@@ -211,4 +212,3 @@ opt-level = 2
 # Optimize pure-Rust SHA-256 digest engine (only 440 lines, instant to compile, 50x faster hashing)
 [profile.dev.package.kiln-digest]
 opt-level = 3
-
