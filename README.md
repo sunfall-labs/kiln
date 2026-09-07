@@ -11,16 +11,20 @@ immediately, so the edit-run loop never waits for a native build.
 
 ## Status
 
-kiln is at v0 and under active development. Today it runs and compiles a real but bounded subset
-of the language and of Node's API: modules (ESM and CommonJS), classes, closures, generators,
-async functions and promises, the standard built-ins including `Map`, `Set`, typed arrays, JSON,
-regular expressions, BigInt and Temporal, and the `node:http`, `node:net`, `node:fs`,
-`node:events`, `node:stream`, `node:buffer`, `node:path` and `node:url` surfaces that small
-services use. What is not implemented is refused with a source location rather than
-approximated; `docs/language-coverage.md` records the ladder.
+kiln is at v0 and under active development, with a strong focus on high ECMAScript conformance, real-world library compatibility, and native performance:
 
-Conformance is measured, not asserted. The native backend is held to byte-identical output with
-the interpreter on every probe in `conformance/native`, and the interpreter is held to Test262.
+- **ECMAScript Conformance**: Tracks the official Test262 suite, passing the vast majority of tests across standard built-ins, syntax, and runtime semantics (tracked chunk-by-chunk in `conformance/test262-baseline.json`).
+- **Real-World Library Compatibility**: Executes unmodified third-party libraries and application bundles, producing output byte-identical to Node under both the interpreter and the native C backend (`conformance/thirdparty`):
+  - *Tooling & Compilers*: `@babel/parser` + `@babel/traverse` + `@babel/generator` (`babel`), `acorn`.
+  - *Reactive & State Systems*: `vue-reactivity` (Vue 3 reactive proxy system), `mobx`, `rxjs`.
+  - *Validation & Runtime Generation*: `ajv` (JSON Schema compiler with runtime code generation).
+  - *Standard Utilities*: `lodash`, `date-fns`, `dayjs`, `semver`, `marked`, `mustache`, `uuid`, `chalk`, `ms`, `immer`.
+- **Targeted Corpora**: Held to clean runs across dedicated suites for language edge cases (`conformance/guard`), Node compatibility (`conformance/node`), regression tests (`conformance/regress`), Effect runtime semantics (`conformance/effect`), and HTTP server workloads (`conformance/server`).
+- **Engine Parity**: The compiled native C backend is held to byte-identical output and matching exit codes with the bytecode interpreter across the entire native corpus (`conformance/native`), ensuring zero divergence between execution modes.
+
+Today it compiles and executes a substantial language and runtime surface: modules (ESM and CommonJS, including cyclic dependencies), classes and private fields, closures, generators and `yield*`, async functions and promises, standard built-ins (`Map`, `Set`, typed arrays, JSON, regular expressions, BigInt, Temporal, `Date`, `DataView`), and the core `node:*` APIs (`http`, `net`, `fs`, `events`, `stream`, `buffer`, `path`, `url`, `util`) needed for high-throughput services.
+
+What is not implemented is refused with a source location rather than approximated or returning silent `undefined`. (`docs/language-coverage.md` records the initial bootstrap backlog; current progress is tracked directly in `conformance/test262-baseline.json` and the gate suites).
 
 ## Measured
 
