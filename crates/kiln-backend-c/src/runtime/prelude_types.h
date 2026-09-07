@@ -879,7 +879,6 @@ typedef enum kiln_gc_kind {
     KILN_GC_NODE_RESPONSE,
     KILN_GC_NODE_COMPLETION,
     KILN_GC_NODE_FS_COMPLETION,
-    KILN_GC_MICROTASK,
     KILN_GC_NEXT_TICK,
     KILN_GC_TIMER,
     KILN_GC_KIND_COUNT
@@ -1196,9 +1195,10 @@ typedef struct kiln_commonjs_require {
     void *context;
 } kiln_commonjs_require;
 
-/* One entry of the microtask queue: run `handler` against `argument` and settle `derived` with
- * what it produced.  A handler that is not callable passes the value through unchanged, which is
- * what `p.then(undefined, f)` and `p.catch(f)` rely on. */
+/* One job of the promise lane: run `handler` against `argument` and settle `derived` with what
+ * it produced.  A handler that is not callable passes the value through unchanged, which is what
+ * `p.then(undefined, f)` and `p.catch(f)` rely on.  These are values in an array the prelude
+ * owns (`kiln_gc_heap.jobs`), not cells: see the head of `promises.c`. */
 typedef struct kiln_microtask {
     kiln_value handler;
     kiln_value argument;
@@ -1496,6 +1496,13 @@ int kiln_number_to_js_string(double value, char *buffer, size_t capacity);
 double kiln_string_to_number(const char *bytes, size_t len);
 typedef int (*kiln_realm_work_fn)(void *work, void *host, void *thrown);
 typedef void (*kiln_realm_drop_fn)(void *work);
+/* The promise job lane the prelude owns (Phase 6.3). Promise reactions and await resumptions
+ * are queued in the prelude, not handed to the runtime one FFI call and one GC cell at a time;
+ * the realm calls back into the lane at the point in its drain where the promise jobs belong,
+ * and `pending` is what tells it there is anything there. `context` is the heap the ring lives
+ * in, so a realm never drains another realm's lane. */
+typedef int (*kiln_realm_lane_run_fn)(void *context, void *host, void *thrown);
+typedef int (*kiln_realm_lane_pending_fn)(void *context);
 typedef int (*kiln_realm_entry_fn)(void *context);
 #define KILN_REALM_ASYNC_ABI_VERSION 5
 #define KILN_REALM_ASYNC_OK 0

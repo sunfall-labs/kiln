@@ -46,6 +46,7 @@ macro_rules! provider_abi_registry {
             (realm, kiln_realm_now_nanoseconds, realm_now_nanoseconds);
             (realm, kiln_realm_queue_microtask, realm_queue_work);
             (realm, kiln_realm_queue_next_tick, realm_queue_work);
+            (realm, kiln_realm_set_promise_lane, realm_set_promise_lane);
             (realm, kiln_realm_set_timeout, realm_set_timer);
             (realm, kiln_realm_set_interval, realm_set_timer);
             (realm, kiln_realm_clear_timer, realm_clear_timer);
@@ -116,7 +117,7 @@ macro_rules! provider_export_names {
 }
 
 /// Version of the private provider ABI represented by [`provider_abi_registry!`].
-pub const PROVIDER_ABI_VERSION: u32 = 32;
+pub const PROVIDER_ABI_VERSION: u32 = 33;
 
 /// Canonical ordered export names required in a packaged provider manifest.
 pub const PROVIDER_EXPORTS: &[&str] = provider_abi_registry!(provider_export_names);
@@ -127,20 +128,22 @@ mod tests {
 
     #[test]
     fn registry_has_the_packaged_contract_shape() {
-        // 32, and 89 exports: `kiln_parallel_map` joined for `parallelMap` (ADR 0058, application
-        // 2): one call that runs an emitted chunk worker over index ranges on a private Rayon
-        // pool. Before that, 31 and 88: `JSON.parse` moved into the archive as a tape (`kiln_json_parse`,
-        // one call that lends the reader's per-thread tape), so the emitted C stopped carrying a
-        // reader of its own. Before that, 30 and 87: `kiln_realm_generation_slot` joined the contract when the prelude
-        // learned to cache per-realm answers -- the heap pointer first -- behind a generation the
-        // realm bumps on every entry, exit and heap attach, so a thread that hosts several realms
-        // never serves one realm the other's cache. Before that, 29 and 86:
-        // `kiln_realm_runtime_report` joined when a compiled server learned to answer `SIGUSR1`
-        // with what it is doing. A shipped archive built before either does not export the newer
-        // symbol, and the version is how a resolver knows to rebuild rather than to fail at link
-        // time.
-        assert_eq!(PROVIDER_ABI_VERSION, 32);
-        assert_eq!(PROVIDER_EXPORTS.len(), 89);
+        // 33, and 90 exports: `kiln_realm_set_promise_lane` joined when the promise job queue
+        // moved into the prelude (Phase 6.3). The realm no longer receives one work item per
+        // reaction; it calls the lane back at the point in its drain where promise jobs belong,
+        // and asks `pending` whether there are any. Before that, 32 and 89: `kiln_parallel_map`
+        // joined for `parallelMap` (ADR 0058, application 2): one call that runs an emitted chunk
+        // worker over index ranges on a private Rayon pool. Before that, 31 and 88: `JSON.parse`
+        // moved into the archive as a tape (`kiln_json_parse`, one call that lends the reader's
+        // per-thread tape), so the emitted C stopped carrying a reader of its own. Before that,
+        // 30 and 87: `kiln_realm_generation_slot` joined the contract when the prelude learned to
+        // cache per-realm answers -- the heap pointer first -- behind a generation the realm bumps
+        // on every entry, exit and heap attach, so a thread that hosts several realms never serves
+        // one realm the other's cache. A shipped archive built before any of these does not export
+        // the newer symbol, and the version is how a resolver knows to rebuild rather than to fail
+        // at link time.
+        assert_eq!(PROVIDER_ABI_VERSION, 33);
+        assert_eq!(PROVIDER_EXPORTS.len(), 90);
         assert_eq!(PROVIDER_EXPORTS.first(), Some(&"kiln_realm_create"));
         assert_eq!(PROVIDER_EXPORTS.last(), Some(&"kiln_parallel_map"));
     }

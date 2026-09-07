@@ -1,24 +1,55 @@
-
-/* Generated code owns each work payload because only it understands `kiln_value`. The Realm
+/* The promise job lane (Phase 6.3).
+ *
+ * Generated code owns each work payload because only it understands `kiln_value`. The Realm
  * Runtime owns queueing, ordering, virtual time, cancellation and disposal timing through opaque
- * pointers; no language value layout crosses the private ABI. */
+ * pointers; no language value layout crosses the private ABI. A *promise* job crosses none of
+ * that: it is a handler, an argument and a derived promise, it runs in the turn it was queued
+ * in, it is never cancelled and it has no deadline. Paying a GC cell and a call across the
+ * private ABI for each one bought nothing -- and an `await` loop queues one per iteration.
+ *
+ * So the jobs live in an array in the heap (`kiln_gc_heap.jobs`), the collector marks it, and
+ * the realm drains it by calling `kiln_c99_run_promise_jobs` at the point in its own drain where
+ * promise jobs belong: after `process.nextTick`, before the next host completion. The lanes the
+ * runtime still owns -- next tick, timers, completions -- are unchanged, because ordering
+ * between lanes is the realm's to decide and only the promise lane's *contents* moved. */
+static int kiln_c99_jobs_grow(kiln_gc_heap *heap) {
+    size_t capacity;
+    kiln_microtask *grown;
+    if (heap->job_head != 0) {
+        /* A drain that keeps enqueueing walks the head forward and leaves the space behind it
+         * empty; sliding into that space is what keeps one turn's ring at one turn's size. */
+        size_t live = heap->job_tail - heap->job_head;
+        if (live != 0) memmove(heap->jobs, heap->jobs + heap->job_head, live * sizeof *heap->jobs);
+        heap->job_head = 0;
+        heap->job_tail = live;
+        if (live < heap->job_capacity) return KILN_C99_OK;
+    }
+    capacity = heap->job_capacity == 0 ? 16 : heap->job_capacity * 2;
+    if (capacity <= heap->job_capacity || capacity > ((size_t)-1) / sizeof *grown) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    grown = (kiln_microtask *)realloc(heap->jobs, capacity * sizeof *grown);
+    if (grown == NULL) return KILN_C99_OUT_OF_MEMORY;
+    heap->jobs = grown;
+    heap->job_capacity = capacity;
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value derived,
                             int rejected, int continuation) {
-    kiln_microtask *task;
-    int status;
-    task = (kiln_microtask *)kiln_c99_gc_alloc(KILN_GC_MICROTASK, sizeof *task);
-    if (task == NULL) return KILN_C99_OUT_OF_MEMORY;
-    task->handler = handler;
-    task->argument = argument;
-    task->derived = derived;
-    task->rejected = rejected;
-    task->continuation = continuation;
-    status = kiln_realm_queue_microtask(kiln_c99_run_microtask, kiln_c99_drop_microtask,
-                                        task);
-    if (status != KILN_C99_OK) {
-        kiln_c99_drop_microtask(task);
-        return status;
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    kiln_microtask *job;
+    if (heap == NULL) return KILN_C99_OUT_OF_MEMORY;
+    if (KILN_UNLIKELY(heap->job_tail == heap->job_capacity)) {
+        int status = kiln_c99_jobs_grow(heap);
+        if (status != KILN_C99_OK) return status;
     }
+    job = &heap->jobs[heap->job_tail++];
+    job->handler = handler;
+    job->argument = argument;
+    job->derived = derived;
+    job->rejected = rejected;
+    job->continuation = continuation;
     return KILN_C99_OK;
 }
 
@@ -214,14 +245,6 @@ static int kiln_c99_then_continue(kiln_value promise, kiln_value generator) {
     return KILN_C99_OK;
 }
 
-/* A job that has run, or one dropped with its queue, is a cell in a nursery chunk that the next
- * collection settles with everything else in the chunk; releasing it by hand was a lookup, a
- * finaliser call and a free-list push per job, a tenth of an await loop, for a slot the chunk
- * reset reclaims wholesale. */
-static void kiln_c99_drop_microtask(void *work) {
-    (void)work;
-}
-
 /* Give a refusal inside a turn somewhere to say what it was.
  *
  * A module body hands its diagnostic back through the entry point's result, and
@@ -246,13 +269,11 @@ static void kiln_c99_publish_turn_refusal(int status, kiln_value produced, kiln_
                   : kiln_c99_control_diagnostic();
 }
 
-static int kiln_c99_run_microtask(void *work, void *host_pointer, void *thrown_pointer) {
-    kiln_microtask *task = (kiln_microtask *)work;
-    kiln_host *host = (kiln_host *)host_pointer;
-    kiln_value *thrown = (kiln_value *)thrown_pointer;
+/* Run one promise job. `task` is the drain's own copy, not a pointer into the ring: a handler
+ * that enqueues can grow the array out from under it. */
+static int kiln_c99_run_job(kiln_microtask *task, kiln_host *host, kiln_value *thrown) {
     kiln_value produced = kiln_c99_undefined();
     int status;
-    if (task == NULL || thrown == NULL) return KILN_C99_INVALID_ARGUMENT;
     if (task->continuation) {
         /* An await's value arriving at its frame: step it where `@@resume` bound to it used to. */
         status = kiln_c99_generator_of(task->handler)->async_generator
@@ -293,6 +314,40 @@ static int kiln_c99_run_microtask(void *work, void *host_pointer, void *thrown_p
         status = kiln_c99_settle(task->derived, produced, 0);
         kiln_c99_publish_turn_refusal(status, kiln_c99_undefined(), thrown);
         return status;
+    }
+    return KILN_C99_OK;
+}
+
+/* Does the lane hold a job the realm has not run yet? */
+static int kiln_c99_promise_jobs_pending(void *context) {
+    kiln_gc_heap *heap = (kiln_gc_heap *)context;
+    return heap != NULL && heap->job_head < heap->job_tail;
+}
+
+/* Run the lane empty, including everything queued while it runs -- which is the whole point: a
+ * `then` chain and an `await` loop both queue their next job from inside the current one, and a
+ * checkpoint that ran only what was there when it started would leave the rest for the next
+ * turn and print in the wrong order.
+ *
+ * The copy into `job` is what keeps the values alive: a popped job is no longer marked through
+ * the ring, and the local is a C frame the conservative stack scan reads, exactly as the popped
+ * microtask cell used to be kept alive by the local that held it. */
+static int kiln_c99_run_promise_jobs(void *context, void *host_pointer, void *thrown_pointer) {
+    kiln_gc_heap *heap = (kiln_gc_heap *)context;
+    kiln_host *host = (kiln_host *)host_pointer;
+    kiln_value *thrown = (kiln_value *)thrown_pointer;
+    if (heap == NULL || thrown == NULL) return KILN_C99_INVALID_ARGUMENT;
+    while (heap->job_head < heap->job_tail) {
+        kiln_microtask job = heap->jobs[heap->job_head++];
+        int status;
+        /* An emptied ring starts again at zero, so a program that never has two jobs waiting at
+         * once never grows the array past its first block. */
+        if (heap->job_head == heap->job_tail) {
+            heap->job_head = 0;
+            heap->job_tail = 0;
+        }
+        status = kiln_c99_run_job(&job, host, thrown);
+        if (status != KILN_C99_OK) return status;
     }
     return KILN_C99_OK;
 }

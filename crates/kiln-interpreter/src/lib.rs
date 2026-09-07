@@ -23019,70 +23019,93 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
     /// The ECMAScript microtask checkpoint, independent of which infrastructure turn reached it.
     /// Tokio owns polling; this queue owns language ordering.
+    ///
+    /// The shape of the loop is the ordering, and it is node's. `process.nextTick` outranks the
+    /// promise queue, and a tick queued by a tick joins the same pass. The promise queue is then
+    /// drained *whole*, without looking back at the ticks: a microtask checkpoint runs to
+    /// exhaustion and is not re-entered part way, so a `nextTick` queued from inside a promise
+    /// job waits for the rest of that queue. Taking one job from each lane in turn instead --
+    /// which is what this did -- ran such a tick ahead of a promise job that had been queued
+    /// before it, and `Promise.resolve().then(f).then(g)` with an `f` that calls `nextTick`
+    /// printed the tick between `f` and `g` where node prints it after both.
     fn drain_microtask_jobs(&mut self) -> Result<(), ExecutionError> {
-        while let Some(Scheduled { context, job }) =
-            self.with_realm_mut(|realm| realm.pop_next_tick().or_else(|| realm.pop_microtask()))
-        {
-            // The context this job was queued in, in force for exactly as long as it runs. A
-            // drain is a flat loop rather than a stack, so the previous one is whatever the last
-            // job left and is replaced rather than restored.
-            self.async_context = context;
-            match job {
-                Job::NextTick(callback, arguments) => self
-                    .call_value(&callback, Value::Undefined, arguments, self.instruction)
-                    .map(|_| ()),
-                Job::Callback(callback, arguments) => self
-                    .call_value(&callback, Value::Undefined, arguments, self.instruction)
-                    .map(|_| ()),
-                Job::React(outcome, reaction) => self.run_reaction(outcome, reaction),
-                Job::Adopt(outer, inner) => {
-                    self.react(
-                        &inner,
-                        Value::Undefined,
-                        Value::Undefined,
-                        Sink::Promise(outer),
-                        false,
-                    );
-                    Ok(())
-                }
-                Job::Import(promise, specifier) => {
-                    match self.import_module(&specifier)? {
-                        Ok(namespace) => self.settle(&promise, &Settled::Fulfilled(namespace)),
-                        Err(thrown) => self.settle(&promise, &Settled::Rejected(thrown)),
-                    }
-                    Ok(())
-                }
-                Job::ShadowImport {
-                    promise,
-                    specifier,
-                    export,
-                    evaluated,
-                    caller,
-                } => {
-                    let settled = self.shadow_import(&specifier, &export, evaluated, caller)?;
-                    self.settle(&promise, &settled);
-                    Ok(())
-                }
-                Job::Thenable(promise, resolution, then) => {
-                    let resolve = Value::Settler(Rc::clone(&promise), false);
-                    let reject = Value::Settler(Rc::clone(&promise), true);
-                    match self.call_catching(
-                        &then,
-                        resolution,
-                        Vec::from([resolve, reject]),
-                        self.instruction,
-                    )? {
-                        Ok(_) => {}
-                        // A `then` that throws rejects -- unless it had already settled the
-                        // promise before throwing, which `settle` ignores. That ordering is the
-                        // whole of the specification's "already resolved" flag.
-                        Err(thrown) => self.settle(&promise, &Settled::Rejected(thrown)),
-                    }
-                    Ok(())
-                }
-            }?;
+        loop {
+            let mut ran = false;
+            while let Some(scheduled) = self.with_realm_mut(|realm| realm.pop_next_tick()) {
+                ran = true;
+                self.run_scheduled_job(scheduled)?;
+            }
+            while let Some(scheduled) = self.with_realm_mut(|realm| realm.pop_microtask()) {
+                ran = true;
+                self.run_scheduled_job(scheduled)?;
+            }
+            if !ran {
+                return Ok(());
+            }
         }
-        Ok(())
+    }
+
+    /// Run one queued job in the async context it was queued in.
+    fn run_scheduled_job(&mut self, scheduled: Scheduled) -> Result<(), ExecutionError> {
+        let Scheduled { context, job } = scheduled;
+        // The context this job was queued in, in force for exactly as long as it runs. A
+        // drain is a flat loop rather than a stack, so the previous one is whatever the last
+        // job left and is replaced rather than restored.
+        self.async_context = context;
+        match job {
+            Job::NextTick(callback, arguments) => self
+                .call_value(&callback, Value::Undefined, arguments, self.instruction)
+                .map(|_| ()),
+            Job::Callback(callback, arguments) => self
+                .call_value(&callback, Value::Undefined, arguments, self.instruction)
+                .map(|_| ()),
+            Job::React(outcome, reaction) => self.run_reaction(outcome, reaction),
+            Job::Adopt(outer, inner) => {
+                self.react(
+                    &inner,
+                    Value::Undefined,
+                    Value::Undefined,
+                    Sink::Promise(outer),
+                    false,
+                );
+                Ok(())
+            }
+            Job::Import(promise, specifier) => {
+                match self.import_module(&specifier)? {
+                    Ok(namespace) => self.settle(&promise, &Settled::Fulfilled(namespace)),
+                    Err(thrown) => self.settle(&promise, &Settled::Rejected(thrown)),
+                }
+                Ok(())
+            }
+            Job::ShadowImport {
+                promise,
+                specifier,
+                export,
+                evaluated,
+                caller,
+            } => {
+                let settled = self.shadow_import(&specifier, &export, evaluated, caller)?;
+                self.settle(&promise, &settled);
+                Ok(())
+            }
+            Job::Thenable(promise, resolution, then) => {
+                let resolve = Value::Settler(Rc::clone(&promise), false);
+                let reject = Value::Settler(Rc::clone(&promise), true);
+                match self.call_catching(
+                    &then,
+                    resolution,
+                    Vec::from([resolve, reject]),
+                    self.instruction,
+                )? {
+                    Ok(_) => {}
+                    // A `then` that throws rejects -- unless it had already settled the
+                    // promise before throwing, which `settle` ignores. That ordering is the
+                    // whole of the specification's "already resolved" flag.
+                    Err(thrown) => self.settle(&promise, &Settled::Rejected(thrown)),
+                }
+                Ok(())
+            }
+        }
     }
 
     /// Take the result of a step, turning an error a program could catch into a thrown value.

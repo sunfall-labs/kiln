@@ -817,6 +817,8 @@ int kiln_number_to_js_string(double value, char *buffer, size_t capacity);
 double kiln_string_to_number(const char *bytes, size_t len);
 typedef int (*kiln_realm_work_fn)(void *work, void *host, void *thrown);
 typedef void (*kiln_realm_drop_fn)(void *work);
+typedef int (*kiln_realm_lane_run_fn)(void *context, void *host, void *thrown);
+typedef int (*kiln_realm_lane_pending_fn)(void *context);
 typedef int (*kiln_realm_entry_fn)(void *context);
 #define KILN_REALM_ASYNC_ABI_VERSION 5
 #define KILN_REALM_ASYNC_OK 0
@@ -868,6 +870,7 @@ int kiln_realm_now(double *out_milliseconds);
 int kiln_realm_now_nanoseconds(int64_t *out_high, uint64_t *out_low);
 int kiln_realm_queue_microtask(kiln_realm_work_fn run, kiln_realm_drop_fn drop, void *work);
 int kiln_realm_queue_next_tick(kiln_realm_work_fn run, kiln_realm_drop_fn drop, void *work);
+int kiln_realm_set_promise_lane(kiln_realm_lane_run_fn run, kiln_realm_lane_pending_fn pending, void *context);
 int kiln_realm_set_timeout(double delay_ms, kiln_realm_work_fn run, kiln_realm_drop_fn drop, void *work, uint64_t *out_id);
 int kiln_realm_set_interval(double delay_ms, kiln_realm_work_fn run, kiln_realm_drop_fn drop, void *work, uint64_t *out_id);
 int kiln_realm_clear_timer(uint64_t id);
@@ -1138,8 +1141,7 @@ static int kiln_c99_settle(kiln_value promise, kiln_value value, int rejected);
 static int kiln_c99_then(kiln_value promise, kiln_value on_fulfilled, kiln_value on_rejected,
 static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value derived,
 static int kiln_c99_enqueue_next_tick(kiln_value callback, const kiln_value *args, size_t argc);
-static int kiln_c99_run_microtask(void *work, void *host, void *thrown);
-static void kiln_c99_drop_microtask(void *work);
+static int kiln_c99_run_job(kiln_microtask *task, kiln_host *host, kiln_value *thrown);
 static int kiln_c99_run_next_tick(void *work, void *host, void *thrown);
 static void kiln_c99_drop_next_tick(void *work);
 static int kiln_c99_run_timer(void *work, void *host, void *thrown);
@@ -1299,8 +1301,11 @@ static int kiln_c99_gc_hook_introspect(void *opaque) {
 typedef struct kiln_realm_cache {
 static _Thread_local kiln_realm_cache kiln_c99_realm_cached;
 static kiln_gc_heap *kiln_c99_gc_heap_uncached(void);
+static int kiln_c99_run_promise_jobs(void *context, void *host, void *thrown);
+static int kiln_c99_promise_jobs_pending(void *context);
 static kiln_gc_heap *kiln_c99_gc_heap(void) {
 static inline uint64_t kiln_c99_realm_generation(void) {
+static kiln_gc_heap *kiln_c99_gc_lane_attached(void *attached) {
 static kiln_gc_heap *kiln_c99_gc_heap_uncached(void) {
 static size_t kiln_c99_gc_hash(const void *pointer, size_t mask) {
 static int kiln_c99_gc_ptrset_grow(kiln_gc_ptrset *set, size_t wanted) {
@@ -1392,6 +1397,7 @@ static void kiln_c99_gc_begin(kiln_gc_heap *heap) {
 static void kiln_c99_gc_sweep(kiln_gc_heap *heap, int orphan_marked) {
 static size_t kiln_c99_nursery_settle(kiln_gc_heap *heap, char *base, char *limit,
 static void kiln_c99_nursery_spare(kiln_gc_heap *heap, kiln_nursery_chunk *chunk) {
+static void kiln_c99_gc_mark_promise_jobs(kiln_gc_heap *heap) {
 static void kiln_c99_gc_collect(void *opaque, int force) {
 static void kiln_c99_gc_teardown_begin(void *opaque) {
 static void kiln_c99_gc_teardown_end(void *opaque) {
@@ -1975,6 +1981,7 @@ static int kiln_c99_throw_cannot_delete(kiln_value *thrown, const char *key, siz
 static int kiln_c99_throw_error(kiln_value *thrown, uint64_t kind, const char *message) {
 static void kiln_c99_typed_overflow(void) {
 static int kiln_c99_throw_node_invalid_arg_type(kiln_value *thrown, const char *message) {
+static int kiln_c99_jobs_grow(kiln_gc_heap *heap) {
 static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value derived,
 static int kiln_c99_enqueue_next_tick(kiln_value callback, const kiln_value *args, size_t argc) {
 static int kiln_c99_new_promise(kiln_value *out) {
@@ -1987,9 +1994,10 @@ static int kiln_c99_settle(kiln_value promise, kiln_value value, int rejected) {
 static int kiln_c99_new_settler(kiln_value *out, kiln_value promise, int rejects) {
 static int kiln_c99_then(kiln_value promise, kiln_value on_fulfilled, kiln_value on_rejected,
 static int kiln_c99_then_continue(kiln_value promise, kiln_value generator) {
-static void kiln_c99_drop_microtask(void *work) {
 static void kiln_c99_publish_turn_refusal(int status, kiln_value produced, kiln_value *thrown) {
-static int kiln_c99_run_microtask(void *work, void *host_pointer, void *thrown_pointer) {
+static int kiln_c99_run_job(kiln_microtask *task, kiln_host *host, kiln_value *thrown) {
+static int kiln_c99_promise_jobs_pending(void *context) {
+static int kiln_c99_run_promise_jobs(void *context, void *host_pointer, void *thrown_pointer) {
 static void kiln_c99_drop_next_tick(void *work) {
 static int kiln_c99_run_next_tick(void *work, void *host_pointer, void *thrown_pointer) {
 static void kiln_c99_drop_timer(void *work) {

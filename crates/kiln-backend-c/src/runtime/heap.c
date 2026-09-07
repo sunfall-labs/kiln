@@ -313,6 +313,19 @@ typedef struct kiln_gc_heap {
     kiln_c99_site **sites;
     size_t site_len;
     size_t site_cap;
+    /* The promise job lane (Phase 6.3). A promise reaction and an await resumption used to be a
+     * GC cell and a call across the private ABI each; they are values in this array now, which
+     * the realm drains by calling back into the prelude. It lives in the heap because the heap
+     * is the one per-realm object every emitted unit shares -- the prelude's statics are
+     * per-unit with internal linkage, so a ring in one of those would be a queue the other
+     * unit's `await` never reaches.
+     *
+     * Head and tail are indices, not a modulus: a drain runs the ring empty, and empty resets
+     * both to zero, so the array only ever has to hold one turn's worth of jobs. */
+    kiln_microtask *jobs;
+    size_t job_head;
+    size_t job_tail;
+    size_t job_capacity;
 } kiln_gc_heap;
 
 static const kiln_gc_hooks kiln_c99_gc_hooks;
@@ -706,6 +719,9 @@ typedef struct kiln_realm_cache {
 static _Thread_local kiln_realm_cache kiln_c99_realm_cached;
 
 static kiln_gc_heap *kiln_c99_gc_heap_uncached(void);
+/* The promise lane's two callbacks, defined with the queue itself in `promises.c`. */
+static int kiln_c99_run_promise_jobs(void *context, void *host, void *thrown);
+static int kiln_c99_promise_jobs_pending(void *context);
 
 static kiln_gc_heap *kiln_c99_gc_heap(void) {
     kiln_realm_cache *cache = &kiln_c99_realm_cached;
@@ -731,13 +747,26 @@ static inline uint64_t kiln_c99_realm_generation(void) {
     return *cache->generation_slot;
 }
 
+/* Hand the realm this heap's promise lane and answer with the heap.
+ *
+ * Registering here rather than once at startup is what makes the lane per realm: a realm is a
+ * heap, this is where a unit learns which heap it is in, and the registration a second realm
+ * makes replaces the first realm's, whose ring died with its heap. Every unit's copy of the two
+ * callbacks behaves identically -- they read the ring out of the context -- so it does not
+ * matter which unit's copy the realm ends up holding. */
+static kiln_gc_heap *kiln_c99_gc_lane_attached(void *attached) {
+    (void)kiln_realm_set_promise_lane(kiln_c99_run_promise_jobs, kiln_c99_promise_jobs_pending,
+                                      attached);
+    return (kiln_gc_heap *)attached;
+}
+
 static kiln_gc_heap *kiln_c99_gc_heap_uncached(void) {
     void *attached = kiln_realm_gc_current_heap();
     kiln_gc_heap *candidate;
     int status;
-    if (attached != NULL) return (kiln_gc_heap *)attached;
+    if (attached != NULL) return kiln_c99_gc_lane_attached(attached);
     status = kiln_realm_gc_attach(&kiln_c99_gc_hooks, NULL, &attached);
-    if (status == KILN_C99_OK && attached != NULL) return (kiln_gc_heap *)attached;
+    if (status == KILN_C99_OK && attached != NULL) return kiln_c99_gc_lane_attached(attached);
     if (status != KILN_C99_OK) {
         if (kiln_c99_gc_fallback.hooks == NULL) {
             kiln_c99_gc_heap_init(&kiln_c99_gc_fallback);
@@ -764,7 +793,7 @@ static kiln_gc_heap *kiln_c99_gc_heap_uncached(void) {
      * kiln_c99_introspect_pending that this unit's handler writes. The prelude is emitted per
      * unit with internal linkage, so arming anywhere else would arm one flag and poll another. */
     else kiln_c99_introspect_armed = kiln_c99_introspect_arm();
-    return (kiln_gc_heap *)attached;
+    return kiln_c99_gc_lane_attached(attached);
 }
 
 static size_t kiln_c99_gc_hash(const void *pointer, size_t mask) {
@@ -2232,13 +2261,6 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
     case KILN_GC_NODE_FS_COMPLETION:
         kiln_c99_gc_mark_value(heap, &((kiln_node_fs_completion *)payload)->promise);
         break;
-    case KILN_GC_MICROTASK: {
-        kiln_microtask *task = (kiln_microtask *)payload;
-        kiln_c99_gc_mark_value(heap, &task->handler);
-        kiln_c99_gc_mark_value(heap, &task->argument);
-        kiln_c99_gc_mark_value(heap, &task->derived);
-        break;
-    }
     case KILN_GC_NEXT_TICK: {
         kiln_next_tick *tick = (kiln_next_tick *)payload;
         kiln_c99_gc_mark_value(heap, &tick->callback);
@@ -2573,6 +2595,20 @@ static void kiln_c99_nursery_spare(kiln_gc_heap *heap, kiln_nursery_chunk *chunk
     nursery->spare_count += 1;
 }
 
+/* Every job still waiting in the promise lane is a root, exactly as the queued work item that
+ * carried it used to be. A job that has been popped and is running is held in the drain's own
+ * local, which the conservative stack scan finds -- the same thing that kept a popped microtask
+ * cell alive. */
+static void kiln_c99_gc_mark_promise_jobs(kiln_gc_heap *heap) {
+    size_t index;
+    for (index = heap->job_head; index < heap->job_tail; ++index) {
+        kiln_microtask *job = &heap->jobs[index];
+        kiln_c99_gc_mark_value(heap, &job->handler);
+        kiln_c99_gc_mark_value(heap, &job->argument);
+        kiln_c99_gc_mark_value(heap, &job->derived);
+    }
+}
+
 static void kiln_c99_gc_collect(void *opaque, int force) {
     kiln_gc_heap *heap = (kiln_gc_heap *)opaque;
     size_t threshold;
@@ -2596,6 +2632,7 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
     kiln_c99_gc_begin(heap);
     (void)kiln_realm_gc_mark_roots(heap);
     kiln_c99_key_mark_pinned(heap);
+    kiln_c99_gc_mark_promise_jobs(heap);
     if (heap->mid_turn) kiln_c99_gc_scan_stack(heap);
     kiln_c99_gc_drain(heap);
 
@@ -2749,6 +2786,9 @@ static void kiln_c99_gc_teardown_end(void *opaque) {
     free(heap->slab_table.table);
     free(heap->stack);
     free(heap->keys.entries);
+    /* Teardown does not run what is left in the lane: a realm being destroyed has no turn to run
+     * a job in, and the values are about to be freed with the rest of the heap. */
+    free(heap->jobs);
     free(heap);
 }
 
