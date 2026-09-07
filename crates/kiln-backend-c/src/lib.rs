@@ -24,7 +24,7 @@ pub const C_ABI_VERSION: u32 = 1;
 /// keys include this revision so those objects are never reused across generator changes.
 // Epoch 31 changes the private dictionary-cache index encoding. Old sentinel-initialized
 // modules must not be reused beside the zero-backed runtime, despite the unchanged C layout.
-pub const C_GENERATOR_VERSION: u32 = 37;
+pub const C_GENERATOR_VERSION: u32 = 38;
 
 /// Stable basename used by decoupled translation units for the shared runtime declarations.
 ///
