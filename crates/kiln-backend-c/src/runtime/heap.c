@@ -190,6 +190,19 @@ typedef struct kiln_gc_nursery {
     uint64_t promotions;
     uint64_t resets;
     kiln_nursery_chunk *promoted;
+    /* Chunks filled since the last collection, oldest last; each is reset or promoted on its
+     * own at the next collection, so one long-lived object retires one chunk and not the whole
+     * nursery. `full_bytes` against `budget` is what makes a collection due inside a turn. */
+    kiln_nursery_chunk *full;
+    size_t full_bytes;
+    size_t budget;
+    /* Emptied chunks kept for reuse, with their bitmaps, up to a budget's worth. */
+    kiln_nursery_chunk *spare;
+    size_t spare_count;
+    /* The lowest and highest address of any chunk ever made: a word outside the pair -- almost
+     * every word the conservative scan looks at -- is rejected before the chunk lists are walked. */
+    const char *lo;
+    const char *hi;
 } kiln_gc_nursery;
 
 typedef struct kiln_gc_heap {
@@ -210,6 +223,12 @@ typedef struct kiln_gc_heap {
     kiln_gc_ptrset large_table;
     kiln_gc_ptrset slab_table;
     kiln_gc_slab *all_slabs;
+    /* The lowest and highest address of any memory this heap has handed out -- slabs, large
+     * blocks and nursery chunks. A word outside the pair, which is nearly every word the
+     * conservative scan reads (return addresses, stack addresses, small integers), is rejected
+     * with one compare before any table is probed. */
+    uintptr_t lo;
+    uintptr_t hi;
     uint32_t class_slab_count[(KILN_GC_SLAB_CLASS_MAX - KILN_GC_SLAB_CLASS_MIN) /
                               KILN_GC_SLAB_CLASS_STEP + 1]; /* slabs of each class, live */
     kiln_gc_slab *class_free_head[(KILN_GC_SLAB_CLASS_MAX - KILN_GC_SLAB_CLASS_MIN) /
@@ -252,6 +271,15 @@ static const kiln_gc_hooks kiln_c99_gc_hooks;
 /* The heap a unit uses when no realm is active: the prelude's own tests. It never collects. */
 static kiln_gc_heap kiln_c99_gc_fallback;
 
+/* Widen the heap's address bounds to cover [base, base + size). */
+static inline void kiln_c99_gc_bound(kiln_gc_heap *heap, const void *base, size_t size) {
+    uintptr_t lo = (uintptr_t)base;
+    uintptr_t hi = lo + size;
+    if (heap->lo == 0 || lo < heap->lo) heap->lo = lo;
+    if (hi > heap->hi) heap->hi = hi;
+}
+
+
 /* Set with `KILN_GC_STRESS`, and read only on `kiln_c99_gc_kind_of_ptr`: the header read is checked
  * against the heap search it replaced, so a pointer that never came from the allocator is caught
  * where it is used rather than where its garbage kind is acted on. */
@@ -260,16 +288,24 @@ static int kiln_c99_gc_stress_checks;
 static void kiln_c99_nursery_init(kiln_gc_nursery *nursery) {
     const char *setting;
     memset(nursery, 0, sizeof *nursery);
-    nursery->capacity = (size_t)2 * 1024 * 1024;
+    /* The nursery is a budget of chunks, not one block: allocation bumps through a chunk, a
+     * filled chunk waits for the next collection, and there each chunk is reset for reuse when
+     * nothing in it survived or promoted on its own when something did. `KILN_NURSERY_KIB`
+     * sets the budget; the chunk stays a size a few thousand blocks fill. */
+    nursery->capacity = (size_t)256 * 1024;
+    nursery->budget = (size_t)4 * 1024 * 1024;
     setting = getenv("KILN_NURSERY_KIB");
     if (setting != NULL && setting[0] >= '0' && setting[0] <= '9') {
         size_t kib = (size_t)strtoul(setting, NULL, 10);
-        if (kib > 0 && kib <= 64 * 1024) nursery->capacity = kib * 1024;
+        if (kib > 0 && kib <= 1024 * 1024) nursery->budget = kib * 1024;
     }
+    if (nursery->budget < nursery->capacity) nursery->capacity = nursery->budget;
     nursery->base = (char *)malloc(nursery->capacity);
     if (nursery->base != NULL) {
         nursery->bump = nursery->base;
         nursery->limit = nursery->base + nursery->capacity;
+        nursery->lo = nursery->base;
+        nursery->hi = nursery->limit;
         nursery->bitmap_words = (nursery->capacity / 16 + 63) / 64;
         nursery->bitmap = (uint64_t *)calloc(nursery->bitmap_words, sizeof(uint64_t));
         if (nursery->bitmap != NULL) {
@@ -286,6 +322,16 @@ static void kiln_c99_nursery_init(kiln_gc_nursery *nursery) {
     }
 }
 
+static void kiln_c99_nursery_free_list(kiln_nursery_chunk *chunk) {
+    while (chunk != NULL) {
+        kiln_nursery_chunk *next = chunk->next;
+        free(chunk->base);
+        free(chunk->bitmap);
+        free(chunk);
+        chunk = next;
+    }
+}
+
 static void kiln_c99_nursery_destroy(kiln_gc_nursery *nursery) {
     if (nursery->base != NULL) {
         free(nursery->base);
@@ -295,14 +341,14 @@ static void kiln_c99_nursery_destroy(kiln_gc_nursery *nursery) {
         free(nursery->bitmap);
         nursery->bitmap = NULL;
     }
-    while (nursery->promoted != NULL) {
-        kiln_nursery_chunk *next = nursery->promoted->next;
-        free(nursery->promoted->base);
-        free(nursery->promoted->bitmap);
-        free(nursery->promoted);
-        nursery->promoted = next;
-    }
-    nursery->active = 0;
+    kiln_c99_nursery_free_list(nursery->promoted);
+    nursery->promoted = NULL;
+    kiln_c99_nursery_free_list(nursery->full);
+    nursery->full = NULL;
+    nursery->full_bytes = 0;
+    kiln_c99_nursery_free_list(nursery->spare);
+    nursery->spare = NULL;
+    nursery->spare_count = 0;
 }
 
 static void kiln_c99_gc_heap_init(kiln_gc_heap *heap) {
@@ -341,6 +387,7 @@ static void kiln_c99_gc_heap_init(kiln_gc_heap *heap) {
         heap->floor = kib * 1024;
     }
     kiln_c99_nursery_init(&heap->nursery);
+    if (heap->nursery.active) kiln_c99_gc_bound(heap, heap->nursery.base, heap->nursery.capacity);
 }
 
 /* Diagnostics stay off the locale-sensitive printf family (decision recorded beside
@@ -843,6 +890,7 @@ static kiln_gc_slab *kiln_c99_gc_slab_new(kiln_gc_heap *heap, int class_index) {
     if (heap->all_slabs != NULL) heap->all_slabs->all_prev = slab;
     heap->all_slabs = slab;
     heap->class_slab_count[class_index] += 1;
+    kiln_c99_gc_bound(heap, slab, KILN_GC_SLAB_SIZE);
     slab->free_prev = NULL;
     slab->free_next = heap->class_free_head[class_index];
     if (heap->class_free_head[class_index] != NULL)
@@ -894,87 +942,90 @@ static kiln_gc_block *kiln_c99_gc_lookup_slab(const kiln_gc_heap *heap, const vo
     return NULL;
 }
 
+/* The nursery region holding `ptr` -- the current chunk, one filled this cycle, or a promoted
+ * one -- as its base, its allocation limit and its bitmap. */
+static int kiln_c99_nursery_locate(const kiln_gc_heap *heap, const char *ptr, char **base,
+                                   char **limit, uint64_t **bitmap, size_t *words) {
+    const kiln_nursery_chunk *chunk;
+    if (heap == NULL || !heap->nursery.active || ptr == NULL) return 0;
+    if (ptr < heap->nursery.lo || ptr >= heap->nursery.hi) return 0;
+    if (ptr >= heap->nursery.base && ptr < heap->nursery.bump) {
+        *base = heap->nursery.base;
+        *limit = heap->nursery.bump;
+        *bitmap = heap->nursery.bitmap;
+        *words = heap->nursery.bitmap_words;
+        return 1;
+    }
+    for (chunk = heap->nursery.full; chunk != NULL; chunk = chunk->next) {
+        if (ptr >= chunk->base && ptr < chunk->limit) {
+            *base = chunk->base;
+            *limit = chunk->limit;
+            *bitmap = chunk->bitmap;
+            *words = chunk->bitmap_words;
+            return 1;
+        }
+    }
+    for (chunk = heap->nursery.promoted; chunk != NULL; chunk = chunk->next) {
+        if (ptr >= chunk->base && ptr < chunk->limit) {
+            *base = chunk->base;
+            *limit = chunk->limit;
+            *bitmap = chunk->bitmap;
+            *words = chunk->bitmap_words;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* The live block that starts exactly at `candidate` inside a located region, or NULL. */
+static kiln_gc_block *kiln_c99_nursery_block_at(const char *base, const char *limit,
+                                                const uint64_t *bitmap, size_t words,
+                                                const char *candidate) {
+    size_t block_offset;
+    size_t bit_idx;
+    kiln_gc_block *block;
+    if (candidate < base || candidate + sizeof(kiln_gc_block) > limit) return NULL;
+    block_offset = (size_t)(candidate - base);
+    if ((block_offset & 15) != 0) return NULL;
+    bit_idx = block_offset >> 4;
+    if (bit_idx >> 6 >= words) return NULL;
+    if ((bitmap[bit_idx >> 6] & ((uint64_t)1 << (bit_idx & 63))) == 0) return NULL;
+    block = (kiln_gc_block *)candidate;
+    if (block->kind & KILN_GC_FLAG_DEAD) return NULL;
+    return block;
+}
+
 static void kiln_c99_nursery_clear_bit(kiln_gc_heap *heap, const kiln_gc_block *block) {
     const char *ptr = (const char *)block;
+    char *base;
+    char *limit;
+    uint64_t *bitmap;
+    size_t words;
     if (heap == NULL || block == NULL) return;
-    if (heap->nursery.active && ptr >= heap->nursery.base && ptr < heap->nursery.bump) {
-        size_t offset = (size_t)(ptr - heap->nursery.base);
-        size_t bit_idx = offset >> 4;
-        if (bit_idx >> 6 < heap->nursery.bitmap_words) {
-            heap->nursery.bitmap[bit_idx >> 6] &= ~((uint64_t)1 << (bit_idx & 63));
-        }
-        return;
-    }
-    {
-        kiln_nursery_chunk *chunk = heap->nursery.promoted;
-        while (chunk != NULL) {
-            if (ptr >= chunk->base && ptr < chunk->limit) {
-                size_t offset = (size_t)(ptr - chunk->base);
-                size_t bit_idx = offset >> 4;
-                if (bit_idx >> 6 < chunk->bitmap_words) {
-                    chunk->bitmap[bit_idx >> 6] &= ~((uint64_t)1 << (bit_idx & 63));
-                }
-                return;
-            }
-            chunk = chunk->next;
-        }
+    if (kiln_c99_nursery_locate(heap, ptr, &base, &limit, &bitmap, &words)) {
+        size_t bit_idx = (size_t)(ptr - base) >> 4;
+        if (bit_idx >> 6 < words) bitmap[bit_idx >> 6] &= ~((uint64_t)1 << (bit_idx & 63));
     }
 }
 
 static kiln_gc_block *kiln_c99_gc_lookup_nursery(const kiln_gc_heap *heap, const void *payload) {
+    const char *p = (const char *)payload;
+    char *base;
+    char *limit;
+    uint64_t *bitmap;
+    size_t words;
+    kiln_gc_block *block;
     if (heap == NULL || !heap->nursery.active || payload == NULL) return NULL;
-    /* Active nursery check */
-    if ((const char *)payload >= heap->nursery.base + sizeof(kiln_gc_block) &&
-        (const char *)payload < heap->nursery.bump) {
-        size_t block_offset = (size_t)((const char *)payload - sizeof(kiln_gc_block) - heap->nursery.base);
-        if ((block_offset & 15) == 0) {
-            size_t bit_idx = block_offset >> 4;
-            if (bit_idx >> 6 < heap->nursery.bitmap_words &&
-                (heap->nursery.bitmap[bit_idx >> 6] & ((uint64_t)1 << (bit_idx & 63))) != 0) {
-                kiln_gc_block *block = (kiln_gc_block *)(heap->nursery.base + block_offset);
-                if ((block->kind & KILN_GC_FLAG_DEAD) == 0) return block;
-            }
-        }
+    if ((uintptr_t)p >= sizeof(kiln_gc_block) &&
+        kiln_c99_nursery_locate(heap, p, &base, &limit, &bitmap, &words)) {
+        block = kiln_c99_nursery_block_at(base, limit, bitmap, words, p - sizeof(kiln_gc_block));
+        if (block != NULL) return block;
     }
-    if ((uintptr_t)payload >= sizeof(kiln_string) &&
-        (const char *)payload - sizeof(kiln_string) >= heap->nursery.base + sizeof(kiln_gc_block) &&
-        (const char *)payload - sizeof(kiln_string) < heap->nursery.bump) {
-        size_t block_offset = (size_t)((const char *)payload - sizeof(kiln_string) - sizeof(kiln_gc_block) - heap->nursery.base);
-        if ((block_offset & 15) == 0) {
-            size_t bit_idx = block_offset >> 4;
-            if (bit_idx >> 6 < heap->nursery.bitmap_words &&
-                (heap->nursery.bitmap[bit_idx >> 6] & ((uint64_t)1 << (bit_idx & 63))) != 0) {
-                kiln_gc_block *block = (kiln_gc_block *)(heap->nursery.base + block_offset);
-                if ((block->kind & KILN_GC_FLAG_DEAD) == 0 && (block->kind & KILN_GC_KIND_MASK) == KILN_GC_STRING) return block;
-            }
-        }
-    }
-    /* Promoted chunks check */
-    for (const kiln_nursery_chunk *chunk = heap->nursery.promoted; chunk != NULL; chunk = chunk->next) {
-        if ((const char *)payload >= chunk->base + sizeof(kiln_gc_block) &&
-            (const char *)payload < chunk->limit) {
-            size_t block_offset = (size_t)((const char *)payload - sizeof(kiln_gc_block) - chunk->base);
-            if ((block_offset & 15) == 0) {
-                size_t bit_idx = block_offset >> 4;
-                if (bit_idx >> 6 < chunk->bitmap_words &&
-                    (chunk->bitmap[bit_idx >> 6] & ((uint64_t)1 << (bit_idx & 63))) != 0) {
-                    kiln_gc_block *block = (kiln_gc_block *)(chunk->base + block_offset);
-                    if ((block->kind & KILN_GC_FLAG_DEAD) == 0) return block;
-                }
-            }
-        }
-        if ((uintptr_t)payload >= sizeof(kiln_string) &&
-            (const char *)payload - sizeof(kiln_string) >= chunk->base + sizeof(kiln_gc_block) &&
-            (const char *)payload - sizeof(kiln_string) < chunk->limit) {
-            size_t block_offset = (size_t)((const char *)payload - sizeof(kiln_string) - sizeof(kiln_gc_block) - chunk->base);
-            if ((block_offset & 15) == 0) {
-                size_t bit_idx = block_offset >> 4;
-                if (bit_idx >> 6 < chunk->bitmap_words &&
-                    (chunk->bitmap[bit_idx >> 6] & ((uint64_t)1 << (bit_idx & 63))) != 0) {
-                    kiln_gc_block *block = (kiln_gc_block *)(chunk->base + block_offset);
-                    if ((block->kind & KILN_GC_FLAG_DEAD) == 0 && (block->kind & KILN_GC_KIND_MASK) == KILN_GC_STRING) return block;
-                }
-            }
+    if ((uintptr_t)p >= sizeof(kiln_string) + sizeof(kiln_gc_block)) {
+        const char *q = p - sizeof(kiln_string);
+        if (kiln_c99_nursery_locate(heap, q, &base, &limit, &bitmap, &words)) {
+            block = kiln_c99_nursery_block_at(base, limit, bitmap, words, q - sizeof(kiln_gc_block));
+            if (block != NULL && (block->kind & KILN_GC_KIND_MASK) == KILN_GC_STRING) return block;
         }
     }
     return NULL;
@@ -1151,14 +1202,13 @@ static kiln_gc_block *kiln_c99_gc_lookup_interior(const kiln_gc_heap *heap, uint
         if (block->size == KILN_GC_SLOT_FREE) return NULL;
         return block;
     }
-    if (heap->nursery.active && (const char *)address >= heap->nursery.base &&
-        (const char *)address < heap->nursery.bump) {
-        return kiln_c99_gc_bitmap_block(heap->nursery.bitmap, heap->nursery.bitmap_words,
-                                        heap->nursery.base, address);
-    }
-    for (chunk = heap->nursery.promoted; chunk != NULL; chunk = chunk->next) {
-        if ((const char *)address >= chunk->base && (const char *)address < chunk->limit) {
-            return kiln_c99_gc_bitmap_block(chunk->bitmap, chunk->bitmap_words, chunk->base, address);
+    {
+        char *base;
+        char *limit;
+        uint64_t *bitmap;
+        size_t words;
+        if (kiln_c99_nursery_locate(heap, (const char *)address, &base, &limit, &bitmap, &words)) {
+            return kiln_c99_gc_bitmap_block(bitmap, words, base, address);
         }
     }
     {
@@ -1173,10 +1223,15 @@ static void kiln_c99_gc_mark_found(kiln_gc_heap *heap, kiln_gc_block *block);
 /* One word of the stack: as a raw address, and as the payload of a boxed value when its top
  * bits are a box prefix. Either that lands inside a live block marks the block. */
 static void kiln_c99_gc_mark_word(kiln_gc_heap *heap, uintptr_t word) {
-    kiln_gc_block *block = kiln_c99_gc_lookup_interior(heap, word);
-    if (block != NULL) kiln_c99_gc_mark_found(heap, block);
+    kiln_gc_block *block;
+    if (word >= heap->lo && word < heap->hi) {
+        block = kiln_c99_gc_lookup_interior(heap, word);
+        if (block != NULL) kiln_c99_gc_mark_found(heap, block);
+    }
     if ((word & KILN_TAG_MASK) >= KILN_TAG_STRING_PREFIX) {
-        block = kiln_c99_gc_lookup_interior(heap, word & UINT64_C(0x0000FFFFFFFFFFFF));
+        uintptr_t address = word & UINT64_C(0x0000FFFFFFFFFFFF);
+        if (address < heap->lo || address >= heap->hi) return;
+        block = kiln_c99_gc_lookup_interior(heap, address);
         if (block != NULL) kiln_c99_gc_mark_found(heap, block);
     }
 }
@@ -1262,6 +1317,62 @@ static void kiln_c99_gc_collect_mid_turn(kiln_gc_heap *heap) {
  * on. Every other caller goes through `kiln_c99_gc_alloc`, which always asks for zero: a mid-turn
  * collection can run before the payload is filled in, and the tracer must not walk a previous
  * occupant's pointers as if they belonged to the new block. */
+/* Take a fresh chunk as the current one: a spare when there is one, else new memory. The
+ * nursery goes inactive if memory is refused, and allocation continues in the slabs. */
+static int kiln_c99_nursery_fresh_chunk(kiln_gc_heap *heap) {
+    kiln_gc_nursery *nursery = &heap->nursery;
+    char *base;
+    uint64_t *bitmap;
+    if (nursery->spare != NULL) {
+        kiln_nursery_chunk *spare = nursery->spare;
+        nursery->spare = spare->next;
+        nursery->spare_count -= 1;
+        base = spare->base;
+        bitmap = spare->bitmap;
+        free(spare);
+    } else {
+        base = (char *)malloc(nursery->capacity);
+        bitmap = base == NULL ? NULL : (uint64_t *)calloc(nursery->bitmap_words, sizeof(uint64_t));
+        if (bitmap == NULL) {
+            free(base);
+            nursery->base = NULL;
+            nursery->bitmap = NULL;
+            nursery->bump = NULL;
+            nursery->limit = NULL;
+            nursery->active = 0;
+            return 0;
+        }
+    }
+    nursery->base = base;
+    nursery->bump = base;
+    nursery->limit = base + nursery->capacity;
+    nursery->bitmap = bitmap;
+    nursery->count = 0;
+    nursery->bytes = 0;
+    if (nursery->lo == NULL || base < nursery->lo) nursery->lo = base;
+    if (nursery->hi == NULL || base + nursery->capacity > nursery->hi) nursery->hi = base + nursery->capacity;
+    kiln_c99_gc_bound(heap, base, nursery->capacity);
+    return 1;
+}
+
+/* The current chunk is full: queue it for the next collection and start another. */
+static void kiln_c99_nursery_turn_chunk(kiln_gc_heap *heap) {
+    kiln_gc_nursery *nursery = &heap->nursery;
+    kiln_nursery_chunk *filled;
+    if (nursery->bump == nursery->base) return;
+    filled = (kiln_nursery_chunk *)malloc(sizeof *filled);
+    if (filled == NULL) return;
+    filled->base = nursery->base;
+    filled->limit = nursery->bump;
+    filled->bitmap = nursery->bitmap;
+    filled->bitmap_words = nursery->bitmap_words;
+    filled->live_count = 0;
+    filled->next = nursery->full;
+    nursery->full = filled;
+    nursery->full_bytes += (size_t)(nursery->bump - nursery->base);
+    (void)kiln_c99_nursery_fresh_chunk(heap);
+}
+
 static void *kiln_c99_gc_alloc_ex(uint32_t kind, size_t size, int zero_payload) {
     kiln_gc_heap *heap = kiln_c99_gc_heap();
     size_t payload = size == 0 ? 1 : size;
@@ -1276,6 +1387,14 @@ static void *kiln_c99_gc_alloc_ex(uint32_t kind, size_t size, int zero_payload) 
         int due;
         if (threshold < KILN_GC_MID_TURN_FLOOR) threshold = KILN_GC_MID_TURN_FLOOR;
         due = heap->since_collection >= threshold;
+        /* A budget of filled chunks is collected while the live heap is small next to it: the
+         * pass over them either resets a chunk, and allocation stays a bump into hot memory, or
+         * promotes it alone. A large live heap makes every mark expensive; there the chunks
+         * wait for the size-based trigger above. */
+        if (!due && heap->nursery.full_bytes >= heap->nursery.budget &&
+            heap->survived <= heap->nursery.budget * 8) {
+            due = 1;
+        }
         if (heap->stress_every != 0 && --heap->stress_countdown == 0) {
             heap->stress_countdown = heap->stress_every;
             due = 1;
@@ -1286,7 +1405,8 @@ static void *kiln_c99_gc_alloc_ex(uint32_t kind, size_t size, int zero_payload) 
     if (!kiln_c99_gc_is_tenured_kind(kind) && heap->nursery.active && (payload + sizeof(kiln_gc_block) <= (heap->nursery.capacity >> 2))) {
         size_t total = sizeof(kiln_gc_block) + payload;
         total = (total + 15) & ~((size_t)15);
-        if (heap->nursery.bump + total <= heap->nursery.limit) {
+        if (heap->nursery.bump + total > heap->nursery.limit) kiln_c99_nursery_turn_chunk(heap);
+        if (heap->nursery.active && heap->nursery.bump + total <= heap->nursery.limit) {
             block = (kiln_gc_block *)heap->nursery.bump;
             size_t offset = (size_t)(heap->nursery.bump - heap->nursery.base);
             size_t bit_idx = offset >> 4;
@@ -1335,6 +1455,7 @@ static void *kiln_c99_gc_alloc_ex(uint32_t kind, size_t size, int zero_payload) 
         return NULL;
     }
     block->kind = kind | KILN_GC_FLAG_LARGE;
+    kiln_c99_gc_bound(heap, block, sizeof *block + payload);
     block->mark = 0;
     block->size = size;
     block->prev = NULL;
@@ -1399,6 +1520,7 @@ static void *kiln_c99_gc_alloc_tenured(uint32_t kind, size_t size) {
         return NULL;
     }
     block->kind = kind | KILN_GC_FLAG_LARGE;
+    kiln_c99_gc_bound(heap, block, sizeof *block + payload);
     block->mark = 0;
     block->size = size;
     block->prev = NULL;
@@ -2291,6 +2413,62 @@ static void kiln_c99_gc_sweep(kiln_gc_heap *heap, int orphan_marked) {
     heap->since_collection = 0;
 }
 
+/* Walk one nursery chunk after a mark: finalise what died, and say how many blocks survived. */
+static size_t kiln_c99_nursery_settle(kiln_gc_heap *heap, char *base, char *limit,
+                                      uint64_t *bitmap, size_t words) {
+    size_t survivors = 0;
+    size_t dead = 0;
+    size_t reclaimed = 0;
+    char *curr = base;
+    while (curr < limit) {
+        kiln_gc_block *b = (kiln_gc_block *)curr;
+        size_t payload = b->size == 0 ? 1 : b->size;
+        size_t total = (sizeof(kiln_gc_block) + payload + 15) & ~((size_t)15);
+        if ((b->kind & KILN_GC_FLAG_DEAD) == 0) {
+            if (b->mark == heap->epoch) {
+                survivors++;
+            } else {
+                size_t bit_idx = (size_t)(curr - base) >> 4;
+                dead++;
+                reclaimed += b->size;
+                kiln_c99_gc_finalize(b);
+                b->kind |= KILN_GC_FLAG_DEAD;
+                if (bit_idx >> 6 < words) bitmap[bit_idx >> 6] &= ~((uint64_t)1 << (bit_idx & 63));
+            }
+        }
+        curr += total;
+    }
+    heap->count -= dead;
+    heap->bytes -= reclaimed;
+    heap->freed_blocks += dead;
+    heap->freed_bytes += reclaimed;
+    if (heap->since_collection >= reclaimed) {
+        heap->since_collection -= reclaimed;
+    } else {
+        heap->since_collection = 0;
+    }
+    return survivors;
+}
+
+/* An emptied chunk goes back to the spares, up to a budget's worth; beyond that it is freed. */
+static void kiln_c99_nursery_spare(kiln_gc_heap *heap, kiln_nursery_chunk *chunk) {
+    kiln_gc_nursery *nursery = &heap->nursery;
+    size_t used_words = ((size_t)(chunk->limit - chunk->base) / 16 + 63) / 64;
+    if (used_words > chunk->bitmap_words) used_words = chunk->bitmap_words;
+    memset(chunk->bitmap, 0, used_words * sizeof(uint64_t));
+    if (nursery->spare_count >= nursery->budget / nursery->capacity + 2) {
+        free(chunk->base);
+        free(chunk->bitmap);
+        free(chunk);
+        return;
+    }
+    chunk->limit = chunk->base;
+    chunk->live_count = 0;
+    chunk->next = nursery->spare;
+    nursery->spare = chunk;
+    nursery->spare_count += 1;
+}
+
 static void kiln_c99_gc_collect(void *opaque, int force) {
     kiln_gc_heap *heap = (kiln_gc_heap *)opaque;
     size_t threshold;
@@ -2301,7 +2479,8 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
     if (heap == NULL || heap->collecting || heap->fallback) return;
     if (!heap->enabled && !heap->stress) return;
 
-    nursery_has_allocs = heap->nursery.active && (heap->nursery.bump > heap->nursery.base);
+    nursery_has_allocs = heap->nursery.active &&
+                         (heap->nursery.bump > heap->nursery.base || heap->nursery.full != NULL);
     threshold = heap->floor > heap->survived ? heap->floor : heap->survived;
     tenured_due = force || heap->stress || (heap->since_collection >= threshold);
 
@@ -2322,88 +2501,48 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
          * when the whole region resets or promotes as before, and its live ones need no
          * promotion because nothing moves. The slabs, where a long turn's allocation goes
          * once the nursery is full, are swept below. */
-        if (nursery_has_allocs && !heap->mid_turn) {
-            size_t nursery_survivors = 0;
-            size_t nursery_dead = 0;
-            size_t nursery_reclaimed_bytes = 0;
-            char *curr = heap->nursery.base;
-            while (curr < heap->nursery.bump) {
-                kiln_gc_block *b = (kiln_gc_block *)curr;
-                size_t payload = b->size == 0 ? 1 : b->size;
-                size_t total = (sizeof(kiln_gc_block) + payload + 15) & ~((size_t)15);
-                if ((b->kind & KILN_GC_FLAG_DEAD) == 0) {
-                    if (b->mark == heap->epoch) {
-                        nursery_survivors++;
-                    } else {
-                        nursery_dead++;
-                        nursery_reclaimed_bytes += b->size;
-                        kiln_c99_gc_finalize(b);
-                        b->kind |= KILN_GC_FLAG_DEAD;
-                        size_t offset = (size_t)(curr - heap->nursery.base);
-                        size_t bit_idx = offset >> 4;
-                        if (bit_idx >> 6 < heap->nursery.bitmap_words) {
-                            heap->nursery.bitmap[bit_idx >> 6] &= ~((uint64_t)1 << (bit_idx & 63));
-                        }
-                    }
-                }
-                curr += total;
-            }
-
-            if (nursery_survivors == 0) {
-                /* No survivors: reset the pointer! */
-                size_t used = (size_t)(heap->nursery.bump - heap->nursery.base);
-                size_t used_words = (used + 1023) >> 10;
-                if (used_words > heap->nursery.bitmap_words) used_words = heap->nursery.bitmap_words;
-                memset(heap->nursery.bitmap, 0, used_words * sizeof(uint64_t));
-                heap->nursery.bump = heap->nursery.base;
-                heap->nursery.count = 0;
-                heap->nursery.bytes = 0;
-                heap->nursery.resets++;
-                heap->count -= nursery_dead;
-                heap->bytes -= nursery_reclaimed_bytes;
-                heap->freed_blocks += nursery_dead;
-                heap->freed_bytes += nursery_reclaimed_bytes;
-                if (heap->since_collection >= nursery_reclaimed_bytes) {
-                    heap->since_collection -= nursery_reclaimed_bytes;
+        if (nursery_has_allocs) {
+            kiln_nursery_chunk *chunk = heap->nursery.full;
+            heap->nursery.full = NULL;
+            heap->nursery.full_bytes = 0;
+            while (chunk != NULL) {
+                kiln_nursery_chunk *next = chunk->next;
+                size_t survivors = kiln_c99_nursery_settle(heap, chunk->base, chunk->limit,
+                                                           chunk->bitmap, chunk->bitmap_words);
+                if (survivors == 0) {
+                    heap->nursery.resets++;
+                    kiln_c99_nursery_spare(heap, chunk);
                 } else {
-                    heap->since_collection = 0;
-                }
-            } else {
-                /* Else promote! */
-                kiln_nursery_chunk *chunk = (kiln_nursery_chunk *)malloc(sizeof(kiln_nursery_chunk));
-                if (chunk != NULL) {
-                    chunk->base = heap->nursery.base;
-                    chunk->limit = heap->nursery.bump;
-                    chunk->bitmap = heap->nursery.bitmap;
-                    chunk->bitmap_words = heap->nursery.bitmap_words;
-                    chunk->live_count = nursery_survivors;
+                    chunk->live_count = survivors;
                     chunk->next = heap->nursery.promoted;
                     heap->nursery.promoted = chunk;
-                    heap->nursery.promotions += nursery_survivors;
-                    heap->count -= nursery_dead;
-                    heap->bytes -= nursery_reclaimed_bytes;
-                    heap->freed_blocks += nursery_dead;
-                    heap->freed_bytes += nursery_reclaimed_bytes;
-                    if (heap->since_collection >= nursery_reclaimed_bytes) {
-                        heap->since_collection -= nursery_reclaimed_bytes;
-                    } else {
-                        heap->since_collection = 0;
-                    }
-                    /* Fresh nursery for next turn */
-                    heap->nursery.base = (char *)malloc(heap->nursery.capacity);
-                    if (heap->nursery.base != NULL) {
-                        heap->nursery.bump = heap->nursery.base;
-                        heap->nursery.limit = heap->nursery.base + heap->nursery.capacity;
-                        heap->nursery.bitmap = (uint64_t *)calloc(heap->nursery.bitmap_words, sizeof(uint64_t));
-                        heap->nursery.count = 0;
-                        heap->nursery.bytes = 0;
-                        if (heap->nursery.bitmap == NULL) {
-                            free(heap->nursery.base);
-                            heap->nursery.base = NULL;
-                            heap->nursery.active = 0;
-                        }
-                    } else {
-                        heap->nursery.active = 0;
+                    heap->nursery.promotions += survivors;
+                }
+                chunk = next;
+            }
+            if (heap->nursery.bump > heap->nursery.base) {
+                size_t survivors = kiln_c99_nursery_settle(heap, heap->nursery.base, heap->nursery.bump,
+                                                           heap->nursery.bitmap, heap->nursery.bitmap_words);
+                if (survivors == 0) {
+                    size_t used_words = ((size_t)(heap->nursery.bump - heap->nursery.base) / 16 + 63) / 64;
+                    if (used_words > heap->nursery.bitmap_words) used_words = heap->nursery.bitmap_words;
+                    memset(heap->nursery.bitmap, 0, used_words * sizeof(uint64_t));
+                    heap->nursery.bump = heap->nursery.base;
+                    heap->nursery.count = 0;
+                    heap->nursery.bytes = 0;
+                    heap->nursery.resets++;
+                } else {
+                    kiln_nursery_chunk *promoted = (kiln_nursery_chunk *)malloc(sizeof *promoted);
+                    if (promoted != NULL) {
+                        promoted->base = heap->nursery.base;
+                        promoted->limit = heap->nursery.bump;
+                        promoted->bitmap = heap->nursery.bitmap;
+                        promoted->bitmap_words = heap->nursery.bitmap_words;
+                        promoted->live_count = survivors;
+                        promoted->next = heap->nursery.promoted;
+                        heap->nursery.promoted = promoted;
+                        heap->nursery.promotions += survivors;
+                        (void)kiln_c99_nursery_fresh_chunk(heap);
                     }
                 }
             }
@@ -2469,6 +2608,7 @@ static void kiln_c99_gc_teardown_end(void *opaque) {
         kiln_c99_gc_trace_text(" bytes) freed in total\n");
     }
     if (heap->nursery.active && heap->nursery.base != NULL) {
+        kiln_nursery_chunk *chunk = heap->nursery.full;
         char *curr = heap->nursery.base;
         while (curr < heap->nursery.bump) {
             kiln_gc_block *b = (kiln_gc_block *)curr;
@@ -2479,6 +2619,19 @@ static void kiln_c99_gc_teardown_end(void *opaque) {
                 b->kind |= KILN_GC_FLAG_DEAD;
             }
             curr += total;
+        }
+        for (; chunk != NULL; chunk = chunk->next) {
+            curr = chunk->base;
+            while (curr < chunk->limit) {
+                kiln_gc_block *b = (kiln_gc_block *)curr;
+                size_t payload = b->size == 0 ? 1 : b->size;
+                size_t total = (sizeof(kiln_gc_block) + payload + 15) & ~((size_t)15);
+                if ((b->kind & KILN_GC_FLAG_DEAD) == 0) {
+                    kiln_c99_gc_finalize(b);
+                    b->kind |= KILN_GC_FLAG_DEAD;
+                }
+                curr += total;
+            }
         }
     }
     kiln_c99_nursery_destroy(&heap->nursery);
