@@ -391,6 +391,7 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
          * said -- the worst answer of the three available. */
         for (ancestor = parents; ancestor != NULL; ancestor = ancestor->parent) {
             if (ancestor->container == (const void *)array) {
+                kiln_c99_json_drop_nested(&nested);
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                             "Converting circular structure to JSON");
             }
@@ -481,6 +482,7 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
         size_t written = 0;
         for (ancestor = parents; ancestor != NULL; ancestor = ancestor->parent) {
             if (ancestor->container == (const void *)kiln_c99_proxy_of(value)) {
+                kiln_c99_json_drop_nested(&nested);
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                             "Converting circular structure to JSON");
             }
@@ -569,6 +571,7 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
          * the shortest way in. */
         for (ancestor = parents; ancestor != NULL; ancestor = ancestor->parent) {
             if (ancestor->container == (const void *)object) {
+                kiln_c99_json_drop_nested(&nested);
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                             "Converting circular structure to JSON");
             }
