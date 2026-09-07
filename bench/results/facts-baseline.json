@@ -23759,6 +23759,7 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
+                0,
                 9
               ],
               "sites": [
@@ -25181,6 +25182,7 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
+                2,
                 13
               ],
               "sites": [
@@ -25292,6 +25294,8 @@
               "reads_arguments": false,
               "returned_sites": [
                 2,
+                19,
+                20,
                 44
               ],
               "sites": [
@@ -25542,6 +25546,7 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
+                2,
                 16
               ],
               "sites": [
@@ -25912,6 +25917,11 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
+                4,
+                30,
+                38,
+                42,
+                54,
                 62
               ],
               "sites": [
@@ -26353,6 +26363,10 @@
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
+              "returned_sites": [
+                11,
+                16
+              ],
               "sites": [
                 {
                   "id": 0,
@@ -26509,7 +26523,10 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
-                54
+                31,
+                54,
+                66,
+                76
               ],
               "sites": [
                 {
@@ -28139,6 +28156,9 @@
               "reads_arguments": false,
               "returned_sites": [
                 45,
+                56,
+                59,
+                60,
                 65
               ],
               "sites": [
@@ -30899,6 +30919,9 @@
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
+              "returned_sites": [
+                0
+              ],
               "sites": [
                 {
                   "id": 0,
@@ -68882,6 +68905,9 @@
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
+              "returned_sites": [
+                19
+              ],
               "sites": [
                 {
                   "id": 0,
@@ -122301,6 +122327,9 @@
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
+              "returned_sites": [
+                0
+              ],
               "sites": [
                 {
                   "id": 0,
@@ -133135,6 +133164,9 @@
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
+              "returned_sites": [
+                0
+              ],
               "sites": [
                 {
                   "id": 0,
@@ -134326,7 +134358,8 @@
               "can_throw": true,
               "reads_arguments": true,
               "returned_sites": [
-                4
+                4,
+                5
               ],
               "sites": [
                 {
@@ -141238,6 +141271,9 @@
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
+              "returned_sites": [
+                4
+              ],
               "sites": [
                 {
                   "id": 0,
@@ -141369,6 +141405,9 @@
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
+              "returned_sites": [
+                0
+              ],
               "sites": [
                 {
                   "id": 0,
@@ -186533,6 +186572,9 @@
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
+              "returned_sites": [
+                3
+              ],
               "sites": [
                 {
                   "id": 0,
@@ -186599,6 +186641,10 @@
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
+              "returned_sites": [
+                2,
+                5
+              ],
               "sites": [
                 {
                   "id": 0,
@@ -199698,6 +199744,7 @@
               "returned_sites": [
                 6,
                 11,
+                14,
                 16
               ],
               "sites": [
@@ -200482,6 +200529,7 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
+                17,
                 19
               ],
               "sites": [
@@ -208410,7 +208458,8 @@
                 5,
                 6,
                 8,
-                13
+                13,
+                18
               ],
               "sites": [
                 {
@@ -221036,7 +221085,8 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
-                1
+                1,
+                4
               ],
               "sites": [
                 {
@@ -225101,6 +225151,9 @@
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
+              "returned_sites": [
+                1
+              ],
               "sites": [
                 {
                   "id": 0,
@@ -252305,6 +252358,9 @@
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
+              "returned_sites": [
+                0
+              ],
               "sites": [
                 {
                   "id": 0,
@@ -255579,6 +255635,10 @@
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
+              "returned_sites": [
+                1,
+                4
+              ],
               "sites": [
                 {
                   "id": 0,

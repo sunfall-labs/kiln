@@ -193,6 +193,30 @@ Invariant for the track: the JavaScript handler runs a few hundred instructions 
 nothing else on the request path runs in JavaScript. If a step needs the handler to do more, the
 step is wrong.
 
+## Phase 6: representation, to the 1.2x line
+
+Decided 2026-09-07. Every row of `bench/` within 1.2x of node or ahead of it, most ahead.
+Phases 2 to 5 exhausted the call-site levers (NOTES 2026-09-06: a method call is ninety
+instructions at full width; the rest is the representation). Each remaining gap has one
+named cause, and each cause is a representation change across the runtime, done in this
+order of leverage. Work is split into worktrees by file ownership; the orchestrator owns the
+emitter and integration, agents own bounded runtime projects, and every batch lands through
+the gate with `KILN_IC_CHECK` and `KILN_SPECULATE=exit` runs where a cache or a clone changed.
+
+| # | project | closes | owner and files | done when |
+| --- | --- | --- | --- | --- |
+| 6.1 | Escape analysis for a literal with a spread: an object whose only uses are its spread, its defines and constant-key reads in one function is never allocated; literal-defined keys read the defined value, other keys read `base`'s slot at the spread point under a learned shape guard, and any other use or a guard failure allocates as today. | object-spread (non-escaping case) | orchestrator; `graph.rs`, `emit_graph/` | object-spread ahead of node; probe of spread snapshot semantics matches node under `KILN_SPECULATE=exit` |
+| 6.2 | A shortest-round-trip double formatter in C with JS `Number.prototype.toString` spelling, differentially fuzzed against node; used by JSON first, then by every number-to-text. | json, and every number that becomes text | agent; `numbers.c`, `json.c`, a fuzz probe | one million random doubles and the edge list spell identically to node; json within 1.2x |
+| 6.3 | The promise job lane in C: reactions queue into a ring the prelude owns and the drain runs them in one call, with the queue a GC root; next-tick and completion lanes stay where they are and drain around it in node's order. | microtasks | agent; `promises.c`, `heap.c` (marking), the FFI drain | microtasks within 1.2x; ordering probes and the node corpus unchanged |
+| 6.4 | A lean object: a three-word header plus inline slots, the rare fields (accessors, freeze bits, brands, elements) in a side extension; allocation a bump and a template copy, inlined into emitted C; spread a memcpy. | object-spread (escaping case), json parse, every allocation-heavy row | orchestrator design; agents per file group for the field-access rewrite | object-spread with an escaping literal within 1.2x; no row slower |
+| 6.5 | Typed slots: a shape records which slots hold doubles unboxed, a `this.x` read on the row path is a load with no NaN-box check, and a typed accumulator is never boxed across a loop. | class-poly, mandelbrot, nbody, loop | orchestrator; `shapes.c`, `boxed.c`, emitter | class-poly within 1.2x |
+| 6.6 | Sliced strings: substring, slice and split parts share the source buffer; join writes into its final string once; the emitted intrinsics make slices. | string-ops, json stringify | agent for the runtime, orchestrator for the intrinsics | string-ops within 1.2x |
+
+Rules that hold across the phase: no row gets slower (the table is measured whole after every
+landing); a change to a cache or a clone runs the corpora under `KILN_IC_CHECK` and the
+benchmarks under `KILN_SPECULATE=exit` before it lands; an agent reports numbers it measured
+and what it did not do, and the orchestrator reviews the diff before cherry-picking.
+
 ## Later, only if needed
 
 - One description of each instruction's semantics generating both the interpreter dispatch and

@@ -9134,11 +9134,14 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
         }
         ExpressionKind::MemberAssignment { object, value, .. } => {
             collect_identifiers(object, names, collecting);
-            // The value is already inside this property definition. Once the collector
-            // is walking a function body, a function expression assigned here remains
-            // nested relative to that owner. Losing that state is what left module
-            // bindings unboxed in `Layer.prototype.match = function match (...) {}`.
-            collect_identifiers(value, names, true);
+            // The value is walked like any other expression: a function expression in it
+            // establishes its own nesting (the `Function` arm above collects its body whatever
+            // this flag says, which is what keeps `Layer.prototype.match = function match (...)
+            // {}` closing over its module), and a plain value does not. Walking the value as if
+            // it were nested boxed every local a member write read -- `m.h = m.f` made `m` a
+            // cell -- and a cell is a heap read at every use and an escape to the scalar
+            // analysis.
+            collect_identifiers(value, names, collecting);
         }
         ExpressionKind::Chain { expression } | ExpressionKind::Await(expression) => {
             collect_identifiers(expression, names, collecting);

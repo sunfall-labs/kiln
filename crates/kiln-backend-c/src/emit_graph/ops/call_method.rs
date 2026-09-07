@@ -1660,7 +1660,7 @@ pub(super) fn emit_call_method(
                 o = object.0,
                 typed_sync = if typed && spec.exits && spec.calls.contains(&vid) {
                     let invariant = lookup_speculation_invariant("method_call_number");
-                    format!("/* Speculation exit [{}]: {} */ if (!kiln_twin) {{ if (KILN_UNLIKELY(!KILN_VAL_IS_NUMBER(v{v}))) goto kiln_generic_resume_{v}; memcpy(&d{v}, &v{v}, sizeof(d{v})); }}", invariant.name, invariant.language_rule)
+                    format!("/* Speculation exit [{}]: {} */ if (!kiln_twin) {{ if (KILN_UNLIKELY(!KILN_VAL_IS_NUMBER(v{v}))) {{ {} goto kiln_generic_resume_{v}; }} memcpy(&d{v}, &v{v}, sizeof(d{v})); }}", invariant.name, invariant.language_rule, super::materialize_all_sunk(ctx.graph, symbol, ctx.defs, ctx.array_slots))
                 } else if typed {
                     format!("if (!kiln_twin) memcpy(&d{v}, &v{v}, sizeof(d{v}));")
                 } else {
