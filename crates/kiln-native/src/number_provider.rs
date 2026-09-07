@@ -383,7 +383,7 @@ fn build_from_source(identity: &ToolIdentity) -> Result<NumberProvider, NumberPr
             // The semantic cores remain feature-gated; the default `realm` feature adds the Tokio
             // runtime that now owns native entry as well as interpreted entry.
             OsString::from("--features"),
-            OsString::from("regexp,bigint,temporal,json,parallel"),
+            OsString::from("regexp,bigint,temporal,json,parallel,ffi"),
             OsString::from("--profile"),
             OsString::from(PROVIDER_PROFILE),
             OsString::from("--target"),
@@ -479,6 +479,7 @@ fn source_digest(root: &Path) -> Result<Digest, NumberProviderError> {
         "crates/kiln-number-core/Cargo.toml",
         "crates/kiln-number-core/src/lib.rs",
         "crates/kiln-native-number-ffi/Cargo.toml",
+        "crates/kiln-native-number-ffi/src/ffi.rs",
         "crates/kiln-native-number-ffi/src/lib.rs",
         "crates/kiln-native-number-abi/Cargo.toml",
         "crates/kiln-native-number-abi/src/lib.rs",
@@ -735,6 +736,10 @@ mod tests {
                 b"core\0bytes\n".as_slice(),
             ),
             ("crates/kiln-native-number-ffi/Cargo.toml", b"[lib]\n"),
+            (
+                "crates/kiln-native-number-ffi/src/ffi.rs",
+                b"dynamic ffi\n".as_slice(),
+            ),
             (
                 "crates/kiln-native-number-ffi/src/lib.rs",
                 b"ffi\n".as_slice(),
