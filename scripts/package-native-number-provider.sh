@@ -214,6 +214,19 @@ KILN_PROVIDER_SOURCE_DIGEST=$(
 		crates/kiln-node-path/src/lib.rs \
 		crates/kiln-temporal/Cargo.toml \
 		crates/kiln-temporal/src/lib.rs \
+		crates/kiln-intl/Cargo.toml \
+		crates/kiln-intl/src/collator.rs \
+		crates/kiln-intl/src/datetime.rs \
+		crates/kiln-intl/src/displaynames.rs \
+		crates/kiln-intl/src/duration.rs \
+		crates/kiln-intl/src/lib.rs \
+		crates/kiln-intl/src/list.rs \
+		crates/kiln-intl/src/locale.rs \
+		crates/kiln-intl/src/number.rs \
+		crates/kiln-intl/src/parts.rs \
+		crates/kiln-intl/src/plurals.rs \
+		crates/kiln-intl/src/relative.rs \
+		crates/kiln-intl/src/segmenter.rs \
 		crates/kiln-json/Cargo.toml \
 		crates/kiln-json/src/lib.rs \
 		crates/kiln-json/src/scalar.rs \

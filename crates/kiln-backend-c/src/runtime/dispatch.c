@@ -1326,7 +1326,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
      * agree in both kinds of realm. */
     if (code == KILN_C99_METHOD_PERFORMANCE_NOW) {
         double milliseconds;
-        status = kiln_realm_now(&milliseconds);
+        status = kiln_realm_performance_now(&milliseconds);
         if (status == KILN_C99_OK) *result = kiln_c99_number(milliseconds);
         return status;
     }
@@ -3328,7 +3328,9 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             if (status != KILN_C99_OK) {
                 return status;
             }
-            *result = kiln_c99_number(milliseconds);
+            /* Date time values are integral milliseconds. The host clock deliberately keeps
+             * sub-millisecond precision for performance.now(), but Date.now() must discard it. */
+            *result = kiln_c99_number(trunc(milliseconds));
             return KILN_C99_OK;
         }
         case KILN_C99_METHOD_COLLECTION_GET:

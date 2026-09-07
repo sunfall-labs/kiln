@@ -496,6 +496,19 @@ fn source_digest(root: &Path) -> Result<Digest, NumberProviderError> {
         // to warn about, which is the worst kind.
         "crates/kiln-temporal/Cargo.toml",
         "crates/kiln-temporal/src/lib.rs",
+        "crates/kiln-intl/Cargo.toml",
+        "crates/kiln-intl/src/collator.rs",
+        "crates/kiln-intl/src/datetime.rs",
+        "crates/kiln-intl/src/displaynames.rs",
+        "crates/kiln-intl/src/duration.rs",
+        "crates/kiln-intl/src/lib.rs",
+        "crates/kiln-intl/src/list.rs",
+        "crates/kiln-intl/src/locale.rs",
+        "crates/kiln-intl/src/number.rs",
+        "crates/kiln-intl/src/parts.rs",
+        "crates/kiln-intl/src/plurals.rs",
+        "crates/kiln-intl/src/relative.rs",
+        "crates/kiln-intl/src/segmenter.rs",
         // `JSON.parse`'s reader, compiled into the archive under the `json` feature and linked by
         // the interpreter directly, for the same reason as the two above.
         "crates/kiln-json/Cargo.toml",
@@ -753,6 +766,19 @@ mod tests {
             ("crates/kiln-node-path/src/lib.rs", b"node-path\n"),
             ("crates/kiln-temporal/Cargo.toml", b"[package]\n"),
             ("crates/kiln-temporal/src/lib.rs", b"temporal\n"),
+            ("crates/kiln-intl/Cargo.toml", b"[package]\n"),
+            ("crates/kiln-intl/src/collator.rs", b"collator\n"),
+            ("crates/kiln-intl/src/datetime.rs", b"datetime\n"),
+            ("crates/kiln-intl/src/displaynames.rs", b"displaynames\n"),
+            ("crates/kiln-intl/src/duration.rs", b"duration\n"),
+            ("crates/kiln-intl/src/lib.rs", b"intl\n"),
+            ("crates/kiln-intl/src/list.rs", b"list\n"),
+            ("crates/kiln-intl/src/locale.rs", b"locale\n"),
+            ("crates/kiln-intl/src/number.rs", b"number\n"),
+            ("crates/kiln-intl/src/parts.rs", b"parts\n"),
+            ("crates/kiln-intl/src/plurals.rs", b"plurals\n"),
+            ("crates/kiln-intl/src/relative.rs", b"relative\n"),
+            ("crates/kiln-intl/src/segmenter.rs", b"segmenter\n"),
             ("crates/kiln-json/Cargo.toml", b"[package]\n"),
             ("crates/kiln-json/src/lib.rs", b"json\n"),
             ("crates/kiln-json/src/scalar.rs", b"scalar\n"),
@@ -778,7 +804,7 @@ mod tests {
 
         assert_eq!(
             source_digest(&root.0).expect("hash source identity fixture"),
-            Digest::from_hex("f96ede024b84213464e1468fe2ccfb9162e0c235b1a73a7ae52b18ecd9de36ab")
+            Digest::from_hex("7df4c50c7f7c42e82fc76f55e9271ba73b87e2209d0311a06193dfb4afe59e2f")
                 .expect("fixture digest")
         );
     }
