@@ -162,6 +162,15 @@ pub(super) fn emit_unary_boxed(
 
     let x = value.0;
     let code = unary_code(*op);
+    if ctx.plan.compact && !matches!(op, UnaryOp::Void | UnaryOp::Not | UnaryOp::TypeOf) {
+        let check = status_check(diagnostic_site, pc, label, unwind);
+        if scalar_proto {
+            writeln!(output, "    v{v} = kiln_c99_val_unary_fast({code}, v{x});").unwrap();
+        } else {
+            writeln!(output, "    {{ kiln_value ans; int status = kiln_c99_unary_checked({code}, host, kiln_val_to_boundary(v{x}), &ans, depth, thrown); {check} v{v} = kiln_val_from_boundary(ans); }}").unwrap();
+        }
+        return;
+    }
     match op {
         UnaryOp::Void => writeln!(output, "    v{v} = KILN_VAL_UNDEFINED;").unwrap(),
         // `!` and `typeof` never call back into the program and never throw.
@@ -557,6 +566,10 @@ pub(super) fn emit_binary_boxed(
             "int status = KILN_C99_OK; v{v} = kiln_c99_val_binary({code}, host, v{l}, v{r}, &status, depth, thrown); {check}"
         )
     };
+    if ctx.plan.compact {
+        writeln!(output, "    {{ {slow} }}").unwrap();
+        return;
+    }
     let fast = binary_fast_body(*op).map(|f| {
         f.replace("LEFT", &format!("v{l}"))
             .replace("RIGHT", &format!("v{r}"))

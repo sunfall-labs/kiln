@@ -28,6 +28,10 @@ fn push_c_byte(output: &mut String, byte: u8) {
     match byte {
         b'"' => output.push_str("\\\""),
         b'\\' => output.push_str("\\\\"),
+        // C translates trigraphs before it parses string literals. Spelling either question
+        // mark in `??=` as `\\?` preserves JavaScript source text instead of turning it into
+        // `#` on compilers that still perform that translation.
+        b'?' => output.push_str("\\?"),
         b'\n' => output.push_str("\\n"),
         b'\r' => output.push_str("\\r"),
         b'\t' => output.push_str("\\t"),
@@ -47,7 +51,7 @@ pub(crate) fn c_string(value: &str) -> String {
         let remaining = &bytes[offset..];
         let next_escape = remaining
             .iter()
-            .position(|&b| b < 0x20 || b == b'"' || b == b'\\' || b > 0x7e);
+            .position(|&b| b < 0x20 || b == b'"' || b == b'\\' || b == b'?' || b > 0x7e);
         match next_escape {
             Some(pos) => {
                 if pos > 0 {
@@ -64,4 +68,15 @@ pub(crate) fn c_string(value: &str) -> String {
     }
     output.push('"');
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{c_string, c_string_chunked};
+
+    #[test]
+    fn question_marks_cannot_form_c_trigraphs() {
+        assert_eq!(c_string("left ??= right"), r#""left \?\?= right""#);
+        assert_eq!(c_string_chunked("left ??= right"), r#""left \?\?= right""#);
+    }
 }

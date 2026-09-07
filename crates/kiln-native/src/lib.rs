@@ -24,9 +24,9 @@ use kiln_artifact_cache::{
 #[cfg(test)]
 use kiln_backend_c::emit_module_with_logical_path;
 use kiln_backend_c::{
-    C_ABI_VERSION, C_GENERATOR_VERSION, EmissionPolicy, EmitError,
+    C_ABI_VERSION, C_GENERATOR_VERSION, EmissionPolicy, EmitError, RUNTIME_PRELUDE_HEADER_NAME,
     emit_commonjs_module_with_logical_path_and_policy, emit_module_with_logical_path_and_policy,
-    emit_runtime_module_with_logical_path, emit_with_policy,
+    emit_runtime_module_with_logical_path_and_policy, emit_with_policy, runtime_prelude_header,
 };
 use kiln_host_abi::HOST_ABI_VERSION;
 pub use kiln_host_abi::HostValue;
@@ -46,6 +46,18 @@ use rayon::prelude::*;
 
 static WORK_COUNTER: AtomicU64 = AtomicU64::new(0);
 static MATERIALIZE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn prelude_header_digest() -> Digest {
+    Digest::hash(runtime_prelude_header().as_bytes())
+}
+
+fn materialize_prelude_header(root: &Path) -> Result<(), NativeError> {
+    materialize(
+        &root.join(RUNTIME_PRELUDE_HEADER_NAME),
+        runtime_prelude_header().as_bytes(),
+        false,
+    )
+}
 static DISCOVERED_TOOLCHAIN: OnceLock<Result<Toolchain, ToolchainError>> = OnceLock::new();
 static SHARED_PUBLICATION_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
@@ -195,7 +207,7 @@ impl NativeBuilder {
         // Deterministic generated sources are always stored under the debug cache profile. Graph
         // module sources share the ordinary module-source identity byte-for-byte.
         allow(
-            format!("kiln-c-abi-{C_ABI_VERSION}"),
+            format!("kiln-c-abi-{C_ABI_VERSION}-generator-{C_GENERATOR_VERSION}"),
             Backend::C,
             &module_abi,
             CacheProfile::Debug,
@@ -353,6 +365,7 @@ impl NativeBuilder {
         let total_started = Instant::now();
         let emit_started = Instant::now();
         let mut emission = options.realm.emission_executable();
+        emission.compact = options.profile != NativeProfile::Profile;
         if options.profile == NativeProfile::Profile {
             emission.type_profile_record = true;
         }
@@ -376,7 +389,7 @@ impl NativeBuilder {
 
         let module_source_key = key(
             ArtifactKind::GeneratedC,
-            format!("kiln-c-abi-{C_ABI_VERSION}"),
+            format!("kiln-c-abi-{C_ABI_VERSION}-generator-{C_GENERATOR_VERSION}"),
             Backend::C,
             &module_abi,
             &target,
@@ -448,7 +461,7 @@ impl NativeBuilder {
             &target,
             profile.cache(),
             object_options,
-            [module_source_digest],
+            [module_source_digest, prelude_header_digest()],
         );
         let prelude_key = key(
             ArtifactKind::RuntimeLibrary,
@@ -545,6 +558,7 @@ impl NativeBuilder {
             }
         }
 
+        materialize_prelude_header(workspace.path())?;
         let compile_options = CompileOptions {
             profile: profile.toolchain(),
             march_native: options.march_native,
@@ -724,7 +738,9 @@ impl NativeBuilder {
     ) -> Result<NativeSharedLibraryReport, NativeError> {
         let total_started = Instant::now();
         let emit_started = Instant::now();
-        let module = emit_with_policy(program, options.realm.emission())?;
+        let mut emission = options.realm.emission();
+        emission.compact = options.profile != NativeProfile::Profile;
+        let module = emit_with_policy(program, emission.clone())?;
         let module_api_symbol = embedding_module_api_symbol(&module.symbol)?;
         let module_wrapper = owned_result_wrapper_source(
             &module.symbol,
@@ -761,7 +777,7 @@ impl NativeBuilder {
         // not poison the reusable non-PIC module source cache.
         let module_source_key = key(
             ArtifactKind::GeneratedC,
-            format!("kiln-c-abi-{C_ABI_VERSION}"),
+            format!("kiln-c-abi-{C_ABI_VERSION}-generator-{C_GENERATOR_VERSION}"),
             Backend::C,
             &module_abi,
             &target,
@@ -807,10 +823,9 @@ impl NativeBuilder {
             &target,
             profile.cache(),
             object_options,
-            [module_source_digest],
+            [module_source_digest, prelude_header_digest()],
         );
-        let prelude_source =
-            kiln_backend_c::runtime_prelude_source_with_policy(&options.realm.emission());
+        let prelude_source = kiln_backend_c::runtime_prelude_source_with_policy(&emission);
         let prelude_source_key = key(
             ArtifactKind::GeneratedC,
             format!("kiln-runtime-prelude-{NATIVE_PRELUDE_VERSION}"),
@@ -908,6 +923,7 @@ impl NativeBuilder {
             }
         }
 
+        materialize_prelude_header(workspace.path())?;
         let compile_options = CompileOptions {
             profile: profile.toolchain(),
             position_independent: true,
@@ -1060,13 +1076,20 @@ impl NativeBuilder {
         options: &NativeBuildOptions,
     ) -> Result<NativeSharedLibraryReport, NativeError> {
         validate_native_node_builtins(graph)?;
+        let mut emission = options.realm.emission();
+        emission.compact = options.profile != NativeProfile::Profile;
         let total_started = Instant::now();
         let emit_started = Instant::now();
-        let mut modules = Vec::with_capacity(graph.module_count());
-        let mut symbols = std::collections::HashSet::with_capacity(graph.module_count());
-        for node in graph.modules() {
+        let nodes = graph.modules().collect::<Vec<_>>();
+        let emitted_modules = emit_indexed(nodes.len(), "shared graph module emission", |index| {
+            let node = nodes[index];
             let logical_path = logical_module_path(graph.project_root(), &node.path)?;
-            let emitted = emit_native_graph_module(node, &logical_path, &options.realm)?;
+            let emitted = emit_native_graph_module_with_policy(node, &logical_path, &emission)?;
+            Ok(emitted)
+        })?;
+        let mut modules = Vec::with_capacity(nodes.len());
+        let mut symbols = std::collections::HashSet::with_capacity(graph.module_count());
+        for (node, emitted) in nodes.into_iter().zip(emitted_modules) {
             if !symbols.insert(emitted.symbol.clone()) {
                 return Err(NativeError::SymbolCollision {
                     symbol: emitted.symbol,
@@ -1123,7 +1146,7 @@ impl NativeBuilder {
         for (_, module) in &modules {
             let source_key = key(
                 ArtifactKind::GeneratedC,
-                format!("kiln-c-abi-{C_ABI_VERSION}"),
+                format!("kiln-c-abi-{C_ABI_VERSION}-generator-{C_GENERATOR_VERSION}"),
                 Backend::C,
                 &module_abi,
                 &target,
@@ -1156,9 +1179,14 @@ impl NativeBuilder {
         };
         let module_object_options = Digest::hash(
             format!(
-                "shared-graph\0pic\0c11\0visibility-hidden\0{}\0{}{march_opt}",
+                "shared-graph\0pic\0c11\0visibility-hidden\0{}\0{}{march_opt}\0module-opt={}",
                 identity.kind,
-                profile.as_str()
+                profile.as_str(),
+                if profile == NativeProfile::Release {
+                    "o0"
+                } else {
+                    "profile-default"
+                }
             )
             .as_bytes(),
         );
@@ -1183,6 +1211,9 @@ impl NativeBuilder {
         module_compile_options
             .extra_args
             .push("-fvisibility=hidden".into());
+        if profile == NativeProfile::Release {
+            module_compile_options.extra_args.push("-O0".into());
+        }
         let wrapper_compile_options = CompileOptions {
             profile: profile.toolchain(),
             position_independent: true,
@@ -1200,7 +1231,7 @@ impl NativeBuilder {
                 &target,
                 profile.cache(),
                 module_object_options,
-                [*source_digest],
+                [*source_digest, prelude_header_digest()],
             ));
         }
         let wrapper_object_key = key(
@@ -1213,8 +1244,7 @@ impl NativeBuilder {
             wrapper_object_options,
             [wrapper_source_digest, topology],
         );
-        let prelude_source =
-            kiln_backend_c::runtime_prelude_source_with_policy(&options.realm.emission());
+        let prelude_source = kiln_backend_c::runtime_prelude_source_with_policy(&emission);
         let prelude_source_key = key(
             ArtifactKind::GeneratedC,
             format!("kiln-runtime-prelude-{NATIVE_PRELUDE_VERSION}"),
@@ -1346,6 +1376,7 @@ impl NativeBuilder {
             }
         }
 
+        materialize_prelude_header(workspace.path())?;
         let compile_started = Instant::now();
         let (module_objects, other_objects) = rayon::join(
             || {
@@ -1543,6 +1574,7 @@ impl NativeBuilder {
         let total_started = Instant::now();
         let emit_started = Instant::now();
         let mut emission = options.realm.emission_executable();
+        emission.compact = options.profile != NativeProfile::Profile;
         if options.profile == NativeProfile::Profile {
             emission.type_profile_record = true;
         }
@@ -1550,12 +1582,17 @@ impl NativeBuilder {
         if let Some(profile) = resolve_type_profile(options, entry_module_path) {
             emission.type_profile = Some(std::sync::Arc::new(profile));
         }
-        let mut modules = Vec::with_capacity(graph.module_count());
-        let mut logical_paths = Vec::with_capacity(graph.module_count());
-        let mut symbols = std::collections::HashSet::with_capacity(graph.module_count());
-        for node in graph.modules() {
+        let nodes = graph.modules().collect::<Vec<_>>();
+        let emitted_modules = emit_indexed(nodes.len(), "graph module emission", |index| {
+            let node = nodes[index];
             let logical_path = logical_module_path(graph.project_root(), &node.path)?;
             let emitted = emit_native_graph_module_with_policy(node, &logical_path, &emission)?;
+            Ok((logical_path, emitted))
+        })?;
+        let mut modules = Vec::with_capacity(nodes.len());
+        let mut logical_paths = Vec::with_capacity(nodes.len());
+        let mut symbols = std::collections::HashSet::with_capacity(graph.module_count());
+        for (node, (logical_path, emitted)) in nodes.into_iter().zip(emitted_modules) {
             if !symbols.insert(emitted.symbol.clone()) {
                 return Err(NativeError::SymbolCollision {
                     symbol: emitted.symbol,
@@ -1586,7 +1623,7 @@ impl NativeBuilder {
         for (_, module) in &modules {
             let source_key = key(
                 ArtifactKind::GeneratedC,
-                format!("kiln-c-abi-{C_ABI_VERSION}"),
+                format!("kiln-c-abi-{C_ABI_VERSION}-generator-{C_GENERATOR_VERSION}"),
                 Backend::C,
                 &module_abi,
                 &target,
@@ -1656,6 +1693,25 @@ impl NativeBuilder {
             march_native: options.march_native,
             ..CompileOptions::default()
         };
+        let mut module_compile_options = compile_options.clone();
+        if profile == NativeProfile::Release {
+            // Large bundles spend nearly all cold-build time optimizing generated application
+            // glue. The runtime and prelude remain O3, where the hot generic operations live.
+            module_compile_options.extra_args.push("-O0".into());
+        }
+        let module_object_options = Digest::hash(
+            format!(
+                "c11\0{}\0{}\0generator-{C_GENERATOR_VERSION}{march_opt}\0module-opt={}",
+                identity.kind,
+                profile.as_str(),
+                if profile == NativeProfile::Release {
+                    "o0"
+                } else {
+                    "profile-default"
+                }
+            )
+            .as_bytes(),
+        );
         let compile_started = Instant::now();
         let mut module_keys = Vec::with_capacity(modules.len());
         for (index, (_, _module)) in modules.iter().enumerate() {
@@ -1667,8 +1723,8 @@ impl NativeBuilder {
                 &module_abi,
                 &target,
                 profile.cache(),
-                object_options,
-                [*source_digest],
+                module_object_options,
+                [*source_digest, prelude_header_digest()],
             ));
         }
         let prelude_key = key(
@@ -1788,13 +1844,14 @@ impl NativeBuilder {
             }
         }
 
+        materialize_prelude_header(workspace.path())?;
         let (module_objects, ((prelude_object, runtime_object), launcher_object)) = rayon::join(
             || {
                 let module_keys_ref = &module_keys;
                 let module_sources_ref = &module_sources;
                 let module_c_ref = &paths.module_c;
                 let module_o_ref = &paths.module_o;
-                let compile_options_ref = &compile_options;
+                let compile_options_ref = &module_compile_options;
                 compile_indexed(module_keys_ref.len(), "module compile", move |index| {
                     self.object(
                         &module_keys_ref[index],
@@ -2312,6 +2369,7 @@ fn native_builtin_supported_exports(
     }
 }
 
+#[cfg(test)]
 fn emit_native_graph_module(
     node: &kiln_module_graph::ModuleNode,
     logical_path: &str,
@@ -2333,10 +2391,11 @@ fn emit_native_graph_module_with_policy(
                 })?;
             let (program, body) =
                 native_builtin_runtime_module(&node.program, builtin, materializer)?;
-            Ok(emit_runtime_module_with_logical_path(
+            Ok(emit_runtime_module_with_logical_path_and_policy(
                 &program,
                 logical_path,
                 &body,
+                policy.clone(),
             )?)
         }
         ModuleSource::CommonJs => Ok(emit_commonjs_module_with_logical_path_and_policy(
@@ -2360,10 +2419,11 @@ fn emit_native_graph_module_with_policy(
                 native_c_string(source),
                 source.len()
             );
-            Ok(emit_runtime_module_with_logical_path(
+            Ok(emit_runtime_module_with_logical_path_and_policy(
                 &node.program,
                 logical_path,
                 &body,
+                policy.clone(),
             )?)
         }
         ModuleSource::Source => Ok(emit_module_with_logical_path_and_policy(

@@ -24,7 +24,30 @@ pub const C_ABI_VERSION: u32 = 1;
 /// keys include this revision so those objects are never reused across generator changes.
 // Epoch 31 changes the private dictionary-cache index encoding. Old sentinel-initialized
 // modules must not be reused beside the zero-backed runtime, despite the unchanged C layout.
-pub const C_GENERATOR_VERSION: u32 = 31;
+pub const C_GENERATOR_VERSION: u32 = 37;
+
+/// Stable basename used by decoupled translation units for the shared runtime declarations.
+///
+/// The native pipeline materializes this header once beside every set of generated module files.
+/// Keeping the name here makes the emitted include and the materialized file one contract.
+pub const RUNTIME_PRELUDE_HEADER_NAME: &str = "kiln_runtime_prelude.h";
+
+/// Release specialization is for small hot bodies. Cloning larger bodies multiplies C parsing,
+/// optimization, object size, and instruction-cache pressure for negligible benefit.
+pub(crate) const MAX_SPECIALIZED_INSTRUCTIONS: usize = 192;
+const COMPACT_DIAGNOSTIC_SITE: &str = "\0kiln-unit-site";
+
+pub(crate) fn diagnostic_source(site: &str) -> String {
+    if site == COMPACT_DIAGNOSTIC_SITE {
+        "ku_site".to_owned()
+    } else {
+        c_string(site)
+    }
+}
+
+pub(crate) fn compact_diagnostic_site(site: &str) -> bool {
+    site == COMPACT_DIAGNOSTIC_SITE
+}
 
 /// Realm policy that changes observable native execution.
 ///
@@ -37,6 +60,8 @@ pub struct EmissionPolicy {
     pub timezone: EmissionStringPolicy,
     pub locale: EmissionStringPolicy,
     pub decoupled_prelude: bool,
+    /// Prefer one compact generic body over speculative, typed, fast, and parallel clones.
+    pub compact: bool,
     pub type_profile_record: bool,
     pub type_profile: Option<std::sync::Arc<graph::TypeProfile>>,
 }
@@ -364,6 +389,21 @@ pub fn emit_runtime_module_with_logical_path(
     logical_path: &str,
     body: &str,
 ) -> Result<CModule, EmitError> {
+    emit_runtime_module_with_logical_path_and_policy(
+        module,
+        logical_path,
+        body,
+        EmissionPolicy::default(),
+    )
+}
+
+/// Emit a runtime-provided module under the same prelude policy as ordinary graph modules.
+pub fn emit_runtime_module_with_logical_path_and_policy(
+    module: &ModuleProgram,
+    logical_path: &str,
+    body: &str,
+    policy: EmissionPolicy,
+) -> Result<CModule, EmitError> {
     validate_logical_path(logical_path)?;
     validate_module(module)?;
     if body.as_bytes().contains(&0) {
@@ -371,10 +411,10 @@ pub fn emit_runtime_module_with_logical_path(
             message: "runtime module body contains an embedded NUL".to_owned(),
         });
     }
-    let (program_hash, _) = hash_module_pair(module);
+    let (program_hash, _) = hash_module_pair_with_policy(module, &policy);
     let (path_hash, path_hash_seeded) = hash_logical_path_pair(logical_path);
     let symbol = format!("kiln_module_path_{path_hash:016x}{path_hash_seeded:016x}");
-    let source = render_runtime_module(module, program_hash, &symbol, body);
+    let source = render_runtime_module(module, program_hash, &symbol, body, &policy);
     Ok(CModule {
         symbol,
         source,
@@ -832,7 +872,7 @@ pub(crate) fn closure_construction(
     } else {
         0
     };
-    let diagnostic_source = c_string(diagnostic_site);
+    let diagnostic_source = diagnostic_source(diagnostic_site);
     format!(
         "kiln_c99_make_closure(&built, {symbol}_fn_{proto}, {name}, {name_len}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {is_method}, {arrow}, {strict}, {defining_receiver}, kiln_val_from_boundary(kiln_c99_new_target), UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), {captured}, UINT32_C({capture_count}))"
     )
@@ -890,7 +930,11 @@ fn render_functions(
             .unwrap();
         }
     }
-    let receiver_columns: Vec<usize> = graphs.iter().map(emit_graph::this_site_count).collect();
+    let receiver_columns: Vec<usize> = if policy.compact {
+        vec![0; graphs.len()]
+    } else {
+        graphs.iter().map(emit_graph::this_site_count).collect()
+    };
     direct.set_receiver_columns(&receiver_columns);
     // A typed entry over a restartable body is emitted as one: decided by emitting it, which
     // depends on the plan and not on what the entry turns out to need.
@@ -1071,19 +1115,23 @@ fn render_functions(
         .iter()
         .enumerate()
         .map(|(index, proto)| {
-            emit_graph::emit_fast_clone(
-                &graphs[index],
-                proto,
-                program,
-                symbol,
-                index,
-                !proto_produces_references(proto, program),
-                diagnostic_site,
-                &plan.functions,
-                strict_functions,
-                &direct.functions[index],
-            )
-            .is_some()
+            (!policy.compact && proto.code.len() <= MAX_SPECIALIZED_INSTRUCTIONS)
+                .then(|| {
+                    emit_graph::emit_fast_clone(
+                        &graphs[index],
+                        proto,
+                        program,
+                        symbol,
+                        index,
+                        !proto_produces_references(proto, program),
+                        diagnostic_site,
+                        &plan.functions,
+                        strict_functions,
+                        &direct.functions[index],
+                    )
+                })
+                .flatten()
+                .is_some()
         })
         .collect();
     direct.set_fast(&fast);
@@ -1374,6 +1422,7 @@ fn names(text: &str, word: &str) -> bool {
 fn plan_unit(
     program: &Program,
     diagnostic_site: &str,
+    compact: bool,
 ) -> Result<
     (
         Vec<FunctionGraph>,
@@ -1399,7 +1448,8 @@ fn plan_unit(
     let body = entry_proto(program);
     let entry_graph = graph_for(&body, program, "the module body", diagnostic_site)?;
     let publishes_frame = compute_publishes_frame(program);
-    let direct = direct::DirectPlan::plan(program, &graphs, &entry_graph, &publishes_frame);
+    let direct =
+        direct::DirectPlan::plan(program, &graphs, &entry_graph, &publishes_frame, compact);
     Ok((graphs, body, entry_graph, direct))
 }
 
@@ -1518,7 +1568,7 @@ fn render_entry(
 
         let frame_stack = plan.body.max(1);
         let frame_handlers = program.code.len().max(1);
-        let diagnostic_source = c_string(diagnostic_site);
+        let diagnostic_source = diagnostic_source(diagnostic_site);
         writeln!(
             output,
             r#"    kiln_value entry_closure;
@@ -1569,7 +1619,7 @@ fn render_entry(
         return Ok(());
     }
 
-    let callables = produces_references(program);
+    let callables = produces_references(program) || (policy.compact && module.is_some());
     let entry_symbol = if callables {
         format!("{symbol}_body")
     } else {
@@ -2059,29 +2109,29 @@ int {symbol}(kiln_host *host, kiln_value *result) {{
     .unwrap();
 }
 
-fn render_module_realm_wrapper(output: &mut String, symbol: &str) {
+fn render_module_realm_wrapper(output: &mut String, symbol: &str, unit_symbol: &str) {
     writeln!(
         output,
         r#"
-typedef struct {symbol}_realm_context {{
+typedef struct {unit_symbol}_realm_context {{
     kiln_host *host;
     kiln_value *result;
     const kiln_value *imports;
     size_t import_count;
     kiln_value *exports;
     size_t export_count;
-}} {symbol}_realm_context;
+}} {unit_symbol}_realm_context;
 
-static int {symbol}_gc_result_entry(void *result) {{
+static int {unit_symbol}_gc_result_entry(void *result) {{
     return kiln_realm_gc_register_roots(kiln_c99_gc_result_roots, result,
                                         KILN_GC_ROOT_SURVIVES_TEARDOWN);
 }}
 
-static int {symbol}_realm_entry(void *opaque) {{
-    {symbol}_realm_context *context = ({symbol}_realm_context *)opaque;
+static int {unit_symbol}_realm_entry(void *opaque) {{
+    {unit_symbol}_realm_context *context = ({unit_symbol}_realm_context *)opaque;
     int status;
     if (context == NULL) return KILN_C99_INVALID_ARGUMENT;
-    status = {symbol}_body(context->host, context->result, context->imports,
+    status = {unit_symbol}_body(context->host, context->result, context->imports,
                            context->import_count, context->exports, context->export_count);
     /* A graph is linked from one C translation unit per JavaScript module. Diagnostic state is
      * deliberately private to each unit, so the module that owns the refusing instruction must
@@ -2094,14 +2144,14 @@ static int {symbol}_realm_entry(void *opaque) {{
 
 int {symbol}(kiln_host *host, kiln_value *result, const kiln_value *imports,
              size_t import_count, kiln_value *exports, size_t export_count) {{
-    {symbol}_realm_context context;
+    {unit_symbol}_realm_context context;
     uint64_t realm = 0;
     int status;
     int destroy_status;
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     if (kiln_realm_is_active()) {{
         (void)kiln_realm_diagnostic_reset();
-        status = {symbol}_body(host, result, imports, import_count, exports, export_count);
+        status = {unit_symbol}_body(host, result, imports, import_count, exports, export_count);
         if (status == KILN_C99_CONTROL_ERROR)
             *result = kiln_c99_control_diagnostic();
         return status;
@@ -2124,9 +2174,9 @@ int {symbol}(kiln_host *host, kiln_value *result, const kiln_value *imports,
     context.export_count = export_count;
     status = kiln_realm_create(&realm);
     if (status == KILN_C99_OK)
-        status = kiln_realm_enter(realm, {symbol}_gc_result_entry, result);
+        status = kiln_realm_enter(realm, {unit_symbol}_gc_result_entry, result);
     if (status == KILN_C99_OK)
-        status = kiln_realm_enter(realm, {symbol}_realm_entry, &context);
+        status = kiln_realm_enter(realm, {unit_symbol}_realm_entry, &context);
     if (status == KILN_C99_OK)
         status = kiln_realm_drive(realm, host, result);
     if (realm != 0) {{
@@ -2324,14 +2374,14 @@ fn render(
     let strict_functions = vec![true; program.functions.len()];
     let callables = produces_references(program);
     let header_len = if policy.decoupled_prelude {
-        runtime_prelude_header().len()
+        64
     } else {
         HEADER.len()
     };
     let mut output = String::with_capacity(header_len + program.code.len() * 64);
     render_emission_policy(&mut output, policy);
     if policy.decoupled_prelude {
-        output.push_str(runtime_prelude_header());
+        writeln!(output, "#include \"{RUNTIME_PRELUDE_HEADER_NAME}\"").unwrap();
     } else {
         output.push_str(HEADER);
         output = output.replace(
@@ -2345,7 +2395,9 @@ fn render(
     )
     .unwrap();
     render_constant_declarations(&mut output, program, symbol);
-    render_regex_matchers(&mut output, program, symbol);
+    if !policy.compact {
+        render_regex_matchers(&mut output, program, symbol);
+    }
     let keys = property_key_constants(program);
     render_key_table(&mut output, program, symbol, &keys);
     render_template_sites(&mut output, program, symbol);
@@ -2365,7 +2417,7 @@ fn render(
         !keys.is_empty(),
         program.template_sites.len(),
     );
-    let (graphs, body, entry_graph, mut direct) = plan_unit(program, symbol)?;
+    let (graphs, body, entry_graph, mut direct) = plan_unit(program, symbol, policy.compact)?;
     render_functions(
         &mut output,
         program,
@@ -2406,8 +2458,11 @@ fn render_module(
     diagnostic_site: &str,
 ) -> Result<String, EmitError> {
     let program = &module.program;
+    // Compact graph modules are each compiled as their own translation unit. Private identifiers
+    // therefore do not need the link-visible content hash; retain it only on exported adapters.
+    let unit_symbol = if policy.compact { "ku" } else { symbol };
     let plan = validate_program(program).expect("render called after validation");
-    let callables = produces_references(program);
+    let callables = produces_references(program) || policy.compact;
     // What the compiler said, padded with the strict answer. A `ModuleProgram` assembled by hand
     // -- a builtin's export shape, a fixture -- carries no table, and reading its absence as
     // strict is what keeps every unit that is really ESM emitting the bytes it emitted before.
@@ -2422,14 +2477,14 @@ fn render_module(
         })
         .collect();
     let header_len = if policy.decoupled_prelude {
-        runtime_prelude_header().len()
+        64
     } else {
         HEADER.len()
     };
     let mut output = String::with_capacity(header_len + program.code.len() * 72);
     render_emission_policy(&mut output, policy);
     if policy.decoupled_prelude {
-        output.push_str(runtime_prelude_header());
+        writeln!(output, "#include \"{RUNTIME_PRELUDE_HEADER_NAME}\"").unwrap();
     } else {
         output.push_str(HEADER);
         output = output.replace(
@@ -2444,34 +2499,49 @@ fn render_module(
         if commonjs { 1 } else { module.exports.len() }
     )
     .unwrap();
-    render_constant_declarations(&mut output, program, symbol);
-    render_regex_matchers(&mut output, program, symbol);
+    let emission_diagnostic_site = if policy.compact {
+        writeln!(
+            output,
+            "static const char ku_site[] = {};",
+            c_string(diagnostic_site)
+        )
+        .unwrap();
+        output.push_str("#define KU_STATUS(PC, OP, UNWIND) do { if (status == KILN_C99_THROWN) { UNWIND; } if (status == KILN_C99_CONTROL_ERROR) { kiln_c99_note_refusal(ku_site, (size_t)(PC), (OP), (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; } while (0)\n");
+        COMPACT_DIAGNOSTIC_SITE
+    } else {
+        diagnostic_site
+    };
+    render_constant_declarations(&mut output, program, unit_symbol);
+    if !policy.compact {
+        render_regex_matchers(&mut output, program, unit_symbol);
+    }
     let keys = property_key_constants(program);
-    render_key_table(&mut output, program, symbol, &keys);
-    render_template_sites(&mut output, program, symbol);
+    render_key_table(&mut output, program, unit_symbol, &keys);
+    render_template_sites(&mut output, program, unit_symbol);
     if uses_module_scope(program) {
         writeln!(
             output,
-            "static kiln_val {symbol}_globals[{}];",
+            "static kiln_val {unit_symbol}_globals[{}];",
             usize::try_from(program.local_count).unwrap().max(1)
         )
         .unwrap();
     }
     render_unit_roots(
         &mut output,
-        symbol,
+        unit_symbol,
         uses_module_scope(program),
         program.local_count,
         !keys.is_empty(),
         program.template_sites.len(),
     );
-    let (graphs, body, entry_graph, mut direct) = plan_unit(program, diagnostic_site)?;
+    let (graphs, body, entry_graph, mut direct) =
+        plan_unit(program, diagnostic_site, policy.compact)?;
     render_functions(
         &mut output,
         program,
         &plan,
-        symbol,
-        diagnostic_site,
+        unit_symbol,
+        emission_diagnostic_site,
         &strict_functions,
         &graphs,
         &mut direct,
@@ -2481,8 +2551,8 @@ fn render_module(
         &mut output,
         program,
         &plan,
-        symbol,
-        diagnostic_site,
+        unit_symbol,
+        emission_diagnostic_site,
         &strict_functions,
         !keys.is_empty(),
         Some((module, commonjs)),
@@ -2504,7 +2574,7 @@ fn render_module(
     }
     render_namespace_wrapper(&mut output, symbol);
     if callables {
-        render_module_realm_wrapper(&mut output, symbol);
+        render_module_realm_wrapper(&mut output, symbol, unit_symbol);
     }
     Ok(output)
 }
@@ -2514,13 +2584,24 @@ fn render_runtime_module(
     program_hash: u64,
     symbol: &str,
     body: &str,
+    policy: &EmissionPolicy,
 ) -> String {
-    let mut output = String::with_capacity(HEADER.len() + body.len() + 1024);
-    output.push_str(HEADER);
-    output = output.replace(
-        "/* KILN_NATIVE_CONSTRUCTOR_TABLE */",
-        &render_native_constructor_table(),
-    );
+    let header_len = if policy.decoupled_prelude {
+        64
+    } else {
+        HEADER.len()
+    };
+    let mut output = String::with_capacity(header_len + body.len() + 1024);
+    render_emission_policy(&mut output, policy);
+    if policy.decoupled_prelude {
+        writeln!(output, "#include \"{RUNTIME_PRELUDE_HEADER_NAME}\"").unwrap();
+    } else {
+        output.push_str(HEADER);
+        output = output.replace(
+            "/* KILN_NATIVE_CONSTRUCTOR_TABLE */",
+            &render_native_constructor_table(),
+        );
+    }
     writeln!(
         output,
         "/* Runtime module hash: {program_hash:016x}; bytecode version: {BYTECODE_VERSION}; imports: {}; exports: {}. */",
@@ -2554,7 +2635,7 @@ fn render_runtime_module(
     }
     output.push_str("    *result = kiln_c99_undefined();\n    return KILN_C99_OK;\n}\n");
     render_namespace_wrapper(&mut output, symbol);
-    render_module_realm_wrapper(&mut output, symbol);
+    render_module_realm_wrapper(&mut output, symbol, symbol);
     output
 }
 
@@ -2743,6 +2824,7 @@ fn hash_program_with_policy_and_seed(program: &Program, policy: &EmissionPolicy,
         u8::from(policy.host_clock),
         entropy_tag,
         u8::from(policy.decoupled_prelude),
+        u8::from(policy.compact),
     ] {
         hash ^= u64::from(value);
         hash = hash.wrapping_mul(0x100000001b3);
@@ -3209,10 +3291,6 @@ fn hash_function_proto(hash: &mut u64, function: &FunctionProto) {
     }
 }
 
-fn hash_module_pair(module: &ModuleProgram) -> (u64, u64) {
-    hash_module_pair_with_policy(module, &EmissionPolicy::default())
-}
-
 fn hash_module_pair_with_policy(module: &ModuleProgram, policy: &EmissionPolicy) -> (u64, u64) {
     (
         hash_module_with_policy_and_seed(module, policy, 0xcbf29ce484222325),
@@ -3239,6 +3317,7 @@ fn hash_module_with_policy_and_seed(
         u8::from(policy.host_clock),
         entropy_tag,
         u8::from(policy.decoupled_prelude),
+        u8::from(policy.compact),
     ] {
         hash ^= u64::from(value);
         hash = hash.wrapping_mul(0x100000001b3);

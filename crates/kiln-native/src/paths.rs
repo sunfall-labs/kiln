@@ -333,9 +333,11 @@ pub(crate) fn configure_shared_library_link(
     output: &Path,
     public_symbols: &[&str],
     workspace: &Path,
-    _compiler: CompilerKind,
+    compiler: CompilerKind,
 ) -> Result<(), NativeError> {
     let identity = shared_library_link_identity(output);
+    #[cfg(not(target_os = "linux"))]
+    let _ = compiler;
     #[cfg(target_os = "macos")]
     {
         let exports = workspace.join("exports.txt");
@@ -372,7 +374,7 @@ pub(crate) fn configure_shared_library_link(
         // passing it down, so a shared build under zig cannot use it. Nothing is lost: the version
         // script above ends in `local: *;`, which already hides every symbol not named in it, and
         // `--exclude-libs` was the second lock on the same door.
-        if _compiler != CompilerKind::Zig {
+        if compiler != CompilerKind::Zig {
             options.extra_args.push("-Wl,--exclude-libs,ALL".into());
         }
     }

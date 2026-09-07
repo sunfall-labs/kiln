@@ -140,6 +140,88 @@ fn runtime_module_materializer_stays_inside_the_backend_value_abi() {
     assert!(emitted.source.contains("static int kiln_module_path_"));
     assert!(emitted.source.contains("kiln_realm_enter"));
     assert!(!emitted.source.contains("extern kiln_value"));
+
+    let decoupled = emit_runtime_module_with_logical_path_and_policy(
+        &module,
+        ".kiln/builtins/probe.builtin",
+        "exports[0] = kiln_c99_method(KILN_C99_METHOD_QUEUE_MICROTASK);",
+        EmissionPolicy {
+            decoupled_prelude: true,
+            ..EmissionPolicy::default()
+        },
+    )
+    .expect("decoupled runtime module emits");
+    assert!(
+        decoupled
+            .source
+            .contains(&format!("#include \"{RUNTIME_PRELUDE_HEADER_NAME}\""))
+    );
+    assert!(!decoupled.source.contains("enum kiln_value_tag"));
+}
+
+#[test]
+fn decoupled_modules_include_one_external_runtime_header() {
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants: Vec::new(),
+        code: vec![Instruction::Return],
+        local_count: 0,
+        functions: Vec::new(),
+        template_sites: Vec::new(),
+    };
+    let policy = EmissionPolicy {
+        decoupled_prelude: true,
+        ..EmissionPolicy::default()
+    };
+    let emitted = emit_with_policy(&program, policy).expect("decoupled module emits");
+
+    assert!(
+        emitted
+            .source
+            .contains(&format!("#include \"{RUNTIME_PRELUDE_HEADER_NAME}\"")),
+        "the module must name the header materialized by kiln-native"
+    );
+    assert!(!emitted.source.contains("enum kiln_value_tag"));
+    assert!(
+        emitted.source.len() < runtime_prelude_header().len(),
+        "a decoupled module must not carry a copy of the runtime header"
+    );
+}
+
+#[test]
+fn compact_emission_defers_regex_compilation_to_the_provider() {
+    let program = program(
+        vec![Constant::String("a+".into()), Constant::String("g".into())],
+        vec![
+            Instruction::NewRegExp {
+                pattern: 0,
+                flags: 1,
+            },
+            Instruction::Return,
+        ],
+        0,
+    );
+    let normal = emit(&program).expect("normal regexp emits");
+    let compact = emit_with_policy(
+        &program,
+        EmissionPolicy {
+            compact: true,
+            ..EmissionPolicy::default()
+        },
+    )
+    .expect("compact regexp emits");
+
+    assert!(normal.source.contains(&format!("{}_re_0_1", normal.symbol)));
+    assert!(
+        !compact
+            .source
+            .contains(&format!("{}_re_0_1", compact.symbol))
+    );
+    assert!(compact.source.contains(&format!(
+        "kiln_c99_new_regexp(&built, {}_constant_0",
+        compact.symbol
+    )));
 }
 
 #[test]
@@ -5566,7 +5648,7 @@ fn type_profile_drives_candidate_speculation_and_recording() {
         ..Default::default()
     };
 
-    let c_with_profile = emit_with_policy(&prog, profile_policy).unwrap();
+    let c_with_profile = emit_with_policy(&prog, profile_policy.clone()).unwrap();
     assert!(
         c_with_profile
             .source
@@ -5577,6 +5659,17 @@ fn type_profile_drives_candidate_speculation_and_recording() {
             .source
             .contains("KILN_VAL_IS_DOUBLE(args[0])")
     );
+
+    let compact = emit_with_policy(
+        &prog,
+        EmissionPolicy {
+            compact: true,
+            ..profile_policy
+        },
+    )
+    .unwrap();
+    assert!(!compact.source.contains("Clone A: guarded fast path"));
+    assert!(compact.source.len() < c_with_profile.source.len());
 
     // Emit with policy.type_profile_record:
     let record_policy = EmissionPolicy {
