@@ -75,6 +75,14 @@ now answers it for `Array.prototype`, beside the `@@iterator` case it already ha
 identical. `keys` and `entries` were already listed, and `[].values === [][Symbol.iterator]` holds
 on both.
 
+## Found alongside
+
+The last two entries below were split out on 2026-09-07 into
+`.scratch/builtin-member-parity/issues/01` (the `in` operator, since fixed on both engines) and
+`.scratch/builtin-member-parity/issues/02` (the per-prototype own-name counts, whose wrong
+answers are fixed and whose unbuilt-member gap is recorded per prototype), so that a resolved
+issue does not carry open work. The three typed-view entries remain open here.
+
 ## Found alongside, not fixed
 
 * `Array.prototype.concat.call(view, 9)` spreads the view; node treats it as one element, since a

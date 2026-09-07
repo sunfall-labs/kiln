@@ -1594,6 +1594,7 @@ static int kiln_c99_iterator_prototype_gap(const char *key, size_t key_len) {
 static uint64_t kiln_c99_array_method(const char *key, size_t key_len) {
 static int kiln_c99_is_array_member(const char *key, size_t key_len) {
 static int kiln_c99_is_date_member(const char *key, size_t key_len) {
+static int kiln_c99_collection_kind_member(int is_map, int is_weak, const char *key,
 static int kiln_c99_is_collection_member(const kiln_collection *collection, const char *key,
 static int kiln_c99_is_string_member(const char *key, size_t key_len) {
 static uint64_t kiln_c99_typed_prototype_method(const char *key, size_t key_len) {
@@ -1873,6 +1874,8 @@ static int kiln_c99_generator_step(kiln_host *host, kiln_value produced, int don
 static int kiln_c99_default_require(void *context, kiln_host *host, kiln_value specifier,
 static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value source, int depth,
+static int kiln_c99_is_symbol_key(const char *key, size_t key_len) {
+static int kiln_c99_builtin_has_member(uint64_t builtin, const char *key, size_t key_len) {
 static int kiln_c99_has_property(kiln_host *host, kiln_value target, const char *key,
 static void kiln_c99_typed_own(kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_typed_prototype_own(kiln_value target, const char *key, size_t key_len,

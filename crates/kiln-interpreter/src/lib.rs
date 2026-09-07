@@ -38848,7 +38848,16 @@ fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
                 Overridden::Held(..) => true,
                 Overridden::Removed => false,
                 Overridden::Untouched => {
-                    native.property(&name).is_some()
+                    // `intrinsic_owns` rather than `property`, which is what a *read* finds and
+                    // is a different question. A prototype table's `property` carries its last
+                    // step up to `Object.prototype` and answers `Some(Undefined)` for a name it
+                    // does not have at all, so asking it made `in` true for every string on
+                    // every built-in prototype in the realm -- `"nope" in Array.prototype` among
+                    // them, which is worse than useless to the feature-detects that ask it. The
+                    // ownership test is the one `hasOwnProperty` and `getOwnPropertyNames`
+                    // already agree on; the step up to `Object.prototype` is taken below, so
+                    // `"hasOwnProperty" in Array.prototype` stays true.
+                    intrinsic_owns(*native, &name).is_some()
                         || identity_property(target, &name).is_some()
                         || (matches!(native, Native::Error(kind) if *kind != ErrorKind::Error)
                             && name == "isError"
@@ -39061,7 +39070,9 @@ fn bump_size(receiver: &Value, delta: f64) {
 /// monkey-patching both need -- this table is what moves onto it.
 fn string_property(name: &str) -> Value {
     match name {
-        "values" => Value::Native(Native::StringValues, RealmId::PRIMARY),
+        // A string carries `@@iterator` and no `values` beside it, unlike an array: node answers
+        // `undefined` for `"abc".values`, and `String.prototype` has no such own name. The
+        // iterator itself is unchanged -- it is the arm below, reaching the same function.
         key if key == WellKnown::Iterator.property_key() => {
             Value::Native(Native::StringValues, RealmId::PRIMARY)
         }
