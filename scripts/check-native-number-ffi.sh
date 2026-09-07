@@ -76,6 +76,7 @@ KILN_NUMBER_EXPECTED_SOURCE_DIGEST=$(
 		crates/kiln-temporal/src/lib.rs \
 		crates/kiln-json/Cargo.toml \
 		crates/kiln-json/src/lib.rs \
+		crates/kiln-json/src/scalar.rs \
 		crates/kiln-runtime/Cargo.toml \
 		crates/kiln-runtime/src/http_body.rs \
 		crates/kiln-runtime/src/http_client.rs \
@@ -167,6 +168,10 @@ for KILN_NUMBER_LINK_TOOL in as ld; do
 		ln -s "$KILN_NUMBER_LINK_TOOL_PATH" "$KILN_NUMBER_TOOLS/$KILN_NUMBER_LINK_TOOL"
 	fi
 done
+# bash remembers where it found `rustc` above (`-vV`, for the host target) and `command -v`
+# answers from that table before it looks at PATH, so without forgetting it this check found the
+# real rustc through a PATH that does not contain it and failed every run.
+hash -r
 if PATH="$KILN_NUMBER_TOOLS" command -v cargo >/dev/null 2>&1 || \
 	PATH="$KILN_NUMBER_TOOLS" command -v rustc >/dev/null 2>&1; then
 	printf 'restricted installed-layout PATH unexpectedly contains Rust build tools\n' >&2

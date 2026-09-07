@@ -44,6 +44,8 @@ pub(super) struct OpContext<'a> {
     pub self_index: Option<u32>,
     pub this_site: Option<usize>,
     pub spec: &'a Speculation,
+    /// Emitting the parallel clone of a typed entry; see `emit_graph::parallel_clone`.
+    pub parallel: bool,
 }
 
 /// One status check after a runtime call. A throw unwinds; a refusal is attributed to this site
@@ -213,6 +215,7 @@ pub(super) fn emit_graph_op(
         strict_functions,
         origins,
         unwind,
+        parallel: super::parallel_clone(),
         plan,
         kind,
         self_index,

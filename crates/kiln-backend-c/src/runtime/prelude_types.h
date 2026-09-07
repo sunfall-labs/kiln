@@ -175,6 +175,16 @@ static inline kiln_val kiln_c99_val_from_double(double d) {
 }
 
 int32_t kiln_bigint_is_zero(const void *handle);
+/* `parallelMap`'s fork-join (ADR 0058, application 2), linked from the provider archive. `chunk`
+ * is an emitted static worker over `[start, end)` of the two arrays; the provider splits `[0,
+ * count)` across its private pool, or runs the whole range inline below its floor. The arrays
+ * cross as opaque pointers: the provider never reads an element, so nothing is unboxed or copied,
+ * and a worker runs on a thread that owns no realm -- which is why the backend admits only a
+ * body that reads its double parameters and returns a double (`parallel.rs`). */
+typedef void (*kiln_parallel_chunk_fn)(const void *in, void *out, size_t start, size_t end,
+                                       void *ctx);
+int32_t kiln_parallel_map(const void *in, size_t count, void *out, kiln_parallel_chunk_fn chunk,
+                          void *ctx);
 
 static inline int kiln_c99_val_truthy(kiln_val v) {
     if (v == KILN_VAL_FALSE || v == KILN_VAL_UNDEFINED || v == KILN_VAL_NULL) return 0;

@@ -94,30 +94,40 @@ lends a per-thread tape, and walks it. Both the C recursive-descent reader and t
   and commit 9d96e4a8's chunked nursery walks its chunk list on every pointer lookup, which makes
   main's large parse fifty times slower on the native backend regardless of reader.
 
-### Application 2: `parallelMap` over a Rayon fork-join
+### Application 2: `parallelMap` over a Rayon fork-join (landed 2026-09-06, the commit titled "parallelMap runs its qualifying callback on a Rayon pool")
 
-* **Contract.** `parallelMap` returns an array synchronously. The promise-returning type in
-  `packages/kiln-concurrency/index.d.ts` and the `Promise.all` polyfill are wrong and are
-  corrected. A blocking fork-join on the realm thread is the simplest design that is correct
-  under ADR 0028's one-realm-one-thread rule.
-* **Gate.** The backend lowers to the parallel path only for a closure it can prove allocates
-  nothing and touches no heap object other than the input element: numeric arithmetic over a
-  numeric array, no upvalue reads of heap values, no calls except to builtins on a fixed
-  allowlist. `is_pure()` is not that predicate and is replaced by one that is. Anything else is
-  refused with the reason named, following the `conformance/native/*-refuses.ts` convention, not
-  silently run sequentially.
-* **ABI.** One export, `kiln_parallel_map(elements, count, chunk_fn, ctx, out)`, where
-  `chunk_fn` is an emitted static C function over a `[start, end)` range. Rust owns the pool, the
-  chunk size and a sequential floor below which it runs the chunk inline: a fork-join over five
-  thousand multiply-adds is slower than the loop, and `bench/non-io/multicore-parallel.mjs` as
-  written would regress.
-* **Pool.** A private `rayon::ThreadPool` sized from `available_parallelism`, overridable the
-  way `KILN_WORKERS` is. The "shared CPU budget" in `AGENTS.md` governs `mbx` on a developer
-  machine; it is not a property of a shipped binary and the earlier draft was wrong to cite it.
+* **Contract.** `parallelMap` returns an array synchronously on both engines; the interpreter's
+  `CallbackMethod::ParallelMap` is the reference answer. A blocking fork-join on the realm thread
+  is the simplest design that is correct under ADR 0028's one-realm-one-thread rule.
+* **Gate.** The backend lowers to the pool only for a callback it proves is a function of its
+  `double` parameters: `parallel::parallel_safe` on the value graph (plain function or arrow with
+  one or two parameters, numeric constants, locals, arithmetic and comparison, `Math.<name>` from
+  a fixed allowlist on the `Math` builtin itself, no upvalues, no `this`, no property access, no
+  allocation, no other calls, no throw, a number returned), plus the plan's proof that the typed
+  entry returns a number, plus a scan of the emitted *parallel clone* (`_p`, the typed body with
+  `Math.<name>` as bare libm) for any mention of the host, `thrown`, the receiver, the upvalue
+  table, a shape row or the collector. Every other callback takes the existing sequential
+  lowering, which already agrees with the interpreter; nothing is refused, because the
+  sequential answer is the right answer and a refusal would turn a valid program into a stop.
+* **ABI.** One export, `kiln_parallel_map(in, count, out, chunk, ctx)`, where `in` and `out` are
+  the program's own NaN-boxed element arrays as opaque pointers -- the provider never reads an
+  element, so nothing is unboxed or copied -- and `chunk` is an emitted static C worker over a
+  `[start, end)` range that calls the parallel clone per element. Rust owns a private
+  `rayon::ThreadPool`, the chunk size (1,024) and the sequential floor (16,384 elements, measured
+  and recorded in the constant's doc comment), and `catch_unwind` turns a panic into -2, on which
+  the site takes the sequential lowering. The site checks `kiln_c99_builtin_store_epoch == 0` on
+  the realm thread first, so an overridden `Math.sqrt` never reaches the bare call.
+* **Pool.** Sized from `available_parallelism`, overridable with `KILN_PARALLELISM`; `1` runs
+  every such map inline in the same binary, which is how the sequential number is measured.
+* **Measured** (`bench/non-io/parallel-map-large.mjs`, 2e6 elements, `sqrt`, `pow`, `%` and
+  `floor` per element, warm median, 18 cores at load average 6): kiln native 9.0 ms on the pool
+  against 25.3 ms inline, node 70 ms, bun 21 ms, checksums equal; the map alone is 2.2 ms against
+  18.9 ms. `multicore-parallel.mjs`'s 5,000-element map stays inline at 0.06 ms either way.
 * **Not claimed.** Auto-vectorization of the chunk body needs closure inlining in the emitter
   and a `double[]` representation for numeric arrays; neither exists, and both are separate
   ADRs. `parallelReduce` and `parallelSort` are not defined anywhere and are not part of this
-  decision.
+  decision. A *read* of `parallelMap` as a member still answers `undefined` on the native
+  backend (`.scratch/rust-parallel-engine/issues/06`), the ADR 0054 fix for which is separate.
 
 ## Consequences
 
@@ -125,9 +135,9 @@ lends a per-thread tape, and walks it. Both the C recursive-descent reader and t
   (394 lines, re-exported and used by nothing). The unwired `is_pure()`. The polyfill hooks
   `__kiln_actor_dispatch`, `__kiln_transfer_region`, `__kiln_parallel_map` and
   `__kiln_schedule_task`, which no engine implements, are removed rather than left as promises.
-* **Added.** A `json` feature and a small set of exports in the archive, each with a row in the
-  registry and a packager check; a C tape walker; a Rayon fork-join export and a refusing
-  predicate in the backend.
+* **Added.** A `json` feature and one export in the archive, and a `parallel` feature and one
+  export, each with a row in the registry and a packager check; a C tape walker; a Rayon
+  fork-join export and the `parallel_safe` predicate plus parallel clone in the backend.
 * **Measured, not asserted.** Each application lands with timings on both engines and a profile,
   in the tracker under `.scratch/`, with the shape CLAUDE.md's benchmarking section requires.
 * **Tracker corrected.** The multicore PRD marked all six issues done on 2026-09-06; the runtime

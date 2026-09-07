@@ -169,6 +169,62 @@ pub fn typed_signature(
     (result, params)
 }
 
+thread_local! {
+    /// Set while the parallel clone of a typed entry is being emitted (ADR 0058, application
+    /// 2). It changes two things and nothing else: the entry's name ends in `_p` instead of
+    /// `_t`, and a `Math.<name>` call on the builtin with proven-number arguments lowers to the
+    /// bare libm call with no generic fallback, because the clone runs on a thread with no realm
+    /// to fall back to. The site that calls the clone checks `kiln_c99_builtin_store_epoch` on the
+    /// realm thread first, so an overridden `Math.sqrt` never reaches it. A thread-local rather
+    /// than a parameter because every emitter signature between `lib.rs` and the op would
+    /// otherwise carry a flag that only one op reads.
+    static PARALLEL_CLONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the parallel clone is being emitted on this thread.
+pub fn parallel_clone() -> bool {
+    PARALLEL_CLONE.with(|c| c.get())
+}
+
+/// Run `f` with the parallel-clone flag set, restoring it after.
+pub fn with_parallel_clone<R>(f: impl FnOnce() -> R) -> R {
+    let before = PARALLEL_CLONE.with(|c| c.replace(true));
+    let out = f();
+    PARALLEL_CLONE.with(|c| c.set(before));
+    out
+}
+
+/// The `parallelMap` chunk worker over a proto's parallel clone (ADR 0058, application 2): the
+/// provider's pool calls it over disjoint `[start, end)` ranges of the input and output element
+/// arrays, on a thread that owns no realm. That is sound only because the entry it calls reads
+/// its `double` parameters and returns a `double` -- `parallel::parallel_safe` on the body, and
+/// the clone's text scanned for any mention of the host, receiver, upvalues or heap before it
+/// is admitted (`lib.rs`) -- so no host, receiver, upvalue table, shape row or thread-local heap
+/// cache is reached from here. An entry that bails out (`KILN_VAL_TYPED_FAIL`)
+/// flags `ctx` and stops; the caller then takes the sequential lowering, which recomputes.
+pub fn emit_parallel_chunk(output: &mut String, symbol: &str, index: usize, parameter_count: u32) {
+    use std::fmt::Write as _;
+    let index_arg = if parameter_count == 2 {
+        ", (double)i"
+    } else {
+        ""
+    };
+    writeln!(
+        output,
+        "static void __attribute__((unused)) {symbol}_pmap_{index}(const void *in, void *out, size_t start, size_t end, void *ctx) {{\n\
+    const kiln_val *src = (const kiln_val *)in;\n\
+    kiln_val *dst = (kiln_val *)out;\n\
+    for (size_t i = start; i < end; ++i) {{\n\
+        double d; memcpy(&d, &src[i], sizeof d);\n\
+        double r = {symbol}_fn_{index}_p(1, d{index_arg});\n\
+        if (KILN_UNLIKELY(kiln_c99_typed_failed(r))) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
+        dst[i] = kiln_c99_val_from_double(r);\n\
+    }}\n\
+}}"
+    )
+    .unwrap();
+}
+
 pub(crate) use crate::graph::array_slots;
 
 /// Whether every operation in `graph` has a lowering below. This is the one place that decides

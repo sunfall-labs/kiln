@@ -416,6 +416,7 @@ mod direct;
 pub mod emit_graph;
 pub mod facts;
 pub mod graph;
+pub mod parallel;
 pub mod regex;
 pub mod summary;
 mod tail;
@@ -984,6 +985,66 @@ fn render_functions(
         }
     }
     // A restartable body gets a fast clone: decided by emitting it, once, before any caller.
+    // The parallel clones (ADR 0058, application 2): for every proto whose body passes
+    // `parallel::parallel_safe` and whose typed entry returns a number, emit the typed body once
+    // more under `parallel_clone()` -- named `_p`, `Math.<name>` as bare libm -- and admit it only
+    // if its text names none of the host, `thrown`, the receiver, the upvalue table, a shape row,
+    // or the collector: the same reading `typed_needs` does above, as the machine's own check
+    // that a chunk worker calling this clone reaches nothing a realm thread owns.
+    let mut parallel_clones: Vec<Option<String>> = vec![None; program.functions.len()];
+    for (index, typed) in direct.typed.iter().enumerate() {
+        let Some(typed) = typed else {
+            continue;
+        };
+        if !(typed.typed_returns[index] && typed.parallel_safe[index]) {
+            continue;
+        }
+        let proto = &program.functions[index];
+        let mut scratch = String::new();
+        emit_graph::with_parallel_clone(|| {
+            emit_graph::emit_function_from_graph_with_profile(
+                &mut scratch,
+                &graphs[index],
+                proto,
+                program,
+                symbol,
+                index,
+                !proto_produces_references(proto, program),
+                diagnostic_site,
+                &plan.functions,
+                strict_functions,
+                typed,
+                emit_graph::EntryKind::Typed {
+                    returns_number: true,
+                    restartable: false,
+                },
+                None,
+                false,
+            );
+        });
+        let body = scratch
+            .find("kiln_block_0:;")
+            .map_or("", |at| &scratch[at..]);
+        let clean = ![
+            "host",
+            "thrown",
+            "receiver",
+            "upvalues",
+            "recv_row",
+            "ctx",
+            "kiln_c99_gc",
+            "kiln_c99_new",
+            "kiln_c99_alloc",
+            "kiln_c99_realm",
+        ]
+        .iter()
+        .any(|word| names(body, word));
+        if clean {
+            parallel_clones[index] = Some(scratch);
+        }
+    }
+    let admitted: Vec<bool> = parallel_clones.iter().map(Option::is_some).collect();
+    direct.set_parallel(&admitted);
     let fast: Vec<bool> = program
         .functions
         .iter()
@@ -1040,6 +1101,13 @@ fn render_functions(
                 "static inline {result} {symbol}_fn_{index}_t({params});"
             )
             .unwrap();
+            if direct.parallel_chunk(index as u32) {
+                writeln!(
+                    output,
+                    "static void {symbol}_pmap_{index}(const void *in, void *out, size_t start, size_t end, void *ctx);"
+                )
+                .unwrap();
+            }
         }
     }
     for (index, proto) in program.functions.iter().enumerate() {
@@ -1085,6 +1153,10 @@ fn render_functions(
         );
         if let Some(typed) = &direct.typed[index] {
             emit_typed(output, index, typed, true);
+            if let Some(clone) = &parallel_clones[index] {
+                output.push_str(clone);
+                emit_graph::emit_parallel_chunk(output, symbol, index, proto.parameter_count);
+            }
         }
         // Emitted again now that every plan knows the fast set: a fast clone calls other fast
         // clones by name.

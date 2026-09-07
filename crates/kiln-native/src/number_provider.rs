@@ -383,7 +383,7 @@ fn build_from_source(identity: &ToolIdentity) -> Result<NumberProvider, NumberPr
             // The semantic cores remain feature-gated; the default `realm` feature adds the Tokio
             // runtime that now owns native entry as well as interpreted entry.
             OsString::from("--features"),
-            OsString::from("regexp,bigint,temporal,json"),
+            OsString::from("regexp,bigint,temporal,json,parallel"),
             OsString::from("--profile"),
             OsString::from(PROVIDER_PROFILE),
             OsString::from("--target"),
@@ -499,6 +499,7 @@ fn source_digest(root: &Path) -> Result<Digest, NumberProviderError> {
         // the interpreter directly, for the same reason as the two above.
         "crates/kiln-json/Cargo.toml",
         "crates/kiln-json/src/lib.rs",
+        "crates/kiln-json/src/scalar.rs",
         "crates/kiln-runtime/Cargo.toml",
         "crates/kiln-runtime/src/http_body.rs",
         "crates/kiln-runtime/src/http_client.rs",
@@ -749,6 +750,7 @@ mod tests {
             ("crates/kiln-temporal/src/lib.rs", b"temporal\n"),
             ("crates/kiln-json/Cargo.toml", b"[package]\n"),
             ("crates/kiln-json/src/lib.rs", b"json\n"),
+            ("crates/kiln-json/src/scalar.rs", b"scalar\n"),
             ("crates/kiln-runtime/Cargo.toml", b"[package]\n"),
             ("crates/kiln-runtime/src/http_body.rs", b"body\n"),
             ("crates/kiln-runtime/src/http_client.rs", b"client\n"),
@@ -771,7 +773,7 @@ mod tests {
 
         assert_eq!(
             source_digest(&root.0).expect("hash source identity fixture"),
-            Digest::from_hex("9fd6ec46ddfc0fc686df9ae364207028434c11bb4f4f5d7c7c551e5976bdcceb")
+            Digest::from_hex("07b0b5a54876914d9664a1f28f0ab3f1aec8eb9fd53f38860c21dc68698a219d")
                 .expect("fixture digest")
         );
     }
