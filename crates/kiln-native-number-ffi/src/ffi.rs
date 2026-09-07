@@ -30,6 +30,7 @@ pub const TYPE_U64: u32 = 8;
 pub const TYPE_F32: u32 = 9;
 pub const TYPE_F64: u32 = 10;
 pub const TYPE_POINTER: u32 = 11;
+pub const TYPE_BOOL: u32 = 12;
 
 /// One normalized argument or result. Integer bits are exact, floats use their IEEE bit pattern,
 /// and pointers are represented as `uintptr_t` widened to 64 bits. `kind` is repeated in values so
@@ -62,7 +63,7 @@ impl Slot {
             TYPE_I8 => Self {
                 i8_: value.bits as i8,
             },
-            TYPE_U8 => Self {
+            TYPE_U8 | TYPE_BOOL => Self {
                 u8_: value.bits as u8,
             },
             TYPE_I16 => Self {
@@ -99,7 +100,7 @@ impl Slot {
         unsafe {
             match kind {
                 TYPE_I8 => arg(&self.i8_),
-                TYPE_U8 => arg(&self.u8_),
+                TYPE_U8 | TYPE_BOOL => arg(&self.u8_),
                 TYPE_I16 => arg(&self.i16_),
                 TYPE_U16 => arg(&self.u16_),
                 TYPE_I32 => arg(&self.i32_),
@@ -119,7 +120,7 @@ fn ffi_type(kind: u32, argument: bool) -> Result<Type, String> {
     Ok(match kind {
         TYPE_VOID if !argument => Type::void(),
         TYPE_I8 => Type::i8(),
-        TYPE_U8 => Type::u8(),
+        TYPE_U8 | TYPE_BOOL => Type::u8(),
         TYPE_I16 => Type::i16(),
         TYPE_U16 => Type::u16(),
         TYPE_I32 => Type::i32(),
@@ -445,7 +446,7 @@ fn call(function: &Function, arguments: &[FfiValue]) -> Result<FfiValue, String>
                 0
             }
             TYPE_I8 => function.cif.call::<i8>(pointer, &ffi_arguments) as u64,
-            TYPE_U8 => function.cif.call::<u8>(pointer, &ffi_arguments) as u64,
+            TYPE_U8 | TYPE_BOOL => function.cif.call::<u8>(pointer, &ffi_arguments) as u64,
             TYPE_I16 => function.cif.call::<i16>(pointer, &ffi_arguments) as u64,
             TYPE_U16 => function.cif.call::<u16>(pointer, &ffi_arguments) as u64,
             TYPE_I32 => function.cif.call::<i32>(pointer, &ffi_arguments) as u64,
@@ -508,7 +509,7 @@ unsafe fn callback_argument(pointer: *mut c_void, kind: u32) -> Result<FfiValue,
     let bits = unsafe {
         match kind {
             TYPE_I8 => (*pointer.cast::<i8>()) as u64,
-            TYPE_U8 => u64::from(*pointer.cast::<u8>()),
+            TYPE_U8 | TYPE_BOOL => u64::from(*pointer.cast::<u8>()),
             TYPE_I16 => (*pointer.cast::<i16>()) as u64,
             TYPE_U16 => u64::from(*pointer.cast::<u16>()),
             TYPE_I32 => (*pointer.cast::<i32>()) as u64,
@@ -553,7 +554,7 @@ unsafe fn write_callback_result(
     unsafe {
         match expected {
             TYPE_I8 => pointer.cast::<i8>().write(value.bits as i8),
-            TYPE_U8 => pointer.cast::<u8>().write(value.bits as u8),
+            TYPE_U8 | TYPE_BOOL => pointer.cast::<u8>().write(value.bits as u8),
             TYPE_I16 => pointer.cast::<i16>().write(value.bits as i16),
             TYPE_U16 => pointer.cast::<u16>().write(value.bits as u16),
             TYPE_I32 => pointer.cast::<i32>().write(value.bits as i32),
@@ -817,6 +818,14 @@ mod tests {
         f64::from(left) * 2.0 + right
     }
 
+    extern "C" fn negate_i64(value: i64) -> i64 {
+        -value
+    }
+
+    extern "C" fn invert_bool(value: u8) -> u8 {
+        u8::from(value == 0)
+    }
+
     #[test]
     fn prepared_cif_preserves_integer_and_float_arguments() {
         let function = Function {
@@ -845,6 +854,50 @@ mod tests {
         let result = result.unwrap_or_default();
         assert_eq!(result.kind, TYPE_F64);
         assert_eq!(f64::from_bits(result.bits), 14.5);
+    }
+
+    #[test]
+    fn prepared_cif_preserves_signed_i64_bits() {
+        let function = Function {
+            library: 0,
+            pointer: negate_i64 as *const () as *mut c_void,
+            cif: Cif::new([Type::i64()], Type::i64()),
+            arguments: vec![TYPE_I64],
+            result: TYPE_I64,
+        };
+        let result = call(
+            &function,
+            &[FfiValue {
+                kind: TYPE_I64,
+                reserved: 0,
+                bits: (-42_i64) as u64,
+            }],
+        )
+        .expect("valid signed call");
+        assert_eq!(result.kind, TYPE_I64);
+        assert_eq!(result.bits as i64, 42);
+    }
+
+    #[test]
+    fn bool_has_a_distinct_value_kind() {
+        let function = Function {
+            library: 0,
+            pointer: invert_bool as *const () as *mut c_void,
+            cif: Cif::new([Type::u8()], Type::u8()),
+            arguments: vec![TYPE_BOOL],
+            result: TYPE_BOOL,
+        };
+        let result = call(
+            &function,
+            &[FfiValue {
+                kind: TYPE_BOOL,
+                reserved: 0,
+                bits: 1,
+            }],
+        )
+        .expect("valid boolean call");
+        assert_eq!(result.kind, TYPE_BOOL);
+        assert_eq!(result.bits, 0);
     }
 
     unsafe extern "C" fn add_callback(

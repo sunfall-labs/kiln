@@ -124,7 +124,7 @@ macro_rules! provider_export_names {
 }
 
 /// Version of the private provider ABI represented by [`provider_abi_registry!`].
-pub const PROVIDER_ABI_VERSION: u32 = 34;
+pub const PROVIDER_ABI_VERSION: u32 = 35;
 
 /// Canonical ordered export names required in a packaged provider manifest.
 pub const PROVIDER_EXPORTS: &[&str] = provider_abi_registry!(provider_export_names);
@@ -135,7 +135,10 @@ mod tests {
 
     #[test]
     fn registry_has_the_packaged_contract_shape() {
-        // 33, and 90 exports: `kiln_realm_set_promise_lane` joined when the promise job queue
+        // 35 keeps the same export set but adds the distinct boolean scalar kind to node:ffi;
+        // an older provider would interpret that kind as unsupported. Before that, 34 and 97
+        // exports added the seven node:ffi provider operations. Before that, 33 and 90 exports:
+        // `kiln_realm_set_promise_lane` joined when the promise job queue
         // moved into the prelude (Phase 6.3). The realm no longer receives one work item per
         // reaction; it calls the lane back at the point in its drain where promise jobs belong,
         // and asks `pending` whether there are any. Before that, 32 and 89: `kiln_parallel_map`
@@ -149,7 +152,7 @@ mod tests {
         // one realm the other's cache. A shipped archive built before any of these does not export
         // the newer symbol, and the version is how a resolver knows to rebuild rather than to fail
         // at link time.
-        assert_eq!(PROVIDER_ABI_VERSION, 34);
+        assert_eq!(PROVIDER_ABI_VERSION, 35);
         assert_eq!(PROVIDER_EXPORTS.len(), 97);
         assert_eq!(PROVIDER_EXPORTS.first(), Some(&"kiln_realm_create"));
         assert_eq!(PROVIDER_EXPORTS.last(), Some(&"kiln_ffi_last_error"));
