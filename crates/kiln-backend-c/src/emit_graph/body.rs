@@ -251,7 +251,7 @@ pub fn emit_function_from_graph_with_profile(
     // 3. Context & arguments setup. `ctx` is never null: every caller, the runtime's and the
     // emitted direct path alike, passes its own.
     let context_start = output.len();
-    let receiver_cache = if !plan.compact && this_site_count(graph) > 0 {
+    let receiver_cache = if !plan.generic_only && this_site_count(graph) > 0 {
         receiver_prologue(symbol, index, &this_columns(graph).1, kind)
     } else {
         String::new()
@@ -644,6 +644,7 @@ fn emit_ssa_declarations(
             sorted_objs.extend(graph.spread_scalar_objects.values());
         }
         sorted_objs.sort_by_key(|s| s.alloc_id.0);
+        sorted_objs.dedup_by_key(|s| s.alloc_id.0);
         for s in sorted_objs {
             let alloc = s.alloc_id.0;
             for &idx in s.fields.values() {
@@ -1102,7 +1103,7 @@ fn emit_blocks(
     let body_start = output.len();
     // The reads of `this`, each with its column in the function's receiver-shape cache: one
     // row per shape seen, one column per property name.
-    let this_sites = if plan.compact {
+    let this_sites = if plan.generic_only {
         std::collections::HashMap::new()
     } else {
         this_columns(graph).0
@@ -1187,7 +1188,7 @@ fn emit_blocks(
     // memory grow linearly for a speedup that only matters inside small hot loops. Keep release
     // speculation bounded, and make compact/native-dev emission single-bodied throughout.
     const MAX_VERSIONED_OPERATIONS: usize = 192;
-    let versioning = !plan.compact
+    let versioning = !plan.generic_only
         && ops.len() <= MAX_VERSIONED_OPERATIONS
         && speculate_enabled
         && !suspends
@@ -1200,7 +1201,7 @@ fn emit_blocks(
 
     let baseline_numbers = &plan.numbers;
     let baseline_ints = &plan.ints;
-    let baseline_booleans = if plan.compact {
+    let baseline_booleans = if plan.generic_only {
         HashSet::new()
     } else {
         booleans_with(
@@ -1569,7 +1570,7 @@ fn emit_blocks(
     }
     (
         shared_sites,
-        if plan.compact {
+        if plan.generic_only {
             0
         } else {
             this_site_count(graph)

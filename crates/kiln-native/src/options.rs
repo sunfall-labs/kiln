@@ -166,6 +166,7 @@ impl NativeRealmPolicy {
             },
             decoupled_prelude: true,
             compact: false,
+            generic_only: false,
             type_profile_record: false,
             type_profile: None,
             live_module_slots: None,

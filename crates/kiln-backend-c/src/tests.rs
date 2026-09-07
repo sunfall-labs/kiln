@@ -5611,19 +5611,23 @@ fn closed_world_module_omits_an_unread_exported_function_body() {
             },
         ],
     );
-    let emitted = emit_module_with_logical_path_and_policy(
-        &module,
-        "fixture.js",
-        EmissionPolicy {
-            compact: true,
-            live_module_slots: Some(std::sync::Arc::new([0].into_iter().collect())),
-            ..EmissionPolicy::default()
-        },
-    )
-    .expect("closed-world module emits");
+    for compact in [true, false] {
+        let emitted = emit_module_with_logical_path_and_policy(
+            &module,
+            "fixture.js",
+            EmissionPolicy {
+                compact,
+                live_module_slots: Some(std::sync::Arc::new([0].into_iter().collect())),
+                ..EmissionPolicy::default()
+            },
+        )
+        .expect("closed-world module emits");
+        let kept = if compact { "ku_fn_0(" } else { "_fn_0(" };
+        let dropped = if compact { "ku_fn_1" } else { "_fn_1" };
 
-    assert!(emitted.source.contains("ku_fn_0("));
-    assert!(!emitted.source.contains("ku_fn_1("));
+        assert!(emitted.source.contains(kept));
+        assert!(!emitted.source.contains(dropped));
+    }
 }
 
 #[test]
@@ -6192,6 +6196,14 @@ fn typed_dist_compiles_to_guarded_unboxed_clone_with_entry_guards_matching_untyp
 
     let untyped_c = emit(&untyped_prog).unwrap();
     let typed_c = emit(&typed_prog).unwrap();
+    let compact_typed_c = emit_with_policy(
+        &typed_prog,
+        EmissionPolicy {
+            compact: true,
+            ..EmissionPolicy::default()
+        },
+    )
+    .unwrap();
 
     // Both must emit Clone A (fast unboxed) and Clone B (generic fallback)
     assert!(typed_c.source.contains("/* Clone A: guarded fast path */"));
@@ -6204,6 +6216,16 @@ fn typed_dist_compiles_to_guarded_unboxed_clone_with_entry_guards_matching_untyp
     // Both must emit entry guards for parameters 0 and 1
     assert!(typed_c.source.contains("KILN_VAL_IS_DOUBLE(args[0])"));
     assert!(typed_c.source.contains("KILN_VAL_IS_DOUBLE(args[1])"));
+    assert!(
+        compact_typed_c
+            .source
+            .contains("/* Clone A: guarded fast path */")
+    );
+    assert!(
+        compact_typed_c
+            .source
+            .contains("KILN_VAL_IS_DOUBLE(args[0])")
+    );
 
     // Verify the function bodies emitted for dist match between typed and untyped
     let extract_fn_body = |src: &str, sym: &str| -> String {
@@ -6388,6 +6410,7 @@ fn type_profile_drives_candidate_speculation_and_recording() {
         &prog,
         EmissionPolicy {
             compact: true,
+            generic_only: true,
             ..profile_policy
         },
     )

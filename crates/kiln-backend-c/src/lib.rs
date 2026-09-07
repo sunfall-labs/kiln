@@ -31,7 +31,10 @@ pub const C_ABI_VERSION: u32 = 1;
 // Epoch 40 omits unused context loads from compact function prologues.
 // Epoch 41 removes phi-only chains with no consumers before C emission.
 // Epoch 42 resolves trivial phis and densely renumbers surviving SSA values.
-pub const C_GENERATOR_VERSION: u32 = 42;
+// Epoch 43 prunes unreachable declaration bodies; epoch 44 outlines compact operation plumbing;
+// epoch 45 packs source ranges observable through live closures; epoch 46 decouples compact C
+// source from generic-only emission.
+pub const C_GENERATOR_VERSION: u32 = 46;
 
 /// Content identity of this emitter checkout, including dirty source changes. Input-keyed
 /// caches must not trust a manually advanced generator epoch alone across active worktrees.
@@ -71,8 +74,10 @@ pub struct EmissionPolicy {
     pub timezone: EmissionStringPolicy,
     pub locale: EmissionStringPolicy,
     pub decoupled_prelude: bool,
-    /// Prefer one compact generic body over speculative, typed, fast, and parallel clones.
+    /// Prefer terse generated C and shared helpers where that does not change optimization.
     pub compact: bool,
+    /// Emit only generic bodies, without speculative, typed, fast, or parallel clones.
+    pub generic_only: bool,
     pub type_profile_record: bool,
     pub type_profile: Option<std::sync::Arc<graph::TypeProfile>>,
     /// Module slots whose exported values can be observed by this closed-world executable.
@@ -262,6 +267,9 @@ pub struct CModule {
     pub source: String,
     /// Stable primary FNV-1a identity of the bytecode input and, for [`emit_module`], linkage.
     pub program_hash: u64,
+    /// Whether this unit intentionally contains only generic bodies and should favor the
+    /// cheapest downstream compilation tier.
+    pub generic_only: bool,
 }
 
 /// Backwards-compatible descriptive alias for callers that call an emitted unit a module.
@@ -311,6 +319,7 @@ pub fn emit_with_policy(program: &Program, policy: EmissionPolicy) -> Result<CMo
         symbol,
         source,
         program_hash,
+        generic_only: policy.generic_only,
     })
 }
 
@@ -349,6 +358,7 @@ pub fn emit_module_with_policy(
         symbol,
         source,
         program_hash,
+        generic_only: policy.generic_only,
     })
 }
 
@@ -372,17 +382,36 @@ pub fn emit_module_with_logical_path_and_policy(
     logical_path: &str,
     policy: EmissionPolicy,
 ) -> Result<CModule, EmitError> {
-    validate_logical_path(logical_path)?;
-    validate_module(module)?;
-    let (program_hash, _) = hash_module_pair_with_policy(module, &policy);
-    let (path_hash, path_hash_seeded) = hash_logical_path_pair(logical_path);
-    let symbol = format!("kiln_module_path_{path_hash:016x}{path_hash_seeded:016x}");
+    let (symbol, program_hash, _) =
+        module_identity_with_logical_path_and_policy(module, logical_path, &policy)?;
     let source = render_module(module, program_hash, &symbol, &policy, false, logical_path)?;
     Ok(CModule {
         symbol,
         source,
         program_hash,
+        generic_only: policy.generic_only,
     })
+}
+
+/// Compute the stable symbol and both program hashes without rendering the C body.
+///
+/// Native orchestration uses this to look up a generated source artifact before paying for SSA
+/// planning and rendering. Validation remains part of the contract so a cache hit cannot make an
+/// invalid module acceptable.
+pub fn module_identity_with_logical_path_and_policy(
+    module: &ModuleProgram,
+    logical_path: &str,
+    policy: &EmissionPolicy,
+) -> Result<(String, u64, u64), EmitError> {
+    validate_logical_path(logical_path)?;
+    validate_module(module)?;
+    let (program_hash, seeded_program_hash) = hash_module_pair_with_policy(module, policy);
+    let (path_hash, path_hash_seeded) = hash_logical_path_pair(logical_path);
+    Ok((
+        format!("kiln_module_path_{path_hash:016x}{path_hash_seeded:016x}"),
+        program_hash,
+        seeded_program_hash,
+    ))
 }
 
 /// Emit a CommonJS body whose private graph ABI exposes the final `module.exports` value as one
@@ -410,6 +439,7 @@ pub fn emit_commonjs_module_with_logical_path_and_policy(
         symbol,
         source,
         program_hash,
+        generic_only: policy.generic_only,
     })
 }
 
@@ -454,6 +484,7 @@ pub fn emit_runtime_module_with_logical_path_and_policy(
         symbol,
         source,
         program_hash,
+        generic_only: policy.generic_only,
     })
 }
 
@@ -1030,7 +1061,7 @@ fn render_functions(
             .unwrap();
         }
     }
-    let receiver_columns: Vec<usize> = if policy.compact {
+    let receiver_columns: Vec<usize> = if policy.generic_only {
         vec![0; graphs.len()]
     } else {
         graphs.iter().map(emit_graph::this_site_count).collect()
@@ -1215,7 +1246,7 @@ fn render_functions(
         .iter()
         .enumerate()
         .map(|(index, proto)| {
-            (!policy.compact && proto.code.len() <= MAX_SPECIALIZED_INSTRUCTIONS)
+            (!policy.generic_only && proto.code.len() <= MAX_SPECIALIZED_INSTRUCTIONS)
                 .then(|| {
                     emit_graph::emit_fast_clone(
                         &graphs[index],
@@ -1532,6 +1563,7 @@ fn plan_unit(
     program: &Program,
     diagnostic_site: &str,
     compact: bool,
+    generic_only: bool,
 ) -> Result<
     (
         Vec<FunctionGraph>,
@@ -1557,8 +1589,14 @@ fn plan_unit(
     let body = entry_proto(program);
     let entry_graph = graph_for(&body, program, "the module body", diagnostic_site)?;
     let publishes_frame = compute_publishes_frame(program);
-    let direct =
-        direct::DirectPlan::plan(program, &graphs, &entry_graph, &publishes_frame, compact);
+    let direct = direct::DirectPlan::plan(
+        program,
+        &graphs,
+        &entry_graph,
+        &publishes_frame,
+        compact,
+        generic_only,
+    );
     Ok((graphs, body, entry_graph, direct))
 }
 
@@ -2536,7 +2574,8 @@ fn render(
         !keys.is_empty(),
         program.template_sites.len(),
     );
-    let (graphs, body, entry_graph, mut direct) = plan_unit(program, symbol, policy.compact)?;
+    let (graphs, body, entry_graph, mut direct) =
+        plan_unit(program, symbol, policy.compact, policy.generic_only)?;
     render_functions(
         &mut output,
         program,
@@ -3116,9 +3155,19 @@ fn render_module(
     } else {
         program
     };
-    let (graphs, body, entry_graph, mut direct) =
-        plan_unit(emitted_program, diagnostic_site, policy.compact)?;
+    let (graphs, body, entry_graph, mut direct) = plan_unit(
+        emitted_program,
+        diagnostic_site,
+        policy.compact,
+        policy.generic_only,
+    )?;
     let reachable = liveness.as_ref().map(|(reachable, _, _)| reachable);
+    if let Some(reachable) = reachable {
+        let available = (0..emitted_program.functions.len())
+            .map(|index| reachable.contains(&index))
+            .collect::<Vec<_>>();
+        direct.set_available(&available);
+    }
     render_functions(
         &mut output,
         emitted_program,
@@ -3409,6 +3458,7 @@ fn hash_program_with_policy_and_seed(program: &Program, policy: &EmissionPolicy,
         entropy_tag,
         u8::from(policy.decoupled_prelude),
         u8::from(policy.compact),
+        u8::from(policy.generic_only),
     ] {
         hash ^= u64::from(value);
         hash = hash.wrapping_mul(0x100000001b3);
@@ -3913,6 +3963,7 @@ fn hash_module_with_policy_and_seed(
         entropy_tag,
         u8::from(policy.decoupled_prelude),
         u8::from(policy.compact),
+        u8::from(policy.generic_only),
     ] {
         hash ^= u64::from(value);
         hash = hash.wrapping_mul(0x100000001b3);

@@ -212,6 +212,7 @@ pub(super) fn emit_graph_op(
         .get(&vid)
         .map(|o| (o.pc, o.label.as_str()))
         .unwrap_or((0, "Op"));
+    let diagnostic_source = diagnostic_source(diagnostic_site);
     let ctx = OpContext {
         graph,
         program,
@@ -662,7 +663,7 @@ pub(super) fn emit_graph_op(
                 )
             } else {
                 format!(
-                    "{{ kiln_val call_args[{n}] = {{ {init} }}; int status = kiln_c99_val_call(host, v{c}, {argc} > 0 ? call_args : NULL, (size_t){argc}, depth, thrown, \"{diagnostic_site}\", (size_t){pc}, \"{label}\", &v{v}); {check} }}",
+                    "{{ kiln_val call_args[{n}] = {{ {init} }}; int status = kiln_c99_val_call(host, v{c}, {argc} > 0 ? call_args : NULL, (size_t){argc}, depth, thrown, {diagnostic_source}, (size_t){pc}, \"{label}\", &v{v}); {check} }}",
                     n = argc.max(1),
                     c = callee.0
                 )
@@ -744,7 +745,7 @@ pub(super) fn emit_graph_op(
             for arg in args {
                 init.push_str(&format!(", v{}", arg.0));
             }
-            if plan.compact {
+            if plan.generic_only {
                 let check = status_check(diagnostic_site, pc, label, unwind);
                 let sync_number = typed
                     .then(|| format!(" memcpy(&d{v}, &v{v}, sizeof(d{v}));"))
@@ -753,14 +754,22 @@ pub(super) fn emit_graph_op(
                     output,
                     "    {{ kiln_val call_stack[{n}] = {{ {init} }}; const kiln_val *call_args = {argc} > 0 ? &call_stack[1] : NULL; int status = kiln_c99_val_call(host, call_stack[0], call_args, (size_t){argc}, depth, thrown, {diagnostic_source}, (size_t){pc}, \"{label}\", &v{v}); {check}{sync_number} }}",
                     n = argc + 1,
-                    diagnostic_source = diagnostic_source(diagnostic_site),
+                    diagnostic_source = diagnostic_source,
                 )
                 .unwrap();
                 return;
             }
             let mut static_branches = String::new();
-            if program.functions.len() <= 32 {
-                for i in 0..program.functions.len() {
+            if plan
+                .available
+                .iter()
+                .filter(|&&available| available)
+                .count()
+                <= 32
+            {
+                for i in (0..program.functions.len())
+                    .filter(|&i| plan.available.get(i).copied().unwrap_or(true))
+                {
                     let fn_name = format!("{symbol}_fn_{i}");
                     let entry = if plan.fast.get(i).copied().unwrap_or(false) {
                         format!("{fn_name}_f")
@@ -787,7 +796,7 @@ pub(super) fn emit_graph_op(
             let check = status_check(diagnostic_site, pc, label, unwind);
             writeln!(
                 output,
-                "    {{ kiln_val call_stack[{n}] = {{ {init} }}; const kiln_val *call_args = {argc} > 0 ? &call_stack[1] : NULL; kiln_closure *plain = KILN_VAL_IS_CLOSURE(call_stack[0]) ? (kiln_closure *)KILN_VAL_PTR(call_stack[0]) : NULL; if (KILN_LIKELY(plain != NULL && !plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ kiln_val call_result = KILN_VAL_UNDEFINED; kiln_val recv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&recv); kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status; {indirect} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; v{v} = call_result; }} else {{ int status = kiln_c99_val_call(host, call_stack[0], call_args, (size_t){argc}, depth, thrown, \"{diagnostic_site}\", (size_t){pc}, \"{label}\", &v{v}); {check} }} }}",
+                "    {{ kiln_val call_stack[{n}] = {{ {init} }}; const kiln_val *call_args = {argc} > 0 ? &call_stack[1] : NULL; kiln_closure *plain = KILN_VAL_IS_CLOSURE(call_stack[0]) ? (kiln_closure *)KILN_VAL_PTR(call_stack[0]) : NULL; if (KILN_LIKELY(plain != NULL && !plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ kiln_val call_result = KILN_VAL_UNDEFINED; kiln_val recv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&recv); kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status; {indirect} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; v{v} = call_result; }} else {{ int status = kiln_c99_val_call(host, call_stack[0], call_args, (size_t){argc}, depth, thrown, {diagnostic_source}, (size_t){pc}, \"{label}\", &v{v}); {check} }} }}",
                 n = argc + 1
             )
             .unwrap();
