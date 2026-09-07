@@ -1,20 +1,102 @@
-/* Whether any byte in this span needs `\"`, `\\` or `\u00XX` escaping. A single predicate pass
- * over plain comparisons, with no per-byte call into the text builder, is what lets the common
- * case below become one bulk append instead of one append per byte -- and it is exactly as valid
+/* Does any byte in this word need `\"`, `\\` or `\u00XX` escaping?
+ *
+ * The standard word tricks: `(w - 0x01..01 * n) & ~w & 0x80..80` has a high bit set in every byte
+ * lane below `n`, and xor-ing against a word of one byte turns "is any lane equal to it" into the
+ * same question about zero. Three word tests decide eight bytes, and they are exactly as valid
  * for a multi-byte UTF-8 string as for ASCII, since every continuation and lead byte is >= 0x80
  * and so never equals a quote, a backslash or a C0 control. */
+#define KILN_JSON_ONES UINT64_C(0x0101010101010101)
+#define KILN_JSON_HIGH UINT64_C(0x8080808080808080)
+
+static inline int kiln_c99_json_word_escapes(uint64_t word) {
+    uint64_t quotes = word ^ (KILN_JSON_ONES * (uint64_t)'"');
+    uint64_t slashes = word ^ (KILN_JSON_ONES * (uint64_t)'\\');
+    return ((word - KILN_JSON_ONES * 0x20u) & ~word & KILN_JSON_HIGH) != 0 ||
+           ((quotes - KILN_JSON_ONES) & ~quotes & KILN_JSON_HIGH) != 0 ||
+           ((slashes - KILN_JSON_ONES) & ~slashes & KILN_JSON_HIGH) != 0;
+}
+
+/* Whether any byte in this span needs escaping; the predicate the slow path below asks once it
+ * knows the span does not fit in the builder as it stands. */
 static int kiln_c99_json_needs_escape(const char *bytes, size_t len) {
-    size_t index;
-    for (index = 0; index < len; ++index) {
+    size_t index = 0;
+    while (index + 8 <= len) {
+        uint64_t word;
+        memcpy(&word, bytes + index, sizeof word);
+        if (kiln_c99_json_word_escapes(word)) return 1;
+        index += 8;
+    }
+    for (; index < len; ++index) {
         unsigned char byte = (unsigned char)bytes[index];
         if (byte == '"' || byte == '\\' || byte < 0x20) return 1;
     }
     return 0;
 }
 
+#undef KILN_JSON_ONES
+#undef KILN_JSON_HIGH
+
+/* One byte per row: 1 where JSON has to escape the byte, 0 where it stands for itself. A table
+ * read, rather than the three comparisons it replaces, is what the copy loop below wants -- the
+ * strings a document is made of are keys and short values of a handful of bytes each, so the
+ * per-byte test is the loop, and clang compiled the three comparisons into eight instructions a
+ * byte (it duplicated the equality tests to carry the exit out of the loop). One load and one
+ * branch is four. */
+static const unsigned char kiln_c99_json_escape_class[256] = {
+    /* 0x00 */ 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    /* 0x10 */ 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    /* 0x20 */ 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 0x30 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 0x40 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 0x50 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0,
+    /* 0x60 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 0x70 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 0x80 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 0x90 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 0xA0 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 0xB0 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 0xC0 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 0xD0 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 0xE0 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 0xF0 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+};
+
+/* Quotes and copies the span into the builder in one pass, or answers 0 having changed nothing.
+ *
+ * The bytes are examined and copied together, and the write is committed only by the `text->len`
+ * at the end -- so a span that turns out to need escaping, or one the builder has no room for,
+ * simply leaves the general path below to do the work.
+ *
+ * What stood here was a separate predicate pass over the span followed by three
+ * `kiln_c99_text_append` calls, each repeating the same capacity test for between one byte and
+ * the whole string. A document is mostly keys and short string values, so that was two passes and
+ * four capacity tests per member to copy a dozen bytes. */
+static int kiln_c99_json_quote_plain(kiln_text *text, const char *bytes, size_t len) {
+    char *at;
+    size_t copied;
+    if (KILN_UNLIKELY(text->len + len + 2 > text->capacity)) {
+        return 0;
+    }
+    at = text->bytes + text->len + 1;
+    for (copied = 0; copied < len; ++copied) {
+        unsigned char byte = (unsigned char)bytes[copied];
+        if (KILN_UNLIKELY(kiln_c99_json_escape_class[byte] != 0)) {
+            return 0;
+        }
+        at[copied] = (char)byte;
+    }
+    at[-1] = '"';
+    at[len] = '"';
+    text->len += len + 2;
+    return 1;
+}
+
 static int kiln_c99_json_quote(kiln_text *text, const char *bytes, size_t len) {
     static const char digits[] = "0123456789abcdef";
     size_t index;
+    if (kiln_c99_json_quote_plain(text, bytes, len)) {
+        return KILN_C99_OK;
+    }
     if (kiln_c99_text_append(text, "\"", 1) != KILN_C99_OK) {
         return KILN_C99_OUT_OF_MEMORY;
     }
@@ -67,6 +149,55 @@ static int kiln_c99_json_quote(kiln_text *text, const char *bytes, size_t len) {
     return kiln_c99_text_append(text, "\"", 1);
 }
 
+/* The four scalars a document is mostly made of, written straight from the heap's own
+ * representation.
+ *
+ * Every member of an array or a shaped object is offered here before the general walk is entered,
+ * and each of these is decided by one test on the tagged word. `kiln_c99_json_value` would first
+ * convert that word to a boundary `kiln_value`, ask whether the value might carry a `toJSON`, and
+ * initialise a nested builder for an indent the compact form does not have -- none of which a
+ * number, a string, a boolean or null has any use for, and all of which was being paid once per
+ * member of every document.
+ *
+ * Answers 0 for anything else, including `undefined` and a hole, which the caller hands to
+ * `kiln_c99_json_value` unchanged -- so the omission rules stay in exactly one place. */
+static int kiln_c99_json_scalar(kiln_text *text, kiln_val value, int *status) {
+    if (KILN_VAL_IS_NUMBER(value)) {
+        double number;
+        char spelled[32];
+        size_t written;
+        memcpy(&number, &value, sizeof number);
+        /* NaN and both infinities have no JSON spelling and serialise as null, which is the same
+         * rule -- and the same formatter for everything else -- the general walk applies. */
+        if (KILN_UNLIKELY(!isfinite(number))) {
+            *status = kiln_c99_text_append(text, "null", 4);
+            return 1;
+        }
+        written = kiln_c99_double_to_js(number, spelled);
+        *status = kiln_c99_text_append(text, spelled, written);
+        return 1;
+    }
+    if (KILN_VAL_IS_STRING(value)) {
+        const kiln_string *string = (const kiln_string *)KILN_VAL_PTR(value);
+        *status = string == NULL ? kiln_c99_json_quote(text, "", 0)
+                                 : kiln_c99_json_quote(text, string->bytes, string->byte_len);
+        return 1;
+    }
+    if (value == KILN_VAL_NULL) {
+        *status = kiln_c99_text_append(text, "null", 4);
+        return 1;
+    }
+    if (value == KILN_VAL_TRUE) {
+        *status = kiln_c99_text_append(text, "true", 4);
+        return 1;
+    }
+    if (value == KILN_VAL_FALSE) {
+        *status = kiln_c99_text_append(text, "false", 5);
+        return 1;
+    }
+    return 0;
+}
+
 /* True when no object in `value`'s own store or its prototype chain owns a property named
  * "toJSON" -- the common case for a plain object literal, whose chain is just Object.prototype.
  * `JSON.stringify`'s real question is `IsCallable(GetV(value, "toJSON"))`, and `GetV` walks every
@@ -114,6 +245,13 @@ static int kiln_c99_json_lacks_tojson(kiln_value value) {
         }
         value = object->prototype;
     }
+}
+
+/* The nested-indent builder is only ever allocated for the pretty form; the compact form leaves
+ * it null from top to bottom, and every one of the walk's exits was calling `free` on that null
+ * through the dynamic linker's stub -- once per container per document, for nothing. */
+static void kiln_c99_json_drop_nested(kiln_text *nested) {
+    if (nested->bytes != NULL) free(nested->bytes);
 }
 
 /* `serialised` is 0 when the value has no JSON spelling at all -- undefined, a function -- which
@@ -220,27 +358,27 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
     if (indent_len != 0 &&
         (kiln_c99_text_append(&nested, current, current_len) != KILN_C99_OK ||
          kiln_c99_text_append(&nested, indent, indent_len) != KILN_C99_OK)) {
-        free(nested.bytes);
+        kiln_c99_json_drop_nested(&nested);
         return KILN_C99_OUT_OF_MEMORY;
     }
 
 #define KILN_JSON_OPEN(bracket)                                                                   \
     do {                                                                                          \
         if (kiln_c99_text_append(text, bracket, 1) != KILN_C99_OK) {                               \
-            free(nested.bytes);                                                                    \
+            kiln_c99_json_drop_nested(&nested);                                                   \
             return KILN_C99_OUT_OF_MEMORY;                                                          \
         }                                                                                          \
     } while (0)
 #define KILN_JSON_BREAK(first)                                                                    \
     do {                                                                                          \
         if (!(first) && kiln_c99_text_append(text, ",", 1) != KILN_C99_OK) {                       \
-            free(nested.bytes);                                                                    \
+            kiln_c99_json_drop_nested(&nested);                                                   \
             return KILN_C99_OUT_OF_MEMORY;                                                          \
         }                                                                                          \
         if (indent_len != 0 &&                                                                     \
             (kiln_c99_text_append_c(text, "\n") != KILN_C99_OK ||                                  \
              kiln_c99_text_append(text, nested.bytes, nested.len) != KILN_C99_OK)) {                \
-            free(nested.bytes);                                                                    \
+            kiln_c99_json_drop_nested(&nested);                                                   \
             return KILN_C99_OUT_OF_MEMORY;                                                          \
         }                                                                                          \
     } while (0)
@@ -263,26 +401,33 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
         for (index = 0; index < array->count; ++index) {
             int wrote;
             KILN_JSON_BREAK(index == 0);
+            if (kiln_c99_json_scalar(text, array->elements[index], &status)) {
+                if (status != KILN_C99_OK) {
+                    kiln_c99_json_drop_nested(&nested);
+                    return status;
+                }
+                continue;
+            }
             status = kiln_c99_json_value(host, text, kiln_val_to_boundary(array->elements[index]), indent, indent_len,
                                          nested.bytes, nested.len, &wrote, depth, &frame, thrown);
             if (status != KILN_C99_OK) {
-                free(nested.bytes);
+                kiln_c99_json_drop_nested(&nested);
                 return status;
             }
             /* An element with no JSON spelling -- undefined, a function, a hole -- becomes null
              * rather than disappearing: an array's positions are part of its meaning. */
             if (!wrote && kiln_c99_text_append_c(text, "null") != KILN_C99_OK) {
-                free(nested.bytes);
+                kiln_c99_json_drop_nested(&nested);
                 return KILN_C99_OUT_OF_MEMORY;
             }
         }
         if (indent_len != 0 && array->count != 0 &&
             (kiln_c99_text_append_c(text, "\n") != KILN_C99_OK ||
              kiln_c99_text_append(text, current, current_len) != KILN_C99_OK)) {
-            free(nested.bytes);
+            kiln_c99_json_drop_nested(&nested);
             return KILN_C99_OUT_OF_MEMORY;
         }
-        free(nested.bytes);
+        kiln_c99_json_drop_nested(&nested);
         return kiln_c99_text_append_c(text, "]");
     }
     if (value.tag == KILN_VALUE_TYPED_ARRAY) {
@@ -300,7 +445,7 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
             KILN_JSON_BREAK(index == 0);
             if (kiln_c99_json_quote(text, digits, written) != KILN_C99_OK ||
                 (indent_len != 0 ? kiln_c99_text_append(text, ": ", 2) : kiln_c99_text_append(text, ":", 1)) != KILN_C99_OK) {
-                free(nested.bytes);
+                kiln_c99_json_drop_nested(&nested);
                 return KILN_C99_OUT_OF_MEMORY;
             }
             /* Through the same recursion an object member takes, so a `Float64Array` holding
@@ -309,17 +454,17 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
                                          indent, indent_len, nested.bytes, nested.len, &wrote,
                                          depth, parents, thrown);
             if (status != KILN_C99_OK) {
-                free(nested.bytes);
+                kiln_c99_json_drop_nested(&nested);
                 return status;
             }
         }
         if (indent_len != 0 && view->length != 0 &&
             (kiln_c99_text_append_c(text, "\n") != KILN_C99_OK ||
              kiln_c99_text_append(text, current, current_len) != KILN_C99_OK)) {
-            free(nested.bytes);
+            kiln_c99_json_drop_nested(&nested);
             return KILN_C99_OUT_OF_MEMORY;
         }
-        free(nested.bytes);
+        kiln_c99_json_drop_nested(&nested);
         return kiln_c99_text_append_c(text, "}");
     }
     if (value.tag == KILN_VALUE_PROXY) {
@@ -347,7 +492,7 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
             double length;
             status = kiln_c99_get(host, value, "length", 6, &length_value, depth, thrown);
             if (status != KILN_C99_OK) {
-                free(nested.bytes);
+                kiln_c99_json_drop_nested(&nested);
                 return status;
             }
             length = kiln_c99_as_number(length_value);
@@ -359,7 +504,7 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
         } else {
             status = kiln_c99_own_keys(host, value, &keys, depth, thrown);
             if (status != KILN_C99_OK) {
-                free(nested.bytes);
+                kiln_c99_json_drop_nested(&nested);
                 return status;
             }
             count = kiln_c99_array_of(keys)->count;
@@ -379,20 +524,20 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
             int wrote;
             status = kiln_c99_get_computed(host, value, key, &member, depth, thrown);
             if (status != KILN_C99_OK) {
-                free(nested.bytes);
+                kiln_c99_json_drop_nested(&nested);
                 return status;
             }
             KILN_JSON_BREAK(written == 0);
             if (!is_array && (kiln_c99_json_quote(text, key.ptr, key.len) != KILN_C99_OK ||
                               (indent_len != 0 ? kiln_c99_text_append(text, ": ", 2) : kiln_c99_text_append(text, ":", 1)) !=
                                   KILN_C99_OK)) {
-                free(nested.bytes);
+                kiln_c99_json_drop_nested(&nested);
                 return KILN_C99_OUT_OF_MEMORY;
             }
             status = kiln_c99_json_value(host, text, member, indent, indent_len, nested.bytes,
                                          nested.len, &wrote, depth, &frame, thrown);
             if (status != KILN_C99_OK) {
-                free(nested.bytes);
+                kiln_c99_json_drop_nested(&nested);
                 return status;
             }
             if (!wrote) {
@@ -401,7 +546,7 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
                     continue;
                 }
                 if (kiln_c99_text_append_c(text, "null") != KILN_C99_OK) {
-                    free(nested.bytes);
+                    kiln_c99_json_drop_nested(&nested);
                     return KILN_C99_OUT_OF_MEMORY;
                 }
             }
@@ -410,10 +555,10 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
         if (indent_len != 0 && written != 0 &&
             (kiln_c99_text_append_c(text, "\n") != KILN_C99_OK ||
              kiln_c99_text_append(text, current, current_len) != KILN_C99_OK)) {
-            free(nested.bytes);
+            kiln_c99_json_drop_nested(&nested);
             return KILN_C99_OUT_OF_MEMORY;
         }
-        free(nested.bytes);
+        kiln_c99_json_drop_nested(&nested);
         return kiln_c99_text_append_c(text, is_array ? "]" : "}");
     }
     {
@@ -448,18 +593,26 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
                     int wrote;
                     if (object->elements[index] == KILN_VAL_HOLE) continue;
                     nlen = kiln_c99_double_to_js((double)index, num_buf);
-                    member = kiln_val_to_boundary(object->elements[index]);
                     mark = text->len;
                     KILN_JSON_BREAK(written == 0);
                     if (kiln_c99_json_quote(text, num_buf, nlen) != KILN_C99_OK ||
                         (indent_len != 0 ? kiln_c99_text_append(text, ": ", 2) : kiln_c99_text_append(text, ":", 1)) != KILN_C99_OK) {
-                        free(nested.bytes);
+                        kiln_c99_json_drop_nested(&nested);
                         return KILN_C99_OUT_OF_MEMORY;
                     }
+                    if (kiln_c99_json_scalar(text, object->elements[index], &status)) {
+                        if (status != KILN_C99_OK) {
+                            kiln_c99_json_drop_nested(&nested);
+                            return status;
+                        }
+                        written += 1;
+                        continue;
+                    }
+                    member = kiln_val_to_boundary(object->elements[index]);
                     status = kiln_c99_json_value(host, text, member, indent, indent_len,
                                                  nested.bytes, nested.len, &wrote, depth, &frame, thrown);
                     if (status != KILN_C99_OK) {
-                        free(nested.bytes);
+                        kiln_c99_json_drop_nested(&nested);
                         return status;
                     }
                     if (!wrote) {
@@ -473,26 +626,35 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
             for (index = 0; index < length && object->shape != NULL && index < object->shape->property_count; ++index) {
                 const char *skey = object->shape->keys[index];
                 size_t key_len = kiln_c99_key_len(skey);
+                kiln_val held = (object->slots != NULL && index < object->slot_capacity)
+                                    ? object->slots[index]
+                                    : KILN_VAL_UNDEFINED;
                 kiln_value member;
                 size_t mark;
                 int wrote;
                 if (key_len >= 2 && skey[0] == '@' && skey[1] == '@') {
                     continue;
                 }
-                member = (object->slots != NULL && index < object->slot_capacity)
-                             ? kiln_val_to_boundary(object->slots[index])
-                             : kiln_c99_undefined();
                 mark = text->len;
                 KILN_JSON_BREAK(written == 0);
                 if (kiln_c99_json_quote(text, skey, key_len) != KILN_C99_OK ||
                     (indent_len != 0 ? kiln_c99_text_append(text, ": ", 2) : kiln_c99_text_append(text, ":", 1)) != KILN_C99_OK) {
-                    free(nested.bytes);
+                    kiln_c99_json_drop_nested(&nested);
                     return KILN_C99_OUT_OF_MEMORY;
                 }
+                if (kiln_c99_json_scalar(text, held, &status)) {
+                    if (status != KILN_C99_OK) {
+                        kiln_c99_json_drop_nested(&nested);
+                        return status;
+                    }
+                    written += 1;
+                    continue;
+                }
+                member = kiln_val_to_boundary(held);
                 status = kiln_c99_json_value(host, text, member, indent, indent_len,
                                              nested.bytes, nested.len, &wrote, depth, &frame, thrown);
                 if (status != KILN_C99_OK) {
-                    free(nested.bytes);
+                    kiln_c99_json_drop_nested(&nested);
                     return status;
                 }
                 if (!wrote) {
@@ -520,7 +682,7 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
                 status = kiln_c99_call(host, &member, object->properties[index].getter, value,
                                        NULL, 0, depth, thrown);
                 if (status != KILN_C99_OK) {
-                    free(nested.bytes);
+                    kiln_c99_json_drop_nested(&nested);
                     return status;
                 }
             } else {
@@ -534,13 +696,13 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
             if (kiln_c99_json_quote(text, object->properties[index].key,
                                     object->properties[index].key_len) != KILN_C99_OK ||
                 (indent_len != 0 ? kiln_c99_text_append(text, ": ", 2) : kiln_c99_text_append(text, ":", 1)) != KILN_C99_OK) {
-                free(nested.bytes);
+                kiln_c99_json_drop_nested(&nested);
                 return KILN_C99_OUT_OF_MEMORY;
             }
             status = kiln_c99_json_value(host, text, member, indent, indent_len, nested.bytes,
                                          nested.len, &wrote, depth, &frame, thrown);
             if (status != KILN_C99_OK) {
-                free(nested.bytes);
+                kiln_c99_json_drop_nested(&nested);
                 return status;
             }
             if (!wrote) {
@@ -553,10 +715,10 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
     if (indent_len != 0 && written != 0 &&
             (kiln_c99_text_append_c(text, "\n") != KILN_C99_OK ||
              kiln_c99_text_append(text, current, current_len) != KILN_C99_OK)) {
-            free(nested.bytes);
+            kiln_c99_json_drop_nested(&nested);
             return KILN_C99_OUT_OF_MEMORY;
         }
-        free(nested.bytes);
+        kiln_c99_json_drop_nested(&nested);
         return kiln_c99_text_append_c(text, "}");
     }
 #undef KILN_JSON_OPEN
@@ -579,13 +741,13 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
  * dictionary mode exactly as any other object growing past the same limit would. A repeated key
  * is `find_slot` overwriting the earlier value in place, which is JSON.parse's last-one-wins rule
  * for free. */
-static int kiln_c99_json_define(kiln_value built, const char *ikey, kiln_value member) {
+static int kiln_c99_json_define(kiln_value built, const char *ikey, kiln_val member) {
     kiln_object *object = kiln_c99_object_of(built);
     uint32_t slot;
     kiln_shape *next;
     if (object->shape != NULL) {
         if (kiln_c99_shape_find_slot(object->shape, ikey, &slot) && slot < object->slot_capacity) {
-            object->slots[slot] = kiln_val_from_boundary(member);
+            object->slots[slot] = member;
             return KILN_C99_OK;
         }
         if (kiln_c99_shape_transition(object->shape, ikey, &next)) {
@@ -595,12 +757,13 @@ static int kiln_c99_json_define(kiln_value built, const char *ikey, kiln_value m
                     return grown;
                 }
             }
-            object->slots[next->slot_index] = kiln_val_from_boundary(member);
+            object->slots[next->slot_index] = member;
             object->shape = next;
             return KILN_C99_OK;
         }
     }
-    return kiln_c99_put(NULL, built, ikey, kiln_c99_key_len(ikey), member, 0, NULL);
+    return kiln_c99_put(NULL, built, ikey, kiln_c99_key_len(ikey), kiln_val_to_boundary(member), 0,
+                        NULL);
 }
 
 /* Building `JSON.parse`'s answer from the tape the linked reader produced.
@@ -741,10 +904,23 @@ static void kiln_c99_json_build_release(kiln_json_build_stack *stack) {
     }
 }
 
+/* A parsed value travels this walk as a `kiln_val` -- the heap's own representation -- and not
+ * as a boundary `kiln_value`.
+ *
+ * The two are not the same amount of work for a string. A boundary string is a bare
+ * pointer-and-length with no heap identity, so `kiln_val_from_boundary` has no choice but to
+ * allocate a block and copy the bytes into it -- which meant a parsed string was allocated and
+ * copied *twice*, once by `kiln_c99_copy_text` here and once again by the `define` or `push` that
+ * took it, each with its own ASCII scan over the bytes. Building the `kiln_val` once and handing
+ * it to `kiln_c99_json_define` and `kiln_c99_array_push_val` leaves one allocation per string.
+ *
+ * The collector sees a `kiln_val` on the machine stack exactly as it saw the `kiln_value` it
+ * replaces: `kiln_c99_gc_mark_word` tests a word both as a raw address and as a boxed pointer, so
+ * a tagged string, array or object in a local is a root either way. */
 static int kiln_c99_json_build(const kiln_json_node *nodes, size_t count,
-                               const unsigned char *text, size_t text_len, kiln_value *out) {
+                               const unsigned char *text, size_t text_len, kiln_val *out) {
     kiln_json_build_stack stack;
-    kiln_value root = kiln_c99_undefined();
+    kiln_val root = KILN_VAL_UNDEFINED;
     int have_root = 0;
     size_t index;
     stack.frames = stack.local;
@@ -755,7 +931,8 @@ static int kiln_c99_json_build(const kiln_json_node *nodes, size_t count,
     for (index = 0; index < count; ++index) {
         const kiln_json_node *node = &nodes[index];
         kiln_json_build_frame *top = stack.depth == 0 ? NULL : &stack.frames[stack.depth - 1];
-        kiln_value value = kiln_c99_undefined();
+        kiln_val value = KILN_VAL_UNDEFINED;
+        kiln_value container = kiln_c99_undefined();
         int status = KILN_C99_OK;
         int opened = 0;
         if (have_root) {
@@ -796,30 +973,33 @@ static int kiln_c99_json_build(const kiln_json_node *nodes, size_t count,
         }
         switch (node->tag) {
         case KILN_JSON_NULL:
-            value = kiln_c99_null();
+            value = KILN_VAL_NULL;
             break;
         case KILN_JSON_FALSE:
-            value = kiln_c99_boolean(0);
+            value = KILN_VAL_FALSE;
             break;
         case KILN_JSON_TRUE:
-            value = kiln_c99_boolean(1);
+            value = KILN_VAL_TRUE;
             break;
         case KILN_JSON_NUMBER: {
             double number;
             memcpy(&number, &node->value, sizeof number);
-            value = kiln_c99_number(number);
+            value = kiln_c99_val_from_double(number);
             break;
         }
         case KILN_JSON_STRING:
-            value = kiln_c99_copy_text((const char *)text + (size_t)node->value, (size_t)node->len);
+            value = kiln_c99_val_from_text((const char *)text + (size_t)node->value,
+                                           (size_t)node->len);
             break;
         case KILN_JSON_ARRAY:
             /* The count is known up front, so the array is allocated once at its final size. */
-            status = kiln_c99_new_array_with_capacity(&value, (size_t)node->len, 1);
+            status = kiln_c99_new_array_with_capacity(&container, (size_t)node->len, 1);
+            value = kiln_val_from_boundary(container);
             opened = node->len != 0;
             break;
         case KILN_JSON_OBJECT:
-            status = kiln_c99_new_object(&value);
+            status = kiln_c99_new_object(&container);
+            value = kiln_val_from_boundary(container);
             opened = node->len != 0;
             break;
         default:
@@ -827,7 +1007,7 @@ static int kiln_c99_json_build(const kiln_json_node *nodes, size_t count,
             KILN_C99_REFUSE_INTERNAL("JSON.parse, which turns it into a SyntaxError the program can catch");
         }
         if (status == KILN_C99_OK && opened) {
-            status = kiln_c99_json_build_open(&stack, value, (size_t)node->len,
+            status = kiln_c99_json_build_open(&stack, container, (size_t)node->len,
                                               node->tag == KILN_JSON_OBJECT);
         }
         if (status != KILN_C99_OK) {
@@ -864,7 +1044,7 @@ static int kiln_c99_json_build(const kiln_json_node *nodes, size_t count,
                 frame->key = kiln_c99_undefined();
                 frame->has_key = 0;
             } else {
-                status = kiln_c99_array_push(frame->container, value);
+                status = kiln_c99_array_push_val(frame->container, value);
             }
             if (status != KILN_C99_OK) {
                 kiln_c99_json_build_release(&stack);
@@ -874,7 +1054,7 @@ static int kiln_c99_json_build(const kiln_json_node *nodes, size_t count,
             if (frame->remaining != 0) {
                 break;
             }
-            value = frame->container;
+            value = kiln_val_from_boundary(frame->container);
             stack.depth -= 1;
         }
     }
@@ -891,7 +1071,7 @@ static int kiln_c99_json_build(const kiln_json_node *nodes, size_t count,
  * text, so `JSON.parse("1 2")` has no answer here either. The tape is lent from the reader's
  * per-thread scratch and is valid until the next parse on this thread, which is after the walk:
  * the walk allocates on this heap and never parses. */
-static int kiln_c99_json_document(const char *bytes, size_t len, kiln_value *out) {
+static int kiln_c99_json_document(const char *bytes, size_t len, kiln_val *out) {
     const kiln_json_node *nodes = NULL;
     size_t count = 0;
     const unsigned char *text = NULL;

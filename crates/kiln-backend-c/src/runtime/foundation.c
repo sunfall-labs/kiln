@@ -233,6 +233,7 @@ static kiln_value kiln_c99_inspect(kiln_value value);
 static int kiln_c99_reserve(void **items, size_t *capacity, size_t needed, size_t item_size);
 static int kiln_c99_text_append_c(kiln_text *text, const char *literal);
 static kiln_value kiln_c99_text_value(kiln_text *text);
+static kiln_val kiln_c99_text_val(kiln_text *text);
 static int kiln_c99_same_name(const char *key, size_t key_len, const char *name);
 static int kiln_c99_same_key(const kiln_property *property, const char *key, size_t key_len);
 static int kiln_c99_new_object(kiln_value *out);
@@ -566,7 +567,7 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
                                const char *indent, size_t indent_len, const char *current,
                                size_t current_len, int *serialised, int depth,
                                const kiln_json_frame *parents, kiln_value *thrown);
-static int kiln_c99_json_document(const char *bytes, size_t len, kiln_value *out);
+static int kiln_c99_json_document(const char *bytes, size_t len, kiln_val *out);
 static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
                          kiln_value receiver, const kiln_value *args, size_t argc, int depth,
                          kiln_value *thrown);

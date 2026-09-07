@@ -160,10 +160,9 @@ static kiln_val kiln_c99_val_from_text(const char *bytes, size_t len) {
     }
     memcpy(copy, bytes, len);
     kiln_string *s = ((kiln_string *)copy) - 1;
-    int is_ascii = 1;
-    for (size_t i = 0; i < len; ++i) {
-        if ((unsigned char)copy[i] >= 0x80) { is_ascii = 0; break; }
-    }
+    /* Eight bytes at a time; the byte loop this replaces was a second pass over every string
+     * built. */
+    int is_ascii = kiln_c99_ascii_scan(copy, len);
     s->length = is_ascii ? len : kiln_c99_utf8_to_utf16_len(copy, len);
     s->byte_len = len;
     s->bytes = copy;
@@ -199,10 +198,7 @@ static kiln_value kiln_c99_copy_text(const char *text, size_t len) {
     }
     memcpy(copy, text, len);
     kiln_string *s = ((kiln_string *)copy) - 1;
-    int is_ascii = 1;
-    for (size_t i = 0; i < len; ++i) {
-        if ((unsigned char)copy[i] >= 0x80) { is_ascii = 0; break; }
-    }
+    int is_ascii = kiln_c99_ascii_scan(copy, len);
     s->length = is_ascii ? len : kiln_c99_utf8_to_utf16_len(copy, len);
     s->byte_len = len;
     s->bytes = copy;
@@ -382,6 +378,23 @@ static int kiln_c99_text_append_c(kiln_text *text, const char *literal) {
 static kiln_value kiln_c99_text_value(kiln_text *text) {
     kiln_value result = text->len == 0 ? kiln_c99_value(KILN_VALUE_STRING, 0, NULL, 0)
                                        : kiln_c99_copy_text(text->bytes, text->len);
+    if (!text->borrowed) free(text->bytes);
+    text->borrowed = 0;
+    text->bytes = NULL;
+    text->len = 0;
+    text->capacity = 0;
+    return result;
+}
+
+/* The same escape as `kiln_c99_text_value`, answering the heap's own representation.
+ *
+ * A boundary `kiln_value` string is a bare pointer and length with no heap identity, so a caller
+ * that wanted a `kiln_val` had to hand this function's answer to `kiln_val_from_boundary` -- which
+ * has no way to know the bytes were already in a block of this heap and allocates a second one,
+ * copying every byte and scanning it for ASCII a second time. `JSON.stringify` did exactly that
+ * for every document it built. */
+static kiln_val kiln_c99_text_val(kiln_text *text) {
+    kiln_val result = kiln_c99_val_from_text(text->bytes, text->len);
     if (!text->borrowed) free(text->bytes);
     text->borrowed = 0;
     text->bytes = NULL;

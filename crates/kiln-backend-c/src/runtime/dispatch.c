@@ -4623,7 +4623,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         }
         case KILN_C99_METHOD_JSON_PARSE: {
             kiln_value source = argc > 0 ? kiln_c99_text(args[0]) : kiln_c99_undefined();
-            kiln_value parsed;
+            kiln_val parsed;
             if (argc > 1 && args[1].tag != KILN_VALUE_UNDEFINED) {
                 /* A reviver rewrites the tree bottom-up; ignoring it would hand back a document
                  * the program never asked for. */
@@ -4644,7 +4644,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             if (status != KILN_C99_OK) {
                 return status;
             }
-            *result = parsed;
+            *result = kiln_val_to_boundary(parsed);
             return KILN_C99_OK;
         }
         case KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF: {

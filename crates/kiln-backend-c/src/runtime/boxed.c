@@ -428,7 +428,7 @@ static int kiln_c99_val_json_stringify_fast(kiln_host *host, kiln_val val, kiln_
         return status;
     }
     if (wrote) {
-        *out = kiln_val_from_boundary(kiln_c99_text_value(&text));
+        *out = kiln_c99_text_val(&text);
     } else {
         if (!text.borrowed) free(text.bytes);
         *out = KILN_VAL_UNDEFINED;
@@ -443,13 +443,13 @@ static int kiln_c99_val_json_parse_fast(kiln_host *host, kiln_val val, kiln_val 
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR, "Unexpected token in JSON");
     }
     const kiln_string *s = (const kiln_string *)KILN_VAL_PTR(val);
-    kiln_value parsed;
+    kiln_val parsed;
     int status = kiln_c99_json_document(s ? s->bytes : "", s ? s->byte_len : 0, &parsed);
     if (status == KILN_C99_CONTROL_ERROR) {
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR, "Unexpected token in JSON");
     }
     if (status != KILN_C99_OK) return status;
-    *out = kiln_val_from_boundary(parsed);
+    *out = parsed;
     return KILN_C99_OK;
 }
 

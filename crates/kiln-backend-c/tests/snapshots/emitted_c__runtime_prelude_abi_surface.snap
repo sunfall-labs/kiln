@@ -987,6 +987,7 @@ static kiln_value kiln_c99_inspect(kiln_value value);
 static int kiln_c99_reserve(void **items, size_t *capacity, size_t needed, size_t item_size);
 static int kiln_c99_text_append_c(kiln_text *text, const char *literal);
 static kiln_value kiln_c99_text_value(kiln_text *text);
+static kiln_val kiln_c99_text_val(kiln_text *text);
 static int kiln_c99_same_name(const char *key, size_t key_len, const char *name);
 static int kiln_c99_same_key(const kiln_property *property, const char *key, size_t key_len);
 static int kiln_c99_new_object(kiln_value *out);
@@ -1193,7 +1194,7 @@ static double kiln_c99_key_index(const char *key, size_t key_len);
 static uint64_t kiln_c99_array_method(const char *key, size_t key_len);
 typedef struct kiln_json_frame {
 static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value value,
-static int kiln_c99_json_document(const char *bytes, size_t len, kiln_value *out);
+static int kiln_c99_json_document(const char *bytes, size_t len, kiln_val *out);
 static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
 static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, uint64_t code,
@@ -1683,6 +1684,7 @@ static void kiln_c99_note_refusal(const char *site, size_t instruction,
 static int kiln_c99_text_append_grow(kiln_text *text, const char *bytes, size_t len) {
 static int kiln_c99_text_append_c(kiln_text *text, const char *literal) {
 static kiln_value kiln_c99_text_value(kiln_text *text) {
+static kiln_val kiln_c99_text_val(kiln_text *text) {
 static kiln_value kiln_c99_copy_utf8_lossy(const uint8_t *bytes, size_t length) {
 oom:
 static kiln_value kiln_c99_text(kiln_value value) {
@@ -1902,15 +1904,24 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
 static int kiln_c99_set_function_name(kiln_value function, kiln_value key, const char *prefix) {
 static int kiln_c99_define_private(kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_define_method(kiln_value target, const char *key, size_t key_len,
+#define KILN_JSON_ONES UINT64_C(0x0101010101010101)
+#define KILN_JSON_HIGH UINT64_C(0x8080808080808080)
+static inline int kiln_c99_json_word_escapes(uint64_t word) {
 static int kiln_c99_json_needs_escape(const char *bytes, size_t len) {
+#undef KILN_JSON_ONES
+#undef KILN_JSON_HIGH
+static const unsigned char kiln_c99_json_escape_class[256] = {
+static int kiln_c99_json_quote_plain(kiln_text *text, const char *bytes, size_t len) {
 static int kiln_c99_json_quote(kiln_text *text, const char *bytes, size_t len) {
+static int kiln_c99_json_scalar(kiln_text *text, kiln_val value, int *status) {
 static int kiln_c99_json_lacks_tojson(kiln_value value) {
+static void kiln_c99_json_drop_nested(kiln_text *nested) {
 static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value value,
 #define KILN_JSON_OPEN(bracket)                                                                   \
 #define KILN_JSON_BREAK(first)                                                                    \
 #undef KILN_JSON_OPEN
 #undef KILN_JSON_BREAK
-static int kiln_c99_json_define(kiln_value built, const char *ikey, kiln_value member) {
+static int kiln_c99_json_define(kiln_value built, const char *ikey, kiln_val member) {
 typedef struct kiln_json_build_frame {
 #define KILN_JSON_BUILD_LOCAL_FRAMES 32
 typedef struct kiln_json_build_stack {
@@ -1919,7 +1930,7 @@ static int kiln_c99_json_build_materialize_key(kiln_json_build_stack *stack, siz
 static int kiln_c99_json_build_open(kiln_json_build_stack *stack, kiln_value container,
 static void kiln_c99_json_build_release(kiln_json_build_stack *stack) {
 static int kiln_c99_json_build(const kiln_json_node *nodes, size_t count,
-static int kiln_c99_json_document(const char *bytes, size_t len, kiln_value *out) {
+static int kiln_c99_json_document(const char *bytes, size_t len, kiln_val *out) {
 static void kiln_c99_civil_from_days(int64_t days, int64_t *year, int *month, int *day) {
 static int64_t kiln_c99_days_from_civil(int64_t year, int64_t month, int64_t day) {
 static int64_t kiln_c99_floor_div(int64_t value, int64_t divisor) {
