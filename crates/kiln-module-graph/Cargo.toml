@@ -16,4 +16,5 @@ kiln-runtime = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
+kiln-node-abi = { workspace = true }
 frontend-oxc = { path = "../frontend-oxc" }

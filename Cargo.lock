@@ -1276,6 +1276,7 @@ dependencies = [
  "kiln-interpreter",
  "kiln-ir",
  "kiln-module-resolver",
+ "kiln-node-abi",
  "kiln-runtime",
  "serde",
 ]

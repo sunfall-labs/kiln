@@ -1660,7 +1660,7 @@ static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *re
     if (env_val.tag == KILN_VALUE_OBJECT) {
         kiln_object *pobj = kiln_c99_object_of(env_val);
         for (size_t i = 0; i < pobj->count; ++i) {
-            kiln_dyn_scope_set(&scope, pobj->properties[i].key, strlen(pobj->properties[i].key), pobj->properties[i].value);
+            kiln_dyn_scope_set(&scope, pobj->properties[i].key, pobj->properties[i].key_len, pobj->properties[i].value);
         }
     }
 
