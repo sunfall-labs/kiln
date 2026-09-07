@@ -126,6 +126,10 @@ while (drawn < 200000) {
 
 console.log("spellings " + seen);
 console.log("fnv1a64 " + hashHigh + " " + hashLow);
+// `scripts/native.sh` compares the interpreter against the compiled backend, so a spelling both
+// halves of kiln got wrong in the same way would pass. These two words are what node prints for
+// this corpus, checked in so the probe answers to node too and not only to kiln's other half.
+console.log("fnv1a64 expected 3557275855 1659592157");
 for (let i = 0; i < firstSpellings.length; i++) {
   console.log(i + " " + firstSpellings[i]);
 }
