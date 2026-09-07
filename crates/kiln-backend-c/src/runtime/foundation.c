@@ -228,7 +228,6 @@ static kiln_value kiln_c99_text(kiln_value value);
 static kiln_value kiln_c99_copy_text(const char *text, size_t len);
 static kiln_value kiln_c99_inspect(kiln_value value);
 static int kiln_c99_reserve(void **items, size_t *capacity, size_t needed, size_t item_size);
-static int kiln_c99_text_append(kiln_text *text, const char *bytes, size_t len);
 static int kiln_c99_text_append_c(kiln_text *text, const char *literal);
 static kiln_value kiln_c99_text_value(kiln_text *text);
 static int kiln_c99_same_name(const char *key, size_t key_len, const char *name);

@@ -30,6 +30,13 @@ static int kiln_c99_array_reserve(kiln_array *array, size_t needed) {
     if (needed <= array->capacity) {
         return KILN_C99_OK;
     }
+    if (array->elements == NULL && needed <= sizeof array->inline_elements / sizeof array->inline_elements[0]) {
+        /* An array's first elements live in the array: a parsed `[1, 2, 3]` or a `push` onto
+         * `[]` used to malloc four slots it had room for already. */
+        array->elements = array->inline_elements;
+        array->capacity = sizeof array->inline_elements / sizeof array->inline_elements[0];
+        return KILN_C99_OK;
+    }
     grown = array->capacity == 0 ? 4 : array->capacity;
     while (grown < needed) {
         if (grown > ((size_t)-1) / 2 / sizeof(kiln_val)) {
