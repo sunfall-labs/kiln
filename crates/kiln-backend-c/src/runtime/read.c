@@ -1403,6 +1403,27 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 KILN_C99_ABSENT("not a member of Error.prototype; Error.prototype only owns name, message, toString, and constructor",
                                 out);
             }
+            /* The four collection prototypes do not share a member list -- a `Set` has no `get`,
+             * a `WeakMap` has neither `size` nor an iterator -- so a name belonging to a sibling
+             * kind is absent here rather than unbuilt, and absent is undefined. Without this the
+             * kind split in `kiln_c99_namespace_method` turned `Map.prototype.add` from a wrong
+             * function into a wrong refusal; node answers undefined. A member of *this* kind that
+             * this backend has not built still falls through to the refusal below, by name. */
+            if (target.bits == KILN_C99_BUILTIN_MAP_PROTOTYPE ||
+                target.bits == KILN_C99_BUILTIN_SET_PROTOTYPE ||
+                target.bits == KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE ||
+                target.bits == KILN_C99_BUILTIN_WEAK_SET_PROTOTYPE) {
+                if (!kiln_c99_collection_kind_member(
+                        target.bits == KILN_C99_BUILTIN_MAP_PROTOTYPE ||
+                            target.bits == KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE,
+                        target.bits == KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE ||
+                            target.bits == KILN_C99_BUILTIN_WEAK_SET_PROTOTYPE,
+                        key, key_len)) {
+                    KILN_C99_ABSENT("not a member of this collection's prototype; "
+                                    "kiln_c99_collection_kind_member holds the ones that are",
+                                    out);
+                }
+            }
         }
         KILN_C99_REFUSE("a member the language puts on this built-in and this backend has not "
                         "built");

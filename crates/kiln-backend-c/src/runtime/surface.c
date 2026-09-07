@@ -305,14 +305,29 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
                                       KILN_C99_METHOD_OBJECT_VALUE_OF);
     case KILN_C99_BUILTIN_MAP_PROTOTYPE:
     case KILN_C99_BUILTIN_SET_PROTOTYPE:
-        /* The same range a collection's own read uses, so a method reached through the table and
-         * one reached through an instance can never turn out to be different functions. */
-        return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_COLLECTION_GET,
-                                      KILN_C99_METHOD_COLLECTION_SELF);
     case KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE:
-    case KILN_C99_BUILTIN_WEAK_SET_PROTOTYPE:
-        return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_COLLECTION_GET,
-                                      KILN_C99_METHOD_COLLECTION_DELETE);
+    case KILN_C99_BUILTIN_WEAK_SET_PROTOTYPE: {
+        /* The same range a collection's own read uses, so a method reached through the table and
+         * one reached through an instance can never turn out to be different functions.
+         *
+         * The range is shared by all four kinds, and it was consulted without asking which one
+         * this is -- so every kind answered for every other kind's members. `Map.prototype.add`
+         * and `Set.prototype.get` were functions, and both appeared in the prototype's own-name
+         * listing; node has neither, and `add` on a Map is the one a program is most likely to
+         * feature-detect before choosing between the two. The kind decides, exactly as it does
+         * for a live collection in `kiln_c99_is_collection_member`. */
+        int is_map = builtin == KILN_C99_BUILTIN_MAP_PROTOTYPE ||
+                     builtin == KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE;
+        int is_weak = builtin == KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE ||
+                      builtin == KILN_C99_BUILTIN_WEAK_SET_PROTOTYPE;
+        uint64_t code = kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_COLLECTION_GET,
+                                               is_weak ? KILN_C99_METHOD_COLLECTION_DELETE
+                                                       : KILN_C99_METHOD_COLLECTION_SELF);
+        if (code != 0 && !kiln_c99_collection_kind_member(is_map, is_weak, key, key_len)) {
+            return 0;
+        }
+        return code;
+    }
     case KILN_C99_BUILTIN_STRING_PROTOTYPE:
         return kiln_c99_string_method(key, key_len);
     case KILN_C99_BUILTIN_ITERATOR_PROTOTYPE:

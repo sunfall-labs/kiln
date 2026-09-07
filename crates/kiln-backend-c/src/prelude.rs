@@ -1824,10 +1824,13 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
     },
     AbsentAnswer {
         function: "kiln_c99_get_own_kind",
-        sites: 26,
+        sites: 27,
         proved_by: "one membership predicate per receiver kind -- kiln_c99_is_array_member, \
                     kiln_c99_is_string_member, kiln_c99_is_date_member, \
-                    kiln_c99_is_collection_member, kiln_c99_is_array_buffer_member, \
+                    kiln_c99_is_collection_member and the kiln_c99_collection_kind_member \
+                    beneath it, which answers for a collection *prototype* the same way \
+                    (a name belonging to a sibling kind -- `Map.prototype.add` -- is absent \
+                    rather than unbuilt), kiln_c99_is_array_buffer_member, \
                     kiln_c99_is_typed_array_member, and BUILTIN_SURFACE plus \
                     BUILTIN_SURFACE_BACKLOG for the table-driven built-ins. These are the lists \
                     the two engines can disagree about, and \
@@ -3727,8 +3730,8 @@ static int kiln_c99_is_date_member(const char *key, size_t key_len) {
  * should have answered. A bundled `vue-reactivity` reads arbitrary names off a reactive `Map`
  * for exactly the reason it reads them off a reactive array, and stopped here after the array
  * was fixed. */
-static int kiln_c99_is_collection_member(const kiln_collection *collection, const char *key,
-                                         size_t key_len) {
+static int kiln_c99_collection_kind_member(int is_map, int is_weak, const char *key,
+                                          size_t key_len) {
     /* `Object.prototype` is above every one of them, so its members count as members here too:
      * a name this backend cannot resolve yet has to keep refusing rather than answer undefined. */
     static const char *const shared[] = {
@@ -3742,18 +3745,18 @@ static int kiln_c99_is_collection_member(const kiln_collection *collection, cons
             return 1;
         }
     }
-    if (!collection->is_weak) {
+    if (!is_weak) {
         for (index = 0; index < sizeof strong / sizeof *strong; ++index) {
             if (kiln_c99_same_name(key, key_len, strong[index])) {
                 return 1;
             }
         }
     }
-    if (collection->is_map && (kiln_c99_same_name(key, key_len, "get") ||
-                               kiln_c99_same_name(key, key_len, "set"))) {
+    if (is_map && (kiln_c99_same_name(key, key_len, "get") ||
+                   kiln_c99_same_name(key, key_len, "set"))) {
         return 1;
     }
-    if (!collection->is_map && kiln_c99_same_name(key, key_len, "add")) {
+    if (!is_map && kiln_c99_same_name(key, key_len, "add")) {
         return 1;
     }
     /* The two symbol-keyed members, spelled the way a reserved key reaches here. They are named
@@ -3763,7 +3766,13 @@ static int kiln_c99_is_collection_member(const kiln_collection *collection, cons
     if (kiln_c99_same_name(key, key_len, "@@toStringTag")) {
         return 1;
     }
-    return !collection->is_weak && kiln_c99_same_name(key, key_len, "@@iterator");
+    return !is_weak && kiln_c99_same_name(key, key_len, "@@iterator");
+}
+
+/* The same question asked of a live collection, which is the only caller that has one. */
+static int kiln_c99_is_collection_member(const kiln_collection *collection, const char *key,
+                                         size_t key_len) {
+    return kiln_c99_collection_kind_member(collection->is_map, collection->is_weak, key, key_len);
 }
 
 /* Whether a name is a member of `String.prototype` *in the language*, which is a different
@@ -3924,9 +3933,11 @@ static int kiln_c99_is_data_view_member(const char *key, size_t key_len) {
  * receiver's own `toString`, which for a string is the string: there is no locale in it to
  * consult, so nothing here is the Intl surface ADR 0042 refuses by name. */
 static uint64_t kiln_c99_string_method(const char *key, size_t key_len) {
-    if (kiln_c99_same_name(key, key_len, "values")) {
-        return KILN_C99_METHOD_ARRAY_VALUES;
-    }
+    /* `values` is deliberately absent: a string carries `@@iterator` and no `values` beside it,
+     * unlike an array. Answering it here made `"abc".values` a function and put `values` in
+     * `Object.getOwnPropertyNames(String.prototype)`, a name node has on neither. The iterator
+     * itself is unaffected -- the `@@iterator` cases in the string read and in
+     * `kiln_c99_namespace_method` reach `KILN_C99_METHOD_ARRAY_VALUES` directly. */
     if (kiln_c99_same_name(key, key_len, "toLocaleString")) {
         return KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING;
     }

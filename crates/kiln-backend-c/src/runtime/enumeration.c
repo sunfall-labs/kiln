@@ -158,6 +158,92 @@ static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value sourc
     }
 }
 
+/* A reserved key spelling: every symbol-keyed property reaches this layer as `@@name`, whether
+ * it is well-known or came from `Symbol.for`. Written out inline in half a dozen places; named
+ * here because two membership predicates deliberately answer *every* one of them and the `in`
+ * operator must not. */
+static int kiln_c99_is_symbol_key(const char *key, size_t key_len) {
+    return key_len > 2 && key[0] == '@' && key[1] == '@';
+}
+
+/* Whether a built-in object -- a prototype table, a constructor, a namespace -- carries a name,
+ * own or inherited.
+ *
+ * `in` asks whether the property *exists*, so this answers out of the membership predicates
+ * rather than by attempting a read: a read refuses a member of the language this backend has not
+ * built, which is the right answer for `String.prototype.anchor` and the wrong one for
+ * `"anchor" in String.prototype` -- that question is answerable and the answer is true. It is the
+ * same split the regexp arm below already makes for an instance.
+ *
+ * Without an arm of its own a built-in fell through to the object chain walk, which stops at the
+ * first value that is not an object -- so every name was false. `"map" in Array.prototype` denied
+ * a member `Array.prototype.map` demonstrably has, and a feature test that asks before calling
+ * took the branch written for a realm that never had it. That is how `@kiln/concurrency` came to
+ * install a polyfill over `parallelMap` on the one backend that had just grown it. */
+static int kiln_c99_builtin_has_member(uint64_t builtin, const char *key, size_t key_len) {
+    /* What this backend actually answers for, which is a subset of the language and the only
+     * part a read can produce. */
+    if (kiln_c99_namespace_method(builtin, key, key_len) != 0) {
+        return 1;
+    }
+    /* A symbol key is settled by the lookup above and nowhere else. The per-kind predicates
+     * below answer *every* `@@` name, which is right for the reads they were written for and
+     * wrong here for the same reason as on a date instance: `Symbol.for("x") in Array.prototype`
+     * is false, and only the well-known members the lookup knows about are true. */
+    if (kiln_c99_is_symbol_key(key, key_len)) {
+        return 0;
+    }
+    /* ...and the rest of what the *language* puts on this prototype, whether or not this backend
+     * has built it. One predicate per receiver kind, the same ones the reads consult. */
+    switch (builtin) {
+    case KILN_C99_BUILTIN_ARRAY_PROTOTYPE:
+        if (kiln_c99_is_array_member(key, key_len)) return 1;
+        break;
+    case KILN_C99_BUILTIN_STRING_PROTOTYPE:
+        if (kiln_c99_is_string_member(key, key_len)) return 1;
+        break;
+    case KILN_C99_BUILTIN_DATE_PROTOTYPE:
+        if (kiln_c99_is_date_member(key, key_len)) return 1;
+        break;
+    case KILN_C99_BUILTIN_MAP_PROTOTYPE:
+    case KILN_C99_BUILTIN_SET_PROTOTYPE:
+    case KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE:
+    case KILN_C99_BUILTIN_WEAK_SET_PROTOTYPE:
+        if (kiln_c99_collection_kind_member(
+                builtin == KILN_C99_BUILTIN_MAP_PROTOTYPE ||
+                    builtin == KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE,
+                builtin == KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE ||
+                    builtin == KILN_C99_BUILTIN_WEAK_SET_PROTOTYPE,
+                key, key_len)) {
+            return 1;
+        }
+        break;
+    case KILN_C99_BUILTIN_DATA_VIEW_PROTOTYPE:
+        if (kiln_c99_is_data_view_member(key, key_len)) return 1;
+        break;
+    default:
+        break;
+    }
+    /* A built-in that is a function answers to a callable's own members; a namespace does not.
+     * The read path draws the same line. */
+    if (!kiln_c99_is_namespace(builtin) &&
+        (kiln_c99_callable_method(key, key_len) != 0 ||
+         kiln_c99_same_name(key, key_len, "name") ||
+         kiln_c99_same_name(key, key_len, "length") ||
+         kiln_c99_same_name(key, key_len, "prototype"))) {
+        return 1;
+    }
+    /* The chain ends at `Object.prototype` for all of them, which is what makes
+     * `"hasOwnProperty" in Array.prototype` true -- the shape half the feature-detects in the
+     * wild are written as. The same three the read path hands out there, plus `constructor`,
+     * which every prototype table names. */
+    return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_HAS_OWN_PROPERTY,
+                                  KILN_C99_METHOD_OBJECT_VALUE_OF) != 0 ||
+           kiln_c99_same_name(key, key_len, "constructor") ||
+           kiln_c99_same_name(key, key_len, "toString") ||
+           kiln_c99_same_name(key, key_len, "toLocaleString");
+}
+
 /* `key in target`: whether the name is reachable, own or inherited. Unlike a read this does not
  * call an accessor -- the question is whether the property exists, not what it produces. */
 static int kiln_c99_has_property(kiln_host *host, kiln_value target, const char *key,
@@ -172,6 +258,85 @@ static int kiln_c99_has_property(kiln_host *host, kiln_value target, const char 
         return kiln_c99_has_computed(host, target,
                                      kiln_c99_value(KILN_VALUE_STRING, 0, key, key_len), answer,
                                      depth, thrown);
+    }
+    if (target.tag == KILN_VALUE_BUILTIN) {
+        *answer = kiln_c99_builtin_has_member(target.bits, key, key_len);
+        return KILN_C99_OK;
+    }
+    if (target.tag == KILN_VALUE_PROMISE) {
+        /* Mirrors the promise read: its own store first, then the three methods and
+         * `constructor`. Without an arm it fell through the chain walk below and answered false
+         * about `then` -- the one name every promise-detecting `then` in the wild asks for. */
+        kiln_promise *promise = kiln_c99_promise_of(target);
+        if (promise->properties.tag == KILN_VALUE_OBJECT) {
+            int carried = 0;
+            int status = kiln_c99_has_property(host, promise->properties, key, key_len, &carried,
+                                               depth, thrown);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            if (carried) {
+                *answer = 1;
+                return KILN_C99_OK;
+            }
+        }
+        *answer = kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_THEN,
+                                         KILN_C99_METHOD_FINALLY) != 0 ||
+                  kiln_c99_same_name(key, key_len, "constructor") ||
+                  kiln_c99_same_name(key, key_len, "@@toStringTag") ||
+                  kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_HAS_OWN_PROPERTY,
+                                         KILN_C99_METHOD_OBJECT_VALUE_OF) != 0;
+        return KILN_C99_OK;
+    }
+    if (target.tag == KILN_VALUE_FUNCTION) {
+        /* A closure answers from its own store, then from the members every callable has. Same
+         * reason as the promise above: `"call" in fn` was false about a member `fn.call`
+         * produces. */
+        kiln_closure *closure = kiln_c99_closure_of(target);
+        if (closure->properties.tag == KILN_VALUE_OBJECT) {
+            int carried = 0;
+            int status = kiln_c99_has_property(host, closure->properties, key, key_len, &carried,
+                                               depth, thrown);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            if (carried) {
+                *answer = 1;
+                return KILN_C99_OK;
+            }
+        }
+        *answer = kiln_c99_callable_method(key, key_len) != 0 ||
+                  kiln_c99_same_name(key, key_len, "name") ||
+                  kiln_c99_same_name(key, key_len, "length") ||
+                  /* Method syntax carries no `prototype` unless it is a generator, and cannot be
+                   * constructed -- the same condition the read applies, so a `hasOwnProperty` and
+                   * an `in` about `obj.m.prototype` cannot disagree. */
+                  (kiln_c99_same_name(key, key_len, "prototype") &&
+                   (!closure->is_method || closure->generator)) ||
+                  kiln_c99_same_name(key, key_len, "constructor") ||
+                  kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_HAS_OWN_PROPERTY,
+                                         KILN_C99_METHOD_OBJECT_VALUE_OF) != 0;
+        return KILN_C99_OK;
+    }
+    if (target.tag == KILN_VALUE_DATE) {
+        /* The membership predicate the date read consults, so `"getTime" in d` and `d.getTime`
+         * cannot disagree -- and a member the language has but this backend has not built is
+         * still present, which is the question `in` asks.
+         *
+         * Except for the symbol keys. `kiln_c99_is_date_member` answers *every* `@@` name, which
+         * is right for the read it was written for -- an unimplemented well-known symbol must
+         * refuse rather than read as undefined -- and wrong here, where the question is whether
+         * the property exists. A date owns one symbol-keyed member. Answering the rest true said
+         * `Symbol.for("constructDateFrom") in date` was true to a bundled `date-fns`, which then
+         * called the undefined it found. */
+        if (kiln_c99_is_symbol_key(key, key_len)) {
+            *answer = kiln_c99_same_name(key, key_len, "@@toPrimitive");
+            return KILN_C99_OK;
+        }
+        *answer = kiln_c99_is_date_member(key, key_len) ||
+                  kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_HAS_OWN_PROPERTY,
+                                         KILN_C99_METHOD_OBJECT_VALUE_OF) != 0;
+        return KILN_C99_OK;
     }
     if (target.tag == KILN_VALUE_ARRAY_BUFFER) {
         *answer = kiln_c99_same_name(key, key_len, "byteLength") ||
