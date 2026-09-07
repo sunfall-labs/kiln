@@ -18,6 +18,8 @@ extern void kiln_c99_gc_result_roots(void *opaque, void *context, int phase);
 extern char *kiln_c99_gc_alloc_text(size_t len);
 extern kiln_val kiln_c99_val_from_text(const char *bytes, size_t len);
 extern kiln_val kiln_c99_val_from_ascii(const char *bytes, size_t len);
+extern int kiln_c99_split_ascii_byte(kiln_value *result, const char *bytes, size_t byte_len,
+                                     char separator, size_t limit);
 extern const char *kiln_c99_intern_static(const char *bytes, size_t len);
 extern const char *kiln_c99_intern(const char *bytes, size_t len);
 extern kiln_value kiln_c99_number_bits(uint64_t bits);

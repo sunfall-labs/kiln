@@ -696,6 +696,22 @@ static const kiln_string kiln_c99_ascii_strings[256] = {
 #undef S16
 #undef S4
 static inline kiln_val kiln_c99_val_single_char(unsigned char ch) {
+#if defined(__GNUC__) || defined(__clang__)
+#define KILN_ALWAYS_INLINE __attribute__((always_inline))
+#else
+#define KILN_ALWAYS_INLINE
+#endif
+static inline void kiln_c99_copy_short(char *dst, const char *src, size_t len) {
+#if defined(__GNUC__) && defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#define KILN_C99_LOW_BYTE_FIRST 1
+#else
+#define KILN_C99_LOW_BYTE_FIRST 0
+#endif
+static inline const char *kiln_c99_find_byte(const char *from, const char *end, char sep) {
+#if KILN_C99_LOW_BYTE_FIRST
+#else
+#endif
+static inline int kiln_c99_same_bytes(const char *left, const char *right, size_t len) {
 static inline const char *kiln_c99_memmem(const char *haystack, size_t haystack_len,
 #ifdef KILN_SEPARATE_PRELUDE
 extern kiln_val kiln_c99_val_from_text(const char *bytes, size_t len);
@@ -769,6 +785,7 @@ static inline const uint32_t *kiln_c99_recv_row(const kiln_shape **shapes, const
 static inline int kiln_c99_recv_refused(const kiln_shape *const *refused, const kiln_shape *shape) {
 static inline const uint32_t *kiln_c99_recv_claim(const kiln_shape **shapes,
 typedef struct kiln_array {
+static inline int kiln_c99_array_elements_owned(const kiln_array *array) {
 typedef struct kiln_generator {
 typedef struct kiln_date_parts {
 typedef struct kiln_entry {
@@ -1356,7 +1373,10 @@ static void kiln_c99_gc_collect_mid_turn(kiln_gc_heap *heap) {
 static int kiln_c99_nursery_fresh_chunk(kiln_gc_heap *heap) {
 static void kiln_c99_nursery_turn_chunk(kiln_gc_heap *heap) {
 static void kiln_c99_gc_note_external(size_t size) {
+static inline void kiln_c99_gc_alloc_due(kiln_gc_heap *heap) {
 static void *kiln_c99_gc_alloc_ex(uint32_t kind, size_t size, int zero_payload) {
+static inline void *kiln_c99_gc_nursery_bump(kiln_gc_heap *heap, uint32_t kind, size_t size) {
+KILN_ALWAYS_INLINE static inline void *kiln_c99_gc_alloc_hot(uint32_t kind, size_t size,
 static void *kiln_c99_gc_alloc(uint32_t kind, size_t size) {
 static void *kiln_c99_gc_alloc_pointer_free(uint32_t kind, size_t size) {
 static void *kiln_c99_gc_alloc_tenured(uint32_t kind, size_t size) {
@@ -1408,6 +1428,7 @@ static const kiln_gc_hooks kiln_c99_gc_hooks = {
 static void kiln_c99_gc_result_roots(void *opaque, void *context, int phase) {
 static char *kiln_c99_gc_alloc_text(size_t len) {
 static char *kiln_c99_gc_alloc_text_tenured(size_t len) {
+static size_t kiln_c99_gc_alloc_text_run(size_t count, const size_t *lens, char **out) {
 static kiln_shape kiln_c99_root_shape = {
 static struct kiln_shape *kiln_c99_shape_root(void) {
 static int kiln_c99_shape_find_slot(const kiln_shape *shape, const char *ikey, uint32_t *out_slot) {
@@ -1436,6 +1457,7 @@ static int kiln_c99_node_util(kiln_host *host, kiln_value *out, uint64_t code,
 format_oom:
 static int kiln_c99_new_array(kiln_value *out) {
 static int kiln_c99_array_reserve(kiln_array *array, size_t needed) {
+#define KILN_C99_ARRAY_INBLOCK_MAX ((size_t)64)
 static int kiln_c99_new_array_with_capacity(kiln_value *out, size_t capacity, int is_numeric) {
 static size_t kiln_c99_typed_width(kiln_typed_kind kind) {
 static const char *kiln_c99_typed_name(kiln_typed_kind kind) {
@@ -1753,6 +1775,7 @@ static int kiln_c99_is_trimmed(uint16_t unit) {
 static int kiln_c99_same_value_zero(kiln_value left, kiln_value right) {
 static size_t kiln_c99_relative_index(kiln_value value, size_t length, size_t fallback) {
 static size_t kiln_c99_unit_position(kiln_value value, size_t length, size_t fallback,
+static int kiln_c99_split_ascii_byte(kiln_value *result, const char *bytes, size_t byte_len,
 static int kiln_c99_invoke_string_method(kiln_value *result, uint64_t code, kiln_value receiver,
 static int kiln_c99_match_result(kiln_host *host, kiln_value *out, const uint16_t *units,
 static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t code,

@@ -1490,12 +1490,12 @@ static void kiln_c99_gc_note_external(size_t size) {
     if (heap != NULL) heap->since_collection += size;
 }
 
-static void *kiln_c99_gc_alloc_ex(uint32_t kind, size_t size, int zero_payload) {
-    kiln_gc_heap *heap = kiln_c99_gc_heap();
-    size_t payload = size == 0 ? 1 : size;
-    int class_index;
-    kiln_gc_block *block;
-    if (heap == NULL || size > ((size_t)-1) - sizeof(kiln_gc_block)) return NULL;
+/* The collection an allocation may owe before it hands anything out.
+ *
+ * Its own function because a caller taking a run of blocks at once -- `kiln_c99_gc_alloc_text_run`
+ * below -- owes it once for the run rather than once per block, and the two must not drift: this
+ * is where "is a mid-turn collection due" is decided for both. */
+static inline void kiln_c99_gc_alloc_due(kiln_gc_heap *heap) {
     if (KILN_UNLIKELY(!heap->collecting && heap->enabled && !heap->fallback)) {
         /* A mid-turn collection scans the whole stack and sweeps every slab, so it earns its
          * keep only after a few megabytes, or after allocation has matched twice what
@@ -1518,6 +1518,15 @@ static void *kiln_c99_gc_alloc_ex(uint32_t kind, size_t size, int zero_payload) 
         }
         if (due) kiln_c99_gc_collect_mid_turn(heap);
     }
+}
+
+static void *kiln_c99_gc_alloc_ex(uint32_t kind, size_t size, int zero_payload) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    size_t payload = size == 0 ? 1 : size;
+    int class_index;
+    kiln_gc_block *block;
+    if (heap == NULL || size > ((size_t)-1) - sizeof(kiln_gc_block)) return NULL;
+    kiln_c99_gc_alloc_due(heap);
 
     if (!kiln_c99_gc_is_tenured_kind(kind) && heap->nursery.active && (payload + sizeof(kiln_gc_block) <= (heap->nursery.capacity >> 2))) {
         size_t total = sizeof(kiln_gc_block) + payload;
@@ -1585,6 +1594,70 @@ static void *kiln_c99_gc_alloc_ex(uint32_t kind, size_t size, int zero_payload) 
     /* The large/malloc path has never zeroed: it was already relying on the same "kind fills its
      * own payload before anything else can observe it" property this function generalises. */
     return block + 1;
+}
+
+/* The bump that answers almost every allocation, and nothing else.
+ *
+ * `kiln_c99_gc_alloc_ex` is one function for every kind and every size, and no compiler will
+ * inline it anywhere: the size-class decision, the slab refill and the large-block table sit in
+ * it beside the bump. But a caller that knows its kind -- `kiln_c99_gc_alloc_text` knows it makes
+ * a string, `kiln_c99_new_array` knows it makes an array -- can have the bump inlined into it
+ * with the tenured-kind test folded away against the constant, and leave the frame only when the
+ * bump misses. On the string benchmark the general entry cost about ten nanoseconds a call and
+ * was the largest single line in the profile once splitting stopped allocating one part at a
+ * time.
+ *
+ * Answers NULL for anything it does not take -- an inactive nursery, a block too large for one,
+ * a chunk with no room left -- and the caller hands that to `kiln_c99_gc_alloc_ex` unchanged.
+ * The header, the bitmap bit and the counters are written exactly as the general path writes
+ * them, because this is that path's nursery arm and nothing else.
+ *
+ * The caller owes `kiln_c99_gc_alloc_due` first, and owes the payload the same treatment the
+ * general path would give it: zeroed, unless the kind is one whose caller fills every field the
+ * tracer and the finaliser read before either can run. */
+static inline void *kiln_c99_gc_nursery_bump(kiln_gc_heap *heap, uint32_t kind, size_t size) {
+    kiln_gc_nursery *nursery = &heap->nursery;
+    size_t payload = size == 0 ? 1 : size;
+    size_t total = (sizeof(kiln_gc_block) + payload + 15) & ~((size_t)15);
+    kiln_gc_block *block;
+    size_t bit_idx;
+    if (kiln_c99_gc_is_tenured_kind(kind) || !nursery->active ||
+        sizeof(kiln_gc_block) + payload > (nursery->capacity >> 2) ||
+        nursery->bump + total > nursery->limit) {
+        return NULL;
+    }
+    block = (kiln_gc_block *)nursery->bump;
+    bit_idx = (size_t)(nursery->bump - nursery->base) >> 4;
+    nursery->bitmap[bit_idx >> 6] |= ((uint64_t)1 << (bit_idx & 63));
+    nursery->bump += total;
+    block->kind = kind | KILN_GC_FLAG_NURSERY;
+    block->mark = 0;
+    block->size = size;
+    block->prev = NULL;
+    block->next = NULL;
+    nursery->count += 1;
+    nursery->bytes += size;
+    heap->count += 1;
+    heap->bytes += size;
+    heap->since_collection += size;
+    return block + 1;
+}
+
+/* `kiln_c99_gc_alloc_ex` with its nursery arm inlined at the call site. For a caller whose kind
+ * and payload shape are constants; everything else stays on the general entry. */
+KILN_ALWAYS_INLINE static inline void *kiln_c99_gc_alloc_hot(uint32_t kind, size_t size,
+                                                            int zero_payload) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    if (KILN_LIKELY(heap != NULL)) {
+        void *payload;
+        kiln_c99_gc_alloc_due(heap);
+        payload = kiln_c99_gc_nursery_bump(heap, kind, size);
+        if (KILN_LIKELY(payload != NULL)) {
+            if (zero_payload) memset(payload, 0, size == 0 ? 1 : size);
+            return payload;
+        }
+    }
+    return kiln_c99_gc_alloc_ex(kind, size, zero_payload);
 }
 
 static void *kiln_c99_gc_alloc(uint32_t kind, size_t size) {
@@ -2321,7 +2394,7 @@ static void kiln_c99_gc_finalize(kiln_gc_block *block) {
         break;
     case KILN_GC_ARRAY: {
         kiln_array *arr = (kiln_array *)payload;
-        if (arr->elements != NULL && arr->elements != arr->inline_elements) {
+        if (kiln_c99_array_elements_owned(arr)) {
             free(arr->elements);
         }
         break;
@@ -2827,7 +2900,8 @@ static void kiln_c99_gc_result_roots(void *opaque, void *context, int phase) {
  * that could yield to another allocation, so no one ever reads the slab or nursery slot's
  * previous occupant back out of them. */
 static char *kiln_c99_gc_alloc_text(size_t len) {
-    kiln_string *s = (kiln_string *)kiln_c99_gc_alloc_pointer_free(KILN_GC_STRING, sizeof(kiln_string) + len + 1);
+    kiln_string *s =
+        (kiln_string *)kiln_c99_gc_alloc_hot(KILN_GC_STRING, sizeof(kiln_string) + len + 1, 0);
     if (s == NULL) return NULL;
     s->length = len;
     s->byte_len = len;
@@ -2846,6 +2920,92 @@ static char *kiln_c99_gc_alloc_text_tenured(size_t len) {
     char *bytes = (char *)(s + 1);
     bytes[len] = '\0';
     return bytes;
+}
+
+/* A run of known-ASCII string blocks out of one nursery reservation.
+ *
+ * A `split` hands back one part per separator and every part is the same shape: a
+ * `KILN_GC_STRING` block holding a `kiln_string` header and its bytes. Asked for one at a time,
+ * each part pays the whole of the way in to `kiln_c99_gc_alloc_ex` -- the realm's heap out of
+ * thread-local storage, the collection-due test, the tenured-kind and size-class decisions -- to
+ * answer a question that cannot change between two parts of the same call. On a nine-field log
+ * line that was the single largest cost of `split`, larger than the copying.
+ *
+ * So the question is asked once and the parts are carved out of one bump. Each part still gets
+ * the block header and the nursery bitmap bit the general path would give it, and is still its
+ * own block to the tracer, the sweeper and `kiln_c99_gc_lookup`; nothing downstream can tell a
+ * carved part from an ordinary one.
+ *
+ * Answers with how many parts it placed. That is fewer than asked only when the run does not fit
+ * the chunk being filled or the nursery is not taking allocations at all, and the caller
+ * allocates the remainder the ordinary way -- a short answer is never an error. Each placed
+ * part's header is complete and its `len` body bytes are the caller's to fill immediately, which
+ * is `kiln_c99_gc_alloc_text`'s contract unchanged.
+ *
+ * The parts are marked known-ASCII because the only caller splits a string whose code units are
+ * already its bytes, which is what spares the next reader of a part the scan in
+ * `kiln_c99_string_is_ascii`. */
+static size_t kiln_c99_gc_alloc_text_run(size_t count, const size_t *lens, char **out) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    kiln_gc_nursery *nursery;
+    size_t total = 0;
+    size_t counted = 0;
+    size_t index;
+    char *cursor;
+    if (heap == NULL || count == 0) return 0;
+    kiln_c99_gc_alloc_due(heap);
+    nursery = &heap->nursery;
+    if (!nursery->active || nursery->bitmap == NULL) return 0;
+    for (index = 0; index < count; ++index) {
+        size_t payload = sizeof(kiln_string) + lens[index] + 1;
+        size_t slot = (sizeof(kiln_gc_block) + payload + 15) & ~((size_t)15);
+        /* The same ceiling the general path applies: a block worth a quarter of a chunk is one
+         * the nursery does not want, and one this cannot place either. */
+        if (sizeof(kiln_gc_block) + payload > (nursery->capacity >> 2)) return 0;
+        total += slot;
+    }
+    if (nursery->bump + total > nursery->limit) {
+        kiln_c99_nursery_turn_chunk(heap);
+        if (!nursery->active || nursery->bitmap == NULL ||
+            nursery->bump + total > nursery->limit) {
+            return 0;
+        }
+    }
+    /* The counters are the run's, not each part's: five read-modify-writes per part over a
+     * nine-part line was more of this loop than the header stores were. */
+    cursor = nursery->bump;
+    for (index = 0; index < count; ++index) {
+        size_t len = lens[index];
+        size_t payload = sizeof(kiln_string) + len + 1;
+        size_t slot = (sizeof(kiln_gc_block) + payload + 15) & ~((size_t)15);
+        kiln_gc_block *block = (kiln_gc_block *)cursor;
+        size_t bit_idx = (size_t)(cursor - nursery->base) >> 4;
+        kiln_string *header;
+        char *bytes;
+        nursery->bitmap[bit_idx >> 6] |= ((uint64_t)1 << (bit_idx & 63));
+        block->kind = KILN_GC_STRING | KILN_GC_FLAG_NURSERY | KILN_GC_FLAG_ASCII_KNOWN |
+                      KILN_GC_FLAG_ASCII;
+        block->mark = 0;
+        block->size = payload;
+        block->prev = NULL;
+        block->next = NULL;
+        header = (kiln_string *)(block + 1);
+        bytes = (char *)(header + 1);
+        header->length = len;
+        header->byte_len = len;
+        header->bytes = bytes;
+        bytes[len] = '\0';
+        out[index] = bytes;
+        counted += payload;
+        cursor += slot;
+    }
+    nursery->bump = cursor;
+    nursery->count += count;
+    nursery->bytes += counted;
+    heap->count += count;
+    heap->bytes += counted;
+    heap->since_collection += counted;
+    return count;
 }
 
 static kiln_shape kiln_c99_root_shape = {

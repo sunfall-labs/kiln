@@ -1,6 +1,16 @@
 
+/* The block arrives unzeroed, and every field the tracer and the finaliser read is written below
+ * before anything here can allocate again.
+ *
+ * That is a narrower claim than the one `kiln_c99_gc_alloc_pointer_free` rests on, and a
+ * different one. An array does have a tracer case, but what it reaches is bounded by a field the
+ * allocation's caller sets first: it traces `elements[0 .. count)`, and `count` is zero from here
+ * until elements are written in one at a time. Zeroing the rest bought nothing and cost a
+ * `memset` of the array header and its eight inline slots -- 152 bytes, twice per `split`.
+ * Whatever else changes here, `elements`, `count`, `properties` and `match_input` must be set
+ * before anything that can allocate. */
 static int kiln_c99_new_array(kiln_value *out) {
-    kiln_array *array = (kiln_array *)kiln_c99_gc_alloc(KILN_GC_ARRAY, sizeof *array);
+    kiln_array *array = (kiln_array *)kiln_c99_gc_alloc_hot(KILN_GC_ARRAY, sizeof *array, 0);
     if (array == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
@@ -19,11 +29,12 @@ static int kiln_c99_new_array(kiln_value *out) {
 
 /* A capacity of eight or fewer fits the array's own `inline_elements` -- the shape
  * `kiln_c99_val_array_push_fast` (boxed.c) already grows out of and the GC already knows not to
- * free, both by checking `elements == inline_elements` first. */
+ * free, both by asking `kiln_c99_array_elements_owned` first. */
 /* Grow an array's element storage to hold `needed`. The one place that knows an array may be
- * using its own `inline_elements`: the general `kiln_c99_reserve` would hand that pointer to
- * `realloc`, which is exactly the crash a bundled `ajv` produced the day small arrays were first
- * given their inline storage. Every element growth in the runtime goes through here. */
+ * using storage the allocator never handed out -- its own `inline_elements`, or the run inside
+ * its block: the general `kiln_c99_reserve` would hand either to `realloc`, which is exactly the
+ * crash a bundled `ajv` produced the day small arrays were first given their inline storage.
+ * Every element growth in the runtime goes through here. */
 static int kiln_c99_array_reserve(kiln_array *array, size_t needed) {
     size_t grown;
     kiln_val *moved;
@@ -44,12 +55,12 @@ static int kiln_c99_array_reserve(kiln_array *array, size_t needed) {
         }
         grown *= 2;
     }
-    if (array->elements == array->inline_elements) {
+    if (array->elements != NULL && !kiln_c99_array_elements_owned(array)) {
         moved = (kiln_val *)malloc(grown * sizeof(kiln_val));
         if (moved == NULL) {
             return KILN_C99_OUT_OF_MEMORY;
         }
-        memcpy(moved, array->inline_elements, array->capacity * sizeof(kiln_val));
+        memcpy(moved, array->elements, array->capacity * sizeof(kiln_val));
     } else {
         moved = (kiln_val *)realloc(array->elements, grown * sizeof(kiln_val));
         if (moved == NULL) {
@@ -61,8 +72,22 @@ static int kiln_c99_array_reserve(kiln_array *array, size_t needed) {
     return KILN_C99_OK;
 }
 
+/* How many elements past `inline_elements` an array will carry inside its own block rather than
+ * in a separate `malloc`. Above this the array is large enough that one `malloc` next to one
+ * collected block is the cheaper arrangement, and a block that big would leave the size classes
+ * for the general allocator's large path anyway. */
+#define KILN_C99_ARRAY_INBLOCK_MAX ((size_t)64)
+
 static int kiln_c99_new_array_with_capacity(kiln_value *out, size_t capacity, int is_numeric) {
-    kiln_array *array = (kiln_array *)kiln_c99_gc_alloc(KILN_GC_ARRAY, sizeof *array);
+    /* A count known here buys the elements a place inside the array's own block: one allocation
+     * instead of a collected block plus a `malloc`, and one free instead of a `free` inside the
+     * collector's finaliser. `split` on a line with nine fields paid both, per call. */
+    size_t inline_capacity = sizeof(((kiln_array *)0)->inline_elements) / sizeof(kiln_val);
+    size_t in_block = (capacity > inline_capacity && capacity <= KILN_C99_ARRAY_INBLOCK_MAX)
+                          ? capacity
+                          : 0;
+    kiln_array *array =
+        (kiln_array *)kiln_c99_gc_alloc_hot(KILN_GC_ARRAY, sizeof *array + in_block * sizeof(kiln_val), 0);
     if (array == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
@@ -75,8 +100,10 @@ static int kiln_c99_new_array_with_capacity(kiln_value *out, size_t capacity, in
     array->match_index = -1;
     array->match_input = kiln_c99_undefined();
     array->is_numeric = is_numeric;
-    if (capacity > 0) {
-        size_t inline_capacity = sizeof array->inline_elements / sizeof array->inline_elements[0];
+    if (in_block > 0) {
+        array->elements = (kiln_val *)(array + 1);
+        array->capacity = in_block;
+    } else if (capacity > 0) {
         if (capacity <= inline_capacity) {
             array->elements = array->inline_elements;
             array->capacity = inline_capacity;

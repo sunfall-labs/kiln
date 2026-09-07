@@ -232,12 +232,12 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
                 array->count = (size_t)wanted;
                 return KILN_C99_OK;
             }
-            if (array->elements == array->inline_elements) {
-                size_t grown = 16;
+            if (array->elements != NULL && !kiln_c99_array_elements_owned(array)) {
+                size_t grown = array->capacity < 16 ? 16 : array->capacity;
                 while (grown < (size_t)wanted) grown *= 2;
                 kiln_val *moved = (kiln_val *)malloc(grown * sizeof(kiln_val));
                 if (KILN_UNLIKELY(moved == NULL)) return KILN_C99_OUT_OF_MEMORY;
-                memcpy(moved, array->inline_elements, array->count * sizeof(kiln_val));
+                memcpy(moved, array->elements, array->count * sizeof(kiln_val));
                 array->elements = moved;
                 array->capacity = grown;
             } else {

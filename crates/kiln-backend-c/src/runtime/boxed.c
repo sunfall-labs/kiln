@@ -135,11 +135,11 @@ static int kiln_c99_val_array_push_fast(kiln_val receiver, kiln_val arg, kiln_va
                     *out = kiln_c99_val_from_double((double)arr->count);
                     return KILN_C99_OK;
                 }
-                if (arr->elements == arr->inline_elements) {
-                    size_t new_cap = 16;
+                if (arr->elements != NULL && !kiln_c99_array_elements_owned(arr)) {
+                    size_t new_cap = arr->capacity * 2 < 16 ? 16 : arr->capacity * 2;
                     kiln_val *moved = (kiln_val *)malloc(new_cap * sizeof(kiln_val));
                     if (KILN_UNLIKELY(moved == NULL)) return KILN_C99_OUT_OF_MEMORY;
-                    memcpy(moved, arr->inline_elements, arr->count * sizeof(kiln_val));
+                    memcpy(moved, arr->elements, arr->count * sizeof(kiln_val));
                     arr->elements = moved;
                     arr->capacity = new_cap;
                 } else {
