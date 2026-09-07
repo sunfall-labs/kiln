@@ -28,7 +28,14 @@ pub const C_ABI_VERSION: u32 = 1;
 /// keys include this revision so those objects are never reused across generator changes.
 // Epoch 31 changed the private dictionary-cache index encoding. Epoch 39 indexes SSA values in
 // compact bodies once they reach 512 entries; earlier objects used distinct locals until 4,096.
-pub const C_GENERATOR_VERSION: u32 = 39;
+// Epoch 40 omits unused context loads from compact function prologues.
+// Epoch 41 removes phi-only chains with no consumers before C emission.
+// Epoch 42 resolves trivial phis and densely renumbers surviving SSA values.
+pub const C_GENERATOR_VERSION: u32 = 42;
+
+/// Content identity of this emitter checkout, including dirty source changes. Input-keyed
+/// caches must not trust a manually advanced generator epoch alone across active worktrees.
+pub const C_EMITTER_BUILD_ID: &str = env!("KILN_C_EMITTER_BUILD_ID");
 
 /// Stable basename used by decoupled translation units for the shared runtime declarations.
 ///

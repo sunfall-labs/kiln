@@ -55,6 +55,29 @@ where
         .collect()
 }
 
+/// Start expensive translation units first without changing link order or error precedence.
+/// A shared cursor assigns priorities when workers actually start: simply sorting a Rayon
+/// indexed iterator would still let its split chunks begin in the middle of the cost order.
+pub(crate) fn compile_largest_first<T, F>(
+    sizes: &[usize],
+    stage: &'static str,
+    work: F,
+) -> Result<Vec<T>, NativeError>
+where
+    F: Fn(usize) -> Result<T, NativeError> + Send + Sync,
+    T: Send,
+{
+    let mut order: Vec<_> = (0..sizes.len()).collect();
+    order.sort_unstable_by_key(|&index| (std::cmp::Reverse(sizes[index]), index));
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut results = compile_indexed(sizes.len(), stage, |_| {
+        let index = order[next.fetch_add(1, std::sync::atomic::Ordering::Relaxed)];
+        Ok((index, run_worker(stage, || work(index))))
+    })?;
+    results.sort_unstable_by_key(|(index, _)| *index);
+    results.into_iter().map(|(_, result)| result).collect()
+}
+
 /// Emits independent module translation units concurrently without allowing a large graph to
 /// occupy every machine core or hold an unbounded number of large `String`s in flight.
 pub(crate) fn emit_indexed<T, F>(

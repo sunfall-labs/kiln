@@ -18,6 +18,60 @@ use std::fmt::Write;
 // the indexed spelling keeps large generated bodies smaller and modestly faster to compile.
 const COMPACT_INDEXED_VALUE_THRESHOLD: u32 = 512;
 
+/// Compact bodies use generic runtime calls rather than the optimized call paths. Determine
+/// their context needs from the rendered body, including tail bridges and suspension setup,
+/// instead of duplicating those emitters' requirements in an opcode classification.
+///
+/// Only these side-effect-free prologue declarations are candidates. Identifier matching is
+/// deliberately conservative: names in comments or strings also retain a declaration. The
+/// generated macros do not implicitly capture these locals. Noncompact clones are unchanged.
+fn retain_used_context(output: &mut String, context: std::ops::Range<usize>) {
+    const LOCALS: [(&str, &str); 6] = [
+        ("host", "    kiln_host *host = ctx->host;\n"),
+        ("thrown", "    kiln_value *thrown = ctx->thrown;\n"),
+        ("frame", "    kiln_generator *frame = ctx->frame;\n"),
+        ("depth", "    int depth = ctx->depth;\n"),
+        (
+            "kiln_inheriting",
+            "    const int kiln_inheriting = kiln_c99_inheriting_new_target; (void)kiln_inheriting;\n",
+        ),
+        (
+            "receiver",
+            "    kiln_val receiver = receiver_ptr ? *receiver_ptr : KILN_VAL_UNDEFINED;\n",
+        ),
+    ];
+    let mut used = [false; LOCALS.len()];
+    let setup = &output[context.clone()];
+    // Do not count a declaration's own name (or ctx->field) as a use. All other setup,
+    // including receiver caches and arguments/frame publication, participates in the scan.
+    let remaining_setup = setup
+        .split_inclusive('\n')
+        .filter(|line| !LOCALS.iter().any(|(_, declaration)| line == declaration));
+    for text in remaining_setup.chain(std::iter::once(&output[context.end..])) {
+        for identifier in text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_') {
+            match identifier {
+                "host" => used[0] = true,
+                "thrown" => used[1] = true,
+                "frame" => used[2] = true,
+                "depth" => used[3] = true,
+                "kiln_inheriting" => used[4] = true,
+                "receiver" => used[5] = true,
+                _ => {}
+            }
+        }
+    }
+    let retained = setup
+        .split_inclusive('\n')
+        .filter(|line| {
+            !LOCALS
+                .iter()
+                .enumerate()
+                .any(|(index, (_, declaration))| !used[index] && line == declaration)
+        })
+        .collect::<String>();
+    output.replace_range(context, &retained);
+}
+
 /// A runtime call that writes its answer through `&vN` takes the address of the SSA value, and
 /// a C compiler then keeps that value in memory for the whole body -- every read of it, on
 /// every path, pays a load and a store, for a slow path that rarely runs. The answer goes
@@ -196,6 +250,7 @@ pub fn emit_function_from_graph_with_profile(
 
     // 3. Context & arguments setup. `ctx` is never null: every caller, the runtime's and the
     // emitted direct path alike, passes its own.
+    let context_start = output.len();
     let receiver_cache = if !plan.compact && this_site_count(graph) > 0 {
         receiver_prologue(symbol, index, &this_columns(graph).1, kind)
     } else {
@@ -243,6 +298,7 @@ pub fn emit_function_from_graph_with_profile(
             .unwrap();
         }
     }
+    let context_end = output.len();
     if kind == EntryKind::Boxed {
         output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
         if type_profile_record && proto.parameter_count > 0 {
@@ -346,6 +402,9 @@ pub fn emit_function_from_graph_with_profile(
         type_profile_record,
     );
     output.push_str("}\n");
+    if plan.compact && kind == EntryKind::Boxed {
+        retain_used_context(output, context_start..context_end);
+    }
     // The boxed clone, emitted first, declares the sites every clone of this function uses,
     // and the receiver-shape cache: four rows of shapes, a slot per read of `this` in each.
     if kind == EntryKind::Boxed && (shared_sites > 0 || this_sites > 0) {

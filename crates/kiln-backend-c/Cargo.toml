@@ -20,3 +20,6 @@ serde_json = { workspace = true }
 [dev-dependencies]
 insta = { workspace = true }
 regress = { workspace = true }
+
+[build-dependencies]
+kiln-digest = { workspace = true }
