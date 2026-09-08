@@ -33,8 +33,9 @@ pub const C_ABI_VERSION: u32 = 1;
 // Epoch 42 resolves trivial phis and densely renumbers surviving SSA values.
 // Epoch 43 prunes unreachable declaration bodies; epoch 44 outlines compact operation plumbing;
 // epoch 45 packs source ranges observable through live closures; epoch 46 decouples compact C
-// source from generic-only emission.
-pub const C_GENERATOR_VERSION: u32 = 46;
+// source from generic-only emission. Epoch 47 preserves inherited class evaluation and budgets
+// release specialization using only retained code.
+pub const C_GENERATOR_VERSION: u32 = 47;
 
 /// Content identity of this emitter checkout, including dirty source changes. Input-keyed
 /// caches must not trust a manually advanced generator epoch alone across active worktrees.
@@ -2899,6 +2900,39 @@ pub fn closed_world_module_live_slots_with_declarations(
     declarations: &[RemovableDeclaration],
 ) -> BTreeSet<u32> {
     closed_world_function_liveness(program, demanded, direct_eval, declarations).2
+}
+
+/// Instruction and function counts after the same declaration liveness used by C emission.
+/// Without a closed-world export demand, conservatively count the entire module. This is an
+/// IR-only query: callers can choose specialization before constructing any SSA graphs.
+pub fn retained_module_size(
+    module: &ModuleProgram,
+    demanded: Option<&BTreeSet<u32>>,
+) -> (usize, usize) {
+    let program = &module.program;
+    let Some(demanded) = demanded else {
+        return (
+            program.code.len()
+                + program
+                    .functions
+                    .iter()
+                    .map(|f| f.code.len())
+                    .sum::<usize>(),
+            program.functions.len(),
+        );
+    };
+    let (reachable, dead_pcs, _) = closed_world_function_liveness(
+        program,
+        demanded,
+        module.link_facts.direct_eval,
+        &module.link_facts.removable_declarations,
+    );
+    let instructions = program.code.len() - dead_pcs[0].len()
+        + reachable
+            .iter()
+            .map(|&index| program.functions[index].code.len() - dead_pcs[index + 1].len())
+            .sum::<usize>();
+    (instructions, reachable.len())
 }
 
 /// Statically named members read from one module namespace slot, or `None` when the namespace
