@@ -71,10 +71,16 @@ fn release_module_specialization_budget_counts_all_instructions() {
         functions: Vec::new(),
         template_sites: Vec::new(),
     };
-    assert!(!release_module_uses_generic_bodies(&program));
+    assert!(!release_module_uses_generic_bodies(
+        &budget_module(program.clone()),
+        &EmissionPolicy::default()
+    ));
 
     program.functions.push(empty_function());
-    assert!(release_module_uses_generic_bodies(&program));
+    assert!(release_module_uses_generic_bodies(
+        &budget_module(program.clone()),
+        &EmissionPolicy::default()
+    ));
 }
 
 #[test]
@@ -88,10 +94,133 @@ fn release_module_specialization_budget_counts_functions() {
         functions: vec![empty_function(); MAX_RELEASE_SPECIALIZED_MODULE_FUNCTIONS],
         template_sites: Vec::new(),
     };
-    assert!(!release_module_uses_generic_bodies(&program));
+    assert!(!release_module_uses_generic_bodies(
+        &budget_module(program.clone()),
+        &EmissionPolicy::default()
+    ));
 
     program.functions.push(empty_function());
-    assert!(release_module_uses_generic_bodies(&program));
+    assert!(release_module_uses_generic_bodies(
+        &budget_module(program.clone()),
+        &EmissionPolicy::default()
+    ));
+}
+
+fn budget_module(program: Program) -> ModuleProgram {
+    let mut module = kiln_ir::compile_module(&frontend_oxc::parse("main.mjs", "")).unwrap();
+    module.program = program;
+    module
+}
+
+#[test]
+fn release_specialization_ignores_dead_functions_but_keeps_live_and_eval_budgets() {
+    let mut source = String::from(
+        "export function hot(n) { let x = 0; for (let i = 0; i < n; i++) x += i; return x; }\n",
+    );
+    for index in 0..32 {
+        source.push_str(&format!("function unused{index}() {{ return 1; }}\n"));
+    }
+    source.push_str("class Unused { method() { return 1; } }\n");
+    let mut module = kiln_ir::compile_module(&frontend_oxc::parse("main.mjs", &source)).unwrap();
+    let demanded = module
+        .exports
+        .iter()
+        .map(|export| export.local_slot)
+        .collect();
+    let policy = EmissionPolicy {
+        live_module_slots: Some(Arc::new(demanded)),
+        ..Default::default()
+    };
+    assert!(!release_module_uses_generic_bodies(&module, &policy));
+    assert_eq!(
+        kiln_backend_c::retained_module_size(&module, policy.live_module_slots.as_deref()).1,
+        1
+    );
+    assert!(
+        release_module_uses_generic_bodies(&module, &EmissionPolicy::default()),
+        "shared/open modules retain all bodies"
+    );
+    let all = EmissionPolicy {
+        live_module_slots: Some(Arc::new((0..module.program.local_count).collect())),
+        ..Default::default()
+    };
+    assert!(release_module_uses_generic_bodies(&module, &all));
+    // A single dead function can exceed the instruction budget without hitting the function
+    // count limit. Its body must not disable specialization either.
+    let huge_source = format!(
+        "export function hot(n) {{ return n + 1; }} function unused() {{ {} }}",
+        "console.log(1);".repeat(MAX_RELEASE_SPECIALIZED_MODULE_INSTRUCTIONS)
+    );
+    let huge = kiln_ir::compile_module(&frontend_oxc::parse("main.mjs", &huge_source)).unwrap();
+    assert!(release_module_uses_generic_bodies(
+        &huge,
+        &EmissionPolicy::default()
+    ));
+    let huge_policy = EmissionPolicy {
+        live_module_slots: Some(Arc::new(
+            huge.exports
+                .iter()
+                .map(|export| export.local_slot)
+                .collect(),
+        )),
+        ..Default::default()
+    };
+    assert!(!release_module_uses_generic_bodies(&huge, &huge_policy));
+    module.link_facts.direct_eval = true;
+    assert!(release_module_uses_generic_bodies(&module, &policy));
+}
+
+#[test]
+fn inherited_classes_are_not_removable_declarations() {
+    for source in [
+        "class Unused extends Later {} class Later {}",
+        "class Base {} Base = 3; class Unused extends Base {}",
+        "class Base {} const Unused = class extends Base {};",
+    ] {
+        let module = kiln_ir::compile_module(&frontend_oxc::parse("main.mjs", source)).unwrap();
+        assert_eq!(
+            module.link_facts.removable_declarations.len(),
+            1,
+            "only the class without heritage is removable: {source}"
+        );
+    }
+}
+
+#[test]
+fn release_pruning_preserves_superclass_tdz() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-class-tdz");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "class Unused extends Later {} class Later {} console.log('continued');",
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("tdz"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(report.output).output().unwrap();
+    assert!(!result.status.success());
+    assert!(result.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("ReferenceError"),
+        "{:?}",
+        result
+    );
 }
 
 struct OxcFrontend;
@@ -2490,7 +2619,12 @@ fn graph_emission_cache_hits_persist_and_all_input_classes_invalidate() {
     };
     let cache_path = project.path.join("emission-cache");
     let cache = ArtifactCache::new(&cache_path);
-    let expected = emit_native_graph_module_with_policy(node, "main.js", &policy).unwrap();
+    // Release selection can change generic_only after the input cache key is computed.
+    let selected_policy = EmissionPolicy {
+        generic_only: !policy.generic_only,
+        ..policy.clone()
+    };
+    let expected = emit_native_graph_module_with_policy(node, "main.js", &selected_policy).unwrap();
     let (first, first_hit) =
         cached_graph_module(&cache, "test-target", node, "main.js", &policy, || {
             Ok(expected.clone())

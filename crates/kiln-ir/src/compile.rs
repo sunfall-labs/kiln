@@ -1047,7 +1047,6 @@ impl Compiler {
     }
 
     fn plain_module_statements(&mut self, list: &[Statement]) {
-        let ordinary_classes = removable_class_names_in_order(list);
         for statement in list {
             self.hoist_names(statement);
         }
@@ -1060,7 +1059,7 @@ impl Compiler {
             if matches!(statement.kind, StatementKind::Function(_)) {
                 continue;
             }
-            let removable_names = removable_declaration_names(statement, &ordinary_classes);
+            let removable_names = removable_declaration_names(statement);
             let pc_start = self.code.len();
             self.statement(statement);
             if let Some(names) = removable_names {
@@ -7474,48 +7473,16 @@ fn removable_class_structure(class: &Class) -> bool {
             })
 }
 
-fn removable_class_evaluation(class: &Class, ordinary_classes: &HashSet<String>) -> bool {
-    removable_class_structure(class)
-        && match class.superclass.as_ref().map(|value| &value.kind) {
-            None => true,
-            Some(ExpressionKind::Identifier(name)) => ordinary_classes.contains(name),
-            _ => false,
-        }
+fn removable_class_evaluation(class: &Class) -> bool {
+    // Evaluating a superclass reads a binding and validates its current value. Even a name
+    // declared as a class elsewhere may be in its TDZ or reassigned before this statement.
+    // Keep all heritage evaluation until we can prove initialization and value stability.
+    class.superclass.is_none() && removable_class_structure(class)
 }
 
-fn removable_class_names_in_order(list: &[Statement]) -> HashSet<String> {
-    let mut ordinary = HashSet::new();
-    for statement in list {
-        let (name, class) = match &statement.kind {
-            StatementKind::Class(class) => (class.name.as_deref(), Some(class.as_ref())),
-            StatementKind::Variable { declarations, .. } if declarations.len() == 1 => {
-                let declaration = &declarations[0];
-                let class = declaration.initializer.as_ref().and_then(|value| {
-                    if let ExpressionKind::Class(class) = &value.kind {
-                        Some(class.as_ref())
-                    } else {
-                        None
-                    }
-                });
-                (declaration.pattern.as_identifier(), class)
-            }
-            _ => (None, None),
-        };
-        if let (Some(name), Some(class)) = (name, class)
-            && removable_class_evaluation(class, &ordinary)
-        {
-            ordinary.insert(name.to_owned());
-        }
-    }
-    ordinary
-}
-
-fn removable_declaration_names(
-    statement: &Statement,
-    ordinary_classes: &HashSet<String>,
-) -> Option<Vec<String>> {
+fn removable_declaration_names(statement: &Statement) -> Option<Vec<String>> {
     match &statement.kind {
-        StatementKind::Class(class) if removable_class_evaluation(class, ordinary_classes) => {
+        StatementKind::Class(class) if removable_class_evaluation(class) => {
             class.name.clone().map(|name| vec![name])
         }
         StatementKind::Variable { kind, declarations }
@@ -7526,9 +7493,7 @@ fn removable_declaration_names(
                 let name = declaration.pattern.as_identifier()?.to_owned();
                 let removable = match declaration.initializer.as_ref().map(|value| &value.kind) {
                     None | Some(ExpressionKind::Function(_)) => true,
-                    Some(ExpressionKind::Class(class)) => {
-                        removable_class_evaluation(class, ordinary_classes)
-                    }
+                    Some(ExpressionKind::Class(class)) => removable_class_evaluation(class),
                     _ => false,
                 };
                 if !removable {

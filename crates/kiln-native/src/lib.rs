@@ -51,15 +51,26 @@ const RELEASE_PRELUDE_COMPILE_IDENTITY: &[u8] = b"vectorize=off\0slp-vectorize=o
 const MAX_RELEASE_SPECIALIZED_MODULE_INSTRUCTIONS: usize = 512;
 const MAX_RELEASE_SPECIALIZED_MODULE_FUNCTIONS: usize = 16;
 
-fn release_module_uses_generic_bodies(program: &Program) -> bool {
-    program.functions.len() > MAX_RELEASE_SPECIALIZED_MODULE_FUNCTIONS
-        || program.code.len()
-            + program
-                .functions
-                .iter()
-                .map(|function| function.code.len())
-                .sum::<usize>()
-            > MAX_RELEASE_SPECIALIZED_MODULE_INSTRUCTIONS
+fn release_module_uses_generic_bodies(module: &ModuleProgram, policy: &EmissionPolicy) -> bool {
+    let (instructions, functions) =
+        kiln_backend_c::retained_module_size(module, policy.live_module_slots.as_deref());
+    functions > MAX_RELEASE_SPECIALIZED_MODULE_FUNCTIONS
+        || instructions > MAX_RELEASE_SPECIALIZED_MODULE_INSTRUCTIONS
+}
+
+// Select the budget only on a generated-C cache miss. Warm builds must not rerun liveness,
+// and the cache payload must remember the actual policy used to compile the emitted body.
+fn emit_graph_module_for_profile(
+    node: &kiln_module_graph::ModuleNode,
+    logical_path: &str,
+    policy: &EmissionPolicy,
+    profile: NativeProfile,
+) -> Result<kiln_backend_c::CModule, NativeError> {
+    let mut policy = policy.clone();
+    if profile == NativeProfile::Release {
+        policy.generic_only = release_module_uses_generic_bodies(&node.program, &policy);
+    }
+    emit_native_graph_module_with_policy(node, logical_path, &policy)
 }
 
 fn configure_release_prelude_compile(options: &mut CompileOptions) {
@@ -1156,19 +1167,21 @@ impl NativeBuilder {
         let emitted_modules = emit_indexed(nodes.len(), "shared graph module emission", |index| {
             let node = nodes[index];
             let logical_path = logical_module_path(graph.project_root(), &node.path)?;
-            let mut module_emission = emission.clone();
-            if options.profile == NativeProfile::Release
-                && release_module_uses_generic_bodies(&node.program.program)
-            {
-                module_emission.generic_only = true;
-            }
+            let module_emission = emission.clone();
             cached_graph_module(
                 &self.cache,
                 &target,
                 node,
                 &logical_path,
                 &module_emission,
-                || emit_native_graph_module_with_policy(node, &logical_path, &module_emission),
+                || {
+                    emit_graph_module_for_profile(
+                        node,
+                        &logical_path,
+                        &module_emission,
+                        options.profile,
+                    )
+                },
             )
         })?;
         let mut modules = Vec::with_capacity(nodes.len());
@@ -1685,11 +1698,6 @@ impl NativeBuilder {
             let node = nodes[index];
             let logical_path = logical_module_path(graph.project_root(), &node.path)?;
             let mut module_emission = emission.clone();
-            if options.profile == NativeProfile::Release
-                && release_module_uses_generic_bodies(&node.program.program)
-            {
-                module_emission.generic_only = true;
-            }
             if matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs) {
                 module_emission.live_module_slots = Some(Arc::new(
                     selected
@@ -1705,7 +1713,14 @@ impl NativeBuilder {
                 node,
                 &logical_path,
                 &module_emission,
-                || emit_native_graph_module_with_policy(node, &logical_path, &module_emission),
+                || {
+                    emit_graph_module_for_profile(
+                        node,
+                        &logical_path,
+                        &module_emission,
+                        options.profile,
+                    )
+                },
             )?;
             Ok((logical_path, emitted, generated_c_hit))
         })?;
@@ -2686,7 +2701,7 @@ fn cached_graph_module(
         &module_abi_identity(),
         target,
         CacheProfile::Debug,
-        Digest::hash(b"native-graph-emission-input-v1"),
+        Digest::hash(b"native-graph-emission-input-v2"),
         [
             input,
             prelude_header_digest(),
@@ -2696,7 +2711,7 @@ fn cached_graph_module(
     );
     match cache.lookup(&cache_key)? {
         Lookup::Hit(artifact) => {
-            let (program_hash, symbol, source): (u64, String, String) =
+            let (program_hash, symbol, source, generic_only): (u64, String, String, bool) =
                 serde_json::from_slice(&artifact.bytes).map_err(|error| CacheError::Corrupt {
                     path: artifact.path,
                     reason: format!("invalid cached C module: {error}"),
@@ -2706,15 +2721,20 @@ fn cached_graph_module(
                     program_hash,
                     symbol,
                     source,
-                    generic_only: policy.generic_only,
+                    generic_only,
                 },
                 true,
             ))
         }
         Lookup::Miss => {
             let module = emit()?;
-            let bytes = serde_json::to_vec(&(module.program_hash, &module.symbol, &module.source))
-                .expect("C module contains only strings and an integer");
+            let bytes = serde_json::to_vec(&(
+                module.program_hash,
+                &module.symbol,
+                &module.source,
+                module.generic_only,
+            ))
+            .expect("C module contains only strings and an integer");
             cache.put(&cache_key, &bytes)?;
             Ok((module, false))
         }
