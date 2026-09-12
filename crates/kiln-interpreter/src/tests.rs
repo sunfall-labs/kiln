@@ -4978,3 +4978,194 @@ fn whatwg_url_and_search_params_support() {
         Err(ExecutionError::TypeErrorMessage { .. })
     ));
 }
+
+#[test]
+fn node_zlib_streaming_and_sync_compression_and_decompression() {
+    let program = Program::default();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: std::collections::VecDeque::new(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+
+    let original = b"Hello from Kiln node:zlib full compression suite!";
+
+    // 1. Test streaming Gzip compression -> streaming Gunzip decompression
+    let gzip = vm
+        .dispatch_native(Native::NodeZlibCreateGzip, &Value::Undefined, &[], 0)
+        .expect("createGzip succeeds");
+    let orig_chunk = node_bytes_value(original.to_vec());
+    vm.dispatch_native(Native::NodeWritableEnd, &gzip, &[orig_chunk], 0)
+        .expect("gzip.end succeeds");
+
+    let compressed_gz_val = vm
+        .dispatch_native(Native::NodeReadableRead, &gzip, &[], 0)
+        .expect("gzip.read succeeds");
+    let compressed_gz_bytes = match &compressed_gz_val {
+        Value::TypedArray(view) => view.bytes(),
+        _ => panic!("Expected Uint8Array from gzip.read()"),
+    };
+
+    let gunzip = vm
+        .dispatch_native(Native::NodeZlibCreateGunzip, &Value::Undefined, &[], 0)
+        .expect("createGunzip succeeds");
+    vm.dispatch_native(Native::NodeWritableEnd, &gunzip, &[compressed_gz_val], 0)
+        .expect("gunzip.end succeeds");
+
+    let decompressed_gz_val = vm
+        .dispatch_native(Native::NodeReadableRead, &gunzip, &[], 0)
+        .expect("gunzip.read succeeds");
+    let decompressed_bytes = match decompressed_gz_val {
+        Value::TypedArray(view) => view.bytes(),
+        _ => panic!("Expected Uint8Array from gunzip.read()"),
+    };
+    assert_eq!(decompressed_bytes, original);
+
+    // 2. Test streaming Deflate compression -> streaming Inflate decompression
+    let deflate = vm
+        .dispatch_native(Native::NodeZlibCreateDeflate, &Value::Undefined, &[], 0)
+        .expect("createDeflate succeeds");
+    let orig_chunk2 = node_bytes_value(original.to_vec());
+    vm.dispatch_native(Native::NodeWritableEnd, &deflate, &[orig_chunk2], 0)
+        .expect("deflate.end succeeds");
+
+    let compressed_deflate_val = vm
+        .dispatch_native(Native::NodeReadableRead, &deflate, &[], 0)
+        .expect("deflate.read succeeds");
+    let compressed_deflate_bytes = match &compressed_deflate_val {
+        Value::TypedArray(view) => view.bytes(),
+        _ => panic!("Expected Uint8Array from deflate.read()"),
+    };
+
+    let inflate = vm
+        .dispatch_native(Native::NodeZlibCreateInflate, &Value::Undefined, &[], 0)
+        .expect("createInflate succeeds");
+    vm.dispatch_native(
+        Native::NodeWritableEnd,
+        &inflate,
+        &[compressed_deflate_val],
+        0,
+    )
+    .expect("inflate.end succeeds");
+
+    let decompressed_inflate_val = vm
+        .dispatch_native(Native::NodeReadableRead, &inflate, &[], 0)
+        .expect("inflate.read succeeds");
+    let decompressed_bytes = match decompressed_inflate_val {
+        Value::TypedArray(view) => view.bytes(),
+        _ => panic!("Expected Uint8Array from inflate.read()"),
+    };
+    assert_eq!(decompressed_bytes, original);
+
+    // 3. Test streaming Unzip auto-detecting gzip and deflate
+    let unzip_gz = vm
+        .dispatch_native(Native::NodeZlibCreateUnzip, &Value::Undefined, &[], 0)
+        .expect("createUnzip succeeds");
+    let gz_chunk = node_bytes_value(compressed_gz_bytes.clone());
+    vm.dispatch_native(Native::NodeWritableEnd, &unzip_gz, &[gz_chunk], 0)
+        .expect("unzip.end with gzip data succeeds");
+    let unzipped_gz = vm
+        .dispatch_native(Native::NodeReadableRead, &unzip_gz, &[], 0)
+        .expect("unzip.read gzip succeeds");
+    assert_eq!(
+        match unzipped_gz {
+            Value::TypedArray(v) => v.bytes(),
+            _ => panic!("Expected bytes"),
+        },
+        original
+    );
+
+    let unzip_deflate = vm
+        .dispatch_native(Native::NodeZlibCreateUnzip, &Value::Undefined, &[], 0)
+        .expect("createUnzip succeeds");
+    let deflate_chunk = node_bytes_value(compressed_deflate_bytes.clone());
+    vm.dispatch_native(Native::NodeWritableEnd, &unzip_deflate, &[deflate_chunk], 0)
+        .expect("unzip.end with deflate data succeeds");
+    let unzipped_deflate = vm
+        .dispatch_native(Native::NodeReadableRead, &unzip_deflate, &[], 0)
+        .expect("unzip.read deflate succeeds");
+    assert_eq!(
+        match unzipped_deflate {
+            Value::TypedArray(v) => v.bytes(),
+            _ => panic!("Expected bytes"),
+        },
+        original
+    );
+
+    // 4. Test sync APIs: gzipSync, gunzipSync, deflateSync, inflateSync, unzipSync
+    let orig_val = node_bytes_value(original.to_vec());
+    let sync_gzipped = vm
+        .dispatch_native(
+            Native::NodeZlibGzipSync,
+            &Value::Undefined,
+            &[orig_val.clone()],
+            0,
+        )
+        .expect("gzipSync succeeds");
+    let sync_gunzipped = vm
+        .dispatch_native(
+            Native::NodeZlibGunzipSync,
+            &Value::Undefined,
+            &[sync_gzipped.clone()],
+            0,
+        )
+        .expect("gunzipSync succeeds");
+    assert_eq!(
+        match sync_gunzipped {
+            Value::TypedArray(v) => v.bytes(),
+            _ => panic!("Expected bytes"),
+        },
+        original
+    );
+
+    let sync_deflated = vm
+        .dispatch_native(
+            Native::NodeZlibDeflateSync,
+            &Value::Undefined,
+            &[orig_val],
+            0,
+        )
+        .expect("deflateSync succeeds");
+    let sync_inflated = vm
+        .dispatch_native(
+            Native::NodeZlibInflateSync,
+            &Value::Undefined,
+            &[sync_deflated.clone()],
+            0,
+        )
+        .expect("inflateSync succeeds");
+    assert_eq!(
+        match sync_inflated {
+            Value::TypedArray(v) => v.bytes(),
+            _ => panic!("Expected bytes"),
+        },
+        original
+    );
+
+    let sync_unzipped = vm
+        .dispatch_native(
+            Native::NodeZlibUnzipSync,
+            &Value::Undefined,
+            &[sync_deflated],
+            0,
+        )
+        .expect("unzipSync succeeds");
+    assert_eq!(
+        match sync_unzipped {
+            Value::TypedArray(v) => v.bytes(),
+            _ => panic!("Expected bytes"),
+        },
+        original
+    );
+
+    // 5. Test zlib constants
+    let constants = Native::NodeZlib
+        .property("constants")
+        .expect("zlib constants property exists");
+    assert_eq!(vm.property(&constants, "Z_OK"), Value::Number(0.0));
+    assert_eq!(vm.property(&constants, "Z_SYNC_FLUSH"), Value::Number(2.0));
+    assert_eq!(vm.property(&constants, "Z_STREAM_END"), Value::Number(1.0));
+}

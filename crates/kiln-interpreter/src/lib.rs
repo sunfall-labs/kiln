@@ -362,6 +362,7 @@ enum NodeObject {
     Hash(Rc<RefCell<HashState>>),
     StringDecoder(Rc<RefCell<StringDecoderState>>),
     AsyncLocalStorage(Rc<AsyncStorage>),
+    Zlib(Rc<ZlibState>),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -405,6 +406,24 @@ struct WritableState {
     finished: bool,
     destroyed: bool,
     write: Option<Value>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ZlibTransformKind {
+    Gzip,
+    Gunzip,
+    Deflate,
+    Inflate,
+    Unzip,
+    Brotli,
+}
+
+#[derive(Debug)]
+struct ZlibState {
+    kind: ZlibTransformKind,
+    readable: Rc<RefCell<ReadableState>>,
+    writable: Rc<RefCell<WritableState>>,
+    accumulated: RefCell<Vec<u8>>,
 }
 
 #[derive(Debug)]
@@ -8377,6 +8396,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     });
                 }
                 let chunk = arguments.first().cloned().unwrap_or(Value::Undefined);
+                if let Value::Object(obj) = receiver
+                    && let Some(NodeObject::Zlib(zlib_state)) = &obj.borrow().node_object
+                {
+                    let bytes = match &chunk {
+                        Value::TypedArray(view) => view.bytes(),
+                        Value::ArrayBuffer(ab) => ab.bytes.borrow().clone(),
+                        Value::String(s) => s.as_bytes().to_vec(),
+                        _ => Vec::new(),
+                    };
+                    zlib_state
+                        .accumulated
+                        .borrow_mut()
+                        .extend_from_slice(&bytes);
+                }
                 let callback = arguments
                     .iter()
                     .rev()
@@ -8421,6 +8454,46 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     state.finished = true;
                 }
                 sync_writable_public_state(receiver, &state.borrow());
+                let maybe_zlib = if let Value::Object(obj) = receiver {
+                    if let Some(NodeObject::Zlib(zlib_state)) = &obj.borrow().node_object {
+                        Some((zlib_state.kind, zlib_state.accumulated.borrow().clone()))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some((kind, input_bytes)) = maybe_zlib {
+                    match transform_zlib(kind, &input_bytes) {
+                        Ok(decompressed) => {
+                            let out_buf = node_bytes_value(decompressed);
+                            self.dispatch_node_readable(
+                                Native::NodeReadablePush,
+                                receiver,
+                                &[out_buf],
+                                instruction,
+                            )?;
+                            self.dispatch_node_readable(
+                                Native::NodeReadablePush,
+                                receiver,
+                                &[Value::Null],
+                                instruction,
+                            )?;
+                        }
+                        Err(err) => {
+                            let error = self.construct_error(
+                                ErrorKind::Error,
+                                &[Value::String(err.to_string())],
+                            );
+                            self.dispatch_node_event(
+                                Native::NodeEventEmit,
+                                receiver,
+                                &[Value::String("error".into()), error],
+                                instruction,
+                            )?;
+                        }
+                    }
+                }
                 self.dispatch_node_event(
                     Native::NodeEventEmit,
                     receiver,
@@ -14513,13 +14586,71 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // Kiln captures the realm's standard streams. They are therefore not terminals,
             // regardless of whether the embedding process happens to have an ambient TTY.
             Native::NodeTtyIsatty => return Ok(Value::Boolean(false)),
+            Native::NodeZlibCreateGzip => {
+                return Ok(node_zlib_create_transform(ZlibTransformKind::Gzip));
+            }
+            Native::NodeZlibCreateGunzip => {
+                return Ok(node_zlib_create_transform(ZlibTransformKind::Gunzip));
+            }
+            Native::NodeZlibCreateDeflate => {
+                return Ok(node_zlib_create_transform(ZlibTransformKind::Deflate));
+            }
+            Native::NodeZlibCreateInflate => {
+                return Ok(node_zlib_create_transform(ZlibTransformKind::Inflate));
+            }
+            Native::NodeZlibCreateUnzip => {
+                return Ok(node_zlib_create_transform(ZlibTransformKind::Unzip));
+            }
+            Native::NodeZlibCreateBrotliDecompress => {
+                return Ok(node_zlib_create_transform(ZlibTransformKind::Brotli));
+            }
             Native::NodeZlibCreateDecompress => {
-                return Err(ExecutionError::Host {
-                    instruction,
-                    message:
-                        "node:zlib streaming decompression requires the async-compression provider"
-                            .to_owned(),
-                });
+                return Ok(node_zlib_create_transform(ZlibTransformKind::Gunzip));
+            }
+            Native::NodeZlibGzipSync => {
+                let bytes = zlib_buffer_arg(arguments.first());
+                let res = transform_zlib(ZlibTransformKind::Gzip, &bytes).map_err(|err| {
+                    ExecutionError::TypeErrorMessage {
+                        message: err.to_string(),
+                    }
+                })?;
+                return Ok(node_bytes_value(res));
+            }
+            Native::NodeZlibGunzipSync => {
+                let bytes = zlib_buffer_arg(arguments.first());
+                let res = transform_zlib(ZlibTransformKind::Gunzip, &bytes).map_err(|err| {
+                    ExecutionError::TypeErrorMessage {
+                        message: err.to_string(),
+                    }
+                })?;
+                return Ok(node_bytes_value(res));
+            }
+            Native::NodeZlibDeflateSync => {
+                let bytes = zlib_buffer_arg(arguments.first());
+                let res = transform_zlib(ZlibTransformKind::Deflate, &bytes).map_err(|err| {
+                    ExecutionError::TypeErrorMessage {
+                        message: err.to_string(),
+                    }
+                })?;
+                return Ok(node_bytes_value(res));
+            }
+            Native::NodeZlibInflateSync => {
+                let bytes = zlib_buffer_arg(arguments.first());
+                let res = transform_zlib(ZlibTransformKind::Inflate, &bytes).map_err(|err| {
+                    ExecutionError::TypeErrorMessage {
+                        message: err.to_string(),
+                    }
+                })?;
+                return Ok(node_bytes_value(res));
+            }
+            Native::NodeZlibUnzipSync => {
+                let bytes = zlib_buffer_arg(arguments.first());
+                let res = transform_zlib(ZlibTransformKind::Unzip, &bytes).map_err(|err| {
+                    ExecutionError::TypeErrorMessage {
+                        message: err.to_string(),
+                    }
+                })?;
+                return Ok(node_bytes_value(res));
             }
             Native::TextDecoderConstructor => {
                 let label = arguments
@@ -33678,10 +33809,118 @@ fn node_readable_state(receiver: &Value) -> Result<Rc<RefCell<ReadableState>>, E
     };
     match &object.borrow().node_object {
         Some(NodeObject::Readable(state)) => Ok(Rc::clone(state)),
+        Some(NodeObject::Zlib(state)) => Ok(Rc::clone(&state.readable)),
         _ => Err(ExecutionError::TypeErrorMessage {
             message: "Readable method called on an incompatible receiver".into(),
         }),
     }
+}
+
+fn zlib_buffer_arg(value: Option<&Value>) -> Vec<u8> {
+    match value {
+        Some(Value::TypedArray(view)) => view.bytes(),
+        Some(Value::ArrayBuffer(ab)) => ab.bytes.borrow().clone(),
+        Some(Value::String(s)) => s.as_bytes().to_vec(),
+        _ => Vec::new(),
+    }
+}
+
+fn transform_zlib(kind: ZlibTransformKind, bytes: &[u8]) -> Result<Vec<u8>, std::io::Error> {
+    use std::io::{Read, Write};
+    match kind {
+        ZlibTransformKind::Gzip => {
+            let mut encoder =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder.write_all(bytes)?;
+            encoder.finish()
+        }
+        ZlibTransformKind::Gunzip => {
+            let mut decoder = flate2::read::GzDecoder::new(bytes);
+            let mut out = Vec::new();
+            decoder.read_to_end(&mut out)?;
+            Ok(out)
+        }
+        ZlibTransformKind::Deflate => {
+            let mut encoder =
+                flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder.write_all(bytes)?;
+            encoder.finish()
+        }
+        ZlibTransformKind::Inflate => {
+            let mut decoder = flate2::read::ZlibDecoder::new(bytes);
+            let mut out = Vec::new();
+            match decoder.read_to_end(&mut out) {
+                Ok(_) => Ok(out),
+                Err(_) => {
+                    let mut raw = flate2::read::DeflateDecoder::new(bytes);
+                    let mut raw_out = Vec::new();
+                    raw.read_to_end(&mut raw_out)?;
+                    Ok(raw_out)
+                }
+            }
+        }
+        ZlibTransformKind::Unzip => {
+            let mut gz = flate2::read::GzDecoder::new(bytes);
+            let mut out = Vec::new();
+            if gz.read_to_end(&mut out).is_ok() {
+                Ok(out)
+            } else {
+                let mut zlib = flate2::read::ZlibDecoder::new(bytes);
+                let mut zout = Vec::new();
+                if zlib.read_to_end(&mut zout).is_ok() {
+                    Ok(zout)
+                } else {
+                    let mut raw = flate2::read::DeflateDecoder::new(bytes);
+                    let mut raw_out = Vec::new();
+                    raw.read_to_end(&mut raw_out)?;
+                    Ok(raw_out)
+                }
+            }
+        }
+        ZlibTransformKind::Brotli => Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "brotli decompression not yet supported",
+        )),
+    }
+}
+
+fn node_zlib_create_transform(kind: ZlibTransformKind) -> Value {
+    let readable_state = new_readable_state(16 * 1024, None);
+    let writable_state = Rc::new(RefCell::new(WritableState {
+        ended: false,
+        finished: false,
+        destroyed: false,
+        write: None,
+    }));
+    let zlib_state = Rc::new(ZlibState {
+        kind,
+        readable: Rc::clone(&readable_state),
+        writable: Rc::clone(&writable_state),
+        accumulated: RefCell::new(Vec::new()),
+    });
+    let object = Rc::new(RefCell::new(ObjectData::default()));
+    {
+        let mut data = object.borrow_mut();
+        data.node_events.get_or_insert_with(Vec::new);
+        data.node_object = Some(NodeObject::Zlib(zlib_state));
+        data.set_prototype(Value::Native(
+            Native::PrototypeOf(PrototypeTable::Readable),
+            RealmId::PRIMARY,
+        ));
+        data.set_non_enumerable(
+            "write",
+            Value::Native(Native::NodeWritableWrite, RealmId::PRIMARY),
+        );
+        data.set_non_enumerable(
+            "end",
+            Value::Native(Native::NodeWritableEnd, RealmId::PRIMARY),
+        );
+        data.set_non_enumerable("writableEnded", Value::Boolean(false));
+        data.set_non_enumerable("writableFinished", Value::Boolean(false));
+        data.set_non_enumerable("readableEnded", Value::Boolean(false));
+        data.set_non_enumerable("destroyed", Value::Boolean(false));
+    }
+    Value::Object(object)
 }
 
 fn sync_readable_public_state(receiver: &Value, state: &ReadableState) {
@@ -33740,6 +33979,7 @@ fn node_writable_state(receiver: &Value) -> Result<Rc<RefCell<WritableState>>, E
     };
     match &object.borrow().node_object {
         Some(NodeObject::Writable(state)) => Ok(Rc::clone(state)),
+        Some(NodeObject::Zlib(state)) => Ok(Rc::clone(&state.writable)),
         _ => Err(ExecutionError::TypeErrorMessage {
             message: "Writable method called on an incompatible receiver".into(),
         }),
@@ -38242,6 +38482,17 @@ fn call_native(
         | Native::NodeTtyIsatty
         | Native::NodeZlib
         | Native::NodeZlibCreateDecompress
+        | Native::NodeZlibCreateGunzip
+        | Native::NodeZlibCreateInflate
+        | Native::NodeZlibCreateGzip
+        | Native::NodeZlibCreateDeflate
+        | Native::NodeZlibCreateUnzip
+        | Native::NodeZlibCreateBrotliDecompress
+        | Native::NodeZlibGunzipSync
+        | Native::NodeZlibInflateSync
+        | Native::NodeZlibGzipSync
+        | Native::NodeZlibDeflateSync
+        | Native::NodeZlibUnzipSync
         | Native::NodePerfHooks
         | Native::NodeHttps
         | Native::NodeHttpsCreateServer
