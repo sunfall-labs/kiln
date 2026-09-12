@@ -3809,7 +3809,7 @@ fn graph_shared_public_digest(
     Ok(Digest::hash(&bytes))
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum NativeGraphImport {
     Internal,
     Binding {
@@ -3818,6 +3818,10 @@ enum NativeGraphImport {
     },
     Namespace {
         provider_index: usize,
+    },
+    CommonJsNamed {
+        provider_index: usize,
+        property: String,
     },
 }
 
@@ -3912,6 +3916,16 @@ fn demand_namespace_members(
                     .entry(module.clone())
                     .or_default()
                     .insert(*local_slot);
+                if newly_live || newly_demanded {
+                    queue.push_back(module.clone());
+                }
+            }
+            Some(ResolvedExport::CommonJsNamed { module, .. }) => {
+                let newly_live = live.insert(module.clone());
+                let newly_demanded = live_export_slots
+                    .entry(module.clone())
+                    .or_default()
+                    .insert(0);
                 if newly_live || newly_demanded {
                     queue.push_back(module.clone());
                 }
@@ -4058,6 +4072,16 @@ fn native_executable_graph(
                         queue.push_back(module.clone());
                     }
                 }
+                Some(ResolvedExport::CommonJsNamed { module, .. }) => {
+                    let newly_demanded = live_export_slots
+                        .entry(module.clone())
+                        .or_default()
+                        .insert(0);
+                    mark_live(module, &mut live, &mut queue);
+                    if newly_demanded {
+                        queue.push_back(module.clone());
+                    }
+                }
                 Some(ResolvedExport::Namespace { module }) => {
                     let static_members = namespace_member_cache
                         .entry((node.path.clone(), import.local_slot))
@@ -4110,6 +4134,16 @@ fn native_executable_graph(
                             .entry(module.clone())
                             .or_default()
                             .insert(*local_slot);
+                        mark_live(module, &mut live, &mut queue);
+                        if newly_demanded {
+                            queue.push_back(module.clone());
+                        }
+                    }
+                    Some(ResolvedExport::CommonJsNamed { module, .. }) => {
+                        let newly_demanded = live_export_slots
+                            .entry(module.clone())
+                            .or_default()
+                            .insert(0);
                         mark_live(module, &mut live, &mut queue);
                         if newly_demanded {
                             queue.push_back(module.clone());
@@ -4255,6 +4289,31 @@ fn graph_import_value(
     }
 
     let (origin, local_slot) = match graph.resolved_export(&dependency.target, &import.imported) {
+        Some(ResolvedExport::CommonJsNamed { module, property }) => {
+            let provider_index = *indices.get(module).ok_or_else(|| {
+                NativeError::Graph(ModuleGraphError::InternalMissingModule {
+                    path: module.clone(),
+                })
+            })?;
+            let importer_index = *indices.get(&node.path).ok_or_else(|| {
+                NativeError::Graph(ModuleGraphError::InternalMissingModule {
+                    path: node.path.clone(),
+                })
+            })?;
+            if provider_index >= importer_index {
+                return Err(NativeError::Emit(EmitError::Unsupported {
+                    feature: format!(
+                        "`{}`, imported across a module cycle before `{}` has run, in native module graphs",
+                        property,
+                        module.display()
+                    ),
+                }));
+            }
+            return Ok(NativeGraphImport::CommonJsNamed {
+                provider_index,
+                property: property.clone(),
+            });
+        }
         Some(ResolvedExport::Local { module, local_slot }) => (module, *local_slot),
         Some(ResolvedExport::Namespace { module }) => {
             let provider_index = *indices.get(module).ok_or_else(|| {
@@ -4384,6 +4443,14 @@ fn graph_namespace_plans(
                             *local_slot,
                             &name,
                         )?;
+                        NativeNamespaceValue::Binding {
+                            provider_index,
+                            export_index,
+                        }
+                    }
+                    Some(ResolvedExport::CommonJsNamed { module, .. }) => {
+                        let (provider_index, export_index) =
+                            graph_export_slot(modules, indices, &node.path, module, 0, &name)?;
                         NativeNamespaceValue::Binding {
                             provider_index,
                             export_index,
@@ -4824,6 +4891,9 @@ extern int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
                               const kiln_value *arguments, kiln_value *result);
 extern int kiln_cli_write_result(kiln_value value);
 extern void kiln_cli_report_failure_in(int status, kiln_value value, const char *phase);
+extern kiln_value kiln_cli_describe_error(kiln_value value);
+extern int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+                        kiln_value *out, int depth, kiln_value *thrown);
 extern int kiln_realm_create(uint64_t *out_realm);
 extern int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *context);
 extern int kiln_realm_set_argv(uint64_t realm, uint64_t argc, const char *const *argv);
@@ -4836,6 +4906,8 @@ extern int kiln_realm_gc_unregister_roots(kiln_gc_roots_fn roots, void *context)
 extern int kiln_realm_gc_mark_value(void *heap, const void *value);
 #define KILN_GC_ROOT_SURVIVES_TEARDOWN 1u
 #define KILN_GC_PHASE_RESET 2
+#define KILN_C99_THROWN (-7)
+#define KILN_C99_CONTROL_ERROR (-2)
 "#,
     );
     for (_, module) in modules {
@@ -5092,6 +5164,23 @@ static int kiln_graph_enter(void *opaque) {
                     )
                     .unwrap();
                 }
+                NativeGraphImport::CommonJsNamed {
+                    provider_index,
+                    property,
+                } => {
+                    writeln!(
+                        evaluation,
+                        "    status = kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, result, result);\n    if (status != 0) return status;"
+                    )
+                    .unwrap();
+                    let prop_c = native_c_string(&property);
+                    let prop_len = property.len();
+                    writeln!(
+                        evaluation,
+                        "    status = kiln_c99_get(host, kiln_exports_{provider_index}[0], {prop_c}, (size_t){prop_len}, &kiln_imports_{index}[{import_index}], 0, result);\n    if (status != 0) return status;"
+                    )
+                    .unwrap();
+                }
             }
         }
         let imports = if node.program.imports.is_empty() {
@@ -5205,11 +5294,31 @@ static int kiln_cli_run_realm(int argc, char **argv, int writes_result) {
     output.push_str(
         r##"    if (status == 0) { phase = "module body"; status = kiln_realm_enter(realm, kiln_graph_enter, &graph); }
     if (status == 0) { phase = "the turn loop"; status = kiln_realm_drive(realm, &graph.host, &graph.result); }
+    if (status == 0 && graph.entry_result.tag == 16 /* KILN_VALUE_PROMISE */) {
+        typedef struct kiln_launcher_promise_view {
+            int state;
+            kiln_value value;
+        } kiln_launcher_promise_view;
+        kiln_launcher_promise_view *promise = (kiln_launcher_promise_view *)(uintptr_t)graph.entry_result.bits;
+        if (promise != NULL) {
+            if (promise->state == 2 /* KILN_C99_REJECTED */) {
+                status = KILN_C99_THROWN;
+                phase = "module body";
+                graph.result = kiln_cli_describe_error(promise->value);
+            } else if (promise->state == 0 /* KILN_C99_PENDING */) {
+                status = KILN_C99_CONTROL_ERROR;
+                phase = "the turn loop";
+                graph.result = kiln_graph_diagnostic("top-level await", "unsettled");
+            } else if (promise->state == 1 /* KILN_C99_FULFILLED */) {
+                graph.entry_result = promise->value;
+            }
+        }
+    }
     if (status != 0) kiln_cli_report_failure_in(status, graph.result, phase);
     if (writes_result && status == 0 && kiln_cli_write_result(graph.entry_result) != 0) status = 1;
     destroy_status = kiln_realm_destroy(realm);
     if (status == 0) status = destroy_status;
-    return status;
+    return status == 0 ? 0 : 1;
 }
 
 /* How many realms to run, read from the environment rather than fixed at build time.
@@ -5626,6 +5735,8 @@ typedef int (*kiln_graph_module_fn)(kiln_host *host, kiln_value *result,
                                     kiln_value *exports, size_t export_count);
 typedef int (*kiln_commonjs_require_fn)(void *context, kiln_host *host, kiln_value specifier,
                                         kiln_value *result, kiln_value *thrown);
+extern int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+                        kiln_value *out, int depth, kiln_value *thrown);
 
 "#,
     );
@@ -5874,6 +5985,23 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
                     writeln!(
                         output,
                         "    import_arrays[{index}][{import_index}] = namespaces[{provider_index}];"
+                    )
+                    .unwrap();
+                }
+                NativeGraphImport::CommonJsNamed {
+                    provider_index,
+                    property,
+                } => {
+                    writeln!(
+                        output,
+                        "    status = kiln_graph_load_commonjs(&commonjs_modules[{provider_index}], &module_result, &module_result);\n    if (status != KILN_C99_OK) {{ *result = module_result; goto cleanup; }}"
+                    )
+                    .unwrap();
+                    let prop_c = native_c_string(&property);
+                    let prop_len = property.len();
+                    writeln!(
+                        output,
+                        "    status = kiln_c99_get(proxy_host, export_arrays[{provider_index}][0], {prop_c}, (size_t){prop_len}, &import_arrays[{index}][{import_index}], 0, &module_result);\n    if (status != KILN_C99_OK) {{ *result = module_result; goto cleanup; }}"
                     )
                     .unwrap();
                 }

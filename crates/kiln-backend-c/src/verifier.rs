@@ -165,6 +165,11 @@ pub fn verify_function_graph(graph: &FunctionGraph) -> Result<(), VerifierError>
                 condition: _,
                 true_block,
                 false_block,
+            }
+            | Terminator::BranchNotNullish {
+                condition: _,
+                true_block,
+                false_block,
             } => {
                 if !block_map.contains_key(true_block) {
                     return Err(VerifierError::UnknownBlock(*true_block));
@@ -385,7 +390,8 @@ pub fn verify_function_graph(graph: &FunctionGraph) -> Result<(), VerifierError>
 
         // Check terminator operands
         match &block.terminator {
-            Terminator::Branch { condition, .. } => {
+            Terminator::Branch { condition, .. }
+            | Terminator::BranchNotNullish { condition, .. } => {
                 let &(def_block, _def_idx) =
                     def_site.get(condition).ok_or(VerifierError::UseBeforeDef {
                         value: *condition,

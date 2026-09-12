@@ -12,6 +12,7 @@ static int kiln_c99_install_event_emitter_methods(kiln_value target) {
         {"once", 4, KILN_C99_METHOD_NODE_EVENT_ONCE},
         {"emit", 4, KILN_C99_METHOD_NODE_EVENT_EMIT},
         {"listeners", 9, KILN_C99_METHOD_NODE_EVENT_LISTENERS},
+        {"listenerCount", 13, KILN_C99_METHOD_NODE_EVENT_LISTENER_COUNT},
         {"removeListener", 14, KILN_C99_METHOD_NODE_EVENT_REMOVE_LISTENER},
         {"off", 3, KILN_C99_METHOD_NODE_EVENT_REMOVE_LISTENER},
         {"removeAllListeners", 18, KILN_C99_METHOD_NODE_EVENT_REMOVE_ALL_LISTENERS},
@@ -169,6 +170,12 @@ static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t cod
         return kiln_c99_install_event_emitter_methods(*result);
     }
     if (receiver.tag != KILN_VALUE_OBJECT) {
+        if (code == KILN_C99_METHOD_NODE_EVENT_LISTENER_COUNT && argc > 0 && args[0].tag == KILN_VALUE_OBJECT) {
+            kiln_value emitter = args[0];
+            const kiln_value *rest_args = argc > 1 ? args + 1 : NULL;
+            size_t rest_argc = argc > 1 ? argc - 1 : 0;
+            return kiln_c99_node_event(host, result, code, emitter, rest_args, rest_argc, depth, thrown);
+        }
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                     "EventEmitter method called on an incompatible receiver");
     }
@@ -185,6 +192,10 @@ static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t cod
             code != KILN_C99_METHOD_NODE_EVENT_ON && code != KILN_C99_METHOD_NODE_EVENT_ONCE) {
             if (code == KILN_C99_METHOD_NODE_EVENT_EMIT) *result = kiln_c99_boolean(0);
             else if (code == KILN_C99_METHOD_NODE_EVENT_LISTENERS) return kiln_c99_new_array(result);
+            else if (code == KILN_C99_METHOD_NODE_EVENT_LISTENER_COUNT) {
+                *result = kiln_c99_number(0.0);
+                return KILN_C99_OK;
+            }
             else *result = receiver;
             return KILN_C99_OK;
         }
@@ -272,6 +283,10 @@ static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t cod
     if (bucket.tag != KILN_VALUE_OBJECT) {
         if (code == KILN_C99_METHOD_NODE_EVENT_EMIT) *result = kiln_c99_boolean(0);
         else if (code == KILN_C99_METHOD_NODE_EVENT_LISTENERS) return kiln_c99_new_array(result);
+        else if (code == KILN_C99_METHOD_NODE_EVENT_LISTENER_COUNT) {
+            *result = kiln_c99_number(0.0);
+            return KILN_C99_OK;
+        }
         else *result = receiver;
         return KILN_C99_OK;
     }
@@ -291,6 +306,10 @@ static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t cod
                 if (status == KILN_C99_OK) status = kiln_c99_array_push(*result, callback);
             }
             return status;
+        }
+        if (code == KILN_C99_METHOD_NODE_EVENT_LISTENER_COUNT) {
+            *result = kiln_c99_number((double)stored->count);
+            return KILN_C99_OK;
         }
         if (code == KILN_C99_METHOD_NODE_EVENT_REMOVE_LISTENER) {
             kiln_value wanted = argc > 1 ? args[1] : kiln_c99_undefined();

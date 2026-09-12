@@ -933,8 +933,8 @@ method_ids! {
     (KILN_C99_METHOD_PROCESS_HRTIME_BIGINT, 398, Direct),
     (KILN_C99_METHOD_PROCESS_CWD, 399, Direct),
     (KILN_C99_METHOD_ATOMICS_UNAVAILABLE, 400, Direct),
-    (KILN_C99_METHOD_SET_IMMEDIATE, 401, Direct),
-    (KILN_C99_METHOD_CLEAR_IMMEDIATE, 402, Direct),
+    (KILN_C99_METHOD_SET_IMMEDIATE, 401, Generic),
+    (KILN_C99_METHOD_CLEAR_IMMEDIATE, 402, Generic),
     (KILN_C99_METHOD_NODE_HTTP_SERVER, 403, Direct),
     (KILN_C99_METHOD_NODE_SERVER_SET_TIMEOUT, 404, Direct, NodeServer, NodeNet),
     (KILN_C99_METHOD_NODE_RESPONSE_GET_HEADER, 405, Direct, NodeResponse),
@@ -1060,6 +1060,8 @@ method_ids! {
      * the one borrowed from `Array.prototype`. The pooled walk is a direct-call-site lowering
      * and never reaches this code. */
     (KILN_C99_METHOD_ARRAY_PARALLEL_MAP, 494, ArrayLookup),
+    (KILN_C99_METHOD_NODE_EVENT_LISTENER_COUNT, 502, NodeEvent),
+    (KILN_C99_METHOD_PROCESS_KILL, 503, Direct),
 }
 
 /// The hook a host installs when it lets a program make a second realm.
@@ -3171,6 +3173,8 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_NODE_ALS_DISABLE),
     emit_method_define!(KILN_C99_METHOD_STRING_FROM_CODE_POINT),
     emit_method_define!(KILN_C99_METHOD_ARRAY_PARALLEL_MAP),
+    emit_method_define!(KILN_C99_METHOD_NODE_EVENT_LISTENER_COUNT),
+    emit_method_define!(KILN_C99_METHOD_PROCESS_KILL),
     emit_method_define!(KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE),
     emit_method_define!(KILN_C99_METHOD_NODE_QUERYSTRING_PARSE),
     r#"

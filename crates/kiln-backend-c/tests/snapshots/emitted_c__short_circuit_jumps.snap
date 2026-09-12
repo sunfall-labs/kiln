@@ -1,6 +1,6 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 1119
+assertion_line: 1126
 expression: body(&unit)
 ---
 /* Program hash: 0b1825e8f7333c14; bytecode version: 4. */
@@ -26,7 +26,7 @@ kiln_block_0:;
         goto kiln_block_1;
     }
 kiln_block_1:;
-    if (kiln_c99_val_truthy(v0)) {
+    if (!KILN_VAL_IS_NULLISH(v0)) {
         goto kiln_block_2;
     } else {
         goto kiln_block_2;

@@ -98,6 +98,10 @@ pub(crate) fn event_emitter_property(prop: &str) -> Option<Value> {
         "EventEmitter" | "default" => {
             Some(Value::Native(Native::NodeEventEmitter, RealmId::PRIMARY))
         }
+        "listenerCount" => Some(Value::Native(
+            Native::NodeEventListenerCount,
+            RealmId::PRIMARY,
+        )),
         _ => None,
     }
 }
@@ -109,6 +113,10 @@ pub(crate) fn prototype_property(prop: &str) -> Option<Value> {
         "once" => Some(Value::Native(Native::NodeEventOnce, RealmId::PRIMARY)),
         "emit" => Some(Value::Native(Native::NodeEventEmit, RealmId::PRIMARY)),
         "listeners" => Some(Value::Native(Native::NodeEventListeners, RealmId::PRIMARY)),
+        "listenerCount" => Some(Value::Native(
+            Native::NodeEventListenerCount,
+            RealmId::PRIMARY,
+        )),
         "eventNames" => Some(Value::Native(Native::NodeEventNames, RealmId::PRIMARY)),
         "removeListener" | "off" => Some(Value::Native(
             Native::NodeEventRemoveListener,
@@ -134,6 +142,7 @@ pub(crate) const fn js_name(native: Native) -> Option<&'static str> {
         Native::NodeEventOnce => Some("once"),
         Native::NodeEventEmit => Some("emit"),
         Native::NodeEventListeners => Some("listeners"),
+        Native::NodeEventListenerCount => Some("listenerCount"),
         Native::NodeEventNames => Some("eventNames"),
         Native::NodeEventRemoveListener => Some("removeListener"),
         Native::NodeEventRemoveAllListeners => Some("removeAllListeners"),

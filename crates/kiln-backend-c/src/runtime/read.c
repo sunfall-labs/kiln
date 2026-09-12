@@ -959,6 +959,12 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             *out = target;
             return KILN_C99_OK;
         }
+        if (target.tag == KILN_VALUE_METHOD &&
+            target.bits == KILN_C99_METHOD_NODE_EVENT_EMITTER &&
+            kiln_c99_same_name(key, key_len, "listenerCount")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_LISTENER_COUNT);
+            return KILN_C99_OK;
+        }
         if (target.tag == KILN_VALUE_METHOD && kiln_c99_same_name(key, key_len, "prototype")) {
             return kiln_c99_callable_prototype(target, out);
         }

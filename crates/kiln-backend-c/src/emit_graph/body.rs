@@ -797,7 +797,8 @@ fn emit_block_sequence(
             Terminator::Return(Some(v)) | Terminator::Throw(v) => {
                 used.insert(*v);
             }
-            Terminator::Branch { condition, .. } => {
+            Terminator::Branch { condition, .. }
+            | Terminator::BranchNotNullish { condition, .. } => {
                 used.insert(*condition);
             }
             Terminator::Suspend { value, spilled, .. } => {
@@ -1051,6 +1052,9 @@ fn boxed_uses(
                 if !compares_twins && !booleans.contains(condition) {
                     used.insert(*condition);
                 }
+            }
+            Terminator::BranchNotNullish { condition, .. } => {
+                used.insert(*condition);
             }
             Terminator::Return(Some(v)) => {
                 let typed_number = matches!(
@@ -1848,6 +1852,40 @@ fn emit_terminator(
                 _ => None,
             }
             .unwrap_or_else(|| format!("kiln_c99_val_truthy(v{})", condition.0));
+            writeln!(output, "    if ({test}) {{").unwrap();
+            emit_phi_assignments(
+                output,
+                graph,
+                current_block.id,
+                *true_block,
+                numbers,
+                ints,
+                booleans,
+                indexed_values,
+                used,
+            );
+            writeln!(output, "        goto {block_prefix}{};", true_block.0).unwrap();
+            output.push_str("    } else {\n");
+            emit_phi_assignments(
+                output,
+                graph,
+                current_block.id,
+                *false_block,
+                numbers,
+                ints,
+                booleans,
+                indexed_values,
+                used,
+            );
+            writeln!(output, "        goto {block_prefix}{};", false_block.0).unwrap();
+            output.push_str("    }\n");
+        }
+        Terminator::BranchNotNullish {
+            condition,
+            true_block,
+            false_block,
+        } => {
+            let test = format!("!KILN_VAL_IS_NULLISH(v{})", condition.0);
             writeln!(output, "    if ({test}) {{").unwrap();
             emit_phi_assignments(
                 output,

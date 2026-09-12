@@ -338,6 +338,11 @@ pub enum Terminator {
         true_block: BlockId,
         false_block: BlockId,
     },
+    BranchNotNullish {
+        condition: ValueId,
+        true_block: BlockId,
+        false_block: BlockId,
+    },
     Return(Option<ValueId>),
     Throw(ValueId),
     /// A `yield` or an `await`: hand `value` out, keep `spilled` -- the operand stack beneath
@@ -460,13 +465,21 @@ impl FunctionGraph {
     }
 
     pub fn mark_non_escaping_objects(&mut self, program: &Program) {
-        let res = escape_analysis(self, program);
+        self.mark_non_escaping_objects_with_extra_slots(program, None);
+    }
+
+    pub fn mark_non_escaping_objects_with_extra_slots(
+        &mut self,
+        program: &Program,
+        extra_slots: Option<&HashSet<u32>>,
+    ) {
+        let res = escape_analysis_with(self, program, false, extra_slots).0;
         self.non_escaping_objects = res.non_escaping;
         self.scalar_objects = res.scalar_objects;
         self.scalar_alias_map = res.alias_map;
         // The same analysis with a spread allowed: what it finds beyond the unconditional
         // result is sunk speculatively, by the fast clone alone.
-        let (with_spread, sinks) = escape_analysis_with(self, program, true);
+        let (with_spread, sinks) = escape_analysis_with(self, program, true, extra_slots);
         self.spread_scalar_objects = with_spread
             .scalar_objects
             .into_iter()
@@ -1463,16 +1476,25 @@ pub fn build_function_graph(
     if binds_at_call {
         block_starts.insert(proto.prologue_end as usize);
     }
+    let jumps_to_zero = code.iter().any(|inst| match inst {
+        Instruction::Jump(0)
+        | Instruction::JumpIfFalse(0)
+        | Instruction::JumpIfTruthy(0)
+        | Instruction::JumpIfNotNullish(0)
+        | Instruction::PushHandler(0) => true,
+        _ => false,
+    });
+    let block_offset = if jumps_to_zero { 1 } else { 0 };
     let block_starts_vec: Vec<usize> = block_starts.into_iter().collect();
     let pc_to_block: BTreeMap<usize, BlockId> = block_starts_vec
         .iter()
         .enumerate()
-        .map(|(idx, &pc)| (pc, BlockId(idx as u32)))
+        .map(|(idx, &pc)| (pc, BlockId((idx + block_offset) as u32)))
         .collect();
 
     // Map each PC to its containing BlockId
     let pc_to_containing_block = |pc: usize| -> BlockId {
-        let mut prev_block = BlockId(0);
+        let mut prev_block = BlockId(block_offset as u32);
         for (&start, &bid) in &pc_to_block {
             if start <= pc {
                 prev_block = bid;
@@ -1484,10 +1506,10 @@ pub fn build_function_graph(
     };
 
     // Phase 2: Compute predecessor/successor edges and active exception handlers
-    let num_blocks = block_starts_vec.len();
-    let mut block_ranges = Vec::with_capacity(num_blocks);
+    let num_blocks = block_starts_vec.len() + block_offset;
+    let mut block_ranges = Vec::with_capacity(block_starts_vec.len());
     for (i, &start) in block_starts_vec.iter().enumerate() {
-        let end = if i + 1 < num_blocks {
+        let end = if i + 1 < block_starts_vec.len() {
             block_starts_vec[i + 1]
         } else {
             code.len()
@@ -1504,7 +1526,8 @@ pub fn build_function_graph(
             _ => None,
         })
         .collect();
-    for (b_idx, &(start, end)) in block_ranges.iter().enumerate() {
+    for (i, &(start, end)) in block_ranges.iter().enumerate() {
+        let b_idx = i + block_offset;
         for inst in &code[start..end] {
             match inst {
                 Instruction::PushHandler(target) => {
@@ -1534,7 +1557,7 @@ pub fn build_function_graph(
         BlockId(0),
         AbstractFrame {
             stack: Vec::new(),
-            locals: initial_locals,
+            locals: initial_locals.clone(),
         },
     );
 
@@ -1545,9 +1568,13 @@ pub fn build_function_graph(
     // pre-branch value after the join. Stack merges (`c ? a : b`) get their phis when the first
     // frame arrives, because only then is the depth known.
     let mut static_preds: Vec<Vec<BlockId>> = vec![Vec::new(); num_blocks];
-    for (b_idx, &(start, end)) in block_ranges.iter().enumerate() {
+    if jumps_to_zero {
+        static_preds[1].push(BlockId(0));
+    }
+    for (i, &(start, end)) in block_ranges.iter().enumerate() {
+        let b_idx = i + block_offset;
         let this = BlockId(b_idx as u32);
-        let next = (b_idx + 1 < num_blocks).then(|| BlockId((b_idx + 1) as u32));
+        let next = (i + 1 < block_ranges.len()).then(|| BlockId((b_idx + 1) as u32));
         let mut succs: Vec<BlockId> = Vec::new();
         let last = if end > start { code.get(end - 1) } else { None };
         match last {
@@ -1663,7 +1690,37 @@ pub fn build_function_graph(
         // which starts there: both with an empty operand stack and the locals in the frame.
         graph.seam_block = Some(pc_to_containing_block(proto.prologue_end as usize));
     }
-    for (b_idx, &(start, end)) in block_ranges.iter().enumerate() {
+    if jumps_to_zero {
+        let mut operations = Vec::new();
+        for (slot, &vid) in graph.initial_locals.clone().iter().enumerate() {
+            operations.push((vid, GraphOp::LoadLocal(slot as u32)));
+        }
+        let target = BlockId(1);
+        let terminator = Terminator::Jump(target);
+        let successors = vec![target];
+        propagate_frame(
+            &mut block_entry_frames,
+            &mut merges,
+            BlockId(0),
+            target,
+            &AbstractFrame {
+                stack: Vec::new(),
+                locals: initial_locals.clone(),
+            },
+            &mut graph,
+            &mut operations,
+        );
+        basic_blocks.push(BasicBlock {
+            id: BlockId(0),
+            operations,
+            terminator,
+            predecessors: Vec::new(),
+            successors,
+            exception_handler: None,
+        });
+    }
+    for (i, &(start, end)) in block_ranges.iter().enumerate() {
+        let b_idx = i + block_offset;
         let block_id = BlockId(b_idx as u32);
         let mut frame = block_entry_frames
             .get(&block_id)
@@ -1869,7 +1926,7 @@ pub fn build_function_graph(
                     let cond = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
                     let target_block = *pc_to_block.get(&(*target as usize)).unwrap();
                     let fallthrough_block = pc_to_containing_block(pc + 1);
-                    terminator = Terminator::Branch {
+                    terminator = Terminator::BranchNotNullish {
                         condition: cond,
                         true_block: target_block,
                         false_block: fallthrough_block,
@@ -2300,6 +2357,9 @@ fn remove_dead_phis(graph: &mut FunctionGraph) {
             | Terminator::Throw(value)
             | Terminator::Branch {
                 condition: value, ..
+            }
+            | Terminator::BranchNotNullish {
+                condition: value, ..
             } => {
                 live.insert(*value);
             }
@@ -2358,6 +2418,9 @@ fn map_graph_values(graph: &mut FunctionGraph, map: impl Fn(ValueId) -> ValueId)
             Terminator::Return(Some(value))
             | Terminator::Throw(value)
             | Terminator::Branch {
+                condition: value, ..
+            }
+            | Terminator::BranchNotNullish {
                 condition: value, ..
             } => *value = map(*value),
             Terminator::Suspend { value, spilled, .. } => {
@@ -2472,6 +2535,9 @@ fn compact_value_ids(graph: &mut FunctionGraph) {
             Terminator::Return(Some(value))
             | Terminator::Throw(value)
             | Terminator::Branch {
+                condition: value, ..
+            }
+            | Terminator::BranchNotNullish {
                 condition: value, ..
             } => present[value.0 as usize] = true,
             Terminator::Suspend { value, spilled, .. } => {
@@ -2614,7 +2680,7 @@ const OBJECT_PROTOTYPE_PROPERTIES: &[&str] = &[
 ];
 
 pub fn escape_analysis(graph: &FunctionGraph, program: &Program) -> EscapeAnalysisResult {
-    escape_analysis_with(graph, program, false).0
+    escape_analysis_with(graph, program, false, None).0
 }
 
 /// A bridge that a spread-aware analysis treats as an aliasing write onto its target rather
@@ -2660,6 +2726,7 @@ fn escape_analysis_with(
     graph: &FunctionGraph,
     program: &Program,
     with_spread: bool,
+    extra_slots: Option<&HashSet<u32>>,
 ) -> (EscapeAnalysisResult, HashMap<ValueId, SpreadSink>) {
     let mut defs = HashMap::new();
     for block in &graph.blocks {
@@ -2755,7 +2822,8 @@ fn escape_analysis_with(
         match &block.terminator {
             Terminator::Return(Some(v))
             | Terminator::Throw(v)
-            | Terminator::Branch { condition: v, .. } => {
+            | Terminator::Branch { condition: v, .. }
+            | Terminator::BranchNotNullish { condition: v, .. } => {
                 live_values.insert(*v);
             }
             Terminator::Suspend { value, spilled, .. } => {
@@ -2852,13 +2920,17 @@ fn escape_analysis_with(
                     Some((target, Some((key, _, _)), _)) if alias_to_root.get(target) == Some(&root) && key == name)
             })
     };
-    let slots_in_array = array_slots(graph, program);
+    let mut slots_in_array = array_slots(graph, program);
+    if let Some(extra) = extra_slots {
+        slots_in_array.extend(extra.iter().copied());
+    }
 
     for block in &graph.blocks {
         match &block.terminator {
             Terminator::Return(Some(v))
             | Terminator::Throw(v)
-            | Terminator::Branch { condition: v, .. } => {
+            | Terminator::Branch { condition: v, .. }
+            | Terminator::BranchNotNullish { condition: v, .. } => {
                 if let Some(&root) = alias_to_root.get(v) {
                     escaped.insert(root);
                 }
