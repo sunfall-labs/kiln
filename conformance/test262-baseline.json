@@ -17,8 +17,8 @@
       "passed": 40
     },
     "built-ins/Array": {
-      "failed": 221,
-      "passed": 5896
+      "failed": 219,
+      "passed": 5898
     },
     "built-ins/ArrayBuffer": {
       "failed": 30,
@@ -173,8 +173,8 @@
       "passed": 198
     },
     "built-ins/String": {
-      "failed": 182,
-      "passed": 2261
+      "failed": 180,
+      "passed": 2263
     },
     "built-ins/StringIteratorPrototype": {
       "failed": 4,
@@ -377,8 +377,8 @@
       "passed": 3
     },
     "language/expressions": {
-      "failed": 474,
-      "passed": 20488
+      "failed": 463,
+      "passed": 20507
     },
     "language/function-code": {
       "failed": 4,
@@ -401,7 +401,7 @@
       "passed": 535
     },
     "language/import": {
-      "failed": 103,
+      "failed": 104,
       "passed": 24
     },
     "language/keywords": {
@@ -417,8 +417,8 @@
       "passed": 1025
     },
     "language/module-code": {
-      "failed": 52,
-      "passed": 537
+      "failed": 61,
+      "passed": 538
     },
     "language/punctuators": {
       "failed": 0,
@@ -441,8 +441,8 @@
       "passed": 160
     },
     "language/statements": {
-      "failed": 389,
-      "passed": 17613
+      "failed": 369,
+      "passed": 17633
     },
     "language/types": {
       "failed": 6,
@@ -477,15 +477,15 @@
       "passed": 6
     },
     "staging/sm": {
-      "failed": 681,
-      "passed": 1914
+      "failed": 668,
+      "passed": 1928
     },
     "staging/source-phase-imports": {
       "failed": 0,
       "passed": 0
     },
     "staging/top-level-await": {
-      "failed": 0,
+      "failed": 1,
       "passed": 0
     }
   },
