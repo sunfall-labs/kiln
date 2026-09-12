@@ -14578,6 +14578,65 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Value::String("sha512".into()),
                 ])));
             }
+            Native::NodeCryptoGetRandomValues => {
+                let Some(arg) = arguments.first() else {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "The \"typedArray\" argument must be an instance of TypedArray"
+                            .into(),
+                    });
+                };
+                let Value::TypedArray(view) = arg else {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "The \"typedArray\" argument must be an instance of TypedArray"
+                            .into(),
+                    });
+                };
+                if matches!(
+                    view.kind,
+                    TypedKind::Float16 | TypedKind::Float32 | TypedKind::Float64
+                ) {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "The \"typedArray\" argument must be an integer-based TypedArray"
+                            .into(),
+                    });
+                }
+                let total_len = view.len() * view.kind.width();
+                if total_len > 65536 {
+                    return Err(ExecutionError::RangeErrorMessage {
+                        message: "The ArrayBufferView's byte length exceeds the allowed limit of 65536 bytes".into(),
+                    });
+                }
+                if total_len > 0 {
+                    let random = self.random_bytes(total_len, instruction)?;
+                    view.buffer.bytes.borrow_mut()[view.offset..view.offset + total_len]
+                        .copy_from_slice(&random);
+                }
+                return Ok(arg.clone());
+            }
+            Native::NodeCryptoTimingSafeEqual => {
+                let Some(arg_a) = arguments.first() else {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "The \"a\" and \"b\" arguments must be of type ArrayBufferView or ArrayBuffer".into(),
+                    });
+                };
+                let Some(arg_b) = arguments.get(1) else {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "The \"a\" and \"b\" arguments must be of type ArrayBufferView or ArrayBuffer".into(),
+                    });
+                };
+                let bytes_a = view_or_buffer_bytes(arg_a)?;
+                let bytes_b = view_or_buffer_bytes(arg_b)?;
+                if bytes_a.len() != bytes_b.len() {
+                    return Err(ExecutionError::RangeErrorMessage {
+                        message: "Input buffers must have the same byte length".into(),
+                    });
+                }
+                let mut diff = 0_u8;
+                for (&x, &y) in bytes_a.iter().zip(bytes_b.iter()) {
+                    diff |= x ^ y;
+                }
+                return Ok(Value::Boolean(std::hint::black_box(diff) == 0));
+            }
             Native::NodeCryptoCreateHash => return node_hash(arguments),
             Native::NodeCryptoCreateHmac => return node_hmac(arguments),
             Native::NodeHashUpdate => {
@@ -25935,6 +25994,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Native(Native::TextDecoderConstructor, realm),
         );
         globals.set_non_enumerable("URL", Value::Native(Native::UrlConstructor, realm));
+        globals.set_non_enumerable("crypto", Value::Native(Native::NodeCrypto, realm));
         globals.set_non_enumerable(
             "SharedArrayBuffer",
             Value::Native(Native::SharedArrayBufferConstructor, realm),
@@ -34529,6 +34589,24 @@ fn readable_chunk_length(value: &Value) -> usize {
     }
 }
 
+fn view_or_buffer_bytes(val: &Value) -> Result<Vec<u8>, ExecutionError> {
+    match val {
+        Value::TypedArray(view) => Ok(view.bytes()),
+        Value::ArrayBuffer(buffer) => Ok(buffer.bytes.borrow().clone()),
+        Value::DataView(view) => {
+            if view.out_of_bounds() {
+                return Ok(Vec::new());
+            }
+            let length = view.byte_length().unwrap_or(0);
+            Ok(view.buffer.bytes.borrow()[view.offset..view.offset + length].to_vec())
+        }
+        _ => Err(ExecutionError::TypeErrorMessage {
+            message: "The \"a\" and \"b\" arguments must be of type ArrayBufferView or ArrayBuffer"
+                .into(),
+        }),
+    }
+}
+
 fn node_bytes_value(bytes: Vec<u8>) -> Value {
     let length = bytes.len();
     let buffer = BufferData::fixed(length);
@@ -38706,8 +38784,10 @@ fn call_native(
         | Native::NodeCryptoRandomBytes
         | Native::NodeCryptoRandomFillSync
         | Native::NodeCryptoGetHashes
+        | Native::NodeCryptoGetRandomValues
         | Native::NodeCryptoCreateHash
         | Native::NodeCryptoCreateHmac
+        | Native::NodeCryptoTimingSafeEqual
         | Native::NodeHashUpdate
         | Native::NodeHashDigest
         | Native::NodeStringDecoder
@@ -47143,6 +47223,14 @@ fn native_js_name(native: &Native) -> String {
         Native::AbortSignalAbort => "abort".to_owned(),
         Native::AbortSignalTimeout => "timeout".to_owned(),
         Native::AbortSignalAny => "any".to_owned(),
+        Native::NodeCryptoRandomUuid => "randomUUID".to_owned(),
+        Native::NodeCryptoRandomBytes => "randomBytes".to_owned(),
+        Native::NodeCryptoRandomFillSync => "randomFillSync".to_owned(),
+        Native::NodeCryptoGetHashes => "getHashes".to_owned(),
+        Native::NodeCryptoGetRandomValues => "getRandomValues".to_owned(),
+        Native::NodeCryptoCreateHash => "createHash".to_owned(),
+        Native::NodeCryptoCreateHmac => "createHmac".to_owned(),
+        Native::NodeCryptoTimingSafeEqual => "timingSafeEqual".to_owned(),
         // FOUR NAMES THE DERIVATION SPELLED OUT OF THE RUST VARIANT.
         //
         // These are not near-misses of capitalisation: each one handed a program the identifier

@@ -142,8 +142,10 @@ pub enum Native {
     NodeCryptoRandomBytes,
     NodeCryptoRandomFillSync,
     NodeCryptoGetHashes,
+    NodeCryptoGetRandomValues,
     NodeCryptoCreateHash,
     NodeCryptoCreateHmac,
+    NodeCryptoTimingSafeEqual,
     NodeHashUpdate,
     NodeHashDigest,
     NodeStringDecoder,
@@ -1330,12 +1332,20 @@ impl Native {
             (Self::NodeCrypto, "getHashes") => {
                 Some(Value::Native(Self::NodeCryptoGetHashes, RealmId::PRIMARY))
             }
+            (Self::NodeCrypto, "getRandomValues") => Some(Value::Native(
+                Self::NodeCryptoGetRandomValues,
+                RealmId::PRIMARY,
+            )),
             (Self::NodeCrypto, "createHash") => {
                 Some(Value::Native(Self::NodeCryptoCreateHash, RealmId::PRIMARY))
             }
             (Self::NodeCrypto, "createHmac") => {
                 Some(Value::Native(Self::NodeCryptoCreateHmac, RealmId::PRIMARY))
             }
+            (Self::NodeCrypto, "timingSafeEqual") => Some(Value::Native(
+                Self::NodeCryptoTimingSafeEqual,
+                RealmId::PRIMARY,
+            )),
             (Self::NodeStringDecoder, "StringDecoder") => Some(Value::Native(
                 Self::NodeStringDecoderConstructor,
                 RealmId::PRIMARY,

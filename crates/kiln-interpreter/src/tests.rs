@@ -5335,4 +5335,138 @@ fn node_crypto_random_bytes_fill_hashes_and_hmac() {
     assert_eq!(&uuid_str[13..14], "-");
     assert_eq!(&uuid_str[18..19], "-");
     assert_eq!(&uuid_str[23..24], "-");
+
+    // 6. Test crypto.timingSafeEqual
+    let a = node_bytes_value(vec![1, 2, 3, 4]);
+    let b = node_bytes_value(vec![1, 2, 3, 4]);
+    let c = node_bytes_value(vec![1, 2, 3, 5]);
+    let d = node_bytes_value(vec![1, 2, 3]);
+
+    let eq_result = vm
+        .dispatch_native(
+            Native::NodeCryptoTimingSafeEqual,
+            &Value::Undefined,
+            &[a.clone(), b.clone()],
+            0,
+        )
+        .expect("timingSafeEqual succeeds");
+    assert_eq!(eq_result, Value::Boolean(true));
+
+    let neq_result = vm
+        .dispatch_native(
+            Native::NodeCryptoTimingSafeEqual,
+            &Value::Undefined,
+            &[a.clone(), c.clone()],
+            0,
+        )
+        .expect("timingSafeEqual succeeds");
+    assert_eq!(neq_result, Value::Boolean(false));
+
+    // Mismatched lengths -> RangeError
+    let diff_len_result = vm.dispatch_native(
+        Native::NodeCryptoTimingSafeEqual,
+        &Value::Undefined,
+        &[a.clone(), d.clone()],
+        0,
+    );
+    assert!(matches!(
+        diff_len_result,
+        Err(ExecutionError::RangeErrorMessage { .. })
+    ));
+
+    // Non-buffer -> TypeError
+    let type_err_result = vm.dispatch_native(
+        Native::NodeCryptoTimingSafeEqual,
+        &Value::Undefined,
+        &[a.clone(), Value::String("foo".into())],
+        0,
+    );
+    assert!(matches!(
+        type_err_result,
+        Err(ExecutionError::TypeErrorMessage { .. })
+    ));
+
+    // 7. Test crypto.getRandomValues
+    let u8_arr = Value::TypedArray(Rc::new(TypedArrayData {
+        buffer: BufferData::fixed(16),
+        offset: 0,
+        length: Some(16),
+        kind: TypedKind::Uint8,
+        properties: RefCell::new(ObjectData::default()),
+    }));
+    let rand_vals = vm
+        .dispatch_native(
+            Native::NodeCryptoGetRandomValues,
+            &Value::Undefined,
+            &[u8_arr.clone()],
+            0,
+        )
+        .expect("getRandomValues succeeds");
+    assert_eq!(rand_vals, u8_arr);
+    let Value::TypedArray(u8_view) = &rand_vals else {
+        panic!("must be TypedArray");
+    };
+    assert_eq!(u8_view.bytes().len(), 16);
+
+    // Float32Array throws TypeError
+    let f32_arr = Value::TypedArray(Rc::new(TypedArrayData {
+        buffer: BufferData::fixed(16),
+        offset: 0,
+        length: Some(4),
+        kind: TypedKind::Float32,
+        properties: RefCell::new(ObjectData::default()),
+    }));
+    let f32_err = vm.dispatch_native(
+        Native::NodeCryptoGetRandomValues,
+        &Value::Undefined,
+        &[f32_arr],
+        0,
+    );
+    assert!(matches!(
+        f32_err,
+        Err(ExecutionError::TypeErrorMessage { .. })
+    ));
+
+    // Length > 65536 throws RangeError
+    let big_arr = Value::TypedArray(Rc::new(TypedArrayData {
+        buffer: BufferData::fixed(65537),
+        offset: 0,
+        length: Some(65537),
+        kind: TypedKind::Uint8,
+        properties: RefCell::new(ObjectData::default()),
+    }));
+    let big_err = vm.dispatch_native(
+        Native::NodeCryptoGetRandomValues,
+        &Value::Undefined,
+        &[big_arr],
+        0,
+    );
+    assert!(matches!(
+        big_err,
+        Err(ExecutionError::RangeErrorMessage { .. })
+    ));
+
+    // 8. Test global crypto object
+    let globals = vm.global_object();
+    let global_crypto = vm.read_property(&globals, "crypto", 0).unwrap();
+    assert!(matches!(
+        global_crypto,
+        Value::Native(Native::NodeCrypto, _)
+    ));
+
+    let grv = vm
+        .read_property(&global_crypto, "getRandomValues", 0)
+        .unwrap();
+    let grv_name = vm.read_property(&grv, "name", 0).unwrap();
+    assert_eq!(grv_name, Value::String("getRandomValues".into()));
+
+    let ruuid = vm.read_property(&global_crypto, "randomUUID", 0).unwrap();
+    let ruuid_name = vm.read_property(&ruuid, "name", 0).unwrap();
+    assert_eq!(ruuid_name, Value::String("randomUUID".into()));
+
+    let tse = vm
+        .read_property(&global_crypto, "timingSafeEqual", 0)
+        .unwrap();
+    let tse_name = vm.read_property(&tse, "name", 0).unwrap();
+    assert_eq!(tse_name, Value::String("timingSafeEqual".into()));
 }
