@@ -114,6 +114,8 @@ pub(crate) use async_hooks::{
 // `buffer` houses node:buffer, Buffer constructor and statics.
 mod buffer;
 pub(crate) use buffer::node_bytes_value;
+// `console` houses console methods and node:console.
+mod console;
 
 /// The built-ins the runtime provides natively.
 ///
@@ -44801,6 +44803,9 @@ fn native_js_name(native: &Native) -> String {
         return name.to_owned();
     }
     if let Some(name) = buffer::js_name(*native) {
+        return name.to_owned();
+    }
+    if let Some(name) = console::js_name(*native) {
         return name.to_owned();
     }
     match native {
