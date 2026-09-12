@@ -403,7 +403,11 @@ fn report(output: Output) -> Result<i32> {
     // program actually wrote, which is what `console.error` going to stderr is for.
     emit_error(&output.error_text)?;
     for note in &output.notes {
-        eprintln!("kiln: {note}");
+        if note.contains('\n') {
+            eprintln!("{note}");
+        } else {
+            eprintln!("kiln: {note}");
+        }
     }
     Ok(output.exit_code)
 }

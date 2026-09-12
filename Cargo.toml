@@ -137,6 +137,8 @@ num-traits = { version = "0.2", default-features = false, features = ["std"] }
 # proptest is used only as a dev-dependency, so it never enters a consumer's build graph and
 # does not bear on the foundational-crate rule in docs/adr/0004.
 proptest = { version = "1.11", default-features = false, features = ["std"] }
+# Pure data-driven diagnostic snippet rendering for CLI reports. Zero procedural macros.
+annotate-snippets = { version = "0.12", default-features = false, features = ["std"] }
 # Filesystem events. The debouncer is not optional: editors write-then-rename and emit several
 # events per save.
 notify = { version = "8.2", default-features = false, features = ["macos_fsevent"] }
