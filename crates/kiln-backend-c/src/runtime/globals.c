@@ -367,6 +367,13 @@ static int kiln_c99_global_object(kiln_value *out) {
             status = kiln_c99_put(NULL, *globals, "console", 7, built, 0, NULL);
         }
     }
+    if (status == KILN_C99_OK) {
+        kiln_value built;
+        status = kiln_c99_new_object(&built);
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_put(NULL, *globals, "crypto", 6, built, 0, NULL);
+        }
+    }
     /* The three value properties of the global object are the only ones the specification locks
      * on every axis: `{ writable: false, enumerable: false, configurable: false }`. An ordinary
      * put would leave them configurable, and `delete NaN` would then answer `true` here and

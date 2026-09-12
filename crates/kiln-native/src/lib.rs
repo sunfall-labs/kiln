@@ -3399,8 +3399,14 @@ if (status != KILN_C99_OK) return status;
 status = kiln_c99_put(host, namespace, "randomUUID", 10, random_uuid, 0, NULL);
 if (status != KILN_C99_OK) return status;
 exports[0] = create_hash;
-exports[1] = namespace;
-exports[2] = random_uuid;"#,
+exports[1] = kiln_c99_undefined();
+exports[2] = namespace;
+exports[3] = kiln_c99_undefined();
+exports[4] = kiln_c99_undefined();
+exports[5] = kiln_c99_undefined();
+exports[6] = kiln_c99_undefined();
+exports[7] = random_uuid;
+exports[8] = kiln_c99_undefined();"#,
         ),
         _ => None,
     }

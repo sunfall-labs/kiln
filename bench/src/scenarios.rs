@@ -647,7 +647,7 @@ pub fn targeted_conformance(budget: Budget) -> Result<Measurement, String> {
 
 /// Measure the resident daemon's affected Node batch for a concrete `node:net` runtime edit.
 ///
-/// The selected count is part of the benchmark contract: timing all 35 cases after an ownership
+/// The selected count is part of the benchmark contract: timing all 36 cases after an ownership
 /// metadata regression would still produce a number, but it would no longer measure the
 /// design.md §9 fast-iteration path this row names.
 pub fn targeted_node_net_conformance(budget: Budget) -> Result<Measurement, String> {
@@ -693,7 +693,7 @@ fn require_node_net_selection(
     summary: &TestSummary,
     expected_cache_hit: bool,
 ) -> Result<(), String> {
-    if summary.discovered == 35
+    if summary.discovered == 36
         && summary.selected == 5
         && summary.passed == 5
         && summary.failed == 0
@@ -704,7 +704,7 @@ fn require_node_net_selection(
         return Ok(());
     }
     Err(format!(
-        "changed node:net batch was discovered={} selected={} pass={} fail={} unsupported={} skipped={} discovery_cache_hit={}, expected 35/5/5/0/0/0/{expected_cache_hit}",
+        "changed node:net batch was discovered={} selected={} pass={} fail={} unsupported={} skipped={} discovery_cache_hit={}, expected 36/5/5/0/0/0/{expected_cache_hit}",
         summary.discovered,
         summary.selected,
         summary.passed,
