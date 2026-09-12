@@ -1240,12 +1240,7 @@ impl Native {
             // their defaults to `AsyncResource`, `StringDecoder` and `performance` and made
             // `typeof` answer "function" where node answers "object".
             (Self::NodeAssert, prop) => crate::assert::property(prop),
-            (Self::NodeAsyncHooks, "AsyncResource") => {
-                Some(Value::Native(Self::NodeAsyncResource, RealmId::PRIMARY))
-            }
-            (Self::NodeAsyncHooks, "AsyncLocalStorage") => {
-                Some(Value::Native(Self::NodeAsyncLocalStorage, RealmId::PRIMARY))
-            }
+            (Self::NodeAsyncHooks, prop) => crate::async_hooks::property(prop),
             (Self::NodeCrypto, prop) => crate::crypto::property(prop),
             (Self::NodeStringDecoder, prop) => crate::string_decoder::property(prop),
             (Self::NodeStream, prop) => crate::stream::property(prop),

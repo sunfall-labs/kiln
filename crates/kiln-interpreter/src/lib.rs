@@ -107,6 +107,11 @@ pub(crate) use http::{
 // `fs` houses node:fs and node:fs/promises implementations.
 mod fs;
 pub(crate) use fs::node_encoding;
+// `async_hooks` houses node:async_hooks, AsyncLocalStorage, and AsyncResource.
+mod async_hooks;
+pub(crate) use async_hooks::{
+    AsyncContext, AsyncStorage, bind_store, node_async_local_storage, node_async_storage,
+};
 
 /// The built-ins the runtime provides natively.
 ///
@@ -6682,32 +6687,6 @@ struct Timer {
 
 /// One `AsyncLocalStorage`, whose identity is the whole of it.
 ///
-/// Two storages are different because they are different allocations -- there is no name, index
-/// or serial to compare, and `Rc::ptr_eq` is the question the language actually asks. `disabled`
-/// is the one piece of state a storage carries: `disable()` is permanent in Node, and a disabled
-/// storage reads as empty everywhere rather than being removed from contexts already captured.
-#[derive(Debug)]
-struct AsyncStorage {
-    disabled: std::cell::Cell<bool>,
-}
-
-/// Two storages are equal only when they are the same one.
-///
-/// Written out rather than derived for the reason [`Closure`]'s is: `disabled` is state, not
-/// identity, and a derive over it would make any two untouched storages compare equal.
-impl PartialEq for AsyncStorage {
-    fn eq(&self, other: &Self) -> bool {
-        std::ptr::eq(self, other)
-    }
-}
-
-/// Every `AsyncLocalStorage` that currently holds a store, and what it holds.
-///
-/// Shared rather than copied: this is captured every time a job is queued -- once per promise
-/// reaction, which is the hottest scheduling path there is -- and is empty in every program that
-/// never asks for a storage, which is nearly all of them. A `Vec` rather than a map because it
-/// is searched by pointer identity and is almost always empty or a single entry.
-type AsyncContext = Rc<Vec<(Rc<AsyncStorage>, Value)>>;
 
 /// A promise: a value that is not there yet, and the reactions waiting for it.
 ///
@@ -32994,72 +32973,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     }
 }
 
-/// `new AsyncLocalStorage()`.
-///
-/// The instance is an ordinary object carrying its own identity in `node_object`; the methods are
-/// shared natives that read that identity off their receiver, exactly as `StringDecoder`'s do.
-fn node_async_local_storage() -> Value {
-    let mut data = ObjectData {
-        node_object: Some(NodeObject::AsyncLocalStorage(Rc::new(AsyncStorage {
-            disabled: std::cell::Cell::new(false),
-        }))),
-        ..Default::default()
-    };
-    data.set(
-        "run",
-        Value::Native(Native::NodeAsyncLocalStorageRun, RealmId::PRIMARY),
-    );
-    data.set(
-        "getStore",
-        Value::Native(Native::NodeAsyncLocalStorageGetStore, RealmId::PRIMARY),
-    );
-    data.set(
-        "enterWith",
-        Value::Native(Native::NodeAsyncLocalStorageEnterWith, RealmId::PRIMARY),
-    );
-    data.set(
-        "exit",
-        Value::Native(Native::NodeAsyncLocalStorageExit, RealmId::PRIMARY),
-    );
-    data.set(
-        "disable",
-        Value::Native(Native::NodeAsyncLocalStorageDisable, RealmId::PRIMARY),
-    );
-    Value::Object(Rc::new(RefCell::new(data)))
-}
-
-/// A context with one storage's binding replaced, or removed when `store` is `None`.
-///
-/// A fresh context rather than a mutation, because contexts already captured by queued work must
-/// not change underneath it: that captured copy *is* the store those jobs will see.
-fn bind_store(
-    context: &AsyncContext,
-    storage: &Rc<AsyncStorage>,
-    store: Option<Value>,
-) -> AsyncContext {
-    let mut bindings: Vec<(Rc<AsyncStorage>, Value)> = context
-        .iter()
-        .filter(|(held, _)| !Rc::ptr_eq(held, storage))
-        .cloned()
-        .collect();
-    if let Some(store) = store {
-        bindings.push((Rc::clone(storage), store));
-    }
-    Rc::new(bindings)
-}
-
-/// The storage a method was called on, or a `TypeError` naming the mistake.
-fn node_async_storage(receiver: &Value) -> Result<Rc<AsyncStorage>, ExecutionError> {
-    if let Value::Object(object) = receiver
-        && let Some(NodeObject::AsyncLocalStorage(storage)) = &object.borrow().node_object
-    {
-        return Ok(Rc::clone(storage));
-    }
-    Err(ExecutionError::TypeErrorMessage {
-        message: "AsyncLocalStorage method called on an incompatible receiver".into(),
-    })
-}
-
 /// The three reserved slots an `AbortSignal` keeps beside its public shape.
 const ABORT_LISTENERS: &str = "@@abort-listeners";
 
@@ -44986,6 +44899,9 @@ fn native_js_name(native: &Native) -> String {
         return name.to_owned();
     }
     if let Some(name) = fs::js_name(*native) {
+        return name.to_owned();
+    }
+    if let Some(name) = async_hooks::js_name(*native) {
         return name.to_owned();
     }
     match native {
