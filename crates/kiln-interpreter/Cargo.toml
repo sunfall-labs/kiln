@@ -25,3 +25,5 @@ sha2 = { workspace = true }
 encoding_rs = { workspace = true }
 url = { workspace = true }
 flate2 = { workspace = true }
+lasso = { workspace = true }
+cap-std = { workspace = true }

@@ -145,6 +145,10 @@ encoding_rs = { version = "0.8", default-features = false, features = ["alloc"] 
 url = { version = "2.5", default-features = false, features = ["std"] }
 # Compression & decompression (gzip, zlib, deflate) for node:zlib via pure-Rust miniz_oxide backend.
 flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
+# Compact arena-backed string interner for property keys and shapes (ADR 0047, ADR 0050)
+lasso = { version = "0.7", default-features = false }
+# Capability-based sandboxed filesystem access (ADR 0029 §5)
+cap-std = { version = "4.0", default-features = false }
 # Filesystem events. The debouncer is not optional: editors write-then-rename and emit several
 # events per save.
 notify = { version = "8.2", default-features = false, features = ["macos_fsevent"] }

@@ -67,6 +67,10 @@ skip = [
     # target platforms at all; they are in the graph because `all-features = true` above
     # resolves every target.
     { crate = "windows-sys@0.60", reason = "notify trails mio by one minor; not built on unix" },
+    # fs-set-times pulls windows-sys 0.59. Not built on unix.
+    { crate = "windows-sys@0.59", reason = "fs-set-times trails windows-sys; not built on unix" },
+    # cap-primitives is on io-lifetimes 3 while its fs-set-times dependency is on io-lifetimes 2.
+    { crate = "io-lifetimes@2", reason = "fs-set-times has not moved to io-lifetimes 3; transitive in cap-std" },
 ]
 # Only a warning, and reluctantly. A path dependency carries no version requirement, so every
 # `kiln-*` crate depending on another reads as a wildcard; `allow-wildcard-paths` is the
