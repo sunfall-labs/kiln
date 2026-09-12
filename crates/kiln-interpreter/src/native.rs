@@ -139,7 +139,11 @@ pub enum Native {
     NodeAsyncLocalStorageDisable,
     NodeCrypto,
     NodeCryptoRandomUuid,
+    NodeCryptoRandomBytes,
+    NodeCryptoRandomFillSync,
+    NodeCryptoGetHashes,
     NodeCryptoCreateHash,
+    NodeCryptoCreateHmac,
     NodeHashUpdate,
     NodeHashDigest,
     NodeStringDecoder,
@@ -1310,11 +1314,27 @@ impl Native {
             (Self::NodeAsyncHooks, "AsyncLocalStorage") => {
                 Some(Value::Native(Self::NodeAsyncLocalStorage, RealmId::PRIMARY))
             }
+            (Self::NodeCrypto, "default") => {
+                Some(Value::Native(Self::NodeCrypto, RealmId::PRIMARY))
+            }
             (Self::NodeCrypto, "randomUUID") => {
                 Some(Value::Native(Self::NodeCryptoRandomUuid, RealmId::PRIMARY))
             }
+            (Self::NodeCrypto, "randomBytes") => {
+                Some(Value::Native(Self::NodeCryptoRandomBytes, RealmId::PRIMARY))
+            }
+            (Self::NodeCrypto, "randomFillSync") => Some(Value::Native(
+                Self::NodeCryptoRandomFillSync,
+                RealmId::PRIMARY,
+            )),
+            (Self::NodeCrypto, "getHashes") => {
+                Some(Value::Native(Self::NodeCryptoGetHashes, RealmId::PRIMARY))
+            }
             (Self::NodeCrypto, "createHash") => {
                 Some(Value::Native(Self::NodeCryptoCreateHash, RealmId::PRIMARY))
+            }
+            (Self::NodeCrypto, "createHmac") => {
+                Some(Value::Native(Self::NodeCryptoCreateHmac, RealmId::PRIMARY))
             }
             (Self::NodeStringDecoder, "StringDecoder") => Some(Value::Native(
                 Self::NodeStringDecoderConstructor,

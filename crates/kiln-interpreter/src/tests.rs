@@ -5169,3 +5169,170 @@ fn node_zlib_streaming_and_sync_compression_and_decompression() {
     assert_eq!(vm.property(&constants, "Z_SYNC_FLUSH"), Value::Number(2.0));
     assert_eq!(vm.property(&constants, "Z_STREAM_END"), Value::Number(1.0));
 }
+
+#[test]
+fn node_crypto_random_bytes_fill_hashes_and_hmac() {
+    let program = Program::default();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: std::collections::VecDeque::new(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+
+    // 1. Test crypto.getHashes()
+    let hashes = vm
+        .dispatch_native(Native::NodeCryptoGetHashes, &Value::Undefined, &[], 0)
+        .expect("getHashes succeeds");
+    let Value::Array(hashes_arr) = hashes else {
+        panic!("getHashes must return Array");
+    };
+    let hash_names: Vec<String> = hashes_arr
+        .borrow()
+        .iter()
+        .map(Value::to_display_string)
+        .collect();
+    assert!(hash_names.contains(&"sha256".to_string()));
+    assert!(hash_names.contains(&"md5".to_string()));
+    assert!(hash_names.contains(&"sha1".to_string()));
+    assert!(hash_names.contains(&"sha512".to_string()));
+
+    // 2. Test crypto.randomBytes(size)
+    let random16 = vm
+        .dispatch_native(
+            Native::NodeCryptoRandomBytes,
+            &Value::Undefined,
+            &[Value::Number(16.0)],
+            0,
+        )
+        .expect("randomBytes(16) succeeds");
+    let Value::TypedArray(bytes16) = &random16 else {
+        panic!("randomBytes must return TypedArray/Buffer");
+    };
+    assert_eq!(bytes16.bytes().len(), 16);
+
+    // Negative size -> RangeError
+    let neg_result = vm.dispatch_native(
+        Native::NodeCryptoRandomBytes,
+        &Value::Undefined,
+        &[Value::Number(-5.0)],
+        0,
+    );
+    assert!(matches!(
+        neg_result,
+        Err(ExecutionError::RangeErrorMessage { .. })
+    ));
+
+    // 3. Test crypto.randomFillSync(buffer, offset, size)
+    let buf = node_bytes_value(vec![0_u8; 8]);
+    let filled = vm
+        .dispatch_native(
+            Native::NodeCryptoRandomFillSync,
+            &Value::Undefined,
+            &[buf.clone(), Value::Number(2.0), Value::Number(4.0)],
+            0,
+        )
+        .expect("randomFillSync succeeds");
+    let Value::TypedArray(buf_view) = &filled else {
+        panic!("randomFillSync must return buffer");
+    };
+    let buf_bytes = buf_view.bytes();
+    assert_eq!(buf_bytes[0], 0);
+    assert_eq!(buf_bytes[1], 0);
+    assert_eq!(buf_bytes[6], 0);
+    assert_eq!(buf_bytes[7], 0);
+    // At least one byte in the middle slice [2..6] should be non-zero (or filled)
+    let mid = &buf_bytes[2..6];
+    assert_eq!(mid.len(), 4);
+
+    // 4. Test crypto.createHmac(algorithm, key) with RFC 4231 test vector
+    // RFC 4231 Test Case 2:
+    // Key = "key"
+    // Data = "The quick brown fox jumps over the lazy dog"
+    // Expected HMAC-SHA256 = f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8
+    let hmac = vm
+        .dispatch_native(
+            Native::NodeCryptoCreateHmac,
+            &Value::Undefined,
+            &[Value::String("sha256".into()), Value::String("key".into())],
+            0,
+        )
+        .expect("createHmac succeeds");
+    let update_fn = vm.property(&hmac, "update");
+    let digest_fn = vm.property(&hmac, "digest");
+    assert!(is_callable(&update_fn));
+    assert!(is_callable(&digest_fn));
+
+    let updated = vm
+        .dispatch_native(
+            Native::NodeHashUpdate,
+            &hmac,
+            &[Value::String(
+                "The quick brown fox jumps over the lazy dog".into(),
+            )],
+            0,
+        )
+        .expect("update succeeds");
+    assert_eq!(updated, hmac);
+
+    let digest = vm
+        .dispatch_native(
+            Native::NodeHashDigest,
+            &hmac,
+            &[Value::String("hex".into())],
+            0,
+        )
+        .expect("digest succeeds");
+    assert_eq!(
+        digest,
+        Value::String("f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8".into())
+    );
+
+    // RFC 2202 Test Case 1 (MD5):
+    // Key = 16 bytes of 0x0b
+    // Data = "Hi There"
+    // Expected = 9294727a3638bb1c13f48ef8158bfc9d
+    let md5_key = node_bytes_value(vec![0x0b; 16]);
+    let hmac_md5 = vm
+        .dispatch_native(
+            Native::NodeCryptoCreateHmac,
+            &Value::Undefined,
+            &[Value::String("md5".into()), md5_key],
+            0,
+        )
+        .expect("createHmac md5 succeeds");
+    vm.dispatch_native(
+        Native::NodeHashUpdate,
+        &hmac_md5,
+        &[Value::String("Hi There".into())],
+        0,
+    )
+    .expect("update succeeds");
+    let digest_md5 = vm
+        .dispatch_native(
+            Native::NodeHashDigest,
+            &hmac_md5,
+            &[Value::String("hex".into())],
+            0,
+        )
+        .expect("digest succeeds");
+    assert_eq!(
+        digest_md5,
+        Value::String("9294727a3638bb1c13f48ef8158bfc9d".into())
+    );
+
+    // 5. Test crypto.randomUUID() format
+    let uuid_val = vm
+        .dispatch_native(Native::NodeCryptoRandomUuid, &Value::Undefined, &[], 0)
+        .expect("randomUUID succeeds");
+    let Value::String(uuid_str) = uuid_val else {
+        panic!("randomUUID must return string");
+    };
+    assert_eq!(uuid_str.len(), 36);
+    assert_eq!(&uuid_str[8..9], "-");
+    assert_eq!(&uuid_str[13..14], "-");
+    assert_eq!(&uuid_str[18..19], "-");
+    assert_eq!(&uuid_str[23..24], "-");
+}

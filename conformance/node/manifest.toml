@@ -308,3 +308,12 @@ source = "upstream-adapted/json-module-entry.mjs"
 status = "runnable"
 features = ["json-modules", "commonjs", "esm", "module-cache", "module-graph"]
 expected_stdout = "pass\n"
+
+[[test]]
+id = "node-v24.7.0/crypto/primitives"
+requires_host = "node"
+source = "upstream-adapted/crypto-primitives.mjs"
+status = "runnable"
+features = ["node:crypto", "randomBytes", "randomFillSync", "getHashes", "createHash", "createHmac", "module-graph"]
+expected_stdout = "pass\n"
+
