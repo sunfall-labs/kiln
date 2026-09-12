@@ -1,6 +1,6 @@
 # Issue 01: a regular expression with 37 or more capture groups segfaults the native backend
 
-Status: needs-triage
+Status: resolved
 Feature: regexp-many-groups
 Governing ADR: ADR 0025
 
@@ -68,3 +68,18 @@ not.
 - The repro prints `38` on the native backend and matches node at 37, 48 and a few hundred groups.
 - A native probe under `conformance/native/` covering a group count above whatever fixed bound is
   found, with the bound named in a comment so the next reader knows why that number.
+
+## Comments
+
+### Resolved 2026-09-12
+
+Two distinct defects caused the failure:
+
+1. **Stack buffer overflow**: `kiln_regexp_search` in `kiln-native-number-ffi` documents `out_capacity` as the number of capture group *pairs* (`out_ranges` must be writable for `out_capacity * 2` values). Callers in `dispatch.c`, `strings.c`, and `regexp.c` declared `int64_t ranges[64]` and passed `capacity = sizeof ranges / sizeof *ranges = 64`. `kiln_regexp_search` interpreted this as room for 64 groups (128 values). At 37 capture groups (38 total groups), it wrote 76 `int64_t` elements into the 64-element stack buffer, smashing the stack canary and aborting.
+2. **Fixed 32-group bounds**:
+   - `kiln_c99_regexp_find` passed `capacity / 2` to `kiln_regexp_search` to prevent stack overruns, and stopped clamping `*groups = capacity`.
+   - `dispatch.c`, `boxed.c`, and `strings.c` now detect when `groups > ranges_capacity / 2`, dynamically allocate `ranges` on the heap for all groups, and free upon completion.
+   - `can_reuse` in `boxed.c` and `dispatch.c` is guarded with `groups <= 32` to prevent reading `cached_ranges` past index 63.
+   - `regex.rs` stopped clamping `*groups = capacity / 2` in compiled matcher entry, returning the full group count.
+
+Added native probe [`conformance/native/regexp-many-groups.js`](file:///home/candrewlee/Work/kiln/conformance/native/regexp-many-groups.js) covering 32, 37, 48, and 100 groups across `exec`, `test`, `split`, and `match`, matching Node and the interpreter bit-for-bit.

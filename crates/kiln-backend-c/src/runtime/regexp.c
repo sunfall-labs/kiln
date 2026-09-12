@@ -128,16 +128,13 @@ static int kiln_c99_regexp_find(kiln_regexp *regexp, const uint16_t *units, size
         }
         return KILN_C99_OK;
     }
-    if (kiln_regexp_search(regexp->handle, units, count, start, ranges, capacity) != 1) {
+    if (kiln_regexp_search(regexp->handle, units, count, start, ranges, capacity / 2) != 1) {
         return KILN_C99_OK;
     }
     if (regexp->sticky && ranges[0] != (int64_t)start) {
         return KILN_C99_OK;
     }
     *groups = kiln_regexp_group_count(regexp->handle);
-    if (*groups > capacity) {
-        *groups = capacity;
-    }
     *matched = 1;
     return KILN_C99_OK;
 }

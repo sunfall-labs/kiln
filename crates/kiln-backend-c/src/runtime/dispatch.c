@@ -2727,7 +2727,9 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             size_t start;
             size_t groups = 0;
             int matched = 0;
-            int64_t ranges[64];
+            int64_t stack_ranges[64];
+            int64_t *ranges = stack_ranges;
+            size_t ranges_capacity = sizeof(stack_ranges) / sizeof(stack_ranges[0]);
             /* `RegExp.prototype.test.call({})` has no pattern to match with. Note that
              * `toString` on a foreign receiver is *not* this: it answers rather than throwing,
              * so that guard stays a refusal. */
@@ -2758,7 +2760,16 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             int stack_used = 0;
             if (is_ascii && regexp->matcher_ascii != NULL) {
                 status = regexp->matcher_ascii((const uint8_t *)subject.ptr, subject.len, start,
-                                               ranges, sizeof ranges / sizeof *ranges, &groups, &matched);
+                                               ranges, ranges_capacity, &groups, &matched);
+                if (status == KILN_C99_OK && matched && groups > ranges_capacity / 2) {
+                    ranges = (int64_t *)malloc(groups * 2 * sizeof(int64_t));
+                    if (ranges == NULL) {
+                        return KILN_C99_OUT_OF_MEMORY;
+                    }
+                    ranges_capacity = groups * 2;
+                    status = regexp->matcher_ascii((const uint8_t *)subject.ptr, subject.len, start,
+                                                   ranges, ranges_capacity, &groups, &matched);
+                }
             } else {
                 if (is_ascii && subject.len <= 512) {
                     size_t i;
@@ -2774,9 +2785,24 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     }
                 }
                 status = kiln_c99_regexp_find(regexp, units, count, start, ranges,
-                                              sizeof ranges / sizeof *ranges, &groups, &matched);
+                                              ranges_capacity, &groups, &matched);
+                if (status == KILN_C99_OK && matched && groups > ranges_capacity / 2) {
+                    ranges = (int64_t *)malloc(groups * 2 * sizeof(int64_t));
+                    if (ranges == NULL) {
+                        if (units != NULL && !stack_used) {
+                            free(units);
+                        }
+                        return KILN_C99_OUT_OF_MEMORY;
+                    }
+                    ranges_capacity = groups * 2;
+                    status = kiln_c99_regexp_find(regexp, units, count, start, ranges,
+                                                  ranges_capacity, &groups, &matched);
+                }
             }
             if (status != KILN_C99_OK) {
+                if (ranges != stack_ranges) {
+                    free(ranges);
+                }
                 if (units != NULL && !stack_used) {
                     free(units);
                 }
@@ -2788,6 +2814,9 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 regexp->last_index = matched ? (double)ranges[1] : 0.0;
             }
             if (!matched) {
+                if (ranges != stack_ranges) {
+                    free(ranges);
+                }
                 if (units != NULL && !stack_used) {
                     free(units);
                 }
@@ -2796,6 +2825,9 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 return KILN_C99_OK;
             }
             if (code == KILN_C99_METHOD_REGEXP_TEST) {
+                if (ranges != stack_ranges) {
+                    free(ranges);
+                }
                 if (units != NULL && !stack_used) {
                     free(units);
                 }
@@ -2814,7 +2846,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     if (groups > 0) {
                         status = kiln_c99_array_reserve(arr, groups);
                     }
-                    int can_reuse = (regexp->cached_group_count == groups);
+                    int can_reuse = (regexp->cached_group_count == groups && groups <= 32);
                     if (can_reuse) {
                         for (group = 0; group < groups; ++group) {
                             if (regexp->cached_ranges[group * 2] != ranges[group * 2] ||
@@ -2857,6 +2889,9 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     }
                     arr->match_index = ranges[0];
                     arr->match_input = subject;
+                }
+                if (ranges != stack_ranges) {
+                    free(ranges);
                 }
                 if (units != NULL && !stack_used) {
                     free(units);
