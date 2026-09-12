@@ -1555,6 +1555,19 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         *result = kiln_c99_copy_text("/", 1);
         return KILN_C99_OK;
     }
+    if (code == KILN_C99_METHOD_PROCESS_KILL) {
+        if (argc > 1 && kiln_c99_truthy(args[1])) {
+            kiln_value ignored;
+            kiln_value process_val;
+            kiln_value signal = args[1];
+            if (kiln_c99_process_object(&process_val) == KILN_C99_OK) {
+                kiln_c99_node_event(host, &ignored, KILN_C99_METHOD_NODE_EVENT_EMIT,
+                                    process_val, &signal, 1, depth, NULL);
+            }
+        }
+        *result = kiln_c99_boolean(1);
+        return KILN_C99_OK;
+    }
     if (code == KILN_C99_METHOD_PROCESS_HRTIME ||
         code == KILN_C99_METHOD_PROCESS_HRTIME_BIGINT) {
         int64_t high;

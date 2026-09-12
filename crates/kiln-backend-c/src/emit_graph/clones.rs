@@ -155,7 +155,10 @@ pub fn emit_restartable(
         }
         if !matches!(
             block.terminator,
-            Terminator::Return(_) | Terminator::Branch { .. } | Terminator::Jump(_)
+            Terminator::Return(_)
+                | Terminator::Branch { .. }
+                | Terminator::BranchNotNullish { .. }
+                | Terminator::Jump(_)
         ) {
             return None;
         }

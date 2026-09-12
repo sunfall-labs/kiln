@@ -216,7 +216,10 @@ pub fn summarize_graph(graph: &FunctionGraph) -> FunctionSummary {
         .all(|b| {
             matches!(
                 b.terminator,
-                Terminator::Jump(_) | Terminator::Branch { .. } | Terminator::Return(_)
+                Terminator::Jump(_)
+                    | Terminator::Branch { .. }
+                    | Terminator::BranchNotNullish { .. }
+                    | Terminator::Return(_)
             ) && b.operations.iter().all(|(_, op)| {
                 op.effect() == Effect::Pure || matches!(op, GraphOp::StoreLocal { .. })
             })

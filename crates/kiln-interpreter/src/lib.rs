@@ -10179,6 +10179,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Object(object) => object.as_ref(),
             Value::Function(closure) => &closure.properties,
             _ => {
+                if native == Native::NodeEventListenerCount
+                    && let Some(first) = arguments.first()
+                    && let Value::Object(obj) = first
+                {
+                    let event = arguments
+                        .get(1)
+                        .unwrap_or(&Value::Undefined)
+                        .to_display_string();
+                    return Ok(Value::Number(
+                        node_listeners(obj.as_ref(), &event).len() as f64
+                    ));
+                }
                 return Err(ExecutionError::TypeErrorMessage {
                     message: "EventEmitter method called on an incompatible receiver".into(),
                 });
@@ -10305,6 +10317,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         .map(|listener| listener.callback)
                         .collect(),
                 )))
+            }
+            Native::NodeEventListenerCount => {
+                let event = arguments
+                    .first()
+                    .unwrap_or(&Value::Undefined)
+                    .to_display_string();
+                Ok(Value::Number(node_listeners(object, &event).len() as f64))
             }
             Native::NodeEventNames => Ok(Value::Array(ArrayData::new(
                 object
@@ -14456,6 +14475,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 | Native::NodeEventOnce
                 | Native::NodeEventEmit
                 | Native::NodeEventListeners
+                | Native::NodeEventListenerCount
                 | Native::NodeEventNames
                 | Native::NodeEventRemoveListener
                 | Native::NodeEventRemoveAllListeners
@@ -15418,6 +15438,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // later supply its captured project root as a realm capability; until then `/` is
             // the stable virtual root and never consults the embedding process.
             Native::ProcessCwd => Ok(Value::String("/".to_owned())),
+            Native::ProcessKill => Ok(Value::Boolean(true)),
             // Copying reads each property, and a read is a call when the property is an
             // accessor -- which is why this cannot be a pure transformation of its arguments.
             Native::ObjectAssign => {
@@ -25166,6 +25187,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Native(Native::ProcessHrtime, RealmId::PRIMARY),
         );
         process.set_non_enumerable("cwd", Value::Native(Native::ProcessCwd, RealmId::PRIMARY));
+        process.set_non_enumerable("kill", Value::Native(Native::ProcessKill, RealmId::PRIMARY));
         process.set_non_enumerable(
             "nextTick",
             Value::Native(Native::ProcessNextTick, RealmId::PRIMARY),
@@ -36574,6 +36596,7 @@ fn call_native(
         | Native::ProcessHrtime
         | Native::ProcessHrtimeBigInt
         | Native::ProcessCwd
+        | Native::ProcessKill
         | Native::UrlConstructor
         | Native::UrlSearchParamsGet
         | Native::UrlSearchParamsHas
@@ -36623,6 +36646,7 @@ fn call_native(
         | Native::NodeEventOnce
         | Native::NodeEventEmit
         | Native::NodeEventListeners
+        | Native::NodeEventListenerCount
         | Native::NodeEventNames
         | Native::NodeEventRemoveListener
         | Native::NodeEventRemoveAllListeners

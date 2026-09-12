@@ -2519,6 +2519,40 @@ fn emitted_module_initializes_imports_and_publishes_exports() {
 }
 
 #[test]
+fn emitted_module_publishes_exported_object_literal() {
+    let generated = emit_module(&module(
+        program(
+            vec![
+                Constant::String("layer".into()),
+                Constant::Number(42.0f64.to_bits()),
+            ],
+            vec![
+                Instruction::Const(0),
+                Instruction::Const(1),
+                Instruction::NewObject { count: 1 },
+                Instruction::StoreLocal(0),
+                Instruction::Const(1),
+                Instruction::Return,
+            ],
+            1,
+        ),
+        vec![],
+        vec![kiln_ir::ExportBinding {
+            exported: "service".into(),
+            local_slot: 0,
+        }],
+    ))
+    .expect("module emits");
+    assert!(
+        generated
+            .source
+            .contains("kiln_c99_new_object_with_capacity"),
+        "exported object literal must not be scalar-replaced: emitted source was:\n{}",
+        generated.source
+    );
+}
+
+#[test]
 fn emits_every_scalar_constant_and_host_call_through_numeric_abi() {
     let program = program(
         vec![

@@ -176,6 +176,7 @@ pub struct ModuleGraph {
 pub enum ResolvedExport {
     Local { module: PathBuf, local_slot: u32 },
     Namespace { module: PathBuf },
+    CommonJsNamed { module: PathBuf, property: String },
     Ambiguous,
 }
 
@@ -906,6 +907,7 @@ impl ModuleGraph {
         }
         let (origin, local_slot) = match self.resolved_export(provider, &import.imported) {
             Some(ResolvedExport::Local { module, local_slot }) => (module.clone(), *local_slot),
+            Some(ResolvedExport::CommonJsNamed { module, .. }) => (module.clone(), 0),
             Some(ResolvedExport::Namespace { module }) => {
                 return Err(ModuleGraphError::Source {
                     path: importer.to_path_buf(),
@@ -999,7 +1001,7 @@ impl ModuleGraph {
                     kiln_interpreter::namespace_object(entries),
                 ))
             }
-            ResolvedExport::Ambiguous => None,
+            ResolvedExport::CommonJsNamed { .. } | ResolvedExport::Ambiguous => None,
         }
     }
 
@@ -1020,9 +1022,9 @@ impl ModuleGraph {
             resolutions
                 .iter()
                 .filter_map(|(name, resolution)| match resolution {
-                    ResolvedExport::Local { .. } | ResolvedExport::Namespace { .. } => {
-                        Some(name.clone())
-                    }
+                    ResolvedExport::Local { .. }
+                    | ResolvedExport::Namespace { .. }
+                    | ResolvedExport::CommonJsNamed { .. } => Some(name.clone()),
                     ResolvedExport::Ambiguous => None,
                 })
                 .collect(),
@@ -1066,6 +1068,8 @@ impl ModuleGraph {
                         .entry(module.clone())
                         .or_default()
                         .insert(*local_slot);
+                } else if let ResolvedExport::CommonJsNamed { module, .. } = resolution {
+                    wanted.entry(module.clone()).or_default().insert(0);
                 }
             }
         }
@@ -1138,6 +1142,9 @@ impl ModuleGraph {
                         Some(ResolvedExport::Namespace { module }) => self
                             .plan_namespace(module, &slot_index)
                             .map(ModuleBinding::Namespace),
+                        Some(ResolvedExport::CommonJsNamed { module, .. }) => {
+                            slot_index(module, 0).map(ModuleBinding::Value)
+                        }
                         Some(ResolvedExport::Ambiguous) | None => None,
                     }
                 };
@@ -1545,7 +1552,11 @@ impl ModuleGraph {
                             self.export_resolutions
                                 .get(path)
                                 .and_then(|resolutions| resolutions.get(&name)),
-                            Some(ResolvedExport::Local { .. } | ResolvedExport::Namespace { .. })
+                            Some(
+                                ResolvedExport::Local { .. }
+                                    | ResolvedExport::Namespace { .. }
+                                    | ResolvedExport::CommonJsNamed { .. }
+                            )
                         )
                     {
                         exports.entry(name).or_insert(value);
@@ -2144,7 +2155,11 @@ fn validate_links(
                     .get(&dependency.target)
                     .and_then(|resolutions| resolutions.get(&import.imported))
                 {
-                    Some(ResolvedExport::Local { .. } | ResolvedExport::Namespace { .. }) => {}
+                    Some(
+                        ResolvedExport::Local { .. }
+                        | ResolvedExport::Namespace { .. }
+                        | ResolvedExport::CommonJsNamed { .. },
+                    ) => {}
                     Some(ResolvedExport::Ambiguous) => {
                         return Err(ModuleGraphError::AmbiguousExport {
                             importer: importer_path.clone(),
@@ -2313,9 +2328,15 @@ impl<'graph> ExportResolver<'graph> {
             return Resolution::None;
         };
         if node.source == ModuleSource::CommonJs {
-            return Resolution::Found(ResolvedExport::Local {
+            if name == "default" {
+                return Resolution::Found(ResolvedExport::Local {
+                    module: path.to_path_buf(),
+                    local_slot: 0,
+                });
+            }
+            return Resolution::Found(ResolvedExport::CommonJsNamed {
                 module: path.to_path_buf(),
-                local_slot: 0,
+                property: name.to_owned(),
             });
         }
         if let Some(export) = node

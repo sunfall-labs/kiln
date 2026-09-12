@@ -627,7 +627,65 @@ int kiln_cli_write_result(kiln_value value) {
  * about the program from the program's words, and it belongs where the words are written: the
  * caller used to add it by prefixing the whole stream, which made a program's own error output
  * read as a compiler diagnostic. */
+kiln_value kiln_cli_describe_error(kiln_value value) {
+    if (value.tag == KILN_VALUE_STRING && value.ptr != NULL) {
+        return value;
+    }
+    if (value.tag == 16 /* KILN_VALUE_PROMISE */ && value.bits != 0) {
+        typedef struct kiln_runtime_promise_view {
+            int state;
+            kiln_value val;
+        } kiln_runtime_promise_view;
+        kiln_runtime_promise_view *p = (kiln_runtime_promise_view *)(uintptr_t)value.bits;
+        if (p != NULL && p->state == 2 /* KILN_C99_REJECTED */) {
+            return kiln_cli_describe_error(p->val);
+        }
+    }
+    if (value.tag == 9 /* KILN_VALUE_OBJECT */ && value.bits != 0) {
+        typedef struct kiln_runtime_prop_view {
+            const char *key;
+            size_t key_len;
+            int enumerable;
+            int symbol_hidden;
+            int writable;
+            int configurable;
+            int accessor;
+            int refused;
+            kiln_value val;
+        } kiln_runtime_prop_view;
+        typedef struct kiln_runtime_obj_view {
+            kiln_runtime_prop_view *properties;
+            size_t count;
+        } kiln_runtime_obj_view;
+        kiln_runtime_obj_view *obj = (kiln_runtime_obj_view *)(uintptr_t)value.bits;
+        if (obj != NULL && obj->properties != NULL) {
+            for (size_t i = 0; i < obj->count; ++i) {
+                if (obj->properties[i].key != NULL &&
+                    obj->properties[i].key_len == 5 &&
+                    memcmp(obj->properties[i].key, "stack", 5) == 0) {
+                    if (obj->properties[i].val.tag == KILN_VALUE_STRING &&
+                        obj->properties[i].val.ptr != NULL) {
+                        return obj->properties[i].val;
+                    }
+                }
+            }
+            for (size_t i = 0; i < obj->count; ++i) {
+                if (obj->properties[i].key != NULL &&
+                    obj->properties[i].key_len == 7 &&
+                    memcmp(obj->properties[i].key, "message", 7) == 0) {
+                    if (obj->properties[i].val.tag == KILN_VALUE_STRING &&
+                        obj->properties[i].val.ptr != NULL) {
+                        return obj->properties[i].val;
+                    }
+                }
+            }
+        }
+    }
+    return value;
+}
+
 void kiln_cli_report_failure_in(int status, kiln_value value, const char *phase) {
+    value = kiln_cli_describe_error(value);
     fputs("kiln: ", stderr);
     if (status == KILN_C99_THROWN) {
         fputs("uncaught ", stderr);
@@ -823,6 +881,7 @@ extern int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
                               const kiln_value *arguments, kiln_value *result);
 extern int kiln_cli_write_result(kiln_value value);
 extern void kiln_cli_report_failure_in(int status, kiln_value value, const char *phase);
+extern kiln_value kiln_cli_describe_error(kiln_value value);
 typedef int (*kiln_realm_entry_fn)(void *context);
 extern int kiln_realm_create(uint64_t *out_realm);
 extern int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *context);
@@ -886,6 +945,26 @@ int main(int argc, char **argv) {
     if (status == KILN_C99_OK) {
         phase = "the turn loop";
         status = kiln_realm_drive(realm, &host, &result);
+    }
+    if (status == KILN_C99_OK && result.tag == 16 /* KILN_VALUE_PROMISE */) {
+        typedef struct kiln_launcher_promise_view {
+            int state;
+            kiln_value value;
+        } kiln_launcher_promise_view;
+        kiln_launcher_promise_view *promise = (kiln_launcher_promise_view *)(uintptr_t)result.bits;
+        if (promise != NULL) {
+            if (promise->state == 2 /* KILN_C99_REJECTED */) {
+                status = KILN_C99_THROWN;
+                phase = "module body";
+                result = kiln_cli_describe_error(promise->value);
+            } else if (promise->state == 0 /* KILN_C99_PENDING */) {
+                status = KILN_C99_CONTROL_ERROR;
+                phase = "the turn loop";
+                result = (kiln_value){ KILN_VALUE_STRING, 29, { .ptr = "top-level await never settled" } };
+            } else if (promise->state == 1 /* KILN_C99_FULFILLED */) {
+                result = promise->value;
+            }
+        }
     }
     if (realm != 0) {
         destroy_status = kiln_realm_destroy(realm);

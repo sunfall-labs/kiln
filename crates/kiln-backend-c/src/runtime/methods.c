@@ -110,12 +110,14 @@ static const char *kiln_c99_method_name(uint64_t code) {
      * three codes. */
     case KILN_C99_METHOD_NODE_ASSERT_OK: return "assert";
     case KILN_C99_METHOD_NODE_EVENT_EMITTER: return "EventEmitter";
+    case KILN_C99_METHOD_NODE_EVENT_LISTENER_COUNT: return "listenerCount";
     case KILN_C99_METHOD_NODE_HTTP_SERVER: return "Server";
     case KILN_C99_METHOD_NODE_REQUEST_HEADERS_GET: return "headers";
     case KILN_C99_METHOD_NODE_REQUEST_HEADERS_SET: return "headers";
     case KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER: return "createServer";
     case KILN_C99_METHOD_NODE_QUERYSTRING_PARSE: return "parse";
     case KILN_C99_METHOD_PROCESS_NEXT_TICK: return "nextTick";
+    case KILN_C99_METHOD_PROCESS_KILL: return "kill";
     case KILN_C99_METHOD_INTL_SEGMENT_RAW: return "__kilnIntlSegment";
     case KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_MILLISECONDS:
         return "fromEpochMilliseconds";

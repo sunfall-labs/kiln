@@ -1565,6 +1565,7 @@ fn plan_unit(
     diagnostic_site: &str,
     compact: bool,
     generic_only: bool,
+    extra_entry_slots: Option<&HashSet<u32>>,
 ) -> Result<
     (
         Vec<FunctionGraph>,
@@ -1588,7 +1589,10 @@ fn plan_unit(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let body = entry_proto(program);
-    let entry_graph = graph_for(&body, program, "the module body", diagnostic_site)?;
+    let mut entry_graph = graph_for(&body, program, "the module body", diagnostic_site)?;
+    if let Some(extra) = extra_entry_slots {
+        entry_graph.mark_non_escaping_objects_with_extra_slots(program, Some(extra));
+    }
     let publishes_frame = compute_publishes_frame(program);
     let direct = direct::DirectPlan::plan(
         program,
@@ -2575,8 +2579,18 @@ fn render(
         !keys.is_empty(),
         program.template_sites.len(),
     );
-    let (graphs, body, entry_graph, mut direct) =
-        plan_unit(program, symbol, policy.compact, policy.generic_only)?;
+    let extra_entry_slots = if uses_module_scope(program) {
+        Some((0..program.local_count).collect::<HashSet<u32>>())
+    } else {
+        None
+    };
+    let (graphs, body, entry_graph, mut direct) = plan_unit(
+        program,
+        symbol,
+        policy.compact,
+        policy.generic_only,
+        extra_entry_slots.as_ref(),
+    )?;
     render_functions(
         &mut output,
         program,
@@ -3052,7 +3066,8 @@ pub fn closed_world_namespace_members(
                 }
             }
             let escapes = match &block.terminator {
-                Terminator::Branch { condition, .. } => is_namespace(*condition),
+                Terminator::Branch { condition, .. }
+                | Terminator::BranchNotNullish { condition, .. } => is_namespace(*condition),
                 Terminator::Return(Some(value)) | Terminator::Throw(value) => is_namespace(*value),
                 Terminator::Suspend { value, spilled, .. } => {
                     is_namespace(*value) || spilled.iter().any(|value| is_namespace(*value))
@@ -3189,11 +3204,23 @@ fn render_module(
     } else {
         program
     };
+    let extra_entry_slots: HashSet<u32> = if uses_module_scope(emitted_program) {
+        (0..emitted_program.local_count).collect()
+    } else {
+        let mut slots = HashSet::new();
+        slots.extend(module.imports.iter().map(|binding| binding.local_slot));
+        slots.extend(module.exports.iter().map(|binding| binding.local_slot));
+        if commonjs {
+            slots.insert(2);
+        }
+        slots
+    };
     let (graphs, body, entry_graph, mut direct) = plan_unit(
         emitted_program,
         diagnostic_site,
         policy.compact,
         policy.generic_only,
+        Some(&extra_entry_slots),
     )?;
     let reachable = liveness.as_ref().map(|(reachable, _, _)| reachable);
     if let Some(reachable) = reachable {
