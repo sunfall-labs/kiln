@@ -1058,9 +1058,6 @@ fn emit_matcher_impl(output: &mut String, prefix: &str, compiled: &CompiledRegex
                      int *matched) {{
     *matched = 0;
     *groups = {total_groups};
-    if (capacity / 2 < *groups) {{
-        *groups = capacity / 2;
-    }}
     if ({early_check}) {{
         return KILN_C99_OK;
     }}

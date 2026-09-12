@@ -948,7 +948,9 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
     size_t replacement_count = 0;
     size_t from = 0;
     size_t at = 0;
-    int64_t ranges[64];
+    int64_t stack_ranges[64];
+    int64_t *ranges = stack_ranges;
+    size_t ranges_capacity = sizeof(stack_ranges) / sizeof(stack_ranges[0]);
     kiln_text built = {NULL, 0, 0};
     kiln_value collected = kiln_c99_undefined();
     int status = kiln_c99_to_units(receiver, &units, &count);
@@ -994,9 +996,12 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
         size_t groups = 0;
         int matched = 0;
         status = kiln_c99_regexp_find(regexp, units, count, 0, ranges,
-                                      sizeof ranges / sizeof *ranges, &groups, &matched);
+                                      ranges_capacity, &groups, &matched);
         if (status == KILN_C99_OK && !matched) {
             status = kiln_c99_array_push(collected, kiln_c99_from_units(units, 0));
+        }
+        if (ranges != stack_ranges) {
+            free(ranges);
         }
         free(units);
         *result = collected;
@@ -1015,12 +1020,32 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
         size_t groups = 0;
         int matched = 0;
         status = kiln_c99_regexp_find(regexp, units, count, at, ranges,
-                                      sizeof ranges / sizeof *ranges, &groups, &matched);
+                                      ranges_capacity, &groups, &matched);
         if (status != KILN_C99_OK || !matched) {
             break;
         }
+        if (groups > ranges_capacity / 2) {
+            int64_t *new_ranges = (int64_t *)malloc(groups * 2 * sizeof(int64_t));
+            if (new_ranges == NULL) {
+                status = KILN_C99_OUT_OF_MEMORY;
+                break;
+            }
+            if (ranges != stack_ranges) {
+                free(ranges);
+            }
+            ranges = new_ranges;
+            ranges_capacity = groups * 2;
+            status = kiln_c99_regexp_find(regexp, units, count, at, ranges,
+                                          ranges_capacity, &groups, &matched);
+            if (status != KILN_C99_OK || !matched) {
+                break;
+            }
+        }
         if (code == KILN_C99_METHOD_STRING_SEARCH) {
             *result = kiln_c99_number((double)ranges[0]);
+            if (ranges != stack_ranges) {
+                free(ranges);
+            }
             free(units);
             free(replacement);
             return KILN_C99_OK;
@@ -1028,6 +1053,9 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
         if (code == KILN_C99_METHOD_STRING_MATCH && !regexp->global) {
             status = kiln_c99_match_result(host, result, units, count, ranges, groups, depth,
                                            thrown);
+            if (ranges != stack_ranges) {
+                free(ranges);
+            }
             free(units);
             free(replacement);
             return status;
@@ -1150,6 +1178,9 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
             break;
         }
         }
+    }
+    if (ranges != stack_ranges) {
+        free(ranges);
     }
     free(units);
     free(replacement);

@@ -257,31 +257,51 @@ static int kiln_c99_val_regexp_exec_fast(kiln_val receiver, kiln_val arg, kiln_v
                     size_t start = regexp->global || regexp->sticky
                         ? (regexp->last_index < 0.0 ? 0 : (size_t)regexp->last_index)
                         : 0;
-                    int64_t ranges[64];
+                    int64_t stack_ranges[64];
+                    int64_t *ranges = stack_ranges;
+                    size_t ranges_capacity = sizeof(stack_ranges) / sizeof(stack_ranges[0]);
                     size_t groups = 0;
                     int matched = 0;
                     int status = regexp->matcher_ascii((const uint8_t *)sval.ptr, sval.len, start,
-                                                       ranges, sizeof ranges / sizeof *ranges, &groups, &matched);
+                                                       ranges, ranges_capacity, &groups, &matched);
                     if (KILN_UNLIKELY(status != KILN_C99_OK)) return status;
+                    if (matched && groups > ranges_capacity / 2) {
+                        ranges = (int64_t *)malloc(groups * 2 * sizeof(int64_t));
+                        if (ranges == NULL) return KILN_C99_OUT_OF_MEMORY;
+                        ranges_capacity = groups * 2;
+                        status = regexp->matcher_ascii((const uint8_t *)sval.ptr, sval.len, start,
+                                                       ranges, ranges_capacity, &groups, &matched);
+                        if (KILN_UNLIKELY(status != KILN_C99_OK)) {
+                            free(ranges);
+                            return status;
+                        }
+                    }
                     if (regexp->global || regexp->sticky) {
                         regexp->last_index = matched ? (double)ranges[1] : 0.0;
                     }
                     if (!matched) {
+                        if (ranges != stack_ranges) free(ranges);
                         *out = KILN_VAL_NULL;
                         return KILN_C99_OK;
                     }
                     kiln_value built;
                     status = kiln_c99_new_array(&built);
-                    if (KILN_UNLIKELY(status != KILN_C99_OK)) return status;
+                    if (KILN_UNLIKELY(status != KILN_C99_OK)) {
+                        if (ranges != stack_ranges) free(ranges);
+                        return status;
+                    }
                     kiln_array *arr = kiln_c99_array_of(built);
                     if (groups <= sizeof(arr->inline_elements) / sizeof(arr->inline_elements[0])) {
                         arr->elements = arr->inline_elements;
                         arr->capacity = sizeof(arr->inline_elements) / sizeof(arr->inline_elements[0]);
                     } else {
                         status = kiln_c99_array_reserve(arr, groups);
-                        if (KILN_UNLIKELY(status != KILN_C99_OK)) return status;
+                        if (KILN_UNLIKELY(status != KILN_C99_OK)) {
+                            if (ranges != stack_ranges) free(ranges);
+                            return status;
+                        }
                     }
-                    int can_reuse = (regexp->cached_group_count == groups);
+                    int can_reuse = (regexp->cached_group_count == groups && groups <= 32);
                     if (can_reuse) {
                         for (size_t g = 0; g < groups; ++g) {
                             if (regexp->cached_ranges[g * 2] != ranges[g * 2] ||
@@ -328,6 +348,7 @@ static int kiln_c99_val_regexp_exec_fast(kiln_val receiver, kiln_val arg, kiln_v
                     }
                     arr->match_index = ranges[0];
                     arr->match_input = sval;
+                    if (ranges != stack_ranges) free(ranges);
                     *out = kiln_val_from_boundary(built);
                     return KILN_C99_OK;
                 }
