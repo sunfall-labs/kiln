@@ -1270,36 +1270,9 @@ impl Native {
             (Self::NodeEvents, prop) => crate::events::property(prop),
             (Self::NodeNet, prop) => crate::net::property(prop),
             (Self::NodeHttp, prop) => crate::http::property(prop),
-            (Self::NodeBuffer | Self::NodeBufferGlobal, "from") => {
-                Some(Value::Native(Self::NodeBufferFrom, RealmId::PRIMARY))
+            (Self::NodeBuffer | Self::NodeBufferGlobal, prop) => {
+                crate::buffer::property(self, prop)
             }
-            (
-                Self::NodeBuffer | Self::NodeBufferGlobal,
-                "alloc" | "allocUnsafe" | "allocUnsafeSlow",
-            ) => Some(Value::Native(Self::NodeBufferAlloc, RealmId::PRIMARY)),
-            (Self::NodeBuffer | Self::NodeBufferGlobal, "isBuffer") => {
-                Some(Value::Native(Self::NodeBufferIsBuffer, RealmId::PRIMARY))
-            }
-            (Self::NodeBuffer | Self::NodeBufferGlobal, "byteLength") => {
-                Some(Value::Native(Self::NodeBufferByteLength, RealmId::PRIMARY))
-            }
-            (Self::NodeBuffer | Self::NodeBufferGlobal, "concat") => {
-                Some(Value::Native(Self::NodeBufferConcat, RealmId::PRIMARY))
-            }
-            // `require("buffer").Buffer` is the constructor, and has to be the *same* value as
-            // the global `Buffer` -- that identity is what every `Buffer.isBuffer` shim relies
-            // on. `default` stays the namespace: an ESM default import of a Node builtin is the
-            // namespace object, not the constructor.
-            (Self::NodeBuffer | Self::NodeBufferGlobal, "Buffer") => {
-                Some(Value::Native(Self::NodeBufferGlobal, RealmId::PRIMARY))
-            }
-            (Self::NodeBuffer, "default") => {
-                Some(Value::Native(Self::NodeBuffer, RealmId::PRIMARY))
-            }
-            (Self::NodeBuffer | Self::NodeBufferGlobal, "constants") => Some(ordinary_object([(
-                "MAX_STRING_LENGTH".to_owned(),
-                Value::Number(536_870_888.0),
-            )])),
             (Self::ProcessHrtime, "bigint") => {
                 Some(Value::Native(Self::ProcessHrtimeBigInt, RealmId::PRIMARY))
             }
