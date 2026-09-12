@@ -594,6 +594,9 @@ static int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_valu
     slot->getter = kiln_c99_undefined();
     slot->setter = kiln_c99_undefined();
     slot->value = value;
+    slot->writable = 1;
+    slot->enumerable = !(text.len >= 2 && text.ptr[0] == '@' && text.ptr[1] == '@');
+    slot->configurable = 1;
     return KILN_C99_OK;
 }
 

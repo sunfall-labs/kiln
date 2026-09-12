@@ -1,6 +1,6 @@
 # A plain member after a getter of the same name in an object literal keeps the getter
 
-**Status:** open
+**Status:** resolved
 
 Found 2026-09-06 while proving the `DefineNamedProperty` site cache with a probe; the divergence
 is present on a binary from 2026-09-04, before that cache existed, and the cache never sees this
