@@ -1262,94 +1262,24 @@ impl Native {
             (Self::NodeFs, "promises") => {
                 Some(Value::Native(Self::NodeFsPromises, RealmId::PRIMARY))
             }
-            (Self::NodeDiagnosticsChannel, "channel") => Some(Value::Native(
-                Self::NodeDiagnosticsChannelCreate,
-                RealmId::PRIMARY,
-            )),
-            (Self::NodeDiagnosticsChannel, "tracingChannel") => Some(Value::Native(
-                Self::NodeDiagnosticsTracingChannel,
-                RealmId::PRIMARY,
-            )),
-            (Self::NodeDiagnosticsChannel, "hasSubscribers") => Some(Value::Boolean(false)),
-            (Self::NodeUtil, "inherits") => {
-                Some(Value::Native(Self::NodeUtilInherits, RealmId::PRIMARY))
-            }
-            (Self::NodeUtil, "debuglog") => {
-                Some(Value::Native(Self::NodeUtilDebuglog, RealmId::PRIMARY))
-            }
-            (Self::NodeUtil, "deprecate") => {
-                Some(Value::Native(Self::NodeUtilDeprecate, RealmId::PRIMARY))
-            }
-            (Self::NodeUtil, "inspect") => {
-                Some(Value::Native(Self::NodeUtilInspect, RealmId::PRIMARY))
-            }
-            (Self::NodeUtilInspect, "custom") => Some(Value::Symbol(Symbol::WellKnown(
-                WellKnown::NodeInspectCustom,
-            ))),
-            (Self::NodeUtil, "format") => {
-                Some(Value::Native(Self::NodeUtilFormat, RealmId::PRIMARY))
-            }
-            // The same two constructors the global scope already has. `node:util` is where they
-            // were before they were global and where library code still reaches for them:
-            // `react-dom/server` opens with `new (require("util").TextEncoder)()`, and finding
-            // `undefined` there stopped the module while it was still loading.
-            (Self::NodeUtil, "TextEncoder") => Some(Value::Native(
-                Self::TextEncoderConstructor,
-                RealmId::PRIMARY,
-            )),
-            (Self::NodeUtil, "TextDecoder") => Some(Value::Native(
-                Self::TextDecoderConstructor,
-                RealmId::PRIMARY,
-            )),
+            (Self::NodeDiagnosticsChannel, prop) => crate::diagnostics_channel::property(prop),
+            (Self::NodeUtil, prop) => crate::util::property(prop),
+            (Self::NodeUtilInspect, prop) => crate::util::inspect_property(prop),
             // `default` binds to the module namespace unless an arm below overrides it, and an
             // override is only correct where node's own default is callable. Measured against
             // node v25.9.0, exactly four are: `assert`, `events`, `module` and `stream`.
             // `async_hooks`, `string_decoder` and `perf_hooks` used to override too, which bound
             // their defaults to `AsyncResource`, `StringDecoder` and `performance` and made
             // `typeof` answer "function" where node answers "object".
-            (Self::NodeAssert, "default" | "ok" | "strict") => {
-                Some(Value::Native(Self::NodeAssertOk, RealmId::PRIMARY))
-            }
+            (Self::NodeAssert, prop) => crate::assert::property(prop),
             (Self::NodeAsyncHooks, "AsyncResource") => {
                 Some(Value::Native(Self::NodeAsyncResource, RealmId::PRIMARY))
             }
             (Self::NodeAsyncHooks, "AsyncLocalStorage") => {
                 Some(Value::Native(Self::NodeAsyncLocalStorage, RealmId::PRIMARY))
             }
-            (Self::NodeCrypto, "default") => {
-                Some(Value::Native(Self::NodeCrypto, RealmId::PRIMARY))
-            }
-            (Self::NodeCrypto, "randomUUID") => {
-                Some(Value::Native(Self::NodeCryptoRandomUuid, RealmId::PRIMARY))
-            }
-            (Self::NodeCrypto, "randomBytes") => {
-                Some(Value::Native(Self::NodeCryptoRandomBytes, RealmId::PRIMARY))
-            }
-            (Self::NodeCrypto, "randomFillSync") => Some(Value::Native(
-                Self::NodeCryptoRandomFillSync,
-                RealmId::PRIMARY,
-            )),
-            (Self::NodeCrypto, "getHashes") => {
-                Some(Value::Native(Self::NodeCryptoGetHashes, RealmId::PRIMARY))
-            }
-            (Self::NodeCrypto, "getRandomValues") => Some(Value::Native(
-                Self::NodeCryptoGetRandomValues,
-                RealmId::PRIMARY,
-            )),
-            (Self::NodeCrypto, "createHash") => {
-                Some(Value::Native(Self::NodeCryptoCreateHash, RealmId::PRIMARY))
-            }
-            (Self::NodeCrypto, "createHmac") => {
-                Some(Value::Native(Self::NodeCryptoCreateHmac, RealmId::PRIMARY))
-            }
-            (Self::NodeCrypto, "timingSafeEqual") => Some(Value::Native(
-                Self::NodeCryptoTimingSafeEqual,
-                RealmId::PRIMARY,
-            )),
-            (Self::NodeStringDecoder, "StringDecoder") => Some(Value::Native(
-                Self::NodeStringDecoderConstructor,
-                RealmId::PRIMARY,
-            )),
+            (Self::NodeCrypto, prop) => crate::crypto::property(prop),
+            (Self::NodeStringDecoder, prop) => crate::string_decoder::property(prop),
             (Self::NodeStream, "Readable") => {
                 Some(Value::Native(Self::NodeReadable, RealmId::PRIMARY))
             }
@@ -1375,136 +1305,11 @@ impl Native {
                 Self::PrototypeOf(PrototypeTable::Writable),
                 RealmId::PRIMARY,
             )),
-            (Self::NodeDns, "lookup") => Some(Value::Native(Self::NodeDnsLookup, RealmId::PRIMARY)),
-            (Self::NodeOs, "networkInterfaces") => Some(Value::Native(
-                Self::NodeOsNetworkInterfaces,
-                RealmId::PRIMARY,
-            )),
-            (Self::NodeOs, "hostname") => {
-                Some(Value::Native(Self::NodeOsHostname, RealmId::PRIMARY))
-            }
-            (Self::NodeOs, "platform") => Some(Value::Native(
-                Self::NodeOsFact(OsFact::Platform),
-                RealmId::PRIMARY,
-            )),
-            (Self::NodeOs, "arch") => Some(Value::Native(
-                Self::NodeOsFact(OsFact::Arch),
-                RealmId::PRIMARY,
-            )),
-            (Self::NodeOs, "type") => Some(Value::Native(
-                Self::NodeOsFact(OsFact::Type),
-                RealmId::PRIMARY,
-            )),
-            (Self::NodeOs, "endianness") => Some(Value::Native(
-                Self::NodeOsFact(OsFact::Endianness),
-                RealmId::PRIMARY,
-            )),
-            (Self::NodeOs, "tmpdir") => Some(Value::Native(
-                Self::NodeOsFact(OsFact::TmpDir),
-                RealmId::PRIMARY,
-            )),
-            (Self::NodeOs, "homedir") => Some(Value::Native(
-                Self::NodeOsFact(OsFact::HomeDir),
-                RealmId::PRIMARY,
-            )),
-            (Self::NodeOs, "release") => Some(Value::Native(
-                Self::NodeOsFact(OsFact::Release),
-                RealmId::PRIMARY,
-            )),
-            (Self::NodeOs, "version") => Some(Value::Native(
-                Self::NodeOsFact(OsFact::Version),
-                RealmId::PRIMARY,
-            )),
-            (Self::NodeOs, "machine") => Some(Value::Native(
-                Self::NodeOsFact(OsFact::Machine),
-                RealmId::PRIMARY,
-            )),
-            (Self::NodeOs, "availableParallelism") => Some(Value::Native(
-                Self::NodeOsFact(OsFact::Parallelism),
-                RealmId::PRIMARY,
-            )),
-            (Self::NodeOs, "cpus") => Some(Value::Native(
-                Self::NodeOsFact(OsFact::Cpus),
-                RealmId::PRIMARY,
-            )),
-            (Self::NodeOs, "totalmem") => Some(Value::Native(
-                Self::NodeOsFact(OsFact::TotalMem),
-                RealmId::PRIMARY,
-            )),
-            (Self::NodeOs, "freemem") => Some(Value::Native(
-                Self::NodeOsFact(OsFact::FreeMem),
-                RealmId::PRIMARY,
-            )),
-            (Self::NodeOs, "uptime") => Some(Value::Native(
-                Self::NodeOsFact(OsFact::Uptime),
-                RealmId::PRIMARY,
-            )),
-            (Self::NodeOs, "loadavg") => Some(Value::Native(
-                Self::NodeOsFact(OsFact::LoadAvg),
-                RealmId::PRIMARY,
-            )),
-            (Self::NodeOs, "userInfo") => Some(Value::Native(
-                Self::NodeOsFact(OsFact::UserInfo),
-                RealmId::PRIMARY,
-            )),
-            (Self::NodeOs, "EOL") => Some(Value::String("\n".to_owned())),
-            (Self::NodeOs, "devNull") => Some(Value::String("/dev/null".to_owned())),
-            (Self::NodeTty, "isatty") => Some(Value::Native(Self::NodeTtyIsatty, RealmId::PRIMARY)),
-            (Self::NodeZlib, "createInflate") => {
-                Some(Value::Native(Self::NodeZlibCreateInflate, RealmId::PRIMARY))
-            }
-            (Self::NodeZlib, "createGunzip") => {
-                Some(Value::Native(Self::NodeZlibCreateGunzip, RealmId::PRIMARY))
-            }
-            (Self::NodeZlib, "createGzip") => {
-                Some(Value::Native(Self::NodeZlibCreateGzip, RealmId::PRIMARY))
-            }
-            (Self::NodeZlib, "createDeflate") => {
-                Some(Value::Native(Self::NodeZlibCreateDeflate, RealmId::PRIMARY))
-            }
-            (Self::NodeZlib, "createUnzip") => {
-                Some(Value::Native(Self::NodeZlibCreateUnzip, RealmId::PRIMARY))
-            }
-            (Self::NodeZlib, "createBrotliDecompress") => Some(Value::Native(
-                Self::NodeZlibCreateBrotliDecompress,
-                RealmId::PRIMARY,
-            )),
-            (Self::NodeZlib, "gunzipSync") => {
-                Some(Value::Native(Self::NodeZlibGunzipSync, RealmId::PRIMARY))
-            }
-            (Self::NodeZlib, "inflateSync") => {
-                Some(Value::Native(Self::NodeZlibInflateSync, RealmId::PRIMARY))
-            }
-            (Self::NodeZlib, "gzipSync") => {
-                Some(Value::Native(Self::NodeZlibGzipSync, RealmId::PRIMARY))
-            }
-            (Self::NodeZlib, "deflateSync") => {
-                Some(Value::Native(Self::NodeZlibDeflateSync, RealmId::PRIMARY))
-            }
-            (Self::NodeZlib, "unzipSync") => {
-                Some(Value::Native(Self::NodeZlibUnzipSync, RealmId::PRIMARY))
-            }
-            (Self::NodeZlib, "constants") => Some(ordinary_object([
-                ("Z_NO_FLUSH".to_owned(), Value::Number(0.0)),
-                ("Z_PARTIAL_FLUSH".to_owned(), Value::Number(1.0)),
-                ("Z_SYNC_FLUSH".to_owned(), Value::Number(2.0)),
-                ("Z_FULL_FLUSH".to_owned(), Value::Number(3.0)),
-                ("Z_FINISH".to_owned(), Value::Number(4.0)),
-                ("Z_BLOCK".to_owned(), Value::Number(5.0)),
-                ("Z_TREES".to_owned(), Value::Number(6.0)),
-                ("Z_OK".to_owned(), Value::Number(0.0)),
-                ("Z_STREAM_END".to_owned(), Value::Number(1.0)),
-                ("Z_NEED_DICT".to_owned(), Value::Number(2.0)),
-                ("Z_ERRNO".to_owned(), Value::Number(-1.0)),
-                ("Z_STREAM_ERROR".to_owned(), Value::Number(-2.0)),
-                ("Z_DATA_ERROR".to_owned(), Value::Number(-3.0)),
-                ("Z_MEM_ERROR".to_owned(), Value::Number(-4.0)),
-                ("Z_BUF_ERROR".to_owned(), Value::Number(-5.0)),
-                ("Z_VERSION_ERROR".to_owned(), Value::Number(-6.0)),
-            ])),
-            (Self::NodePerfHooks, "performance") => {
-                Some(Value::Native(Self::Performance, RealmId::PRIMARY))
-            }
+            (Self::NodeDns, prop) => crate::dns::property(prop),
+            (Self::NodeOs, prop) => crate::os::property(prop),
+            (Self::NodeTty, prop) => crate::tty::property(prop),
+            (Self::NodeZlib, prop) => crate::zlib::property(prop),
+            (Self::NodePerfHooks, prop) => crate::perf_hooks::property(prop),
             (Self::NodeHttps, "createServer") => {
                 Some(Value::Native(Self::NodeHttpsCreateServer, RealmId::PRIMARY))
             }
@@ -1519,60 +1324,12 @@ impl Native {
                 Self::NodeModuleCreateRequire,
                 RealmId::PRIMARY,
             )),
-            (Self::NodePath, "join") => Some(Value::Native(Self::NodePathJoin, RealmId::PRIMARY)),
-            (Self::NodePath, "dirname") => Some(Value::Native(
-                Self::NodePathPart(PathPart::Dir),
-                RealmId::PRIMARY,
-            )),
-            (Self::NodePath, "basename") => Some(Value::Native(
-                Self::NodePathPart(PathPart::Base),
-                RealmId::PRIMARY,
-            )),
-            (Self::NodePath, "extname") => Some(Value::Native(
-                Self::NodePathPart(PathPart::Ext),
-                RealmId::PRIMARY,
-            )),
-            (Self::NodePath, "normalize") => Some(Value::Native(
-                Self::NodePathPart(PathPart::Normalize),
-                RealmId::PRIMARY,
-            )),
-            (Self::NodePath, "relative") => {
-                Some(Value::Native(Self::NodePathRelative, RealmId::PRIMARY))
-            }
-            (Self::NodePath, "parse") => Some(Value::Native(Self::NodePathParse, RealmId::PRIMARY)),
-            (Self::NodePath, "format") => {
-                Some(Value::Native(Self::NodePathFormat, RealmId::PRIMARY))
-            }
-            (Self::NodePath, "delimiter") => Some(Value::String(":".to_owned())),
-            // `path.posix` is this module: the realm's paths are POSIX paths, and `path.win32`
-            // is deliberately absent rather than answered with them -- a `win32.sep` of "/" is
-            // the kind of confident wrong answer a bundler's platform check acts on.
-            (Self::NodePath, "posix") => Some(Value::Native(Self::NodePath, RealmId::PRIMARY)),
-            (Self::NodePath, "resolve") => {
-                Some(Value::Native(Self::NodePathResolve, RealmId::PRIMARY))
-            }
-            (Self::NodePath, "isAbsolute") => {
-                Some(Value::Native(Self::NodePathIsAbsolute, RealmId::PRIMARY))
-            }
-            (Self::NodePath, "sep") => Some(Value::String("/".to_owned())),
+            (Self::NodePath, prop) => crate::path::property(prop),
             (Self::NodeWorkerThreads, "Worker") => {
                 Some(Value::Native(Self::NodeWorkerConstructor, RealmId::PRIMARY))
             }
-            (Self::NodeQueryString, "parse" | "decode") => {
-                Some(Value::Native(Self::NodeQueryStringParse, RealmId::PRIMARY))
-            }
-            (Self::NodeQueryString, "default") => {
-                Some(Value::Native(Self::NodeQueryString, RealmId::PRIMARY))
-            }
-            (Self::NodeUrl, "URL") => Some(Value::Native(Self::UrlConstructor, RealmId::PRIMARY)),
-            (Self::NodeUrl, "parse") => Some(Value::Native(Self::NodeUrlParse, RealmId::PRIMARY)),
-            (Self::NodeUrl, "fileURLToPath") => {
-                Some(Value::Native(Self::NodeUrlFileUrlToPath, RealmId::PRIMARY))
-            }
-            (Self::NodeUrl, "pathToFileURL") => {
-                Some(Value::Native(Self::NodeUrlPathToFileUrl, RealmId::PRIMARY))
-            }
-            (Self::NodeUrl, "default") => Some(Value::Native(Self::NodeUrl, RealmId::PRIMARY)),
+            (Self::NodeQueryString, prop) => crate::querystring::property(prop),
+            (Self::NodeUrl, prop) => crate::url::property(prop),
             (Self::NodeEvents, "EventEmitter" | "default") => {
                 Some(Value::Native(Self::NodeEventEmitter, RealmId::PRIMARY))
             }
