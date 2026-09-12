@@ -498,6 +498,8 @@ struct UrlState {
     pathname: String,
     search: String,
     hash: String,
+    username: String,
+    password: String,
     query: Vec<(String, String)>,
 }
 
@@ -15403,7 +15405,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .first()
                     .map(Value::to_display_string)
                     .unwrap_or_default();
-                let base = arguments.get(1).map(Value::to_display_string);
+                let base = arguments.get(1).and_then(|val| match val {
+                    Value::Undefined => None,
+                    Value::Object(obj) => {
+                        if let Some(NodeObject::Url(state)) = &obj.borrow().node_object {
+                            Some(state.href.clone())
+                        } else {
+                            Some(val.to_display_string())
+                        }
+                    }
+                    _ => Some(val.to_display_string()),
+                });
                 Ok(url_object(parse_url(&input, base.as_deref())?))
             }
             Native::NodeUrlParse => Ok(node_legacy_url_parse(
@@ -15413,28 +15425,65 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .unwrap_or_default(),
             )),
             Native::NodeUrlFileUrlToPath => {
-                let input = arguments
-                    .first()
-                    .map(Value::to_display_string)
-                    .unwrap_or_default();
-                let path = input.strip_prefix("file://").ok_or_else(|| {
-                    ExecutionError::TypeErrorMessage {
-                        message: "fileURLToPath requires a file: URL".to_owned(),
+                let url_string = match arguments.first() {
+                    Some(Value::Object(obj)) => {
+                        if let Some(NodeObject::Url(state)) = &obj.borrow().node_object {
+                            state.href.clone()
+                        } else {
+                            arguments
+                                .first()
+                                .map(Value::to_display_string)
+                                .unwrap_or_default()
+                        }
                     }
-                })?;
-                Ok(Value::String(decode_form_component(path)))
+                    Some(val) => val.to_display_string(),
+                    None => String::new(),
+                };
+                let parsed =
+                    url::Url::parse(&url_string).map_err(|_| ExecutionError::TypeErrorMessage {
+                        message: "fileURLToPath requires a file: URL".to_owned(),
+                    })?;
+                if parsed.scheme() != "file" {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "fileURLToPath requires a file: URL".to_owned(),
+                    });
+                }
+                let path = parsed
+                    .to_file_path()
+                    .map_err(|_| ExecutionError::TypeErrorMessage {
+                        message: "fileURLToPath could not convert file URL to path".to_owned(),
+                    })?;
+                Ok(Value::String(path.to_string_lossy().into_owned()))
             }
             Native::NodeUrlPathToFileUrl => {
                 let path = arguments
                     .first()
                     .map(Value::to_display_string)
                     .unwrap_or_default();
-                let absolute = if path.starts_with('/') {
-                    path
+                let path_buf = std::path::PathBuf::from(&path);
+                let url_res = if path_buf.is_absolute() {
+                    url::Url::from_file_path(&path_buf)
+                } else if let Ok(cwd) = std::env::current_dir() {
+                    url::Url::from_file_path(cwd.join(&path_buf))
                 } else {
-                    format!("/{path}")
+                    url::Url::from_file_path(format!("/{path}"))
                 };
-                Ok(url_object(parse_url(&format!("file://{absolute}"), None)?))
+                let parsed_url = match url_res {
+                    Ok(u) => u,
+                    Err(_) => {
+                        let abs = if path.starts_with('/') {
+                            path
+                        } else {
+                            format!("/{path}")
+                        };
+                        url::Url::parse(&format!("file://{abs}")).map_err(|_| {
+                            ExecutionError::TypeErrorMessage {
+                                message: "pathToFileURL failed".to_owned(),
+                            }
+                        })?
+                    }
+                };
+                Ok(url_object(parse_url(parsed_url.as_str(), None)?))
             }
             Native::NodeQueryStringParse => Ok(node_querystring_parse(
                 &arguments
@@ -15477,6 +15526,77 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .find(|(key, _)| key == &name)
                     .map(|(_, value)| Value::String(value.clone()))
                     .unwrap_or(Value::Null))
+            }
+            Native::UrlSearchParamsHas => {
+                let Value::Object(object) = receiver else {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "URLSearchParams.has called on an incompatible receiver".into(),
+                    });
+                };
+                let state = match &object.borrow().node_object {
+                    Some(NodeObject::UrlSearchParams(state)) => Rc::clone(state),
+                    _ => {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: "URLSearchParams.has called on an incompatible receiver"
+                                .into(),
+                        });
+                    }
+                };
+                let name = arguments
+                    .first()
+                    .map(Value::to_display_string)
+                    .unwrap_or_default();
+                Ok(Value::Boolean(
+                    state.query.iter().any(|(key, _)| key == &name),
+                ))
+            }
+            Native::UrlSearchParamsGetAll => {
+                let Value::Object(object) = receiver else {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "URLSearchParams.getAll called on an incompatible receiver".into(),
+                    });
+                };
+                let state = match &object.borrow().node_object {
+                    Some(NodeObject::UrlSearchParams(state)) => Rc::clone(state),
+                    _ => {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: "URLSearchParams.getAll called on an incompatible receiver"
+                                .into(),
+                        });
+                    }
+                };
+                let name = arguments
+                    .first()
+                    .map(Value::to_display_string)
+                    .unwrap_or_default();
+                let values: Vec<Value> = state
+                    .query
+                    .iter()
+                    .filter(|(key, _)| key == &name)
+                    .map(|(_, value)| Value::String(value.clone()))
+                    .collect();
+                Ok(Value::Array(ArrayData::new(values)))
+            }
+            Native::UrlSearchParamsToString => {
+                let Value::Object(object) = receiver else {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "URLSearchParams.toString called on an incompatible receiver"
+                            .into(),
+                    });
+                };
+                let state = match &object.borrow().node_object {
+                    Some(NodeObject::UrlSearchParams(state)) => Rc::clone(state),
+                    _ => {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: "URLSearchParams.toString called on an incompatible receiver"
+                                .into(),
+                        });
+                    }
+                };
+                let encoded = url::form_urlencoded::Serializer::new(String::new())
+                    .extend_pairs(&state.query)
+                    .finish();
+                Ok(Value::String(encoded))
             }
             Native::ArrayFrom => self.array_from(arguments, instruction),
             Native::ArrayFromAsync => self.array_from_async(receiver, arguments, instruction),
@@ -30010,6 +30130,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         "pathname" => Value::String(state.pathname.clone()),
                         "search" => Value::String(state.search.clone()),
                         "hash" => Value::String(state.hash.clone()),
+                        "username" => Value::String(state.username.clone()),
+                        "password" => Value::String(state.password.clone()),
                         "searchParams" => url_search_params_object(Rc::clone(state)),
                         // Both answer `href`. A `URL` is one of the few objects real code hands
                         // straight to string concatenation -- `` `imported from ${url}` `` --
@@ -34283,95 +34405,63 @@ fn url_search_params_object(state: Rc<UrlState>) -> Value {
         "get",
         Value::Native(Native::UrlSearchParamsGet, RealmId::PRIMARY),
     );
+    object.set(
+        "has",
+        Value::Native(Native::UrlSearchParamsHas, RealmId::PRIMARY),
+    );
+    object.set(
+        "getAll",
+        Value::Native(Native::UrlSearchParamsGetAll, RealmId::PRIMARY),
+    );
+    object.set(
+        "toString",
+        Value::Native(Native::UrlSearchParamsToString, RealmId::PRIMARY),
+    );
     Value::Object(Rc::new(RefCell::new(object)))
 }
 
 fn parse_url(input: &str, base: Option<&str>) -> Result<UrlState, ExecutionError> {
-    let absolute = if input.contains("://") {
-        input.to_owned()
-    } else {
-        let base = base.ok_or_else(|| ExecutionError::TypeErrorMessage {
-            message: format!("Invalid URL: {input}"),
-        })?;
-        let Some(scheme_end) = base.find("://") else {
-            return Err(ExecutionError::TypeErrorMessage {
-                message: format!("Invalid base URL: {base}"),
-            });
-        };
-        let authority_start = scheme_end + 3;
-        let authority_end = base[authority_start..]
-            .find(['/', '?', '#'])
-            .map_or(base.len(), |index| authority_start + index);
-        let origin = &base[..authority_end];
-        if input.starts_with('/') {
-            format!("{origin}{input}")
-        } else {
-            let base_path_end = base[authority_end..]
-                .find(['?', '#'])
-                .map_or(base.len(), |index| authority_end + index);
-            let base_path = &base[authority_end..base_path_end];
-            let directory = base_path.rsplit_once('/').map_or("/", |(dir, _)| dir);
-            format!("{origin}{directory}/{input}")
+    let parsed = match base {
+        Some(base_str) => {
+            let base_url =
+                url::Url::parse(base_str).map_err(|_| ExecutionError::TypeErrorMessage {
+                    message: format!("Invalid base URL: {base_str}"),
+                })?;
+            base_url
+                .join(input)
+                .map_err(|_| ExecutionError::TypeErrorMessage {
+                    message: format!("Invalid URL: {input}"),
+                })?
         }
+        None => url::Url::parse(input).map_err(|_| ExecutionError::TypeErrorMessage {
+            message: format!("Invalid URL: {input}"),
+        })?,
     };
-    let scheme_end = absolute
-        .find("://")
-        .ok_or_else(|| ExecutionError::TypeErrorMessage {
-            message: format!("Invalid URL: {absolute}"),
-        })?;
-    let protocol = format!("{}:", &absolute[..scheme_end]);
-    let authority_start = scheme_end + 3;
-    let authority_end = absolute[authority_start..]
-        .find(['/', '?', '#'])
-        .map_or(absolute.len(), |index| authority_start + index);
-    let host = absolute[authority_start..authority_end].to_owned();
-    // An empty authority is invalid for every special scheme except `file:`, which is defined
-    // to have one: `file:///a.css` is a valid URL whose host is the empty string, and it is what
-    // `pathToFileURL` produces for every path on this machine. Rejecting it made postcss's
-    // `CssSyntaxError` constructor throw a `TypeError` on its way to reporting a CSS syntax
-    // error, so a malformed stylesheet crashed the process instead of being reported.
-    if host.is_empty() && protocol != "file:" {
-        return Err(ExecutionError::TypeErrorMessage {
-            message: format!("Invalid URL: {absolute}"),
-        });
-    }
-    let (hostname, port) = host
-        .rsplit_once(':')
-        .filter(|(_, port)| !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()))
-        .map_or_else(
-            || (host.clone(), String::new()),
-            |(hostname, port)| (hostname.to_owned(), port.to_owned()),
-        );
-    let fragment_at = absolute[authority_end..]
-        .find('#')
-        .map(|index| authority_end + index);
-    let query_at = absolute[authority_end..]
-        .find('?')
-        .map(|index| authority_end + index)
-        .filter(|query| fragment_at.is_none_or(|fragment| *query < fragment));
-    let path_end = query_at.or(fragment_at).unwrap_or(absolute.len());
-    let pathname = if authority_end == path_end {
-        "/".to_owned()
-    } else {
-        absolute[authority_end..path_end].to_owned()
+
+    let href = parsed.as_str().to_owned();
+    let origin = parsed.origin().ascii_serialization();
+    let protocol = format!("{}:", parsed.scheme());
+    let host = match (parsed.host_str(), parsed.port()) {
+        (Some(h), Some(p)) => format!("{h}:{p}"),
+        (Some(h), None) => h.to_owned(),
+        (None, _) => String::new(),
     };
-    let search = query_at.map_or_else(String::new, |query| {
-        absolute[query..fragment_at.unwrap_or(absolute.len())].to_owned()
-    });
-    let hash = fragment_at.map_or_else(String::new, |fragment| absolute[fragment..].to_owned());
-    let query = search
-        .strip_prefix('?')
-        .unwrap_or_default()
-        .split('&')
-        .filter(|part| !part.is_empty())
-        .map(|part| {
-            let (name, value) = part.split_once('=').unwrap_or((part, ""));
-            (decode_form_component(name), decode_form_component(value))
-        })
+    let hostname = parsed.host_str().unwrap_or("").to_owned();
+    let port = parsed.port().map_or_else(String::new, |p| p.to_string());
+    let pathname = parsed.path().to_owned();
+    let search = parsed.query().map_or_else(String::new, |q| format!("?{q}"));
+    let hash = parsed
+        .fragment()
+        .map_or_else(String::new, |f| format!("#{f}"));
+    let username = parsed.username().to_owned();
+    let password = parsed.password().unwrap_or("").to_owned();
+    let query = parsed
+        .query_pairs()
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
         .collect();
-    let origin = format!("{}//{host}", protocol);
+
     Ok(UrlState {
-        href: format!("{origin}{pathname}{search}{hash}"),
+        href,
         origin,
         protocol,
         host,
@@ -34380,6 +34470,8 @@ fn parse_url(input: &str, base: Option<&str>) -> Result<UrlState, ExecutionError
         pathname,
         search,
         hash,
+        username,
+        password,
         query,
     })
 }
@@ -38213,6 +38305,9 @@ fn call_native(
         | Native::ProcessCwd
         | Native::UrlConstructor
         | Native::UrlSearchParamsGet
+        | Native::UrlSearchParamsHas
+        | Native::UrlSearchParamsGetAll
+        | Native::UrlSearchParamsToString
         | Native::UrlToString
         | Native::TextDecoderConstructor
         | Native::TextDecoderDecode

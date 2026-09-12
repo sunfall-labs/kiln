@@ -250,6 +250,9 @@ pub enum Native {
     ProcessCwd,
     UrlConstructor,
     UrlSearchParamsGet,
+    UrlSearchParamsHas,
+    UrlSearchParamsGetAll,
+    UrlSearchParamsToString,
     /// `URL.prototype.toString` and `toJSON`, which are one method under two names.
     UrlToString,
     NodeServerListen,
