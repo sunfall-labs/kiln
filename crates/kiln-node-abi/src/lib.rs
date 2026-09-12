@@ -122,7 +122,15 @@ const BUILTINS: &[BuiltinAbi] = &[
     },
     BuiltinAbi {
         specifier: "node:crypto",
-        exports: &["createHash", "default", "randomUUID"],
+        exports: &[
+            "createHash",
+            "createHmac",
+            "default",
+            "getHashes",
+            "randomBytes",
+            "randomFillSync",
+            "randomUUID",
+        ],
         commonjs: CommonJsProjection::Namespace,
     },
     BuiltinAbi {

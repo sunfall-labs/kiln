@@ -376,6 +376,7 @@ enum HashAlgorithm {
 #[derive(Debug)]
 struct HashState {
     algorithm: HashAlgorithm,
+    hmac_key: Option<Vec<u8>>,
     bytes: Vec<u8>,
     digested: bool,
 }
@@ -7743,6 +7744,16 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         Ok((self.entropy_word(instruction)? >> 11) as f64 / 9_007_199_254_740_992.0)
     }
 
+    fn random_bytes(&mut self, size: usize, instruction: usize) -> Result<Vec<u8>, ExecutionError> {
+        let mut bytes = Vec::with_capacity(size);
+        while bytes.len() < size {
+            let word = self.entropy_word(instruction)?.to_le_bytes();
+            let take = (size - bytes.len()).min(8);
+            bytes.extend_from_slice(&word[..take]);
+        }
+        Ok(bytes)
+    }
+
     /// Cut the reference cycles this run created, so the process can reclaim what it allocated.
     ///
     /// A closure owns exactly three edges that the object graph can point back along: the
@@ -14426,7 +14437,149 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     bytes[15]
                 )));
             }
+            Native::NodeCryptoRandomBytes => {
+                let Some(size_val) = arguments.first() else {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "The \"size\" argument must be of type number".into(),
+                    });
+                };
+                let size_num = match size_val {
+                    Value::Number(n) => *n,
+                    _ => {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: "The \"size\" argument must be of type number".into(),
+                        });
+                    }
+                };
+                if size_num.is_nan() || size_num < 0.0 || size_num > 2147483647.0 {
+                    return Err(ExecutionError::RangeErrorMessage {
+                        message: "The value of \"size\" is out of range".into(),
+                    });
+                }
+                let size = size_num as usize;
+                let bytes = self.random_bytes(size, instruction)?;
+                let result = node_bytes_value(bytes);
+                if let Some(cb) = arguments.get(1)
+                    && !matches!(cb, Value::Undefined)
+                {
+                    if !is_callable(cb) {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: "The \"cb\" argument must be of type function".into(),
+                        });
+                    }
+                    self.call_value(cb, Value::Undefined, vec![Value::Null, result], instruction)?;
+                    return Ok(Value::Undefined);
+                }
+                return Ok(result);
+            }
+            Native::NodeCryptoRandomFillSync => {
+                let Some(buffer_val) = arguments.first() else {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message:
+                            "The \"buffer\" argument must be an ArrayBufferView or ArrayBuffer"
+                                .into(),
+                    });
+                };
+                match buffer_val {
+                    Value::TypedArray(view) => {
+                        let total_len = view.len() * view.kind.width();
+                        let offset = arguments.get(1).map(|v| v.as_number()).unwrap_or(0.0);
+                        if offset.is_nan() || offset < 0.0 || offset > total_len as f64 {
+                            return Err(ExecutionError::RangeErrorMessage {
+                                message: "The value of \"offset\" is out of range".into(),
+                            });
+                        }
+                        let offset = offset as usize;
+                        let size = arguments
+                            .get(2)
+                            .map(|v| v.as_number())
+                            .unwrap_or((total_len - offset) as f64);
+                        if size.is_nan() || size < 0.0 || offset + (size as usize) > total_len {
+                            return Err(ExecutionError::RangeErrorMessage {
+                                message: "The value of \"size\" is out of range".into(),
+                            });
+                        }
+                        let size = size as usize;
+                        if size > 0 {
+                            let random = self.random_bytes(size, instruction)?;
+                            view.buffer.bytes.borrow_mut()
+                                [view.offset + offset..view.offset + offset + size]
+                                .copy_from_slice(&random);
+                        }
+                        return Ok(buffer_val.clone());
+                    }
+                    Value::ArrayBuffer(buffer) => {
+                        let total_len = buffer.bytes.borrow().len();
+                        let offset = arguments.get(1).map(|v| v.as_number()).unwrap_or(0.0);
+                        if offset.is_nan() || offset < 0.0 || offset > total_len as f64 {
+                            return Err(ExecutionError::RangeErrorMessage {
+                                message: "The value of \"offset\" is out of range".into(),
+                            });
+                        }
+                        let offset = offset as usize;
+                        let size = arguments
+                            .get(2)
+                            .map(|v| v.as_number())
+                            .unwrap_or((total_len - offset) as f64);
+                        if size.is_nan() || size < 0.0 || offset + (size as usize) > total_len {
+                            return Err(ExecutionError::RangeErrorMessage {
+                                message: "The value of \"size\" is out of range".into(),
+                            });
+                        }
+                        let size = size as usize;
+                        if size > 0 {
+                            let random = self.random_bytes(size, instruction)?;
+                            buffer.bytes.borrow_mut()[offset..offset + size]
+                                .copy_from_slice(&random);
+                        }
+                        return Ok(buffer_val.clone());
+                    }
+                    Value::DataView(view) => {
+                        let total_len = view.byte_length().unwrap_or(0);
+                        let offset = arguments.get(1).map(|v| v.as_number()).unwrap_or(0.0);
+                        if offset.is_nan() || offset < 0.0 || offset > total_len as f64 {
+                            return Err(ExecutionError::RangeErrorMessage {
+                                message: "The value of \"offset\" is out of range".into(),
+                            });
+                        }
+                        let offset = offset as usize;
+                        let size = arguments
+                            .get(2)
+                            .map(|v| v.as_number())
+                            .unwrap_or((total_len - offset) as f64);
+                        if size.is_nan() || size < 0.0 || offset + (size as usize) > total_len {
+                            return Err(ExecutionError::RangeErrorMessage {
+                                message: "The value of \"size\" is out of range".into(),
+                            });
+                        }
+                        let size = size as usize;
+                        if size > 0 {
+                            let random = self.random_bytes(size, instruction)?;
+                            view.buffer.bytes.borrow_mut()
+                                [view.offset + offset..view.offset + offset + size]
+                                .copy_from_slice(&random);
+                        }
+                        return Ok(buffer_val.clone());
+                    }
+                    _ => {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message:
+                                "The \"buffer\" argument must be an ArrayBufferView or ArrayBuffer"
+                                    .into(),
+                        });
+                    }
+                }
+            }
+            Native::NodeCryptoGetHashes => {
+                return Ok(Value::Array(ArrayData::new(vec![
+                    Value::String("md5".into()),
+                    Value::String("sha1".into()),
+                    Value::String("sha256".into()),
+                    Value::String("sha512".into()),
+                ])));
+            }
             Native::NodeCryptoCreateHash => return node_hash(arguments),
+            Native::NodeCryptoCreateHmac => return node_hmac(arguments),
             Native::NodeHashUpdate => {
                 let state = node_hash_state(receiver)?;
                 let mut state = state.borrow_mut();
@@ -14447,7 +14600,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     });
                 }
                 state.digested = true;
-                let bytes = node_hash_digest(state.algorithm, &state.bytes);
+                let bytes = if let Some(key) = &state.hmac_key {
+                    node_hmac_digest(state.algorithm, key, &state.bytes)
+                } else {
+                    node_hash_digest(state.algorithm, &state.bytes)
+                };
                 let encoding = arguments.first().map(Value::to_display_string);
                 return match encoding.as_deref() {
                     None => Ok(node_bytes_value(bytes)),
@@ -34406,6 +34563,60 @@ fn node_hash(arguments: &[Value]) -> Result<Value, ExecutionError> {
     let mut data = ObjectData {
         node_object: Some(NodeObject::Hash(Rc::new(RefCell::new(HashState {
             algorithm,
+            hmac_key: None,
+            bytes: Vec::new(),
+            digested: false,
+        })))),
+        ..Default::default()
+    };
+    data.set(
+        "update",
+        Value::Native(Native::NodeHashUpdate, RealmId::PRIMARY),
+    );
+    data.set(
+        "digest",
+        Value::Native(Native::NodeHashDigest, RealmId::PRIMARY),
+    );
+    Ok(Value::Object(Rc::new(RefCell::new(data))))
+}
+
+fn node_hmac(arguments: &[Value]) -> Result<Value, ExecutionError> {
+    let name = arguments
+        .first()
+        .map(Value::to_display_string)
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .replace('-', "");
+    let algorithm = match name.as_str() {
+        "md5" => HashAlgorithm::Md5,
+        "sha1" => HashAlgorithm::Sha1,
+        "sha256" => HashAlgorithm::Sha256,
+        "sha512" => HashAlgorithm::Sha512,
+        _ => {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: format!("Digest method not supported: {name}"),
+            });
+        }
+    };
+    let Some(key_arg) = arguments.get(1) else {
+        return Err(ExecutionError::TypeErrorMessage {
+            message:
+                "The \"key\" argument must be of type string or an instance of Buffer or TypedArray"
+                    .into(),
+        });
+    };
+    if key_arg.is_nullish() {
+        return Err(ExecutionError::TypeErrorMessage {
+            message:
+                "The \"key\" argument must be of type string or an instance of Buffer or TypedArray"
+                    .into(),
+        });
+    }
+    let key = node_body_bytes(Some(key_arg))?;
+    let mut data = ObjectData {
+        node_object: Some(NodeObject::Hash(Rc::new(RefCell::new(HashState {
+            algorithm,
+            hmac_key: Some(key),
             bytes: Vec::new(),
             digested: false,
         })))),
@@ -34443,6 +34654,33 @@ fn node_hash_digest(algorithm: HashAlgorithm, bytes: &[u8]) -> Vec<u8> {
         HashAlgorithm::Sha256 => sha2::Sha256::digest(bytes).to_vec(),
         HashAlgorithm::Sha512 => sha2::Sha512::digest(bytes).to_vec(),
     }
+}
+
+fn node_hmac_digest(algorithm: HashAlgorithm, key: &[u8], data: &[u8]) -> Vec<u8> {
+    let block_size = match algorithm {
+        HashAlgorithm::Md5 | HashAlgorithm::Sha1 | HashAlgorithm::Sha256 => 64,
+        HashAlgorithm::Sha512 => 128,
+    };
+    let mut key_block = vec![0_u8; block_size];
+    if key.len() > block_size {
+        let hashed_key = node_hash_digest(algorithm, key);
+        key_block[..hashed_key.len()].copy_from_slice(&hashed_key);
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+    let mut inner_input = Vec::with_capacity(block_size + data.len());
+    for &b in &key_block {
+        inner_input.push(b ^ 0x36);
+    }
+    inner_input.extend_from_slice(data);
+    let inner_hash = node_hash_digest(algorithm, &inner_input);
+
+    let mut outer_input = Vec::with_capacity(block_size + inner_hash.len());
+    for &b in &key_block {
+        outer_input.push(b ^ 0x5c);
+    }
+    outer_input.extend_from_slice(&inner_hash);
+    node_hash_digest(algorithm, &outer_input)
 }
 
 /// `new AsyncLocalStorage()`.
@@ -38465,7 +38703,11 @@ fn call_native(
         | Native::NodeAsyncResourceEmitDestroy
         | Native::NodeCrypto
         | Native::NodeCryptoRandomUuid
+        | Native::NodeCryptoRandomBytes
+        | Native::NodeCryptoRandomFillSync
+        | Native::NodeCryptoGetHashes
         | Native::NodeCryptoCreateHash
+        | Native::NodeCryptoCreateHmac
         | Native::NodeHashUpdate
         | Native::NodeHashDigest
         | Native::NodeStringDecoder
