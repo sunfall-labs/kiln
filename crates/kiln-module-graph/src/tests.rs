@@ -1387,7 +1387,7 @@ fn node_net_connect_is_a_typed_virtual_module_export() {
             ExecutionCapabilities::default(),
         )
         .expect("execute typed node:net module");
-    assert_eq!(host.output, ["[Function: nodeNetConnect]"]);
+    assert_eq!(host.output, ["[Function: connect]"]);
 }
 
 #[test]
