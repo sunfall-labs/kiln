@@ -77,6 +77,12 @@ mod tty;
 mod dns;
 // `perf_hooks` houses node:perf_hooks performance hooks namespace.
 mod perf_hooks;
+// `events` houses node:events and EventEmitter listener tracking.
+mod events;
+pub(crate) use events::{
+    NodeEventBucket, NodeEventListener, node_event_emitter, node_listeners,
+    remove_last_node_listener, remove_node_listener,
+};
 
 /// The built-ins the runtime provides natively.
 ///
@@ -465,18 +471,6 @@ struct HttpResponseState {
 struct HttpIncomingState {
     stream: kiln_host_abi::ResourceId,
     readable: Rc<RefCell<ReadableState>>,
-}
-
-#[derive(Clone, Debug)]
-struct NodeEventBucket {
-    name: String,
-    listeners: Vec<NodeEventListener>,
-}
-
-#[derive(Clone, Debug)]
-struct NodeEventListener {
-    callback: Value,
-    once: bool,
 }
 
 impl Default for ObjectData {
@@ -33085,16 +33079,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     }
 }
 
-fn node_event_emitter() -> Value {
-    let mut data = ObjectData::default();
-    data.set_prototype(Value::Native(
-        Native::PrototypeOf(PrototypeTable::EventEmitter),
-        RealmId::PRIMARY,
-    ));
-    data.node_events = Some(Vec::new());
-    Value::Object(Rc::new(RefCell::new(data)))
-}
-
 fn node_readable(arguments: &[Value], receiver: Option<&Value>) -> Value {
     let options = arguments.first().cloned().unwrap_or(Value::Undefined);
     let high_water_mark = own_data_property(&options, "highWaterMark")
@@ -33734,53 +33718,6 @@ fn text_encoder() -> Value {
         Value::Native(Native::TextEncoderEncode, RealmId::PRIMARY),
     );
     Value::Object(Rc::new(RefCell::new(data)))
-}
-
-fn node_listeners(object: &RefCell<ObjectData>, event: &str) -> Vec<NodeEventListener> {
-    object
-        .borrow()
-        .node_events
-        .as_ref()
-        .and_then(|buckets| buckets.iter().find(|bucket| bucket.name == event))
-        .map(|bucket| bucket.listeners.clone())
-        .unwrap_or_default()
-}
-
-fn remove_node_listener(object: &RefCell<ObjectData>, event: &str, listener: &Value) {
-    let mut data = object.borrow_mut();
-    let Some(buckets) = data.node_events.as_mut() else {
-        return;
-    };
-    let Some(bucket) = buckets.iter_mut().find(|bucket| bucket.name == event) else {
-        return;
-    };
-    if let Some(index) = bucket
-        .listeners
-        .iter()
-        .position(|registered| same_value(&registered.callback, listener))
-    {
-        bucket.listeners.remove(index);
-    }
-}
-
-fn remove_last_node_listener(object: &RefCell<ObjectData>, event: &str, listener: &Value) {
-    let mut data = object.borrow_mut();
-    let Some(buckets) = data.node_events.as_mut() else {
-        return;
-    };
-    let Some(bucket) = buckets.iter_mut().find(|bucket| bucket.name == event) else {
-        return;
-    };
-    if let Some(index) = bucket
-        .listeners
-        .iter()
-        .rposition(|registered| same_value(&registered.callback, listener))
-    {
-        bucket.listeners.remove(index);
-    }
-    if bucket.listeners.is_empty() {
-        buckets.retain(|bucket| bucket.name != event);
-    }
 }
 
 fn unary(operator: UnaryOp, value: Value) -> Result<Value, ExecutionError> {
@@ -45666,6 +45603,9 @@ fn native_js_name(native: &Native) -> String {
         return name.to_owned();
     }
     if let Some(name) = perf_hooks::js_name(*native) {
+        return name.to_owned();
+    }
+    if let Some(name) = events::js_name(*native) {
         return name.to_owned();
     }
     match native {
