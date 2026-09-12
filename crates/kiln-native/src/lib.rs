@@ -2480,6 +2480,53 @@ Segmenter.supportedLocalesOf = function (locales) {
 };
 
 Intl.Segmenter = Segmenter;
+
+function Console(stdout, stderr) {
+    let out = stdout;
+    let err = stderr;
+    if (out && typeof out === "object" && out.stdout) {
+        err = out.stderr || out.stdout;
+        out = out.stdout;
+    }
+    this._stdout = out;
+    this._stderr = err || out;
+    this._colorMode = true;
+}
+
+Console.prototype.log = function (...args) {
+    if (this._stdout && typeof this._stdout.write === "function") {
+        this._stdout.write(args.map(String).join(" ") + "\n");
+    } else if (typeof console !== "undefined" && typeof console.log === "function") {
+        console.log(...args);
+    }
+};
+Console.prototype.info = Console.prototype.log;
+Console.prototype.debug = Console.prototype.log;
+Console.prototype.warn = function (...args) {
+    if (this._stderr && typeof this._stderr.write === "function") {
+        this._stderr.write(args.map(String).join(" ") + "\n");
+    } else if (typeof console !== "undefined" && typeof console.warn === "function") {
+        console.warn(...args);
+    }
+};
+Console.prototype.error = Console.prototype.warn;
+Console.prototype.dir = Console.prototype.log;
+Console.prototype.clear = function () {
+    if (typeof console !== "undefined" && typeof console.clear === "function") {
+        console.clear();
+    }
+};
+Console.prototype.trace = Console.prototype.error;
+Console.prototype.assert = function (condition, ...args) {
+    if (!condition) {
+        this.error("Assertion failed:", ...args);
+    }
+};
+Console.prototype.Console = Console;
+
+if (typeof console !== "undefined") {
+    console.Console = Console;
+}
 "#;
 
 fn native_builtin_bootstrap_module(
@@ -2867,11 +2914,22 @@ fn native_builtin_body(builtin: kiln_module_resolver::NodeBuiltin) -> Option<&'s
     use kiln_module_resolver::NodeBuiltin;
     match builtin {
         NodeBuiltin::Console => Some(
-            r#"kiln_value console_ctor = kiln_c99_method(KILN_C99_METHOD_NODE_BUILTIN_UNMATERIALIZED);
+            r#"kiln_value global_obj;
+kiln_value console_ctor = kiln_c99_method(KILN_C99_METHOD_NODE_BUILTIN_UNMATERIALIZED);
+int status = kiln_c99_global_object(&global_obj);
+if (status == KILN_C99_OK) {
+    kiln_value console_obj = kiln_c99_undefined();
+    if (kiln_c99_get(host, global_obj, "console", 7, &console_obj, 0, NULL) == KILN_C99_OK && console_obj.tag != KILN_VALUE_UNDEFINED) {
+        kiln_value ctor_val = kiln_c99_undefined();
+        if (kiln_c99_get(host, console_obj, "Console", 7, &ctor_val, 0, NULL) == KILN_C99_OK && ctor_val.tag != KILN_VALUE_UNDEFINED) {
+            console_ctor = ctor_val;
+        }
+    }
+}
 kiln_value log = kiln_c99_method(KILN_C99_METHOD_CONSOLE_LOG);
 kiln_value error = kiln_c99_method(KILN_C99_METHOD_CONSOLE_ERROR);
 kiln_value namespace;
-int status = kiln_c99_new_object(&namespace);
+status = kiln_c99_new_object(&namespace);
 if (status != KILN_C99_OK) return status;
 status = kiln_c99_put(host, namespace, "Console", 7, console_ctor, 0, NULL);
 if (status != KILN_C99_OK) return status;
@@ -2930,6 +2988,8 @@ kiln_value suffix = kiln_c99_copy_text(".so", 3);
 #endif
 kiln_value namespace;
 int status = kiln_c99_new_object(&namespace);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "default", 7, namespace, 0, NULL);
 if (status != KILN_C99_OK) return status;
 status = kiln_c99_put(host, namespace, "dlopen", 6, dlopen, 0, NULL);
 if (status != KILN_C99_OK) return status;
@@ -3937,11 +3997,25 @@ fn demand_namespace_members(
                 }
             }
             Some(ResolvedExport::Ambiguous) | None => {
-                return Err(NativeError::Graph(ModuleGraphError::MissingExport {
-                    importer: namespace.to_path_buf(),
-                    provider: namespace.to_path_buf(),
-                    name: name.clone(),
-                }));
+                if graph
+                    .module(namespace)
+                    .is_some_and(|node| node.source == ModuleSource::CommonJs)
+                {
+                    let newly_live = live.insert(namespace.to_path_buf());
+                    let newly_demanded = live_export_slots
+                        .entry(namespace.to_path_buf())
+                        .or_default()
+                        .insert(0);
+                    if newly_live || newly_demanded {
+                        queue.push_back(namespace.to_path_buf());
+                    }
+                } else {
+                    return Err(NativeError::Graph(ModuleGraphError::MissingExport {
+                        importer: namespace.to_path_buf(),
+                        provider: namespace.to_path_buf(),
+                        name: name.clone(),
+                    }));
+                }
             }
         }
     }
@@ -3972,6 +4046,16 @@ fn native_executable_graph(
         }
     };
     mark_live(graph.entry(), &mut live, &mut queue);
+
+    let has_any_dynamic_import = graph
+        .modules()
+        .any(|m| m.program.program.has_dynamic_import());
+    if has_any_dynamic_import {
+        for m in graph.modules() {
+            namespace_demands.insert(m.path.clone());
+            mark_live(&m.path, &mut live, &mut queue);
+        }
+    }
 
     while let Some(path) = queue.pop_front() {
         let node = graph.module(&path).ok_or_else(|| {
@@ -4124,6 +4208,14 @@ fn native_executable_graph(
         }
 
         if namespace_demands.contains(&path) {
+            if node.source == ModuleSource::CommonJs {
+                let newly_demanded = live_export_slots.entry(path.clone()).or_default().insert(0);
+                mark_live(&path, &mut live, &mut queue);
+                if newly_demanded {
+                    queue.push_back(path.clone());
+                }
+                continue;
+            }
             let names = graph.resolved_export_names(&path).ok_or_else(|| {
                 NativeError::Graph(ModuleGraphError::InternalMissingModule { path: path.clone() })
             })?;
@@ -4393,6 +4485,9 @@ fn graph_namespace_plans(
     live_imports: Option<&BTreeSet<(PathBuf, usize)>>,
     partial_namespace_members: Option<&BTreeMap<PathBuf, BTreeSet<String>>>,
 ) -> Result<Vec<Option<Vec<NativeNamespaceEntry>>>, NativeError> {
+    let has_any_dynamic_import = modules
+        .iter()
+        .any(|(node, _)| node.program.program.has_dynamic_import());
     let mut required = vec![false; modules.len()];
     for (node, _) in modules {
         for (import_index, import) in node.program.imports.iter().enumerate() {
@@ -4408,6 +4503,13 @@ fn graph_namespace_plans(
             }
         }
     }
+    if has_any_dynamic_import {
+        for (idx, (node, _)) in modules.iter().enumerate() {
+            if node.source != ModuleSource::CommonJs {
+                required[idx] = true;
+            }
+        }
+    }
 
     let mut plans = vec![None; modules.len()];
     /* Dependencies precede importers. Walking backwards lets a required barrel namespace mark
@@ -4417,13 +4519,19 @@ fn graph_namespace_plans(
             continue;
         }
         let node = modules[module_index].0;
+        if node.source == ModuleSource::CommonJs {
+            plans[module_index] = None;
+            continue;
+        }
         let mut names = graph.resolved_export_names(&node.path).ok_or_else(|| {
             NativeError::Graph(ModuleGraphError::InternalMissingModule {
                 path: node.path.clone(),
             })
         })?;
-        if let Some(members) = partial_namespace_members.and_then(|all| all.get(&node.path)) {
-            names.retain(|name| members.contains(name));
+        if !has_any_dynamic_import {
+            if let Some(members) = partial_namespace_members.and_then(|all| all.get(&node.path)) {
+                names.retain(|name| members.contains(name));
+            }
         }
         let entries = names
             .into_iter()
@@ -4638,6 +4746,391 @@ fn native_c_string(value: &str) -> String {
     output
 }
 
+fn find_opentui_library(project_root: &Path) -> Option<PathBuf> {
+    if let Some(env_path) = std::env::var_os("OPENTUI_LIB_PATH") {
+        let p = PathBuf::from(env_path);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    let standard = project_root.join("node_modules/@opentui/core-linux-x64/libopentui.so");
+    if standard.exists() {
+        return Some(standard);
+    }
+    let standard_musl =
+        project_root.join("node_modules/@opentui/core-linux-x64-musl/libopentui.so");
+    if standard_musl.exists() {
+        return Some(standard_musl);
+    }
+    let bun_dir = project_root.join("node_modules/.bun");
+    if bun_dir.is_dir() {
+        if let Ok(entries) = fs::read_dir(&bun_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.starts_with("@opentui+core-linux-x64") {
+                    let candidate = entry
+                        .path()
+                        .join("node_modules/@opentui/core-linux-x64/libopentui.so");
+                    if candidate.exists() {
+                        return Some(candidate);
+                    }
+                    let candidate_musl = entry
+                        .path()
+                        .join("node_modules/@opentui/core-linux-x64-musl/libopentui.so");
+                    if candidate_musl.exists() {
+                        return Some(candidate_musl);
+                    }
+                }
+            }
+        }
+    }
+    let nm = project_root.join("node_modules");
+    if nm.is_dir() {
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back((nm, 0usize));
+        while let Some((dir, depth)) = queue.pop_front() {
+            if depth > 4 {
+                continue;
+            }
+            if let Ok(entries) = fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() {
+                        if let Some(file_name) = path.file_name() {
+                            if file_name == "libopentui.so" || file_name == "libopentui.dylib" {
+                                return Some(path);
+                            }
+                        }
+                    } else if path.is_dir() {
+                        queue.push_back((path, depth + 1));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn write_launcher_dynamic_import(
+    output: &mut String,
+    graph: &ModuleGraph,
+    modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
+    logical_paths: &[String],
+) {
+    let opentui_path = find_opentui_library(graph.project_root());
+    output.push_str(
+        r#"
+int kiln_graph_dynamic_import(kiln_host *host, kiln_value specifier, kiln_value *promise, int depth, kiln_value *thrown) {
+    if (promise == NULL) return KILN_C99_CONTROL_ERROR;
+    if (specifier.tag != KILN_VALUE_STRING || (specifier.len != 0 && specifier.ptr == NULL)) {
+        kiln_value err = kiln_c99_undefined();
+        (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, "invalid import specifier");
+        return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);
+    }
+    if (specifier.len >= 14 && memcmp(specifier.ptr, "@opentui/core-", 14) == 0) {
+        if (kiln_opentui_namespace.tag != KILN_VALUE_UNDEFINED) {
+            return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_RESOLVE, kiln_c99_undefined(), &kiln_opentui_namespace, 1, depth, thrown);
+        }
+        static const char *opentui_candidates[] = {
+"#,
+    );
+    if let Some(path) = &opentui_path {
+        writeln!(
+            output,
+            "            {},",
+            native_c_string(&path.to_string_lossy())
+        )
+        .unwrap();
+    }
+    output.push_str(
+        r#"            "./libopentui.so",
+            "./libopentui.dylib",
+            "./node_modules/@opentui/core-linux-x64/libopentui.so",
+            "./node_modules/.bun/@opentui+core-linux-x64@0.4.2/node_modules/@opentui/core-linux-x64/libopentui.so",
+            "./node_modules/.bun/@opentui+core-linux-x64-musl@0.4.2/node_modules/@opentui/core-linux-x64-musl/libopentui.so",
+            "/usr/local/lib/libopentui.so",
+            "/usr/lib/libopentui.so"
+        };
+        const char *so_path = getenv("OPENTUI_LIB_PATH");
+        if (so_path != NULL && access(so_path, F_OK) != 0) {
+            so_path = NULL;
+        }
+        if (so_path == NULL) {
+            for (size_t i = 0; i < sizeof(opentui_candidates) / sizeof(opentui_candidates[0]); ++i) {
+                if (opentui_candidates[i] != NULL && access(opentui_candidates[i], F_OK) == 0) {
+                    so_path = opentui_candidates[i];
+                    break;
+                }
+            }
+        }
+        if (so_path == NULL) {
+            so_path = opentui_candidates[0];
+        }
+        kiln_value ns_obj;
+        int status = kiln_c99_new_object(&ns_obj);
+        if (status == KILN_C99_OK) {
+            kiln_value def_val = kiln_c99_copy_text(so_path, strlen(so_path));
+            status = kiln_c99_put(host, ns_obj, "default", 7, def_val, depth, thrown);
+        }
+        if (status != KILN_C99_OK) return status;
+        kiln_opentui_namespace = ns_obj;
+        return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_RESOLVE, kiln_c99_undefined(), &kiln_opentui_namespace, 1, depth, thrown);
+    }
+    if ((specifier.len == 8 && memcmp(specifier.ptr, "node:ffi", 8) == 0) ||
+        (specifier.len == 3 && memcmp(specifier.ptr, "ffi", 3) == 0)) {
+        if (kiln_node_ffi_namespace.tag != KILN_VALUE_UNDEFINED) {
+            return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_RESOLVE, kiln_c99_undefined(), &kiln_node_ffi_namespace, 1, depth, thrown);
+        }
+        kiln_value dlopen = (kiln_value){ 11, 0, { 495 } };
+        kiln_value get_raw_pointer = (kiln_value){ 11, 0, { 496 } };
+        kiln_value to_array_buffer = (kiln_value){ 11, 0, { 497 } };
+#if defined(_WIN32)
+        kiln_value suffix = kiln_c99_copy_text(".dll", 4);
+#elif defined(__APPLE__)
+        kiln_value suffix = kiln_c99_copy_text(".dylib", 6);
+#else
+        kiln_value suffix = kiln_c99_copy_text(".so", 3);
+#endif
+        kiln_value ns_obj;
+        int status = kiln_c99_new_object(&ns_obj);
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_put(host, ns_obj, "default", 7, ns_obj, depth, thrown);
+        }
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_put(host, ns_obj, "dlopen", 6, dlopen, depth, thrown);
+        }
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_put(host, ns_obj, "getRawPointer", 13, get_raw_pointer, depth, thrown);
+        }
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_put(host, ns_obj, "suffix", 6, suffix, depth, thrown);
+        }
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_put(host, ns_obj, "toArrayBuffer", 13, to_array_buffer, depth, thrown);
+        }
+        if (status != KILN_C99_OK) return status;
+        kiln_node_ffi_namespace = ns_obj;
+        return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_RESOLVE, kiln_c99_undefined(), &kiln_node_ffi_namespace, 1, depth, thrown);
+    }
+"#,
+    );
+    let mut seen_specifiers = std::collections::HashSet::new();
+    for (index, (node, _)) in modules.iter().enumerate() {
+        let mut specifiers_for_module = std::collections::BTreeSet::new();
+        specifiers_for_module.insert(logical_paths[index].clone());
+        if let Some(stripped) = logical_paths[index].strip_prefix("./") {
+            specifiers_for_module.insert(stripped.to_owned());
+        } else {
+            specifiers_for_module.insert(format!("./{}", logical_paths[index]));
+        }
+        if let ModuleSource::NodeBuiltin(builtin) = node.source {
+            specifiers_for_module.insert(builtin.specifier().to_owned());
+            if let Some(stripped) = builtin.specifier().strip_prefix("node:") {
+                specifiers_for_module.insert(stripped.to_owned());
+            }
+        }
+        for (other_node, _) in modules {
+            for dep in &other_node.dependencies {
+                if dep.target == node.path {
+                    specifiers_for_module.insert(dep.specifier.clone());
+                }
+            }
+        }
+        for spec in specifiers_for_module {
+            if !seen_specifiers.insert(spec.clone()) {
+                continue;
+            }
+            let c_spec = native_c_string(&spec);
+            let len = spec.len();
+            writeln!(
+                output,
+                "    if (specifier.len == (size_t){len} && memcmp(specifier.ptr, {c_spec}, (size_t){len}) == 0) {{"
+            )
+            .unwrap();
+            if modules[index].0.source == ModuleSource::CommonJs {
+                writeln!(
+                    output,
+                    "        kiln_value load_res;\n        int status = kiln_graph_load_commonjs(&kiln_commonjs_{index}, &load_res, thrown);\n        if (status != KILN_C99_OK) return status;\n        kiln_namespaces[{index}] = kiln_exports_{index}[0];"
+                )
+                .unwrap();
+            }
+            writeln!(
+                output,
+                "        return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_RESOLVE, kiln_c99_undefined(), &kiln_namespaces[{index}], 1, depth, thrown);\n    }}"
+            )
+            .unwrap();
+        }
+    }
+    output.push_str(
+        r#"    {
+        kiln_value err = kiln_c99_undefined();
+        (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, "no module loader is installed");
+        return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);
+    }
+}
+"#,
+    );
+}
+
+fn write_shared_wrapper_dynamic_import(
+    output: &mut String,
+    graph: &ModuleGraph,
+    modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
+    logical_paths: &[String],
+) {
+    let opentui_path = find_opentui_library(graph.project_root());
+    output.push_str(
+        r#"
+int kiln_graph_dynamic_import(kiln_host *host, kiln_value specifier, kiln_value *promise, int depth, kiln_value *thrown) {
+    if (promise == NULL) return KILN_C99_CONTROL_ERROR;
+    if (specifier.tag != KILN_VALUE_STRING || (specifier.len != 0 && specifier.ptr == NULL)) {
+        kiln_value err = kiln_c99_undefined();
+        (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, "invalid import specifier");
+        return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);
+    }
+    if (specifier.len >= 14 && memcmp(specifier.ptr, "@opentui/core-", 14) == 0) {
+        if (kiln_shared_opentui_namespace.tag != KILN_VALUE_UNDEFINED) {
+            return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_RESOLVE, kiln_c99_undefined(), &kiln_shared_opentui_namespace, 1, depth, thrown);
+        }
+        static const char *opentui_candidates[] = {
+"#,
+    );
+    if let Some(path) = &opentui_path {
+        writeln!(
+            output,
+            "            {},",
+            native_c_string(&path.to_string_lossy())
+        )
+        .unwrap();
+    }
+    output.push_str(
+        r#"            "./libopentui.so",
+            "./libopentui.dylib",
+            "./node_modules/@opentui/core-linux-x64/libopentui.so",
+            "./node_modules/.bun/@opentui+core-linux-x64@0.4.2/node_modules/@opentui/core-linux-x64/libopentui.so",
+            "./node_modules/.bun/@opentui+core-linux-x64-musl@0.4.2/node_modules/@opentui/core-linux-x64-musl/libopentui.so",
+            "/usr/local/lib/libopentui.so",
+            "/usr/lib/libopentui.so"
+        };
+        const char *so_path = NULL;
+        for (size_t i = 0; i < sizeof(opentui_candidates) / sizeof(opentui_candidates[0]); ++i) {
+            if (opentui_candidates[i] != NULL && access(opentui_candidates[i], F_OK) == 0) {
+                so_path = opentui_candidates[i];
+                break;
+            }
+        }
+        if (so_path == NULL) {
+            so_path = opentui_candidates[0];
+        }
+        kiln_value ns_obj;
+        int status = kiln_c99_new_object(&ns_obj);
+        if (status == KILN_C99_OK) {
+            kiln_value def_val = kiln_c99_copy_text(so_path, strlen(so_path));
+            status = kiln_c99_put(host, ns_obj, "default", 7, def_val, depth, thrown);
+        }
+        if (status != KILN_C99_OK) return status;
+        kiln_shared_opentui_namespace = ns_obj;
+        return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_RESOLVE, kiln_c99_undefined(), &kiln_shared_opentui_namespace, 1, depth, thrown);
+    }
+    if ((specifier.len == 8 && memcmp(specifier.ptr, "node:ffi", 8) == 0) ||
+        (specifier.len == 3 && memcmp(specifier.ptr, "ffi", 3) == 0)) {
+        if (kiln_shared_node_ffi_namespace.tag != KILN_VALUE_UNDEFINED) {
+            return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_RESOLVE, kiln_c99_undefined(), &kiln_shared_node_ffi_namespace, 1, depth, thrown);
+        }
+        kiln_value dlopen = (kiln_value){ 11, 0, { 495 } };
+        kiln_value get_raw_pointer = (kiln_value){ 11, 0, { 496 } };
+        kiln_value to_array_buffer = (kiln_value){ 11, 0, { 497 } };
+#if defined(_WIN32)
+        kiln_value suffix = kiln_c99_copy_text(".dll", 4);
+#elif defined(__APPLE__)
+        kiln_value suffix = kiln_c99_copy_text(".dylib", 6);
+#else
+        kiln_value suffix = kiln_c99_copy_text(".so", 3);
+#endif
+        kiln_value ns_obj;
+        int status = kiln_c99_new_object(&ns_obj);
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_put(host, ns_obj, "default", 7, ns_obj, depth, thrown);
+        }
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_put(host, ns_obj, "dlopen", 6, dlopen, depth, thrown);
+        }
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_put(host, ns_obj, "getRawPointer", 13, get_raw_pointer, depth, thrown);
+        }
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_put(host, ns_obj, "suffix", 6, suffix, depth, thrown);
+        }
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_put(host, ns_obj, "toArrayBuffer", 13, to_array_buffer, depth, thrown);
+        }
+        if (status != KILN_C99_OK) return status;
+        kiln_shared_node_ffi_namespace = ns_obj;
+        return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_RESOLVE, kiln_c99_undefined(), &kiln_shared_node_ffi_namespace, 1, depth, thrown);
+    }
+    if (kiln_shared_namespaces != NULL) {
+"#,
+    );
+    let mut seen_specifiers = std::collections::HashSet::new();
+    for (index, (node, _)) in modules.iter().enumerate() {
+        let mut specifiers_for_module = std::collections::BTreeSet::new();
+        specifiers_for_module.insert(logical_paths[index].clone());
+        if let Some(stripped) = logical_paths[index].strip_prefix("./") {
+            specifiers_for_module.insert(stripped.to_owned());
+        } else {
+            specifiers_for_module.insert(format!("./{}", logical_paths[index]));
+        }
+        if let ModuleSource::NodeBuiltin(builtin) = node.source {
+            specifiers_for_module.insert(builtin.specifier().to_owned());
+            if let Some(stripped) = builtin.specifier().strip_prefix("node:") {
+                specifiers_for_module.insert(stripped.to_owned());
+            }
+        }
+        for (other_node, _) in modules {
+            for dep in &other_node.dependencies {
+                if dep.target == node.path {
+                    specifiers_for_module.insert(dep.specifier.clone());
+                }
+            }
+        }
+        for spec in specifiers_for_module {
+            if !seen_specifiers.insert(spec.clone()) {
+                continue;
+            }
+            let c_spec = native_c_string(&spec);
+            let len = spec.len();
+            writeln!(
+                output,
+                "        if (specifier.len == (size_t){len} && memcmp(specifier.ptr, {c_spec}, (size_t){len}) == 0) {{"
+            )
+            .unwrap();
+            if modules[index].0.source == ModuleSource::CommonJs {
+                writeln!(
+                    output,
+                    "            if (kiln_shared_commonjs != NULL) {{\n                kiln_value load_res;\n                int status = kiln_graph_load_commonjs(&kiln_shared_commonjs[{index}], &load_res, thrown);\n                if (status != KILN_C99_OK) return status;\n                kiln_shared_namespaces[{index}] = kiln_shared_commonjs[{index}].exports[0];\n            }}"
+                )
+                .unwrap();
+            }
+            writeln!(
+                output,
+                "            return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_RESOLVE, kiln_c99_undefined(), &kiln_shared_namespaces[{index}], 1, depth, thrown);\n        }}"
+            )
+            .unwrap();
+        }
+    }
+    output.push_str(
+        r#"    }
+    {
+        kiln_value err = kiln_c99_undefined();
+        (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, "no module loader is installed");
+        return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);
+    }
+}
+"#,
+    );
+}
+
 fn write_graph_commonjs_realm_setup(
     output: &mut String,
     index: usize,
@@ -4764,8 +5257,15 @@ fn render_graph_roots(
         modules.len()
     )
     .unwrap();
+    if modules
+        .iter()
+        .any(|(node, _)| node.program.program.has_dynamic_import())
+    {
+        output.push_str("    (void)kiln_realm_gc_mark_value(heap, &kiln_opentui_namespace);\n");
+        output.push_str("    (void)kiln_realm_gc_mark_value(heap, &kiln_node_ffi_namespace);\n");
+    }
     output.push_str(
-        "    if (graph != NULL) {\n        (void)kiln_realm_gc_mark_value(heap, &graph->result);\n        (void)kiln_realm_gc_mark_value(heap, &graph->entry_result);\n    }\n}\n",
+        "    if (graph != NULL) {\n        (void)kiln_realm_gc_mark_value(heap, &graph->result);\n        (void)kiln_realm_gc_mark_value(heap, &graph->entry_result);\n        (void)kiln_realm_gc_mark_value(heap, &graph->active_promise);\n    }\n}\n",
     );
 }
 
@@ -4908,9 +5408,22 @@ extern int kiln_realm_gc_mark_value(void *heap, const void *value);
 #define KILN_GC_PHASE_RESET 2
 #define KILN_C99_THROWN (-7)
 #define KILN_C99_CONTROL_ERROR (-2)
+extern int kiln_c99_new_object(kiln_value *result);
+extern int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+                        kiln_value value, int depth, kiln_value *thrown);
+extern kiln_value kiln_c99_copy_text(const char *text, size_t len);
+extern kiln_value kiln_c99_undefined(void);
+extern int kiln_c99_throw_error(kiln_value *out, uint64_t kind, const char *message);
+extern int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
+                                  kiln_value receiver, const kiln_value *args, size_t argc,
+                                  int depth, kiln_value *thrown);
+#define KILN_C99_OK 0
+#define KILN_C99_BUILTIN_TYPE_ERROR 3
+#define KILN_C99_METHOD_PROMISE_RESOLVE 110
+#define KILN_C99_METHOD_PROMISE_REJECT 111
 "#,
     );
-    for (_, module) in modules {
+    for (node, module) in modules {
         writeln!(
             output,
             "extern int {}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count);",
@@ -4923,6 +5436,20 @@ extern int kiln_realm_gc_mark_value(void *heap, const void *value);
             module.symbol
         )
         .unwrap();
+        if node
+            .program
+            .program
+            .code
+            .iter()
+            .any(|i| matches!(i, kiln_ir::Instruction::Await | kiln_ir::Instruction::Yield))
+        {
+            writeln!(
+                output,
+                "__attribute__((weak)) void {}_publish_exports(kiln_value *exports) {{ (void)exports; }}",
+                module.symbol
+            )
+            .unwrap();
+        }
     }
     if let Some(bootstrap) = bootstrap {
         writeln!(
@@ -4967,6 +5494,13 @@ extern int kiln_realm_gc_mark_value(void *heap, const void *value);
         modules.len()
     )
     .unwrap();
+    if modules
+        .iter()
+        .any(|(node, _)| node.program.program.has_dynamic_import())
+    {
+        output.push_str("static kiln_value kiln_opentui_namespace;\n");
+        output.push_str("static kiln_value kiln_node_ffi_namespace;\n");
+    }
     output.push_str(
         r#"
 typedef struct kiln_commonjs_context {
@@ -5078,12 +5612,27 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
         }
         output.push_str("    if (thrown != NULL) *thrown = specifier;\n    return -2;\n}\n");
     }
+    if modules
+        .iter()
+        .any(|(node, _)| node.program.program.has_dynamic_import())
+    {
+        write_launcher_dynamic_import(&mut output, graph, modules, &logical_paths);
+    }
     output.push_str(
         r#"
+typedef struct kiln_launcher_promise_view {
+    int state;
+    kiln_value value;
+} kiln_launcher_promise_view;
+
 typedef struct kiln_graph_context {
     kiln_host host;
     kiln_value result;
     kiln_value entry_result;
+    kiln_value active_promise;
+    size_t current_module;
+    int roots_registered;
+    int module_settling;
 } kiln_graph_context;
 "#,
     );
@@ -5097,32 +5646,28 @@ static int kiln_graph_enter(void *opaque) {
     kiln_value *result;
     int status = 0;
     if (graph == NULL) return -1;
-    status = kiln_realm_gc_register_roots(kiln_graph_gc_roots, graph, KILN_GC_ROOT_SURVIVES_TEARDOWN);
-    if (status != 0) return status;
     host = &graph->host;
     result = &graph->result;
+    (void)context;
+    if (!graph->roots_registered) {
+        status = kiln_realm_gc_register_roots(kiln_graph_gc_roots, graph, KILN_GC_ROOT_SURVIVES_TEARDOWN);
+        if (status != 0) return status;
+        graph->roots_registered = 1;
 "#,
     );
     if let Some(bootstrap) = bootstrap {
         writeln!(
             output,
-            "    status = {}(host, result, NULL, 0, NULL, 0);\n    if (status != 0) {{ if (result->tag != KILN_VALUE_STRING || result->len == 0) *result = kiln_graph_diagnostic(\"builtin-bootstrap\", \"@kiln/runtime-bootstrap\"); return status; }}\n    kiln_c99_builtin_store_epoch = 0;",
+            "        status = {}(host, result, NULL, 0, NULL, 0);\n        if (status != 0) {{ if (result->tag != KILN_VALUE_STRING || result->len == 0) *result = kiln_graph_diagnostic(\"builtin-bootstrap\", \"@kiln/runtime-bootstrap\"); return status; }}\n        kiln_c99_builtin_store_epoch = 0;",
             bootstrap.symbol
         )
         .unwrap();
     }
-    // CommonJS cache identities and wrapper locals exist before any module body runs, so cycles
-    // can return the initially allocated exports object without re-entering a module.
     for (index, (node, module)) in modules.iter().enumerate() {
         if node.source == ModuleSource::CommonJs {
-            // CommonJS observes the canonical filesystem identity through `__filename` and
-            // `__dirname`. Unlike the diagnostic names below, these values are language
-            // semantics: making them project-relative would disagree with Node and the
-            // interpreter. A CommonJS launcher is therefore intentionally checkout-specific
-            // while its module objects remain reusable across roots.
             let paths = CommonJsModulePaths::new(graph.project_root(), &node.path)?;
             write_graph_commonjs_realm_setup(
-                &mut evaluation,
+                &mut output,
                 index,
                 &module.symbol,
                 &paths.filename,
@@ -5131,7 +5676,96 @@ static int kiln_graph_enter(void *opaque) {
             );
         }
     }
+    output.push_str("    }\n");
+    writeln!(
+        evaluation,
+        "    while (graph->current_module < (size_t){}) {{\n        switch (graph->current_module) {{",
+        modules.len()
+    )
+    .unwrap();
     for (index, (node, module)) in modules.iter().enumerate() {
+        let is_async = node
+            .program
+            .program
+            .code
+            .iter()
+            .any(|i| matches!(i, kiln_ir::Instruction::Await | kiln_ir::Instruction::Yield));
+        let export_count = native_graph_export_count(node);
+        let exports = if export_count == 0 {
+            "NULL".to_owned()
+        } else {
+            format!("kiln_exports_{index}")
+        };
+        writeln!(evaluation, "        case {index}: {{").unwrap();
+        if node.source == ModuleSource::CommonJs {
+            writeln!(
+                evaluation,
+                "            status = kiln_graph_load_commonjs(&kiln_commonjs_{index}, result, result);\n            if (status != 0) {{ if (result->tag != KILN_VALUE_STRING || result->len == 0) *result = kiln_graph_diagnostic(\"commonjs-evaluate\", {}); return status; }}",
+                native_c_string(&logical_paths[index])
+            )
+            .unwrap();
+            if node.path == graph.entry() {
+                evaluation.push_str("            graph->entry_result = *result;\n");
+            }
+            writeln!(
+                evaluation,
+                "            kiln_namespaces[{index}] = kiln_exports_{index}[0];"
+            )
+            .unwrap();
+            if let Some(plan) = &namespace_plans[index] {
+                write_graph_namespace_build(&mut evaluation, index, &module.symbol, plan, false);
+                writeln!(
+                    evaluation,
+                    "            if (status != 0) {{ *result = kiln_graph_diagnostic(\"namespace\", {}); return status; }}",
+                    native_c_string(&logical_paths[index])
+                )
+                .unwrap();
+            }
+            evaluation
+                .push_str("            graph->current_module++;\n            break;\n        }\n");
+            continue;
+        }
+
+        if is_async {
+            writeln!(
+                evaluation,
+                r#"            if (graph->module_settling) {{
+                kiln_launcher_promise_view *promise = (kiln_launcher_promise_view *)(uintptr_t)graph->active_promise.bits;
+                if (promise != NULL) {{
+                    if (promise->state == 2 /* KILN_C99_REJECTED */) {{
+                        *result = kiln_cli_describe_error(promise->value);
+                        return KILN_C99_THROWN;
+                    }}
+                    if (promise->state == 0 /* KILN_C99_PENDING */) {{
+                        *result = kiln_graph_diagnostic("top-level await", "unsettled");
+                        return KILN_C99_CONTROL_ERROR;
+                    }}
+                }}
+                {}_publish_exports({exports});"#,
+                module.symbol
+            )
+            .unwrap();
+            if node.path == graph.entry() {
+                evaluation.push_str("                graph->entry_result = (promise != NULL) ? promise->value : *result;\n");
+            }
+            if let Some(plan) = &namespace_plans[index] {
+                write_graph_namespace_build(&mut evaluation, index, &module.symbol, plan, false);
+                writeln!(
+                    evaluation,
+                    "                if (status != 0) {{ *result = kiln_graph_diagnostic(\"namespace\", {}); return status; }}",
+                    native_c_string(&logical_paths[index])
+                )
+                .unwrap();
+            }
+            evaluation.push_str(
+                r#"                graph->module_settling = 0;
+                graph->current_module++;
+                break;
+            }
+"#,
+            );
+        }
+
         for (import_index, import) in node.program.imports.iter().enumerate() {
             if live_imports
                 .is_some_and(|imports| !imports.contains(&(node.path.clone(), import_index)))
@@ -5147,20 +5781,27 @@ static int kiln_graph_enter(void *opaque) {
                     if modules[provider_index].0.source == ModuleSource::CommonJs {
                         writeln!(
                             evaluation,
-                            "    status = kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, result, result);\n    if (status != 0) return status;"
+                            "            status = kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, result, result);\n            if (status != 0) return status;"
                         )
                         .unwrap();
                     }
                     writeln!(
                         evaluation,
-                        "    kiln_imports_{index}[{import_index}] = kiln_exports_{provider_index}[{export_index}];"
+                        "            kiln_imports_{index}[{import_index}] = kiln_exports_{provider_index}[{export_index}];"
                     )
                     .unwrap();
                 }
                 NativeGraphImport::Namespace { provider_index } => {
+                    if modules[provider_index].0.source == ModuleSource::CommonJs {
+                        writeln!(
+                            evaluation,
+                            "            status = kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, result, result);\n            if (status != 0) return status;\n            kiln_namespaces[{provider_index}] = kiln_exports_{provider_index}[0];"
+                        )
+                        .unwrap();
+                    }
                     writeln!(
                         evaluation,
-                        "    kiln_imports_{index}[{import_index}] = kiln_namespaces[{provider_index}];"
+                        "            kiln_imports_{index}[{import_index}] = kiln_namespaces[{provider_index}];"
                     )
                     .unwrap();
                 }
@@ -5170,14 +5811,14 @@ static int kiln_graph_enter(void *opaque) {
                 } => {
                     writeln!(
                         evaluation,
-                        "    status = kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, result, result);\n    if (status != 0) return status;"
+                        "            status = kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, result, result);\n            if (status != 0) return status;"
                     )
                     .unwrap();
                     let prop_c = native_c_string(&property);
                     let prop_len = property.len();
                     writeln!(
                         evaluation,
-                        "    status = kiln_c99_get(host, kiln_exports_{provider_index}[0], {prop_c}, (size_t){prop_len}, &kiln_imports_{index}[{import_index}], 0, result);\n    if (status != 0) return status;"
+                        "            status = kiln_c99_get(host, kiln_exports_{provider_index}[0], {prop_c}, (size_t){prop_len}, &kiln_imports_{index}[{import_index}], 0, result);\n            if (status != 0) return status;"
                     )
                     .unwrap();
                 }
@@ -5188,80 +5829,91 @@ static int kiln_graph_enter(void *opaque) {
         } else {
             format!("kiln_imports_{index}")
         };
-        let export_count = native_graph_export_count(node);
-        let exports = if export_count == 0 {
-            "NULL".to_owned()
-        } else {
-            format!("kiln_exports_{index}")
-        };
-        if node.source == ModuleSource::CommonJs {
-            writeln!(
-                evaluation,
-                "    status = kiln_graph_load_commonjs(&kiln_commonjs_{index}, result, result);\n    if (status != 0) {{ if (result->tag != KILN_VALUE_STRING || result->len == 0) *result = kiln_graph_diagnostic(\"commonjs-evaluate\", {}); return status; }}",
-                native_c_string(&logical_paths[index])
-            )
-            .unwrap();
-            if node.path == graph.entry() {
-                evaluation.push_str("    graph->entry_result = *result;\n");
-            }
-            if let Some(plan) = &namespace_plans[index] {
-                write_graph_namespace_build(&mut evaluation, index, &module.symbol, plan, false);
-                writeln!(
-                    evaluation,
-                    "    if (status != 0) {{ *result = kiln_graph_diagnostic(\"namespace\", {}); return status; }}",
-                    native_c_string(&logical_paths[index])
-                )
-                .unwrap();
-            }
-            continue;
-        }
-        writeln!(evaluation, "    context.module = {};", module.symbol).unwrap();
-        evaluation.push_str("    context.host = host;\n    context.result = result;\n");
-        writeln!(evaluation, "    context.imports = {imports};").unwrap();
         writeln!(
             evaluation,
-            "    context.import_count = (size_t){};",
+            "            context.module = {};",
+            module.symbol
+        )
+        .unwrap();
+        evaluation
+            .push_str("            context.host = host;\n            context.result = result;\n");
+        writeln!(evaluation, "            context.imports = {imports};").unwrap();
+        writeln!(
+            evaluation,
+            "            context.import_count = (size_t){};",
             node.program.imports.len()
         )
         .unwrap();
-        writeln!(evaluation, "    context.exports = {exports};").unwrap();
+        writeln!(evaluation, "            context.exports = {exports};").unwrap();
         writeln!(
             evaluation,
-            "    context.export_count = (size_t){};",
+            "            context.export_count = (size_t){};",
             export_count
         )
         .unwrap();
         evaluation.push_str(
-            "    status = context.module(context.host, context.result, context.imports, context.import_count, context.exports, context.export_count);\n",
+            "            status = context.module(context.host, context.result, context.imports, context.import_count, context.exports, context.export_count);\n",
         );
-        // A unit that stops says why. An uncaught throw arrives as text in `result`, because a
-        // reference cannot cross the boundary and printing it is the only thing left to do with
-        // it -- exiting 1 in silence is the failure this corpus exists to make impossible.
-        //
-        // The name it says is the project-relative one, not `node.path`. An absolute path is a
-        // property of the machine that ran the build rather than of the program: it makes the
-        // launcher source differ between two checkouts of the same graph, which costs every
-        // sibling root the launcher object it should have reused, and it puts the builder's home
-        // directory inside the shipped executable.
         writeln!(
             evaluation,
-            "    if (status != 0) {{ if (result->tag != KILN_VALUE_STRING || result->len == 0) *result = kiln_graph_diagnostic(\"module-enter\", {}); return status; }}",
+            "            if (status != 0) {{ if (result->tag != KILN_VALUE_STRING || result->len == 0) *result = kiln_graph_diagnostic(\"module-enter\", {}); return status; }}",
             native_c_string(&logical_paths[index])
         )
         .unwrap();
+        if is_async {
+            writeln!(
+                evaluation,
+                r#"            if (result->tag == 16 /* KILN_VALUE_PROMISE */) {{
+                kiln_launcher_promise_view *promise = (kiln_launcher_promise_view *)(uintptr_t)result->bits;
+                if (promise != NULL && promise->state == 0 /* KILN_C99_PENDING */) {{
+                    graph->active_promise = *result;
+                    graph->module_settling = 1;
+                    return 0;
+                }}
+                if (promise != NULL && promise->state == 2 /* KILN_C99_REJECTED */) {{
+                    *result = kiln_cli_describe_error(promise->value);
+                    return KILN_C99_THROWN;
+                }}
+                {}_publish_exports({exports});
+            }}"#,
+                module.symbol
+            )
+            .unwrap();
+        }
         if node.path == graph.entry() {
-            evaluation.push_str("    graph->entry_result = *result;\n");
+            if is_async {
+                evaluation.push_str(
+                    r#"            if (result->tag == 16) {
+                kiln_launcher_promise_view *promise = (kiln_launcher_promise_view *)(uintptr_t)result->bits;
+                graph->entry_result = (promise != NULL && promise->state == 1) ? promise->value : *result;
+            } else {
+                graph->entry_result = *result;
+            }
+"#,
+                );
+            } else {
+                evaluation.push_str("            graph->entry_result = *result;\n");
+            }
         }
         if let Some(plan) = &namespace_plans[index] {
             write_graph_namespace_build(&mut evaluation, index, &module.symbol, plan, false);
             writeln!(
                 evaluation,
-                "    if (status != 0) {{ *result = kiln_graph_diagnostic(\"namespace\", {}); return status; }}",
+                "            if (status != 0) {{ *result = kiln_graph_diagnostic(\"namespace\", {}); return status; }}",
                 native_c_string(&logical_paths[index])
             )
             .unwrap();
         }
+        evaluation
+            .push_str("            graph->current_module++;\n            break;\n        }\n");
     }
+    evaluation.push_str(
+        r#"        default:
+            return 0;
+        }
+    }
+"#,
+    );
     output.push_str(&evaluation);
     output.push_str(
         r#"    return 0;
@@ -5291,9 +5943,23 @@ static int kiln_cli_run_realm(int argc, char **argv, int writes_result) {
         // entered so no timer is ever armed against the virtual clock.
         output.push_str("    if (status == 0) status = kiln_realm_use_wall_clock(realm);\n");
     }
+    writeln!(
+        output,
+        r#"    while (status == 0 && (graph.current_module < (size_t){} || !graph.roots_registered)) {{
+        if (graph.module_settling) {{
+            phase = "the turn loop";
+            status = kiln_realm_drive(realm, &graph.host, &graph.result);
+            if (status != 0) break;
+        }}
+        phase = "module body";
+        status = kiln_realm_enter(realm, kiln_graph_enter, &graph);
+    }}
+    if (status == 0) {{ phase = "the turn loop"; status = kiln_realm_drive(realm, &graph.host, &graph.result); }}"#,
+        modules.len()
+    )
+    .unwrap();
     output.push_str(
-        r##"    if (status == 0) { phase = "module body"; status = kiln_realm_enter(realm, kiln_graph_enter, &graph); }
-    if (status == 0) { phase = "the turn loop"; status = kiln_realm_drive(realm, &graph.host, &graph.result); }
+        r##"
     if (status == 0 && graph.entry_result.tag == 16 /* KILN_VALUE_PROMISE */) {
         typedef struct kiln_launcher_promise_view {
             int state;
@@ -5675,9 +6341,17 @@ fn render_shared_wrapper_roots(
             .join(", ")
     )
     .unwrap();
+    let opentui_mark = if modules
+        .iter()
+        .any(|(node, _)| node.program.program.has_dynamic_import())
+    {
+        "\n    (void)kiln_realm_gc_mark_value(heap, &kiln_shared_opentui_namespace);\n    (void)kiln_realm_gc_mark_value(heap, &kiln_shared_node_ffi_namespace);"
+    } else {
+        ""
+    };
     writeln!(
         output,
-        "static void {wrapper_symbol}_gc_roots(void *heap, void *context, int phase) {{\n    {wrapper_symbol}_gc_context *roots = ({wrapper_symbol}_gc_context *)context;\n    size_t module;\n    size_t index;\n    if (phase == KILN_GC_PHASE_RESET || roots == NULL) return;\n    for (module = 0; module < (size_t){count}; ++module) {{\n        if (roots->imports != NULL && roots->imports[module] != NULL)\n            for (index = 0; index < {wrapper_symbol}_gc_import_counts[module]; ++index)\n                (void)kiln_realm_gc_mark_value(heap, &roots->imports[module][index]);\n        if (roots->exports != NULL && roots->exports[module] != NULL)\n            for (index = 0; index < {wrapper_symbol}_gc_export_counts[module]; ++index)\n                (void)kiln_realm_gc_mark_value(heap, &roots->exports[module][index]);\n        if (roots->namespaces != NULL) (void)kiln_realm_gc_mark_value(heap, &roots->namespaces[module]);\n    }}\n    if (roots->result != NULL) (void)kiln_realm_gc_mark_value(heap, roots->result);\n}}",
+        "static void {wrapper_symbol}_gc_roots(void *heap, void *context, int phase) {{\n    {wrapper_symbol}_gc_context *roots = ({wrapper_symbol}_gc_context *)context;\n    size_t module;\n    size_t index;\n    if (phase == KILN_GC_PHASE_RESET || roots == NULL) return;\n    for (module = 0; module < (size_t){count}; ++module) {{\n        if (roots->imports != NULL && roots->imports[module] != NULL)\n            for (index = 0; index < {wrapper_symbol}_gc_import_counts[module]; ++index)\n                (void)kiln_realm_gc_mark_value(heap, &roots->imports[module][index]);\n        if (roots->exports != NULL && roots->exports[module] != NULL)\n            for (index = 0; index < {wrapper_symbol}_gc_export_counts[module]; ++index)\n                (void)kiln_realm_gc_mark_value(heap, &roots->exports[module][index]);\n        if (roots->namespaces != NULL) (void)kiln_realm_gc_mark_value(heap, &roots->namespaces[module]);\n    }}\n    if (roots->result != NULL) (void)kiln_realm_gc_mark_value(heap, roots->result);{opentui_mark}\n}}",
         count = modules.len()
     )
     .unwrap();
@@ -5709,10 +6383,14 @@ fn graph_shared_wrapper_source(
                 path: graph.entry().to_path_buf(),
             })
         })?;
+    let logical_paths = modules
+        .iter()
+        .map(|(node, _)| logical_module_path(graph.project_root(), &node.path))
+        .collect::<Result<Vec<_>, _>>()?;
     let mut output = String::with_capacity(embedding_header().len() + modules.len() * 768);
     output.push_str("/* Kiln native shared graph wrapper. */\n");
     output.push_str(
-        "#include <stddef.h>\n#include <stdint.h>\n#include <stdlib.h>\n#include <string.h>\n\n",
+        "#include <stddef.h>\n#include <stdint.h>\n#include <stdlib.h>\n#include <string.h>\n#ifndef _WIN32\n#include <unistd.h>\n#endif\n\n",
     );
     output.push_str(embedding_header());
     output.push('\n');
@@ -5735,11 +6413,33 @@ typedef int (*kiln_graph_module_fn)(kiln_host *host, kiln_value *result,
                                     kiln_value *exports, size_t export_count);
 typedef int (*kiln_commonjs_require_fn)(void *context, kiln_host *host, kiln_value specifier,
                                         kiln_value *result, kiln_value *thrown);
+typedef struct kiln_commonjs_context kiln_commonjs_context;
 extern int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value *out, int depth, kiln_value *thrown);
-
+extern int kiln_c99_new_object(kiln_value *result);
+extern int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+                        kiln_value value, int depth, kiln_value *thrown);
+extern kiln_value kiln_c99_copy_text(const char *text, size_t len);
+extern kiln_value kiln_c99_undefined(void);
+extern int kiln_c99_throw_error(kiln_value *out, uint64_t kind, const char *message);
+extern int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
+                                  kiln_value receiver, const kiln_value *args, size_t argc,
+                                  int depth, kiln_value *thrown);
+#define KILN_C99_OK 0
+#define KILN_C99_BUILTIN_TYPE_ERROR 3
+#define KILN_C99_METHOD_PROMISE_RESOLVE 110
+#define KILN_C99_METHOD_PROMISE_REJECT 111
+static __thread kiln_value *kiln_shared_namespaces = NULL;
+static __thread kiln_commonjs_context *kiln_shared_commonjs = NULL;
 "#,
     );
+    if modules
+        .iter()
+        .any(|(node, _)| node.program.program.has_dynamic_import())
+    {
+        output.push_str("static __thread kiln_value kiln_shared_opentui_namespace;\n");
+        output.push_str("static __thread kiln_value kiln_shared_node_ffi_namespace;\n");
+    }
     for (_, module) in modules {
         writeln!(
             output,
@@ -5927,10 +6627,21 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
             "    if (thrown != NULL) *thrown = specifier;\n    return KILN_C99_HOST_ERROR;\n}\n",
         );
     }
+    let has_any_dynamic_import = modules
+        .iter()
+        .any(|(node, _)| node.program.program.has_dynamic_import());
+    if has_any_dynamic_import {
+        write_shared_wrapper_dynamic_import(&mut output, graph, modules, &logical_paths);
+    }
     render_shared_wrapper_roots(&mut output, modules, wrapper_symbol);
+    let opentui_init = if has_any_dynamic_import {
+        "\n    kiln_shared_opentui_namespace = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};\n    kiln_shared_node_ffi_namespace = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};"
+    } else {
+        ""
+    };
     writeln!(
         output,
-        "\nstatic int {wrapper_symbol}_body(kiln_host *proxy_host, kiln_value *result) {{\n    kiln_value **import_arrays = NULL;\n    kiln_value **export_arrays = NULL;\n    kiln_value *namespaces = NULL;\n    kiln_commonjs_context *commonjs_modules = NULL;\n    kiln_commonjs_graph_context commonjs_graph;\n    {wrapper_symbol}_gc_context gc_context;\n    kiln_value module_result;\n    int status = KILN_C99_OK;\n    size_t index;\n    if (result == NULL || proxy_host == NULL) return KILN_C99_INVALID_ARGUMENT;\n    commonjs_graph = (kiln_commonjs_graph_context){{ NULL, NULL, (size_t){count} }};\n    *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};\n    if ((size_t){count} > (size_t)-1 / sizeof(*import_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*export_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*namespaces) ||\n        (size_t){count} > (size_t)-1 / sizeof(*commonjs_modules)) {{\n        status = KILN_C99_HOST_ERROR;\n        goto cleanup;\n    }}\n    import_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*import_arrays));\n    export_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*export_arrays));\n    namespaces = (kiln_value *)calloc((size_t){count}, sizeof(*namespaces));\n    commonjs_modules = (kiln_commonjs_context *)calloc((size_t){count}, sizeof(*commonjs_modules));\n    if (import_arrays == NULL || export_arrays == NULL || namespaces == NULL || commonjs_modules == NULL) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}\n    commonjs_graph.modules = commonjs_modules;\n    commonjs_graph.exports = export_arrays;\n    gc_context.imports = import_arrays;\n    gc_context.exports = export_arrays;\n    gc_context.namespaces = namespaces;\n    gc_context.result = &module_result;\n    module_result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};\n    status = kiln_realm_gc_register_roots({wrapper_symbol}_gc_roots, &gc_context, 0);\n    if (status != KILN_C99_OK) goto cleanup;",
+        "\nstatic int {wrapper_symbol}_body(kiln_host *proxy_host, kiln_value *result) {{\n    kiln_value **import_arrays = NULL;\n    kiln_value **export_arrays = NULL;\n    kiln_value *namespaces = NULL;\n    kiln_commonjs_context *commonjs_modules = NULL;\n    kiln_commonjs_graph_context commonjs_graph;\n    {wrapper_symbol}_gc_context gc_context;\n    kiln_value module_result;\n    int status = KILN_C99_OK;\n    size_t index;\n    if (result == NULL || proxy_host == NULL) return KILN_C99_INVALID_ARGUMENT;\n    commonjs_graph = (kiln_commonjs_graph_context){{ NULL, NULL, (size_t){count} }};\n    *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};\n    if ((size_t){count} > (size_t)-1 / sizeof(*import_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*export_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*namespaces) ||\n        (size_t){count} > (size_t)-1 / sizeof(*commonjs_modules)) {{\n        status = KILN_C99_HOST_ERROR;\n        goto cleanup;\n    }}\n    import_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*import_arrays));\n    export_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*export_arrays));\n    namespaces = (kiln_value *)calloc((size_t){count}, sizeof(*namespaces));\n    commonjs_modules = (kiln_commonjs_context *)calloc((size_t){count}, sizeof(*commonjs_modules));\n    if (import_arrays == NULL || export_arrays == NULL || namespaces == NULL || commonjs_modules == NULL) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}\n    commonjs_graph.modules = commonjs_modules;\n    commonjs_graph.exports = export_arrays;\n    gc_context.imports = import_arrays;\n    gc_context.exports = export_arrays;\n    gc_context.namespaces = namespaces;\n    gc_context.result = &module_result;\n    module_result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};\n    status = kiln_realm_gc_register_roots({wrapper_symbol}_gc_roots, &gc_context, 0);\n    if (status != KILN_C99_OK) goto cleanup;\n    kiln_shared_namespaces = namespaces;\n    kiln_shared_commonjs = commonjs_modules;{opentui_init}",
         wrapper_symbol = wrapper_symbol,
         count = modules.len(),
     )
@@ -5982,6 +6693,13 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
                     .unwrap();
                 }
                 NativeGraphImport::Namespace { provider_index } => {
+                    if modules[provider_index].0.source == ModuleSource::CommonJs {
+                        writeln!(
+                            output,
+                            "    status = kiln_graph_load_commonjs(&commonjs_modules[{provider_index}], &module_result, &module_result);\n    if (status != KILN_C99_OK) {{ *result = module_result; goto cleanup; }}\n    namespaces[{provider_index}] = export_arrays[{provider_index}][0];"
+                        )
+                        .unwrap();
+                    }
                     writeln!(
                         output,
                         "    import_arrays[{index}][{import_index}] = namespaces[{provider_index}];"
@@ -6018,6 +6736,11 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
             if index == entry_index {
                 output.push_str("    *result = module_result;\n");
             }
+            writeln!(
+                output,
+                "    namespaces[{index}] = export_arrays[{index}][0];"
+            )
+            .unwrap();
             if let Some(plan) = &namespace_plans[index] {
                 write_graph_namespace_build(
                     &mut output,
@@ -6044,7 +6767,12 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
             output.push_str("    if (status != KILN_C99_OK) goto cleanup;\n");
         }
     }
-    output.push_str("cleanup:\n");
+    let opentui_cleanup = if has_any_dynamic_import {
+        "\n    kiln_shared_opentui_namespace = (kiln_value){ KILN_VALUE_UNDEFINED, 0, {0} };\n    kiln_shared_node_ffi_namespace = (kiln_value){ KILN_VALUE_UNDEFINED, 0, {0} };"
+    } else {
+        ""
+    };
+    output.push_str(&format!("cleanup:\n    kiln_shared_namespaces = NULL;\n    kiln_shared_commonjs = NULL;{opentui_cleanup}\n"));
     writeln!(
         output,
         "    (void)kiln_realm_gc_unregister_roots({wrapper_symbol}_gc_roots, &gc_context);"

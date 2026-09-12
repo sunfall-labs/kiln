@@ -295,6 +295,9 @@ static int kiln_c99_proxy_get(kiln_host *host, kiln_value proxy, kiln_value key,
 static int kiln_c99_get_with_receiver(kiln_host *host, kiln_value target, kiln_value key,
                                       kiln_value receiver, kiln_value *out, int depth,
                                       kiln_value *thrown);
+static int kiln_c99_set_with_receiver(kiln_host *host, kiln_value target, kiln_value key,
+                                      kiln_value value, kiln_value receiver, int strict,
+                                      int depth, kiln_value *thrown);
 static int kiln_c99_proxy_set(kiln_host *host, kiln_value proxy, kiln_value key, kiln_value value,
                               int strict, int depth, kiln_value *thrown);
 static int kiln_c99_set_computed(kiln_host *host, kiln_value target, kiln_value key,
@@ -1138,9 +1141,17 @@ static int kiln_c99_ffi_argument(kiln_value value, uint32_t kind, kiln_ffi_value
             bits = (uint64_t)(uintptr_t)(view->buffer->bytes + view->byte_offset);
         } else return kiln_c99_throw_not_a(thrown, value, "node:ffi pointer argument");
     } else if (kind == KILN_C99_FFI_BOOL) {
-        if (value.tag != KILN_VALUE_BOOLEAN)
+        if (value.tag == KILN_VALUE_BOOLEAN) {
+            bits = value.bits != 0;
+        } else if (value.tag == KILN_VALUE_NUMBER) {
+            bits = kiln_c99_as_number(value) != 0.0;
+        } else if (value.tag == KILN_VALUE_BIGINT) {
+            int status = kiln_c99_ffi_u64(value, &bits, thrown);
+            if (status != KILN_C99_OK) return status;
+            bits = bits != 0;
+        } else {
             return kiln_c99_throw_not_a(thrown, value, "node:ffi boolean argument");
-        bits = value.bits != 0;
+        }
     } else if (kind == KILN_C99_FFI_I64 || kind == KILN_C99_FFI_U64) {
         if (value.tag == KILN_VALUE_BIGINT) {
             int64_t high = 0;

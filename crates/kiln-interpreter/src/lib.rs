@@ -12595,6 +12595,69 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     };
                     self.stack.push(value);
                 }
+                Instruction::SetSuperPropertyStrict { name, strict } => {
+                    let name = self.string_constant(*name, current)?;
+                    let value = self.pop(current)?;
+                    let target = self.pop(current)?;
+                    if target.is_nullish() {
+                        self.throw_error(
+                            ErrorKind::Type,
+                            format!(
+                                "Cannot set properties of {} (setting '{name}')",
+                                target.to_display_string()
+                            ),
+                            current,
+                        )?;
+                        continue;
+                    }
+                    let receiver = self.this_value.clone();
+                    let key = Value::String(name.clone());
+                    let write = self.set_reflect(&target, &key, value.clone(), &receiver, current);
+                    let Some(accepted) = self.catchable(write, current)? else {
+                        continue;
+                    };
+                    if !accepted && *strict {
+                        self.throw_error(
+                            ErrorKind::Type,
+                            format!("Cannot set property '{name}'"),
+                            current,
+                        )?;
+                        continue;
+                    }
+                    self.stack.push(value);
+                }
+                Instruction::SetSuperElementStrict { strict } => {
+                    let value = self.pop(current)?;
+                    let target = self.pop(current)?;
+                    let key = self.pop(current)?;
+                    if target.is_nullish() {
+                        let shown = key.to_display_string();
+                        self.throw_error(
+                            ErrorKind::Type,
+                            format!(
+                                "Cannot set properties of {} (setting '{shown}')",
+                                target.to_display_string()
+                            ),
+                            current,
+                        )?;
+                        continue;
+                    }
+                    let receiver = self.this_value.clone();
+                    let write = self.set_reflect(&target, &key, value.clone(), &receiver, current);
+                    let Some(accepted) = self.catchable(write, current)? else {
+                        continue;
+                    };
+                    if !accepted && *strict {
+                        let shown = key.to_display_string();
+                        self.throw_error(
+                            ErrorKind::Type,
+                            format!("Cannot set property '{shown}'"),
+                            current,
+                        )?;
+                        continue;
+                    }
+                    self.stack.push(value);
+                }
                 Instruction::SetProperty(name) => {
                     let name = self.string_constant(*name, current)?;
                     let value = self.pop(current)?;

@@ -1618,7 +1618,8 @@ fn render_entry(
     output: &mut String,
     program: &Program,
     plan: &StackPlan,
-    symbol: &str,
+    public_symbol: &str,
+    unit_symbol: &str,
     diagnostic_site: &str,
     strict_functions: &[bool],
     keyed: bool,
@@ -1634,7 +1635,7 @@ fn render_entry(
             graph,
             body,
             program,
-            symbol,
+            unit_symbol,
             diagnostic_site,
             &plan.functions,
             strict_functions,
@@ -1643,7 +1644,7 @@ fn render_entry(
         );
 
         let _callables = true;
-        let entry_symbol = format!("{symbol}_body");
+        let entry_symbol = format!("{unit_symbol}_body");
         let linkage = "static ";
         match module {
             None => writeln!(
@@ -1659,19 +1660,19 @@ fn render_entry(
         }
         writeln!(
             output,
-            "    (void)kiln_realm_gc_register_roots({symbol}_gc_roots, NULL, 0);"
+            "    (void)kiln_realm_gc_register_roots({unit_symbol}_gc_roots, NULL, 0);"
         )
         .unwrap();
-        render_key_prologue(output, symbol, keyed);
+        render_key_prologue(output, unit_symbol, keyed);
         if policy.type_profile_record {
-            writeln!(output, "    (void)atexit({symbol}_dump_type_profile);").unwrap();
+            writeln!(output, "    (void)atexit({unit_symbol}_dump_type_profile);").unwrap();
         }
         output.push_str("    kiln_val receiver = KILN_VAL_UNDEFINED; (void)receiver;\n");
         output.push_str("    int depth = 0;\n");
         output.push_str("    kiln_value thrown_value = kiln_c99_undefined();\n");
         output.push_str("    kiln_value *thrown = &thrown_value;\n");
         let locals = usize::try_from(program.local_count).unwrap().max(1);
-        writeln!(output, "    kiln_val *locals = {symbol}_globals;").unwrap();
+        writeln!(output, "    kiln_val *locals = {unit_symbol}_globals;").unwrap();
         output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
 
         if let Some((module_prog, is_commonjs)) = module {
@@ -1726,7 +1727,7 @@ fn render_entry(
             r#"    kiln_value entry_closure;
     int status = kiln_c99_make_closure(
         &entry_closure,
-        {symbol}_entry_body,
+        {unit_symbol}_entry_body,
         "<entry>", 7,
         "<entry>", 7,
         {diagnostic_source},
@@ -1768,14 +1769,15 @@ fn render_entry(
             }
         }
         output.push_str("    return KILN_C99_OK;\n}\n");
+        render_publish_exports(output, public_symbol, unit_symbol, module, true);
         return Ok(());
     }
 
     let callables = produces_references(program) || (policy.compact && module.is_some());
     let entry_symbol = if callables {
-        format!("{symbol}_body")
+        format!("{unit_symbol}_body")
     } else {
-        symbol.to_owned()
+        unit_symbol.to_owned()
     };
     let module_scope = uses_module_scope(program);
     let linkage = if callables { "static " } else { "" };
@@ -1793,12 +1795,12 @@ fn render_entry(
     }
     writeln!(
         output,
-        "    (void)kiln_realm_gc_register_roots({symbol}_gc_roots, NULL, 0);"
+        "    (void)kiln_realm_gc_register_roots({unit_symbol}_gc_roots, NULL, 0);"
     )
     .unwrap();
-    render_key_prologue(output, symbol, keyed);
+    render_key_prologue(output, unit_symbol, keyed);
     if policy.type_profile_record {
-        writeln!(output, "    (void)atexit({symbol}_dump_type_profile);").unwrap();
+        writeln!(output, "    (void)atexit({unit_symbol}_dump_type_profile);").unwrap();
     }
     // A module's `this` is undefined: a module is strict, and strict mode does not substitute
     // the global object. An arrow made here snapshots it, so it is declared for that read too.
@@ -1813,7 +1815,7 @@ fn render_entry(
     }
     let locals = usize::try_from(program.local_count).unwrap().max(1);
     if module_scope {
-        writeln!(output, "    kiln_val *locals = {symbol}_globals;").unwrap();
+        writeln!(output, "    kiln_val *locals = {unit_symbol}_globals;").unwrap();
     } else {
         writeln!(output, "    kiln_val locals[{locals}];").unwrap();
     }
@@ -1882,7 +1884,7 @@ fn render_entry(
         graph,
         body,
         program,
-        symbol,
+        unit_symbol,
         !callables,
         diagnostic_site,
         &plan.functions,
@@ -1894,7 +1896,35 @@ fn render_entry(
         policy.type_profile_record,
     );
     output.push_str("}\n");
+    render_publish_exports(output, public_symbol, unit_symbol, module, module_scope);
     Ok(())
+}
+
+fn render_publish_exports(
+    output: &mut String,
+    public_symbol: &str,
+    unit_symbol: &str,
+    module: Option<(&ModuleProgram, bool)>,
+    module_scope: bool,
+) {
+    if let Some((module_prog, false)) = module {
+        if module_scope {
+            writeln!(
+                output,
+                "void {public_symbol}_publish_exports(kiln_value *exports) {{\n    if (exports == NULL) return;"
+            )
+            .unwrap();
+            for (index, binding) in module_prog.exports.iter().enumerate() {
+                writeln!(
+                    output,
+                    "    exports[{index}] = kiln_val_binding_to_boundary({unit_symbol}_globals[{}]);",
+                    binding.local_slot
+                )
+                .unwrap();
+            }
+            writeln!(output, "}}\n").unwrap();
+        }
+    }
 }
 
 /// The constant table.
@@ -1974,6 +2004,7 @@ fn property_key_constants(program: &Program) -> Vec<u32> {
             | Instruction::DeleteProperty(name)
             | Instruction::LoadSuperProperty(name)
             | Instruction::SetPropertyStrict { name, .. }
+            | Instruction::SetSuperPropertyStrict { name, .. }
             | Instruction::DeletePropertyStrict { name, .. }
             | Instruction::CallMethod { name, .. } => Some(*name),
             _ => None,
@@ -2591,6 +2622,11 @@ fn render(
         policy.generic_only,
         extra_entry_slots.as_ref(),
     )?;
+    if program.has_dynamic_import() {
+        output.push_str(
+            "__attribute__((weak)) int kiln_graph_dynamic_import(kiln_host *host, kiln_value specifier, kiln_value *promise, int depth, kiln_value *thrown) {\n    (void)specifier;\n    kiln_value err = kiln_c99_undefined();\n    (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, \"no module loader is installed\");\n    return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);\n}\n",
+        );
+    }
     render_functions(
         &mut output,
         program,
@@ -2607,6 +2643,7 @@ fn render(
         &mut output,
         program,
         &plan,
+        symbol,
         symbol,
         symbol,
         &strict_functions,
@@ -3229,6 +3266,11 @@ fn render_module(
             .collect::<Vec<_>>();
         direct.set_available(&available);
     }
+    if emitted_program.has_dynamic_import() {
+        output.push_str(
+            "__attribute__((weak)) int kiln_graph_dynamic_import(kiln_host *host, kiln_value specifier, kiln_value *promise, int depth, kiln_value *thrown) {\n    (void)specifier;\n    kiln_value err = kiln_c99_undefined();\n    (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, \"no module loader is installed\");\n    return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);\n}\n",
+        );
+    }
     render_functions(
         &mut output,
         emitted_program,
@@ -3245,6 +3287,7 @@ fn render_module(
         &mut output,
         emitted_program,
         &plan,
+        symbol,
         unit_symbol,
         emission_diagnostic_site,
         &strict_functions,
@@ -3328,6 +3371,11 @@ fn render_runtime_module(
         output.push('\n');
     }
     output.push_str("    *result = kiln_c99_undefined();\n    return KILN_C99_OK;\n}\n");
+    writeln!(
+        output,
+        "void {symbol}_publish_exports(kiln_value *exports) {{\n    (void)exports;\n}}"
+    )
+    .unwrap();
     render_namespace_wrapper(&mut output, symbol);
     render_module_realm_wrapper(&mut output, symbol, symbol);
     output
@@ -3635,6 +3683,15 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
                 word(&mut hash, u64::from(*value));
             }
             Instruction::LoadSuperElement => byte(&mut hash, 73),
+            Instruction::SetSuperPropertyStrict { name, strict } => {
+                byte(&mut hash, 80);
+                word(&mut hash, u64::from(*name));
+                byte(&mut hash, u8::from(*strict));
+            }
+            Instruction::SetSuperElementStrict { strict } => {
+                byte(&mut hash, 81);
+                byte(&mut hash, u8::from(*strict));
+            }
             Instruction::SuperCall { argc } => {
                 byte(&mut hash, 35);
                 word(&mut hash, u64::from(*argc));

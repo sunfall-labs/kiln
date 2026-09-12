@@ -167,7 +167,7 @@ static int kiln_c99_url_construct(kiln_value *out, const kiln_value *args, size_
             memcmp(resp->target_ptr, input.ptr, input.len) == 0) {
             resp->url_used = 1;
             if (resp->url_object.tag != KILN_VALUE_OBJECT) {
-                status = kiln_c99_new_object_with_capacity_tenured(&resp->url_object, 4);
+                status = kiln_c99_new_object_with_capacity_tenured(&resp->url_object, 6);
                 if (status != KILN_C99_OK) return status;
                 status = kiln_c99_new_object_with_capacity_tenured(&resp->search_params_object, 4);
                 if (status != KILN_C99_OK) return status;
@@ -176,6 +176,8 @@ static int kiln_c99_url_construct(kiln_value *out, const kiln_value *args, size_
                 if (status != KILN_C99_OK) return status;
                 status = kiln_c99_put_hot_key(NULL, resp->url_object, KILN_C99_HOT_KEY_SEARCH_PARAMS,
                                               resp->search_params_object, 0, NULL);
+                if (status != KILN_C99_OK) return status;
+                status = kiln_c99_put(NULL, resp->url_object, "@@url", 5, kiln_c99_boolean(1), 0, NULL);
                 if (status != KILN_C99_OK) return status;
             }
             size_t path_len = (size_t)((query != NULL ? query :
@@ -246,7 +248,9 @@ static int kiln_c99_url_construct(kiln_value *out, const kiln_value *args, size_
     status = kiln_c99_put_hot_key(NULL, params, KILN_C99_HOT_KEY_GET,
                           kiln_c99_method(KILN_C99_METHOD_URL_SEARCH_PARAMS_GET), 0, NULL);
     if (status != KILN_C99_OK) return status;
-    return kiln_c99_put_hot_key(NULL, *out, KILN_C99_HOT_KEY_SEARCH_PARAMS, params, 0, NULL);
+    status = kiln_c99_put_hot_key(NULL, *out, KILN_C99_HOT_KEY_SEARCH_PARAMS, params, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    return kiln_c99_put(NULL, *out, "@@url", 5, kiln_c99_boolean(1), 0, NULL);
 }
 
 static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,

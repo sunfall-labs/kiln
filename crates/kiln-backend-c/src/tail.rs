@@ -489,6 +489,26 @@ pub(crate) fn emit_tail_instruction(
             )
             .unwrap();
         }
+        Instruction::SetSuperPropertyStrict { name, strict } => {
+            let Constant::String(text) = &constants[*name as usize] else {
+                unreachable!("verification rejects a non-string property name before emission")
+            };
+            let strict_num = if *strict { 1 } else { 0 };
+            writeln!(
+                output,
+                "    {{ kiln_value proto = kiln_val_to_boundary(stack[sp - 2]); kiln_value val = kiln_val_to_boundary(stack[sp - 1]); int status = kiln_c99_set_with_receiver(host, proto, kiln_c99_value(KILN_VALUE_STRING, 0, {symbol}_key_{name}, {}), val, kiln_val_to_boundary(receiver), {strict_num}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 2] = stack[sp - 1]; sp--; }}",
+                text.len()
+            )
+            .unwrap();
+        }
+        Instruction::SetSuperElementStrict { strict } => {
+            let strict_num = if *strict { 1 } else { 0 };
+            writeln!(
+                output,
+                "    {{ kiln_value key = kiln_val_to_boundary(stack[sp - 3]); kiln_value proto = kiln_val_to_boundary(stack[sp - 2]); kiln_value val = kiln_val_to_boundary(stack[sp - 1]); int status = kiln_c99_set_with_receiver(host, proto, key, val, kiln_val_to_boundary(receiver), {strict_num}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 3] = stack[sp - 1]; sp -= 2; }}"
+            )
+            .unwrap();
+        }
         Instruction::LoadPrototype => {
             writeln!(
                 output,
@@ -524,7 +544,7 @@ pub(crate) fn emit_tail_instruction(
         Instruction::DynamicImport => {
             writeln!(
                 output,
-                "    {{ kiln_value err = kiln_c99_undefined(); (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, \"no module loader is installed\"); kiln_value promise; int status = kiln_c99_invoke_method(host, &promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_val_from_boundary(promise); }}"
+                "    {{ kiln_value promise; int status = kiln_graph_dynamic_import(host, kiln_val_to_boundary(stack[sp - 1]), &promise, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_val_from_boundary(promise); }}"
             )
             .unwrap();
         }

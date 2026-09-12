@@ -1807,17 +1807,11 @@ impl Lowerer<'_> {
                     value: Box::new(value),
                 }
             }
-            // `super[k] = v` takes the same shortcut as `super.x = v`, and inherits the same
-            // single wrong case; the reasoning is written out below.
             AssignmentTarget::ComputedMemberExpression(member)
                 if !member.optional && matches!(member.object, Expression::Super(_)) =>
             {
-                HirExpressionKind::ComputedAssignment {
+                HirExpressionKind::SuperComputedAssignment {
                     operator,
-                    object: Box::new(HirExpression {
-                        kind: HirExpressionKind::This,
-                        span,
-                    }),
                     property: Box::new(self.expression(&member.expression)),
                     value: Box::new(value),
                 }
@@ -1830,20 +1824,11 @@ impl Lowerer<'_> {
                     value: Box::new(value),
                 }
             }
-            // `super.x = v` assigns to `this`, not to the parent's prototype: the prototype is
-            // only consulted for a setter, and a write with none creates an own property on the
-            // instance. The one case this gets wrong is a class that defines `set x` *and*
-            // writes `super.x` inside it -- the idiom for avoiding recursion -- where the
-            // specification starts the search above the home object and this starts at it.
             AssignmentTarget::StaticMemberExpression(member)
                 if !member.optional && matches!(member.object, Expression::Super(_)) =>
             {
-                HirExpressionKind::MemberAssignment {
+                HirExpressionKind::SuperMemberAssignment {
                     operator,
-                    object: Box::new(HirExpression {
-                        kind: HirExpressionKind::This,
-                        span,
-                    }),
                     property: member.property.name.to_string(),
                     value: Box::new(value),
                 }

@@ -854,6 +854,32 @@ static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *a
                       value.tag != KILN_VALUE_BIGINT && value.tag != KILN_VALUE_CELL &&
                       value.tag != KILN_VALUE_HOLE && value.tag != KILN_VALUE_UNINITIALIZED;
             return KILN_C99_OK;
+        case KILN_C99_BUILTIN_URL: {
+            kiln_value marker;
+            *answer = 0;
+            if (value.tag == KILN_VALUE_OBJECT &&
+                kiln_c99_get(NULL, value, "@@url", 5, &marker, 0, NULL) == KILN_C99_OK &&
+                marker.tag == KILN_VALUE_BOOLEAN && marker.bits != 0) {
+                *answer = 1;
+            }
+            return KILN_C99_OK;
+        }
+        case KILN_C99_BUILTIN_BUFFER:
+            *answer = value.tag == KILN_VALUE_TYPED_ARRAY &&
+                      kiln_c99_typed_array_of(value)->is_buffer;
+            return KILN_C99_OK;
+        case KILN_C99_BUILTIN_FUNCTION: {
+            kiln_value type = kiln_c99_typeof(value);
+            *answer = type.len == 8 && memcmp(type.ptr, "function", 8) == 0;
+            return KILN_C99_OK;
+        }
+        case KILN_C99_BUILTIN_STRING:
+        case KILN_C99_BUILTIN_NUMBER:
+        case KILN_C99_BUILTIN_BOOLEAN:
+        case KILN_C99_BUILTIN_SYMBOL:
+        case KILN_C99_BUILTIN_BIGINT:
+            *answer = 0;
+            return KILN_C99_OK;
         default:
             KILN_C99_REFUSE("instanceof against a built-in whose instances this backend does not "
                             "model");

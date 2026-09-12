@@ -237,6 +237,17 @@ pub enum Instruction {
     /// object's `[[Prototype]]` is read after the key expression has run, so a key expression
     /// that re-links the home object is seen by the lookup it precedes.
     LoadSuperElement,
+    /// `super.x = v`: write the named property of the value on top -- the home object's prototype --
+    /// with the running function's `this` as the receiver. Stack: `[prototype, value] -> [value]`.
+    SetSuperPropertyStrict {
+        name: u32,
+        strict: bool,
+    },
+    /// `super[k] = v`: the computed spelling of [`Instruction::SetSuperPropertyStrict`].
+    /// Stack: `[key, prototype, value] -> [value]`.
+    SetSuperElementStrict {
+        strict: bool,
+    },
     /// Read a value's `[[Prototype]]`. Stack: `[value] -> [prototype]`.
     ///
     /// The read half of [`Instruction::SetPrototype`], and it exists for exactly one caller:
