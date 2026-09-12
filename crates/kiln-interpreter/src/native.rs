@@ -1330,9 +1330,7 @@ impl Native {
             }
             (Self::NodeQueryString, prop) => crate::querystring::property(prop),
             (Self::NodeUrl, prop) => crate::url::property(prop),
-            (Self::NodeEvents, "EventEmitter" | "default") => {
-                Some(Value::Native(Self::NodeEventEmitter, RealmId::PRIMARY))
-            }
+            (Self::NodeEvents, prop) => crate::events::property(prop),
             (Self::NodeNet, "createServer") => {
                 Some(Value::Native(Self::NodeNetCreateServer, RealmId::PRIMARY))
             }
@@ -1480,40 +1478,10 @@ impl Native {
                 Some(Value::Native(Self::ConsoleConstructor, RealmId::PRIMARY))
             }
             (Self::NodeConsole, name) => Self::PrototypeOf(PrototypeTable::Console).property(name),
-            (Self::NodeEventEmitter, "prototype") => Some(Value::Native(
-                Self::PrototypeOf(PrototypeTable::EventEmitter),
-                RealmId::PRIMARY,
-            )),
-            (Self::NodeEventEmitter, "EventEmitter" | "default") => {
-                Some(Value::Native(Self::NodeEventEmitter, RealmId::PRIMARY))
+            (Self::NodeEventEmitter, prop) => crate::events::event_emitter_property(prop),
+            (Self::PrototypeOf(PrototypeTable::EventEmitter), prop) => {
+                crate::events::prototype_property(prop)
             }
-            (Self::PrototypeOf(PrototypeTable::EventEmitter), "constructor") => {
-                Some(Value::Native(Self::NodeEventEmitter, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::EventEmitter), "on" | "addListener") => {
-                Some(Value::Native(Self::NodeEventOn, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::EventEmitter), "once") => {
-                Some(Value::Native(Self::NodeEventOnce, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::EventEmitter), "emit") => {
-                Some(Value::Native(Self::NodeEventEmit, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::EventEmitter), "listeners") => {
-                Some(Value::Native(Self::NodeEventListeners, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::EventEmitter), "eventNames") => {
-                Some(Value::Native(Self::NodeEventNames, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::EventEmitter), "removeListener" | "off") => Some(
-                Value::Native(Self::NodeEventRemoveListener, RealmId::PRIMARY),
-            ),
-            (Self::PrototypeOf(PrototypeTable::EventEmitter), "removeAllListeners") => Some(
-                Value::Native(Self::NodeEventRemoveAllListeners, RealmId::PRIMARY),
-            ),
-            (Self::PrototypeOf(PrototypeTable::EventEmitter), "setMaxListeners") => Some(
-                Value::Native(Self::NodeEventSetMaxListeners, RealmId::PRIMARY),
-            ),
             (Self::PrototypeOf(PrototypeTable::Readable), "constructor") => {
                 Some(Value::Native(Self::NodeReadable, RealmId::PRIMARY))
             }
