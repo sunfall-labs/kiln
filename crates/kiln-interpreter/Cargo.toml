@@ -24,3 +24,4 @@ sha1 = { workspace = true }
 sha2 = { workspace = true }
 encoding_rs = { workspace = true }
 url = { workspace = true }
+flate2 = { workspace = true }

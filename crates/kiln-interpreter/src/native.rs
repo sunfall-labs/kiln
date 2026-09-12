@@ -171,6 +171,17 @@ pub enum Native {
     NodeTtyIsatty,
     NodeZlib,
     NodeZlibCreateDecompress,
+    NodeZlibCreateGunzip,
+    NodeZlibCreateInflate,
+    NodeZlibCreateGzip,
+    NodeZlibCreateDeflate,
+    NodeZlibCreateUnzip,
+    NodeZlibCreateBrotliDecompress,
+    NodeZlibGunzipSync,
+    NodeZlibInflateSync,
+    NodeZlibGzipSync,
+    NodeZlibDeflateSync,
+    NodeZlibUnzipSync,
     NodePerfHooks,
     NodeHttps,
     NodeHttpsCreateServer,
@@ -1409,9 +1420,58 @@ impl Native {
             (Self::NodeOs, "EOL") => Some(Value::String("\n".to_owned())),
             (Self::NodeOs, "devNull") => Some(Value::String("/dev/null".to_owned())),
             (Self::NodeTty, "isatty") => Some(Value::Native(Self::NodeTtyIsatty, RealmId::PRIMARY)),
-            (Self::NodeZlib, "createInflate" | "createGunzip" | "createBrotliDecompress") => Some(
-                Value::Native(Self::NodeZlibCreateDecompress, RealmId::PRIMARY),
-            ),
+            (Self::NodeZlib, "createInflate") => {
+                Some(Value::Native(Self::NodeZlibCreateInflate, RealmId::PRIMARY))
+            }
+            (Self::NodeZlib, "createGunzip") => {
+                Some(Value::Native(Self::NodeZlibCreateGunzip, RealmId::PRIMARY))
+            }
+            (Self::NodeZlib, "createGzip") => {
+                Some(Value::Native(Self::NodeZlibCreateGzip, RealmId::PRIMARY))
+            }
+            (Self::NodeZlib, "createDeflate") => {
+                Some(Value::Native(Self::NodeZlibCreateDeflate, RealmId::PRIMARY))
+            }
+            (Self::NodeZlib, "createUnzip") => {
+                Some(Value::Native(Self::NodeZlibCreateUnzip, RealmId::PRIMARY))
+            }
+            (Self::NodeZlib, "createBrotliDecompress") => Some(Value::Native(
+                Self::NodeZlibCreateBrotliDecompress,
+                RealmId::PRIMARY,
+            )),
+            (Self::NodeZlib, "gunzipSync") => {
+                Some(Value::Native(Self::NodeZlibGunzipSync, RealmId::PRIMARY))
+            }
+            (Self::NodeZlib, "inflateSync") => {
+                Some(Value::Native(Self::NodeZlibInflateSync, RealmId::PRIMARY))
+            }
+            (Self::NodeZlib, "gzipSync") => {
+                Some(Value::Native(Self::NodeZlibGzipSync, RealmId::PRIMARY))
+            }
+            (Self::NodeZlib, "deflateSync") => {
+                Some(Value::Native(Self::NodeZlibDeflateSync, RealmId::PRIMARY))
+            }
+            (Self::NodeZlib, "unzipSync") => {
+                Some(Value::Native(Self::NodeZlibUnzipSync, RealmId::PRIMARY))
+            }
+            (Self::NodeZlib, "constants") => Some(ordinary_object([
+                ("Z_NO_FLUSH".to_owned(), Value::Number(0.0)),
+                ("Z_PARTIAL_FLUSH".to_owned(), Value::Number(1.0)),
+                ("Z_SYNC_FLUSH".to_owned(), Value::Number(2.0)),
+                ("Z_FULL_FLUSH".to_owned(), Value::Number(3.0)),
+                ("Z_FINISH".to_owned(), Value::Number(4.0)),
+                ("Z_BLOCK".to_owned(), Value::Number(5.0)),
+                ("Z_TREES".to_owned(), Value::Number(6.0)),
+                ("Z_OK".to_owned(), Value::Number(0.0)),
+                ("Z_STREAM_END".to_owned(), Value::Number(1.0)),
+                ("Z_NEED_DICT".to_owned(), Value::Number(2.0)),
+                ("Z_ERRNO".to_owned(), Value::Number(-1.0)),
+                ("Z_STREAM_ERROR".to_owned(), Value::Number(-2.0)),
+                ("Z_DATA_ERROR".to_owned(), Value::Number(-3.0)),
+                ("Z_MEM_ERROR".to_owned(), Value::Number(-4.0)),
+                ("Z_BUF_ERROR".to_owned(), Value::Number(-5.0)),
+                ("Z_VERSION_ERROR".to_owned(), Value::Number(-6.0)),
+            ])),
             (Self::NodePerfHooks, "performance") => {
                 Some(Value::Native(Self::Performance, RealmId::PRIMARY))
             }
