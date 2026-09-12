@@ -139,6 +139,8 @@ num-traits = { version = "0.2", default-features = false, features = ["std"] }
 proptest = { version = "1.11", default-features = false, features = ["std"] }
 # Pure data-driven diagnostic snippet rendering for CLI reports. Zero procedural macros.
 annotate-snippets = { version = "0.12", default-features = false, features = ["std"] }
+# WHATWG Encoding Standard reference implementation in safe Rust (TextDecoder/Buffer).
+encoding_rs = { version = "0.8", default-features = false, features = ["alloc"] }
 # Filesystem events. The debouncer is not optional: editors write-then-rename and emit several
 # events per save.
 notify = { version = "8.2", default-features = false, features = ["macos_fsevent"] }

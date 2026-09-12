@@ -14523,17 +14523,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let label = arguments
                     .first()
                     .filter(|value| !matches!(value, Value::Undefined))
-                    .map_or_else(|| "utf-8".to_owned(), Value::to_display_string)
-                    .to_ascii_lowercase();
-                if !matches!(label.as_str(), "utf-8" | "utf8" | "unicode-1-1-utf-8") {
-                    return Err(ExecutionError::RangeErrorMessage {
+                    .map_or_else(|| "utf-8".to_owned(), Value::to_display_string);
+                let encoding = encoding_rs::Encoding::for_label(label.trim().as_bytes())
+                    .ok_or_else(|| ExecutionError::RangeErrorMessage {
                         message: format!("The encoding label provided ('{label}') is invalid"),
-                    });
-                }
+                    })?;
+                let encoding_name = encoding.name().to_ascii_lowercase();
+                let fatal = arguments
+                    .get(1)
+                    .and_then(|options| own_data_property(options, "fatal"))
+                    .is_some_and(|v| v.is_truthy());
+                let ignore_bom = arguments
+                    .get(1)
+                    .and_then(|options| own_data_property(options, "ignoreBOM"))
+                    .is_some_and(|v| v.is_truthy());
                 return Ok(ordinary_object([
-                    ("encoding".to_owned(), Value::String("utf-8".to_owned())),
-                    ("fatal".to_owned(), Value::Boolean(false)),
-                    ("ignoreBOM".to_owned(), Value::Boolean(false)),
+                    ("encoding".to_owned(), Value::String(encoding_name)),
+                    ("fatal".to_owned(), Value::Boolean(fatal)),
+                    ("ignoreBOM".to_owned(), Value::Boolean(ignore_bom)),
                     (
                         "decode".to_owned(),
                         Value::Native(Native::TextDecoderDecode, RealmId::PRIMARY),
@@ -14554,7 +14561,28 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         });
                     }
                 };
-                return Ok(Value::String(String::from_utf8_lossy(&bytes).into_owned()));
+                let encoding_label = own_data_property(receiver, "encoding")
+                    .and_then(|v| match v {
+                        Value::String(s) => Some(s),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| "utf-8".to_owned());
+                let fatal = own_data_property(receiver, "fatal").is_some_and(|v| v.is_truthy());
+                let ignore_bom =
+                    own_data_property(receiver, "ignoreBOM").is_some_and(|v| v.is_truthy());
+                let encoding = encoding_rs::Encoding::for_label(encoding_label.as_bytes())
+                    .unwrap_or(encoding_rs::UTF_8);
+                let (decoded, had_errors) = if ignore_bom {
+                    encoding.decode_without_bom_handling(&bytes)
+                } else {
+                    encoding.decode_with_bom_removal(&bytes)
+                };
+                if fatal && had_errors {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "The encoded data was not valid for encoding".to_owned(),
+                    });
+                }
+                return Ok(Value::String(decoded.into_owned()));
             }
             Native::NodeHttpsCreateServer => {
                 return Err(ExecutionError::Host {
@@ -15334,14 +15362,41 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .map(Value::to_display_string)
                     .unwrap_or_else(|| "utf8".into())
                     .to_ascii_lowercase();
-                if !matches!(encoding.as_str(), "utf8" | "utf-8") {
-                    return Err(ExecutionError::TypeErrorMessage {
-                        message: format!("unsupported Buffer encoding: {encoding}"),
-                    });
+                let bytes = view.bytes();
+                match encoding.as_str() {
+                    "utf8" | "utf-8" => {
+                        Ok(Value::String(String::from_utf8_lossy(&bytes).into_owned()))
+                    }
+                    "hex" => {
+                        const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+                        let mut hex_str = String::with_capacity(bytes.len() * 2);
+                        for &b in &bytes {
+                            hex_str.push(HEX_DIGITS[(b >> 4) as usize] as char);
+                            hex_str.push(HEX_DIGITS[(b & 0x0f) as usize] as char);
+                        }
+                        Ok(Value::String(hex_str))
+                    }
+                    "latin1" | "binary" | "ascii" => {
+                        let (decoded, _) =
+                            encoding_rs::WINDOWS_1252.decode_without_bom_handling(&bytes);
+                        Ok(Value::String(decoded.into_owned()))
+                    }
+                    "utf16le" | "utf-16le" | "ucs2" | "ucs-2" => {
+                        let (decoded, _) =
+                            encoding_rs::UTF_16LE.decode_without_bom_handling(&bytes);
+                        Ok(Value::String(decoded.into_owned()))
+                    }
+                    other => {
+                        if let Some(enc) = encoding_rs::Encoding::for_label(other.as_bytes()) {
+                            let (decoded, _) = enc.decode_without_bom_handling(&bytes);
+                            Ok(Value::String(decoded.into_owned()))
+                        } else {
+                            Err(ExecutionError::TypeErrorMessage {
+                                message: format!("unsupported Buffer encoding: {encoding}"),
+                            })
+                        }
+                    }
                 }
-                Ok(Value::String(
-                    String::from_utf8_lossy(&view.bytes()).into_owned(),
-                ))
             }
             Native::UrlConstructor => {
                 let input = arguments

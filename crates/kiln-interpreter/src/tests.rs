@@ -4623,3 +4623,142 @@ fn process_object_is_event_emitter() {
     .expect("process.on succeeds");
     assert!(matches!(result.value, Value::Object(_)));
 }
+
+#[test]
+fn text_decoder_and_buffer_support_whatwg_encodings() {
+    let program = Program::default();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: std::collections::VecDeque::new(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+
+    // 1. TextDecoder default utf-8
+    let decoder_utf8 = vm
+        .dispatch_native(Native::TextDecoderConstructor, &Value::Undefined, &[], 0)
+        .expect("TextDecoder default constructor succeeds");
+    let buf_utf8 = test_buffer("Hello 🌍".as_bytes(), None, false);
+    let decoded_utf8 = vm
+        .dispatch_native(Native::TextDecoderDecode, &decoder_utf8, &[buf_utf8], 0)
+        .expect("TextDecoder decode succeeds");
+    assert_eq!(decoded_utf8, Value::String("Hello 🌍".to_owned()));
+
+    // 2. TextDecoder windows-1252
+    let decoder_1252 = vm
+        .dispatch_native(
+            Native::TextDecoderConstructor,
+            &Value::Undefined,
+            &[Value::String("windows-1252".to_owned())],
+            0,
+        )
+        .expect("TextDecoder windows-1252 constructor succeeds");
+    // In windows-1252, 0xA3 is '£', 0xE9 is 'é'
+    let buf_1252 = test_buffer(
+        &[0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x20, 0xa3, 0xe9],
+        None,
+        false,
+    );
+    let decoded_1252 = vm
+        .dispatch_native(Native::TextDecoderDecode, &decoder_1252, &[buf_1252], 0)
+        .expect("TextDecoder decode succeeds");
+    assert_eq!(decoded_1252, Value::String("Hello £é".to_owned()));
+
+    // 3. TextDecoder utf-16le
+    let decoder_utf16le = vm
+        .dispatch_native(
+            Native::TextDecoderConstructor,
+            &Value::Undefined,
+            &[Value::String("utf-16le".to_owned())],
+            0,
+        )
+        .expect("TextDecoder utf-16le constructor succeeds");
+    // "Hi" in utf-16le is [0x48, 0x00, 0x69, 0x00]
+    let buf_utf16le = test_buffer(&[0x48, 0x00, 0x69, 0x00], None, false);
+    let decoded_utf16le = vm
+        .dispatch_native(
+            Native::TextDecoderDecode,
+            &decoder_utf16le,
+            &[buf_utf16le],
+            0,
+        )
+        .expect("TextDecoder decode succeeds");
+    assert_eq!(decoded_utf16le, Value::String("Hi".to_owned()));
+
+    // 4. TextDecoder invalid label throws RangeError
+    let invalid = vm.dispatch_native(
+        Native::TextDecoderConstructor,
+        &Value::Undefined,
+        &[Value::String("unsupported-encoding-xyz".to_owned())],
+        0,
+    );
+    assert!(matches!(
+        invalid,
+        Err(ExecutionError::RangeErrorMessage { .. })
+    ));
+
+    // 5. TextDecoder fatal option throws TypeError on invalid byte sequences
+    let options = ordinary_object([("fatal".to_owned(), Value::Boolean(true))]);
+    let decoder_fatal = vm
+        .dispatch_native(
+            Native::TextDecoderConstructor,
+            &Value::Undefined,
+            &[Value::String("utf-8".to_owned()), options],
+            0,
+        )
+        .expect("fatal TextDecoder succeeds");
+    let invalid_utf8_buf = test_buffer(&[0xff, 0xfe], None, false);
+    let fatal_result = vm.dispatch_native(
+        Native::TextDecoderDecode,
+        &decoder_fatal,
+        &[invalid_utf8_buf],
+        0,
+    );
+    assert!(matches!(
+        fatal_result,
+        Err(ExecutionError::TypeErrorMessage { .. })
+    ));
+
+    // 6. Node Buffer.prototype.toString encodings (hex, latin1, utf16le)
+    let raw_bytes = test_buffer(&[0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x21], None, false);
+    let uint8_view =
+        construct_typed_array(TypedKind::Uint8, &[raw_bytes]).expect("Uint8Array creates");
+
+    let hex_res = vm
+        .dispatch_native(
+            Native::NodeBufferToString,
+            &uint8_view,
+            &[Value::String("hex".to_owned())],
+            0,
+        )
+        .expect("Buffer.toString hex");
+    assert_eq!(hex_res, Value::String("48656c6c6f21".to_owned()));
+
+    let latin1_bytes = test_buffer(&[0xa3, 0xe9], None, false);
+    let latin1_view =
+        construct_typed_array(TypedKind::Uint8, &[latin1_bytes]).expect("Uint8Array creates");
+    let latin1_res = vm
+        .dispatch_native(
+            Native::NodeBufferToString,
+            &latin1_view,
+            &[Value::String("latin1".to_owned())],
+            0,
+        )
+        .expect("Buffer.toString latin1");
+    assert_eq!(latin1_res, Value::String("£é".to_owned()));
+
+    let utf16_bytes = test_buffer(&[0x48, 0x00, 0x69, 0x00], None, false);
+    let utf16_view =
+        construct_typed_array(TypedKind::Uint8, &[utf16_bytes]).expect("Uint8Array creates");
+    let utf16_res = vm
+        .dispatch_native(
+            Native::NodeBufferToString,
+            &utf16_view,
+            &[Value::String("utf16le".to_owned())],
+            0,
+        )
+        .expect("Buffer.toString utf16le");
+    assert_eq!(utf16_res, Value::String("Hi".to_owned()));
+}
