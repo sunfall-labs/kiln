@@ -119,7 +119,9 @@ pub(crate) fn run_source_with_manifest(
         steps,
         source_view,
     )? {
-        SourceResponse::Ready(summary) => finish_run_summary(path, summary, project_notes),
+        SourceResponse::Ready(summary) => {
+            finish_run_summary(path, summary, project_notes, Some(&text))
+        }
         SourceResponse::Stale(_) => {
             let snapshot = establish_snapshot(backend, project_root, canonical, &text, node)?;
             project_notes.extend(snapshot.notes);
@@ -134,7 +136,9 @@ pub(crate) fn run_source_with_manifest(
                 steps,
                 source_view,
             )? {
-                SourceResponse::Ready(summary) => finish_run_summary(path, summary, project_notes),
+                SourceResponse::Ready(summary) => {
+                    finish_run_summary(path, summary, project_notes, Some(&text))
+                }
                 SourceResponse::Stale(current) => {
                     return Err(Error::Protocol(format!("stale source view {}", current.0)));
                 }
@@ -182,7 +186,7 @@ pub(crate) fn run_watched_source_at_view(
         SourceResponse::Ready(summary) => summary,
         SourceResponse::Stale(current) => return Err(ViewError::Stale(current)),
     };
-    let mut output = finish_run_summary(path, summary, Vec::new());
+    let mut output = finish_run_summary(path, summary, Vec::new(), None);
     output.source_view = Some(source_view);
     Ok((output, source_view))
 }
@@ -263,19 +267,23 @@ fn finish_run_summary(
     path: &Path,
     summary: kiln_proto::RunSummary,
     project_notes: Vec<String>,
+    source: Option<&str>,
 ) -> Output {
     let display = path.display().to_string();
     let notes = summary
         .diagnostics
         .iter()
         .map(|diagnostic| {
-            let diagnostic_path = diagnostic.path.as_deref().unwrap_or(&display);
-            match (diagnostic.start, diagnostic.end) {
-                (Some(start), Some(end)) => {
-                    format!("{diagnostic_path}:{start}..{end}: {}", diagnostic.message)
-                }
-                _ => format!("{diagnostic_path}: {}", diagnostic.message),
-            }
+            let src = if diagnostic
+                .path
+                .as_deref()
+                .is_none_or(|p| p == display || p == summary.path)
+            {
+                source
+            } else {
+                None
+            };
+            render::diagnostic(&display, diagnostic, src)
         })
         .chain(project_notes)
         .collect();
@@ -561,7 +569,7 @@ pub fn check(backend: &mut dyn Backend, path: &Path, root: &Path) -> Result<Outp
                     source_view,
                 )?;
             }
-            match backend.check_at_view(canonical, root_text, source_view)? {
+            match backend.check_at_view(canonical.clone(), root_text, source_view)? {
                 SourceResponse::Ready(summary) => summary,
                 SourceResponse::Stale(current) => {
                     return Err(Error::Protocol(format!("stale source view {}", current.0)));
@@ -574,13 +582,16 @@ pub fn check(backend: &mut dyn Backend, path: &Path, root: &Path) -> Result<Outp
 
     let work = Work::between(&before, &after);
     notes.extend(summary.diagnostics.iter().map(|diagnostic| {
-        let diagnostic_path = diagnostic.path.as_deref().unwrap_or(&display);
-        match (diagnostic.start, diagnostic.end) {
-            (Some(start), Some(end)) => {
-                format!("{diagnostic_path}:{start}..{end}: {}", diagnostic.message)
-            }
-            _ => format!("{diagnostic_path}: {}", diagnostic.message),
-        }
+        let src = if diagnostic
+            .path
+            .as_deref()
+            .is_none_or(|p| p == display || p == canonical)
+        {
+            Some(text.as_str())
+        } else {
+            None
+        };
+        render::diagnostic(&display, diagnostic, src)
     }));
     Ok(Output {
         text: render::check(&display, &summary, &work, after.revision, elapsed),
@@ -605,13 +616,14 @@ pub fn check_source(
 ) -> Result<Output> {
     let before = backend.stats()?;
     let started = Instant::now();
-    let source_view = match backend.set_source_at_view(canonical.clone(), text, SourceView(0))? {
-        SourceUpdate::Updated(view) => view,
-        SourceUpdate::Stale(current) => {
-            return Err(Error::Protocol(format!("stale source view {}", current.0)));
-        }
-    };
-    let summary = match backend.check_at_view(canonical, project_root, source_view)? {
+    let source_view =
+        match backend.set_source_at_view(canonical.clone(), text.clone(), SourceView(0))? {
+            SourceUpdate::Updated(view) => view,
+            SourceUpdate::Stale(current) => {
+                return Err(Error::Protocol(format!("stale source view {}", current.0)));
+            }
+        };
+    let summary = match backend.check_at_view(canonical.clone(), project_root, source_view)? {
         SourceResponse::Ready(summary) => summary,
         SourceResponse::Stale(current) => {
             return Err(Error::Protocol(format!("stale source view {}", current.0)));
@@ -625,13 +637,16 @@ pub fn check_source(
         .diagnostics
         .iter()
         .map(|diagnostic| {
-            let diagnostic_path = diagnostic.path.as_deref().unwrap_or(display);
-            match (diagnostic.start, diagnostic.end) {
-                (Some(start), Some(end)) => {
-                    format!("{diagnostic_path}:{start}..{end}: {}", diagnostic.message)
-                }
-                _ => format!("{diagnostic_path}: {}", diagnostic.message),
-            }
+            let src = if diagnostic
+                .path
+                .as_deref()
+                .is_none_or(|p| p == display || p == canonical)
+            {
+                Some(text.as_str())
+            } else {
+                None
+            };
+            render::diagnostic(display, diagnostic, src)
         })
         .collect();
     Ok(Output {
@@ -2144,9 +2159,17 @@ mod tests {
         .expect("a malformed parse is still a cached check result");
 
         assert!(out.text.contains("diagnostics     1"), "{}", out.text);
-        assert_eq!(
-            out.notes,
-            ["broken.ts:7..8: expected an identifier".to_string()]
+        assert_eq!(out.notes.len(), 1);
+        assert!(
+            out.notes[0].contains("error: expected an identifier"),
+            "{}",
+            out.notes[0]
+        );
+        assert!(out.notes[0].contains("broken.ts"), "{}", out.notes[0]);
+        assert!(
+            out.notes[0].contains("export const = 1;"),
+            "{}",
+            out.notes[0]
         );
         assert_eq!(out.exit_code, 1);
     }
@@ -2199,6 +2222,7 @@ mod tests {
                 }],
             },
             Vec::new(),
+            None,
         );
 
         assert_eq!(out.exit_code, 1);

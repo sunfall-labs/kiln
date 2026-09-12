@@ -10,9 +10,10 @@
 use std::fmt::Write as _;
 use std::time::Duration;
 
+use annotate_snippets::{AnnotationKind, Level, Renderer, Snippet};
 use kiln_proto::{
-    CacheGcSummary, ModuleSummary, NativeBuildSummary, NativeSharedLibrarySummary, ProjectSummary,
-    Stats,
+    CacheGcSummary, Diagnostic, ModuleSummary, NativeBuildSummary, NativeSharedLibrarySummary,
+    ProjectSummary, Stats,
 };
 
 /// Width of the indented label column, sized to the longest label ("implementation").
@@ -366,6 +367,35 @@ pub fn cache_gc(summary: &CacheGcSummary) -> String {
         }
     }
     out
+}
+
+/// Format a single compiler or resolution diagnostic.
+///
+/// When the underlying source text and character span are available, this renders an
+/// `annotate-snippets` codeframe displaying the file, line number, source snippet, and caret
+/// underline pointing at the offending span. If source text or offsets are not available (e.g.
+/// module graph resolution errors), it falls back to a clean single-line report.
+pub fn diagnostic(display_path: &str, diag: &Diagnostic, source: Option<&str>) -> String {
+    let path = diag.path.as_deref().unwrap_or(display_path);
+    if let (Some(src), Some(start), Some(end)) = (source, diag.start, diag.end) {
+        let start = start as usize;
+        let end = end as usize;
+        if start <= end && end <= src.len() {
+            let report = [Level::ERROR.primary_title(&diag.message).element(
+                Snippet::source(src).line_start(1).path(path).annotation(
+                    AnnotationKind::Primary
+                        .span(start..end)
+                        .label(&diag.message),
+                ),
+            )];
+            let renderer = Renderer::plain();
+            return renderer.render(&report).to_string();
+        }
+    }
+    match (diag.start, diag.end) {
+        (Some(start), Some(end)) => format!("{path}:{start}..{end}: {}", diag.message),
+        _ => format!("{path}: {}", diag.message),
+    }
 }
 
 /// Binary units, because a cache budget is a disk allocation and `du` reports the same way.
@@ -730,5 +760,47 @@ mod tests {
         };
         let out = native_build("src/main.ts", &summary);
         assert!(out.contains("facts:\n  closed world: closed"), "{out}");
+    }
+
+    #[test]
+    fn diagnostic_renders_codeframe_when_source_and_span_are_available() {
+        let diag = Diagnostic {
+            path: Some("broken.ts".to_owned()),
+            message: "expected an identifier".to_owned(),
+            start: Some(13),
+            end: Some(14),
+        };
+        let source = "export const = 1;";
+        let rendered = diagnostic("broken.ts", &diag, Some(source));
+        assert!(
+            rendered.contains("error: expected an identifier"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("broken.ts"), "{rendered}");
+        assert!(rendered.contains("export const = 1;"), "{rendered}");
+    }
+
+    #[test]
+    fn diagnostic_falls_back_to_line_format_when_source_is_unavailable() {
+        let diag = Diagnostic {
+            path: Some("broken.ts".to_owned()),
+            message: "expected an identifier".to_owned(),
+            start: Some(7),
+            end: Some(8),
+        };
+        let rendered = diagnostic("broken.ts", &diag, None);
+        assert_eq!(rendered, "broken.ts:7..8: expected an identifier");
+    }
+
+    #[test]
+    fn diagnostic_falls_back_to_message_when_span_is_none() {
+        let diag = Diagnostic {
+            path: Some("dep.js".to_owned()),
+            message: "could not resolve ./missing.js".to_owned(),
+            start: None,
+            end: None,
+        };
+        let rendered = diagnostic("main.js", &diag, None);
+        assert_eq!(rendered, "dep.js: could not resolve ./missing.js");
     }
 }
