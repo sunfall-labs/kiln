@@ -1292,16 +1292,8 @@ impl Native {
             (Self::NodeTty, prop) => crate::tty::property(prop),
             (Self::NodeZlib, prop) => crate::zlib::property(prop),
             (Self::NodePerfHooks, prop) => crate::perf_hooks::property(prop),
-            (Self::NodeHttps, "createServer") => {
-                Some(Value::Native(Self::NodeHttpsCreateServer, RealmId::PRIMARY))
-            }
-            (Self::NodeHttp2, "createServer") => {
-                Some(Value::Native(Self::NodeHttp2CreateServer, RealmId::PRIMARY))
-            }
-            (Self::NodeHttp2, "createSecureServer") => Some(Value::Native(
-                Self::NodeHttp2CreateSecureServer,
-                RealmId::PRIMARY,
-            )),
+            (Self::NodeHttps, prop) => crate::http::https_property(prop),
+            (Self::NodeHttp2, prop) => crate::http::http2_property(prop),
             (Self::NodeModule, "createRequire") => Some(Value::Native(
                 Self::NodeModuleCreateRequire,
                 RealmId::PRIMARY,
@@ -1313,35 +1305,8 @@ impl Native {
             (Self::NodeQueryString, prop) => crate::querystring::property(prop),
             (Self::NodeUrl, prop) => crate::url::property(prop),
             (Self::NodeEvents, prop) => crate::events::property(prop),
-            (Self::NodeNet, "createServer") => {
-                Some(Value::Native(Self::NodeNetCreateServer, RealmId::PRIMARY))
-            }
-            (Self::NodeNet, "connect" | "createConnection") => {
-                Some(Value::Native(Self::NodeNetConnect, RealmId::PRIMARY))
-            }
-            (Self::NodeHttp, "createServer") => {
-                Some(Value::Native(Self::NodeHttpCreateServer, RealmId::PRIMARY))
-            }
-            (Self::NodeHttp, "Server") => {
-                Some(Value::Native(Self::NodeHttpServer, RealmId::PRIMARY))
-            }
-            (Self::NodeHttp, "IncomingMessage") => {
-                Some(Value::Native(Self::NodeReadable, RealmId::PRIMARY))
-            }
-            (Self::NodeHttp, "request") => {
-                Some(Value::Native(Self::NodeHttpRequest, RealmId::PRIMARY))
-            }
-            (Self::NodeHttp, "get") => Some(Value::Native(Self::NodeHttpGet, RealmId::PRIMARY)),
-            (Self::NodeHttp, "ServerResponse") => Some(Value::Native(
-                Self::NodeHttpServerResponse,
-                RealmId::PRIMARY,
-            )),
-            (Self::NodeHttp, "METHODS") => Some(Value::Array(ArrayData::new(
-                HTTP_METHODS
-                    .iter()
-                    .map(|method| Value::String((*method).to_owned()))
-                    .collect(),
-            ))),
+            (Self::NodeNet, prop) => crate::net::property(prop),
+            (Self::NodeHttp, prop) => crate::http::property(prop),
             (Self::NodeBuffer | Self::NodeBufferGlobal, "from") => {
                 Some(Value::Native(Self::NodeBufferFrom, RealmId::PRIMARY))
             }
