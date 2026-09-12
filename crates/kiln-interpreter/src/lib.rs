@@ -89,6 +89,21 @@ pub(crate) use stream::{
     ReadableState, WritableState, new_readable_state, node_readable, node_readable_state,
     node_writable, node_writable_state, sync_readable_public_state, sync_writable_public_state,
 };
+// `net` houses node:net TCP server and socket implementations.
+mod net;
+pub(crate) use net::{
+    NetSocketState, NodeConnection, NodeServerState, ServerProtocol, node_connect_arguments,
+    node_listen_arguments, node_net_socket_state, node_net_socket_value, node_server_object,
+    node_socket_object, sync_node_socket_ready_state,
+};
+// `http` houses node:http, node:https, and node:http2 implementations.
+mod http;
+pub(crate) use http::{
+    HttpClientRequestState, HttpIncomingState, HttpResponseState, node_body_bytes,
+    node_http_client_request, node_http_client_request_object, node_http_incoming,
+    node_http_request_arguments, node_http_response, node_http_server, node_http_socket_facade,
+    readable_chunk_length,
+};
 
 /// The built-ins the runtime provides natively.
 ///
@@ -98,12 +113,6 @@ pub(crate) use stream::{
 mod intrinsic_members;
 mod symbol;
 pub use symbol::*;
-
-// Node's public HTTP method catalogue, which both engines answer `http.METHODS` with. It lives in
-// `kiln-node-abi` rather than here because the native backend has to publish the same array, and a
-// second copy of that list is a second thing that can fall out of step -- which is how
-// `typeof http.METHODS` came to differ between two runs of the same bytecode.
-use kiln_node_abi::HTTP_METHODS;
 
 /// The reservation a private name is stored under, ahead of its scope number and its spelling.
 ///
@@ -374,86 +383,6 @@ enum NodeObject {
     StringDecoder(Rc<RefCell<StringDecoderState>>),
     AsyncLocalStorage(Rc<AsyncStorage>),
     Zlib(Rc<zlib::ZlibState>),
-}
-
-#[derive(Debug)]
-struct NetSocketState {
-    owner: Option<Weak<RefCell<NodeServerState>>>,
-    resource: Option<kiln_host_abi::ResourceId>,
-    object: Option<Weak<RefCell<ObjectData>>>,
-    readable: Rc<RefCell<ReadableState>>,
-}
-
-#[derive(Debug)]
-struct NodeServerState {
-    driver: TcpServerDriver,
-    handler: Value,
-    protocol: ServerProtocol,
-    timeout_milliseconds: f64,
-    streams: Vec<NodeConnection>,
-    object: Option<Weak<RefCell<ObjectData>>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ServerProtocol {
-    Net,
-    Http,
-    HttpClient,
-}
-
-#[derive(Debug)]
-struct NodeConnection {
-    driver: StreamDriver,
-    runtime_http: bool,
-    socket: Option<Rc<RefCell<NetSocketState>>>,
-    socket_object: Option<Value>,
-    request: Option<Value>,
-    response: Option<Value>,
-    client_requests: std::collections::BTreeMap<u64, Value>,
-    client_responses: std::collections::BTreeMap<u64, Value>,
-    http_responses: Vec<(u64, Value)>,
-    close_when_response_ends: bool,
-    closed: bool,
-    applying_read_completion: bool,
-}
-
-impl NodeConnection {
-    fn resource(&self) -> kiln_host_abi::ResourceId {
-        self.driver.resource()
-    }
-}
-
-#[derive(Debug)]
-struct HttpClientRequestState {
-    host: String,
-    port: u16,
-    method: String,
-    path: String,
-    headers: Vec<(String, String)>,
-    body: Vec<u8>,
-    callback: Value,
-    socket: Option<Rc<RefCell<NetSocketState>>>,
-    object: Option<Rc<RefCell<ObjectData>>>,
-    ended: bool,
-    started: bool,
-    request_id: u64,
-}
-
-#[derive(Debug)]
-struct HttpResponseState {
-    stream: kiln_host_abi::ResourceId,
-    request_id: Option<u64>,
-    status: u16,
-    headers: Vec<(String, String)>,
-    streaming: bool,
-    ended: bool,
-    object: Option<Weak<RefCell<ObjectData>>>,
-}
-
-#[derive(Debug)]
-struct HttpIncomingState {
-    stream: kiln_host_abi::ResourceId,
-    readable: Rc<RefCell<ReadableState>>,
 }
 
 impl Default for ObjectData {
@@ -33062,383 +32991,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     }
 }
 
-fn node_server_object(state: &Rc<RefCell<NodeServerState>>) -> Value {
-    let mut data = ObjectData {
-        node_events: Some(Vec::new()),
-        node_object: Some(NodeObject::NodeServer(Rc::clone(state))),
-        ..Default::default()
-    };
-    data.set(
-        "listen",
-        Value::Native(Native::NodeServerListen, RealmId::PRIMARY),
-    );
-    data.set(
-        "close",
-        Value::Native(Native::NodeServerClose, RealmId::PRIMARY),
-    );
-    data.set(
-        "address",
-        Value::Native(Native::NodeServerAddress, RealmId::PRIMARY),
-    );
-    data.set(
-        "setTimeout",
-        Value::Native(Native::NodeServerSetTimeout, RealmId::PRIMARY),
-    );
-    data.set("timeout", Value::Number(0.0));
-    data.set("keepAliveTimeout", Value::Number(5_000.0));
-    data.set("requestTimeout", Value::Number(300_000.0));
-    data.set("httpAllowHalfOpen", Value::Boolean(false));
-    data.set("on", Value::Native(Native::NodeEventOn, RealmId::PRIMARY));
-    data.set(
-        "once",
-        Value::Native(Native::NodeEventOnce, RealmId::PRIMARY),
-    );
-    data.set(
-        "emit",
-        Value::Native(Native::NodeEventEmit, RealmId::PRIMARY),
-    );
-    data.set(
-        "removeListener",
-        Value::Native(Native::NodeEventRemoveListener, RealmId::PRIMARY),
-    );
-    data.set(
-        "off",
-        Value::Native(Native::NodeEventRemoveListener, RealmId::PRIMARY),
-    );
-    data.set(
-        "removeAllListeners",
-        Value::Native(Native::NodeEventRemoveAllListeners, RealmId::PRIMARY),
-    );
-    let object = Rc::new(RefCell::new(data));
-    state.borrow_mut().object = Some(Rc::downgrade(&object));
-    Value::Object(object)
-}
-
-fn node_socket_object(state: &Rc<RefCell<NetSocketState>>) -> Value {
-    let mut data = ObjectData {
-        node_events: Some(Vec::new()),
-        node_object: Some(NodeObject::NetSocket(Rc::clone(state))),
-        ..Default::default()
-    };
-    data.set("on", Value::Native(Native::NodeEventOn, RealmId::PRIMARY));
-    data.set(
-        "once",
-        Value::Native(Native::NodeEventOnce, RealmId::PRIMARY),
-    );
-    data.set(
-        "emit",
-        Value::Native(Native::NodeEventEmit, RealmId::PRIMARY),
-    );
-    data.set(
-        "write",
-        Value::Native(Native::NodeSocketWrite, RealmId::PRIMARY),
-    );
-    data.set(
-        "end",
-        Value::Native(Native::NodeSocketEnd, RealmId::PRIMARY),
-    );
-    data.set(
-        "destroy",
-        Value::Native(Native::NodeSocketDestroy, RealmId::PRIMARY),
-    );
-    data.set("readyState", Value::String("open".into()));
-    data.set(
-        "setEncoding",
-        Value::Native(Native::NodeReadableSetEncoding, RealmId::PRIMARY),
-    );
-    let object = Rc::new(RefCell::new(data));
-    state.borrow_mut().object = Some(Rc::downgrade(&object));
-    Value::Object(object)
-}
-
-fn sync_node_socket_ready_state(
-    server: &Rc<RefCell<NodeServerState>>,
-    resource: kiln_host_abi::ResourceId,
-) {
-    let ready_state = server
-        .borrow()
-        .streams
-        .iter()
-        .find(|stream| stream.resource() == resource)
-        .map(|stream| stream.driver.state().ready_state().as_str());
-    let socket = node_net_socket_value(server, resource);
-    if let (Some(ready_state), Some(Value::Object(socket))) = (ready_state, socket) {
-        socket
-            .borrow_mut()
-            .set("readyState", Value::String(ready_state.into()));
-    }
-}
-
-fn node_http_socket_facade() -> Value {
-    let mut data = ObjectData {
-        node_events: Some(Vec::new()),
-        ..Default::default()
-    };
-    data.set("on", Value::Native(Native::NodeEventOn, RealmId::PRIMARY));
-    data.set(
-        "once",
-        Value::Native(Native::NodeEventOnce, RealmId::PRIMARY),
-    );
-    data.set(
-        "emit",
-        Value::Native(Native::NodeEventEmit, RealmId::PRIMARY),
-    );
-    data.set(
-        "removeListener",
-        Value::Native(Native::NodeEventRemoveListener, RealmId::PRIMARY),
-    );
-    data.set(
-        "off",
-        Value::Native(Native::NodeEventRemoveListener, RealmId::PRIMARY),
-    );
-    data.set(
-        "removeAllListeners",
-        Value::Native(Native::NodeEventRemoveAllListeners, RealmId::PRIMARY),
-    );
-    data.set("destroyed", Value::Boolean(false));
-    data.set("encrypted", Value::Boolean(false));
-    Value::Object(Rc::new(RefCell::new(data)))
-}
-
-fn node_net_socket_value(
-    server: &Rc<RefCell<NodeServerState>>,
-    resource: kiln_host_abi::ResourceId,
-) -> Option<Value> {
-    server
-        .borrow()
-        .streams
-        .iter()
-        .find(|stream| stream.resource() == resource)
-        .and_then(|stream| stream.request.clone())
-}
-
-fn node_net_socket_state(receiver: &Value) -> Result<Rc<RefCell<NetSocketState>>, ExecutionError> {
-    let Value::Object(object) = receiver else {
-        return Err(ExecutionError::TypeErrorMessage {
-            message: "Socket method called on an incompatible receiver".into(),
-        });
-    };
-    match &object.borrow().node_object {
-        Some(NodeObject::NetSocket(state)) => Ok(Rc::clone(state)),
-        _ => Err(ExecutionError::TypeErrorMessage {
-            message: "Socket method called on an incompatible receiver".into(),
-        }),
-    }
-}
-
-fn node_http_server(receiver: &Value) -> Result<Rc<RefCell<NodeServerState>>, ExecutionError> {
-    let Value::Object(object) = receiver else {
-        return Err(ExecutionError::TypeErrorMessage {
-            message: "Server method called on an incompatible receiver".into(),
-        });
-    };
-    match &object.borrow().node_object {
-        Some(NodeObject::NodeServer(state)) => Ok(Rc::clone(state)),
-        _ => Err(ExecutionError::TypeErrorMessage {
-            message: "Server method called on an incompatible receiver".into(),
-        }),
-    }
-}
-
-fn node_http_response(receiver: &Value) -> Result<Rc<RefCell<HttpResponseState>>, ExecutionError> {
-    let Value::Object(object) = receiver else {
-        return Err(ExecutionError::TypeErrorMessage {
-            message: "ServerResponse method called on an incompatible receiver".into(),
-        });
-    };
-    match &object.borrow().node_object {
-        Some(NodeObject::HttpResponse(state)) => Ok(Rc::clone(state)),
-        _ => Err(ExecutionError::TypeErrorMessage {
-            message: "ServerResponse method called on an incompatible receiver".into(),
-        }),
-    }
-}
-
-fn node_http_incoming(receiver: &Value) -> Result<Rc<RefCell<HttpIncomingState>>, ExecutionError> {
-    let Value::Object(object) = receiver else {
-        return Err(ExecutionError::TypeErrorMessage {
-            message: "IncomingMessage method called on an incompatible receiver".into(),
-        });
-    };
-    match &object.borrow().node_object {
-        Some(NodeObject::HttpIncoming(state)) => Ok(Rc::clone(state)),
-        _ => Err(ExecutionError::TypeErrorMessage {
-            message: "IncomingMessage method called on an incompatible receiver".into(),
-        }),
-    }
-}
-
-fn node_http_client_request(
-    receiver: &Value,
-) -> Result<Rc<RefCell<HttpClientRequestState>>, ExecutionError> {
-    let Value::Object(object) = receiver else {
-        return Err(ExecutionError::TypeErrorMessage {
-            message: "ClientRequest method called on an incompatible receiver".into(),
-        });
-    };
-    match &object.borrow().node_object {
-        Some(NodeObject::HttpClientRequest(state)) => Ok(Rc::clone(state)),
-        _ => Err(ExecutionError::TypeErrorMessage {
-            message: "ClientRequest method called on an incompatible receiver".into(),
-        }),
-    }
-}
-
-fn node_http_client_request_object(state: &Rc<RefCell<HttpClientRequestState>>) -> Value {
-    let mut data = ObjectData {
-        node_events: Some(Vec::new()),
-        node_object: Some(NodeObject::HttpClientRequest(Rc::clone(state))),
-        ..Default::default()
-    };
-    data.set(
-        "write",
-        Value::Native(Native::NodeClientRequestWrite, RealmId::PRIMARY),
-    );
-    data.set(
-        "end",
-        Value::Native(Native::NodeClientRequestEnd, RealmId::PRIMARY),
-    );
-    data.set("on", Value::Native(Native::NodeEventOn, RealmId::PRIMARY));
-    data.set(
-        "once",
-        Value::Native(Native::NodeEventOnce, RealmId::PRIMARY),
-    );
-    data.set(
-        "emit",
-        Value::Native(Native::NodeEventEmit, RealmId::PRIMARY),
-    );
-    let object = Rc::new(RefCell::new(data));
-    state.borrow_mut().object = Some(Rc::clone(&object));
-    Value::Object(object)
-}
-
-type HttpRequestArguments = (String, u16, String, String, Vec<(String, String)>, Value);
-
-fn node_http_request_arguments(
-    arguments: &[Value],
-) -> Result<HttpRequestArguments, ExecutionError> {
-    let options = arguments
-        .first()
-        .ok_or_else(|| ExecutionError::TypeErrorMessage {
-            message: "HTTP request options must be an object".into(),
-        })?;
-    let Value::Object(options) = options else {
-        return Err(ExecutionError::TypeErrorMessage {
-            message: "HTTP request options must be an object".into(),
-        });
-    };
-    let options = options.borrow();
-    let own = |name: &str| options.get_own(name);
-    let host = own("host")
-        .or_else(|| own("hostname"))
-        .map(|value| value.to_display_string())
-        .unwrap_or_else(|| "localhost".into());
-    let port = own("port").map(|value| value.as_number()).unwrap_or(80.0);
-    if !port.is_finite() || port.fract() != 0.0 || !(1.0..=65535.0).contains(&port) {
-        return Err(ExecutionError::InvalidPort);
-    }
-    let method = own("method")
-        .map(|value| value.to_display_string().to_ascii_uppercase())
-        .unwrap_or_else(|| "GET".into());
-    let path = own("path")
-        .map(|value| value.to_display_string())
-        .unwrap_or_else(|| "/".into());
-    let mut headers = Vec::new();
-    if let Some(Value::Object(header_object)) = own("headers") {
-        let header_object = header_object.borrow();
-        for property in header_object
-            .properties
-            .iter()
-            .filter(|property| property.attributes.enumerable)
-        {
-            if let Property::Value(value) = &property.property {
-                headers.push((property.key.clone(), value.to_display_string()));
-            }
-        }
-    }
-    let callback = arguments
-        .get(1)
-        .cloned()
-        .filter(is_callable)
-        .unwrap_or(Value::Undefined);
-    Ok((host, port as u16, method, path, headers, callback))
-}
-
-fn node_listen_arguments(
-    arguments: &[Value],
-) -> Result<(u16, String, Option<Value>), ExecutionError> {
-    let options = arguments.first();
-    let port = match options {
-        Some(Value::Object(_)) => options
-            .and_then(|options| own_data_property(options, "port"))
-            .map_or(f64::NAN, |value| value.as_number()),
-        Some(value) => value.as_number(),
-        None => f64::NAN,
-    };
-    if !port.is_finite() || port.fract() != 0.0 || !(0.0..=65535.0).contains(&port) {
-        return Err(ExecutionError::InvalidPort);
-    }
-    let mut host = match options {
-        Some(options @ Value::Object(_)) => own_data_property(options, "host")
-            .and_then(|value| match value {
-                Value::String(host) => Some(host),
-                _ => None,
-            })
-            .unwrap_or_else(|| "0.0.0.0".to_owned()),
-        _ => "0.0.0.0".to_owned(),
-    };
-    let mut callback = None;
-    for argument in arguments.iter().skip(1) {
-        if is_callable(argument) {
-            callback = Some(argument.clone());
-        } else if let Value::String(value) = argument {
-            host = value.clone();
-        }
-    }
-    Ok((port as u16, host, callback))
-}
-
-fn node_connect_arguments(
-    arguments: &[Value],
-) -> Result<(u16, String, Option<Value>), ExecutionError> {
-    let port = arguments.first().map(Value::as_number).unwrap_or(f64::NAN);
-    if !port.is_finite() || port.fract() != 0.0 || !(0.0..=65535.0).contains(&port) {
-        return Err(ExecutionError::InvalidPort);
-    }
-    let mut host = "localhost".to_owned();
-    let mut callback = None;
-    for argument in arguments.iter().skip(1) {
-        if is_callable(argument) {
-            callback = Some(argument.clone());
-        } else if let Value::String(value) = argument {
-            host = value.clone();
-        }
-    }
-    Ok((port as u16, host, callback))
-}
-
-pub(crate) fn node_body_bytes(value: Option<&Value>) -> Result<Vec<u8>, ExecutionError> {
-    match value.unwrap_or(&Value::Undefined) {
-        Value::Undefined | Value::Null => Ok(Vec::new()),
-        Value::String(value) => Ok(value.as_bytes().to_vec()),
-        Value::TypedArray(value) => Ok(value.bytes()),
-        value => Err(ExecutionError::TypeErrorMessage {
-            message: format!(
-                "The chunk argument must be a string or typed array, received {}",
-                value.type_name()
-            ),
-        }),
-    }
-}
-
-fn readable_chunk_length(value: &Value) -> usize {
-    match value {
-        Value::String(value) => value.len(),
-        Value::TypedArray(value) => value.bytes().len(),
-        _ => 1,
-    }
-}
-
 /// `new AsyncLocalStorage()`.
 ///
 /// The instance is an ordinary object carrying its own identity in `node_object`; the methods are
@@ -45452,6 +45004,12 @@ fn native_js_name(native: &Native) -> String {
         return name.to_owned();
     }
     if let Some(name) = stream::js_name(*native) {
+        return name.to_owned();
+    }
+    if let Some(name) = net::js_name(*native) {
+        return name.to_owned();
+    }
+    if let Some(name) = http::js_name(*native) {
         return name.to_owned();
     }
     match native {
