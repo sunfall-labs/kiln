@@ -38,7 +38,6 @@ mod agent;
 use agent::{AgentGroup, AgentOwner, Bytes};
 // `crypto` houses node:crypto and Web Crypto primitives (hashes, HMAC, entropy, constant-time compare).
 mod crypto;
-pub(crate) use crypto::node_bytes_value;
 #[cfg(test)]
 pub(crate) use crypto::{node_hash, node_hash_digest, node_hash_state};
 // `zlib` houses node:zlib compression and streaming transforms.
@@ -112,6 +111,9 @@ mod async_hooks;
 pub(crate) use async_hooks::{
     AsyncContext, AsyncStorage, bind_store, node_async_local_storage, node_async_storage,
 };
+// `buffer` houses node:buffer, Buffer constructor and statics.
+mod buffer;
+pub(crate) use buffer::node_bytes_value;
 
 /// The built-ins the runtime provides natively.
 ///
@@ -14864,118 +14866,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .cloned()
                     .unwrap_or(Value::Boolean(false)))
             }
-            Native::NodeBufferFrom => {
-                let bytes = match arguments.first().unwrap_or(&Value::Undefined) {
-                    Value::String(text) => text.as_bytes().to_vec(),
-                    Value::TypedArray(view) => view.bytes(),
-                    Value::Array(items) => items
-                        .borrow()
-                        .iter()
-                        .map(|value| value.as_number() as u8)
-                        .collect(),
-                    value => {
-                        return Err(ExecutionError::TypeErrorMessage {
-                            message: format!(
-                                "The first argument must be a string, Buffer, Uint8Array, or Array; received {}",
-                                value.type_name()
-                            ),
-                        });
-                    }
-                };
-                Ok(node_bytes_value(bytes))
-            }
-            Native::NodeBufferAlloc => {
-                let length = bounded_buffer(
-                    arguments.first().map(Value::as_number).unwrap_or(f64::NAN),
-                    1,
-                )?;
-                let fill = arguments.get(1).map(Value::as_number).unwrap_or(0.0) as u8;
-                Ok(node_bytes_value(vec![fill; length]))
-            }
-            Native::NodeBufferIsBuffer => Ok(Value::Boolean(matches!(
-                arguments.first(),
-                Some(Value::TypedArray(view)) if view.kind == TypedKind::Uint8
-            ))),
-            Native::NodeBufferByteLength => {
-                let length = match arguments.first().unwrap_or(&Value::Undefined) {
-                    Value::String(text) => text.len(),
-                    Value::TypedArray(view) => view.bytes().len(),
-                    Value::ArrayBuffer(buffer) => buffer.byte_length(),
-                    value => value.to_display_string().len(),
-                };
-                Ok(Value::Number(length as f64))
-            }
-            Native::NodeBufferConcat => {
-                let Some(Value::Array(items)) = arguments.first() else {
-                    return Err(ExecutionError::TypeErrorMessage {
-                        message: "The \"list\" argument must be an instance of Array".into(),
-                    });
-                };
-                let mut bytes = Vec::new();
-                for (index, item) in items.borrow().iter().enumerate() {
-                    let Value::TypedArray(view) = item else {
-                        return Err(ExecutionError::TypeErrorMessage {
-                            message: format!(
-                                "The \"list[{index}]\" argument must be an instance of Buffer or Uint8Array"
-                            ),
-                        });
-                    };
-                    bytes.extend(view.bytes());
-                }
-                if let Some(length) = arguments.get(1) {
-                    let length = bounded_buffer(length.as_number(), 1)?;
-                    bytes.resize(length, 0);
-                    bytes.truncate(length);
-                }
-                Ok(node_bytes_value(bytes))
-            }
-            Native::NodeBufferToString => {
-                let Value::TypedArray(view) = receiver else {
-                    return Err(ExecutionError::TypeErrorMessage {
-                        message: "Buffer.toString called on an incompatible receiver".into(),
-                    });
-                };
-                let encoding = arguments
-                    .first()
-                    .map(Value::to_display_string)
-                    .unwrap_or_else(|| "utf8".into())
-                    .to_ascii_lowercase();
-                let bytes = view.bytes();
-                match encoding.as_str() {
-                    "utf8" | "utf-8" => {
-                        Ok(Value::String(String::from_utf8_lossy(&bytes).into_owned()))
-                    }
-                    "hex" => {
-                        const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
-                        let mut hex_str = String::with_capacity(bytes.len() * 2);
-                        for &b in &bytes {
-                            hex_str.push(HEX_DIGITS[(b >> 4) as usize] as char);
-                            hex_str.push(HEX_DIGITS[(b & 0x0f) as usize] as char);
-                        }
-                        Ok(Value::String(hex_str))
-                    }
-                    "latin1" | "binary" | "ascii" => {
-                        let (decoded, _) =
-                            encoding_rs::WINDOWS_1252.decode_without_bom_handling(&bytes);
-                        Ok(Value::String(decoded.into_owned()))
-                    }
-                    "utf16le" | "utf-16le" | "ucs2" | "ucs-2" => {
-                        let (decoded, _) =
-                            encoding_rs::UTF_16LE.decode_without_bom_handling(&bytes);
-                        Ok(Value::String(decoded.into_owned()))
-                    }
-                    other => {
-                        if let Some(enc) = encoding_rs::Encoding::for_label(other.as_bytes()) {
-                            let (decoded, _) = enc.decode_without_bom_handling(&bytes);
-                            Ok(Value::String(decoded.into_owned()))
-                        } else {
-                            Err(ExecutionError::TypeErrorMessage {
-                                message: format!("unsupported Buffer encoding: {encoding}"),
-                            })
-                        }
-                    }
-                }
-            }
+            Native::NodeBufferFrom
+            | Native::NodeBufferAlloc
+            | Native::NodeBufferIsBuffer
+            | Native::NodeBufferByteLength
+            | Native::NodeBufferConcat
+            | Native::NodeBufferToString => buffer::dispatch(native, receiver, arguments),
             Native::NodeQueryStringParse => querystring::dispatch(native, arguments),
             Native::UrlConstructor
             | Native::NodeUrlParse
@@ -39929,7 +39825,7 @@ fn to_index_number(number: f64) -> Result<f64, ExecutionError> {
 }
 
 /// The element count for a buffer of `length` elements of `width` bytes, bounded.
-fn bounded_buffer(length: f64, width: usize) -> Result<usize, ExecutionError> {
+pub(crate) fn bounded_buffer(length: f64, width: usize) -> Result<usize, ExecutionError> {
     if !length.is_finite() || length <= 0.0 {
         return Ok(0);
     }
@@ -44904,6 +44800,9 @@ fn native_js_name(native: &Native) -> String {
     if let Some(name) = async_hooks::js_name(*native) {
         return name.to_owned();
     }
+    if let Some(name) = buffer::js_name(*native) {
+        return name.to_owned();
+    }
     match native {
         // A symbol-keyed method is named for the symbol in brackets, which is what the
         // specification's `SetFunctionName` does with a symbol key. Derivation would spell it
@@ -45038,15 +44937,6 @@ fn native_js_name(native: &Native) -> String {
         // lower-case past a digit comes back with a capital in it: `f16Round` for `f16round`.
         Native::MathF16Round => "f16round".to_owned(),
         Native::PerformanceNow => "now".to_owned(),
-        Native::NodeBufferFrom => "from".to_owned(),
-        // One variant for `alloc`, `allocUnsafe` and `allocUnsafeSlow`, which node makes three
-        // functions with three names. It reports the name of the function it actually is;
-        // `kiln_builtin_surface::NAME_IS_SHARED` is where the other two are written down, and is
-        // what stops the guard reading them as drift.
-        Native::NodeBufferAlloc => "alloc".to_owned(),
-        Native::NodeBufferIsBuffer => "isBuffer".to_owned(),
-        Native::NodeBufferByteLength => "byteLength".to_owned(),
-        Native::NodeBufferConcat => "concat".to_owned(),
         Native::AbortSignalAbort => "abort".to_owned(),
         Native::AbortSignalTimeout => "timeout".to_owned(),
         Native::AbortSignalAny => "any".to_owned(),
@@ -45060,7 +44950,6 @@ fn native_js_name(native: &Native) -> String {
         // function from another, so an internal spelling in it is a wrong answer and not a
         // cosmetic one; the native backend already gave three of the four the node answer, so
         // this was also the two engines disagreeing.
-        Native::NodeBufferGlobal => "Buffer".to_owned(),
         Native::NodeEventEmitter => "EventEmitter".to_owned(),
         Native::SetTimeout => "setTimeout".to_owned(),
         Native::SetInterval => "setInterval".to_owned(),

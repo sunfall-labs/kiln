@@ -14,8 +14,8 @@ use digest::Digest;
 use kiln_host_abi::HostOps;
 
 use crate::{
-    ArrayData, BufferData, ExecutionError, Native, NodeObject, ObjectData, RealmId, TypedArrayData,
-    TypedKind, Value, Vm, is_callable, node_body_bytes,
+    ArrayData, ExecutionError, Native, NodeObject, ObjectData, RealmId, TypedKind, Value, Vm,
+    is_callable, node_body_bytes, node_bytes_value,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -32,19 +32,6 @@ pub(crate) struct HashState {
     pub(crate) hmac_key: Option<Vec<u8>>,
     pub(crate) bytes: Vec<u8>,
     pub(crate) digested: bool,
-}
-
-pub(crate) fn node_bytes_value(bytes: Vec<u8>) -> Value {
-    let length = bytes.len();
-    let buffer = BufferData::fixed(length);
-    buffer.bytes.borrow_mut().copy_from_slice(&bytes);
-    Value::TypedArray(Rc::new(TypedArrayData {
-        buffer,
-        offset: 0,
-        length: Some(length),
-        kind: TypedKind::Uint8,
-        properties: RefCell::new(ObjectData::default()),
-    }))
 }
 
 pub(crate) fn view_or_buffer_bytes(val: &Value) -> Result<Vec<u8>, ExecutionError> {
