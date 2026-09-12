@@ -83,6 +83,12 @@ pub(crate) use events::{
     NodeEventBucket, NodeEventListener, node_event_emitter, node_listeners,
     remove_last_node_listener, remove_node_listener,
 };
+// `stream` houses node:stream Readable and Writable implementations.
+mod stream;
+pub(crate) use stream::{
+    ReadableState, WritableState, new_readable_state, node_readable, node_readable_state,
+    node_writable, node_writable_state, sync_readable_public_state, sync_writable_public_state,
+};
 
 /// The built-ins the runtime provides natively.
 ///
@@ -368,29 +374,6 @@ enum NodeObject {
     StringDecoder(Rc<RefCell<StringDecoderState>>),
     AsyncLocalStorage(Rc<AsyncStorage>),
     Zlib(Rc<zlib::ZlibState>),
-}
-
-#[derive(Debug)]
-pub(crate) struct ReadableState {
-    pub(crate) buffer: Vec<Value>,
-    pub(crate) buffered_bytes: usize,
-    pub(crate) high_water_mark: usize,
-    pub(crate) ended: bool,
-    pub(crate) end_emitted: bool,
-    pub(crate) reading: bool,
-    pub(crate) flowing: bool,
-    pub(crate) destroyed: bool,
-    pub(crate) encoding: Option<String>,
-    pub(crate) pipes: Vec<Value>,
-    pub(crate) public: Rc<RefCell<ObjectData>>,
-}
-
-#[derive(Debug)]
-pub(crate) struct WritableState {
-    pub(crate) ended: bool,
-    pub(crate) finished: bool,
-    pub(crate) destroyed: bool,
-    pub(crate) write: Option<Value>,
 }
 
 #[derive(Debug)]
@@ -33079,146 +33062,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     }
 }
 
-fn node_readable(arguments: &[Value], receiver: Option<&Value>) -> Value {
-    let options = arguments.first().cloned().unwrap_or(Value::Undefined);
-    let high_water_mark = own_data_property(&options, "highWaterMark")
-        .map(|value| value.as_number().max(0.0) as usize)
-        .unwrap_or(16 * 1024);
-    let encoding = own_data_property(&options, "encoding")
-        .filter(|value| !matches!(value, Value::Undefined))
-        .map(|value| value.to_display_string().to_ascii_lowercase());
-    let state = new_readable_state(high_water_mark, encoding);
-    let public = Rc::clone(&state.borrow().public);
-    let initializes_existing = matches!(receiver, Some(Value::Object(_)));
-    let object = match receiver {
-        Some(Value::Object(object)) => Rc::clone(object),
-        _ => Rc::new(RefCell::new(ObjectData::default())),
-    };
-    {
-        let mut data = object.borrow_mut();
-        data.node_events.get_or_insert_with(Vec::new);
-        data.node_object = Some(NodeObject::Readable(Rc::clone(&state)));
-        if !initializes_existing {
-            data.set_prototype(Value::Native(
-                Native::PrototypeOf(PrototypeTable::Readable),
-                RealmId::PRIMARY,
-            ));
-        }
-        data.set_non_enumerable("_readableState", Value::Object(public));
-        data.set_non_enumerable("readableEnded", Value::Boolean(false));
-        data.set_non_enumerable("destroyed", Value::Boolean(false));
-    }
-    sync_readable_public_state(&Value::Object(Rc::clone(&object)), &state.borrow());
-    Value::Object(object)
-}
-
-pub(crate) fn new_readable_state(
-    high_water_mark: usize,
-    encoding: Option<String>,
-) -> Rc<RefCell<ReadableState>> {
-    let public = Rc::new(RefCell::new(ObjectData::default()));
-    Rc::new(RefCell::new(ReadableState {
-        buffer: Vec::new(),
-        buffered_bytes: 0,
-        high_water_mark,
-        ended: false,
-        end_emitted: false,
-        reading: false,
-        flowing: false,
-        destroyed: false,
-        encoding,
-        pipes: Vec::new(),
-        public,
-    }))
-}
-
-fn node_readable_state(receiver: &Value) -> Result<Rc<RefCell<ReadableState>>, ExecutionError> {
-    let Value::Object(object) = receiver else {
-        return Err(ExecutionError::TypeErrorMessage {
-            message: "Readable method called on an incompatible receiver".into(),
-        });
-    };
-    match &object.borrow().node_object {
-        Some(NodeObject::Readable(state)) => Ok(Rc::clone(state)),
-        Some(NodeObject::Zlib(state)) => Ok(Rc::clone(&state.readable)),
-        _ => Err(ExecutionError::TypeErrorMessage {
-            message: "Readable method called on an incompatible receiver".into(),
-        }),
-    }
-}
-
-fn sync_readable_public_state(receiver: &Value, state: &ReadableState) {
-    {
-        let mut public = state.public.borrow_mut();
-        public.set("reading", Value::Boolean(state.reading));
-        public.set("ended", Value::Boolean(state.ended));
-        public.set("endEmitted", Value::Boolean(state.end_emitted));
-        public.set("flowing", Value::Boolean(state.flowing));
-        public.set("length", Value::Number(state.buffered_bytes as f64));
-        public.set("highWaterMark", Value::Number(state.high_water_mark as f64));
-    }
-    if let Value::Object(object) = receiver {
-        let mut object = object.borrow_mut();
-        object.set_non_enumerable("readableEnded", Value::Boolean(state.end_emitted));
-        object.set_non_enumerable("destroyed", Value::Boolean(state.destroyed));
-    }
-}
-
-fn node_writable(arguments: &[Value], receiver: Option<&Value>) -> Value {
-    let options = arguments.first().cloned().unwrap_or(Value::Undefined);
-    let write = own_data_property(&options, "write").filter(is_callable);
-    let initializes_existing = matches!(receiver, Some(Value::Object(_)));
-    let object = match receiver {
-        Some(Value::Object(object)) => Rc::clone(object),
-        _ => Rc::new(RefCell::new(ObjectData::default())),
-    };
-    let state = Rc::new(RefCell::new(WritableState {
-        ended: false,
-        finished: false,
-        destroyed: false,
-        write,
-    }));
-    {
-        let mut data = object.borrow_mut();
-        data.node_events.get_or_insert_with(Vec::new);
-        data.node_object = Some(NodeObject::Writable(state));
-        if !initializes_existing {
-            data.set_prototype(Value::Native(
-                Native::PrototypeOf(PrototypeTable::Writable),
-                RealmId::PRIMARY,
-            ));
-        }
-        data.set_non_enumerable("writableEnded", Value::Boolean(false));
-        data.set_non_enumerable("writableFinished", Value::Boolean(false));
-        data.set_non_enumerable("destroyed", Value::Boolean(false));
-    }
-    Value::Object(object)
-}
-
-fn node_writable_state(receiver: &Value) -> Result<Rc<RefCell<WritableState>>, ExecutionError> {
-    let Value::Object(object) = receiver else {
-        return Err(ExecutionError::TypeErrorMessage {
-            message: "Writable method called on an incompatible receiver".into(),
-        });
-    };
-    match &object.borrow().node_object {
-        Some(NodeObject::Writable(state)) => Ok(Rc::clone(state)),
-        Some(NodeObject::Zlib(state)) => Ok(Rc::clone(&state.writable)),
-        _ => Err(ExecutionError::TypeErrorMessage {
-            message: "Writable method called on an incompatible receiver".into(),
-        }),
-    }
-}
-
-fn sync_writable_public_state(receiver: &Value, state: &WritableState) {
-    if let Value::Object(object) = receiver {
-        let mut object = object.borrow_mut();
-        object.set_non_enumerable("writableEnded", Value::Boolean(state.ended));
-        object.set_non_enumerable("writableFinished", Value::Boolean(state.finished));
-        object.set_non_enumerable("destroyed", Value::Boolean(state.destroyed));
-    }
-}
-
 fn node_server_object(state: &Rc<RefCell<NodeServerState>>) -> Value {
     let mut data = ObjectData {
         node_events: Some(Vec::new()),
@@ -45606,6 +45449,9 @@ fn native_js_name(native: &Native) -> String {
         return name.to_owned();
     }
     if let Some(name) = events::js_name(*native) {
+        return name.to_owned();
+    }
+    if let Some(name) = stream::js_name(*native) {
         return name.to_owned();
     }
     match native {

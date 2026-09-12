@@ -1280,27 +1280,9 @@ impl Native {
             }
             (Self::NodeCrypto, prop) => crate::crypto::property(prop),
             (Self::NodeStringDecoder, prop) => crate::string_decoder::property(prop),
-            (Self::NodeStream, "Readable") => {
-                Some(Value::Native(Self::NodeReadable, RealmId::PRIMARY))
-            }
-            (Self::NodeStream, "Writable") => {
-                Some(Value::Native(Self::NodeWritable, RealmId::PRIMARY))
-            }
-            (Self::NodeStream, "addAbortSignal") => Some(Value::Native(
-                Self::NodeStreamAddAbortSignal,
-                RealmId::PRIMARY,
-            )),
-            (Self::NodeStream, "finished") => {
-                Some(Value::Native(Self::NodeStreamFinished, RealmId::PRIMARY))
-            }
-            (Self::NodeReadable, "prototype") => Some(Value::Native(
-                Self::PrototypeOf(PrototypeTable::Readable),
-                RealmId::PRIMARY,
-            )),
-            (Self::NodeWritable, "prototype") => Some(Value::Native(
-                Self::PrototypeOf(PrototypeTable::Writable),
-                RealmId::PRIMARY,
-            )),
+            (Self::NodeStream, prop) => crate::stream::property(prop),
+            (Self::NodeReadable, prop) => crate::stream::readable_constructor_property(prop),
+            (Self::NodeWritable, prop) => crate::stream::writable_constructor_property(prop),
             (Self::NodeHttpServerResponse, "prototype") => Some(Value::Native(
                 Self::PrototypeOf(PrototypeTable::Writable),
                 RealmId::PRIMARY,
@@ -1480,47 +1462,21 @@ impl Native {
             (Self::NodeConsole, name) => Self::PrototypeOf(PrototypeTable::Console).property(name),
             (Self::NodeEventEmitter, prop) => crate::events::event_emitter_property(prop),
             (Self::PrototypeOf(PrototypeTable::EventEmitter), prop) => {
-                crate::events::prototype_property(prop)
+                crate::events::prototype_property(prop).or_else(|| {
+                    Some(inherit_from_object(
+                        PrototypeTable::EventEmitter,
+                        Value::Undefined,
+                        prop,
+                    ))
+                })
             }
-            (Self::PrototypeOf(PrototypeTable::Readable), "constructor") => {
-                Some(Value::Native(Self::NodeReadable, RealmId::PRIMARY))
+            (Self::PrototypeOf(PrototypeTable::Readable), prop) => {
+                crate::stream::readable_prototype_property(prop)
+                    .or_else(|| Self::PrototypeOf(PrototypeTable::EventEmitter).property(prop))
             }
-            (Self::PrototypeOf(PrototypeTable::Readable), "push") => {
-                Some(Value::Native(Self::NodeReadablePush, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::Readable), "read") => {
-                Some(Value::Native(Self::NodeReadableRead, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::Readable), "destroy") => {
-                Some(Value::Native(Self::NodeReadableDestroy, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::Readable), "pause") => {
-                Some(Value::Native(Self::NodeReadablePause, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::Readable), "resume") => {
-                Some(Value::Native(Self::NodeReadableResume, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::Readable), "setEncoding") => Some(Value::Native(
-                Self::NodeReadableSetEncoding,
-                RealmId::PRIMARY,
-            )),
-            (Self::PrototypeOf(PrototypeTable::Readable), "pipe") => {
-                Some(Value::Native(Self::NodeReadablePipe, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::Readable), "unpipe") => {
-                Some(Value::Native(Self::NodeReadableUnpipe, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::Writable), "constructor") => {
-                Some(Value::Native(Self::NodeWritable, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::Writable), "write") => {
-                Some(Value::Native(Self::NodeWritableWrite, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::Writable), "end") => {
-                Some(Value::Native(Self::NodeWritableEnd, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::Writable), "destroy") => {
-                Some(Value::Native(Self::NodeWritableDestroy, RealmId::PRIMARY))
+            (Self::PrototypeOf(PrototypeTable::Writable), prop) => {
+                crate::stream::writable_prototype_property(prop)
+                    .or_else(|| Self::PrototypeOf(PrototypeTable::EventEmitter).property(prop))
             }
             // Every `Temporal` namespace, constructor and prototype answers from one place, so
             // the eight types cannot drift on what they expose.
