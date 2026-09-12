@@ -5,7 +5,6 @@
 //! is intentionally a scalar runtime for the first execution slice; object allocation,
 //! exceptions, and async scheduling belong above this VM.
 
-use digest::Digest;
 use kiln_host_abi::{
     ActiveAsyncHostOps, AsyncHostOp, AsyncHostValue, Completion, HostOp, HostOps, HostValue,
     RequestId,
@@ -14,7 +13,7 @@ use kiln_ir::{
     BinaryOp, Constant, EvalAccess, EvalSite, Instruction, ModuleProgram, PrivateKind, Program,
     Strictness, UnaryOp, Upvalue,
 };
-use kiln_node_path::{PathPart, normalize_posix_path, posix_path_part, posix_path_relative};
+
 use kiln_runtime::{
     ActiveHttpRuntime, ClockCapability, DEFAULT_ENTROPY_SEED, EntropyCapability, HttpCloseMode,
     LocaleCapability, Realm, RealmCapabilities, RealmRuntime, RuntimeHttpClientEvent,
@@ -37,11 +36,47 @@ mod intl;
 // so the scheduler can be read -- and reasoned about for determinism -- on its own.
 mod agent;
 use agent::{AgentGroup, AgentOwner, Bytes};
+// `crypto` houses node:crypto and Web Crypto primitives (hashes, HMAC, entropy, constant-time compare).
+mod crypto;
+pub(crate) use crypto::node_bytes_value;
+#[cfg(test)]
+pub(crate) use crypto::{node_hash, node_hash_digest, node_hash_state};
+// `zlib` houses node:zlib compression and streaming transforms.
+mod zlib;
+// `os` houses node:os environment facts and hardware inspection.
+mod os;
+pub use os::OsFact;
+// `path` houses node:path POSIX path utilities.
+mod path;
+pub use path::PathPart;
+// `querystring` houses node:querystring parsing and decoding.
+mod querystring;
+// `url` houses WHATWG URL and node:url implementation.
+mod url;
+pub(crate) use url::UrlState;
+// `string_decoder` houses node:string_decoder implementation.
+mod string_decoder;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fmt;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
+pub(crate) use string_decoder::StringDecoderState;
+#[cfg(test)]
+pub(crate) use string_decoder::decode_utf8_chunk;
+// `util` houses node:util formatting, inspection, and inheritance helpers.
+mod util;
+pub(crate) use util::format as node_util_format;
+// `diagnostics_channel` houses node:diagnostics_channel diagnostic and tracing channels.
+mod diagnostics_channel;
+// `assert` houses node:assert assertion primitives.
+mod assert;
+// `tty` houses node:tty terminal detection primitives.
+mod tty;
+// `dns` houses node:dns deterministic resolution primitives.
+mod dns;
+// `perf_hooks` houses node:perf_hooks performance hooks namespace.
+mod perf_hooks;
 
 /// The built-ins the runtime provides natively.
 ///
@@ -165,42 +200,6 @@ impl ErrorKind {
 /// that silently does nothing -- which is how it first went in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct BrandOnly(bool);
-
-/// One fact `node:os` reports about the machine.
-///
-/// They divide into two kinds, and the division is the whole design here.
-///
-/// **A property of this build** -- `platform`, `arch`, `type`, `endianness`, `machine` -- is a
-/// compile-time constant of the kiln binary rather than an ambient read, so answering it truly
-/// costs nothing and reads nothing. `os.platform()` is what the TypeScript compiler's
-/// `getNodeSystem` asks first, and it is the honest answer.
-///
-/// **A property of the host** -- `tmpdir`, `homedir`, `cpus`, `totalmem`, `uptime` -- is exactly
-/// what ADRs 0015, 0026 and 0031 keep out of the realm: a program that reads one is not
-/// reproducible. Each answers a fixed, defensible value instead, which is the convention
-/// `os.hostname()` already set by answering `"kiln"`. They are here rather than absent because a
-/// missing member is a `TypeError` in the middle of a library's start-up, where a plausible
-/// constant lets it get on with what it was doing -- and because none of them is a number a
-/// program can act on wrongly without also being a program that needed a real machine.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OsFact {
-    Platform,
-    Arch,
-    Type,
-    Endianness,
-    Machine,
-    TmpDir,
-    HomeDir,
-    Release,
-    Version,
-    Parallelism,
-    Cpus,
-    TotalMem,
-    FreeMem,
-    Uptime,
-    LoadAvg,
-    UserInfo,
-}
 
 mod native;
 pub use native::*;
@@ -359,72 +358,33 @@ enum NodeObject {
     Writable(Rc<RefCell<WritableState>>),
     Url(Rc<UrlState>),
     UrlSearchParams(Rc<UrlState>),
-    Hash(Rc<RefCell<HashState>>),
+    Hash(Rc<RefCell<crypto::HashState>>),
     StringDecoder(Rc<RefCell<StringDecoderState>>),
     AsyncLocalStorage(Rc<AsyncStorage>),
-    Zlib(Rc<ZlibState>),
-}
-
-#[derive(Clone, Copy, Debug)]
-enum HashAlgorithm {
-    Md5,
-    Sha1,
-    Sha256,
-    Sha512,
+    Zlib(Rc<zlib::ZlibState>),
 }
 
 #[derive(Debug)]
-struct HashState {
-    algorithm: HashAlgorithm,
-    hmac_key: Option<Vec<u8>>,
-    bytes: Vec<u8>,
-    digested: bool,
-}
-
-#[derive(Debug, Default)]
-struct StringDecoderState {
-    pending: Vec<u8>,
-}
-
-#[derive(Debug)]
-struct ReadableState {
-    buffer: Vec<Value>,
-    buffered_bytes: usize,
-    high_water_mark: usize,
-    ended: bool,
-    end_emitted: bool,
-    reading: bool,
-    flowing: bool,
-    destroyed: bool,
-    encoding: Option<String>,
-    pipes: Vec<Value>,
-    public: Rc<RefCell<ObjectData>>,
+pub(crate) struct ReadableState {
+    pub(crate) buffer: Vec<Value>,
+    pub(crate) buffered_bytes: usize,
+    pub(crate) high_water_mark: usize,
+    pub(crate) ended: bool,
+    pub(crate) end_emitted: bool,
+    pub(crate) reading: bool,
+    pub(crate) flowing: bool,
+    pub(crate) destroyed: bool,
+    pub(crate) encoding: Option<String>,
+    pub(crate) pipes: Vec<Value>,
+    pub(crate) public: Rc<RefCell<ObjectData>>,
 }
 
 #[derive(Debug)]
-struct WritableState {
-    ended: bool,
-    finished: bool,
-    destroyed: bool,
-    write: Option<Value>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ZlibTransformKind {
-    Gzip,
-    Gunzip,
-    Deflate,
-    Inflate,
-    Unzip,
-    Brotli,
-}
-
-#[derive(Debug)]
-struct ZlibState {
-    kind: ZlibTransformKind,
-    readable: Rc<RefCell<ReadableState>>,
-    writable: Rc<RefCell<WritableState>>,
-    accumulated: RefCell<Vec<u8>>,
+pub(crate) struct WritableState {
+    pub(crate) ended: bool,
+    pub(crate) finished: bool,
+    pub(crate) destroyed: bool,
+    pub(crate) write: Option<Value>,
 }
 
 #[derive(Debug)]
@@ -505,22 +465,6 @@ struct HttpResponseState {
 struct HttpIncomingState {
     stream: kiln_host_abi::ResourceId,
     readable: Rc<RefCell<ReadableState>>,
-}
-
-#[derive(Debug)]
-struct UrlState {
-    href: String,
-    origin: String,
-    protocol: String,
-    host: String,
-    hostname: String,
-    port: String,
-    pathname: String,
-    search: String,
-    hash: String,
-    username: String,
-    password: String,
-    query: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug)]
@@ -2831,7 +2775,7 @@ fn from_hex(text: &str, limit: usize) -> Decoded {
 }
 
 /// The base64 spelling of some bytes, padded unless the caller asked otherwise.
-fn to_base64_text(bytes: &[u8], url: bool, omit_padding: bool) -> String {
+pub(crate) fn to_base64_text(bytes: &[u8], url: bool, omit_padding: bool) -> String {
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for group in bytes.chunks(3) {
         let packed = u32::from(group[0]) << 16
@@ -2860,7 +2804,7 @@ fn to_base64_text(bytes: &[u8], url: bool, omit_padding: bool) -> String {
 }
 
 /// The hex spelling of some bytes, in lower case as the specification writes it.
-fn to_hex_text(bytes: &[u8]) -> String {
+pub(crate) fn to_hex_text(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         out.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
@@ -6396,84 +6340,6 @@ pub fn parse_json_module(source: &str) -> Result<Value, ExecutionError> {
     parse_json_text(source)
 }
 
-fn diagnostics_channel() -> Value {
-    ordinary_object([
-        ("hasSubscribers".to_owned(), Value::Boolean(false)),
-        (
-            "publish".to_owned(),
-            Value::Native(Native::NodeDiagnosticsPublish, RealmId::PRIMARY),
-        ),
-        (
-            "runStores".to_owned(),
-            Value::Native(Native::NodeDiagnosticsRunStores, RealmId::PRIMARY),
-        ),
-    ])
-}
-
-fn diagnostics_tracing_channel() -> Value {
-    let start = diagnostics_channel();
-    let end = diagnostics_channel();
-    let async_start = diagnostics_channel();
-    let async_end = diagnostics_channel();
-    let error = diagnostics_channel();
-    ordinary_object([
-        ("hasSubscribers".to_owned(), Value::Boolean(false)),
-        ("start".to_owned(), start),
-        ("end".to_owned(), end),
-        ("asyncStart".to_owned(), async_start),
-        ("asyncEnd".to_owned(), async_end),
-        ("error".to_owned(), error),
-    ])
-}
-
-fn node_util_format(arguments: &[Value]) -> String {
-    let Some(first) = arguments.first() else {
-        return String::new();
-    };
-    let Value::String(template) = first else {
-        return arguments.iter().map(inspect).collect::<Vec<_>>().join(" ");
-    };
-    let mut out = String::new();
-    let mut values = arguments.iter().skip(1);
-    let mut chars = template.chars().peekable();
-    while let Some(character) = chars.next() {
-        if character != '%' {
-            out.push(character);
-            continue;
-        }
-        let Some(specifier) = chars.peek().copied() else {
-            out.push('%');
-            break;
-        };
-        if specifier == '%' {
-            chars.next();
-            out.push('%');
-            continue;
-        }
-        let Some(value) = values.next() else {
-            out.push('%');
-            continue;
-        };
-        chars.next();
-        match specifier {
-            's' => out.push_str(&value.to_display_string()),
-            'd' | 'i' => out.push_str(&number_string(value.as_number())),
-            'j' => out.push_str(&inspect(value)),
-            'o' | 'O' => out.push_str(&inspect(value)),
-            'f' => out.push_str(&value.as_number().to_string()),
-            _ => {
-                out.push('%');
-                out.push(specifier);
-            }
-        }
-    }
-    for value in values {
-        out.push(' ');
-        out.push_str(&inspect(value));
-    }
-    out
-}
-
 /// Execute one linkage-aware module after its acyclic dependencies have completed.
 ///
 /// `import_values` is ordered exactly like [`ModuleProgram::imports`]. Each value is installed in
@@ -8475,7 +8341,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     None
                 };
                 if let Some((kind, input_bytes)) = maybe_zlib {
-                    match transform_zlib(kind, &input_bytes) {
+                    match zlib::transform_zlib(kind, &input_bytes) {
                         Ok(decompressed) => {
                             let out_buf = node_bytes_value(decompressed);
                             self.dispatch_node_readable(
@@ -14254,9 +14120,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return self.dispatch_node_native(native, arguments, instruction);
         }
         match native {
-            Native::NodeDiagnosticsChannelCreate => return Ok(diagnostics_channel()),
+            Native::NodeDiagnosticsChannelCreate => return Ok(diagnostics_channel::channel()),
             Native::NodeDiagnosticsTracingChannel => {
-                return Ok(diagnostics_tracing_channel());
+                return Ok(diagnostics_channel::tracing_channel());
             }
             Native::NodeDiagnosticsPublish => return Ok(Value::Undefined),
             Native::NodeDiagnosticsRunStores => {
@@ -14271,49 +14137,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let forwarded = arguments.iter().skip(3).cloned().collect();
                 return self.call_value(&callback, this_value, forwarded, instruction);
             }
-            Native::NodeUtilDebuglog => {
-                return Ok(Value::Native(Native::NodeUtilDebugNoop, RealmId::PRIMARY));
-            }
-            Native::NodeUtilDebugNoop => return Ok(Value::Undefined),
-            // Warning delivery is an embedding policy. A deterministic realm preserves the
-            // wrapped callable and performs no ambient stderr write.
-            Native::NodeUtilDeprecate => {
-                return Ok(arguments.first().cloned().unwrap_or(Value::Undefined));
-            }
-            Native::NodeUtilInspect => {
-                return Ok(Value::String(inspect(
-                    arguments.first().unwrap_or(&Value::Undefined),
-                )));
-            }
-            Native::NodeUtilInherits => {
-                let constructor = arguments.first().cloned().unwrap_or(Value::Undefined);
-                let super_constructor = arguments.get(1).cloned().unwrap_or(Value::Undefined);
-                if !is_callable(&constructor) || !is_callable(&super_constructor) {
-                    return Err(ExecutionError::TypeErrorMessage {
-                        message: "The constructor and super constructor must be functions"
-                            .to_owned(),
-                    });
-                }
-                let super_prototype =
-                    self.read_property(&super_constructor, "prototype", instruction)?;
-                let constructor_prototype =
-                    self.read_property(&constructor, "prototype", instruction)?;
-                match &constructor_prototype {
-                    Value::Object(object) => {
-                        object.borrow_mut().set_prototype(super_prototype);
-                    }
-                    Value::Function(function) => {
-                        function
-                            .properties
-                            .borrow_mut()
-                            .set_prototype(super_prototype);
-                    }
-                    _ => {}
-                }
-                return Ok(Value::Undefined);
-            }
-            Native::NodeUtilFormat => {
-                return Ok(Value::String(node_util_format(arguments)));
+            Native::NodeUtilDebuglog
+            | Native::NodeUtilDebugNoop
+            | Native::NodeUtilDeprecate
+            | Native::NodeUtilInspect
+            | Native::NodeUtilFormat
+            | Native::NodeUtilInherits => {
+                return util::dispatch(native, arguments, |val, prop| {
+                    self.read_property(val, prop, instruction)
+                });
             }
             Native::ConsoleConstructor => {
                 return Err(ExecutionError::TypeErrorMessage {
@@ -14376,20 +14208,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             | Native::NodeConsole => {
                 return Ok(Value::Undefined);
             }
-            Native::NodeAssertOk => {
-                let value = arguments.first().cloned().unwrap_or(Value::Undefined);
-                if !value.is_truthy() {
-                    return Err(ExecutionError::TypeErrorMessage {
-                        message: arguments
-                            .get(1)
-                            .map(Value::to_display_string)
-                            .unwrap_or_else(|| {
-                                "The expression evaluated to a falsy value".to_owned()
-                            }),
-                    });
-                }
-                return Ok(Value::Undefined);
-            }
+            Native::NodeAssertOk => return assert::ok(arguments),
             Native::NodeAsyncResourceBind => {
                 let callback = arguments.first().cloned().unwrap_or(Value::Undefined);
                 if !is_callable(&callback) {
@@ -14406,284 +14225,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 })));
             }
             Native::NodeAsyncResourceEmitDestroy => return Ok(Value::Undefined),
-            Native::NodeCryptoRandomUuid => {
-                let first = self.entropy_word(instruction)?.to_be_bytes();
-                let second = self.entropy_word(instruction)?.to_be_bytes();
-                let mut bytes = [0_u8; 16];
-                bytes[..8].copy_from_slice(&first);
-                bytes[8..].copy_from_slice(&second);
-                // RFC 9562 UUIDv4: the realm entropy supplies payload bits; version and variant
-                // are structural. Deterministic/seeded realms reproduce, host realms will draw
-                // their words through HostOp::EntropyU64 once that execution path is enabled.
-                bytes[6] = (bytes[6] & 0x0f) | 0x40;
-                bytes[8] = (bytes[8] & 0x3f) | 0x80;
-                return Ok(Value::String(format!(
-                    "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                    bytes[0],
-                    bytes[1],
-                    bytes[2],
-                    bytes[3],
-                    bytes[4],
-                    bytes[5],
-                    bytes[6],
-                    bytes[7],
-                    bytes[8],
-                    bytes[9],
-                    bytes[10],
-                    bytes[11],
-                    bytes[12],
-                    bytes[13],
-                    bytes[14],
-                    bytes[15]
-                )));
-            }
-            Native::NodeCryptoRandomBytes => {
-                let Some(size_val) = arguments.first() else {
-                    return Err(ExecutionError::TypeErrorMessage {
-                        message: "The \"size\" argument must be of type number".into(),
-                    });
-                };
-                let size_num = match size_val {
-                    Value::Number(n) => *n,
-                    _ => {
-                        return Err(ExecutionError::TypeErrorMessage {
-                            message: "The \"size\" argument must be of type number".into(),
-                        });
-                    }
-                };
-                if size_num.is_nan() || size_num < 0.0 || size_num > 2147483647.0 {
-                    return Err(ExecutionError::RangeErrorMessage {
-                        message: "The value of \"size\" is out of range".into(),
-                    });
-                }
-                let size = size_num as usize;
-                let bytes = self.random_bytes(size, instruction)?;
-                let result = node_bytes_value(bytes);
-                if let Some(cb) = arguments.get(1)
-                    && !matches!(cb, Value::Undefined)
-                {
-                    if !is_callable(cb) {
-                        return Err(ExecutionError::TypeErrorMessage {
-                            message: "The \"cb\" argument must be of type function".into(),
-                        });
-                    }
-                    self.call_value(cb, Value::Undefined, vec![Value::Null, result], instruction)?;
-                    return Ok(Value::Undefined);
-                }
-                return Ok(result);
-            }
-            Native::NodeCryptoRandomFillSync => {
-                let Some(buffer_val) = arguments.first() else {
-                    return Err(ExecutionError::TypeErrorMessage {
-                        message:
-                            "The \"buffer\" argument must be an ArrayBufferView or ArrayBuffer"
-                                .into(),
-                    });
-                };
-                match buffer_val {
-                    Value::TypedArray(view) => {
-                        let total_len = view.len() * view.kind.width();
-                        let offset = arguments.get(1).map(|v| v.as_number()).unwrap_or(0.0);
-                        if offset.is_nan() || offset < 0.0 || offset > total_len as f64 {
-                            return Err(ExecutionError::RangeErrorMessage {
-                                message: "The value of \"offset\" is out of range".into(),
-                            });
-                        }
-                        let offset = offset as usize;
-                        let size = arguments
-                            .get(2)
-                            .map(|v| v.as_number())
-                            .unwrap_or((total_len - offset) as f64);
-                        if size.is_nan() || size < 0.0 || offset + (size as usize) > total_len {
-                            return Err(ExecutionError::RangeErrorMessage {
-                                message: "The value of \"size\" is out of range".into(),
-                            });
-                        }
-                        let size = size as usize;
-                        if size > 0 {
-                            let random = self.random_bytes(size, instruction)?;
-                            view.buffer.bytes.borrow_mut()
-                                [view.offset + offset..view.offset + offset + size]
-                                .copy_from_slice(&random);
-                        }
-                        return Ok(buffer_val.clone());
-                    }
-                    Value::ArrayBuffer(buffer) => {
-                        let total_len = buffer.bytes.borrow().len();
-                        let offset = arguments.get(1).map(|v| v.as_number()).unwrap_or(0.0);
-                        if offset.is_nan() || offset < 0.0 || offset > total_len as f64 {
-                            return Err(ExecutionError::RangeErrorMessage {
-                                message: "The value of \"offset\" is out of range".into(),
-                            });
-                        }
-                        let offset = offset as usize;
-                        let size = arguments
-                            .get(2)
-                            .map(|v| v.as_number())
-                            .unwrap_or((total_len - offset) as f64);
-                        if size.is_nan() || size < 0.0 || offset + (size as usize) > total_len {
-                            return Err(ExecutionError::RangeErrorMessage {
-                                message: "The value of \"size\" is out of range".into(),
-                            });
-                        }
-                        let size = size as usize;
-                        if size > 0 {
-                            let random = self.random_bytes(size, instruction)?;
-                            buffer.bytes.borrow_mut()[offset..offset + size]
-                                .copy_from_slice(&random);
-                        }
-                        return Ok(buffer_val.clone());
-                    }
-                    Value::DataView(view) => {
-                        let total_len = view.byte_length().unwrap_or(0);
-                        let offset = arguments.get(1).map(|v| v.as_number()).unwrap_or(0.0);
-                        if offset.is_nan() || offset < 0.0 || offset > total_len as f64 {
-                            return Err(ExecutionError::RangeErrorMessage {
-                                message: "The value of \"offset\" is out of range".into(),
-                            });
-                        }
-                        let offset = offset as usize;
-                        let size = arguments
-                            .get(2)
-                            .map(|v| v.as_number())
-                            .unwrap_or((total_len - offset) as f64);
-                        if size.is_nan() || size < 0.0 || offset + (size as usize) > total_len {
-                            return Err(ExecutionError::RangeErrorMessage {
-                                message: "The value of \"size\" is out of range".into(),
-                            });
-                        }
-                        let size = size as usize;
-                        if size > 0 {
-                            let random = self.random_bytes(size, instruction)?;
-                            view.buffer.bytes.borrow_mut()
-                                [view.offset + offset..view.offset + offset + size]
-                                .copy_from_slice(&random);
-                        }
-                        return Ok(buffer_val.clone());
-                    }
-                    _ => {
-                        return Err(ExecutionError::TypeErrorMessage {
-                            message:
-                                "The \"buffer\" argument must be an ArrayBufferView or ArrayBuffer"
-                                    .into(),
-                        });
-                    }
-                }
-            }
-            Native::NodeCryptoGetHashes => {
-                return Ok(Value::Array(ArrayData::new(vec![
-                    Value::String("md5".into()),
-                    Value::String("sha1".into()),
-                    Value::String("sha256".into()),
-                    Value::String("sha512".into()),
-                ])));
-            }
-            Native::NodeCryptoGetRandomValues => {
-                let Some(arg) = arguments.first() else {
-                    return Err(ExecutionError::TypeErrorMessage {
-                        message: "The \"typedArray\" argument must be an instance of TypedArray"
-                            .into(),
-                    });
-                };
-                let Value::TypedArray(view) = arg else {
-                    return Err(ExecutionError::TypeErrorMessage {
-                        message: "The \"typedArray\" argument must be an instance of TypedArray"
-                            .into(),
-                    });
-                };
-                if matches!(
-                    view.kind,
-                    TypedKind::Float16 | TypedKind::Float32 | TypedKind::Float64
-                ) {
-                    return Err(ExecutionError::TypeErrorMessage {
-                        message: "The \"typedArray\" argument must be an integer-based TypedArray"
-                            .into(),
-                    });
-                }
-                let total_len = view.len() * view.kind.width();
-                if total_len > 65536 {
-                    return Err(ExecutionError::RangeErrorMessage {
-                        message: "The ArrayBufferView's byte length exceeds the allowed limit of 65536 bytes".into(),
-                    });
-                }
-                if total_len > 0 {
-                    let random = self.random_bytes(total_len, instruction)?;
-                    view.buffer.bytes.borrow_mut()[view.offset..view.offset + total_len]
-                        .copy_from_slice(&random);
-                }
-                return Ok(arg.clone());
-            }
-            Native::NodeCryptoTimingSafeEqual => {
-                let Some(arg_a) = arguments.first() else {
-                    return Err(ExecutionError::TypeErrorMessage {
-                        message: "The \"a\" and \"b\" arguments must be of type ArrayBufferView or ArrayBuffer".into(),
-                    });
-                };
-                let Some(arg_b) = arguments.get(1) else {
-                    return Err(ExecutionError::TypeErrorMessage {
-                        message: "The \"a\" and \"b\" arguments must be of type ArrayBufferView or ArrayBuffer".into(),
-                    });
-                };
-                let bytes_a = view_or_buffer_bytes(arg_a)?;
-                let bytes_b = view_or_buffer_bytes(arg_b)?;
-                if bytes_a.len() != bytes_b.len() {
-                    return Err(ExecutionError::RangeErrorMessage {
-                        message: "Input buffers must have the same byte length".into(),
-                    });
-                }
-                let mut diff = 0_u8;
-                for (&x, &y) in bytes_a.iter().zip(bytes_b.iter()) {
-                    diff |= x ^ y;
-                }
-                return Ok(Value::Boolean(std::hint::black_box(diff) == 0));
-            }
-            Native::NodeCryptoCreateHash => return node_hash(arguments),
-            Native::NodeCryptoCreateHmac => return node_hmac(arguments),
-            Native::NodeHashUpdate => {
-                let state = node_hash_state(receiver)?;
-                let mut state = state.borrow_mut();
-                if state.digested {
-                    return Err(ExecutionError::TypeErrorMessage {
-                        message: "Digest already called".into(),
-                    });
-                }
-                state.bytes.extend(node_body_bytes(arguments.first())?);
-                return Ok(receiver.clone());
-            }
-            Native::NodeHashDigest => {
-                let state = node_hash_state(receiver)?;
-                let mut state = state.borrow_mut();
-                if state.digested {
-                    return Err(ExecutionError::TypeErrorMessage {
-                        message: "Digest already called".into(),
-                    });
-                }
-                state.digested = true;
-                let bytes = if let Some(key) = &state.hmac_key {
-                    node_hmac_digest(state.algorithm, key, &state.bytes)
-                } else {
-                    node_hash_digest(state.algorithm, &state.bytes)
-                };
-                let encoding = arguments.first().map(Value::to_display_string);
-                return match encoding.as_deref() {
-                    None => Ok(node_bytes_value(bytes)),
-                    Some("hex") => Ok(Value::String(to_hex_text(&bytes))),
-                    Some("base64") => Ok(Value::String(to_base64_text(&bytes, false, false))),
-                    Some("base64url") => Ok(Value::String(to_base64_text(&bytes, true, true))),
-                    Some(encoding) => Err(ExecutionError::TypeErrorMessage {
-                        message: format!("Unknown encoding: {encoding}"),
-                    }),
-                };
+            Native::NodeCryptoRandomUuid
+            | Native::NodeCryptoRandomBytes
+            | Native::NodeCryptoRandomFillSync
+            | Native::NodeCryptoGetHashes
+            | Native::NodeCryptoGetRandomValues
+            | Native::NodeCryptoTimingSafeEqual
+            | Native::NodeCryptoCreateHash
+            | Native::NodeCryptoCreateHmac
+            | Native::NodeHashUpdate
+            | Native::NodeHashDigest => {
+                return self.crypto_dispatch(native, receiver, arguments, instruction);
             }
             Native::NodeStringDecoderWrite | Native::NodeStringDecoderEnd => {
-                let state = node_string_decoder_state(receiver)?;
-                let bytes = node_body_bytes(arguments.first())?;
-                let text = decode_utf8_chunk(
-                    &mut state.borrow_mut().pending,
-                    &bytes,
-                    matches!(native, Native::NodeStringDecoderEnd),
-                );
-                return Ok(Value::String(text));
+                return string_decoder::dispatch(native, receiver, arguments);
             }
             Native::NodeStreamFinished => {
                 let stream = arguments.first().cloned().unwrap_or(Value::Undefined);
@@ -14729,144 +14284,27 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 return Ok(stream);
             }
             Native::NodeDnsLookup => {
-                let host = arguments
-                    .first()
-                    .map(Value::to_display_string)
-                    .unwrap_or_else(|| "localhost".to_owned());
-                let callback = arguments
-                    .iter()
-                    .rev()
-                    .find(|value| is_callable(value))
-                    .cloned()
-                    .unwrap_or(Value::Undefined);
-                if !is_callable(&callback) {
-                    return Err(ExecutionError::NotCallable {
-                        instruction,
-                        value: callback.type_name(),
-                    });
-                }
-                // Deterministic loopback-only resolution. Non-loopback DNS must become an
-                // explicit async HostOp before it is advertised; it must never read ambient
-                // resolver state from inside the interpreter.
-                let addresses = match host.as_str() {
-                    "localhost" => vec![
-                        ordinary_object([
-                            ("address".to_owned(), Value::String("127.0.0.1".to_owned())),
-                            ("family".to_owned(), Value::Number(4.0)),
-                        ]),
-                        ordinary_object([
-                            ("address".to_owned(), Value::String("::1".to_owned())),
-                            ("family".to_owned(), Value::Number(6.0)),
-                        ]),
-                    ],
-                    "127.0.0.1" => vec![ordinary_object([
-                        ("address".to_owned(), Value::String(host)),
-                        ("family".to_owned(), Value::Number(4.0)),
-                    ])],
-                    "::1" => vec![ordinary_object([
-                        ("address".to_owned(), Value::String(host)),
-                        ("family".to_owned(), Value::Number(6.0)),
-                    ])],
-                    _ => Vec::new(),
-                };
-                let options_all = arguments.get(1).is_some_and(|options| {
-                    own_data_property(options, "all").is_some_and(|value| value.is_truthy())
-                });
-                let callback_arguments = if addresses.is_empty() {
-                    vec![
-                        Value::String("ENOTFOUND".to_owned()),
-                        Value::Array(ArrayData::new(Vec::new())),
-                    ]
-                } else if options_all {
-                    vec![Value::Null, Value::Array(ArrayData::new(addresses))]
-                } else {
-                    let first = addresses.into_iter().next().unwrap();
-                    vec![
-                        Value::Null,
-                        own_data_property(&first, "address").unwrap_or(Value::Undefined),
-                        own_data_property(&first, "family").unwrap_or(Value::Undefined),
-                    ]
-                };
+                let (callback, callback_arguments) = dns::prepare_lookup(arguments, instruction)?;
                 self.call_value(&callback, Value::Undefined, callback_arguments, instruction)?;
                 return Ok(Value::Undefined);
             }
-            Native::NodeOsNetworkInterfaces => {
-                let loopback = Value::Array(ArrayData::new(vec![ordinary_object([
-                    ("address".to_owned(), Value::String("127.0.0.1".to_owned())),
-                    ("family".to_owned(), Value::String("IPv4".to_owned())),
-                    ("internal".to_owned(), Value::Boolean(true)),
-                ])]));
-                return Ok(ordinary_object([("loopback".to_owned(), loopback)]));
+            Native::NodeOsNetworkInterfaces | Native::NodeOsHostname | Native::NodeOsFact(_) => {
+                return os::dispatch(native);
             }
-            Native::NodeOsHostname => return Ok(Value::String("kiln".to_owned())),
-            // Kiln captures the realm's standard streams. They are therefore not terminals,
-            // regardless of whether the embedding process happens to have an ambient TTY.
-            Native::NodeTtyIsatty => return Ok(Value::Boolean(false)),
-            Native::NodeZlibCreateGzip => {
-                return Ok(node_zlib_create_transform(ZlibTransformKind::Gzip));
-            }
-            Native::NodeZlibCreateGunzip => {
-                return Ok(node_zlib_create_transform(ZlibTransformKind::Gunzip));
-            }
-            Native::NodeZlibCreateDeflate => {
-                return Ok(node_zlib_create_transform(ZlibTransformKind::Deflate));
-            }
-            Native::NodeZlibCreateInflate => {
-                return Ok(node_zlib_create_transform(ZlibTransformKind::Inflate));
-            }
-            Native::NodeZlibCreateUnzip => {
-                return Ok(node_zlib_create_transform(ZlibTransformKind::Unzip));
-            }
-            Native::NodeZlibCreateBrotliDecompress => {
-                return Ok(node_zlib_create_transform(ZlibTransformKind::Brotli));
-            }
-            Native::NodeZlibCreateDecompress => {
-                return Ok(node_zlib_create_transform(ZlibTransformKind::Gunzip));
-            }
-            Native::NodeZlibGzipSync => {
-                let bytes = zlib_buffer_arg(arguments.first());
-                let res = transform_zlib(ZlibTransformKind::Gzip, &bytes).map_err(|err| {
-                    ExecutionError::TypeErrorMessage {
-                        message: err.to_string(),
-                    }
-                })?;
-                return Ok(node_bytes_value(res));
-            }
-            Native::NodeZlibGunzipSync => {
-                let bytes = zlib_buffer_arg(arguments.first());
-                let res = transform_zlib(ZlibTransformKind::Gunzip, &bytes).map_err(|err| {
-                    ExecutionError::TypeErrorMessage {
-                        message: err.to_string(),
-                    }
-                })?;
-                return Ok(node_bytes_value(res));
-            }
-            Native::NodeZlibDeflateSync => {
-                let bytes = zlib_buffer_arg(arguments.first());
-                let res = transform_zlib(ZlibTransformKind::Deflate, &bytes).map_err(|err| {
-                    ExecutionError::TypeErrorMessage {
-                        message: err.to_string(),
-                    }
-                })?;
-                return Ok(node_bytes_value(res));
-            }
-            Native::NodeZlibInflateSync => {
-                let bytes = zlib_buffer_arg(arguments.first());
-                let res = transform_zlib(ZlibTransformKind::Inflate, &bytes).map_err(|err| {
-                    ExecutionError::TypeErrorMessage {
-                        message: err.to_string(),
-                    }
-                })?;
-                return Ok(node_bytes_value(res));
-            }
-            Native::NodeZlibUnzipSync => {
-                let bytes = zlib_buffer_arg(arguments.first());
-                let res = transform_zlib(ZlibTransformKind::Unzip, &bytes).map_err(|err| {
-                    ExecutionError::TypeErrorMessage {
-                        message: err.to_string(),
-                    }
-                })?;
-                return Ok(node_bytes_value(res));
+            Native::NodeTtyIsatty => return Ok(tty::isatty()),
+            Native::NodeZlibCreateGzip
+            | Native::NodeZlibCreateGunzip
+            | Native::NodeZlibCreateDeflate
+            | Native::NodeZlibCreateInflate
+            | Native::NodeZlibCreateUnzip
+            | Native::NodeZlibCreateBrotliDecompress
+            | Native::NodeZlibCreateDecompress
+            | Native::NodeZlibGzipSync
+            | Native::NodeZlibGunzipSync
+            | Native::NodeZlibDeflateSync
+            | Native::NodeZlibInflateSync
+            | Native::NodeZlibUnzipSync => {
+                return self.zlib_dispatch(native, receiver, arguments, instruction);
             }
             Native::TextDecoderConstructor => {
                 let label = arguments
@@ -15102,111 +14540,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         .to_owned(),
                 });
             }
-            Native::NodePathJoin => {
-                let joined = arguments
-                    .iter()
-                    .map(Value::to_display_string)
-                    .collect::<Vec<_>>()
-                    .join("/");
-                return Ok(Value::String(normalize_posix_path(&joined)));
-            }
-            Native::NodePathResolve => {
-                let mut resolved = String::new();
-                for part in arguments.iter().map(Value::to_display_string) {
-                    if part.starts_with('/') {
-                        resolved = part;
-                    } else if !part.is_empty() {
-                        if !resolved.ends_with('/') {
-                            resolved.push('/');
-                        }
-                        resolved.push_str(&part);
-                    }
-                }
-                if !resolved.starts_with('/') {
-                    resolved.insert(0, '/');
-                }
-                return Ok(Value::String(normalize_posix_path(&resolved)));
-            }
-            Native::NodePathPart(part) => {
-                let path = arguments
-                    .first()
-                    .map_or_else(String::new, Value::to_display_string);
-                let suffix = arguments.get(1).map(Value::to_display_string);
-                return Ok(Value::String(
-                    posix_path_part(part, &path, suffix.as_deref()).into_owned(),
-                ));
-            }
-            Native::NodePathRelative => {
-                let from = arguments
-                    .first()
-                    .map_or_else(String::new, Value::to_display_string);
-                let to = arguments
-                    .get(1)
-                    .map_or_else(String::new, Value::to_display_string);
-                return Ok(Value::String(posix_path_relative(&from, &to)));
-            }
-            Native::NodePathParse => {
-                let path = arguments
-                    .first()
-                    .map_or_else(String::new, Value::to_display_string);
-                let base = posix_path_part(PathPart::Base, &path, None).into_owned();
-                let ext = posix_path_part(PathPart::Ext, &path, None).into_owned();
-                let name = base
-                    .strip_suffix(ext.as_str())
-                    .filter(|_| !ext.is_empty())
-                    .unwrap_or(&base)
-                    .to_owned();
-                return Ok(ordinary_object([
-                    (
-                        "root".to_owned(),
-                        Value::String(if path.starts_with('/') { "/" } else { "" }.to_owned()),
-                    ),
-                    (
-                        "dir".to_owned(),
-                        Value::String(posix_path_part(PathPart::Dir, &path, None).into_owned()),
-                    ),
-                    ("base".to_owned(), Value::String(base)),
-                    ("ext".to_owned(), Value::String(ext)),
-                    ("name".to_owned(), Value::String(name)),
-                ]));
-            }
-            // `format` is `parse` read backwards, and it prefers `base` over `name`+`ext`
-            // exactly as node does -- a program that edits one field of a parsed path and hands
-            // the object straight back relies on that precedence.
-            Native::NodePathFormat => {
-                let source = arguments.first().cloned().unwrap_or(Value::Undefined);
-                let field = |vm: &mut Self, key: &str| -> Result<String, ExecutionError> {
-                    Ok(match vm.read_property(&source, key, instruction)? {
-                        Value::Undefined | Value::Null => String::new(),
-                        other => other.to_display_string(),
-                    })
-                };
-                let directory = match field(self, "dir")? {
-                    empty if empty.is_empty() => field(self, "root")?,
-                    dir => dir,
-                };
-                let base = match field(self, "base")? {
-                    empty if empty.is_empty() => {
-                        format!("{}{}", field(self, "name")?, field(self, "ext")?)
-                    }
-                    base => base,
-                };
-                return Ok(Value::String(if directory.is_empty() {
-                    base
-                } else if directory == "/" {
-                    format!("/{base}")
-                } else {
-                    format!("{directory}/{base}")
-                }));
-            }
-            Native::NodeOsFact(fact) => return Ok(os_fact(fact)),
-            Native::NodePathIsAbsolute => {
-                return Ok(Value::Boolean(
-                    arguments
-                        .first()
-                        .map(Value::to_display_string)
-                        .is_some_and(|path| path.starts_with('/')),
-                ));
+            Native::NodePathJoin
+            | Native::NodePathResolve
+            | Native::NodePathPart(_)
+            | Native::NodePathRelative
+            | Native::NodePathParse
+            | Native::NodePathFormat
+            | Native::NodePathIsAbsolute => {
+                return path::dispatch(self, native, arguments, instruction);
             }
             Native::NodeWorkerConstructor => {
                 return Err(ExecutionError::Host {
@@ -15747,204 +15088,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                 }
             }
-            Native::UrlConstructor => {
-                let input = arguments
-                    .first()
-                    .map(Value::to_display_string)
-                    .unwrap_or_default();
-                let base = arguments.get(1).and_then(|val| match val {
-                    Value::Undefined => None,
-                    Value::Object(obj) => {
-                        if let Some(NodeObject::Url(state)) = &obj.borrow().node_object {
-                            Some(state.href.clone())
-                        } else {
-                            Some(val.to_display_string())
-                        }
-                    }
-                    _ => Some(val.to_display_string()),
-                });
-                Ok(url_object(parse_url(&input, base.as_deref())?))
-            }
-            Native::NodeUrlParse => Ok(node_legacy_url_parse(
-                &arguments
-                    .first()
-                    .map(Value::to_display_string)
-                    .unwrap_or_default(),
-            )),
-            Native::NodeUrlFileUrlToPath => {
-                let url_string = match arguments.first() {
-                    Some(Value::Object(obj)) => {
-                        if let Some(NodeObject::Url(state)) = &obj.borrow().node_object {
-                            state.href.clone()
-                        } else {
-                            arguments
-                                .first()
-                                .map(Value::to_display_string)
-                                .unwrap_or_default()
-                        }
-                    }
-                    Some(val) => val.to_display_string(),
-                    None => String::new(),
-                };
-                let parsed =
-                    url::Url::parse(&url_string).map_err(|_| ExecutionError::TypeErrorMessage {
-                        message: "fileURLToPath requires a file: URL".to_owned(),
-                    })?;
-                if parsed.scheme() != "file" {
-                    return Err(ExecutionError::TypeErrorMessage {
-                        message: "fileURLToPath requires a file: URL".to_owned(),
-                    });
-                }
-                let path = parsed
-                    .to_file_path()
-                    .map_err(|_| ExecutionError::TypeErrorMessage {
-                        message: "fileURLToPath could not convert file URL to path".to_owned(),
-                    })?;
-                Ok(Value::String(path.to_string_lossy().into_owned()))
-            }
-            Native::NodeUrlPathToFileUrl => {
-                let path = arguments
-                    .first()
-                    .map(Value::to_display_string)
-                    .unwrap_or_default();
-                let path_buf = std::path::PathBuf::from(&path);
-                let url_res = if path_buf.is_absolute() {
-                    url::Url::from_file_path(&path_buf)
-                } else if let Ok(cwd) = std::env::current_dir() {
-                    url::Url::from_file_path(cwd.join(&path_buf))
-                } else {
-                    url::Url::from_file_path(format!("/{path}"))
-                };
-                let parsed_url = match url_res {
-                    Ok(u) => u,
-                    Err(_) => {
-                        let abs = if path.starts_with('/') {
-                            path
-                        } else {
-                            format!("/{path}")
-                        };
-                        url::Url::parse(&format!("file://{abs}")).map_err(|_| {
-                            ExecutionError::TypeErrorMessage {
-                                message: "pathToFileURL failed".to_owned(),
-                            }
-                        })?
-                    }
-                };
-                Ok(url_object(parse_url(parsed_url.as_str(), None)?))
-            }
-            Native::NodeQueryStringParse => Ok(node_querystring_parse(
-                &arguments
-                    .first()
-                    .map(Value::to_display_string)
-                    .unwrap_or_default(),
-            )),
-            Native::UrlToString => {
-                let Value::Object(object) = receiver else {
-                    return Ok(Value::Undefined);
-                };
-                let href = match &object.borrow().node_object {
-                    Some(NodeObject::Url(state)) => state.href.clone(),
-                    _ => String::new(),
-                };
-                Ok(Value::String(href))
-            }
-            Native::UrlSearchParamsGet => {
-                let Value::Object(object) = receiver else {
-                    return Err(ExecutionError::TypeErrorMessage {
-                        message: "URLSearchParams.get called on an incompatible receiver".into(),
-                    });
-                };
-                let state = match &object.borrow().node_object {
-                    Some(NodeObject::UrlSearchParams(state)) => Rc::clone(state),
-                    _ => {
-                        return Err(ExecutionError::TypeErrorMessage {
-                            message: "URLSearchParams.get called on an incompatible receiver"
-                                .into(),
-                        });
-                    }
-                };
-                let name = arguments
-                    .first()
-                    .map(Value::to_display_string)
-                    .unwrap_or_default();
-                Ok(state
-                    .query
-                    .iter()
-                    .find(|(key, _)| key == &name)
-                    .map(|(_, value)| Value::String(value.clone()))
-                    .unwrap_or(Value::Null))
-            }
-            Native::UrlSearchParamsHas => {
-                let Value::Object(object) = receiver else {
-                    return Err(ExecutionError::TypeErrorMessage {
-                        message: "URLSearchParams.has called on an incompatible receiver".into(),
-                    });
-                };
-                let state = match &object.borrow().node_object {
-                    Some(NodeObject::UrlSearchParams(state)) => Rc::clone(state),
-                    _ => {
-                        return Err(ExecutionError::TypeErrorMessage {
-                            message: "URLSearchParams.has called on an incompatible receiver"
-                                .into(),
-                        });
-                    }
-                };
-                let name = arguments
-                    .first()
-                    .map(Value::to_display_string)
-                    .unwrap_or_default();
-                Ok(Value::Boolean(
-                    state.query.iter().any(|(key, _)| key == &name),
-                ))
-            }
-            Native::UrlSearchParamsGetAll => {
-                let Value::Object(object) = receiver else {
-                    return Err(ExecutionError::TypeErrorMessage {
-                        message: "URLSearchParams.getAll called on an incompatible receiver".into(),
-                    });
-                };
-                let state = match &object.borrow().node_object {
-                    Some(NodeObject::UrlSearchParams(state)) => Rc::clone(state),
-                    _ => {
-                        return Err(ExecutionError::TypeErrorMessage {
-                            message: "URLSearchParams.getAll called on an incompatible receiver"
-                                .into(),
-                        });
-                    }
-                };
-                let name = arguments
-                    .first()
-                    .map(Value::to_display_string)
-                    .unwrap_or_default();
-                let values: Vec<Value> = state
-                    .query
-                    .iter()
-                    .filter(|(key, _)| key == &name)
-                    .map(|(_, value)| Value::String(value.clone()))
-                    .collect();
-                Ok(Value::Array(ArrayData::new(values)))
-            }
-            Native::UrlSearchParamsToString => {
-                let Value::Object(object) = receiver else {
-                    return Err(ExecutionError::TypeErrorMessage {
-                        message: "URLSearchParams.toString called on an incompatible receiver"
-                            .into(),
-                    });
-                };
-                let state = match &object.borrow().node_object {
-                    Some(NodeObject::UrlSearchParams(state)) => Rc::clone(state),
-                    _ => {
-                        return Err(ExecutionError::TypeErrorMessage {
-                            message: "URLSearchParams.toString called on an incompatible receiver"
-                                .into(),
-                        });
-                    }
-                };
-                let encoded = url::form_urlencoded::Serializer::new(String::new())
-                    .extend_pairs(&state.query)
-                    .finish();
-                Ok(Value::String(encoded))
-            }
+            Native::NodeQueryStringParse => querystring::dispatch(native, arguments),
+            Native::UrlConstructor
+            | Native::NodeUrlParse
+            | Native::NodeUrlFileUrlToPath
+            | Native::NodeUrlPathToFileUrl
+            | Native::UrlToString
+            | Native::UrlSearchParamsGet
+            | Native::UrlSearchParamsHas
+            | Native::UrlSearchParamsGetAll
+            | Native::UrlSearchParamsToString => url::dispatch(native, receiver, arguments),
             Native::ArrayFrom => self.array_from(arguments, instruction),
             Native::ArrayFromAsync => self.array_from_async(receiver, arguments, instruction),
             Native::ArrayBufferConstructor => {
@@ -26587,7 +25740,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Native::NodeEventEmitter => node_event_emitter(),
             Native::ConsoleConstructor => self.construct_console(arguments, current)?,
-            Native::NodeStringDecoderConstructor => node_string_decoder(),
+            Native::NodeStringDecoderConstructor => string_decoder::node_string_decoder(),
             Native::NodeReadable => node_readable(arguments, None),
             Native::NodeWritable => node_writable(arguments, None),
             Native::NodeHttpServerResponse => node_writable(arguments, None),
@@ -26842,7 +25995,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.stack.push(built);
             }
             Value::Native(Native::NodeStringDecoderConstructor, _) => {
-                self.stack.push(node_string_decoder());
+                self.stack.push(string_decoder::node_string_decoder());
             }
             // `new Object(v)` and `Object(v)` are the same operation: the specification routes
             // both to ToObject, and differs only in a `NewTarget` this interpreter has no other
@@ -30468,30 +29621,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     };
                 }
                 if let Some(NodeObject::Url(state)) = &object.node_object {
-                    return match name {
-                        "href" => Value::String(state.href.clone()),
-                        "origin" => Value::String(state.origin.clone()),
-                        "protocol" => Value::String(state.protocol.clone()),
-                        "host" => Value::String(state.host.clone()),
-                        "hostname" => Value::String(state.hostname.clone()),
-                        "port" => Value::String(state.port.clone()),
-                        "pathname" => Value::String(state.pathname.clone()),
-                        "search" => Value::String(state.search.clone()),
-                        "hash" => Value::String(state.hash.clone()),
-                        "username" => Value::String(state.username.clone()),
-                        "password" => Value::String(state.password.clone()),
-                        "searchParams" => url_search_params_object(Rc::clone(state)),
-                        // Both answer `href`. A `URL` is one of the few objects real code hands
-                        // straight to string concatenation -- `` `imported from ${url}` `` --
-                        // and without them `String(url)` was "Cannot convert object to primitive
-                        // value": postcss's `CssSyntaxError` constructor stringifies the file URL
-                        // it built, so a *CSS syntax error* surfaced as a TypeError from the
-                        // reporter rather than as the located error it had already worked out.
-                        "toString" | "toJSON" => {
-                            Value::Native(Native::UrlToString, RealmId::PRIMARY)
-                        }
-                        _ => object.get(name).unwrap_or(Value::Undefined),
-                    };
+                    return url::read_property(&object, state, name);
                 }
                 object.get(name).unwrap_or_else(|| {
                     // An object whose prototype is explicitly `null` inherits nothing --
@@ -33998,7 +33128,7 @@ fn node_readable(arguments: &[Value], receiver: Option<&Value>) -> Value {
     Value::Object(object)
 }
 
-fn new_readable_state(
+pub(crate) fn new_readable_state(
     high_water_mark: usize,
     encoding: Option<String>,
 ) -> Rc<RefCell<ReadableState>> {
@@ -34031,113 +33161,6 @@ fn node_readable_state(receiver: &Value) -> Result<Rc<RefCell<ReadableState>>, E
             message: "Readable method called on an incompatible receiver".into(),
         }),
     }
-}
-
-fn zlib_buffer_arg(value: Option<&Value>) -> Vec<u8> {
-    match value {
-        Some(Value::TypedArray(view)) => view.bytes(),
-        Some(Value::ArrayBuffer(ab)) => ab.bytes.borrow().clone(),
-        Some(Value::String(s)) => s.as_bytes().to_vec(),
-        _ => Vec::new(),
-    }
-}
-
-fn transform_zlib(kind: ZlibTransformKind, bytes: &[u8]) -> Result<Vec<u8>, std::io::Error> {
-    use std::io::{Read, Write};
-    match kind {
-        ZlibTransformKind::Gzip => {
-            let mut encoder =
-                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-            encoder.write_all(bytes)?;
-            encoder.finish()
-        }
-        ZlibTransformKind::Gunzip => {
-            let mut decoder = flate2::read::GzDecoder::new(bytes);
-            let mut out = Vec::new();
-            decoder.read_to_end(&mut out)?;
-            Ok(out)
-        }
-        ZlibTransformKind::Deflate => {
-            let mut encoder =
-                flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-            encoder.write_all(bytes)?;
-            encoder.finish()
-        }
-        ZlibTransformKind::Inflate => {
-            let mut decoder = flate2::read::ZlibDecoder::new(bytes);
-            let mut out = Vec::new();
-            match decoder.read_to_end(&mut out) {
-                Ok(_) => Ok(out),
-                Err(_) => {
-                    let mut raw = flate2::read::DeflateDecoder::new(bytes);
-                    let mut raw_out = Vec::new();
-                    raw.read_to_end(&mut raw_out)?;
-                    Ok(raw_out)
-                }
-            }
-        }
-        ZlibTransformKind::Unzip => {
-            let mut gz = flate2::read::GzDecoder::new(bytes);
-            let mut out = Vec::new();
-            if gz.read_to_end(&mut out).is_ok() {
-                Ok(out)
-            } else {
-                let mut zlib = flate2::read::ZlibDecoder::new(bytes);
-                let mut zout = Vec::new();
-                if zlib.read_to_end(&mut zout).is_ok() {
-                    Ok(zout)
-                } else {
-                    let mut raw = flate2::read::DeflateDecoder::new(bytes);
-                    let mut raw_out = Vec::new();
-                    raw.read_to_end(&mut raw_out)?;
-                    Ok(raw_out)
-                }
-            }
-        }
-        ZlibTransformKind::Brotli => Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "brotli decompression not yet supported",
-        )),
-    }
-}
-
-fn node_zlib_create_transform(kind: ZlibTransformKind) -> Value {
-    let readable_state = new_readable_state(16 * 1024, None);
-    let writable_state = Rc::new(RefCell::new(WritableState {
-        ended: false,
-        finished: false,
-        destroyed: false,
-        write: None,
-    }));
-    let zlib_state = Rc::new(ZlibState {
-        kind,
-        readable: Rc::clone(&readable_state),
-        writable: Rc::clone(&writable_state),
-        accumulated: RefCell::new(Vec::new()),
-    });
-    let object = Rc::new(RefCell::new(ObjectData::default()));
-    {
-        let mut data = object.borrow_mut();
-        data.node_events.get_or_insert_with(Vec::new);
-        data.node_object = Some(NodeObject::Zlib(zlib_state));
-        data.set_prototype(Value::Native(
-            Native::PrototypeOf(PrototypeTable::Readable),
-            RealmId::PRIMARY,
-        ));
-        data.set_non_enumerable(
-            "write",
-            Value::Native(Native::NodeWritableWrite, RealmId::PRIMARY),
-        );
-        data.set_non_enumerable(
-            "end",
-            Value::Native(Native::NodeWritableEnd, RealmId::PRIMARY),
-        );
-        data.set_non_enumerable("writableEnded", Value::Boolean(false));
-        data.set_non_enumerable("writableFinished", Value::Boolean(false));
-        data.set_non_enumerable("readableEnded", Value::Boolean(false));
-        data.set_non_enumerable("destroyed", Value::Boolean(false));
-    }
-    Value::Object(object)
 }
 
 fn sync_readable_public_state(receiver: &Value, state: &ReadableState) {
@@ -34567,7 +33590,7 @@ fn node_connect_arguments(
     Ok((port as u16, host, callback))
 }
 
-fn node_body_bytes(value: Option<&Value>) -> Result<Vec<u8>, ExecutionError> {
+pub(crate) fn node_body_bytes(value: Option<&Value>) -> Result<Vec<u8>, ExecutionError> {
     match value.unwrap_or(&Value::Undefined) {
         Value::Undefined | Value::Null => Ok(Vec::new()),
         Value::String(value) => Ok(value.as_bytes().to_vec()),
@@ -34587,178 +33610,6 @@ fn readable_chunk_length(value: &Value) -> usize {
         Value::TypedArray(value) => value.bytes().len(),
         _ => 1,
     }
-}
-
-fn view_or_buffer_bytes(val: &Value) -> Result<Vec<u8>, ExecutionError> {
-    match val {
-        Value::TypedArray(view) => Ok(view.bytes()),
-        Value::ArrayBuffer(buffer) => Ok(buffer.bytes.borrow().clone()),
-        Value::DataView(view) => {
-            if view.out_of_bounds() {
-                return Ok(Vec::new());
-            }
-            let length = view.byte_length().unwrap_or(0);
-            Ok(view.buffer.bytes.borrow()[view.offset..view.offset + length].to_vec())
-        }
-        _ => Err(ExecutionError::TypeErrorMessage {
-            message: "The \"a\" and \"b\" arguments must be of type ArrayBufferView or ArrayBuffer"
-                .into(),
-        }),
-    }
-}
-
-fn node_bytes_value(bytes: Vec<u8>) -> Value {
-    let length = bytes.len();
-    let buffer = BufferData::fixed(length);
-    buffer.bytes.borrow_mut().copy_from_slice(&bytes);
-    Value::TypedArray(Rc::new(TypedArrayData {
-        buffer,
-        offset: 0,
-        length: Some(length),
-        kind: TypedKind::Uint8,
-        properties: RefCell::new(ObjectData::default()),
-    }))
-}
-
-fn node_hash(arguments: &[Value]) -> Result<Value, ExecutionError> {
-    let name = arguments
-        .first()
-        .map(Value::to_display_string)
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-        .replace('-', "");
-    let algorithm = match name.as_str() {
-        "md5" => HashAlgorithm::Md5,
-        "sha1" => HashAlgorithm::Sha1,
-        "sha256" => HashAlgorithm::Sha256,
-        "sha512" => HashAlgorithm::Sha512,
-        _ => {
-            return Err(ExecutionError::TypeErrorMessage {
-                message: format!("Digest method not supported: {name}"),
-            });
-        }
-    };
-    let mut data = ObjectData {
-        node_object: Some(NodeObject::Hash(Rc::new(RefCell::new(HashState {
-            algorithm,
-            hmac_key: None,
-            bytes: Vec::new(),
-            digested: false,
-        })))),
-        ..Default::default()
-    };
-    data.set(
-        "update",
-        Value::Native(Native::NodeHashUpdate, RealmId::PRIMARY),
-    );
-    data.set(
-        "digest",
-        Value::Native(Native::NodeHashDigest, RealmId::PRIMARY),
-    );
-    Ok(Value::Object(Rc::new(RefCell::new(data))))
-}
-
-fn node_hmac(arguments: &[Value]) -> Result<Value, ExecutionError> {
-    let name = arguments
-        .first()
-        .map(Value::to_display_string)
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-        .replace('-', "");
-    let algorithm = match name.as_str() {
-        "md5" => HashAlgorithm::Md5,
-        "sha1" => HashAlgorithm::Sha1,
-        "sha256" => HashAlgorithm::Sha256,
-        "sha512" => HashAlgorithm::Sha512,
-        _ => {
-            return Err(ExecutionError::TypeErrorMessage {
-                message: format!("Digest method not supported: {name}"),
-            });
-        }
-    };
-    let Some(key_arg) = arguments.get(1) else {
-        return Err(ExecutionError::TypeErrorMessage {
-            message:
-                "The \"key\" argument must be of type string or an instance of Buffer or TypedArray"
-                    .into(),
-        });
-    };
-    if key_arg.is_nullish() {
-        return Err(ExecutionError::TypeErrorMessage {
-            message:
-                "The \"key\" argument must be of type string or an instance of Buffer or TypedArray"
-                    .into(),
-        });
-    }
-    let key = node_body_bytes(Some(key_arg))?;
-    let mut data = ObjectData {
-        node_object: Some(NodeObject::Hash(Rc::new(RefCell::new(HashState {
-            algorithm,
-            hmac_key: Some(key),
-            bytes: Vec::new(),
-            digested: false,
-        })))),
-        ..Default::default()
-    };
-    data.set(
-        "update",
-        Value::Native(Native::NodeHashUpdate, RealmId::PRIMARY),
-    );
-    data.set(
-        "digest",
-        Value::Native(Native::NodeHashDigest, RealmId::PRIMARY),
-    );
-    Ok(Value::Object(Rc::new(RefCell::new(data))))
-}
-
-fn node_hash_state(receiver: &Value) -> Result<Rc<RefCell<HashState>>, ExecutionError> {
-    let Value::Object(object) = receiver else {
-        return Err(ExecutionError::TypeErrorMessage {
-            message: "Hash method called on an incompatible receiver".into(),
-        });
-    };
-    match &object.borrow().node_object {
-        Some(NodeObject::Hash(state)) => Ok(Rc::clone(state)),
-        _ => Err(ExecutionError::TypeErrorMessage {
-            message: "Hash method called on an incompatible receiver".into(),
-        }),
-    }
-}
-
-fn node_hash_digest(algorithm: HashAlgorithm, bytes: &[u8]) -> Vec<u8> {
-    match algorithm {
-        HashAlgorithm::Md5 => md5::Md5::digest(bytes).to_vec(),
-        HashAlgorithm::Sha1 => sha1::Sha1::digest(bytes).to_vec(),
-        HashAlgorithm::Sha256 => sha2::Sha256::digest(bytes).to_vec(),
-        HashAlgorithm::Sha512 => sha2::Sha512::digest(bytes).to_vec(),
-    }
-}
-
-fn node_hmac_digest(algorithm: HashAlgorithm, key: &[u8], data: &[u8]) -> Vec<u8> {
-    let block_size = match algorithm {
-        HashAlgorithm::Md5 | HashAlgorithm::Sha1 | HashAlgorithm::Sha256 => 64,
-        HashAlgorithm::Sha512 => 128,
-    };
-    let mut key_block = vec![0_u8; block_size];
-    if key.len() > block_size {
-        let hashed_key = node_hash_digest(algorithm, key);
-        key_block[..hashed_key.len()].copy_from_slice(&hashed_key);
-    } else {
-        key_block[..key.len()].copy_from_slice(key);
-    }
-    let mut inner_input = Vec::with_capacity(block_size + data.len());
-    for &b in &key_block {
-        inner_input.push(b ^ 0x36);
-    }
-    inner_input.extend_from_slice(data);
-    let inner_hash = node_hash_digest(algorithm, &inner_input);
-
-    let mut outer_input = Vec::with_capacity(block_size + inner_hash.len());
-    for &b in &key_block {
-        outer_input.push(b ^ 0x5c);
-    }
-    outer_input.extend_from_slice(&inner_hash);
-    node_hash_digest(algorithm, &outer_input)
 }
 
 /// `new AsyncLocalStorage()`.
@@ -34827,64 +33678,6 @@ fn node_async_storage(receiver: &Value) -> Result<Rc<AsyncStorage>, ExecutionErr
     })
 }
 
-fn node_string_decoder() -> Value {
-    let mut data = ObjectData {
-        node_object: Some(NodeObject::StringDecoder(Rc::new(RefCell::new(
-            StringDecoderState::default(),
-        )))),
-        ..Default::default()
-    };
-    data.set(
-        "write",
-        Value::Native(Native::NodeStringDecoderWrite, RealmId::PRIMARY),
-    );
-    data.set(
-        "end",
-        Value::Native(Native::NodeStringDecoderEnd, RealmId::PRIMARY),
-    );
-    Value::Object(Rc::new(RefCell::new(data)))
-}
-
-fn node_string_decoder_state(
-    receiver: &Value,
-) -> Result<Rc<RefCell<StringDecoderState>>, ExecutionError> {
-    let Value::Object(object) = receiver else {
-        return Err(ExecutionError::TypeErrorMessage {
-            message: "StringDecoder method called on an incompatible receiver".into(),
-        });
-    };
-    match &object.borrow().node_object {
-        Some(NodeObject::StringDecoder(state)) => Ok(Rc::clone(state)),
-        _ => Err(ExecutionError::TypeErrorMessage {
-            message: "StringDecoder method called on an incompatible receiver".into(),
-        }),
-    }
-}
-
-/// Decode every complete UTF-8 sequence, retaining only a trailing incomplete sequence. Invalid
-/// interior bytes are replaced exactly as Node's decoder does; an incomplete tail is held for
-/// the next write so chunk boundaries cannot change the text.
-fn decode_utf8_chunk(pending: &mut Vec<u8>, bytes: &[u8], end: bool) -> String {
-    pending.extend_from_slice(bytes);
-    if end {
-        return String::from_utf8_lossy(std::mem::take(pending).as_slice()).into_owned();
-    }
-    let mut keep = 0;
-    for length in 1..=pending.len().min(3) {
-        let start = pending.len() - length;
-        if let Err(error) = std::str::from_utf8(&pending[start..])
-            && error.valid_up_to() == 0
-            && error.error_len().is_none()
-        {
-            keep = length;
-        }
-    }
-    let split = pending.len() - keep;
-    let tail = pending.split_off(split);
-    let complete = std::mem::replace(pending, tail);
-    String::from_utf8_lossy(&complete).into_owned()
-}
-
 /// The three reserved slots an `AbortSignal` keeps beside its public shape.
 const ABORT_LISTENERS: &str = "@@abort-listeners";
 
@@ -34941,175 +33734,6 @@ fn text_encoder() -> Value {
         Value::Native(Native::TextEncoderEncode, RealmId::PRIMARY),
     );
     Value::Object(Rc::new(RefCell::new(data)))
-}
-
-fn url_object(state: UrlState) -> Value {
-    let state = Rc::new(state);
-    let object = ObjectData {
-        node_object: Some(NodeObject::Url(state)),
-        ..Default::default()
-    };
-    Value::Object(Rc::new(RefCell::new(object)))
-}
-
-fn url_search_params_object(state: Rc<UrlState>) -> Value {
-    let mut object = ObjectData {
-        node_object: Some(NodeObject::UrlSearchParams(state)),
-        ..Default::default()
-    };
-    object.set(
-        "get",
-        Value::Native(Native::UrlSearchParamsGet, RealmId::PRIMARY),
-    );
-    object.set(
-        "has",
-        Value::Native(Native::UrlSearchParamsHas, RealmId::PRIMARY),
-    );
-    object.set(
-        "getAll",
-        Value::Native(Native::UrlSearchParamsGetAll, RealmId::PRIMARY),
-    );
-    object.set(
-        "toString",
-        Value::Native(Native::UrlSearchParamsToString, RealmId::PRIMARY),
-    );
-    Value::Object(Rc::new(RefCell::new(object)))
-}
-
-fn parse_url(input: &str, base: Option<&str>) -> Result<UrlState, ExecutionError> {
-    let parsed = match base {
-        Some(base_str) => {
-            let base_url =
-                url::Url::parse(base_str).map_err(|_| ExecutionError::TypeErrorMessage {
-                    message: format!("Invalid base URL: {base_str}"),
-                })?;
-            base_url
-                .join(input)
-                .map_err(|_| ExecutionError::TypeErrorMessage {
-                    message: format!("Invalid URL: {input}"),
-                })?
-        }
-        None => url::Url::parse(input).map_err(|_| ExecutionError::TypeErrorMessage {
-            message: format!("Invalid URL: {input}"),
-        })?,
-    };
-
-    let href = parsed.as_str().to_owned();
-    let origin = parsed.origin().ascii_serialization();
-    let protocol = format!("{}:", parsed.scheme());
-    let host = match (parsed.host_str(), parsed.port()) {
-        (Some(h), Some(p)) => format!("{h}:{p}"),
-        (Some(h), None) => h.to_owned(),
-        (None, _) => String::new(),
-    };
-    let hostname = parsed.host_str().unwrap_or("").to_owned();
-    let port = parsed.port().map_or_else(String::new, |p| p.to_string());
-    let pathname = parsed.path().to_owned();
-    let search = parsed.query().map_or_else(String::new, |q| format!("?{q}"));
-    let hash = parsed
-        .fragment()
-        .map_or_else(String::new, |f| format!("#{f}"));
-    let username = parsed.username().to_owned();
-    let password = parsed.password().unwrap_or("").to_owned();
-    let query = parsed
-        .query_pairs()
-        .map(|(k, v)| (k.into_owned(), v.into_owned()))
-        .collect();
-
-    Ok(UrlState {
-        href,
-        origin,
-        protocol,
-        host,
-        hostname,
-        port,
-        pathname,
-        search,
-        hash,
-        username,
-        password,
-        query,
-    })
-}
-
-fn decode_form_component(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'+' => decoded.push(b' '),
-            b'%' if index + 2 < bytes.len() => {
-                let hex = |byte: u8| match byte {
-                    b'0'..=b'9' => Some(byte - b'0'),
-                    b'a'..=b'f' => Some(byte - b'a' + 10),
-                    b'A'..=b'F' => Some(byte - b'A' + 10),
-                    _ => None,
-                };
-                if let (Some(high), Some(low)) = (hex(bytes[index + 1]), hex(bytes[index + 2])) {
-                    decoded.push((high << 4) | low);
-                    index += 2;
-                } else {
-                    decoded.push(bytes[index]);
-                }
-            }
-            byte => decoded.push(byte),
-        }
-        index += 1;
-    }
-    String::from_utf8_lossy(&decoded).into_owned()
-}
-
-fn node_legacy_url_parse(input: &str) -> Value {
-    let fragment_at = input.find('#');
-    let query_at = input
-        .find('?')
-        .filter(|query| fragment_at.is_none_or(|fragment| *query < fragment));
-    let pathname_end = query_at.or(fragment_at).unwrap_or(input.len());
-    let pathname = &input[..pathname_end];
-    let query_end = fragment_at.unwrap_or(input.len());
-    let query = query_at.map_or("", |query| &input[query + 1..query_end]);
-    let search = query_at.map_or("", |query| &input[query..query_end]);
-    let hash = fragment_at.map_or("", |fragment| &input[fragment..]);
-    let mut object = ObjectData::default();
-    object.set("href", Value::String(input.into()));
-    object.set("pathname", Value::String(pathname.into()));
-    object.set("path", Value::String(format!("{pathname}{search}")));
-    object.set(
-        "search",
-        if query_at.is_some() {
-            Value::String(search.into())
-        } else {
-            Value::Null
-        },
-    );
-    object.set("query", Value::String(query.into()));
-    object.set(
-        "hash",
-        if fragment_at.is_some() {
-            Value::String(hash.into())
-        } else {
-            Value::Null
-        },
-    );
-    Value::Object(Rc::new(RefCell::new(object)))
-}
-
-fn node_querystring_parse(input: &str) -> Value {
-    let mut object = ObjectData::default();
-    for part in input.split('&').filter(|part| !part.is_empty()) {
-        let (name, value) = part.split_once('=').unwrap_or((part, ""));
-        let name = decode_form_component(name);
-        let value = Value::String(decode_form_component(value));
-        match object.get_own(&name).cloned() {
-            None => object.set(&name, value),
-            Some(Value::Array(values)) => values.borrow_mut().push(value),
-            Some(previous) => {
-                object.set(&name, Value::Array(ArrayData::new(vec![previous, value])))
-            }
-        }
-    }
-    Value::Object(Rc::new(RefCell::new(object)))
 }
 
 fn node_listeners(object: &RefCell<ObjectData>, event: &str) -> Vec<NodeEventListener> {
@@ -35225,78 +33849,6 @@ fn split_mix_64(state: &mut u64) -> u64 {
     mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     mixed ^ (mixed >> 31)
-}
-
-/// What `node:os` answers for one fact about the machine.
-///
-/// The compile-time ones are read from `std::env::consts`, which is a property of *this build*
-/// rather than of the environment it is running in -- so answering them truthfully reads nothing
-/// and stays reproducible for a given target. The rest answer a fixed value, which is the
-/// convention `os.hostname()` set: see [`OsFact`].
-fn os_fact(fact: OsFact) -> Value {
-    let text = |value: &str| Value::String(value.to_owned());
-    match fact {
-        // node's spelling, which is not always Rust's: "macos" is "darwin" to every program that
-        // branches on this, and answering Rust's name would fail every one of those branches.
-        OsFact::Platform => text(match std::env::consts::OS {
-            "macos" => "darwin",
-            "windows" => "win32",
-            other => other,
-        }),
-        OsFact::Arch => text(match std::env::consts::ARCH {
-            "x86_64" => "x64",
-            "aarch64" => "arm64",
-            other => other,
-        }),
-        OsFact::Type => text(match std::env::consts::OS {
-            "macos" => "Darwin",
-            "windows" => "Windows_NT",
-            "linux" => "Linux",
-            other => other,
-        }),
-        OsFact::Machine => text(std::env::consts::ARCH),
-        OsFact::Endianness => text(if cfg!(target_endian = "big") {
-            "BE"
-        } else {
-            "LE"
-        }),
-        OsFact::TmpDir => text("/tmp"),
-        OsFact::HomeDir => text("/"),
-        OsFact::Release => text("0.0.0"),
-        OsFact::Version => text("kiln"),
-        // One, and truthfully so: the realm has one agent (see `Atomics.wait`), so a library
-        // sizing a worker pool by this gets a pool this realm can actually run.
-        OsFact::Parallelism => Value::Number(1.0),
-        OsFact::Cpus => Value::Array(ArrayData::new(vec![ordinary_object([
-            ("model".to_owned(), text("kiln")),
-            ("speed".to_owned(), Value::Number(0.0)),
-            (
-                "times".to_owned(),
-                ordinary_object([
-                    ("user".to_owned(), Value::Number(0.0)),
-                    ("nice".to_owned(), Value::Number(0.0)),
-                    ("sys".to_owned(), Value::Number(0.0)),
-                    ("idle".to_owned(), Value::Number(0.0)),
-                    ("irq".to_owned(), Value::Number(0.0)),
-                ]),
-            ),
-        ])])),
-        OsFact::TotalMem | OsFact::FreeMem => Value::Number(0.0),
-        // Zero for the same reason `Date.now()` starts at the epoch: nothing has happened yet.
-        OsFact::Uptime => Value::Number(0.0),
-        OsFact::LoadAvg => Value::Array(ArrayData::new(vec![
-            Value::Number(0.0),
-            Value::Number(0.0),
-            Value::Number(0.0),
-        ])),
-        OsFact::UserInfo => ordinary_object([
-            ("uid".to_owned(), Value::Number(-1.0)),
-            ("gid".to_owned(), Value::Number(-1.0)),
-            ("username".to_owned(), text("kiln")),
-            ("homedir".to_owned(), text("/")),
-            ("shell".to_owned(), Value::Null),
-        ]),
-    }
 }
 
 fn to_int32(value: f64) -> i32 {
@@ -38733,7 +37285,7 @@ fn call_native(
             _ => Value::Object(Rc::new(RefCell::new(ObjectData::default()))),
         },
         Native::NodeEventEmitter => node_event_emitter(),
-        Native::NodeStringDecoderConstructor => node_string_decoder(),
+        Native::NodeStringDecoderConstructor => string_decoder::node_string_decoder(),
         Native::NodeReadable => node_readable(arguments, Some(receiver)),
         Native::NodeWritable => node_writable(arguments, Some(receiver)),
         Native::NodeHttpServerResponse => node_writable(arguments, Some(receiver)),
@@ -41765,7 +40317,7 @@ fn json_value_from_tape(document: &kiln_json::Tape<'_>) -> Result<Value, Executi
 /// Follows node's `util.inspect` closely enough for `scripts/differential.sh` to diff against it,
 /// with two documented limits: output is always one line, where node wraps past about 72
 /// characters, and a cycle is marked `[Circular *1]` without node's matching `<ref *1>` prefix.
-fn inspect(value: &Value) -> String {
+pub(crate) fn inspect(value: &Value) -> String {
     match value {
         // A top-level string prints as itself; only a nested one is quoted.
         Value::String(text) => text.clone(),
@@ -42975,7 +41527,7 @@ fn string_coerced_argument(native: Native, index: usize) -> bool {
     }
 }
 
-fn is_callable(value: &Value) -> bool {
+pub(crate) fn is_callable(value: &Value) -> bool {
     match value {
         // A proxy has a `[[Call]]` method exactly when its target has one, decided when the
         // proxy is made and never after. Treating every proxy as callable meant
@@ -47077,6 +45629,45 @@ fn native_code_source(name: &str) -> String {
 }
 
 fn native_js_name(native: &Native) -> String {
+    if let Some(name) = crypto::js_name(*native) {
+        return name.to_owned();
+    }
+    if let Some(name) = zlib::js_name(*native) {
+        return name.to_owned();
+    }
+    if let Some(name) = os::js_name(*native) {
+        return name.to_owned();
+    }
+    if let Some(name) = path::js_name(*native) {
+        return name.to_owned();
+    }
+    if let Some(name) = querystring::js_name(*native) {
+        return name.to_owned();
+    }
+    if let Some(name) = url::js_name(*native) {
+        return name.to_owned();
+    }
+    if let Some(name) = string_decoder::js_name(*native) {
+        return name.to_owned();
+    }
+    if let Some(name) = util::js_name(*native) {
+        return name.to_owned();
+    }
+    if let Some(name) = diagnostics_channel::js_name(*native) {
+        return name.to_owned();
+    }
+    if let Some(name) = assert::js_name(*native) {
+        return name.to_owned();
+    }
+    if let Some(name) = tty::js_name(*native) {
+        return name.to_owned();
+    }
+    if let Some(name) = dns::js_name(*native) {
+        return name.to_owned();
+    }
+    if let Some(name) = perf_hooks::js_name(*native) {
+        return name.to_owned();
+    }
     match native {
         // A symbol-keyed method is named for the symbol in brackets, which is what the
         // specification's `SetFunctionName` does with a symbol key. Derivation would spell it
@@ -47223,14 +45814,6 @@ fn native_js_name(native: &Native) -> String {
         Native::AbortSignalAbort => "abort".to_owned(),
         Native::AbortSignalTimeout => "timeout".to_owned(),
         Native::AbortSignalAny => "any".to_owned(),
-        Native::NodeCryptoRandomUuid => "randomUUID".to_owned(),
-        Native::NodeCryptoRandomBytes => "randomBytes".to_owned(),
-        Native::NodeCryptoRandomFillSync => "randomFillSync".to_owned(),
-        Native::NodeCryptoGetHashes => "getHashes".to_owned(),
-        Native::NodeCryptoGetRandomValues => "getRandomValues".to_owned(),
-        Native::NodeCryptoCreateHash => "createHash".to_owned(),
-        Native::NodeCryptoCreateHmac => "createHmac".to_owned(),
-        Native::NodeCryptoTimingSafeEqual => "timingSafeEqual".to_owned(),
         // FOUR NAMES THE DERIVATION SPELLED OUT OF THE RUST VARIANT.
         //
         // These are not near-misses of capitalisation: each one handed a program the identifier
@@ -47241,14 +45824,7 @@ fn native_js_name(native: &Native) -> String {
         // function from another, so an internal spelling in it is a wrong answer and not a
         // cosmetic one; the native backend already gave three of the four the node answer, so
         // this was also the two engines disagreeing.
-        //
-        // `NodeAssertOk` is one variant for `require("assert")`, `assert.ok` and `assert.strict`,
-        // which node makes three functions named "assert", "ok" and "strict". It is named for the
-        // value `require` returns, because that is the one a program reads; `assert.ok.name`
-        // reads "assert" here until the three become three variants.
         Native::NodeBufferGlobal => "Buffer".to_owned(),
-        Native::UrlConstructor => "URL".to_owned(),
-        Native::NodeAssertOk => "assert".to_owned(),
         Native::NodeEventEmitter => "EventEmitter".to_owned(),
         Native::SetTimeout => "setTimeout".to_owned(),
         Native::SetInterval => "setInterval".to_owned(),
@@ -47609,7 +46185,7 @@ fn parse_number(value: &str) -> f64 {
 ///
 /// Delegates to the ABI crate rather than repeating the rules: both halves must agree about what
 /// `String(1e21)` is, and the surest way for two copies to agree is for there to be one.
-fn number_string(value: f64) -> String {
+pub(crate) fn number_string(value: f64) -> String {
     kiln_host_abi::number_to_js_string(value)
 }
 
