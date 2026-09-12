@@ -1218,22 +1218,8 @@ impl Native {
         match (self, name) {
             // `realpathSync.native` is the only member any of these publishes, and it is the
             // same refusal reached one level down.
-            (Self::NodeFsSync, "native") => Some(Value::Native(Self::NodeFsSync, RealmId::PRIMARY)),
-            (Self::NodeFsPromises, "appendFile") => {
-                Some(Value::Native(Self::NodeFsAppendFile, RealmId::PRIMARY))
-            }
-            (Self::NodeFsPromises, "readFile") => {
-                Some(Value::Native(Self::NodeFsReadFile, RealmId::PRIMARY))
-            }
-            (Self::NodeFsPromises, "writeFile") => {
-                Some(Value::Native(Self::NodeFsWriteFile, RealmId::PRIMARY))
-            }
-            (Self::NodeFsPromises, "stat") => {
-                Some(Value::Native(Self::NodeFsStat, RealmId::PRIMARY))
-            }
-            (Self::NodeFsPromises, "mkdir") => {
-                Some(Value::Native(Self::NodeFsMkdir, RealmId::PRIMARY))
-            }
+            (Self::NodeFsSync, prop) => crate::fs::sync_property(prop),
+            (Self::NodeFsPromises, prop) => crate::fs::promises_property(prop),
             (Self::AbortSignalConstructor, "abort") => {
                 Some(Value::Native(Self::AbortSignalAbort, RealmId::PRIMARY))
             }
@@ -1243,25 +1229,7 @@ impl Native {
             (Self::AbortSignalConstructor, "any") => {
                 Some(Value::Native(Self::AbortSignalAny, RealmId::PRIMARY))
             }
-            (Self::NodeFs, "existsSync") => {
-                Some(Value::Native(Self::NodeFsExistsSync, RealmId::PRIMARY))
-            }
-            // The synchronous readers exist and refuse when *called*, which is the shape
-            // `existsSync` already had. A library that merely reaches for one during start-up --
-            // the TypeScript compiler's `getNodeSystem` reads `fs.realpathSync.native` to pick
-            // an implementation before it does any I/O -- gets past it; one that actually wants
-            // the bytes is told why it cannot have them. The alternative, leaving the member
-            // absent, turns a feature check into a `TypeError` in the middle of a module body.
-            (
-                Self::NodeFs,
-                "readFileSync" | "writeFileSync" | "statSync" | "lstatSync" | "readdirSync"
-                | "mkdirSync" | "realpathSync" | "openSync" | "readSync" | "closeSync"
-                | "appendFileSync" | "unlinkSync" | "rmSync" | "renameSync" | "readlinkSync"
-                | "accessSync" | "copyFileSync",
-            ) => Some(Value::Native(Self::NodeFsSync, RealmId::PRIMARY)),
-            (Self::NodeFs, "promises") => {
-                Some(Value::Native(Self::NodeFsPromises, RealmId::PRIMARY))
-            }
+            (Self::NodeFs, prop) => crate::fs::property(prop),
             (Self::NodeDiagnosticsChannel, prop) => crate::diagnostics_channel::property(prop),
             (Self::NodeUtil, prop) => crate::util::property(prop),
             (Self::NodeUtilInspect, prop) => crate::util::inspect_property(prop),

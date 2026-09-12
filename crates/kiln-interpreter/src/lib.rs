@@ -104,6 +104,9 @@ pub(crate) use http::{
     node_http_request_arguments, node_http_response, node_http_server, node_http_socket_facade,
     readable_chunk_length,
 };
+// `fs` houses node:fs and node:fs/promises implementations.
+mod fs;
+pub(crate) use fs::node_encoding;
 
 /// The built-ins the runtime provides natively.
 ///
@@ -36891,36 +36894,6 @@ fn node_host_value(value: AsyncHostValue) -> Result<Value, ExecutionError> {
     })
 }
 
-/// Whether a Node read option requests a UTF-8 string rather than a Buffer-like byte view.
-fn node_encoding(option: Option<&Value>) -> Result<bool, ExecutionError> {
-    match option {
-        None | Some(Value::Undefined) | Some(Value::Null) => Ok(false),
-        Some(Value::String(encoding)) => parse_node_encoding(encoding),
-        Some(Value::Object(options)) => match options.borrow().get_own("encoding") {
-            None | Some(Value::Undefined) | Some(Value::Null) => Ok(false),
-            Some(Value::String(encoding)) => parse_node_encoding(encoding),
-            Some(value) => Err(ExecutionError::TypeErrorMessage {
-                message: format!("encoding must be a string, received {}", value.type_name()),
-            }),
-        },
-        Some(value) => Err(ExecutionError::TypeErrorMessage {
-            message: format!(
-                "readFile options must be a string or object, received {}",
-                value.type_name()
-            ),
-        }),
-    }
-}
-
-fn parse_node_encoding(encoding: &str) -> Result<bool, ExecutionError> {
-    match encoding.to_ascii_lowercase().as_str() {
-        "utf8" | "utf-8" => Ok(true),
-        other => Err(ExecutionError::TypeErrorMessage {
-            message: format!("unsupported file encoding {other:?}"),
-        }),
-    }
-}
-
 /// `{ value, done }`, the shape every `next` returns.
 fn iteration_result(value: Value, done: bool) -> Value {
     let mut result = ObjectData::default();
@@ -45010,6 +44983,9 @@ fn native_js_name(native: &Native) -> String {
         return name.to_owned();
     }
     if let Some(name) = http::js_name(*native) {
+        return name.to_owned();
+    }
+    if let Some(name) = fs::js_name(*native) {
         return name.to_owned();
     }
     match native {
