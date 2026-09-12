@@ -1276,91 +1276,17 @@ impl Native {
             (Self::ProcessHrtime, "bigint") => {
                 Some(Value::Native(Self::ProcessHrtimeBigInt, RealmId::PRIMARY))
             }
-            (Self::ConsoleConstructor, "prototype") => Some(Value::Native(
-                Self::PrototypeOf(PrototypeTable::Console),
-                RealmId::PRIMARY,
-            )),
-            (Self::PrototypeOf(PrototypeTable::Console), "constructor") => {
-                Some(Value::Native(Self::ConsoleConstructor, RealmId::PRIMARY))
+            (Self::ConsoleConstructor, prop) => crate::console::constructor_property(prop),
+            (Self::PrototypeOf(PrototypeTable::Console), prop) => {
+                crate::console::prototype_property(prop).or_else(|| {
+                    Some(inherit_from_object(
+                        PrototypeTable::Console,
+                        Value::Undefined,
+                        prop,
+                    ))
+                })
             }
-            (Self::PrototypeOf(PrototypeTable::Console), "log") => {
-                Some(Value::Native(Self::ConsoleLog, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::Console), "info") => {
-                Some(Value::Native(Self::ConsoleInfo, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::Console), "debug") => {
-                Some(Value::Native(Self::ConsoleDebug, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::Console), "dir") => {
-                Some(Value::Native(Self::ConsoleDir, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::Console), "warn") => {
-                Some(Value::Native(Self::ConsoleWarn, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::Console), "error") => {
-                Some(Value::Native(Self::ConsoleError, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::Console), "assert") => {
-                Some(Value::Native(Self::ConsoleAssert, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::Console), "clear") => {
-                Some(Value::Native(Self::ConsoleClear, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::Console), "count") => {
-                Some(Value::Native(Self::ConsoleCount, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::Console), "countReset") => {
-                Some(Value::Native(Self::ConsoleCountReset, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::Console), "group") => {
-                Some(Value::Native(Self::ConsoleGroup, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::Console), "groupEnd") => {
-                Some(Value::Native(Self::ConsoleGroupEnd, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::Console), "groupCollapsed") => {
-                Some(Value::Native(Self::ConsoleGroupCollapsed, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::Console), "table") => {
-                Some(Value::Native(Self::ConsoleTable, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::Console), "time") => {
-                Some(Value::Native(Self::ConsoleTime, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::Console), "timeEnd") => {
-                Some(Value::Native(Self::ConsoleTimeEnd, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::Console), "timeLog") => {
-                Some(Value::Native(Self::ConsoleTimeLog, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::Console), "trace") => {
-                Some(Value::Native(Self::ConsoleTrace, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::Console), "dirxml") => {
-                Some(Value::Native(Self::ConsoleDirxml, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::Console), "timeStamp") => {
-                Some(Value::Native(Self::ConsoleTimeStamp, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::Console), "profile") => {
-                Some(Value::Native(Self::ConsoleProfile, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::Console), "profileEnd") => {
-                Some(Value::Native(Self::ConsoleProfileEnd, RealmId::PRIMARY))
-            }
-            (Self::PrototypeOf(PrototypeTable::Console), key)
-                if key == WellKnown::ToStringTag.property_key() =>
-            {
-                Some(Value::String("console".to_owned()))
-            }
-            (Self::NodeConsole, "default") => {
-                Some(Value::Native(Self::NodeConsole, RealmId::PRIMARY))
-            }
-            (Self::NodeConsole, "Console") => {
-                Some(Value::Native(Self::ConsoleConstructor, RealmId::PRIMARY))
-            }
-            (Self::NodeConsole, name) => Self::PrototypeOf(PrototypeTable::Console).property(name),
+            (Self::NodeConsole, prop) => crate::console::property(prop),
             (Self::NodeEventEmitter, prop) => crate::events::event_emitter_property(prop),
             (Self::PrototypeOf(PrototypeTable::EventEmitter), prop) => {
                 crate::events::prototype_property(prop).or_else(|| {
