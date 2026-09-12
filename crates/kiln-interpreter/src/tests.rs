@@ -4762,3 +4762,219 @@ fn text_decoder_and_buffer_support_whatwg_encodings() {
         .expect("Buffer.toString utf16le");
     assert_eq!(utf16_res, Value::String("Hi".to_owned()));
 }
+
+#[test]
+fn whatwg_url_and_search_params_support() {
+    let program = Program::default();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: std::collections::VecDeque::new(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+
+    // 1. Full URL parsing
+    let url_val = vm
+        .dispatch_native(
+            Native::UrlConstructor,
+            &Value::Undefined,
+            &[Value::String(
+                "https://user:pass@example.com:8080/path/to/file?q=1&filter=true#section"
+                    .to_owned(),
+            )],
+            0,
+        )
+        .expect("URL constructor succeeds");
+
+    assert_eq!(
+        vm.property(&url_val, "href"),
+        Value::String(
+            "https://user:pass@example.com:8080/path/to/file?q=1&filter=true#section".to_owned()
+        )
+    );
+    assert_eq!(
+        vm.property(&url_val, "origin"),
+        Value::String("https://example.com:8080".to_owned())
+    );
+    assert_eq!(
+        vm.property(&url_val, "protocol"),
+        Value::String("https:".to_owned())
+    );
+    assert_eq!(
+        vm.property(&url_val, "host"),
+        Value::String("example.com:8080".to_owned())
+    );
+    assert_eq!(
+        vm.property(&url_val, "hostname"),
+        Value::String("example.com".to_owned())
+    );
+    assert_eq!(
+        vm.property(&url_val, "port"),
+        Value::String("8080".to_owned())
+    );
+    assert_eq!(
+        vm.property(&url_val, "pathname"),
+        Value::String("/path/to/file".to_owned())
+    );
+    assert_eq!(
+        vm.property(&url_val, "search"),
+        Value::String("?q=1&filter=true".to_owned())
+    );
+    assert_eq!(
+        vm.property(&url_val, "hash"),
+        Value::String("#section".to_owned())
+    );
+    assert_eq!(
+        vm.property(&url_val, "username"),
+        Value::String("user".to_owned())
+    );
+    assert_eq!(
+        vm.property(&url_val, "password"),
+        Value::String("pass".to_owned())
+    );
+
+    // toString / toJSON method
+    let to_str = vm
+        .dispatch_native(Native::UrlToString, &url_val, &[], 0)
+        .expect("UrlToString succeeds");
+    assert_eq!(
+        to_str,
+        Value::String(
+            "https://user:pass@example.com:8080/path/to/file?q=1&filter=true#section".to_owned()
+        )
+    );
+
+    // 2. Relative URL resolution with base
+    let base_val = vm
+        .dispatch_native(
+            Native::UrlConstructor,
+            &Value::Undefined,
+            &[Value::String(
+                "https://example.com/dir/index.html".to_owned(),
+            )],
+            0,
+        )
+        .expect("Base URL succeeds");
+    let relative_child = vm
+        .dispatch_native(
+            Native::UrlConstructor,
+            &Value::Undefined,
+            &[Value::String("sub/page.html".to_owned()), base_val],
+            0,
+        )
+        .expect("Relative child URL succeeds");
+    assert_eq!(
+        vm.property(&relative_child, "href"),
+        Value::String("https://example.com/dir/sub/page.html".to_owned())
+    );
+
+    // 3. searchParams methods (get, has, getAll, toString)
+    let search_params = vm.property(&url_val, "searchParams");
+    let get_q = vm
+        .dispatch_native(
+            Native::UrlSearchParamsGet,
+            &search_params,
+            &[Value::String("q".to_owned())],
+            0,
+        )
+        .expect("searchParams.get(q)");
+    assert_eq!(get_q, Value::String("1".to_owned()));
+
+    let get_missing = vm
+        .dispatch_native(
+            Native::UrlSearchParamsGet,
+            &search_params,
+            &[Value::String("missing".to_owned())],
+            0,
+        )
+        .expect("searchParams.get(missing)");
+    assert_eq!(get_missing, Value::Null);
+
+    let has_filter = vm
+        .dispatch_native(
+            Native::UrlSearchParamsHas,
+            &search_params,
+            &[Value::String("filter".to_owned())],
+            0,
+        )
+        .expect("searchParams.has(filter)");
+    assert_eq!(has_filter, Value::Boolean(true));
+
+    let has_missing = vm
+        .dispatch_native(
+            Native::UrlSearchParamsHas,
+            &search_params,
+            &[Value::String("missing".to_owned())],
+            0,
+        )
+        .expect("searchParams.has(missing)");
+    assert_eq!(has_missing, Value::Boolean(false));
+
+    let get_all_q = vm
+        .dispatch_native(
+            Native::UrlSearchParamsGetAll,
+            &search_params,
+            &[Value::String("q".to_owned())],
+            0,
+        )
+        .expect("searchParams.getAll(q)");
+    let Value::Array(get_all_items) = get_all_q else {
+        panic!("searchParams.getAll must return an array");
+    };
+    assert_eq!(&*get_all_items.borrow(), &[Value::String("1".to_owned())]);
+
+    let sp_to_str = vm
+        .dispatch_native(Native::UrlSearchParamsToString, &search_params, &[], 0)
+        .expect("searchParams.toString");
+    assert_eq!(sp_to_str, Value::String("q=1&filter=true".to_owned()));
+
+    // 4. fileURLToPath and pathToFileURL
+    let file_url_res = vm
+        .dispatch_native(
+            Native::NodeUrlPathToFileUrl,
+            &Value::Undefined,
+            &[Value::String("/foo/bar baz.txt".to_owned())],
+            0,
+        )
+        .expect("pathToFileURL succeeds");
+    assert_eq!(
+        vm.property(&file_url_res, "href"),
+        Value::String("file:///foo/bar%20baz.txt".to_owned())
+    );
+
+    // fileURLToPath with string
+    let path_from_str = vm
+        .dispatch_native(
+            Native::NodeUrlFileUrlToPath,
+            &Value::Undefined,
+            &[Value::String("file:///foo/bar%20baz.txt".to_owned())],
+            0,
+        )
+        .expect("fileURLToPath from string succeeds");
+    assert_eq!(path_from_str, Value::String("/foo/bar baz.txt".to_owned()));
+
+    // fileURLToPath with URL object
+    let path_from_obj = vm
+        .dispatch_native(
+            Native::NodeUrlFileUrlToPath,
+            &Value::Undefined,
+            &[file_url_res],
+            0,
+        )
+        .expect("fileURLToPath from URL object succeeds");
+    assert_eq!(path_from_obj, Value::String("/foo/bar baz.txt".to_owned()));
+
+    // 5. Invalid URL throws TypeError
+    let invalid = vm.dispatch_native(
+        Native::UrlConstructor,
+        &Value::Undefined,
+        &[Value::String("not an absolute url".to_owned())],
+        0,
+    );
+    assert!(matches!(
+        invalid,
+        Err(ExecutionError::TypeErrorMessage { .. })
+    ));
+}
