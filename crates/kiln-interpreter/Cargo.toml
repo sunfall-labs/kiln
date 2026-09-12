@@ -22,3 +22,4 @@ digest = { workspace = true }
 md-5 = { workspace = true }
 sha1 = { workspace = true }
 sha2 = { workspace = true }
+encoding_rs = { workspace = true }
