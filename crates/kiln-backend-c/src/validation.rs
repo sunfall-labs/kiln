@@ -128,6 +128,7 @@ pub(crate) fn validate_code(
             | Instruction::SetProperty(name)
             | Instruction::DeleteProperty(name)
             | Instruction::SetPropertyStrict { name, .. }
+            | Instruction::SetSuperPropertyStrict { name, .. }
             | Instruction::DeletePropertyStrict { name, .. }
             | Instruction::DeleteGlobalBinding(name)
             | Instruction::StoreGlobalBindingStrict(name)
@@ -418,6 +419,8 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::LoadPrototype
         | Instruction::LoadSuperProperty(_)
         | Instruction::LoadSuperElement
+        | Instruction::SetSuperPropertyStrict { .. }
+        | Instruction::SetSuperElementStrict { .. }
         | Instruction::LoadGlobal(_)
         | Instruction::StoreGlobal(_)
         | Instruction::DefineAccessor { .. }
@@ -706,6 +709,22 @@ pub(crate) fn stack_effect(
                 Err(underflow(2))
             } else {
                 Ok((height - 1, false))
+            }
+        }
+        // Super write consumes prototype and value, leaving value.
+        Instruction::SetSuperPropertyStrict { .. } => {
+            if height < 2 {
+                Err(underflow(2))
+            } else {
+                Ok((height - 1, false))
+            }
+        }
+        // Super computed write consumes key, prototype, and value, leaving value.
+        Instruction::SetSuperElementStrict { .. } => {
+            if height < 3 {
+                Err(underflow(3))
+            } else {
+                Ok((height - 2, false))
             }
         }
         // The link replaces the value it was read from.

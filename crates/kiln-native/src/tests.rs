@@ -4354,6 +4354,107 @@ fn native_named_import_and_reexport_of_commonjs_properties_resolve_property_valu
 }
 
 #[test]
+fn native_namespace_import_of_commonjs_resolves_property_values() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping CommonJS namespace import integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-commonjs-namespace-import");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).expect("write root package");
+    fs::create_dir(root.path.join("pkg")).expect("create CommonJS package");
+    fs::write(root.path.join("pkg/package.json"), r#"{"type":"commonjs"}"#)
+        .expect("write CommonJS package metadata");
+    fs::write(
+        root.path.join("pkg/index.js"),
+        "module.exports = { answer: 42, greet: () => 'hello' };\n",
+    )
+    .expect("write CommonJS provider");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "import * as pkg from './pkg/index.js'; console.log(pkg.answer, pkg.greet());\n",
+    )
+    .expect("write ESM consumer");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("CommonJS namespace import graph compiles");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .expect("CommonJS namespace import graph builds and runs");
+    assert_eq!(report.stdout, b"42 hello\n");
+}
+
+#[test]
+fn native_dynamic_import_resolves_opentui_and_in_graph_modules() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping dynamic import integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-dynamic-import");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).expect("write root package");
+    fs::create_dir_all(root.path.join("node_modules/@opentui/core-linux-x64"))
+        .expect("create opentui dir");
+    fs::write(
+        root.path
+            .join("node_modules/@opentui/core-linux-x64/libopentui.so"),
+        "fake-opentui-so",
+    )
+    .expect("write mock libopentui");
+    fs::write(root.path.join("helper.mjs"), "export const answer = 99;\n").expect("write helper");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "import * as h from './helper.mjs';\n\
+         const otui = await import('@opentui/core-linux-x64');\n\
+         const helper = await import('./helper.mjs');\n\
+         const ffi = await import('node:ffi');\n\
+         console.log(otui.default.includes('libopentui.so'), helper.answer, typeof ffi.dlopen, typeof ffi.getRawPointer);\n",
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("dynamic import graph compiles");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .expect("dynamic import graph builds and runs");
+    if report.stdout != b"true 99 function function\n" {
+        eprintln!("exit_code: {:?}", report.exit_code);
+        eprintln!("result: {:?}", report.result);
+        eprintln!("stderr: {}", String::from_utf8_lossy(&report.stderr));
+        eprintln!("stdout: {}", String::from_utf8_lossy(&report.stdout));
+    }
+    assert_eq!(report.stdout, b"true 99 function function\n");
+}
+
+#[test]
 fn a_second_build_reuses_every_material_artifact_and_runs() {
     let Some(toolchain) = Toolchain::discover().ok() else {
         eprintln!("skipping native integration: no C compiler found");

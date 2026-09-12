@@ -1331,9 +1331,23 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         return status;
     }
     if (code == KILN_C99_METHOD_NODE_FS_EXISTS_SYNC) {
-        /* A deterministic realm has no ambient synchronous filesystem. Its captured module
-         * graph is resolved before execution, so an optional host path is conservatively absent.
-         * Host-backed filesystem work remains asynchronous and crosses the realm-op boundary. */
+        if (argc > 0 && args != NULL) {
+            kiln_value path_val = kiln_c99_text(args[0]);
+            if (path_val.ptr != NULL) {
+                char stack_buf[1024];
+                char *buf = stack_buf;
+                if (path_val.len >= sizeof(stack_buf)) {
+                    buf = (char *)malloc(path_val.len + 1);
+                }
+                if (buf != NULL) {
+                    memcpy(buf, path_val.ptr, path_val.len);
+                    buf[path_val.len] = '\0';
+                    *result = kiln_c99_boolean(access(buf, F_OK) == 0);
+                    if (buf != stack_buf) free(buf);
+                    return KILN_C99_OK;
+                }
+            }
+        }
         *result = kiln_c99_boolean(0);
         return KILN_C99_OK;
     }
@@ -1377,7 +1391,16 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         KILN_C99_REFUSE("the node:module Module constructor, which this backend does not build");
     }
     if (code == KILN_C99_METHOD_NODE_URL_FILE_URL_TO_PATH) {
-        kiln_value input = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
+        kiln_value input = argc > 0 ? args[0] : kiln_c99_undefined();
+        if (input.tag == KILN_VALUE_OBJECT) {
+            kiln_value pathname;
+            if (kiln_c99_get(host, input, "pathname", 8, &pathname, depth, thrown) == KILN_C99_OK &&
+                pathname.tag == KILN_VALUE_STRING && pathname.len > 0 && pathname.ptr[0] == '/') {
+                *result = pathname;
+                return KILN_C99_OK;
+            }
+        }
+        input = kiln_c99_text(input);
         kiln_value encoded;
         kiln_value decode_args[1];
         if (input.tag != KILN_VALUE_STRING || input.len < 7 ||

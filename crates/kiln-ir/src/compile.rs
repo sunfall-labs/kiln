@@ -941,6 +941,19 @@ impl Compiler {
         }
     }
 
+    fn set_super_property_instruction(&self, name: u32) -> Instruction {
+        Instruction::SetSuperPropertyStrict {
+            name,
+            strict: self.strict,
+        }
+    }
+
+    fn set_super_element_instruction(&self) -> Instruction {
+        Instruction::SetSuperElementStrict {
+            strict: self.strict,
+        }
+    }
+
     fn delete_property_instruction(&self, name: u32) -> Instruction {
         Instruction::DeletePropertyStrict {
             name,
@@ -4501,6 +4514,16 @@ impl Compiler {
                 property,
                 value,
             } => self.member_assignment(*operator, object, property, value),
+            ExpressionKind::SuperMemberAssignment {
+                operator,
+                property,
+                value,
+            } => self.super_member_assignment(*operator, property, value, expression.span),
+            ExpressionKind::SuperComputedAssignment {
+                operator,
+                property,
+                value,
+            } => self.super_computed_assignment(*operator, property, value, expression.span),
             ExpressionKind::PrivateAssignment {
                 operator,
                 object,
@@ -6846,6 +6869,123 @@ impl Compiler {
         self.code.push(self.set_property_instruction(name));
     }
 
+    fn super_member_assignment(
+        &mut self,
+        operator: AssignmentOperator,
+        property: &str,
+        value: &Expression,
+        span: Span,
+    ) {
+        self.require_this_binding();
+        let name = self.constant_index(Constant::String(property.to_owned()));
+        if operator.is_short_circuiting() {
+            let cur_binding = format!("%scur{}", self.hidden_bindings);
+            self.hidden_bindings += 1;
+            self.scopes.push(HashMap::new());
+
+            self.load_home_prototype();
+            self.code.push(Instruction::Dup);
+            self.code.push(Instruction::LoadSuperProperty(name));
+            self.declare_hidden(&cur_binding, span);
+
+            self.load_hidden(&cur_binding);
+            let skip = self.emit_jump(short_circuit_jump(operator));
+            self.code.push(Instruction::Pop);
+            self.load_home_prototype();
+            self.expression(value);
+            self.code.push(self.set_super_property_instruction(name));
+            let done = self.emit_jump(Instruction::Jump(0));
+
+            self.patch_jump(skip);
+            self.code.push(Instruction::Pop);
+            self.load_hidden(&cur_binding);
+            self.patch_jump(done);
+            self.scopes.pop().expect("scope was just pushed");
+            return;
+        }
+
+        self.load_home_prototype();
+        if operator != AssignmentOperator::Assign {
+            self.code.push(Instruction::Dup);
+            self.code.push(Instruction::LoadSuperProperty(name));
+            self.expression(value);
+            self.code
+                .push(Instruction::Binary(compound_operator(operator)));
+        } else {
+            self.expression(value);
+        }
+        self.code.push(self.set_super_property_instruction(name));
+    }
+
+    fn super_computed_assignment(
+        &mut self,
+        operator: AssignmentOperator,
+        property: &Expression,
+        value: &Expression,
+        span: Span,
+    ) {
+        self.require_this_binding();
+        if operator.is_short_circuiting() {
+            let key_binding = format!("%sckey{}", self.hidden_bindings);
+            let cur_binding = format!("%sccur{}", self.hidden_bindings);
+            self.hidden_bindings += 1;
+            self.scopes.push(HashMap::new());
+
+            self.expression(property);
+            self.declare_hidden(&key_binding, span);
+
+            self.load_hidden(&key_binding);
+            self.load_home_prototype();
+            self.code.push(Instruction::LoadSuperElement);
+            self.declare_hidden(&cur_binding, span);
+
+            self.load_hidden(&cur_binding);
+            let skip = self.emit_jump(short_circuit_jump(operator));
+            self.load_hidden(&key_binding);
+            self.load_home_prototype();
+            self.expression(value);
+            self.code.push(self.set_super_element_instruction());
+            let done = self.emit_jump(Instruction::Jump(0));
+
+            self.patch_jump(skip);
+            self.load_hidden(&cur_binding);
+            self.patch_jump(done);
+            self.scopes.pop().expect("scope was just pushed");
+            return;
+        }
+
+        if operator != AssignmentOperator::Assign {
+            let key_binding = format!("%sckey{}", self.hidden_bindings);
+            self.hidden_bindings += 1;
+            self.scopes.push(HashMap::new());
+
+            self.expression(property);
+            self.declare_hidden(&key_binding, span);
+
+            self.load_hidden(&key_binding);
+            self.load_home_prototype();
+            self.code.push(Instruction::LoadSuperElement);
+            self.expression(value);
+            self.code
+                .push(Instruction::Binary(compound_operator(operator)));
+
+            let val_binding = format!("%scval{}", self.hidden_bindings);
+            self.hidden_bindings += 1;
+            self.declare_hidden(&val_binding, span);
+
+            self.load_hidden(&key_binding);
+            self.load_home_prototype();
+            self.load_hidden(&val_binding);
+            self.code.push(self.set_super_element_instruction());
+            self.scopes.pop().expect("scope was just pushed");
+        } else {
+            self.expression(property);
+            self.load_home_prototype();
+            self.expression(value);
+            self.code.push(self.set_super_element_instruction());
+        }
+    }
+
     /// `f?.()` and `o.m?.()`: call only when the callee is there.
     ///
     /// The callee is read into a hidden local so the nullish test has something to look at
@@ -7948,6 +8088,12 @@ fn expression_contains_direct_eval(expression: &Expression) -> bool {
         | ExpressionKind::PrivateAssignment { object, value, .. } => {
             expression_contains_direct_eval(object) || expression_contains_direct_eval(value)
         }
+        ExpressionKind::SuperMemberAssignment { value, .. } => {
+            expression_contains_direct_eval(value)
+        }
+        ExpressionKind::SuperComputedAssignment { property, value, .. } => {
+            expression_contains_direct_eval(property) || expression_contains_direct_eval(value)
+        }
         ExpressionKind::UpdateMember {
             object, property, ..
         }
@@ -8243,6 +8389,12 @@ fn expression_contains_new_function(expression: &Expression) -> bool {
         ExpressionKind::MemberAssignment { object, value, .. }
         | ExpressionKind::PrivateAssignment { object, value, .. } => {
             expression_contains_new_function(object) || expression_contains_new_function(value)
+        }
+        ExpressionKind::SuperMemberAssignment { value, .. } => {
+            expression_contains_new_function(value)
+        }
+        ExpressionKind::SuperComputedAssignment { property, value, .. } => {
+            expression_contains_new_function(property) || expression_contains_new_function(value)
         }
         ExpressionKind::UpdateMember {
             object, property, ..
@@ -8613,6 +8765,15 @@ fn collect_dynamic_imports_from_expression(
         ExpressionKind::MemberAssignment { object, value, .. }
         | ExpressionKind::PrivateAssignment { object, value, .. } => {
             collect_dynamic_imports_from_expression(object, imports);
+            collect_dynamic_imports_from_expression(value, imports);
+        }
+        ExpressionKind::SuperMemberAssignment { value, .. } => {
+            collect_dynamic_imports_from_expression(value, imports);
+        }
+        ExpressionKind::SuperComputedAssignment {
+            property, value, ..
+        } => {
+            collect_dynamic_imports_from_expression(property, imports);
             collect_dynamic_imports_from_expression(value, imports);
         }
         ExpressionKind::UpdateMember {
@@ -9232,6 +9393,15 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
             // it were nested boxed every local a member write read -- `m.h = m.f` made `m` a
             // cell -- and a cell is a heap read at every use and an escape to the scalar
             // analysis.
+            collect_identifiers(value, names, collecting);
+        }
+        ExpressionKind::SuperMemberAssignment { value, .. } => {
+            collect_identifiers(value, names, collecting);
+        }
+        ExpressionKind::SuperComputedAssignment {
+            property, value, ..
+        } => {
+            collect_identifiers(property, names, collecting);
             collect_identifiers(value, names, collecting);
         }
         ExpressionKind::Chain { expression } | ExpressionKind::Await(expression) => {

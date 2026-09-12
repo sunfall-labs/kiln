@@ -2519,6 +2519,34 @@ fn emitted_module_initializes_imports_and_publishes_exports() {
 }
 
 #[test]
+fn emitted_async_module_emits_publish_exports() {
+    let generated = emit_module(&module(
+        program(
+            vec![Constant::Number(42.0f64.to_bits())],
+            vec![
+                Instruction::Const(0),
+                Instruction::StoreLocal(0),
+                Instruction::Const(0),
+                Instruction::Await,
+                Instruction::Pop,
+                Instruction::Return,
+            ],
+            1,
+        ),
+        vec![],
+        vec![kiln_ir::ExportBinding {
+            exported: "answer".into(),
+            local_slot: 0,
+        }],
+    ))
+    .expect("async module emits");
+    assert!(generated.source.contains(&format!(
+        "void {}_publish_exports(kiln_value *exports)",
+        generated.symbol
+    )));
+}
+
+#[test]
 fn emitted_module_publishes_exported_object_literal() {
     let generated = emit_module(&module(
         program(

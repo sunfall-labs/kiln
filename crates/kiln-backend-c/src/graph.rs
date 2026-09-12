@@ -1349,7 +1349,8 @@ pub fn bridge_effect(instruction: &Instruction) -> Option<(usize, u8)> {
         | Instruction::DefineMethod
         | Instruction::DefineAccessor { .. }
         | Instruction::DefineNamedProperty
-        | Instruction::SetPrivate(_) => (3, 1),
+        | Instruction::SetPrivate(_)
+        | Instruction::SetSuperElementStrict { .. } => (3, 1),
         Instruction::SuperApply
         | Instruction::SpreadObject
         | Instruction::SpreadInto
@@ -1357,6 +1358,7 @@ pub fn bridge_effect(instruction: &Instruction) -> Option<(usize, u8)> {
         | Instruction::DefinePrivate { .. }
         | Instruction::GetPrivate(_)
         | Instruction::LoadSuperElement
+        | Instruction::SetSuperPropertyStrict { .. }
         | Instruction::DeleteComputed
         | Instruction::DeleteComputedStrict { .. }
         | Instruction::ConstructSpread => (2, 1),

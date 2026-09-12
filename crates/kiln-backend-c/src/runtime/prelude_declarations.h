@@ -170,6 +170,7 @@ extern kiln_value kiln_c99_concat(kiln_value left, kiln_value right);
 extern int kiln_c99_strict_equal(kiln_value left, kiln_value right);
 extern int kiln_c99_callable_prototype(kiln_value callable, kiln_value *out);
 extern int kiln_c99_get_with_receiver(kiln_host *host, kiln_value target, kiln_value key, kiln_value receiver, kiln_value *out, int depth, kiln_value *thrown);
+extern int kiln_c99_set_with_receiver(kiln_host *host, kiln_value target, kiln_value key, kiln_value value, kiln_value receiver, int strict, int depth, kiln_value *thrown);
 extern int kiln_c99_has_computed(kiln_host *host, kiln_value target, kiln_value key, int *answer, int depth, kiln_value *thrown);
 extern int kiln_c99_delete_computed(kiln_host *host, kiln_value target, kiln_value key, int *answer, int depth, kiln_value *thrown);
 extern int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len, kiln_value *out, int depth, kiln_value *thrown);

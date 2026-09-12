@@ -774,6 +774,18 @@ pub enum ExpressionKind {
         property: String,
         value: Box<Expression>,
     },
+    /// `super.property = value`, including the compound forms.
+    SuperMemberAssignment {
+        operator: AssignmentOperator,
+        property: String,
+        value: Box<Expression>,
+    },
+    /// `super[property] = value`, including the compound forms.
+    SuperComputedAssignment {
+        operator: AssignmentOperator,
+        property: Box<Expression>,
+        value: Box<Expression>,
+    },
     /// An object literal. Property order is source order, which is the order JavaScript
     /// enumerates string keys in and therefore not an implementation detail.
     Object {
@@ -1354,6 +1366,15 @@ fn collect_used_identifiers_in_expression(
         }
         ExpressionKind::MemberAssignment { object, value, .. } => {
             collect_used_identifiers_in_expression(object, used);
+            collect_used_identifiers_in_expression(value, used);
+        }
+        ExpressionKind::SuperMemberAssignment { value, .. } => {
+            collect_used_identifiers_in_expression(value, used);
+        }
+        ExpressionKind::SuperComputedAssignment {
+            property, value, ..
+        } => {
+            collect_used_identifiers_in_expression(property, used);
             collect_used_identifiers_in_expression(value, used);
         }
         ExpressionKind::StaticMember { object, .. }

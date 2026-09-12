@@ -117,10 +117,9 @@ static int kiln_c99_get_with_receiver(kiln_host *host, kiln_value target, kiln_v
     return kiln_c99_get_computed(host, target, key, out, depth, thrown);
 }
 
-/* `proxy[key] = value`, through the `set` trap or through the target. The trap's answer is
- * discarded: a strict-mode assignment would throw on a falsy one, and neither engine does. */
-static int kiln_c99_proxy_set(kiln_host *host, kiln_value proxy, kiln_value key, kiln_value value,
-                              int strict, int depth, kiln_value *thrown) {
+static int kiln_c99_proxy_set_with_receiver(kiln_host *host, kiln_value proxy, kiln_value key,
+                                            kiln_value value, kiln_value receiver, int strict,
+                                            int depth, kiln_value *thrown) {
     kiln_value trap;
     kiln_value inner = kiln_c99_proxy_of(proxy)->target;
     kiln_value handler = kiln_c99_proxy_of(proxy)->handler;
@@ -129,7 +128,7 @@ static int kiln_c99_proxy_set(kiln_host *host, kiln_value proxy, kiln_value key,
         return status;
     }
     if (trap.tag == KILN_VALUE_UNDEFINED) {
-        return kiln_c99_set_computed_mode(host, inner, key, value, strict, depth, thrown);
+        return kiln_c99_set_with_receiver(host, inner, key, value, receiver, strict, depth, thrown);
     }
     {
         kiln_value arguments[4];
@@ -137,7 +136,7 @@ static int kiln_c99_proxy_set(kiln_host *host, kiln_value proxy, kiln_value key,
         arguments[0] = inner;
         arguments[1] = key;
         arguments[2] = value;
-        arguments[3] = proxy;
+        arguments[3] = receiver;
         status = kiln_c99_call(host, &ignored, trap, handler, arguments, 4, depth, thrown);
         if (status != KILN_C99_OK || !strict || kiln_c99_truthy(ignored)) return status;
         {
@@ -148,6 +147,102 @@ static int kiln_c99_proxy_set(kiln_host *host, kiln_value proxy, kiln_value key,
                                          "spelling");
         }
     }
+}
+
+static int kiln_c99_set_with_receiver(kiln_host *host, kiln_value target, kiln_value key,
+                                      kiln_value value, kiln_value receiver, int strict,
+                                      int depth, kiln_value *thrown) {
+    if (target.tag == KILN_VALUE_UNDEFINED || target.tag == KILN_VALUE_NULL) {
+        return kiln_c99_throw_cannot_set(thrown, target);
+    }
+    if (target.tag == KILN_VALUE_PROXY) {
+        return kiln_c99_proxy_set_with_receiver(host, target, key, value, receiver, strict, depth, thrown);
+    }
+    if (target.tag == KILN_VALUE_OBJECT) {
+        kiln_value name = kiln_c99_property_key(key);
+        kiln_value current = target;
+        size_t steps;
+        if (name.tag != KILN_VALUE_STRING) {
+            KILN_C99_REFUSE("a computed property key that is neither a string nor a named symbol "
+                            "slot");
+        }
+        for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
+            kiln_object *object;
+            size_t index;
+            if (current.tag != KILN_VALUE_OBJECT) {
+                break;
+            }
+            object = kiln_c99_object_of(current);
+            if (object->shape != NULL) {
+                kiln_c99_ensure_dictionary(object);
+            }
+            for (index = 0; index < object->count; ++index) {
+                if (!kiln_c99_same_key(&object->properties[index], name.ptr, name.len)) {
+                    continue;
+                }
+                if (object->properties[index].accessor) {
+                    if (object->properties[index].setter.tag == KILN_VALUE_UNDEFINED) {
+                        return strict ? kiln_c99_throw_read_only(thrown, name.ptr, name.len)
+                                      : KILN_C99_OK;
+                    }
+                    kiln_value ignored;
+                    return kiln_c99_call(host, &ignored, object->properties[index].setter, receiver,
+                                         &value, 1, depth, thrown);
+                }
+                if (!object->properties[index].writable) {
+                    return strict ? kiln_c99_throw_read_only(thrown, name.ptr, name.len)
+                                  : KILN_C99_OK;
+                }
+                steps = KILN_C99_MAX_PROTOTYPE_DEPTH;
+                break;
+            }
+            if (steps >= KILN_C99_MAX_PROTOTYPE_DEPTH) {
+                break;
+            }
+            current = object->prototype;
+        }
+
+        /* Write lands on receiver */
+        kiln_value recv_store;
+        int store_status = kiln_c99_definition_store(receiver, &recv_store);
+        if (store_status != KILN_C99_OK) {
+            return strict ? kiln_c99_throw_cannot_set(thrown, receiver) : KILN_C99_OK;
+        }
+        kiln_object *recv_obj = kiln_c99_object_of(recv_store);
+        if (recv_obj->frozen) {
+            return strict ? kiln_c99_throw_read_only(thrown, name.ptr, name.len) : KILN_C99_OK;
+        }
+        if (recv_obj->shape != NULL) {
+            kiln_c99_ensure_dictionary(recv_obj);
+        }
+        size_t recv_index = kiln_c99_own_index(recv_obj, NULL, name.ptr, name.len);
+        if (recv_index != recv_obj->count) {
+            if (recv_obj->properties[recv_index].accessor) {
+                return strict ? kiln_c99_throw_read_only(thrown, name.ptr, name.len) : KILN_C99_OK;
+            }
+            if (!recv_obj->properties[recv_index].writable) {
+                return strict ? kiln_c99_throw_read_only(thrown, name.ptr, name.len) : KILN_C99_OK;
+            }
+            recv_obj->properties[recv_index].value = value;
+            return KILN_C99_OK;
+        }
+        if (recv_obj->not_extensible) {
+            return strict ? kiln_c99_throw_read_only(thrown, name.ptr, name.len) : KILN_C99_OK;
+        }
+        kiln_property *slot;
+        int status = kiln_c99_own_slot(recv_store, name.ptr, name.len, &slot);
+        if (status != KILN_C99_OK) return status;
+        slot->value = value;
+        return KILN_C99_OK;
+    }
+    return strict ? kiln_c99_throw_cannot_set(thrown, target) : KILN_C99_OK;
+}
+
+/* `proxy[key] = value`, through the `set` trap or through the target. The trap's answer is
+ * discarded: a strict-mode assignment would throw on a falsy one, and neither engine does. */
+static int kiln_c99_proxy_set(kiln_host *host, kiln_value proxy, kiln_value key, kiln_value value,
+                              int strict, int depth, kiln_value *thrown) {
+    return kiln_c99_proxy_set_with_receiver(host, proxy, key, value, proxy, strict, depth, thrown);
 }
 
 /* `key in proxy`, `delete proxy[key]`, `Object.keys(proxy)` and
