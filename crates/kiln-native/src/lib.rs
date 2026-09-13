@@ -2881,20 +2881,7 @@ fn native_builtin_supported_exports(
         NodeBuiltin::Module => &["createRequire", "default"],
         NodeBuiltin::QueryString => &["decode", "default", "parse"],
         NodeBuiltin::Url => &["URL", "default", "fileURLToPath", "parse", "pathToFileURL"],
-        // Every name the shared ABI declares: `Buffer`'s statics are real methods in this
-        // runtime, so there is nothing here to hold an alignment slot for.
-        NodeBuiltin::Buffer => &[
-            "Buffer",
-            "alloc",
-            "allocUnsafe",
-            "allocUnsafeSlow",
-            "byteLength",
-            "concat",
-            "constants",
-            "default",
-            "from",
-            "isBuffer",
-        ],
+        NodeBuiltin::Buffer => kiln_builtins::BUFFER_EXPORTS,
         NodeBuiltin::AsyncHooks => &["AsyncLocalStorage", "AsyncResource", "default"],
         NodeBuiltin::Crypto => &["createHash", "default", "randomUUID"],
         _ => &[],
