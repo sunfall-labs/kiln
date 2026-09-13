@@ -2802,9 +2802,7 @@ fn native_builtin_supported_exports(
             "request",
         ],
         NodeBuiltin::Util => kiln_builtins::UTIL_EXPORTS,
-        NodeBuiltin::DiagnosticsChannel => {
-            &["channel", "default", "hasSubscribers", "tracingChannel"]
-        }
+        NodeBuiltin::DiagnosticsChannel => kiln_builtins::DIAGNOSTICS_CHANNEL_EXPORTS,
         NodeBuiltin::Https => &["createServer", "default"],
         NodeBuiltin::Http2 => &["createSecureServer", "createServer", "default"],
         NodeBuiltin::Dns => &["default", "lookup"],
