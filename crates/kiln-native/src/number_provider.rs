@@ -589,6 +589,7 @@ fn source_digest(root: &Path) -> Result<Digest, NumberProviderError> {
         "crates/kiln-runtime/src/http_client.rs",
         "crates/kiln-runtime/src/http_engine.rs",
         "crates/kiln-runtime/src/lib.rs",
+        "crates/kiln-runtime/src/process_wire.rs",
         "crates/kiln-runtime/src/node_http.rs",
         "crates/kiln-runtime/src/node_http_agent.rs",
         "crates/kiln-runtime/src/node_net.rs",
