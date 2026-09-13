@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use kiln_digest::Digest;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub const SOURCE_LIST: &str = include_str!("../../kiln-native/provider-sources.txt");
 pub const SCHEMA_VERSION: u16 = 1;
@@ -34,6 +34,59 @@ pub struct Contract {
     pub full_http: bool,
     pub slim_http: bool,
     pub exports: Vec<&'static str>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderManifest {
+    pub schema: u16,
+    pub provider: String,
+    pub provider_abi: u32,
+    pub format_version: u32,
+    pub parse_version: u32,
+    pub rust_target: String,
+    pub rustc_identity: String,
+    pub source_sha256: String,
+    pub archive_sha256: String,
+    pub archive: String,
+    pub linkage: String,
+    pub pic: bool,
+    pub profile: String,
+    pub cpu_features: String,
+    pub deployment: String,
+    pub libc_baseline: String,
+    pub exports: Vec<String>,
+    #[serde(default = "default_http")]
+    pub http: bool,
+}
+
+fn default_http() -> bool {
+    true
+}
+
+impl ProviderManifest {
+    pub fn identity(&self) -> String {
+        format!(
+            "schema={};provider={};abi={};format={};parse={};target={};rustc={};source={};archive={};linkage={};pic={};profile={};cpu={};http={};deployment={};libc={};exports={}",
+            self.schema,
+            self.provider,
+            self.provider_abi,
+            self.format_version,
+            self.parse_version,
+            self.rust_target,
+            self.rustc_identity,
+            self.source_sha256,
+            self.archive_sha256,
+            self.linkage,
+            self.pic,
+            self.profile,
+            self.cpu_features,
+            self.http,
+            self.deployment,
+            self.libc_baseline,
+            self.exports.join(",")
+        )
+    }
 }
 
 macro_rules! export_names {
