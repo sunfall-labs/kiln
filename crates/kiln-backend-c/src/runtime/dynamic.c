@@ -1810,3 +1810,57 @@ static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
                                  KILN_VAL_UNDEFINED, 0, 16, 0, 0,
                                  val_upvalues, 3);
 }
+/* Dynamic import option validation is shared by every generated importer. Keeping it in the
+ * runtime means the launcher and shared wrapper cannot drift in their object/enumeration rules. */
+static int kiln_c99_validate_dynamic_import_options(kiln_host *host, kiln_value options, int depth,
+                                                    kiln_value *thrown) {
+    kiln_value attrs;
+    kiln_value keys;
+    size_t index;
+    int status;
+    if (options.tag == KILN_VALUE_UNDEFINED) return KILN_C99_OK;
+    if (options.tag == KILN_VALUE_NULL || options.tag == KILN_VALUE_BOOLEAN ||
+        options.tag == KILN_VALUE_NUMBER || options.tag == KILN_VALUE_STRING) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "import options must be an object");
+    }
+    status = kiln_c99_get(host, options, "with", 4, &attrs, depth, thrown);
+    if (status != KILN_C99_OK) return status;
+    if (attrs.tag == KILN_VALUE_UNDEFINED) return KILN_C99_OK;
+    if (attrs.tag == KILN_VALUE_NULL || attrs.tag == KILN_VALUE_BOOLEAN ||
+        attrs.tag == KILN_VALUE_NUMBER || attrs.tag == KILN_VALUE_STRING) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "import attributes must be an object");
+    }
+    status = kiln_c99_own_keys(host, attrs, &keys, depth, thrown);
+    if (status != KILN_C99_OK) return status;
+    for (index = 0; index < kiln_c99_array_of(keys)->count; ++index) {
+        kiln_value key = kiln_val_to_boundary(kiln_c99_array_of(keys)->elements[index]);
+        kiln_value value;
+        if (key.tag != KILN_VALUE_STRING) continue;
+        status = kiln_c99_get(host, attrs, key.ptr, key.len, &value, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (key.len != 4 || memcmp(key.ptr, "type", 4) != 0) {
+            /* Reads for every key happen before this validation, as EnumerableOwnProperties does. */
+            continue;
+        }
+        if (value.tag != KILN_VALUE_STRING) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "import attribute values must be strings");
+        }
+        if (value.len != 4 || memcmp(value.ptr, "file", 4) != 0) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "unsupported import attribute `type`");
+        }
+    }
+    /* Unknown keys are rejected only after all enumerable values have been read. */
+    for (index = 0; index < kiln_c99_array_of(keys)->count; ++index) {
+        kiln_value key = kiln_val_to_boundary(kiln_c99_array_of(keys)->elements[index]);
+        if (key.tag == KILN_VALUE_STRING &&
+            (key.len != 4 || memcmp(key.ptr, "type", 4) != 0)) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "unsupported import attribute");
+        }
+    }
+    return KILN_C99_OK;
+}

@@ -5306,9 +5306,9 @@ fn write_launcher_dynamic_import(
     logical_paths: &[String],
 ) {
     let opentui_path = find_opentui_library(graph.project_root());
-    output.push_str(dynamic_import_validation_c());
     output.push_str(
         r#"
+extern int kiln_c99_validate_dynamic_import_options(kiln_host *, kiln_value, int, kiln_value *);
 int kiln_graph_dynamic_import(kiln_host *host, kiln_value specifier, kiln_value options, kiln_value *promise, int depth, kiln_value *thrown) {
     if (promise == NULL) return KILN_C99_CONTROL_ERROR;
     if (specifier.tag != KILN_VALUE_STRING) {
@@ -5326,7 +5326,7 @@ int kiln_graph_dynamic_import(kiln_host *host, kiln_value specifier, kiln_value 
         return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);
     }
     { kiln_value validation_thrown = kiln_c99_undefined();
-      int attr_status = kiln_validate_dynamic_import_options(host, options, depth, &validation_thrown);
+      int attr_status = kiln_c99_validate_dynamic_import_options(host, options, depth, &validation_thrown);
       if (attr_status != KILN_C99_OK) {
           kiln_value *reason = attr_status == KILN_C99_THROWN ? &validation_thrown : &validation_thrown;
           return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), reason, 1, depth, thrown);
@@ -5485,9 +5485,9 @@ fn write_shared_wrapper_dynamic_import(
     logical_paths: &[String],
 ) {
     let opentui_path = find_opentui_library(graph.project_root());
-    output.push_str(dynamic_import_validation_c());
     output.push_str(
         r#"
+extern int kiln_c99_validate_dynamic_import_options(kiln_host *, kiln_value, int, kiln_value *);
 int kiln_graph_dynamic_import(kiln_host *host, kiln_value specifier, kiln_value options, kiln_value *promise, int depth, kiln_value *thrown) {
     if (promise == NULL) return KILN_C99_CONTROL_ERROR;
     if (specifier.tag != KILN_VALUE_STRING) {
@@ -5505,7 +5505,7 @@ int kiln_graph_dynamic_import(kiln_host *host, kiln_value specifier, kiln_value 
         return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);
     }
     { kiln_value validation_thrown = kiln_c99_undefined();
-      int attr_status = kiln_validate_dynamic_import_options(host, options, depth, &validation_thrown);
+      int attr_status = kiln_c99_validate_dynamic_import_options(host, options, depth, &validation_thrown);
       if (attr_status != KILN_C99_OK) {
           return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &validation_thrown, 1, depth, thrown);
       }
