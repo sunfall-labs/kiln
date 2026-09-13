@@ -13,6 +13,7 @@ mkdir -p "$LOG_ROOT"; LOG_DIR="$(mktemp -d "$LOG_ROOT/run.XXXXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 export KILN_TEST262_LOG_DIR="$LOG_DIR"
 ARGS=(baseline --kiln "$KILN_BIN" --baseline conformance/test262-baseline.json --work "$WORK" --logdir "$LOG_DIR")
+[[ -n ${KILN_TEST262_REPORT:-} ]] && ARGS+=(--report "$KILN_TEST262_REPORT")
 [[ -n ${KILN_TEST262_CHECKOUT:-} ]] && ARGS+=(--checkout "$KILN_TEST262_CHECKOUT")
 [[ -n $UPDATE ]] && ARGS+=(--update)
 python3 "$PWD/scripts/test262_corpus.py" "${ARGS[@]}"

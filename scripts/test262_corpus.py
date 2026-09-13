@@ -238,7 +238,7 @@ def command_baseline(args: argparse.Namespace) -> int:
     chunks = discover_chunks(root, sorted(baseline.get("chunks", {})) or None)
     if not args.update and not baseline.get("chunks"):
         raise CorpusError("baseline holds no chunks; regenerate it with --update")
-    measured, regressions, gains = {}, [], []
+    measured, report_chunks, regressions, gains = {}, {}, [], []
     for index, chunk in enumerate(chunks, 1):
         out = pathlib.Path(args.work) / (chunk.replace("/", "_") + ".json")
         log = pathlib.Path(args.logdir) / (chunk.replace("/", "_") + ".log")
@@ -248,6 +248,7 @@ def command_baseline(args: argparse.Namespace) -> int:
         if total <= 0:
             raise CorpusError(f"chunk {chunk} has zero test results; full log: {log}")
         passed, failed = int(totals["passed"]), int(totals["failed"])
+        report_chunks[chunk] = {"total": sum(report["_kiln_counts"].values()), **report["_kiln_counts"]}
         measured[chunk] = {"passed": passed, "failed": failed}
         old = baseline.get("chunks", {}).get(chunk)
         mark = ""
@@ -257,6 +258,19 @@ def command_baseline(args: argparse.Namespace) -> int:
             elif passed > old["passed"]:
                 gains.append(f"{chunk}: +{passed - old['passed']}"); mark = f"  +{passed - old['passed']}"
         print(f"[{index}/{len(chunks)}] {chunk}  {passed}/{failed}{mark}", flush=True)
+    if getattr(args, "report", None):
+        report = {
+            "schema": 1,
+            "status": "failed" if regressions else "passed",
+            "source": {"name": "Test262 baseline", "repository": REPOSITORY, "commit": COMMIT},
+            "counts": {"total": sum(v["total"] for v in report_chunks.values()), "passed": sum(v["pass"] for v in report_chunks.values()), "failed": sum(v["fail"] for v in report_chunks.values()), "unsupported": sum(v["unsupported"] for v in report_chunks.values()), "skipped": sum(v["skipped"] for v in report_chunks.values())},
+            "chunks": report_chunks,
+            "expected_chunks": chunks,
+            "regressions": regressions,
+        }
+        report_path = pathlib.Path(args.report)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     if args.update:
         baseline.update({"schema": 1, "test262_commit": COMMIT, "chunks": measured})
         baseline_path.write_text(json.dumps(baseline, indent=2, sort_keys=True) + "\n")
@@ -279,7 +293,7 @@ def main() -> int:
     fetch.add_argument("--destination")
     fetch.set_defaults(function=command_fetch)
     base = sub.add_parser("baseline")
-    base.add_argument("--checkout"); base.add_argument("--kiln", required=True); base.add_argument("--baseline", required=True); base.add_argument("--work", required=True); base.add_argument("--logdir", required=True); base.add_argument("--update", action="store_true"); base.set_defaults(function=command_baseline)
+    base.add_argument("--checkout"); base.add_argument("--kiln", required=True); base.add_argument("--baseline", required=True); base.add_argument("--work", required=True); base.add_argument("--logdir", required=True); base.add_argument("--report"); base.add_argument("--update", action="store_true"); base.set_defaults(function=command_baseline)
     args = parser.parse_args()
     try: return args.function(args)
     except (CorpusError, OSError, subprocess.CalledProcessError) as exc:

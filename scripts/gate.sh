@@ -80,6 +80,15 @@ step() {
 	fi
 	echo "full log: $logfile"
 	tail -20 "$logfile" || true
+	local envelope_status=0
+	if [[ -f "$logfile.json" ]]; then
+		cp "$logfile.json" "$logfile.envelope.json"
+	else
+		python3 "$PWD/scripts/gate_results.py" process --name "$name" --log "$logfile" --status "$status" --out "$logfile.envelope.json" || envelope_status=$?
+	fi
+	if [[ $envelope_status -ne 0 ]]; then
+		status=$envelope_status
+	fi
 	if [[ $status -eq 0 ]]; then return 0; fi
 	FAILURES+=("$name")
 	return 0
@@ -98,12 +107,18 @@ BUILD_LOG="$GATE_LOG_DIR/00-build.log"
 kiln_cargo build --release --locked -p kiln-cli >"$BUILD_LOG" 2>&1 || {
 	echo "full log: $BUILD_LOG" >&2
 	tail -20 "$BUILD_LOG" >&2 || true
+	python3 "$PWD/scripts/gate_results.py" process --name build --log "$BUILD_LOG" --status 1 --out "$GATE_LOG_DIR/00-build.envelope.json" || true
+	python3 "$PWD/scripts/gate_results.py" aggregate --directory "$GATE_LOG_DIR" --out "$GATE_LOG_DIR/aggregate.json" \
+		--expected build --expected "crate tests" --expected "native parity" --expected thirdparty \
+		--expected "thirdparty baseline" --expected "facts baseline" --expected "conformance/node" \
+		--expected "conformance/server" --expected "conformance/regress" --expected "test262 baseline" || true
 	echo "gate: release build failed" >&2
 	exit 1
 }
 echo "full log: $BUILD_LOG"
 KILN_BIN="$(kiln_repo_root)/target/release/kiln"
 export KILN_BIN
+python3 "$PWD/scripts/gate_results.py" process --name build --log "$BUILD_LOG" --status 0 --out "$GATE_LOG_DIR/00-build.envelope.json"
 KILN_TEST262_KILN="$KILN_BIN"
 export KILN_TEST262_KILN
 KILN_BENCH_KILN="$KILN_BIN"
@@ -119,28 +134,25 @@ export KILN_BENCH_KILN
 # shellcheck disable=SC2016
 step "crate tests" "$BASH" -c '
 	test_status=0
-	mbx test --workspace -- --test-threads=4 >"$GATE_STEP_LOG" 2>&1 || test_status=$?
-	output="$(cat "$GATE_STEP_LOG")"
+	raw_log="${GATE_STEP_LOG}.raw"
+	mbx test --workspace -- --test-threads=4 >"$raw_log" 2>&1 || test_status=$?
+	output="$(cat "$raw_log")"
 	# The failing *names* as well as the summary: a count says the suite is red and nothing
 	# about which part, and this step is the one that reports breakage in any other crate.
 	# The failure *bodies*, not just their names: a name says which test and nothing about
 	# why, and these failures have been transient enough that a second occurrence may be
 	# the only chance to read one.
-	printf "%s\n" "$output" | grep -E -A6 "^---- .* stdout" | head -60
-	printf "%s\n" "$output" | grep -E "^(test result: FAILED|error)" | head -10
+	printf "%s\n" "$output" | grep -E -A6 "^---- .* stdout" | head -60 || true
+	printf "%s\n" "$output" | grep -E "^(test result: FAILED|error)" | head -10 || true
 	# One total rather than the last three summary lines. The last suites of a workspace run
 	# are doc-test targets with nothing in them, so a tail of "0 passed; 0 failed" three times
 	# reads as a suite that never ran -- two agents read it that way on 2026-09-06 and went
 	# looking for a test cache that does not exist. A total says what happened, and the floor
 	# below is the assertion the comment above promises: a build that produced no test binary
 	# prints no summary lines at all and would otherwise pass on "no FAILED".
-	printf "%s\n" "$output" | awk "/^test result:/ { suites++; passed += \$4; failed += \$6 } END { printf \"crate tests: %d suites, %d passed, %d failed\\n\", suites, passed, failed }"
-	total_passed="$(printf "%s\n" "$output" | awk "/^test result:/ { passed += \$4 } END { print passed + 0 }")"
-	if [[ $total_passed -lt ${KILN_GATE_MIN_PASSED:-500} ]]; then
-		echo "crate tests: only $total_passed tests passed, below the floor of ${KILN_GATE_MIN_PASSED:-500}: the suite did not run" >&2
-		exit 1
-	fi
-	[[ $test_status -eq 0 ]] && ! grep -qE "^error|FAILED" <<<"$output"
+	parser_status=0
+	python3 "$PWD/scripts/gate_results.py" workspace --name "crate tests" --log "$raw_log" --status "$test_status" --out "${GATE_STEP_LOG}.json" || parser_status=$?
+	[[ $test_status -eq 0 && $parser_status -eq 0 ]]
 '
 
 step "native parity" expect_clean "native" "0 diverged" "$BASH" ./scripts/native.sh
@@ -152,16 +164,37 @@ if [[ $QUICK -eq 0 ]]; then
 	for corpus in node server regress; do
 		step "conformance/$corpus" "$BASH" -c "
 			status=0
-			\"\$KILN_BIN\" --one-shot test conformance/$corpus --node >\"\$GATE_STEP_LOG\" 2>&1 || status=\$?
-			out=\"\$(cat \"\$GATE_STEP_LOG\")\"
+			raw_log=\"\${GATE_STEP_LOG}.raw\"
+			result=\"\${GATE_STEP_LOG}.results.json\"
+			\"\$KILN_BIN\" --one-shot test conformance/$corpus --node --out \"\$result\" >\"\$raw_log\" 2>&1 || status=\$?
+			out=\"\$(cat \"\$raw_log\")\"
 			printf '%s\n' \"\$out\" | grep -E '^  (pass|fail) '
-			[[ \$status -eq 0 && \$(grep -cE '^  fail +[1-9]' <<<\"\$out\") -eq 0 ]]
+			parser_status=0
+			python3 \"\$PWD/scripts/gate_results.py\" conformance --name \"conformance/$corpus\" --log \"\$raw_log\" --status \"\$status\" --document \"\$result\" --out \"\${GATE_STEP_LOG}.json\" || parser_status=\$?
+			[[ \$status -eq 0 && \$parser_status -eq 0 ]]
 		"
 	done
-	step "test262 baseline" ./scripts/test262-baseline.sh
+	step "test262 baseline" "$BASH" -c '
+		status=0
+		raw_log="${GATE_STEP_LOG}.raw"
+		result="${GATE_STEP_LOG}.results.json"
+		KILN_TEST262_REPORT="$result" ./scripts/test262-baseline.sh >"$raw_log" 2>&1 || status=$?
+		cat "$raw_log"
+		parser_status=0
+		python3 "$PWD/scripts/gate_results.py" test262 --name "test262 baseline" --log "$raw_log" --status "$status" --document "$result" --out "${GATE_STEP_LOG}.json" || parser_status=$?
+		[[ $status -eq 0 && $parser_status -eq 0 ]]
+	'
 fi
 
 printf '\n=== gate\n'
+if [[ $QUICK -eq 1 ]]; then
+	EXPECTED_STEPS=(build "crate tests" "native parity" thirdparty)
+else
+	EXPECTED_STEPS=(build "crate tests" "native parity" thirdparty "thirdparty baseline" "facts baseline" "conformance/node" "conformance/server" "conformance/regress" "test262 baseline")
+fi
+aggregate_args=()
+for expected in "${EXPECTED_STEPS[@]}"; do aggregate_args+=(--expected "$expected"); done
+python3 "$PWD/scripts/gate_results.py" aggregate --directory "$GATE_LOG_DIR" --out "$GATE_LOG_DIR/aggregate.json" "${aggregate_args[@]}" || FAILURES+=("gate aggregate")
 if [[ ${#FAILURES[@]} -gt 0 ]]; then
 	printf 'FAILED: %s\n' "${FAILURES[*]}" >&2
 	exit 1
