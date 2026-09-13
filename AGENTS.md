@@ -100,6 +100,12 @@ refusal backlog and cut the one summary line above it, and the same on `thirdpar
 verdict and cut the name of the bundle that diverged; both corpora had to run again to read what
 they had already printed. Redirect each script to its own file and grep that.
 
+Each gate invocation keeps its evidence under `target/gate-logs/run.<id>/` (or the directory named
+by `GATE_LOG_DIR`). The directory contains `aggregate.json`, per-step result envelopes, and the
+raw `.log`/`.raw` streams; conformance and Test262 steps also retain their result documents. Read
+the aggregate for the overall verdict and the step envelope for parsed counts, then use the raw
+log when the adapter reports an error or a test failure needs its full output.
+
 Two habits that waste the most. Rebuilding and re-measuring on every commit that lands on `main`
 -- a rebase costs a release build plus a cache-cold native compile of the prelude, and the number
 you get is a clock reading unless the change under test is yours. And running the whole Test262
