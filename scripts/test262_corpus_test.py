@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -13,6 +14,7 @@ import test262_corpus as corpus
 class CorpusPolicyTests(unittest.TestCase):
     def checkout(self, files=None):
         root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         (root / "harness").mkdir()
         (root / "harness/assert.js").write_text("// assert\n")
         (root / "test/language/a").mkdir(parents=True)
@@ -27,54 +29,66 @@ class CorpusPolicyTests(unittest.TestCase):
 
     def valid(self):
         root = self.checkout()
-        with mock.patch.object(corpus, "COMMIT", subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()):
-            return root
+        return root, subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
 
     def test_validate_rejects_dirty_and_empty_checkout(self):
-        root = self.valid()
-        with self.assertRaises(corpus.CorpusError):
-            corpus.validate_checkout(root)
+        root, head = self.valid()
+        with mock.patch.object(corpus, "COMMIT", "wrong"):
+            with self.assertRaisesRegex(corpus.CorpusError, "expected pinned commit"):
+                corpus.validate_checkout(root)
+        with mock.patch.object(corpus, "COMMIT", head):
+            (root / "dirty.txt").write_text("dirty")
+            with self.assertRaisesRegex(corpus.CorpusError, "dirty"):
+                corpus.validate_checkout(root)
+            (root / "dirty.txt").unlink()
         (root / "test/language/a/test.js").unlink()
         subprocess.run(["git", "-C", str(root), "checkout", "--", "."], check=True)
         (root / "test/language/a/test.js").unlink()
-        with mock.patch.object(corpus, "COMMIT", subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()):
-            with self.assertRaises(corpus.CorpusError):
+        with mock.patch.object(corpus, "COMMIT", head):
+            with self.assertRaisesRegex(corpus.CorpusError, "empty"):
                 corpus.resolve_test_root(root)
 
     def test_resolve_selection_is_contained_and_nonempty(self):
-        root = self.valid()
-        with mock.patch.object(corpus, "COMMIT", subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()):
+        root, head = self.valid()
+        with mock.patch.object(corpus, "COMMIT", head):
             selected, report = corpus.resolve_test_root(root, "language/a")
             self.assertEqual(report, "language/a")
             self.assertTrue(selected.is_dir())
-            for value in ("../", "", "language/missing"):
-                if value == "":
-                    continue
-                with self.assertRaises(corpus.CorpusError):
+            outside = Path(tempfile.mkdtemp())
+            self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+            (outside / "escape.js").write_text("x")
+            (root / "test/escape").symlink_to(outside, target_is_directory=True)
+            for value in ("../", "language/missing", "escape"):
+                with self.assertRaisesRegex(corpus.CorpusError, "path|subtree"):
                     corpus.resolve_test_root(root, value)
 
     def test_discovery_and_report_validation(self):
-        root = self.valid()
+        root, head = self.valid()
         chunks = corpus.discover_chunks(root / "test")
         self.assertEqual(chunks, ["language/a"])
         with self.assertRaises(corpus.CorpusError):
             corpus.discover_chunks(root / "test", ["language/missing"])
         fake = root / "fake-kiln"
-        fake.write_text("#!/usr/bin/env python3\nimport os, pathlib, sys\npathlib.Path(sys.argv[5]).write_text(os.environ['FAKE_REPORT'])\n")
+        fake.write_text("#!/usr/bin/env python3\nimport os, pathlib, sys\nif os.environ.get('FAKE_NO_WRITE') != '1': pathlib.Path(sys.argv[5]).write_text(os.environ['FAKE_REPORT'])\n")
         fake.chmod(0o755)
         raw = root / "result.json"
         log = root / "run.log"
-        with mock.patch.dict(os.environ, {"FAKE_REPORT": json.dumps({"tests": [{"id": "a", "outcome": "pass"}]})}):
+        valid = {"tests": [{"id": "a", "outcome": "pass"}], "totals": {"total": 1, "passed": 1, "failed": 0, "unsupported": 0, "skipped": 0}}
+        with mock.patch.dict(os.environ, {"FAKE_REPORT": json.dumps(valid), "FAKE_NO_WRITE": "0"}):
             report, _ = corpus.run_result(str(fake), root / "test/language/a", raw, log)
         self.assertEqual(report["_kiln_counts"]["pass"], 1)
-        for invalid in ({}, {"tests": []}, {"tests": [{"id": "a", "outcome": "wat"}]}):
-            with mock.patch.dict(os.environ, {"FAKE_REPORT": json.dumps(invalid)}):
+        invalid_reports = ({}, {"tests": []}, {"tests": [{"id": "a", "outcome": "wat"}]}, {"tests": [{"id": "a", "outcome": "pass"}], "totals": {"total": 2, "passed": 2, "failed": 0, "unsupported": 0, "skipped": 0}})
+        for invalid in invalid_reports:
+            with mock.patch.dict(os.environ, {"FAKE_REPORT": json.dumps(invalid), "FAKE_NO_WRITE": "0"}):
                 with self.assertRaises(corpus.CorpusError):
                     corpus.run_result(str(fake), root / "test/language/a", raw, log)
+        raw.write_text(json.dumps(valid))
+        with mock.patch.dict(os.environ, {"FAKE_NO_WRITE": "1", "FAKE_REPORT": json.dumps(valid)}):
+            with self.assertRaises(corpus.CorpusError):
+                corpus.run_result(str(fake), root / "test/language/a", raw, log)
 
     def test_managed_fetch_stages_and_explicit_checkout_is_untouched(self):
-        source = self.valid()
-        head = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
+        source, head = self.valid()
         destination = Path(tempfile.mkdtemp()) / "managed"
         with mock.patch.object(corpus, "COMMIT", head), mock.patch.object(corpus, "REPOSITORY", f"file://{source}"):
             fetched = corpus.fetch_managed(destination, minimum_files=1)
