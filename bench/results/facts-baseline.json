@@ -187783,57 +187783,51 @@
                 {
                   "id": 4,
                   "kind": "GetProperty",
-                  "detail": "\"getBuiltinModule\""
-                },
-                {
-                  "id": 5,
-                  "kind": "CallMethod",
-                  "detail": "\"getBuiltinModule\""
-                },
-                {
-                  "id": 6,
-                  "kind": "CallMethod",
-                  "detail": "\"getBuiltinModule\""
-                },
-                {
-                  "id": 7,
-                  "kind": "GetProperty",
                   "detail": "\"__kilnNativeModules\""
                 },
                 {
-                  "id": 8,
+                  "id": 5,
                   "kind": "GetProperty",
                   "detail": "\"fs_promises\""
                 },
                 {
-                  "id": 9,
+                  "id": 6,
                   "kind": "GetProperty",
                   "detail": "\"__kilnNativeModules\""
                 },
                 {
-                  "id": 10,
+                  "id": 7,
                   "kind": "GetProperty",
                   "detail": "\"fs\""
                 },
                 {
-                  "id": 11,
+                  "id": 8,
                   "kind": "GetProperty",
                   "detail": "\"promises\""
                 },
                 {
+                  "id": 9,
+                  "kind": "Call"
+                },
+                {
+                  "id": 10,
+                  "kind": "Call"
+                },
+                {
+                  "id": 11,
+                  "kind": "Call"
+                },
+                {
                   "id": 12,
-                  "kind": "GetProperty",
-                  "detail": "\"getBuiltinModule\""
+                  "kind": "Call"
                 },
                 {
                   "id": 13,
-                  "kind": "CallMethod",
-                  "detail": "\"getBuiltinModule\""
+                  "kind": "Call"
                 },
                 {
                   "id": 14,
-                  "kind": "CallMethod",
-                  "detail": "\"getBuiltinModule\""
+                  "kind": "Call"
                 },
                 {
                   "id": 15,
@@ -187881,55 +187875,31 @@
                 },
                 {
                   "id": 26,
-                  "kind": "Call"
-                },
-                {
-                  "id": 27,
-                  "kind": "Call"
-                },
-                {
-                  "id": 28,
-                  "kind": "Call"
-                },
-                {
-                  "id": 29,
-                  "kind": "Call"
-                },
-                {
-                  "id": 30,
-                  "kind": "Call"
-                },
-                {
-                  "id": 31,
-                  "kind": "Call"
-                },
-                {
-                  "id": 32,
                   "kind": "MakeFunction",
                   "detail": "proto #3"
                 },
                 {
-                  "id": 33,
+                  "id": 27,
                   "kind": "MakeFunction",
                   "detail": "proto #4"
                 },
                 {
-                  "id": 34,
+                  "id": 28,
                   "kind": "MakeFunction",
                   "detail": "proto #5"
                 },
                 {
-                  "id": 35,
+                  "id": 29,
                   "kind": "MakeFunction",
                   "detail": "proto #6"
                 },
                 {
-                  "id": 36,
+                  "id": 30,
                   "kind": "MakeFunction",
                   "detail": "proto #7"
                 },
                 {
-                  "id": 39,
+                  "id": 33,
                   "kind": "SetPropertyStrict",
                   "detail": "\"default\""
                 }
