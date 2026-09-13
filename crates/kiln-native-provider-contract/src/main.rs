@@ -4,10 +4,10 @@ fn main() {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("source-digest") => {
-            let root = args
-                .next()
-                .map(PathBuf::from)
-                .unwrap_or_else(kiln_native_provider_contract::repository_root);
+            let root = args.next().map(PathBuf::from).unwrap_or_else(|| {
+                eprintln!("source-digest requires an explicit repository root");
+                std::process::exit(2);
+            });
             println!(
                 "{}",
                 kiln_native_provider_contract::source_digest(&root)
@@ -25,7 +25,9 @@ fn main() {
             kiln_native_provider_contract::contract().exports.join(" ")
         ),
         _ => {
-            eprintln!("usage: kiln-native-provider-contract <contract|source-digest [root]>");
+            eprintln!(
+                "usage: kiln-native-provider-contract <contract|abi|exports|source-digest ROOT>"
+            );
             std::process::exit(2);
         }
     }
