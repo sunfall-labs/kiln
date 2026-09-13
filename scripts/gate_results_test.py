@@ -46,6 +46,15 @@ class GateResultTests(unittest.TestCase):
                 results.validate({"schema": 1, "verdict": "passed", "source": {"kind": "x", "code_snapshot_sha256": "snapshot"}, "outcomes": counts, "evidence": {"log": "run.log"}})
         with self.assertRaises(results.ResultError):
             results.validate({"schema": 1, "verdict": "passed", "source": {"kind": "x", "code_snapshot_sha256": "snapshot"}, "outcomes": {"total": 1, "passed": -1, "failed": 2}, "evidence": {"log": "run.log"}})
+        for value in (-1, "1", True):
+            with self.assertRaises(results.ResultError):
+                results.validate({"schema": 1, "verdict": "passed", "source": {"kind": "x", "code_snapshot_sha256": "snapshot"}, "outcomes": {"total": 1, "passed": value, "failed": 0}, "evidence": {"log": "run.log"}})
+
+    def test_passed_structured_steps_require_binary_identity(self):
+        for kind in ("workspace", "conformance", "test262"):
+            for binary in (None, ""):
+                with self.assertRaises(results.ResultError):
+                    results.validate({"schema": 1, "verdict": "passed", "source": {"kind": kind, "code_snapshot_sha256": "snapshot", "binary_sha256": binary}, "outcomes": {"total": 1, "passed": 1, "failed": 0}, "evidence": {"log": "run.log"}})
 
     def test_conformance_reads_structured_document(self):
         log = self.log("pass g01\nfail g02\n")
