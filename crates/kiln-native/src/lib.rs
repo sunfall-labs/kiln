@@ -5249,8 +5249,13 @@ fn dynamic_import_validation_c() -> &'static str {
     r#"
 static int kiln_validate_dynamic_import_options(kiln_host *host, kiln_value options, int depth, kiln_value *thrown) {
     kiln_value attrs;
-    kiln_value value;
+    kiln_value keys;
+    size_t index;
+    kiln_value length;
     int status;
+    extern int kiln_c99_own_keys(kiln_host *, kiln_value, kiln_value *, int, kiln_value *);
+    extern int kiln_c99_get_computed(kiln_host *, kiln_value, kiln_value, kiln_value *, int, kiln_value *);
+    extern kiln_value kiln_c99_value(uint32_t, uint64_t, const char *, size_t);
     if (options.tag == KILN_VALUE_UNDEFINED) return KILN_C99_OK;
     if (options.tag == KILN_VALUE_NULL || options.tag == KILN_VALUE_BOOLEAN ||
         options.tag == KILN_VALUE_NUMBER || options.tag == KILN_VALUE_STRING) {
@@ -5263,15 +5268,31 @@ static int kiln_validate_dynamic_import_options(kiln_host *host, kiln_value opti
         attrs.tag == KILN_VALUE_NUMBER || attrs.tag == KILN_VALUE_STRING) {
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "import attributes must be an object");
     }
-    status = kiln_c99_get(host, attrs, "type", 4, &value, depth, thrown);
+    status = kiln_c99_own_keys(host, attrs, &keys, depth, thrown);
     if (status != KILN_C99_OK) return status;
-    {
+    status = kiln_c99_get(host, keys, "length", 6, &length, depth, thrown);
+    if (status != KILN_C99_OK || length.tag != KILN_VALUE_NUMBER) return status;
+    { double count; memcpy(&count, &length.bits, sizeof(count));
+    if (count < 0 || count > 1000000) return KILN_C99_OK;
+    for (index = 0; index < (size_t)count; ++index) {
+        kiln_value key;
+        kiln_value value;
+        { double number = (double)index; uint64_t bits; memcpy(&bits, &number, sizeof(bits));
+        status = kiln_c99_get_computed(host, keys, kiln_c99_value(KILN_VALUE_NUMBER, bits, NULL, 0), &key, depth, thrown); }
+        if (status != KILN_C99_OK) return status;
+        if (key.tag != KILN_VALUE_STRING) continue;
+        status = kiln_c99_get(host, attrs, key.ptr, key.len, &value, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (key.len != 4 || memcmp(key.ptr, "type", 4) != 0) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "unsupported import attribute");
+        }
         if (value.tag != KILN_VALUE_STRING) {
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "import attribute values must be strings");
         }
         if (value.len != 4 || memcmp(value.ptr, "file", 4) != 0) {
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "unsupported import attribute type");
         }
+    }
     }
     return KILN_C99_OK;
 }

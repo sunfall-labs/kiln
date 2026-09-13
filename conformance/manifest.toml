@@ -1399,4 +1399,15 @@ specifier,with,type
 throwing returned promise
 getter rejection getter boom
 42 42
+options-null TypeError
+options-number TypeError
+with-null TypeError
+with-number TypeError
+type-number TypeError
+type-undefined TypeError
+type-unsupported TypeError
+unknown-attribute TypeError
+throwing-attribute Error
+inherited-type ok
+non-enumerable-type ok
 """
