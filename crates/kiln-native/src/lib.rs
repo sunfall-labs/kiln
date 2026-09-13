@@ -6247,8 +6247,7 @@ static int kiln_graph_enter(void *opaque) {
                 )
                 .unwrap();
             }
-            evaluation
-                .push_str("            graph->current_module++;\n            break;\n        }\n");
+            evaluation.push_str("    return 0;\n}\n");
             return Ok(());
         }
 
@@ -6285,8 +6284,7 @@ static int kiln_graph_enter(void *opaque) {
             }
             evaluation.push_str(
                 r#"                graph->module_settling = 0;
-                graph->current_module++;
-                break;
+                return 0;
             }
 "#,
             );
@@ -6430,7 +6428,7 @@ static int kiln_graph_enter(void *opaque) {
             )
             .unwrap();
         }
-        evaluation.push_str("    graph->current_module++;\n    return 0;\n}\n");
+        evaluation.push_str("    return 0;\n}\n");
         Ok(())
     };
     for (index, (node, module)) in modules.iter().enumerate() {
@@ -6439,7 +6437,7 @@ static int kiln_graph_enter(void *opaque) {
     for index in 0..modules.len() {
         writeln!(
             evaluation,
-            "        case {index}: return kiln_graph_eval_module_{index}(graph);"
+            "        case {index}: {{ status = kiln_graph_eval_module_{index}(graph); if (status != 0) return status; if (!graph->module_settling) graph->current_module++; return 0; }}"
         )
         .unwrap();
     }
