@@ -891,6 +891,7 @@ mod tests {
             "deployment": "",
             "libc_baseline": "",
             "exports": PROVIDER_EXPORTS,
+            "http": true,
         });
         let manifest_path = root.0.join(MANIFEST_FILE);
         fs::write(
