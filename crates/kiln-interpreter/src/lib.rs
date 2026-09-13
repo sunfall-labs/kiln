@@ -3316,6 +3316,8 @@ pub struct Closure {
     /// a module boundary is indexed against its own table, and answering from the caller's would
     /// report someone else's body. Whether *this* body is strict is `strictness.function`.
     pub strictness: Rc<Strictness>,
+    /// The module whose lexical code created this closure, used to resolve later import().
+    pub module_path: Option<Rc<str>>,
     /// The declared name, for a console to show. Shared with every other closure over the same
     /// proto rather than copied, because a function expression in a loop makes one closure per
     /// pass and the name is the same every time.
@@ -6627,7 +6629,7 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
         capabilities,
     )?;
     vm.self_bindings = self_bindings;
-    vm.module_path = module_path.map(str::to_owned);
+    vm.module_path = module_path.map(Rc::from);
     vm.self_namespaces = self_namespaces;
     if session.is_some() {
         vm.async_host = Some(runtime as *mut RealmRuntime as *mut dyn ActiveAsyncHostOps);
@@ -7068,6 +7070,8 @@ struct Frame {
     strictness: Rc<Strictness>,
     /// Whether the caller was strict code, restored with the frame.
     strict: bool,
+    /// The module whose lexical code is running, restored with the caller frame.
+    module_path: Option<Rc<str>>,
     /// `new.target` in the caller, restored with the frame.
     new_target: Value,
     /// The closure that was running, or `None` for the module body.
@@ -7218,7 +7222,7 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// execution's host granted agents at all. `None` disables `$262AgentStart` and its siblings.
     host_agents: Option<&'static str>,
     module_loader: Option<Arc<dyn ModuleLoaderService + Send + Sync>>,
-    module_path: Option<String>,
+    module_path: Option<Rc<str>>,
     /// The command line `process.argv` reports, as the host stated it. Empty when no host did.
     argv: Vec<String>,
     /// Promise state waiting for a Tokio-owned host request, keyed by opaque request identity.
@@ -13022,6 +13026,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.strictness = frame.strictness;
                     self.current_realm = frame.realm;
                     self.strict = frame.strict;
+                    self.module_path = frame.module_path;
                     self.function = frame.function;
                     self.this_value = frame.this_value;
                     self.new_target = frame.new_target;
@@ -13145,6 +13150,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.strictness = frame.strictness;
                 self.current_realm = frame.realm;
                 self.strict = frame.strict;
+                self.module_path = frame.module_path;
                 self.function = frame.function;
                 self.this_value = frame.this_value;
                 self.new_target = frame.new_target;
@@ -13165,6 +13171,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             self.strictness = frame.strictness;
             self.current_realm = frame.realm;
             self.strict = frame.strict;
+            self.module_path = frame.module_path;
             self.function = frame.function;
             self.this_value = frame.this_value;
             self.new_target = frame.new_target;
@@ -13280,6 +13287,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             program: std::mem::replace(&mut self.program, Rc::clone(&closure.program)),
             strictness: std::mem::replace(&mut self.strictness, Rc::clone(&closure.strictness)),
             strict: std::mem::replace(&mut self.strict, closure.is_strict()),
+            module_path: std::mem::replace(&mut self.module_path, closure.module_path.clone()),
             function: self.function.take(),
             this_value: std::mem::replace(&mut self.this_value, this_value.clone()),
             new_target: std::mem::replace(&mut self.new_target, new_target.clone()),
@@ -13704,6 +13712,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             program: std::mem::replace(&mut self.program, Rc::clone(&closure.program)),
             strictness: std::mem::replace(&mut self.strictness, Rc::clone(&closure.strictness)),
             strict: std::mem::replace(&mut self.strict, closure.is_strict()),
+            module_path: std::mem::replace(&mut self.module_path, closure.module_path.clone()),
             function: self.function.take(),
             this_value: std::mem::replace(&mut self.this_value, this_value),
             new_target: std::mem::replace(&mut self.new_target, new_target),
@@ -14044,6 +14053,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.strictness = frame.strictness;
         self.current_realm = frame.realm;
         self.strict = frame.strict;
+        self.module_path = frame.module_path;
         self.function = frame.function;
         self.this_value = frame.this_value;
         self.new_target = frame.new_target;
@@ -27530,6 +27540,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             },
             program: Rc::clone(&self.program),
             strictness: Rc::clone(&self.strictness),
+            module_path: self.module_path.clone(),
             captured_new_target: proto.arrow.then(|| self.new_target.clone()),
             captured_arguments,
             prototype: RefCell::new(None),
@@ -32869,6 +32880,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             program: std::mem::replace(&mut self.program, Rc::clone(&closure.program)),
             strictness: std::mem::replace(&mut self.strictness, Rc::clone(&closure.strictness)),
             strict: std::mem::replace(&mut self.strict, closure.is_strict()),
+            module_path: std::mem::replace(&mut self.module_path, closure.module_path.clone()),
             function: self.function.take(),
             this_value: std::mem::replace(&mut self.this_value, entering),
             new_target: std::mem::replace(&mut self.new_target, target),
@@ -33001,6 +33013,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             program: std::mem::replace(&mut self.program, Rc::new(program)),
             strictness: std::mem::replace(&mut self.strictness, Rc::new(program_strictness)),
             strict: std::mem::replace(&mut self.strict, program_is_strict),
+            module_path: self.module_path.clone(),
             function: self.function.take(),
             this_value: std::mem::replace(&mut self.this_value, this_value),
             new_target: std::mem::replace(&mut self.new_target, frame_new_target),
@@ -33208,7 +33221,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             )));
         };
         let plan_result = loader.load(ModuleLoadRequest {
-            importer: self.module_path.clone(),
+            importer: self.module_path.as_deref().map(str::to_owned),
             specifier: specifier.to_owned(),
             attributes: options.cloned(),
         });
@@ -33357,6 +33370,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             program: std::mem::replace(&mut self.program, program),
             strictness: std::mem::replace(&mut self.strictness, strictness),
             strict: std::mem::replace(&mut self.strict, true),
+            module_path: self.module_path.clone(),
             function: self.function.take(),
             // A module body is always strict, so its `this` is `undefined` rather than the
             // global object.
