@@ -1395,6 +1395,86 @@ fn node_builtin_os_ts_evaluates_and_exports_cleanly() {
 }
 
 #[test]
+fn node_builtin_path_ts_evaluates_and_exports_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.js",
+        concat!(
+            "import path, { join, resolve, dirname, basename, extname, parse, format, posix, sep } from 'node:path';",
+            "console.log(join('a', 'b'), resolve('/x', 'y'), dirname('/a/b/c.js'), basename('a/b.txt'), extname('a.txt'), path.sep === '/');",
+            "console.log(JSON.stringify(parse('/a/b/c.txt')));",
+            "console.log(format({ dir: '/x/y', base: 'z.txt' }));",
+            "console.log(path.posix === path);",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with path builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute path builtin");
+    assert_eq!(
+        host.output,
+        [
+            "a/b /x/y /a/b b.txt .txt true",
+            "{\"root\":\"/\",\"dir\":\"/a/b\",\"base\":\"c.txt\",\"ext\":\".txt\",\"name\":\"c\"}",
+            "/x/y/z.txt",
+            "true",
+        ]
+    );
+}
+
+#[test]
+fn node_builtin_path_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const path = require('node:path');",
+            "module.exports = { join: path.join('foo', 'bar'), posixEq: path.posix === path, defaultEq: path.default === path };",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        "import bridge from './bridge.cjs'; console.log(bridge.join, bridge.posixEq, bridge.defaultEq);",
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with path builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute path builtin cjs");
+    assert_eq!(host.output, ["foo/bar true true"]);
+}
+
+#[test]
 fn node_net_connect_is_a_typed_virtual_module_export() {
     let project = TempProject::new();
     let entry = project.write(

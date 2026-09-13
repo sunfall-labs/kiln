@@ -1647,44 +1647,49 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
             .clone();
         let mut targets = Vec::with_capacity(module_node.dependencies.len());
         for dependency in &module_node.dependencies {
-            let value =
-                if let Some(cell) = self.commonjs_cache.get(&dependency.target) {
-                    std::rc::Rc::clone(cell)
-                } else if let Some(provider) = unsafe { (&*self.values).get(&dependency.target) } {
-                    if let Some(value) = self.builtin_commonjs.get(&dependency.target) {
-                        std::rc::Rc::new(std::cell::RefCell::new(value.clone()))
-                    } else if self
-                        .graph
-                        .module_node(&dependency.target)
-                        .is_some_and(|node| node.source == ModuleSource::Json)
-                    {
-                        let value = provider.get("default").cloned().ok_or_else(|| {
-                            ExecutionError::Host {
+            let value = if let Some(cell) = self.commonjs_cache.get(&dependency.target) {
+                std::rc::Rc::clone(cell)
+            } else if let Some(provider) = unsafe { (&*self.values).get(&dependency.target) } {
+                if let Some(value) = self.builtin_commonjs.get(&dependency.target) {
+                    std::rc::Rc::new(std::cell::RefCell::new(value.clone()))
+                } else if self
+                    .graph
+                    .module_node(&dependency.target)
+                    .is_some_and(|node| match node.source {
+                        ModuleSource::Json => true,
+                        ModuleSource::NodeBuiltin(builtin) => kiln_builtins::is_ts_builtin(builtin),
+                        _ => false,
+                    })
+                {
+                    let value =
+                        provider
+                            .get("default")
+                            .cloned()
+                            .ok_or_else(|| ExecutionError::Host {
                                 instruction: 0,
                                 message: format!(
-                                    "JSON target `{}` has no default",
+                                    "Target `{}` has no default",
                                     dependency.target.display()
                                 ),
-                            }
-                        })?;
-                        std::rc::Rc::new(std::cell::RefCell::new(value))
-                    } else {
-                        let mut entries: Vec<_> = provider
-                            .iter()
-                            .map(|(name, value)| (name.clone(), read_through_cell(value)))
-                            .collect();
-                        entries.sort_by(|left, right| left.0.cmp(&right.0));
-                        std::rc::Rc::new(std::cell::RefCell::new(ordinary_object(entries)))
-                    }
+                            })?;
+                    std::rc::Rc::new(std::cell::RefCell::new(read_through_cell(&value)))
                 } else {
-                    return Err(ExecutionError::Host {
-                        instruction: 0,
-                        message: format!(
-                            "CommonJS target `{}` has not been evaluated",
-                            dependency.target.display()
-                        ),
-                    });
-                };
+                    let mut entries: Vec<_> = provider
+                        .iter()
+                        .map(|(name, value)| (name.clone(), read_through_cell(value)))
+                        .collect();
+                    entries.sort_by(|left, right| left.0.cmp(&right.0));
+                    std::rc::Rc::new(std::cell::RefCell::new(ordinary_object(entries)))
+                }
+            } else {
+                return Err(ExecutionError::Host {
+                    instruction: 0,
+                    message: format!(
+                        "CommonJS target `{}` has not been evaluated",
+                        dependency.target.display()
+                    ),
+                });
+            };
             targets.push((
                 dependency.specifier.clone(),
                 dependency.target.to_string_lossy().into_owned(),
