@@ -1286,6 +1286,9 @@ impl NativeBuilder {
         emission.compact = options.profile != NativeProfile::Profile;
         emission.generic_only =
             matches!(options.profile, NativeProfile::Dev | NativeProfile::Check);
+        // Shared graph modules link against one prelude object; keep runtime definitions out of
+        // every module object so exported graph helpers have a single authoritative owner.
+        emission.decoupled_prelude = true;
         let total_started = Instant::now();
         let emit_started = Instant::now();
         let identity = self.toolchain.identity().clone();
