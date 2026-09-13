@@ -5200,9 +5200,40 @@ fn native_runtime_unsupported_builtin_is_deferred_and_excluded() {
         .expect("zlib runtime target");
     assert!(plan.excluded.contains(&zlib.path));
     assert!(
-        plan.failures
-            .contains_key(&(graph.entry().to_path_buf(), "node:zlib".to_owned()))
+        plan.runtime_failures
+            .keys()
+            .any(|(owner, _, specifier)| { owner == graph.entry() && specifier == "node:zlib" })
     );
+}
+
+#[test]
+fn native_runtime_failures_keep_distinct_captured_bases() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-runtime-failure-bases");
+    let base_a = root.path.join("a.cjs");
+    let base_b = root.path.join("b.cjs");
+    fs::write(&base_a, "module.exports = 1;").expect("write base a");
+    fs::write(&base_b, "module.exports = 1;").expect("write base b");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        format!(
+            "import {{ createRequire }} from 'node:module'; createRequire('{}')('node:zlib'); createRequire('{}')('node:zlib');\n",
+            base_a.display(),
+            base_b.display()
+        ),
+    )
+    .expect("write runtime failure entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build runtime failure graph");
+    let plan = native_graph_plan(&graph).expect("runtime failures are deferred");
+    assert_eq!(plan.runtime_failures.len(), 2);
 }
 
 #[test]
