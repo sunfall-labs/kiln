@@ -6994,7 +6994,12 @@ enum Job {
     /// settle the promise before `import(x).then(f)` had attached `f`, which is not observable
     /// on its own -- but the module's *side effects* would then happen before the statement
     /// after the `import()`, and that is.
-    Import(Rc<PromiseData>, String, Option<ImportAttributes>),
+    Import(
+        Rc<PromiseData>,
+        String,
+        Option<ImportAttributes>,
+        Option<Rc<str>>,
+    ),
     /// `ShadowRealm.prototype.importValue(specifier, exportName)`.
     ///
     /// A job for the same reason `Import` is one, and carries the two realms because both
@@ -11824,8 +11829,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // specification hands the promise back first and only then looks at what it
                     // was given, so `import({ toString() { throw x } })` is a rejection and not
                     // an exception at the call site.
-                    let scheduled =
-                        self.scheduled(Job::Import(Rc::clone(&promise), text, _options));
+                    let scheduled = self.scheduled(Job::Import(
+                        Rc::clone(&promise),
+                        text,
+                        _options,
+                        self.module_path.clone(),
+                    ));
                     self.with_realm_mut(|realm| realm.queue_microtask(scheduled));
                     self.stack.push(Value::Promise(promise));
                 }
@@ -23089,8 +23098,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 );
                 Ok(())
             }
-            Job::Import(promise, specifier, options) => {
-                match self.import_module(&specifier, options.as_ref())? {
+            Job::Import(promise, specifier, options, module_path) => {
+                let previous = std::mem::replace(&mut self.module_path, module_path);
+                let imported = self.import_module(&specifier, options.as_ref());
+                self.module_path = previous;
+                match imported? {
                     Ok(namespace) => self.settle(&promise, &Settled::Fulfilled(namespace)),
                     Err(thrown) => self.settle(&promise, &Settled::Rejected(thrown)),
                 }
@@ -33268,7 +33280,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     other => Value::Cell(Rc::new(RefCell::new(other))),
                 };
             }
-            match self.drive_module(Rc::clone(&planned.program), locals)? {
+            let module_path = Rc::from(planned.key.as_str());
+            match self.drive_module(Rc::clone(&planned.program), locals, Some(module_path))? {
                 Ok(returned) => {
                     let Value::Array(exported) = returned else {
                         let error = self.construct_error(
@@ -33344,6 +33357,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         &mut self,
         program: Rc<Program>,
         locals: Vec<Value>,
+        module_path: Option<Rc<str>>,
     ) -> Result<Result<Value, Value>, ExecutionError> {
         if self.native_depth >= self.limits.max_native_depth {
             return Err(ExecutionError::CallDepthExceeded {
@@ -33385,6 +33399,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             instruction: self.instruction,
             stack_base: self.stack.len(),
         });
+        self.module_path = module_path;
         self.global_base = self.frames.len();
         self.instruction = 0;
         let outcome = self.run_frames(depth).map(|result| result.value);
