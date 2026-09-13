@@ -1436,3 +1436,24 @@ expected_stdout = """
 8 true done,value
 getter boom 0 true
 """
+
+[[test]]
+id = "regress/r16-async-generator-delegation-protocol"
+group = "regress"
+source = "regress/r16-async-generator-delegation-protocol.js"
+status = "runnable"
+features = ["async-generators", "yield-star", "for-await-of", "async-iteration"]
+catches = """
+Async generator yield* delegation protocol edges: delegated return and throw forwarding for
+both async and wrapped sync iterators, preserving promises from manually implemented async iterators,
+awaiting return arguments when return is absent, and closing iterators when throw is absent.
+"""
+expected_stdout = """
+async-return: step1=v1,false ret1=ret-val-1,false ret2=ret-val-2,true log=return:arg1,return:arg2
+async-throw: step1=v1,false thr1=throw-val-1,false thr2=fin,true log=throw:err1,throw:err2,after:throw-val-2
+sync-return: r1=sync-ret-1,false r2=sync-ret-2,true log=sync-return:a1,sync-return:a2
+promise-not-unwrapped: is-same=true
+return-missing-awaited: val=42 done=true
+throw-missing-closed: closed=true is-type-error=true
+"""
+

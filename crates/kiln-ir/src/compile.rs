@@ -3607,6 +3607,11 @@ impl Compiler {
 
         // Not done: yield the inner step object out directly, delegating return and throw completions.
         self.patch_jump(not_done);
+        if asynchronous {
+            self.load_hidden(&wrapped_binding);
+        } else {
+            self.push_constant(Constant::Boolean(false));
+        }
         self.load_hidden(&iterator_binding);
         self.load_hidden(&step_binding);
         let yield_star_idx = self.emit_jump(Instruction::YieldStar(0));
