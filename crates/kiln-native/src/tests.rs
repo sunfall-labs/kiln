@@ -4694,14 +4694,16 @@ fn native_dynamic_import_resolves_opentui_and_in_graph_modules() {
     )
     .expect("write mock libopentui");
     fs::write(root.path.join("helper.mjs"), "export const answer = 99;\n").expect("write helper");
+    fs::write(root.path.join("asset.wasm"), [0_u8, 159, 146, 150]).expect("write asset");
     let entry = root.path.join("main.mjs");
     fs::write(
         &entry,
         "import * as h from './helper.mjs';\n\
          const otui = await import('@opentui/core-linux-x64');\n\
          const helper = await import('./helper.mjs');\n\
+         const asset = await import('./asset.wasm', { with: { type: 'file' } });\n\
          const ffi = await import('node:ffi');\n\
-         console.log(otui.default.includes('libopentui.so'), helper.answer, typeof ffi.dlopen, typeof ffi.getRawPointer);\n",
+         console.log(otui.default.includes('libopentui.so'), helper.answer, asset.default.endsWith('asset.wasm'), typeof ffi.dlopen, typeof ffi.getRawPointer);\n",
     )
     .expect("write entry");
     let graph = ModuleGraph::build_node(
@@ -4722,13 +4724,13 @@ fn native_dynamic_import_resolves_opentui_and_in_graph_modules() {
             },
         )
         .expect("dynamic import graph builds and runs");
-    if report.stdout != b"true 99 function function\n" {
+    if report.stdout != b"true 99 true function function\n" {
         eprintln!("exit_code: {:?}", report.exit_code);
         eprintln!("result: {:?}", report.result);
         eprintln!("stderr: {}", String::from_utf8_lossy(&report.stderr));
         eprintln!("stdout: {}", String::from_utf8_lossy(&report.stdout));
     }
-    assert_eq!(report.stdout, b"true 99 function function\n");
+    assert_eq!(report.stdout, b"true 99 true function function\n");
 }
 
 #[test]

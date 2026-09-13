@@ -1389,6 +1389,7 @@ pub fn bridge_effect(instruction: &Instruction) -> Option<(usize, u8)> {
         | Instruction::DeleteProperty(_)
         | Instruction::DeletePropertyStrict { .. }
         | Instruction::DynamicImport => (1, 1),
+        Instruction::DynamicImportWithOptions => (2, 1),
         Instruction::SuperCall { argc } => (usize::from(*argc) + 1, 1),
         Instruction::CallComputed { argc } => (usize::from(*argc) + 2, 1),
         Instruction::ToPropertyKey => (2, 2),
