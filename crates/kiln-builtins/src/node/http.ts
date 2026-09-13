@@ -2,9 +2,10 @@
 
 const nativeModule =
   typeof process !== "undefined"
-    ? typeof (process as any).getBuiltinModule === "function"
-      ? (process as any).getBuiltinModule("http")
-      : (process as any).__kilnNativeModules?.http
+    ? (process as any).__kilnNativeModules?.http ||
+      (typeof (process as any).getBuiltinModule === "function"
+        ? (process as any).getBuiltinModule("http")
+        : null)
     : null;
 
 export const METHODS = [

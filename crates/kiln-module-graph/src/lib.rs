@@ -20,7 +20,7 @@ use kiln_interpreter::{
     ExecutionLimits, ExecutionResult, ImportAttributes, ModuleBinding, ModuleLoadError,
     ModuleLoadRequest, ModuleLoaderService, ModulePlan, ModuleRealmSession, ModuleSelfExport,
     ModuleSelfImport, ModuleValueRef, PlannedModule, Value, execute_module_in_runtime_with_loader,
-    execute_node_module_in_session_with_loader, node_builtin_commonjs_value_for_graph,
+    execute_node_module_in_session_with_loader, node_builtin_commonjs_value,
     node_builtin_export_names, node_builtin_exports, ordinary_object, own_data_property,
     parse_json_module, read_through_cell,
 };
@@ -1796,7 +1796,7 @@ impl ModuleGraph {
                 ModuleSource::NodeBuiltin(builtin) if !kiln_builtins::is_ts_builtin(builtin) => {
                     Some((
                         path.clone(),
-                        node_builtin_commonjs_value_for_graph(builtin.specifier())
+                        node_builtin_commonjs_value(builtin.specifier())
                             .expect("a linkable builtin has a CommonJS projection"),
                     ))
                 }
@@ -2549,7 +2549,7 @@ impl<H: HostOps + ?Sized> CommonJsModuleLoader for CommonJsLoader<'_, H> {
         specifier: &str,
         instruction: usize,
     ) -> Result<Option<Value>, ExecutionError> {
-        if let Some(value) = node_builtin_commonjs_value_for_graph(specifier) {
+        if let Some(value) = node_builtin_commonjs_value(specifier) {
             return Ok(Some(value));
         }
         let builtin = NodeBuiltin::parse(specifier).ok_or_else(|| ExecutionError::Host {
@@ -2654,7 +2654,7 @@ impl<H: HostOps + ?Sized> CommonJsModuleLoader for CommonJsLoader<'_, H> {
                 if let Some(dependency) = runtime_dependency {
                     return self.ensure_target_value(&dependency.target, instruction);
                 }
-                if let Some(value) = node_builtin_commonjs_value_for_graph(specifier) {
+                if let Some(value) = node_builtin_commonjs_value(specifier) {
                     return Ok(value);
                 }
                 if NodeBuiltin::parse(specifier).is_some_and(kiln_builtins::is_ts_builtin) {

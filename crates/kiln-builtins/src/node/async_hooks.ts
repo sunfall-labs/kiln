@@ -1,8 +1,11 @@
 // kiln-builtins: node:async_hooks implementation (Phase 5.2, ADR 0005)
 
 const nativeModule =
-  typeof process !== "undefined" && typeof (process as any).getBuiltinModule === "function"
-    ? (process as any).getBuiltinModule("async_hooks")
+  typeof process !== "undefined"
+    ? (process as any).__kilnNativeModules?.async_hooks ||
+      (typeof (process as any).getBuiltinModule === "function"
+        ? (process as any).getBuiltinModule("async_hooks")
+        : null)
     : null;
 
 const storageMap = new WeakMap<object, any>();

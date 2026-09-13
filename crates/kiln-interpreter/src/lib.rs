@@ -4189,7 +4189,7 @@ pub fn node_builtin_exports(specifier: &str) -> Option<Vec<(String, Value)>> {
 /// callable for modules such as `events` and `assert`. Keeping this beside the export table means
 /// the two projections cannot drift onto different implementations.
 pub fn node_builtin_commonjs_value(specifier: &str) -> Option<Value> {
-    if specifier == "node:module" || specifier == "module" {
+    if kiln_builtins::is_ts_builtin_specifier(specifier) {
         return None;
     }
     let namespace = node_builtin_native_namespace(specifier)?;
@@ -4216,15 +4216,6 @@ pub fn node_builtin_commonjs_value(specifier: &str) -> Option<Value> {
         };
     }
     None
-}
-
-/// Graph-owned CommonJS loading evaluates TypeScript builtins through its
-/// canonical module cells instead of falling back to the legacy native record.
-pub fn node_builtin_commonjs_value_for_graph(specifier: &str) -> Option<Value> {
-    if kiln_builtins::is_ts_builtin_specifier(specifier) {
-        return None;
-    }
-    node_builtin_commonjs_value(specifier)
 }
 
 impl Value {
@@ -15525,13 +15516,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::ProcessGetBuiltinModule => match arguments.first() {
                 Some(Value::String(name)) if kiln_builtins::is_ts_builtin_specifier(name) => {
                     if let Some(loader) = self.commonjs_loader {
-                        return unsafe { (&mut *loader).get_builtin(name, instruction) }.map(
-                            |value| {
-                                value.unwrap_or_else(|| {
-                                    node_builtin_native_namespace(name).unwrap_or(Value::Undefined)
-                                })
-                            },
-                        );
+                        return unsafe { (&mut *loader).get_builtin(name, instruction) }
+                            .map(|value| value.unwrap_or(Value::Undefined));
                     }
                     Err(ExecutionError::TypeErrorMessage {
                         message: format!(
@@ -25984,6 +25970,29 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             "getBuiltinModule",
             Value::Native(Native::ProcessGetBuiltinModule, RealmId::PRIMARY),
         );
+        // TypeScript Node builtins use this private capability table while they are
+        // materializing themselves.  It is deliberately separate from the public
+        // getBuiltinModule projection: asking for the builtin currently being evaluated
+        // must not fall back to a second legacy namespace with different identity.
+        let native_modules = ordinary_object([
+            (
+                "fs".to_owned(),
+                Value::Native(Native::NodeFs, RealmId::PRIMARY),
+            ),
+            (
+                "fs_promises".to_owned(),
+                Value::Native(Native::NodeFsPromises, RealmId::PRIMARY),
+            ),
+            (
+                "http".to_owned(),
+                Value::Native(Native::NodeHttp, RealmId::PRIMARY),
+            ),
+            (
+                "net".to_owned(),
+                Value::Native(Native::NodeNet, RealmId::PRIMARY),
+            ),
+        ]);
+        process.set_non_enumerable("__kilnNativeModules", native_modules);
         let value = Value::Object(Rc::new(RefCell::new(process)));
         self.process_object = Some(value.clone());
         value

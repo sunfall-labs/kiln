@@ -805,6 +805,47 @@ fn array_species_definition_writes_typed_array_elements() {
 }
 
 #[test]
+fn process_private_native_modules_are_separate_from_public_ts_projection() {
+    let program = Program {
+        source: "".into(),
+        template_sites: Vec::new(),
+        version: kiln_ir::BYTECODE_VERSION,
+        constants: Vec::new(),
+        code: Vec::new(),
+        local_count: 0,
+        functions: Vec::new(),
+    };
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: std::collections::VecDeque::new(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+    let process = vm.process_object();
+    let modules = vm
+        .read_property(&process, "__kilnNativeModules", 0)
+        .expect("private capability table");
+    for name in ["fs", "fs_promises", "http", "net"] {
+        assert!(
+            !matches!(vm.read_property(&modules, name, 0), Ok(Value::Undefined)),
+            "missing private native capability: {name}"
+        );
+    }
+    assert!(matches!(
+        vm.dispatch_native(
+            Native::ProcessGetBuiltinModule,
+            &Value::Undefined,
+            &[Value::String("node:fs".to_owned())],
+            0,
+        ),
+        Err(ExecutionError::TypeErrorMessage { message })
+            if message.contains("graph-materialized")
+    ));
+}
+
+#[test]
 fn node_events_builtin_exposes_event_emitter() {
     let program = Program {
         source: "".into(),
