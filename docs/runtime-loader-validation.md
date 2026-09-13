@@ -74,3 +74,26 @@ No meaningful regression was observed; this is launcher-inclusive evidence, not 
 
 The full gate was run earlier; subsequent failures were addressed with targeted checks, without a
 second full-gate run. Validation is complete; landing/push is not recorded here.
+
+## Loader path consolidation
+
+Commit `e32d5c31` removes the conformance loader's ambient `BASE` state. Each capability now owns
+an optional fixture base for importer-less eval/realm/agent requests; a request's explicit importer
+always takes precedence. Two loader instances can therefore run interleaved without sharing a
+resolver directory, while nested imports still resolve from their captured importer.
+
+Production's immutable graph loader and conformance's fresh filesystem loader retain their
+different adapters: both call `ModuleGraph::import_plan_for_request` for the shared
+asset/import-attribute policy, while conformance preserves its `NotFound`/`Syntax`/`Unsupported`
+classification and production preserves graph-owned deferred failures and cache identity.
+
+Focused validation on the consolidation worktree:
+
+- `mbx test -p kiln-module-graph --lib`: 148 passed; log `.scratch/consolidation-module-graph.log`.
+- `mbx test -p kiln-conformance --lib`: 69 passed; log `.scratch/consolidation-conformance.log`.
+- `mbx run -p kiln-cli --bin kiln -- test conformance/regress --node`: 14 passed; log
+  `.scratch/consolidation-regress.log`.
+- Pinned Test262 dynamic-import chunk, checkout `771005236e...c0172`, run with the same
+  `run_limited` memory-cap helper as `scripts/test262.sh`: 1,550 passed, 57 failed, 293
+  unsupported across 1,900 selected variants. Full log `.scratch/consolidation-test262-dynamic-import.log`;
+  this focused corpus result is recorded for diagnosis and is not a green Test262 claim.
