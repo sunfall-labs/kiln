@@ -4963,6 +4963,13 @@ fn native_deferred_dynamic_import_failures_are_catchable() {
     fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).expect("write root package");
     fs::write(root.path.join("bad-syntax.mjs"), "export const = ;\n")
         .expect("write syntax failure");
+    fs::write(
+        root.path.join("bad-export.mjs"),
+        "import { missing } from './dep.mjs'; export const value = missing;\n",
+    )
+    .expect("write missing export failure");
+    fs::write(root.path.join("never-called.mjs"), "export const = ;\n")
+        .expect("write never-called syntax failure");
     fs::write(root.path.join("dep.mjs"), "export const answer = 42;\n").expect("write dependency");
     let entry = root.path.join("main.mjs");
     fs::write(
@@ -4970,6 +4977,8 @@ fn native_deferred_dynamic_import_failures_are_catchable() {
         "console.log('start');\n\
          try { await import('./missing.mjs'); } catch (error) { console.log(error instanceof TypeError); }\n\
          try { await import('./bad-syntax.mjs'); } catch (error) { console.log(error instanceof TypeError); }\n\
+         try { await import('./bad-export.mjs'); } catch (error) { console.log(error instanceof TypeError); }\n\
+         function neverCalled() { return import('./never-called.mjs'); }\n\
          const ns = await import('./dep.mjs'); console.log(ns.answer);\n",
     )
     .expect("write entry");
@@ -4991,7 +5000,7 @@ fn native_deferred_dynamic_import_failures_are_catchable() {
             },
         )
         .expect("deferred failure graph builds and runs");
-    assert_eq!(report.stdout, b"start\ntrue\ntrue\n42\n");
+    assert_eq!(report.stdout, b"start\ntrue\ntrue\ntrue\n42\n");
 }
 
 #[test]
