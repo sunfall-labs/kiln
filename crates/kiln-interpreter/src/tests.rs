@@ -884,40 +884,6 @@ fn node_events_builtin_exposes_event_emitter() {
         node_builtin_export_names("events"),
         Some(&["EventEmitter", "default"][..])
     );
-    assert!(node_builtin_exports("node:events").is_none());
-    assert!(node_builtin_commonjs_value("node:events").is_none());
-}
-
-#[test]
-fn node_builtin_defaults_preserve_namespace_or_callable_shape() {
-    for specifier in ["async_hooks", "crypto", "fs", "http", "net"] {
-        let default = match node_builtin_native_namespace(specifier) {
-            Some(Value::Native(namespace, _)) => namespace
-                .property("default")
-                .unwrap_or(Value::Native(namespace, RealmId::PRIMARY)),
-            _ => panic!("builtin missing: {specifier}"),
-        };
-        assert_eq!(default.type_name(), "object", "node:{specifier}");
-    }
-
-    // node:module is implemented by its TypeScript source program.  The legacy direct
-    // projection intentionally declines to manufacture a partial Native::NodeModule object;
-    // graph execution is the authoritative materialization path for this builtin.
-    assert!(node_builtin_exports("node:module").is_none());
-    assert!(node_builtin_commonjs_value("node:module").is_none());
-    let stream_default = match node_builtin_native_namespace("stream") {
-        Some(Value::Native(namespace, _)) => namespace
-            .property("default")
-            .unwrap_or(Value::Native(namespace, RealmId::PRIMARY)),
-        _ => panic!("legacy stream builtin"),
-    };
-    assert_eq!(stream_default.type_name(), "function");
-    for specifier in kiln_builtins::ts_builtin_specifiers() {
-        assert!(
-            node_builtin_exports(specifier).is_none(),
-            "TS builtin must use graph materialization: node:{specifier}"
-        );
-    }
 }
 
 #[test]

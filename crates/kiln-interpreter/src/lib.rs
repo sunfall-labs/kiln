@@ -4051,56 +4051,9 @@ pub fn node_builtin_export_names(specifier: &str) -> Option<&'static [&'static s
     kiln_node_abi::builtin_abi(specifier).map(|builtin| builtin.exports)
 }
 
-fn node_builtin_namespace(specifier: &str) -> Option<Value> {
-    // TypeScript builtins are evaluated by ModuleGraph. Returning the legacy native namespace
-    // here would let process.getBuiltinModule bypass that authoritative materialization and
-    // expose a partial object.
-    if kiln_builtins::is_ts_builtin_specifier(specifier) {
-        return None;
-    }
-    node_builtin_native_namespace(specifier)
-}
-
-/// Legacy native namespace used by TypeScript builtin implementations when they
-/// probe for an optional host capability during their own lazy evaluation.
-pub fn node_builtin_native_namespace(specifier: &str) -> Option<Value> {
-    Some(Value::Native(
-        match specifier.strip_prefix("node:").unwrap_or(specifier) {
-            "assert" | "assert/strict" => Native::NodeAssert,
-            "buffer" => Native::NodeBuffer,
-            "async_hooks" => Native::NodeAsyncHooks,
-            "console" => Native::NodeConsole,
-            "crypto" => Native::NodeCrypto,
-            "diagnostics_channel" => Native::NodeDiagnosticsChannel,
-            "dns" => Native::NodeDns,
-            "events" => Native::NodeEvents,
-            "fs/promises" => Native::NodeFsPromises,
-            "fs" => Native::NodeFs,
-            "net" => Native::NodeNet,
-            "http" => Native::NodeHttp,
-            "https" => Native::NodeHttps,
-            "http2" => Native::NodeHttp2,
-            "module" => Native::NodeModule,
-            "path" => Native::NodePath,
-            "worker_threads" => Native::NodeWorkerThreads,
-            "perf_hooks" => Native::NodePerfHooks,
-            "os" => Native::NodeOs,
-            "tty" => Native::NodeTty,
-            "zlib" => Native::NodeZlib,
-            "stream" => Native::NodeStream,
-            "string_decoder" => Native::NodeStringDecoder,
-            "querystring" => Native::NodeQueryString,
-            "util" => Native::NodeUtil,
-            "url" => Native::NodeUrl,
-            _ => return None,
-        },
-        RealmId::PRIMARY,
-    ))
-}
-
 /// The specifier a Node builtin namespace value stands for.
 ///
-/// The inverse of [`node_builtin_namespace`], and the only thing that lets a `Native` reach its
+/// The inverse of the builtin namespace projection, and the only thing that lets a `Native` reach its
 /// own entry in the shared ABI table -- which is where the list of names it publishes lives.
 fn node_builtin_specifier(native: Native) -> Option<&'static str> {
     Some(match native {
@@ -4132,90 +4085,6 @@ fn node_builtin_specifier(native: Native) -> Option<&'static str> {
         Native::NodeZlib => "node:zlib",
         _ => return None,
     })
-}
-
-/// The value one advertised export of a builtin names.
-///
-/// `default` is the exception and it is the load-bearing one: a builtin whose default *is* the
-/// module value -- `node:module`, `node:stream` -- carries no member of that name, so the
-/// namespace value itself is the answer. Both projections resolve through here so that the ESM
-/// binding and the CommonJS one cannot disagree about what `default` is; they did, and the
-/// CommonJS side read `None` and fell back to a namespace object nobody could call.
-fn node_builtin_export_value(namespace: Native, name: &str) -> Option<Value> {
-    if name == "default" {
-        return Some(
-            namespace
-                .property("default")
-                .unwrap_or(Value::Native(namespace, RealmId::PRIMARY)),
-        );
-    }
-    namespace.property(name)
-}
-
-pub fn node_builtin_exports(specifier: &str) -> Option<Vec<(String, Value)>> {
-    // TypeScript builtins are materialized by ModuleGraph from their authoritative source
-    // program.  Do not project their ABI names through the legacy Native namespace: that would
-    // silently publish a partial/stale object (for example node:module's `Module` export).
-    let builtin = kiln_node_abi::builtin_abi(specifier)?;
-    if kiln_builtins::is_ts_builtin_specifier(specifier) {
-        return None;
-    }
-    let namespace = node_builtin_native_namespace(specifier)?;
-    let Value::Native(namespace, _) = namespace else {
-        unreachable!("builtin namespaces are native values")
-    };
-    let names = builtin.exports;
-    Some(
-        names
-            .iter()
-            .map(|name| {
-                (
-                    (*name).to_owned(),
-                    node_builtin_export_value(namespace, name).unwrap_or_else(|| {
-                        panic!(
-                            "every advertised builtin export has a native value: specifier={specifier} export={name} namespace={namespace:?}"
-                        )
-                    }),
-                )
-            })
-            .collect(),
-    )
-}
-
-/// The value CommonJS receives from `require()` for one builtin.
-///
-/// ESM and CommonJS project the same canonical builtin record differently. ESM receives named
-/// bindings plus `default`; CommonJS receives Node's historical `module.exports` value, which is
-/// callable for modules such as `events` and `assert`. Keeping this beside the export table means
-/// the two projections cannot drift onto different implementations.
-pub fn node_builtin_commonjs_value(specifier: &str) -> Option<Value> {
-    if kiln_builtins::is_ts_builtin_specifier(specifier) {
-        return None;
-    }
-    let namespace = node_builtin_native_namespace(specifier)?;
-    let Value::Native(native, _) = namespace else {
-        unreachable!("builtin namespaces are native values")
-    };
-    if let Some(abi) = kiln_node_abi::builtin_abi(specifier) {
-        return match abi.commonjs {
-            kiln_node_abi::CommonJsProjection::Namespace => {
-                Some(Value::Native(native, RealmId::PRIMARY))
-            }
-            kiln_node_abi::CommonJsProjection::Callable { export, properties } => {
-                let callable = node_builtin_export_value(native, export)?;
-                for (property, target) in properties {
-                    let value = native.property(target)?;
-                    if let Some(store) = prototype_slot(&callable) {
-                        store.borrow_mut().set(property, value);
-                    } else if native.property(property) != Some(value) {
-                        return None;
-                    }
-                }
-                Some(callable)
-            }
-        };
-    }
-    None
 }
 
 impl Value {
@@ -15525,9 +15394,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         ),
                     })
                 }
-                Some(Value::String(name)) => {
-                    Ok(node_builtin_namespace(name).unwrap_or(Value::Undefined))
-                }
+                Some(Value::String(_)) => Ok(Value::Undefined),
                 _ => Ok(Value::Undefined),
             },
             Native::NodeStatIsFile | Native::NodeStatIsDirectory => {
@@ -21586,9 +21453,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     if let Some(target) = require.get(&specifier) {
                         return Ok(target);
                     }
-                }
-                if let Some(builtin) = node_builtin_commonjs_value(&specifier) {
-                    return Ok(builtin);
                 }
                 self.throw_error(
                     ErrorKind::Error,
