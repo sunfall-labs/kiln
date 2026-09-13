@@ -31467,7 +31467,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             | Value::Capability(..)
             | Value::Element(_)
             | Value::Bound(_)
-            | Value::Wrapped(_) => self
+            | Value::Wrapped(_)
+            // `require.resolve(...)` is a method call, so it arrives here after property
+            // lookup rather than through the bare-call dispatcher. Keep both CommonJS
+            // callables on the same canonical path so their loader state and builtin fallback
+            // semantics cannot diverge between `resolve(specifier)` and `require.resolve(specifier)`.
+            | Value::CommonJsRequire(_)
+            | Value::CommonJsResolve(_) => self
                 .call_value(&method, receiver, arguments, instruction)
                 .map(Some),
             Value::Function(closure) => {

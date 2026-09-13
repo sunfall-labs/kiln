@@ -407,8 +407,8 @@ fn commonjs_resolve_accepts_builtin_aliases_and_kiln_process() {
     // The resolver contract above is the same path used by CommonJS `require.resolve`; the
     // public graph path must still initialize the canonical TS builtin projection on demand.
     let entry = project.write(
-        "public.mjs",
-        "const fs = process.getBuiltinModule('fs'); const nodeFs = process.getBuiltinModule('node:fs'); const processBuiltin = process.getBuiltinModule('kiln:process'); console.log(fs === nodeFs, typeof processBuiltin.run);",
+        "public.cjs",
+        "console.log(require.resolve('fs'), require.resolve('node:fs'), require.resolve('assert/strict'), require.resolve('kiln:process')); const fs = process.getBuiltinModule('fs'); const nodeFs = process.getBuiltinModule('node:fs'); const processBuiltin = process.getBuiltinModule('kiln:process'); console.log(fs === nodeFs, typeof processBuiltin.run);",
     );
     let graph = ModuleGraph::build_node(
         &entry,
@@ -425,7 +425,10 @@ fn commonjs_resolve_accepts_builtin_aliases_and_kiln_process() {
             ExecutionCapabilities::default(),
         )
         .expect("execute builtin public graph");
-    assert_eq!(host.output, ["true function"]);
+    assert_eq!(
+        host.output,
+        ["fs node:fs assert/strict kiln:process", "true function"]
+    );
 }
 
 #[test]
