@@ -63,8 +63,17 @@ export function createRequire(filename: string | any): (specifier: string) => an
   const isUrlObject =
     filename instanceof NodeURL ||
     (filename !== null && typeof filename === "object" && typeof filename.href === "string");
-  if (typeof filename !== "string" && !isUrlObject) {
-    throw new TypeError("The argument must be a string or a file URL object");
+  const isAbsoluteFilename =
+    typeof filename === "string" &&
+    (filename.startsWith("/") || /^[A-Za-z]:[\\/]/.test(filename));
+  const isFileUrlObject =
+    isUrlObject &&
+    (filename.protocol === "file:" ||
+      (typeof filename.href === "string" && filename.href.startsWith("file://")));
+  const isFileUrlString = typeof filename === "string" && filename.startsWith("file://");
+  if (typeof filename !== "string" && !isFileUrlObject ||
+      (typeof filename === "string" && !isAbsoluteFilename && !isFileUrlString)) {
+    throw new TypeError("The argument must be an absolute path or a file URL");
   }
   // The host captures this immutable filename and binds the returned callable to the
   // graph loader for that importer. Keeping the hook private prevents a process-global

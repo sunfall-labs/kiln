@@ -6,6 +6,14 @@
 /// Version of the host operation and value contract.
 pub const HOST_ABI_VERSION: u32 = 3;
 
+/// Internal native runtime operation that returns a realm-owned GC callable. It intentionally
+/// lives outside [`HostOp`], whose result is the scalar `HostValue` ABI.
+pub const HOST_OP_MODULE_CREATE_REQUIRE: u16 = 0x7FF0;
+
+const _: () = {
+    assert!(HOST_OP_MODULE_CREATE_REQUIRE > HostOp::WriteStderr as u16);
+};
+
 /// Operations a compiled program can request from its host.
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -1322,8 +1322,8 @@ static int kiln_c99_generator_delegate_throw(kiln_host *host, kiln_generator *fr
     }
 }
 
-static int kiln_c99_default_require(void *context, kiln_host *host, kiln_value specifier,
-                                    kiln_value *result, kiln_value *thrown) {
+int kiln_c99_default_require(void *context, kiln_host *host, kiln_value specifier,
+                             kiln_value *result, kiln_value *thrown) {
     (void)context;
     if (specifier.tag == KILN_VALUE_STRING && specifier.ptr != NULL) {
         if (specifier.len == 8 && memcmp(specifier.ptr, "node:ffi", 8) == 0)
@@ -1621,6 +1621,13 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             "node:worker_threads requires an isolated realm worker capability");
     }
     if (code == KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE) {
+        /* The generated graph launcher intercepts this operation to capture the filename in the
+         * returned callable. Keep the standalone fallback for realms without a graph host. */
+        if (host != NULL && host->call != NULL) {
+            if (argc != 1 || args == NULL) return KILN_C99_INVALID_ARGUMENT;
+            return host->call(host->context, KILN_C99_HOST_MODULE_CREATE_REQUIRE,
+                              (uint16_t)argc, args, result);
+        }
         return kiln_c99_commonjs_require_value(result, kiln_c99_default_require, NULL);
     }
     /* The `Module` class `require("node:module")` hands back. It exists so that `typeof` and
