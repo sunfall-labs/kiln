@@ -5528,4 +5528,18 @@ engines (as checked by `conformance/native/node-module-shapes.cjs`). Verified wi
 integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`, and full `scripts/native.sh` parity
 (174 matched, 5 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
 
+---
+
+## Phase 5.2 TypeScript built-ins: `node:console` (2026-09-13)
+
+Migrated `node:console` completely to TypeScript via `crates/kiln-builtins/src/node/console.ts`
+with zero additions to the C runtime prelude (Phase 5.1 freeze strictly honored). Implemented canonical
+exports (`Console`, `assert`, `clear`, `count`, `countReset`, `debug`, `default`, `dir`, `dirxml`,
+`error`, `group`, `groupCollapsed`, `groupEnd`, `info`, `log`, `profile`, `profileEnd`, `table`,
+`time`, `timeEnd`, `timeLog`, `timeStamp`, `trace`, `warn`). Delegates to `globalThis.console` with
+fallback implementations when underlying host facilities differ. Verified with native probe
+`conformance/native/node-console-members.cjs` (byte-for-byte identical output between interpreter and native CLI),
+integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`, and full `scripts/native.sh` parity
+(175 matched, 5 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
+
 

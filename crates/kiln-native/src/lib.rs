@@ -2776,9 +2776,7 @@ fn native_builtin_supported_exports(
     use kiln_module_resolver::NodeBuiltin;
 
     match builtin {
-        NodeBuiltin::Console => &[
-            "Console", "debug", "default", "error", "info", "log", "warn",
-        ],
+        NodeBuiltin::Console => kiln_builtins::CONSOLE_EXPORTS,
         NodeBuiltin::Events => &["EventEmitter", "default"],
         NodeBuiltin::Ffi => &[
             "default",
