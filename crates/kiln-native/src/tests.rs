@@ -734,6 +734,37 @@ fn run_native_failure_fixture_with_dependency(
 }
 
 #[test]
+fn native_timer_callbacks_retain_closures_through_gc_and_interval_cancel() {
+    let source = r#"
+const captured = { value: 41 };
+const delay = {
+  valueOf() {
+    const garbage = [];
+    for (let i = 0; i < 5000; i++) garbage.push({ i, text: 'allocation' });
+    return 0;
+  }
+};
+const observed = [];
+setTimeout(() => {
+  observed.push(captured.value);
+  setTimeout(() => observed.push(captured.value + 1), 0);
+}, delay);
+let ticks = 0;
+const interval = setInterval(() => {
+  ticks++;
+  if (ticks === 2) {
+    clearInterval(interval);
+    setTimeout(() => console.log(observed.join(',') + ':' + ticks + ':' + captured.value), 0);
+  }
+}, 0);
+"#;
+    let Some(output) = run_native_http_fixture("native-timer-gc-liveness", source) else {
+        return;
+    };
+    assert_eq!(output, "41,42:2:41\n");
+}
+
+#[test]
 fn native_non_callable_diagnostic_keeps_call_site_and_callee_context() {
     let Some(stderr) = run_native_failure_fixture(
         "kiln-native-non-callable-diagnostic",
