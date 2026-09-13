@@ -2102,7 +2102,7 @@ struct DynamicJournal {
     pending_before: usize,
     new_modules: Vec<PathBuf>,
     new_states: Vec<PathBuf>,
-    new_dynamic_dependencies: Vec<PathBuf>,
+    new_dynamic_dependencies: Vec<(PathBuf, String)>,
     new_failures: Vec<(PathBuf, String)>,
 }
 
@@ -2156,8 +2156,18 @@ where
         for path in journal.new_states {
             self.states.remove(&path);
         }
-        for path in journal.new_dynamic_dependencies {
-            self.dynamic_dependencies.remove(&path);
+        for (importer, specifier) in journal.new_dynamic_dependencies {
+            if let Some(dependencies) = self.dynamic_dependencies.get_mut(&importer) {
+                if let Some(index) = dependencies
+                    .iter()
+                    .position(|dependency| dependency.specifier == specifier)
+                {
+                    dependencies.remove(index);
+                }
+                if dependencies.is_empty() {
+                    self.dynamic_dependencies.remove(&importer);
+                }
+            }
         }
         for key in journal.new_failures {
             self.dynamic_failures.remove(&key);
@@ -2183,10 +2193,10 @@ where
     }
 
     fn record_dynamic_dependency(&mut self, path: &Path, dependency: Dependency) {
-        if !self.dynamic_dependencies.contains_key(path) {
-            if let Some(journal) = &mut self.dynamic_journal {
-                journal.new_dynamic_dependencies.push(path.to_path_buf());
-            }
+        if let Some(journal) = &mut self.dynamic_journal {
+            journal
+                .new_dynamic_dependencies
+                .push((path.to_path_buf(), dependency.specifier.clone()));
         }
         self.dynamic_dependencies
             .entry(path.to_path_buf())

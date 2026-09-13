@@ -192,6 +192,10 @@ fn failed_dynamic_subtree_is_deferred_until_import() {
     );
     let graph = Arc::new(project.graph(&entry).expect("optional subtree is deferred"));
     assert_eq!(graph.module_count(), 1);
+    assert!(
+        graph.dynamic_dependencies(&entry).is_empty(),
+        "failed dynamic targets must not remain in the successful edge map"
+    );
 
     let loader = GraphModuleLoader::new(Arc::clone(&graph));
     let error = match loader.load(ModuleLoadRequest {
