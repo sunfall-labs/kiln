@@ -67,6 +67,85 @@ fn binary_asset_is_retained_as_an_explicit_path_module() {
 }
 
 #[test]
+fn create_require_literal_is_retained_as_lazy_runtime_dependency() {
+    let project = TempProject::new();
+    let dependency = project.write("dep.cjs", "module.exports = 42;");
+    let entry = project.write(
+        "main.mjs",
+        "import { createRequire } from 'node:module'; const req = createRequire(import.meta.url); req('./dep.cjs');",
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        frontend_oxc::parse,
+    )
+    .expect("build createRequire graph");
+    let node = graph.module(&entry).expect("entry node");
+    assert_eq!(
+        node.runtime_dependencies
+            .iter()
+            .map(|dependency| dependency.target.clone())
+            .collect::<Vec<_>>(),
+        vec![dependency.clone()]
+    );
+    assert_eq!(node.runtime_dependencies[0].specifier, "./dep.cjs");
+    assert_eq!(node.runtime_dependencies[0].importer, entry);
+    assert!(
+        graph.module(&dependency).is_some(),
+        "lazy target is in closure"
+    );
+    assert!(
+        !graph.statically_reachable().contains(&dependency),
+        "lazy target is not startup evaluation"
+    );
+}
+
+#[test]
+fn create_require_uses_its_captured_file_as_the_resolution_base() {
+    let project = TempProject::new();
+    fs::create_dir_all(project.root.join("nested")).unwrap();
+    let base = project.write("nested/base.cjs", "module.exports = 1;");
+    let dependency = project.write("nested/dep.cjs", "module.exports = 42;");
+    let entry = project.write(
+        "main.mjs",
+        &format!(
+            "import {{ createRequire }} from 'node:module'; const req = createRequire('{}'); req('./dep.cjs');",
+            base.display()
+        ),
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        frontend_oxc::parse,
+    )
+    .expect("build captured-base graph");
+    let node = graph.module(&entry).expect("entry node");
+    assert_eq!(node.runtime_dependencies.len(), 1);
+    assert_eq!(node.runtime_dependencies[0].importer, base);
+    assert_eq!(node.runtime_dependencies[0].target, dependency);
+}
+
+#[test]
+fn unresolved_create_require_is_a_deferred_runtime_failure() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        "import { createRequire } from 'node:module'; const req = createRequire(import.meta.url); req('./missing.cjs');",
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        frontend_oxc::parse,
+    )
+    .expect("unresolved lazy target is deferred");
+    assert!(graph.module(&entry).is_some());
+    assert!(graph.dynamic_failure(&entry, "./missing.cjs").is_some());
+}
+
+#[test]
 fn dynamic_loader_resolves_against_the_requesting_module() {
     let project = TempProject::new();
     fs::create_dir_all(project.root.join("a")).unwrap();

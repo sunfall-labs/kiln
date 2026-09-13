@@ -361,6 +361,7 @@ pub fn compile_module(module: &Module) -> Result<ModuleProgram, Vec<CompileDiagn
     }
 
     let link_facts = ModuleLinkFacts {
+        node_runtime_requests: Vec::new(),
         immutable_bindings: immutable_module_bindings(module),
         direct_eval: body_contains_direct_eval(&module.body),
         new_function: body_contains_new_function(&module.body),
@@ -442,6 +443,7 @@ pub fn compile_commonjs(module: &Module) -> Result<ModuleProgram, Vec<CompileDia
     }
     compiler.compile_body(module);
     let link_facts = ModuleLinkFacts {
+        node_runtime_requests: Vec::new(),
         immutable_bindings: immutable_module_bindings(module),
         direct_eval: body_contains_direct_eval(&module.body),
         new_function: body_contains_new_function(&module.body),

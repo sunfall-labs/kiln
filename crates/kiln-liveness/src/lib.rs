@@ -269,6 +269,11 @@ pub fn select_executable_modules<'a>(
                 mark_live(&dependency.target, &mut live, &mut queue);
             }
         }
+        // Literal createRequire/getBuiltinModule targets are lazy at execution time but remain
+        // part of the closed graph: the runtime loader may request any one of them.
+        for dependency in &node.runtime_dependencies {
+            mark_live(&dependency.target, &mut live, &mut queue);
+        }
 
         for (import_index, import) in node.program.imports.iter().enumerate() {
             if node.source == ModuleSource::CommonJs && import.source == "*commonjs-wrapper*" {
@@ -575,6 +580,17 @@ pub fn retained_method_groups(
                 },
                 // An explicit `node:` specifier that resolved anywhere else is
                 // unexpected; failing closed keeps the program working.
+                _ if dependency.specifier.starts_with("node:") => return FULL,
+                _ => {}
+            }
+        }
+        for dependency in &node.runtime_dependencies {
+            let target = graph.module(&dependency.target);
+            match target.map(|module| &module.source) {
+                Some(ModuleSource::NodeBuiltin(builtin)) => match builtin_groups(builtin) {
+                    Some(groups) => mask |= groups,
+                    None => return FULL,
+                },
                 _ if dependency.specifier.starts_with("node:") => return FULL,
                 _ => {}
             }
