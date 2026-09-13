@@ -6501,11 +6501,12 @@ static int kiln_graph_enter(void *opaque) {
     );
     for index in 0..modules.len() {
         writeln!(output, "        case {index}: {{").unwrap();
-        for dependency in &modules[index].0.dependencies {
+        for (dependency_index, dependency) in modules[index].0.dependencies.iter().enumerate() {
             if let Some(&provider) = indices.get(&dependency.target) {
                 writeln!(
                     output,
-                    "            int status = kiln_graph_ensure_module(graph, (size_t){provider}); if (status != KILN_C99_OK) return status;"
+                    "            {}status = kiln_graph_ensure_module(graph, (size_t){provider}); if (status != KILN_C99_OK) return status;",
+                    if dependency_index == 0 { "int " } else { "" }
                 )
                 .unwrap();
             }
