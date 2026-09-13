@@ -4464,10 +4464,13 @@ fn dynamic_import_without_module_loader_rejects_with_type_error() {
 
 #[test]
 fn dynamic_import_with_unsupported_loader_rejects_with_type_error() {
-    fn mock_loader(_specifier: &str) -> Result<ModulePlan, ModuleLoadError> {
-        Err(ModuleLoadError::Unsupported(
-            "custom resolver refused specifier".into(),
-        ))
+    struct MockLoader;
+    impl ModuleLoaderService for MockLoader {
+        fn load(&self, _request: ModuleLoadRequest) -> Result<ModulePlan, ModuleLoadError> {
+            Err(ModuleLoadError::Unsupported(
+                "custom resolver refused specifier".into(),
+            ))
+        }
     }
 
     let program = Program {
@@ -4490,7 +4493,8 @@ fn dynamic_import_with_unsupported_loader_rejects_with_type_error() {
         timezone: None,
         locale: None,
     };
-    let capabilities = ExecutionCapabilities::default().with_module_loader(mock_loader);
+    let capabilities =
+        ExecutionCapabilities::default().with_module_loader_service(Arc::new(MockLoader));
     let result = execute(
         Rc::new(program),
         &mut host,

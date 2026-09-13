@@ -4729,14 +4729,6 @@ impl ExecutionCapabilities {
         self.source_compiler
     }
 
-    pub fn with_module_loader(mut self, loader: ModuleLoader) -> Self {
-        self.module_loader = Some(Arc::new(FunctionModuleLoader {
-            loader: Some(loader),
-            with_options: None,
-        }));
-        self
-    }
-
     pub fn with_module_loader_service(
         mut self,
         loader: Arc<dyn ModuleLoaderService + Send + Sync>,
@@ -4746,18 +4738,6 @@ impl ExecutionCapabilities {
     }
 
     pub fn module_loader(&self) -> Option<Arc<dyn ModuleLoaderService + Send + Sync>> {
-        self.module_loader.clone()
-    }
-
-    pub fn with_module_loader_with_options(mut self, loader: ModuleLoaderWithOptions) -> Self {
-        self.module_loader = Some(Arc::new(FunctionModuleLoader {
-            loader: None,
-            with_options: Some(loader),
-        }));
-        self
-    }
-
-    pub fn module_loader_with_options(&self) -> Option<Arc<dyn ModuleLoaderService + Send + Sync>> {
         self.module_loader.clone()
     }
 
@@ -4873,14 +4853,6 @@ pub enum ModuleLoadError {
 /// interpreter is downstream of the bytecode and has no filesystem, no parser and no linker.
 /// A host that installs none simply has no `import()`, and says so rather than answering.
 ///
-/// The specifier arrives already coerced to a string. This temporary function-pointer contract
-/// carries no referrer; a filesystem-backed loader must not emulate one with ambient state. The
-/// referrer-aware service object that replaces this is part of the remaining module-realm kernel
-/// migration.
-pub type ModuleLoader = fn(&str) -> Result<ModulePlan, ModuleLoadError>;
-pub type ModuleLoaderWithOptions =
-    fn(&str, &ImportAttributes) -> Result<ModulePlan, ModuleLoadError>;
-
 /// The complete context of one dynamic import request. The service is scoped to an execution
 /// realm, so a loader can retain graph ownership without ambient process state.
 #[derive(Clone)]
@@ -4897,25 +4869,6 @@ pub struct ImportAttributes {
 
 pub trait ModuleLoaderService: Send + Sync {
     fn load(&self, request: ModuleLoadRequest) -> Result<ModulePlan, ModuleLoadError>;
-}
-
-struct FunctionModuleLoader {
-    loader: Option<ModuleLoader>,
-    with_options: Option<ModuleLoaderWithOptions>,
-}
-
-impl ModuleLoaderService for FunctionModuleLoader {
-    fn load(&self, request: ModuleLoadRequest) -> Result<ModulePlan, ModuleLoadError> {
-        match (&self.with_options, request.attributes) {
-            (Some(loader), Some(options)) => loader(&request.specifier, &options),
-            (None, Some(_)) => Err(ModuleLoadError::Unsupported(
-                "no option-aware module loader is installed".to_owned(),
-            )),
-            (Some(_), None) | (None, None) => self.loader.ok_or_else(|| {
-                ModuleLoadError::Unsupported("no module loader is installed".to_owned())
-            })?(&request.specifier),
-        }
-    }
 }
 
 /// Whether a program reads or writes module scope through the frame stack.
