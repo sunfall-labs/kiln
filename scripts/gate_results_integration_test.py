@@ -77,6 +77,27 @@ class GateResultsCliIntegrationTests(unittest.TestCase):
         self.assertTrue(out.exists(), result.stdout + result.stderr)
         return out
 
+    def workspace_step(self) -> Path:
+        log = self.root / "crate-tests.log"
+        log.write_text(
+            "test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s\n",
+            encoding="utf-8",
+        )
+        out = self.root / "crate-tests.envelope.json"
+        result = self.cli(
+            "workspace",
+            "--name",
+            "crate tests",
+            "--log",
+            str(log),
+            "--status",
+            "0",
+            "--out",
+            str(out),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return out
+
     def aggregate(self, expected: list[str]) -> subprocess.CompletedProcess[str]:
         out = self.root / "aggregate.json"
         args = ["aggregate", "--directory", str(self.root), "--out", str(out)]
@@ -89,7 +110,7 @@ class GateResultsCliIntegrationTests(unittest.TestCase):
 
     def test_quick_four_steps_pass_and_preserve_step_outcomes(self) -> None:
         names = ["build", "crate tests", "native parity", "thirdparty"]
-        paths = [self.process(name) for name in names]
+        paths = [self.process("build"), self.workspace_step(), self.process("native parity"), self.process("thirdparty")]
         result = self.aggregate(names)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.aggregate_document["verdict"], "passed")
@@ -102,6 +123,10 @@ class GateResultsCliIntegrationTests(unittest.TestCase):
                 document["source"]["binary_sha256"],
                 hashlib.sha256(self.binary.read_bytes()).hexdigest(),
             )
+        workspace_record = next(record for record in self.aggregate_document["steps"] if record["source"]["name"] == "crate tests")
+        self.assertEqual(workspace_record["outcomes"], {"total": 3, "passed": 2, "failed": 0})
+        self.assertEqual(workspace_record["outcome_breakdown"]["ignored"], 1)
+        self.assertEqual(workspace_record["evidence"]["log"], str((self.root / "crate-tests.log").resolve()))
 
     def test_missing_duplicate_and_malformed_steps_fail(self) -> None:
         self.process("build")
