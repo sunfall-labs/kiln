@@ -59,7 +59,7 @@ macro_rules! native_artifact_catalogue {
     ($callback:ident) => {
         $callback! {
             sources: [ModuleSource, RuntimeSource, PreludeSource, LauncherSource, GraphLauncherSource, SharedModuleSource, SharedGraphWrapperSource, NumberProvider],
-            objects: [ModuleObject, RuntimeModuleObject, RuntimeObject, PreludeObject, LauncherObject, SharedLibraryObject, SharedPreludeObject, SharedGraphModuleObject, SharedGraphWrapperObject, SharedGraphObject, GraphLauncherObject]
+            objects: [ModuleObject, RuntimeModuleObject, RuntimeObject, PreludeObject, LauncherObject, SharedLibraryObject, SharedPreludeObject, SharedGraphModuleObject, SharedGraphWrapperObject, SharedGraphObject, GraphLauncherObject, SharedLibraryLink, SharedGraphLink]
         }
     };
 }
@@ -76,6 +76,54 @@ macro_rules! define_native_artifact_family {
 native_artifact_catalogue!(define_native_artifact_family);
 
 impl NativeArtifactFamily {
+    fn for_key(kind: ArtifactKind, backend: &Backend, abi: &str) -> Option<Self> {
+        let name = backend.as_str();
+        Some(match (kind, name, abi.contains("module-api-")) {
+            (ArtifactKind::GeneratedC, "c", _) if abi.contains("host-") => Self::ModuleSource,
+            (ArtifactKind::GeneratedC, "native-runtime-source", _) => Self::RuntimeSource,
+            (ArtifactKind::GeneratedC, "native-prelude-source", _) => Self::PreludeSource,
+            (ArtifactKind::GeneratedC, "native-launcher-source", _) => Self::LauncherSource,
+            (ArtifactKind::GeneratedC, "native-graph-launcher-source", _) => {
+                Self::GraphLauncherSource
+            }
+            (ArtifactKind::GeneratedC, "native-shared-library-source", true) => {
+                Self::SharedModuleSource
+            }
+            (ArtifactKind::GeneratedC, "native-shared-graph-wrapper-source", _) => {
+                Self::SharedGraphWrapperSource
+            }
+            (ArtifactKind::RuntimeLibrary, "rust-native-number-provider", _) => {
+                Self::NumberProvider
+            }
+            (ArtifactKind::NativeObject, "c", _) if abi.contains("runtime-") => {
+                Self::RuntimeModuleObject
+            }
+            (ArtifactKind::NativeObject, "c", _) => Self::ModuleObject,
+            (ArtifactKind::NativeObject, "native-runtime", _) => Self::RuntimeObject,
+            (ArtifactKind::NativeObject, "native-runtime-prelude", _) => Self::PreludeObject,
+            (ArtifactKind::NativeObject, "native-launcher", _) => Self::LauncherObject,
+            (ArtifactKind::NativeObject, "native-shared-library", true) => {
+                Self::SharedLibraryObject
+            }
+            (ArtifactKind::NativeObject, "native-shared-prelude", true) => {
+                Self::SharedPreludeObject
+            }
+            (ArtifactKind::NativeObject, "native-shared-graph-module", _) => {
+                Self::SharedGraphModuleObject
+            }
+            (ArtifactKind::NativeObject, "native-shared-graph-wrapper", _) => {
+                Self::SharedGraphWrapperObject
+            }
+            (ArtifactKind::NativeObject, "native-graph-launcher", _) => Self::GraphLauncherObject,
+            (ArtifactKind::NativeObject, "native-shared-graph", _) => Self::SharedGraphObject,
+            // The shared-library backend is also used for the final linked artifact. Its ABI
+            // distinguishes the ordinary and graph variants at the link-input level.
+            (ArtifactKind::LinkedArtifact, "native-shared-library", _) => Self::SharedLibraryLink,
+            (ArtifactKind::LinkedArtifact, "native-shared-graph", _) => Self::SharedGraphLink,
+            _ => return None,
+        })
+    }
+
     fn backend_abi(
         self,
         module_abi: &str,
@@ -146,6 +194,14 @@ impl NativeArtifactFamily {
                 Backend::Custom("native-shared-graph".into()),
                 runtime_abi.into(),
             ),
+            Self::SharedLibraryLink => (
+                Backend::Custom("native-shared-library".into()),
+                embedding_abi.into(),
+            ),
+            Self::SharedGraphLink => (
+                Backend::Custom("native-shared-graph".into()),
+                embedding_abi.into(),
+            ),
         }
     }
     fn compiler_version(self) -> String {
@@ -175,8 +231,48 @@ impl NativeArtifactFamily {
             Self::SharedPreludeObject => "shared-prelude-object".into(),
             Self::SharedGraphModuleObject => "shared-graph-module-object".into(),
             Self::SharedGraphObject => "shared-graph-object".into(),
+            Self::SharedLibraryLink => "shared-library-link".into(),
+            Self::SharedGraphLink => "shared-graph-link".into(),
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn key(
+    kind: ArtifactKind,
+    compiler: impl Into<String>,
+    backend: Backend,
+    abi: &str,
+    target: &str,
+    profile: CacheProfile,
+    options: Digest,
+    inputs: impl IntoIterator<Item = Digest>,
+) -> ArtifactKey {
+    // All production key construction passes through the family catalogue used by eviction.
+    let _family = NativeArtifactFamily::for_key(kind.clone(), &backend, abi);
+    ArtifactKey::new(
+        kind, compiler, backend, abi, target, "generic", profile, "none", options, inputs,
+    )
+}
+
+fn cache_identity(
+    compiler: impl Into<String>,
+    backend: Backend,
+    abi: &str,
+    target: &str,
+    profile: CacheProfile,
+) -> Digest {
+    key(
+        ArtifactKind::GeneratedC,
+        compiler,
+        backend,
+        abi,
+        target,
+        profile,
+        Digest::hash(b"identity representative"),
+        [],
+    )
+    .identity_digest()
 }
 
 fn release_module_uses_generic_bodies(module: &ModuleProgram, policy: &EmissionPolicy) -> bool {
