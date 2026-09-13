@@ -42,6 +42,7 @@ fi
 # shellcheck source=lib.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
 cd "$(kiln_repo_root)"
+export KILN_CODE_SNAPSHOT_SHA256="$(python3 -c 'import sys; sys.path.insert(0, "scripts"); import gate_results; print(gate_results.code_snapshot())')"
 
 QUICK=0
 [[ ${1:-} == --quick ]] && QUICK=1
