@@ -2315,6 +2315,98 @@ fn node_builtin_perf_hooks_commonjs_require_evaluates_cleanly() {
 }
 
 #[test]
+fn node_builtin_console_evaluates_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import nodeConsole, { Console, log, error, warn, info, debug, assert } from 'node:console';",
+            "log('direct-log');",
+            "console.log(",
+            "  typeof nodeConsole === 'object',",
+            "  nodeConsole.default === nodeConsole,",
+            "  typeof Console === 'function',",
+            "  typeof log === 'function',",
+            "  typeof error === 'function',",
+            "  typeof warn === 'function',",
+            "  typeof info === 'function',",
+            "  typeof debug === 'function',",
+            "  typeof assert === 'function',",
+            ");",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with console builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute console builtin");
+    assert_eq!(
+        host.output,
+        ["direct-log", "true true true true true true true true true"]
+    );
+}
+
+#[test]
+fn node_builtin_console_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const c = require('node:console');",
+            "c.log('bridge-log');",
+            "module.exports = {",
+            "  isObj: typeof c === 'object',",
+            "  hasConsole: typeof c.Console === 'function',",
+            "  hasLog: typeof c.log === 'function',",
+            "  selfEq: c.default === c,",
+            "};",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import bridge from './bridge.cjs';",
+            "console.log(bridge.isObj, bridge.hasConsole, bridge.hasLog, bridge.selfEq);",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with console builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute console builtin cjs");
+    assert_eq!(host.output, ["bridge-log", "true true true true"]);
+}
+
+#[test]
 fn node_net_connect_is_a_typed_virtual_module_export() {
     let project = TempProject::new();
     let entry = project.write(

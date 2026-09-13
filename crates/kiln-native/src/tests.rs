@@ -1095,6 +1095,12 @@ fn node_events_is_a_ts_builtin_and_https_has_a_native_runtime_materializer() {
         NodeBuiltin::PerfHooks,
         "PerformanceEntry"
     ));
+    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Console));
+    assert!(native_builtin_supports_export(
+        NodeBuiltin::Console,
+        "Console"
+    ));
+    assert!(native_builtin_supports_export(NodeBuiltin::Console, "log"));
     assert!(native_builtin_body(NodeBuiltin::Https).is_some());
     assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Path));
     assert!(native_builtin_supports_export(NodeBuiltin::Path, "join"));
@@ -9184,4 +9190,94 @@ fn native_node_perf_hooks_commonjs_require_builds_and_runs() {
     );
     let stdout = String::from_utf8_lossy(&result.stdout);
     assert_eq!(stdout.trim(), "cjs-perf: object function number true true");
+}
+
+#[test]
+fn native_node_console_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-console-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import nodeConsole, { Console, log, error, warn, info, debug, assert } from 'node:console';\n",
+            "log('console-log-works');\n",
+            "console.log('console-ts:', typeof nodeConsole, typeof Console, typeof log, typeof error, typeof warn, typeof info, typeof debug, typeof assert, nodeConsole.default === nodeConsole);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("console_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run console binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("console-log-works"));
+    assert!(stdout.contains(
+        "console-ts: object function function function function function function function true"
+    ));
+}
+
+#[test]
+fn native_node_console_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-console-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const c = require('node:console');\n",
+            "c.log('cjs-console-works');\n",
+            "console.log('cjs-console:', typeof c, typeof c.Console, typeof c.log, typeof c.warn, c.default === c);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("console_cjs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run console cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("cjs-console-works"));
+    assert!(stdout.contains("cjs-console: object function function function true"));
 }
