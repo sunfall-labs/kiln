@@ -54,8 +54,8 @@ use std::time::Duration;
 pub use kiln_artifact_cache::{CapabilityIdentity, RealmCapabilityIdentity};
 use kiln_host_abi::{
     AcceptedTcpStream, ActiveAsyncHostOps, AsyncHostError, AsyncHostOp, AsyncHostOps,
-    AsyncHostValue, Completion, FileStat, HostError, HostOp, HostOps, HostValue, RequestId,
-    ResourceId, ResourceInfo, ResourceKind, ResourceState,
+    AsyncHostValue, Completion, FileStat, HostError, HostOp, HostOps, HostValue, ProcessOutput,
+    RequestId, ResourceId, ResourceInfo, ResourceKind, ResourceState,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{
@@ -2479,6 +2479,15 @@ impl TokioHost {
                 return request;
             }
             AsyncHostOp::StdinRead { max_bytes } => AsyncHostOp::StdinRead { max_bytes },
+            AsyncHostOp::ProcessRun {
+                command,
+                args,
+                stdin,
+            } => AsyncHostOp::ProcessRun {
+                command,
+                args,
+                stdin,
+            },
         };
         self.spawn_task(request, sequence, referenced, async move {
             let result = execute_async_host_op(operation).await;
@@ -2964,6 +2973,76 @@ async fn execute_async_host_op(operation: AsyncHostOp) -> Result<AsyncHostValue,
                 .map_err(|error| io_error("read", "stdin".to_string(), error))?;
             bytes.truncate(length);
             Ok(AsyncHostValue::Bytes(bytes))
+        }
+        AsyncHostOp::ProcessRun {
+            command,
+            args,
+            stdin,
+        } => {
+            use std::process::Stdio;
+            let mut process = tokio::process::Command::new(&command);
+            process
+                .args(&args)
+                .stdin(if stdin.is_some() {
+                    Stdio::piped()
+                } else {
+                    Stdio::null()
+                })
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            let mut child = process
+                .spawn()
+                .map_err(|error| io_error("spawn", command.clone(), error))?;
+            let mut child_stdout = child.stdout.take().ok_or_else(|| {
+                AsyncHostError::new(
+                    "EIO",
+                    "spawn",
+                    Some(command.clone()),
+                    "child stdout was not piped",
+                )
+            })?;
+            let mut child_stderr = child.stderr.take().ok_or_else(|| {
+                AsyncHostError::new(
+                    "EIO",
+                    "spawn",
+                    Some(command.clone()),
+                    "child stderr was not piped",
+                )
+            })?;
+            let child_stdin = child.stdin.take();
+            let stdout = async {
+                let mut bytes = Vec::new();
+                child_stdout.read_to_end(&mut bytes).await.map(|_| bytes)
+            };
+            let stderr = async {
+                let mut bytes = Vec::new();
+                child_stderr.read_to_end(&mut bytes).await.map(|_| bytes)
+            };
+            let write_stdin = async {
+                if let (Some(data), Some(mut pipe)) = (stdin, child_stdin) {
+                    pipe.write_all(&data).await?;
+                }
+                Ok::<(), std::io::Error>(())
+            };
+            let (stdout, stderr, stdin_result, status) =
+                tokio::join!(stdout, stderr, write_stdin, child.wait());
+            stdin_result.map_err(|error| io_error("write", format!("{command}:stdin"), error))?;
+            let status = status.map_err(|error| io_error("wait", command.clone(), error))?;
+            let stdout =
+                stdout.map_err(|error| io_error("read", format!("{command}:stdout"), error))?;
+            let stderr =
+                stderr.map_err(|error| io_error("read", format!("{command}:stderr"), error))?;
+            #[cfg(unix)]
+            let signal = std::os::unix::process::ExitStatusExt::signal(&status);
+            #[cfg(not(unix))]
+            let signal = None;
+            Ok(AsyncHostValue::ProcessOutput(ProcessOutput {
+                stdout,
+                stderr,
+                exit_code: status.code(),
+                signal,
+            }))
         }
         AsyncHostOp::CloseResource { .. }
         | AsyncHostOp::SetResourceReferenced { .. }
@@ -3529,6 +3608,95 @@ pub fn duration_from_milliseconds(milliseconds: f64) -> Duration {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn tokio_host_runs_process_with_bidirectional_pipes_and_preserves_status() {
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        let request = runtime.start_host_op(
+            AsyncHostOp::ProcessRun {
+                command: "sh".into(),
+                args: vec![
+                    "-c".into(),
+                    "head -c 131072 /dev/zero & cat >/dev/null; wait; printf stderr >&2".into(),
+                ],
+                stdin: Some(vec![b'x'; 131072]),
+            },
+            false,
+        );
+        let completion = next_host_completion(&mut runtime)
+            .expect("realm runtime remains healthy")
+            .expect("process completes");
+        assert_eq!(completion.request, request);
+        let AsyncHostValue::ProcessOutput(output) = completion.result.expect("process succeeds")
+        else {
+            panic!("expected process output")
+        };
+        assert_eq!(output.stdout.len(), 131072);
+        assert_eq!(output.stderr, b"stderr");
+        assert_eq!(output.exit_code, Some(0));
+        assert_eq!(output.signal, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tokio_host_process_result_preserves_signal_termination() {
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        runtime.start_host_op(
+            AsyncHostOp::ProcessRun {
+                command: "sh".into(),
+                args: vec!["-c".into(), "kill -TERM $$".into()],
+                stdin: None,
+            },
+            false,
+        );
+        let completion = next_host_completion(&mut runtime)
+            .expect("realm runtime remains healthy")
+            .expect("process completes");
+        let AsyncHostValue::ProcessOutput(output) = completion.result.expect("process result")
+        else {
+            panic!("expected process output")
+        };
+        assert_eq!(output.exit_code, None);
+        assert_eq!(output.signal, Some(libc::SIGTERM));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tokio_host_process_reports_nonzero_exit_and_missing_command() {
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        runtime.start_host_op(
+            AsyncHostOp::ProcessRun {
+                command: "sh".into(),
+                args: vec!["-c".into(), "printf failed >&2; exit 7".into()],
+                stdin: None,
+            },
+            false,
+        );
+        let completion = next_host_completion(&mut runtime)
+            .expect("realm runtime remains healthy")
+            .expect("process completes");
+        let AsyncHostValue::ProcessOutput(output) = completion.result.expect("process result")
+        else {
+            panic!("expected process output")
+        };
+        assert_eq!(output.exit_code, Some(7));
+        assert_eq!(output.stderr, b"failed");
+
+        runtime.start_host_op(
+            AsyncHostOp::ProcessRun {
+                command: "kiln-process-command-that-does-not-exist".into(),
+                args: Vec::new(),
+                stdin: None,
+            },
+            false,
+        );
+        let completion = next_host_completion(&mut runtime)
+            .expect("realm runtime remains healthy")
+            .expect("spawn failure completes");
+        let error = completion.result.expect_err("missing command fails");
+        assert_eq!(error.syscall, "spawn");
+    }
+
     /// A clock reading keeps the part of it that is shorter than a millisecond.
     ///
     /// The native FFI once spelled this conversion `as_millis() as f64`, which truncates, while

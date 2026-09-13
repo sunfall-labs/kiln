@@ -156,6 +156,12 @@ pub enum AsyncHostOp {
     TcpShutdown { stream: ResourceId },
     /// Read up to `max_bytes` from the host's standard input. Empty bytes represent EOF.
     StdinRead { max_bytes: usize },
+    /// Run one child process to completion, optionally writing bytes to its standard input.
+    ProcessRun {
+        command: String,
+        args: Vec<String>,
+        stdin: Option<Vec<u8>>,
+    },
 }
 
 /// Stable resource category that does not expose executor or operating-system types.
@@ -222,6 +228,18 @@ pub enum AsyncHostValue {
     ResourceState(ResourceState),
     /// A newly accepted TCP stream.
     AcceptedTcpStream(AcceptedTcpStream),
+    /// Captured child-process output and termination status.
+    ProcessOutput(ProcessOutput),
+}
+
+/// Owned output from a completed child process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessOutput {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub exit_code: Option<i32>,
+    /// Platform signal number when the process was terminated by a signal.
+    pub signal: Option<i32>,
 }
 
 /// Stable error information that a Node compatibility Adapter can turn into a JavaScript error.
