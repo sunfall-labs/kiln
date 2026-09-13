@@ -223,6 +223,68 @@ fn release_pruning_preserves_superclass_tdz() {
     );
 }
 
+#[test]
+fn executable_module_sizes_reports_retained_and_dropped() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let project = TestDirectory::new("kiln-module-sizes");
+    fs::write(
+        project.path.join("package.json"),
+        r#"{"sideEffects": false}"#,
+    )
+    .expect("write package.json");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "import { a } from './dep1.mjs';\nimport './dep2.mjs';\nconsole.log(a());\n",
+    )
+    .expect("write entry");
+    fs::write(
+        project.path.join("dep1.mjs"),
+        "export function a() { return 1; }\nexport function b() { return 2; }\nfunction helperUnused() { return 3; }\n",
+    )
+    .expect("write dep1");
+    fs::write(
+        project.path.join("dep2.mjs"),
+        "globalThis.__sideEffectProbe = 1;\n",
+    )
+    .expect("write dep2");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("sizes graph");
+    let sizes = executable_module_sizes(&graph, NativeProfile::Dev).expect("module sizes");
+    assert_eq!(sizes.len(), 3, "entry plus two dependencies");
+    let by_name = |name: &str| {
+        sizes
+            .iter()
+            .find(|size| size.path.ends_with(name))
+            .unwrap_or_else(|| panic!("{name} reported"))
+    };
+    let entry_sizes = by_name("main.mjs");
+    assert!(entry_sizes.live);
+    let dep1 = by_name("dep1.mjs");
+    assert!(dep1.live);
+    assert!(
+        dep1.retained_functions < dep1.total_functions,
+        "unused helper is not retained: {dep1:?}"
+    );
+    assert!(
+        dep1.retained_instructions < dep1.total_instructions,
+        "unused bodies shrink the module: {dep1:?}"
+    );
+    let dep2 = by_name("dep2.mjs");
+    assert!(
+        !dep2.live,
+        "side-effect-only import of a side-effect-free package is dropped: {dep2:?}"
+    );
+    assert_eq!(dep2.retained_instructions, 0);
+    assert_eq!(dep2.retained_functions, 0);
+}
+
 struct OxcFrontend;
 
 #[test]

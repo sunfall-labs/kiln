@@ -1639,7 +1639,15 @@ pub(crate) fn native_build_graph(
     ) {
         Ok(report) => {
             let explanation = if explain {
-                Some(kiln_backend_c::facts::analyze_graph(graph).format_explain())
+                let mut text = kiln_backend_c::facts::analyze_graph(graph).format_explain();
+                // Out-of-band attribution: a failure here must never fail the
+                // build, so the sizes section is skipped rather than propagated.
+                if let Ok(sizes) =
+                    kiln_native::executable_module_sizes(graph, native_profile(profile))
+                {
+                    text.push_str(&kiln_backend_c::facts::format_module_sizes(&sizes));
+                }
+                Some(text)
             } else {
                 None
             };
