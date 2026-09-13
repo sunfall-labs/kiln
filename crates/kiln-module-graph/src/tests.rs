@@ -142,7 +142,11 @@ fn unresolved_create_require_is_a_deferred_runtime_failure() {
     )
     .expect("unresolved lazy target is deferred");
     assert!(graph.module(&entry).is_some());
-    assert!(graph.dynamic_failure(&entry, "./missing.cjs").is_some());
+    assert_eq!(graph.runtime_failures(&entry).count(), 1);
+    let ((importer, specifier), message) = graph.runtime_failures(&entry).next().unwrap();
+    assert_eq!(importer, &entry);
+    assert_eq!(specifier, "./missing.cjs");
+    assert!(message.contains("runtime request failed"));
 }
 
 #[test]

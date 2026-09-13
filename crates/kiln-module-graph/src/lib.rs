@@ -130,6 +130,13 @@ pub struct RuntimeDependency {
     pub target: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeFailure {
+    pub importer: PathBuf,
+    pub specifier: String,
+    pub message: String,
+}
+
 fn runtime_importer_path(raw: &str) -> Result<PathBuf, String> {
     if raw.starts_with("file:") {
         let url =
@@ -214,6 +221,7 @@ pub struct ModuleGraph {
     patched_modules: Arc<BTreeMap<PathBuf, ModuleNode>>,
     dynamic_dependencies: Arc<HashMap<PathBuf, Vec<Dependency>>>,
     dynamic_failures: Arc<BTreeMap<(PathBuf, String), String>>,
+    runtime_failures: Arc<BTreeMap<PathBuf, BTreeMap<(PathBuf, String), String>>>,
 }
 
 /// A realm-scoped dynamic importer backed by one immutable graph snapshot.
@@ -802,7 +810,9 @@ impl ModuleGraph {
             order: Vec::new(),
             dynamic_dependencies: HashMap::new(),
             dynamic_failures: HashMap::new(),
+            runtime_failures: BTreeMap::new(),
             dynamic_work: Vec::new(),
+            runtime_work: Vec::new(),
             dynamic_journal: None,
         };
         builder.visit(entry_path.clone())?;
@@ -817,6 +827,7 @@ impl ModuleGraph {
             patched_modules: Arc::new(BTreeMap::new()),
             dynamic_dependencies: Arc::new(builder.dynamic_dependencies),
             dynamic_failures: Arc::new(builder.dynamic_failures.into_iter().collect()),
+            runtime_failures: Arc::new(builder.runtime_failures),
         })
     }
 
@@ -872,6 +883,16 @@ impl ModuleGraph {
     /// Return deferred dynamic failures in deterministic importer/specifier order.
     pub fn dynamic_failures(&self) -> impl Iterator<Item = (&(PathBuf, String), &String)> {
         self.dynamic_failures.iter()
+    }
+
+    pub fn runtime_failures(
+        &self,
+        owner: impl AsRef<Path>,
+    ) -> impl Iterator<Item = (&(PathBuf, String), &String)> {
+        self.runtime_failures
+            .get(owner.as_ref())
+            .into_iter()
+            .flat_map(BTreeMap::iter)
     }
 
     /// Return the entry module and all modules reachable through static dependencies.
@@ -1113,6 +1134,12 @@ impl ModuleGraph {
             .filter(|((importer, _), _)| demand.live.contains(importer))
             .map(|(key, message)| (key.clone(), message.clone()))
             .collect();
+        let runtime_failures = self
+            .runtime_failures
+            .iter()
+            .filter(|(owner, _)| demand.live.contains(*owner))
+            .map(|(owner, failures)| (owner.clone(), failures.clone()))
+            .collect();
         Ok((
             Self {
                 entry: self.entry.clone(),
@@ -1123,6 +1150,7 @@ impl ModuleGraph {
                 patched_modules: Arc::new(patched_modules),
                 dynamic_dependencies: Arc::new(dynamic_dependencies),
                 dynamic_failures: Arc::new(dynamic_failures),
+                runtime_failures: Arc::new(runtime_failures),
             },
             LiveDemand {
                 live: demand.live.clone(),
@@ -2321,7 +2349,9 @@ struct Builder<P, R> {
     order: Vec<PathBuf>,
     dynamic_dependencies: HashMap<PathBuf, Vec<Dependency>>,
     dynamic_failures: HashMap<(PathBuf, String), String>,
+    runtime_failures: BTreeMap<PathBuf, BTreeMap<(PathBuf, String), String>>,
     dynamic_work: Vec<DynamicWork>,
+    runtime_work: Vec<RuntimeWork>,
     dynamic_journal: Option<DynamicJournal>,
 }
 
@@ -2339,6 +2369,14 @@ enum WorkItem {
 }
 
 struct DynamicWork {
+    importer: PathBuf,
+    specifier: String,
+    path: PathBuf,
+    source: ModuleSource,
+}
+
+struct RuntimeWork {
+    owner: PathBuf,
     importer: PathBuf,
     specifier: String,
     path: PathBuf,
@@ -2394,6 +2432,35 @@ where
                 );
             }
         }
+        while let Some(runtime) = self.runtime_work.pop() {
+            self.dynamic_journal = Some(DynamicJournal {
+                order_before: self.order.len(),
+                stack_before: self.stack.len(),
+                pending_before: self.runtime_work.len(),
+                ..DynamicJournal::default()
+            });
+            let result = self
+                .visit_static(runtime.path.clone(), Some(runtime.source))
+                .and_then(|_| {
+                    let export_resolutions = resolve_exports(&self.modules, &self.order)?;
+                    validate_links(&self.modules, &self.order, &export_resolutions)
+                });
+            let journal = self.dynamic_journal.take().expect("runtime journal exists");
+            if let Err(error) = result {
+                self.rollback_runtime(journal);
+                self.remove_runtime_dependency(
+                    &runtime.owner,
+                    &runtime.importer,
+                    &runtime.specifier,
+                );
+                self.record_runtime_failure(
+                    runtime.owner,
+                    runtime.importer,
+                    runtime.specifier,
+                    format!("runtime request failed: {error}"),
+                );
+            }
+        }
         Ok(())
     }
 
@@ -2422,6 +2489,18 @@ where
         }
         for key in journal.new_failures {
             self.dynamic_failures.remove(&key);
+        }
+    }
+
+    fn rollback_runtime(&mut self, journal: DynamicJournal) {
+        self.runtime_work.truncate(journal.pending_before);
+        self.stack.truncate(journal.stack_before);
+        self.order.truncate(journal.order_before);
+        for path in journal.new_modules {
+            self.modules.remove(&path);
+        }
+        for path in journal.new_states {
+            self.states.remove(&path);
         }
     }
 
@@ -2476,6 +2555,27 @@ where
             }
         }
         self.dynamic_failures.insert(key, message);
+    }
+
+    fn record_runtime_failure(
+        &mut self,
+        owner: PathBuf,
+        importer: PathBuf,
+        specifier: String,
+        message: String,
+    ) {
+        self.runtime_failures
+            .entry(owner)
+            .or_default()
+            .insert((importer, specifier), message);
+    }
+
+    fn remove_runtime_dependency(&mut self, owner: &Path, importer: &Path, specifier: &str) {
+        if let Some(node) = self.modules.get_mut(owner) {
+            node.runtime_dependencies.retain(|dependency| {
+                !(dependency.importer == importer && dependency.specifier == specifier)
+            });
+        }
     }
 
     fn visit_static(
@@ -2671,8 +2771,10 @@ where
                             let importer = match runtime_importer_path(&request.importer) {
                                 Ok(importer) => importer,
                                 Err(message) => {
-                                    self.record_dynamic_failure(
-                                        (path.clone(), request.specifier.clone()),
+                                    self.record_runtime_failure(
+                                        path.clone(),
+                                        PathBuf::from(&request.importer),
+                                        request.specifier.clone(),
                                         format!(
                                             "runtime request failed for {}: {}",
                                             request.specifier, message
@@ -2692,8 +2794,10 @@ where
                                     // unavailable literal is therefore a catchable runtime
                                     // failure, just like a dynamic import that cannot be resolved;
                                     // it must not make graph construction fail eagerly.
-                                    self.record_dynamic_failure(
-                                        (path.clone(), request.specifier.clone()),
+                                    self.record_runtime_failure(
+                                        path.clone(),
+                                        importer.clone(),
+                                        request.specifier.clone(),
                                         format!(
                                             "runtime request failed to resolve {} from {}: {}",
                                             request.specifier,
@@ -2720,8 +2824,10 @@ where
                                     Ok(Some(NodeModuleFormat::CommonJs)) => ModuleSource::CommonJs,
                                     Ok(_) => ModuleSource::Source,
                                     Err(error) => {
-                                        self.record_dynamic_failure(
-                                            (path.clone(), request.specifier.clone()),
+                                        self.record_runtime_failure(
+                                            path.clone(),
+                                            importer.clone(),
+                                            request.specifier.clone(),
                                             format!(
                                                 "runtime request failed while classifying {}: {}",
                                                 request.specifier, error
@@ -2845,11 +2951,13 @@ where
                             .iter()
                             .cloned()
                             .zip(runtime_sources.iter().cloned())
-                            .rev()
                         {
-                            work.push(WorkItem::Enter {
+                            self.runtime_work.push(RuntimeWork {
+                                owner: path.clone(),
+                                importer: dependency.importer,
+                                specifier: dependency.specifier,
                                 path: dependency.target,
-                                source: Some(source),
+                                source,
                             });
                         }
                         if let Some(dynamic) = self.dynamic_dependencies.get(&path).cloned() {
