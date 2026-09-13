@@ -112,8 +112,7 @@ fn delayed_exported_async_import_uses_defining_module_referrer() {
     fs::create_dir_all(project.root.join("src")).unwrap();
     let entry = project.write(
         "main.mjs",
-        "import { run } from './src/processCapability.mjs';\n\
-         run().then(ns => console.log(ns.source));\n\
+        "import('./src/processCapability.mjs').then(ns => ns.run().then(ns => console.log(ns.source)));\n\
          import('./dep.mjs').then(ns => console.log(ns.source));",
     );
     project.write(
