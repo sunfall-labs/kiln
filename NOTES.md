@@ -5483,3 +5483,20 @@ Also fixed a latent bug in `kiln-interpreter`'s `slice_bounds` where `NaN` argum
 now starts matching (as documented in its header), and added dedicated test `conformance/native/array-buffer-slice.js`
 exercising argument bounds, relative indexing, negative ranges, empty buffers, and memory isolation.
 `scripts/native.sh` improved from 6 refusals down to 5 (170 matched, 5 refused, 0 diverged).
+
+---
+
+## Phase 5.2 TypeScript built-ins: `node:url` (2026-09-13)
+
+Migrated `node:url` completely to TypeScript via `crates/kiln-builtins/src/node/url.ts`
+with zero additions to the C runtime prelude (Phase 5.1 freeze strictly honored). Implemented all 10 canonical
+exports (`URL`, `URLSearchParams`, `default`, `domainToASCII`, `domainToUnicode`, `fileURLToPath`,
+`format`, `parse`, `pathToFileURL`, `urlToHttpOptions`). Provided pure TypeScript implementations of WHATWG `URL`
+and `URLSearchParams` ensuring full property reflection (`protocol`, `hostname`, `port`, `pathname`, `search`,
+`searchParams`, `hash`, `href`, `auth`) across both execution engines, resolving legacy native backend omissions
+where `new URL()` in C only set `pathname` and `searchParams`. Verified with native probe
+`conformance/native/node-url-members.cjs` (byte-for-byte identical output between interpreter and native CLI),
+integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`, and full `scripts/native.sh` parity
+(171 matched, 5 refused, 0 diverged). Updated facts baseline for `bundle:postcss` reflecting `node:url`'s transition to a typed module.
+Per explicit user instructions and AGENTS.md rules, avoided costly whole-workspace gate runs mid-flight to preserve shared CPU resources.
+

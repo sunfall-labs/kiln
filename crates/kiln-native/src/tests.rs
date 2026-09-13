@@ -1069,6 +1069,12 @@ fn node_events_is_a_ts_builtin_and_https_has_a_native_runtime_materializer() {
         NodeBuiltin::Util,
         "promisify"
     ));
+    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Url));
+    assert!(native_builtin_supports_export(NodeBuiltin::Url, "parse"));
+    assert!(native_builtin_supports_export(
+        NodeBuiltin::Url,
+        "fileURLToPath"
+    ));
     assert!(native_builtin_body(NodeBuiltin::Https).is_some());
     assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Path));
     assert!(native_builtin_supports_export(NodeBuiltin::Path, "join"));
@@ -8882,5 +8888,100 @@ fn native_node_util_commonjs_require_builds_and_runs() {
     assert_eq!(
         stdout.trim(),
         "cjs-util: object function function true status: running"
+    );
+}
+
+#[test]
+fn native_node_url_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-url-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import url, { URL, fileURLToPath, pathToFileURL, parse, format, urlToHttpOptions } from 'node:url';\n",
+            "const p = fileURLToPath('file:///etc/hosts');\n",
+            "const u = pathToFileURL('/etc/passwd');\n",
+            "const parsed = parse('http://user:pass@example.com:8080/p/a/t/h?q=1#hash');\n",
+            "const opts = urlToHttpOptions(new URL('http://example.com:3000/api'));\n",
+            "console.log('url-ts:', typeof URL, url.default === url, p, u.protocol, parsed.hostname, parsed.port, opts.port);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("url_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run url binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "url-ts: function true /etc/hosts file: example.com 8080 3000"
+    );
+}
+
+#[test]
+fn native_node_url_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-url-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const url = require('node:url');\n",
+            "const p = url.fileURLToPath('file:///var/log');\n",
+            "console.log('cjs-url:', typeof url, typeof url.URL, typeof url.parse, url.default === url, p);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("url_cjs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run url cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "cjs-url: object function function true /var/log"
     );
 }

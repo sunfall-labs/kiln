@@ -2871,7 +2871,7 @@ fn native_builtin_supported_exports(
         NodeBuiltin::WorkerThreads => &["Worker", "default"],
         NodeBuiltin::Module => &["createRequire", "default"],
         NodeBuiltin::QueryString => kiln_builtins::QUERYSTRING_EXPORTS,
-        NodeBuiltin::Url => &["URL", "default", "fileURLToPath", "parse", "pathToFileURL"],
+        NodeBuiltin::Url => kiln_builtins::URL_EXPORTS,
         NodeBuiltin::Buffer => kiln_builtins::BUFFER_EXPORTS,
         NodeBuiltin::StringDecoder => kiln_builtins::STRING_DECODER_EXPORTS,
         NodeBuiltin::AsyncHooks => &["AsyncLocalStorage", "AsyncResource", "default"],
