@@ -4990,6 +4990,7 @@ pub struct ModuleExecutionResult {
 /// can create a server whose callback runs while the entry module is active. This session is the
 /// explicit ownership seam that prevents those resources from becoming ambient globals or being
 /// stranded in the VM that happened to evaluate their declaring module.
+#[derive(Clone)]
 pub struct ModuleRealmSession {
     shared: Rc<RefCell<ModuleRealmShared>>,
 }
@@ -5005,6 +5006,7 @@ struct ModuleRealmShared {
     symbol_registry: Vec<(String, Value)>,
     symbols: Vec<Rc<UniqueSymbol>>,
     template_objects: std::collections::HashMap<(RealmId, usize, u32), Value>,
+    intrinsics: Rc<Intrinsics>,
 }
 
 impl Default for ModuleRealmSession {
@@ -5021,6 +5023,7 @@ impl Default for ModuleRealmSession {
                 symbol_registry: Vec::new(),
                 symbols: Vec::new(),
                 template_objects: std::collections::HashMap::new(),
+                intrinsics: Rc::new(Intrinsics::default()),
             })),
         }
     }
@@ -6612,6 +6615,7 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
     let drain = session.as_ref().is_some_and(|(_, drain)| *drain);
     if let Some((session, _)) = session.as_ref() {
         vm.module_realm = Some(Rc::clone(&session.shared));
+        vm.intrinsics = Rc::clone(&session.shared.borrow().intrinsics);
     }
     let execution = if enter_runtime {
         runtime.enter(|| vm.run_module_body())
@@ -7147,7 +7151,7 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// A realm root like `global_object` and `error_prototypes`: `Math.max.name` and
     /// `Array.prototype.push` are answered from tables that no program can reach, and this is
     /// where a program's changes to them live for as long as the realm does.
-    intrinsics: Intrinsics,
+    intrinsics: Rc<Intrinsics>,
     /// Whether the suspension that just happened was an `await` rather than a `yield`.
     ///
     /// Written where the body stops and read by whoever resumed it, because the instruction that
@@ -7407,7 +7411,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             suspended_delegate: None,
             global_objects: vec![None],
             process_object: None,
-            intrinsics: Intrinsics::default(),
+            intrinsics: Rc::new(Intrinsics::default()),
             native_depth: 0,
             frames: Vec::new(),
             global_base: 0,
@@ -41999,6 +42003,9 @@ fn slice_bounds(arguments: &[Value], length: usize) -> (usize, usize) {
             None | Some(Value::Undefined) => fallback,
             Some(value) => {
                 let at = value.as_number();
+                if at.is_nan() {
+                    return 0;
+                }
                 if !at.is_finite() {
                     return if at < 0.0 { 0 } else { length };
                 }

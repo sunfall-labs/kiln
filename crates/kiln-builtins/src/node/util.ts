@@ -1,0 +1,347 @@
+// kiln-builtins: node:util implementation (Phase 5.2, ADR 0005)
+
+const customInspectSymbol = Symbol.for("nodejs.util.inspect.custom");
+const customPromisifySymbol = Symbol.for("nodejs.util.promisify.custom");
+
+export const TextDecoder = globalThis.TextDecoder;
+export const TextEncoder = globalThis.TextEncoder;
+
+export function inspect(value: any, options?: any): string {
+  if (value === undefined) return "undefined";
+  if (value === null) return "null";
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "number") return Object.is(value, -0) ? "-0" : String(value);
+  if (typeof value === "bigint") return `${value}n`;
+  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "symbol") return value.toString();
+  if (typeof value === "function") {
+    return value.name ? `[Function: ${value.name}]` : "[Function (anonymous)]";
+  }
+  if (typeof value !== "object") {
+    return String(value);
+  }
+
+  // Custom inspection method
+  if (typeof value[customInspectSymbol] === "function") {
+    return String(value[customInspectSymbol](2, options));
+  }
+
+  if (Array.isArray(value)) {
+    if (value.length === 0) return "[]";
+    const items: string[] = [];
+    for (let i = 0; i < value.length; i++) {
+      const item = value[i];
+      items.push(item === value ? "[Circular]" : inspect(item, options));
+    }
+    return `[ ${items.join(", ")} ]`;
+  }
+
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+  if (value instanceof RegExp) {
+    return value.toString();
+  }
+  if (value instanceof Error) {
+    return value.stack || `${value.name}: ${value.message}`;
+  }
+  if (ArrayBuffer.isView(value) && !(value instanceof DataView)) {
+    const ctorName = value.constructor ? value.constructor.name : "TypedArray";
+    const arr = Array.from(value as any);
+    return `${ctorName}(${arr.length}) [ ${arr.join(", ")} ]`;
+  }
+
+  const keys = Object.keys(value);
+  if (keys.length === 0) return "{}";
+  const entries: string[] = [];
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    const v = value[k];
+    const valStr = v === value ? "[Circular]" : inspect(v, options);
+    entries.push(`${k}: ${valStr}`);
+  }
+  return `{ ${entries.join(", ")} }`;
+}
+
+inspect.custom = customInspectSymbol;
+
+export function formatWithOptions(inspectOptions: any, ...args: any[]): string {
+  if (args.length === 0) {
+    return "";
+  }
+  const first = args[0];
+  if (typeof first !== "string") {
+    return args.map((a) => inspect(a, inspectOptions)).join(" ");
+  }
+  if (args.length === 1) {
+    return first;
+  }
+
+  let out = "";
+  let argIndex = 1;
+  const len = first.length;
+  let i = 0;
+
+  while (i < len) {
+    const ch = first.charCodeAt(i);
+    if (ch !== 37) {
+      // '%'
+      out += first[i];
+      i++;
+      continue;
+    }
+
+    if (i + 1 >= len) {
+      out += "%";
+      break;
+    }
+
+    const nextCh = first[i + 1];
+    if (nextCh === "%") {
+      out += "%";
+      i += 2;
+      continue;
+    }
+
+    if (argIndex >= args.length) {
+      out += "%" + nextCh;
+      i += 2;
+      continue;
+    }
+
+    const val = args[argIndex];
+    if (nextCh === "s") {
+      out += String(val);
+      argIndex++;
+      i += 2;
+    } else if (nextCh === "d" || nextCh === "i") {
+      out += Number(val).toString();
+      argIndex++;
+      i += 2;
+    } else if (nextCh === "f") {
+      out += Number(val).toString();
+      argIndex++;
+      i += 2;
+    } else if (nextCh === "j") {
+      try {
+        out += JSON.stringify(val);
+      } catch {
+        out += "[Circular]";
+      }
+      argIndex++;
+      i += 2;
+    } else if (nextCh === "o" || nextCh === "O") {
+      out += inspect(val, inspectOptions);
+      argIndex++;
+      i += 2;
+    } else {
+      out += "%" + nextCh;
+      i += 2;
+    }
+  }
+
+  while (argIndex < args.length) {
+    out += " " + inspect(args[argIndex++], inspectOptions);
+  }
+
+  return out;
+}
+
+export function format(...args: any[]): string {
+  return formatWithOptions(undefined, ...args);
+}
+
+export function inherits(ctor: any, superCtor: any): void {
+  if (typeof ctor !== "function" || typeof superCtor !== "function") {
+    throw new TypeError("The constructor and super constructor must be functions");
+  }
+  if (superCtor.prototype === undefined) {
+    throw new TypeError("The super constructor to \"inherits\" must have a prototype");
+  }
+  ctor.super_ = superCtor;
+  Object.setPrototypeOf(ctor.prototype, superCtor.prototype);
+}
+
+export function deprecate<T extends (...args: any[]) => any>(
+  fn: T,
+  _msg?: string,
+  _code?: string
+): T {
+  let warned = false;
+  function deprecated(this: any, ...args: any[]) {
+    if (!warned) {
+      warned = true;
+    }
+    return fn.apply(this, args);
+  }
+  Object.setPrototypeOf(deprecated, fn);
+  if (fn.prototype) {
+    deprecated.prototype = fn.prototype;
+  }
+  return deprecated as T;
+}
+
+export function debuglog(_section: string, callback?: any): (...args: any[]) => void {
+  function debug(..._args: any[]) {
+    if (typeof callback === "function") {
+      callback(debug);
+    }
+  }
+  return debug;
+}
+
+export function promisify(original: any): any {
+  if (typeof original !== "function") {
+    throw new TypeError("The \"original\" argument must be of type Function");
+  }
+  if (original[customPromisifySymbol]) {
+    const fn = original[customPromisifySymbol];
+    if (typeof fn !== "function") {
+      throw new TypeError("The \"customPromisify\" property must be of type Function");
+    }
+    return fn;
+  }
+  function fn(this: any, ...args: any[]) {
+    return new Promise((resolve, reject) => {
+      original.call(this, ...args, (err: any, ...values: any[]) => {
+        if (err) return reject(err);
+        if (values.length <= 1) return resolve(values[0]);
+        resolve(values);
+      });
+    });
+  }
+  Object.setPrototypeOf(fn, Object.getPrototypeOf(original));
+  return fn;
+}
+
+promisify.custom = customPromisifySymbol;
+
+export function callbackify(
+  original: (...args: any[]) => Promise<any>
+): (...args: any[]) => void {
+  if (typeof original !== "function") {
+    throw new TypeError("The \"original\" argument must be of type Function");
+  }
+  function callbackified(this: any, ...args: any[]) {
+    const maybeCb = args.pop();
+    if (typeof maybeCb !== "function") {
+      throw new TypeError("The last argument must be of type Function");
+    }
+    const cb = (...cbArgs: any[]) => {
+      maybeCb.apply(this, cbArgs);
+    };
+    original.apply(this, args).then(
+      (ret) => queueMicrotask(() => cb(null, ret)),
+      (err) => queueMicrotask(() => cb(err))
+    );
+  }
+  Object.setPrototypeOf(callbackified, Object.getPrototypeOf(original));
+  return callbackified;
+}
+
+
+export const types = {
+  isAnyArrayBuffer: (val: any): boolean => val instanceof ArrayBuffer,
+  isArgumentsObject: (val: any): boolean =>
+    Object.prototype.toString.call(val) === "[object Arguments]",
+  isArrayBuffer: (val: any): boolean => val instanceof ArrayBuffer,
+  isAsyncFunction: (val: any): boolean =>
+    Object.prototype.toString.call(val) === "[object AsyncFunction]",
+  isBooleanObject: (val: any): boolean =>
+    Object.prototype.toString.call(val) === "[object Boolean]",
+  isBoxedPrimitive: (val: any): boolean =>
+    typeof val === "object" &&
+    val !== null &&
+    (val instanceof Boolean || val instanceof Number || val instanceof String),
+  isDataView: (val: any): boolean => val instanceof DataView,
+  isDate: (val: any): boolean => val instanceof Date,
+  isGeneratorFunction: (val: any): boolean =>
+    Object.prototype.toString.call(val) === "[object GeneratorFunction]",
+  isMap: (val: any): boolean => val instanceof Map,
+  isNativeError: (val: any): boolean => val instanceof Error,
+  isPromise: (val: any): boolean => val instanceof Promise,
+  isRegExp: (val: any): boolean => val instanceof RegExp,
+  isSet: (val: any): boolean => val instanceof Set,
+  isTypedArray: (val: any): boolean =>
+    ArrayBuffer.isView(val) && !(val instanceof DataView),
+  isUint8Array: (val: any): boolean => val instanceof Uint8Array,
+};
+
+export function isArray(val: any): boolean {
+  return Array.isArray(val);
+}
+export function isBoolean(val: any): boolean {
+  return typeof val === "boolean";
+}
+export function isBuffer(val: any): boolean {
+  return val != null && typeof val === "object" && val._isBuffer === true;
+}
+export function isDate(val: any): boolean {
+  return val instanceof Date;
+}
+export function isError(val: any): boolean {
+  return val instanceof Error;
+}
+export function isFunction(val: any): boolean {
+  return typeof val === "function";
+}
+export function isNull(val: any): boolean {
+  return val === null;
+}
+export function isNullOrUndefined(val: any): boolean {
+  return val === null || val === undefined;
+}
+export function isNumber(val: any): boolean {
+  return typeof val === "number";
+}
+export function isObject(val: any): boolean {
+  return val !== null && typeof val === "object";
+}
+export function isPrimitive(val: any): boolean {
+  return val === null || (typeof val !== "object" && typeof val !== "function");
+}
+export function isRegExp(val: any): boolean {
+  return val instanceof RegExp;
+}
+export function isString(val: any): boolean {
+  return typeof val === "string";
+}
+export function isSymbol(val: any): boolean {
+  return typeof val === "symbol";
+}
+export function isUndefined(val: any): boolean {
+  return val === undefined;
+}
+
+const util = {
+  TextDecoder,
+  TextEncoder,
+  callbackify,
+  debuglog,
+  deprecate,
+  format,
+  formatWithOptions,
+  inherits,
+  inspect,
+  isArray,
+  isBoolean,
+  isBuffer,
+  isDate,
+  isError,
+  isFunction,
+  isNull,
+  isNullOrUndefined,
+  isNumber,
+  isObject,
+  isPrimitive,
+  isRegExp,
+  isString,
+  isSymbol,
+  isUndefined,
+  promisify,
+  types,
+  default: undefined as any,
+};
+util.default = util;
+
+export default util;

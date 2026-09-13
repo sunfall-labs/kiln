@@ -26,17 +26,65 @@ pub struct BuiltinAbi {
     pub commonjs: CommonJsProjection,
 }
 
+macro_rules! identity_properties {
+    ($($name:literal),* $(,)?) => {
+        &[$(( $name, $name )),*]
+    };
+}
+
 const EVENTS_PROPERTIES: &[(&str, &str)] = &[
     ("EventEmitter", "EventEmitter"),
     ("default", "EventEmitter"),
 ];
 
-const ASSERT_PROPERTIES: &[(&str, &str)] = &[("ok", "ok"), ("strict", "strict")];
+const ASSERT_PROPERTIES: &[(&str, &str)] = identity_properties![
+    "AssertionError",
+    "deepEqual",
+    "deepStrictEqual",
+    "default",
+    "doesNotMatch",
+    "doesNotReject",
+    "doesNotThrow",
+    "equal",
+    "fail",
+    "ifError",
+    "match",
+    "notDeepEqual",
+    "notDeepStrictEqual",
+    "notEqual",
+    "notStrictEqual",
+    "ok",
+    "rejects",
+    "strict",
+    "strictEqual",
+    "throws",
+];
 
 const BUILTINS: &[BuiltinAbi] = &[
     BuiltinAbi {
         specifier: "node:assert",
-        exports: &["default", "ok", "strict"],
+        exports: &[
+            "AssertionError",
+            "deepEqual",
+            "deepStrictEqual",
+            "default",
+            "doesNotMatch",
+            "doesNotReject",
+            "doesNotThrow",
+            "equal",
+            "fail",
+            "ifError",
+            "match",
+            "notDeepEqual",
+            "notDeepStrictEqual",
+            "notEqual",
+            "notStrictEqual",
+            "ok",
+            "rejects",
+            "strict",
+            "strictEqual",
+            "throws",
+        ],
         commonjs: CommonJsProjection::Callable {
             export: "default",
             properties: ASSERT_PROPERTIES,

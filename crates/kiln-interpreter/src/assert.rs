@@ -19,7 +19,12 @@ pub(crate) fn ok(arguments: &[Value]) -> Result<Value, ExecutionError> {
 
 pub(crate) fn property(prop: &str) -> Option<Value> {
     match prop {
-        "default" | "ok" | "strict" => Some(Value::Native(Native::NodeAssertOk, RealmId::PRIMARY)),
+        "AssertionError" | "deepEqual" | "deepStrictEqual" | "default" | "doesNotMatch"
+        | "doesNotReject" | "doesNotThrow" | "equal" | "fail" | "ifError" | "match"
+        | "notDeepEqual" | "notDeepStrictEqual" | "notEqual" | "notStrictEqual" | "ok"
+        | "rejects" | "strict" | "strictEqual" | "throws" => {
+            Some(Value::Native(Native::NodeAssertOk, RealmId::PRIMARY))
+        }
         _ => None,
     }
 }
