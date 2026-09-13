@@ -855,6 +855,12 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         self.state.shutdown()
     }
 
+    /// Select the host clock before the realm is entered. This keeps Tokio time real for
+    /// host-backed executions; deterministic realms retain paused virtual time.
+    pub fn use_host_clock(&mut self) {
+        self.state.capabilities.clock = ClockCapability::Host;
+    }
+
     /// Builds a runtime around an explicit asynchronous host provider.
     ///
     /// The current-thread Tokio runtime and LocalSet remain the realm scheduler for every
