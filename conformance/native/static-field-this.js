@@ -4,12 +4,13 @@
 class Service {
   static self = this;
   static arrow = (() => this)();
+  static delayed = () => this;
 }
 
 console.log(Service.self === Service, Service.arrow === Service);
 
-const delayed = Service.arrow;
-console.log(delayed === Service);
+const delayed = Service.delayed;
+console.log(delayed() === Service);
 
 class Derived extends Service {
   static self = this;
