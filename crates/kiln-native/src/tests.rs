@@ -7011,8 +7011,8 @@ fn native_host_process_completion_beats_realm_timeout() {
         &entry,
         "import { run } from 'kiln:process';\n\
          const result = await Promise.race([\n\
-           run('/bin/sh', ['-c', 'sleep 0.05; printf done']).then(() => 'process'),\n\
-           new Promise(resolve => setTimeout(() => resolve('timeout'), 500)),\n\
+           run('/bin/sh', ['-c', 'sleep 0.35; printf done']).then(() => 'process'),\n\
+           new Promise(resolve => setTimeout(() => resolve('timeout'), 1000)),\n\
          ]);\n\
          console.log(result);\n",
     )
