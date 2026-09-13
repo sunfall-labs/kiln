@@ -2197,17 +2197,6 @@ where
                             })? == Some(NodeModuleFormat::CommonJs)
                             {
                                 ModuleSource::CommonJs
-                            } else if !self.typed_sources {
-                                ModuleSource::Source
-                            } else if self.resolver.node_format(&resolved).map_err(|error| {
-                                ModuleGraphError::Resolve {
-                                    importer: path.clone(),
-                                    specifier: specifier.clone(),
-                                    error,
-                                }
-                            })? == Some(NodeModuleFormat::CommonJs)
-                            {
-                                ModuleSource::CommonJs
                             } else {
                                 ModuleSource::Source
                             };
@@ -2254,6 +2243,17 @@ where
                                 .is_some_and(kiln_data_formats::is_data_extension)
                             {
                                 ModuleSource::Json
+                            } else if !self.typed_sources {
+                                ModuleSource::Source
+                            } else if self.resolver.node_format(&resolved).map_err(|error| {
+                                ModuleGraphError::Resolve {
+                                    importer: path.clone(),
+                                    specifier: specifier.clone(),
+                                    error,
+                                }
+                            })? == Some(NodeModuleFormat::CommonJs)
+                            {
+                                ModuleSource::CommonJs
                             } else {
                                 ModuleSource::Source
                             };
