@@ -75,38 +75,53 @@ def fetch_managed(destination: pathlib.Path | None = None, *, minimum_files: int
         subprocess.run(["git", "-C", str(stage), "fetch", "--quiet", "--depth=1", "origin", COMMIT], check=True)
         subprocess.run(["git", "-C", str(stage), "checkout", "--quiet", "--detach", COMMIT], check=True)
         validate_checkout(stage, minimum_files=minimum_files)
-        if destination.exists():
-            raise CorpusError(f"managed checkout appeared during fetch; refusing to replace it: {destination}")
+        lock = destination.with_name(destination.name + ".publishing")
         try:
-            os.rename(stage, destination)
+            lock_fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError as exc:
-            raise CorpusError(f"managed checkout appeared during fetch; refusing to replace it: {destination}") from exc
+            raise CorpusError(f"another fetch is publishing this checkout: {destination}") from exc
+        try:
+            if destination.exists():
+                raise CorpusError(f"managed checkout appeared during fetch; refusing to replace it: {destination}")
+            os.rename(stage, destination)
+        finally:
+            os.close(lock_fd)
+            lock.unlink(missing_ok=True)
         return validate_checkout(destination, minimum_files=minimum_files)
     except Exception:
         shutil.rmtree(stage, ignore_errors=True)
         raise
 
 
+def resolve_contained_dir(root: pathlib.Path, selected: str, label: str) -> pathlib.Path:
+    path = pathlib.PurePosixPath(selected)
+    if path.is_absolute() or ".." in path.parts:
+        raise CorpusError(f"{label} must be a relative subtree inside test/")
+    candidate = (root / pathlib.Path(*path.parts)).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise CorpusError(f"{label} escapes test/: {selected}") from exc
+    if not candidate.is_dir():
+        raise CorpusError(f"{label} does not name a directory under test/: {selected}")
+    return candidate
+
+
+def require_nonempty(candidate: pathlib.Path, label: str) -> None:
+    if not any(p.is_file() for p in candidate.rglob("*")):
+        raise CorpusError(f"{label} names an empty subtree")
+
+
 def resolve_test_root(checkout: pathlib.Path, selected: str = "") -> tuple[pathlib.Path, str]:
     root = (checkout / "test").resolve()
     if not root.is_dir():
         raise CorpusError(f"Test262 test directory is missing: {root}")
-    if not selected:
+    if not selected or selected == ".":
         candidate, report_path = root, "."
     else:
-        path = pathlib.PurePosixPath(selected)
-        if path.is_absolute() or ".." in path.parts:
-            raise CorpusError("--path must be a relative subtree inside test/")
-        candidate = (root / pathlib.Path(*path.parts)).resolve()
-        try:
-            candidate.relative_to(root)
-        except ValueError as exc:
-            raise CorpusError(f"--path escapes test/: {selected}") from exc
-        report_path = "/".join(path.parts)
-    if not candidate.is_dir():
-        raise CorpusError(f"--path does not name a directory under test/: {selected}")
-    if not any(p.is_file() for p in candidate.rglob("*")):
-        raise CorpusError(f"--path names an empty subtree: {selected or '.'}")
+        candidate = resolve_contained_dir(root, selected, "--path")
+        report_path = "/".join(pathlib.PurePosixPath(selected).parts)
+    require_nonempty(candidate, f"--path {report_path}")
     return candidate, report_path
 
 
@@ -121,18 +136,8 @@ def discover_chunks(root: pathlib.Path, existing: list[str] | None = None) -> li
             children = [p for p in sorted(top.iterdir()) if p.is_dir()]
             chunks.extend(f"{top.name}/{p.name}" for p in children) if children else chunks.append(top.name)
     for chunk in chunks:
-        relative = pathlib.PurePosixPath(chunk)
-        if relative.is_absolute() or ".." in relative.parts:
-            raise CorpusError(f"baseline names a chunk outside the checkout: {chunk}")
-        path = (root / pathlib.Path(*relative.parts)).resolve()
-        try:
-            path.relative_to(root.resolve())
-        except ValueError as exc:
-            raise CorpusError(f"baseline names a chunk outside the checkout: {chunk}") from exc
-        if not path.is_dir():
-            raise CorpusError(f"baseline names {chunk}, which is not in the checkout")
-        if not any(p.is_file() for p in path.rglob("*")):
-            raise CorpusError(f"chunk {chunk} is empty")
+        path = resolve_contained_dir(root.resolve(), chunk, "baseline chunk")
+        require_nonempty(path, f"baseline chunk {chunk}")
     return chunks
 
 
@@ -179,7 +184,7 @@ def run_result(kiln: str, root: pathlib.Path, output: pathlib.Path, log: pathlib
     for key, value in expected.items():
         if not isinstance(totals.get(key), int) or totals[key] != value:
             raise CorpusError(f"Kiln result totals disagree with test entries for {key}: expected {value}, got {totals.get(key)!r}")
-    if completed.returncode and counts["fail"] == 0:
+    if completed.returncode not in (0, 1) or (completed.returncode == 1 and counts["fail"] == 0):
         raise CorpusError(f"Kiln exited {completed.returncode} without reported test failures; full log: {log}")
     report["_kiln_elapsed_millis"] = max(1, round((time.monotonic() - started) * 1000))
     report["_kiln_paths"] = len(paths)
