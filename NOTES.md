@@ -5472,5 +5472,14 @@ Verified with native probe `conformance/native/node-util-members.cjs` (byte-for-
 interpreter and native CLI), integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`,
 and full `scripts/native.sh` parity (169 matched, 0 diverged). Maintained rule to avoid mid-flight gate runs.
 
+---
 
+## Native Backlog Reduction: `ArrayBuffer.prototype.slice` (2026-09-13)
 
+Implemented native C backend method dispatch for `ArrayBuffer.prototype.slice` via existing method ID
+`KILN_C99_METHOD_SLICE` and `kiln_c99_relative_index`, and removed `"slice"` from `kiln_c99_is_array_buffer_member`.
+Also fixed a latent bug in `kiln-interpreter`'s `slice_bounds` where `NaN` argument coercion erroneously returned
+`length` rather than `0` (per ECMAScript `ToIntegerOrInfinity`). Conformance probe `array-buffer-members-refuse.ts`
+now starts matching (as documented in its header), and added dedicated test `conformance/native/array-buffer-slice.js`
+exercising argument bounds, relative indexing, negative ranges, empty buffers, and memory isolation.
+`scripts/native.sh` improved from 6 refusals down to 5 (170 matched, 5 refused, 0 diverged).
