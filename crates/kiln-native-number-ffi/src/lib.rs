@@ -2330,6 +2330,7 @@ mod realm {
             if realm.entered.get() {
                 return INVALID_ARGUMENT;
             }
+            realm.runtime.borrow_mut().use_host_clock();
             realm.clock.set(NativeClock::wall());
             // The realm's clock jumps from the epoch to the present here, before any timer
             // measures from it.
