@@ -40,6 +40,30 @@ fn release_prelude_compile_policy_has_a_distinct_object_key() {
     }
 }
 
+#[test]
+fn release_large_modules_preserve_throughput_policy() {
+    let mut options = CompileOptions::default();
+    configure_release_module_compile(&mut options, true);
+    let arguments = options
+        .extra_args
+        .iter()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        arguments,
+        [
+            "-O0",
+            "-fno-sanitize=undefined",
+            "-fno-function-sections",
+            "-fno-data-sections"
+        ]
+    );
+    assert_eq!(
+        release_module_compile_identity(true),
+        "generic-o0-nosan-nosections"
+    );
+}
+
 fn empty_function() -> FunctionProto {
     FunctionProto {
         span: kiln_ir::Span::default(),
@@ -402,8 +426,18 @@ fn retained_method_groups_drops_node_groups_without_demand() {
             "import fs from 'node:fs';\nconsole.log(typeof fs.readFile);\n",
         )],
     );
+    let node_groups = groups::NODE_EVENT
+        | groups::NODE_NET
+        | groups::NODE_SERVER
+        | groups::NODE_HTTP
+        | groups::NODE_RESPONSE
+        | groups::BUFFER
+        | groups::NODE_UTIL
+        | groups::NODE_DIAGNOSTICS
+        | groups::NODE_STREAM
+        | groups::NODE_PATH;
     assert_eq!(
-        fs_mask & PRUNABLE_METHOD_GROUPS,
+        fs_mask & node_groups,
         groups::NODE_STREAM | groups::NODE_EVENT | groups::BUFFER,
         "node:fs keeps stream/event and the Buffer methods its reads can return: {fs_mask:#x}"
     );
@@ -422,6 +456,21 @@ fn retained_method_groups_drops_node_groups_without_demand() {
         CORE_METHOD_GROUPS | PRUNABLE_METHOD_GROUPS,
         "dynamic import keeps the full table"
     );
+    let temporal_mask = mask_for(
+        "main.mjs",
+        &[("main.mjs", "console.log(Temporal.Now.instant());\n")],
+    );
+    assert_ne!(
+        temporal_mask & groups::TEMPORAL,
+        0,
+        "loading the Temporal global keeps its semantic dispatch"
+    );
+    let math_mask = mask_for(
+        "main.mjs",
+        &[("main.mjs", "console.log(Math.floor(1.5));\n")],
+    );
+    assert_ne!(math_mask & groups::MATH_NUMBER, 0);
+    assert_eq!(math_mask & groups::TEMPORAL, 0);
 }
 
 struct OxcFrontend;

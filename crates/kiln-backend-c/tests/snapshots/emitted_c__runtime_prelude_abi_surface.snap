@@ -65,6 +65,27 @@ expression: abi_surface(prelude)
 #ifndef KILN_RETAIN_GROUP_NODE_PATH
 #define KILN_RETAIN_GROUP_NODE_PATH 1
 #endif
+#ifndef KILN_RETAIN_GROUP_TEMPORAL
+#define KILN_RETAIN_GROUP_TEMPORAL 1
+#endif
+#ifndef KILN_RETAIN_GROUP_TEMPORAL_FROM
+#define KILN_RETAIN_GROUP_TEMPORAL_FROM 1
+#endif
+#ifndef KILN_RETAIN_GROUP_TEMPORAL_COMPARE
+#define KILN_RETAIN_GROUP_TEMPORAL_COMPARE 1
+#endif
+#ifndef KILN_RETAIN_GROUP_TEMPORAL_NOW_READ
+#define KILN_RETAIN_GROUP_TEMPORAL_NOW_READ 1
+#endif
+#ifndef KILN_RETAIN_GROUP_TEMPORAL_OP
+#define KILN_RETAIN_GROUP_TEMPORAL_OP 1
+#endif
+#ifndef KILN_RETAIN_GROUP_DATE_SETTER
+#define KILN_RETAIN_GROUP_DATE_SETTER 1
+#endif
+#ifndef KILN_RETAIN_GROUP_MATH_NUMBER
+#define KILN_RETAIN_GROUP_MATH_NUMBER 1
+#endif
 static const char *kiln_c99_diagnostic_site = NULL;
 static const char *kiln_c99_diagnostic_operation = NULL;
 static size_t kiln_c99_diagnostic_instruction = 0;
@@ -1647,6 +1668,8 @@ static uint64_t kiln_c99_array_prototype_method(const char *key, size_t key_len)
 static kiln_value kiln_c99_method(uint64_t code) {
 static int kiln_c99_commonjs_require_value(kiln_value *out, kiln_commonjs_require_fn call,
 static const char *kiln_c99_method_name(uint64_t code) {
+#if KILN_RETAIN_GROUP_TEMPORAL
+#endif
 #ifndef KILN_REALM_ENTROPY_SEED
 #define KILN_REALM_ENTROPY_SEED UINT64_C(0x9E3779B97F4A7C15)
 #endif
@@ -1745,6 +1768,8 @@ static int kiln_c99_process_object(kiln_value *out) {
 #if KILN_RETAIN_GROUP_NODE_STREAM
 #endif
 static int kiln_c99_global_object(kiln_value *out) {
+#if KILN_RETAIN_GROUP_TEMPORAL
+#endif
 static int kiln_c99_global_object_val(kiln_val *out) {
 static int kiln_c99_global_binding(kiln_value *out, const char *name, size_t name_len, int *found) {
 static int kiln_c99_declare_global(const char *name, size_t name_len, int configurable) {
@@ -1895,6 +1920,8 @@ static kiln_val kiln_c99_text_val(kiln_text *text) {
 static kiln_value kiln_c99_copy_utf8_lossy(const uint8_t *bytes, size_t length) {
 oom:
 static kiln_value kiln_c99_text(kiln_value value) {
+#if KILN_RETAIN_GROUP_TEMPORAL
+#endif
 static kiln_value kiln_c99_concat(kiln_value left, kiln_value right) {
 static int kiln_c99_strict_equal(kiln_value left, kiln_value right) {
 static int kiln_c99_loose_equal(kiln_value left, kiln_value right) {
@@ -1935,6 +1962,10 @@ static kiln_value *kiln_c99_exotic_store(kiln_value target) {
 static int kiln_c99_store_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char *key,
 #if KILN_RETAIN_GROUP_NODE_HTTP
+#endif
+#if KILN_RETAIN_GROUP_TEMPORAL
+#endif
+#if KILN_RETAIN_GROUP_TEMPORAL
 #endif
 static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_get_ikey(kiln_host *host, kiln_value target, const char *key, size_t key_len,
@@ -2141,6 +2172,15 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
 #if KILN_RETAIN_GROUP_NODE_EVENT
 #else
 #endif
+#if KILN_RETAIN_GROUP_TEMPORAL
+#endif
+#if KILN_RETAIN_GROUP_MATH_NUMBER
+#else
+#endif
+#if KILN_RETAIN_GROUP_MATH_NUMBER
+#endif
+#if KILN_RETAIN_GROUP_DATE_SETTER
+#endif
 static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value source, int depth,
 static int kiln_c99_is_symbol_key(const char *key, size_t key_len) {
 static int kiln_c99_builtin_has_member(uint64_t builtin, const char *key, size_t key_len) {
@@ -2332,6 +2372,8 @@ static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *re
 static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
 static int kiln_c99_validate_dynamic_import_options(kiln_host *host, kiln_value options, int depth,
 static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value callee,
+#if KILN_RETAIN_GROUP_TEMPORAL
+#endif
 #if KILN_RETAIN_GROUP_BUFFER
 #endif
 #if KILN_RETAIN_GROUP_NODE_HTTP

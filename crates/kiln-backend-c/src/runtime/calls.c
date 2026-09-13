@@ -27,12 +27,14 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
     if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_URL) {
         return kiln_c99_url_construct(result, args, argc, thrown);
     }
+#if KILN_RETAIN_GROUP_TEMPORAL
     if (callee.tag == KILN_VALUE_BUILTIN &&
         kiln_c99_temporal_kind_of_builtin(callee.bits) >= 0) {
         return kiln_c99_temporal_construct(host, result,
                                            kiln_c99_temporal_kind_of_builtin(callee.bits), args,
                                            argc, depth, thrown);
     }
+#endif
     /* Demand-driven prelude: the Buffer constructor fast path is compiled out
      * when the executable retains no code that can name the Buffer global
      * (see `retained_method_groups`). Unreachable then, like a dropped

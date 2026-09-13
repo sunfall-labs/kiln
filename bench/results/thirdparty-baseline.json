@@ -33,8 +33,8 @@
       "min_ms": 1.71
     },
     "postcss": {
-      "median_ms": 7.58,
-      "min_ms": 7.31
+      "median_ms": 10.77,
+      "min_ms": 10.58
     },
     "rxjs": {
       "median_ms": 21.56,
