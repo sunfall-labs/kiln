@@ -289,6 +289,22 @@ true x
 """
 
 [[test]]
+id = "guard/g13-async-yieldstar"
+group = "guard"
+source = "guard/g13-async-yieldstar.js"
+status = "runnable"
+features = ["async-generators", "yield-star", "for-await-of", "iterator-result-accessors", "abrupt-completion", "try-finally"]
+catches = """
+An async generator delegating with `yield*` must expose the delegated iterator result's value
+to `for await`, and must read the result accessors once at the delegation boundary. A throwing
+value getter must resume the suspended generator so its `finally` cleanup runs.
+"""
+expected_stdout = """
+42 done,value
+value true
+"""
+
+[[test]]
 id = "guard/g11-proto-on-function"
 group = "guard"
 source = "guard/g11-proto-on-function.js"
