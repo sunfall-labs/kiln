@@ -1168,6 +1168,9 @@ pub enum DynamicImportTarget {
 /// Whole-program linking and closed-world facts extracted for one compiled module.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ModuleLinkFacts {
+    /// Literal Node loader requests discovered by the source frontend. These remain lazy at
+    /// execution time but must participate in graph closure and liveness selection.
+    pub node_runtime_requests: Vec<kiln_hir::NodeRuntimeRequest>,
     /// Module-level bindings that are never mutated across the program.
     pub immutable_bindings: Vec<String>,
     /// Whether the module syntax contains direct `eval(...)`.

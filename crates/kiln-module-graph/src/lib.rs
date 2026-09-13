@@ -120,6 +120,27 @@ pub struct Dependency {
     pub target: PathBuf,
 }
 
+/// A literal lazy loader edge.  Unlike an ordinary dependency, its resolver base is captured
+/// from the `createRequire` call site (which may be a different file than the module containing
+/// the call), so both values are part of the graph identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeDependency {
+    pub importer: PathBuf,
+    pub specifier: String,
+    pub target: PathBuf,
+}
+
+fn runtime_importer_path(raw: &str) -> Result<PathBuf, String> {
+    if raw.starts_with("file:") {
+        let url =
+            url::Url::parse(raw).map_err(|error| format!("invalid file URL `{raw}`: {error}"))?;
+        return url
+            .to_file_path()
+            .map_err(|()| format!("file URL does not identify a local path: {raw}"));
+    }
+    Ok(PathBuf::from(raw))
+}
+
 /// Closed-world demand for one executable: which modules are live, which
 /// export slots each one must keep, and which import edges are live.
 ///
@@ -152,6 +173,8 @@ pub struct ModuleNode {
     /// modules and parsed once when the realm materializes the cached default export.
     pub data: Option<String>,
     pub dependencies: Vec<Dependency>,
+    /// Literal loader targets retained for lazy `createRequire`/`getBuiltinModule` lookup.
+    pub runtime_dependencies: Vec<RuntimeDependency>,
 }
 
 /// The provider responsible for one graph node.
@@ -663,6 +686,8 @@ impl ModuleGraph {
             if source_kind == ModuleSource::CommonJs {
                 program.dependencies = commonjs.expect("CommonJS parse exists").static_requires;
             }
+            program.link_facts.node_runtime_requests =
+                frontend_oxc::discover_node_runtime_requests(path_string, &source);
             Ok(ModulePayload::Program(program))
         })
     }
@@ -948,6 +973,12 @@ impl ModuleGraph {
             let original_imports = std::mem::take(&mut node.program.imports);
             let original_dependencies = std::mem::take(&mut node.dependencies);
             node.dependencies = original_dependencies
+                .iter()
+                .filter(|dependency| demand.live.contains(&dependency.target))
+                .cloned()
+                .collect();
+            node.runtime_dependencies = node
+                .runtime_dependencies
                 .iter()
                 .filter(|dependency| demand.live.contains(&dependency.target))
                 .cloned()
@@ -2572,8 +2603,10 @@ where
                         };
                         validate_exports(&path, &program)?;
                         let mut dependencies = Vec::with_capacity(program.dependencies.len());
+                        let mut runtime_dependencies = Vec::new();
                         let mut dynamic_dependencies = Vec::new();
                         let mut dynamic_sources = Vec::new();
+                        let mut runtime_sources = Vec::new();
                         let mut dependency_sources = Vec::with_capacity(program.dependencies.len());
                         let request = if source == ModuleSource::CommonJs {
                             NodeRequestKind::Require
@@ -2633,6 +2666,77 @@ where
                                 target: resolved.path,
                             });
                             dependency_sources.push(source);
+                        }
+                        for request in &program.link_facts.node_runtime_requests {
+                            let importer = match runtime_importer_path(&request.importer) {
+                                Ok(importer) => importer,
+                                Err(message) => {
+                                    self.record_dynamic_failure(
+                                        (path.clone(), request.specifier.clone()),
+                                        format!(
+                                            "runtime request failed for {}: {}",
+                                            request.specifier, message
+                                        ),
+                                    );
+                                    continue;
+                                }
+                            };
+                            let resolved = match self.resolver.resolve_for_request(
+                                &request.specifier,
+                                &importer,
+                                NodeRequestKind::Require,
+                            ) {
+                                Ok(resolved) => resolved,
+                                Err(error) => {
+                                    // `createRequire` and `getBuiltinModule` execute lazily. An
+                                    // unavailable literal is therefore a catchable runtime
+                                    // failure, just like a dynamic import that cannot be resolved;
+                                    // it must not make graph construction fail eagerly.
+                                    self.record_dynamic_failure(
+                                        (path.clone(), request.specifier.clone()),
+                                        format!(
+                                            "runtime request failed to resolve {} from {}: {}",
+                                            request.specifier,
+                                            importer.display(),
+                                            error
+                                        ),
+                                    );
+                                    continue;
+                                }
+                            };
+                            let runtime_source = if let Some(builtin) = resolved.builtin() {
+                                ModuleSource::NodeBuiltin(builtin)
+                            } else if !self.typed_sources {
+                                ModuleSource::Source
+                            } else if resolved
+                                .path
+                                .extension()
+                                .and_then(|e| e.to_str())
+                                .is_some_and(kiln_data_formats::is_data_extension)
+                            {
+                                ModuleSource::Json
+                            } else {
+                                match self.resolver.node_format(&resolved) {
+                                    Ok(Some(NodeModuleFormat::CommonJs)) => ModuleSource::CommonJs,
+                                    Ok(_) => ModuleSource::Source,
+                                    Err(error) => {
+                                        self.record_dynamic_failure(
+                                            (path.clone(), request.specifier.clone()),
+                                            format!(
+                                                "runtime request failed while classifying {}: {}",
+                                                request.specifier, error
+                                            ),
+                                        );
+                                        continue;
+                                    }
+                                }
+                            };
+                            runtime_dependencies.push(RuntimeDependency {
+                                importer,
+                                specifier: request.specifier.clone(),
+                                target: resolved.path,
+                            });
+                            runtime_sources.push(runtime_source);
                         }
                         // Closed-world native dynamic imports need their statically literal
                         // targets materialized too. This is especially important for file
@@ -2727,9 +2831,21 @@ where
                             program,
                             data,
                             dependencies: dependencies.clone(),
+                            runtime_dependencies: runtime_dependencies.clone(),
                         })));
                         for (dependency, source) in
                             dependencies.into_iter().zip(dependency_sources).rev()
+                        {
+                            work.push(WorkItem::Enter {
+                                path: dependency.target,
+                                source: Some(source),
+                            });
+                        }
+                        for (dependency, source) in runtime_dependencies
+                            .iter()
+                            .cloned()
+                            .zip(runtime_sources.iter().cloned())
+                            .rev()
                         {
                             work.push(WorkItem::Enter {
                                 path: dependency.target,
@@ -2796,6 +2912,7 @@ fn builtin_module_program(builtin: NodeBuiltin) -> ModuleProgram {
             functions: vec![],
         },
         link_facts: kiln_ir::ModuleLinkFacts {
+            node_runtime_requests: Vec::new(),
             immutable_bindings: names.iter().map(|s| (*s).to_owned()).collect(),
             direct_eval: false,
             new_function: false,
@@ -2831,6 +2948,7 @@ fn json_module_program() -> ModuleProgram {
             functions: vec![],
         },
         link_facts: kiln_ir::ModuleLinkFacts {
+            node_runtime_requests: Vec::new(),
             immutable_bindings: vec!["default".to_owned()],
             direct_eval: false,
             new_function: false,

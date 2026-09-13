@@ -83,6 +83,19 @@ pub struct Module {
     pub panicked: bool,
 }
 
+/// A literal Node loader request discovered by the source frontend.
+///
+/// These are lazy runtime edges rather than ordinary static imports: the target is resolved when
+/// the loader call executes, but the closed-world graph still needs the literal target available.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeRuntimeRequest {
+    pub specifier: String,
+    /// The filename captured by `createRequire(import.meta.url)`, or the source module path for
+    /// `process.getBuiltinModule`. Kept as source identity so relative requests resolve through
+    /// the ordinary resolver with the same importer base.
+    pub importer: String,
+}
+
 /// Coarse TypeScript type annotation hints.
 ///
 /// Order the trusted annotations by Static Hermes's published results:

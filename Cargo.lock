@@ -1325,6 +1325,7 @@ dependencies = [
  "notify-debouncer-full",
  "rayon",
  "serde_json",
+ "url",
 ]
 
 [[package]]
@@ -1489,6 +1490,7 @@ dependencies = [
  "kiln-node-abi",
  "kiln-runtime",
  "serde",
+ "url",
 ]
 
 [[package]]

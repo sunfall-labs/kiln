@@ -19,6 +19,17 @@ use kiln_module_resolver::{
 use kiln_proto::{
     NodeModuleFormat, NodeSourceFormat, PackageResolution, SourceDigest, source_digest,
 };
+
+fn captured_importer_path(raw: &str) -> Result<PathBuf> {
+    if raw.starts_with("file:") {
+        let url = url::Url::parse(raw)
+            .map_err(|error| Error::BadInput(format!("invalid file URL `{raw}`: {error}")))?;
+        return url.to_file_path().map_err(|()| {
+            Error::BadInput(format!("file URL does not identify a local path: {raw}"))
+        });
+    }
+    Ok(PathBuf::from(raw))
+}
 use rayon::prelude::*;
 
 const SOURCE_EXTENSIONS: [&str; 8] = ["js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts"];
@@ -394,19 +405,46 @@ pub(crate) fn include_reachable_dependencies(
         } else {
             (frontend_oxc::parse(importer_path, importer_text), None)
         };
-        let mut requests: Vec<(String, NodeRequestKind, bool)> = if commonjs {
+        let mut requests: Vec<(String, NodeRequestKind, bool, PathBuf)> = if commonjs {
             static_requires
                 .expect("CommonJS facts exist")
                 .into_iter()
-                .map(|specifier| (specifier, NodeRequestKind::Require, true))
+                .map(|specifier| (specifier, NodeRequestKind::Require, true, importer.clone()))
                 .collect()
         } else {
             module
                 .runtime_requested_modules()
                 .into_iter()
-                .map(|request| (request.specifier.clone(), NodeRequestKind::Import, true))
+                .map(|request| {
+                    (
+                        request.specifier.clone(),
+                        NodeRequestKind::Import,
+                        true,
+                        importer.clone(),
+                    )
+                })
                 .collect()
         };
+        // Literal createRequire/getBuiltinModule calls are lazy at runtime, but a relative
+        // createRequire target still needs its source text in the synchronized snapshot.
+        for runtime in frontend_oxc::discover_node_runtime_requests(importer_path, importer_text) {
+            let runtime_importer = captured_importer_path(&runtime.importer)?;
+            if !requests
+                .iter()
+                .any(|(existing, kind, _, existing_importer)| {
+                    existing == &runtime.specifier
+                        && *kind == NodeRequestKind::Require
+                        && existing_importer == &runtime_importer
+                })
+            {
+                requests.push((
+                    runtime.specifier,
+                    NodeRequestKind::Require,
+                    false,
+                    runtime_importer,
+                ));
+            }
+        }
         // Dynamic imports with a literal target are graph edges too.  The compiler records
         // these separately from static import declarations because their evaluation is deferred,
         // but source synchronization still has to capture the complete reachable closure.  If we
@@ -414,31 +452,34 @@ pub(crate) fn include_reachable_dependencies(
         // source and pinned Node format were never sent by the client.
         for target in kiln_ir::collect_dynamic_imports(&module.body) {
             if let kiln_ir::DynamicImportTarget::Static(specifier) = target
-                && !requests.iter().any(|(existing, kind, _)| {
+                && !requests.iter().any(|(existing, kind, _, _)| {
                     existing == &specifier && *kind == NodeRequestKind::Import
                 })
             {
                 // Dynamic import always uses the import condition, even in a CommonJS module;
                 // a missing target remains a deferred runtime rejection rather than a build error.
-                requests.push((specifier, NodeRequestKind::Import, false));
+                requests.push((specifier, NodeRequestKind::Import, false, importer.clone()));
             }
         }
 
-        for (specifier, request, required) in requests {
+        for (specifier, request, required, request_importer) in requests {
             if node && kiln_module_resolver::NodeBuiltin::parse(&specifier).is_some() {
                 // Builtins are typed virtual graph nodes. They have no source bytes or package
                 // metadata to synchronize, and the daemon's Node resolver materializes them.
                 continue;
             }
-            let resolved =
-                match resolver.resolve_with_metadata_for_request(&specifier, &importer, request) {
-                    Ok(resolved) => resolved,
-                    // A CommonJS `require()` resolves when execution reaches it. Leaving an
-                    // unresolved literal out of the pinned map lets the runtime throw inside the
-                    // program's own `try/catch`; ESM imports remain strict graph dependencies.
-                    Err(_) if commonjs || !required || !strict => continue,
-                    Err(error) => return Err(Error::BadInput(error.to_string())),
-                };
+            let resolved = match resolver.resolve_with_metadata_for_request(
+                &specifier,
+                &request_importer,
+                request,
+            ) {
+                Ok(resolved) => resolved,
+                // A CommonJS `require()` resolves when execution reaches it. Leaving an
+                // unresolved literal out of the pinned map lets the runtime throw inside the
+                // program's own `try/catch`; ESM imports remain strict graph dependencies.
+                Err(_) if commonjs || !required || !strict => continue,
+                Err(error) => return Err(Error::BadInput(error.to_string())),
+            };
             let target = resolved.module.path.clone();
             let asset = target
                 .extension()
@@ -457,7 +498,7 @@ pub(crate) fn include_reachable_dependencies(
                 node_formats.insert(target.clone(), to_wire_node_format(format));
             }
             let exact_explicit = match resolved.module.kind {
-                ResolutionKind::Relative => importer
+                ResolutionKind::Relative => request_importer
                     .parent()
                     .is_some_and(|directory| directory.join(&specifier).is_file()),
                 ResolutionKind::Absolute => Path::new(&specifier).is_file(),

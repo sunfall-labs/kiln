@@ -650,15 +650,19 @@ fn snapshot_module_payload(
             }
         })?;
         program.dependencies = static_requires;
+        program.link_facts.node_runtime_requests =
+            frontend_oxc::discover_node_runtime_requests(path_string, &source.text);
         return Ok(kiln_module_graph::ModulePayload::Program(program));
     }
     let hir = frontend_oxc::parse(path_string, &source.text);
-    let program = kiln_ir::compile_module(&hir).map_err(|diagnostics| {
+    let mut program = kiln_ir::compile_module(&hir).map_err(|diagnostics| {
         kiln_module_graph::ModuleGraphError::Compile {
             path: path.to_path_buf(),
             diagnostics,
         }
     })?;
+    program.link_facts.node_runtime_requests =
+        frontend_oxc::discover_node_runtime_requests(path_string, &source.text);
     Ok(kiln_module_graph::ModulePayload::Program(program))
 }
 
@@ -1067,6 +1071,8 @@ fn module_payload<E: QueryEngine>(
             }
         })?;
         program.dependencies = static_requires;
+        program.link_facts.node_runtime_requests =
+            frontend_oxc::discover_node_runtime_requests(module_path_string, source);
         return Ok(kiln_module_graph::ModulePayload::Program(program));
     }
     engine
