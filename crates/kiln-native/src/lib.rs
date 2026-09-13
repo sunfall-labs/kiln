@@ -4148,6 +4148,24 @@ struct NativeExecutableGraph<'a> {
     partial_namespace_members: BTreeMap<PathBuf, BTreeSet<String>>,
 }
 
+fn native_static_reachable(graph: &ModuleGraph) -> BTreeSet<PathBuf> {
+    let mut reachable = BTreeSet::new();
+    let mut pending = vec![graph.entry().to_path_buf()];
+    while let Some(path) = pending.pop() {
+        if !reachable.insert(path.clone()) {
+            continue;
+        }
+        if let Some(node) = graph.module(&path) {
+            pending.extend(
+                node.dependencies
+                    .iter()
+                    .map(|dependency| dependency.target.clone()),
+            );
+        }
+    }
+    reachable
+}
+
 /// The exact two-arm dispatcher used by React and similar CommonJS packages.
 ///
 /// This intentionally accepts no general JavaScript. Matching the complete whitespace-free
@@ -4511,11 +4529,12 @@ fn native_executable_graph(
     // the complete namespace even when another importer has a statically known subset.
     partial_namespace_members.retain(|path, _| !namespace_demands.contains(path));
 
+    let modules = graph
+        .modules()
+        .filter(|node| live.contains(&node.path))
+        .collect::<Vec<_>>();
     Ok(NativeExecutableGraph {
-        modules: graph
-            .modules()
-            .filter(|node| live.contains(&node.path))
-            .collect(),
+        modules,
         live_imports,
         live_export_slots,
         inactive_commonjs_dependencies,
@@ -5280,6 +5299,7 @@ fn write_launcher_dynamic_import(
     output.push_str(
         &r#"
 typedef struct kiln_graph_context kiln_graph_context;
+static kiln_value *kiln_graph_module_result(kiln_graph_context *graph, size_t index);
 static int kiln_graph_ensure_module(kiln_graph_context *graph, size_t index);
 extern int kiln_c99_validate_dynamic_import_options(kiln_host *, kiln_value, int, kiln_value *, int *);
 int kiln_graph_dynamic_import(kiln_host *host, const char *importer, kiln_value specifier, kiln_value options, kiln_value *promise, int depth, kiln_value *thrown) {
@@ -5431,7 +5451,7 @@ import_attributes_valid:
             .unwrap();
             writeln!(
                 output,
-                "        int status = kiln_graph_ensure_module((kiln_graph_context *)host->context, (size_t){index});\n        if (status != KILN_C99_OK) return status;"
+                "        int status = kiln_graph_ensure_module((kiln_graph_context *)host->context, (size_t){index});\n        if (status != KILN_C99_OK) return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), kiln_graph_module_result((kiln_graph_context *)host->context, (size_t){index}), 1, depth, thrown);"
             )
             .unwrap();
             if modules[index].0.source == ModuleSource::CommonJs {
@@ -5819,6 +5839,12 @@ fn graph_launcher_source_with_imports(
     for (index, (node, _)) in modules.iter().enumerate() {
         indices.insert(node.path.clone(), index);
     }
+    let startup_paths = native_static_reachable(graph);
+    let startup_indices = modules
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (node, _))| startup_paths.contains(&node.path).then_some(index))
+        .collect::<Vec<_>>();
     let namespace_plans = graph_namespace_plans(
         graph,
         modules,
@@ -6067,6 +6093,7 @@ typedef struct kiln_graph_module_state {
     kiln_value active_promise;
     int module_settling;
     int phase;
+    int failure_status;
 } kiln_graph_module_state;
 
 enum { KILN_MODULE_UNINITIALIZED = 0, KILN_MODULE_EVALUATING = 1,
@@ -6163,9 +6190,21 @@ struct kiln_graph_context {
     size_t current_module;
     int roots_registered;
 };
+
+static kiln_value *kiln_graph_module_result(kiln_graph_context *graph, size_t index) {
+    return &graph->module_states[index].result;
+}
 "#
         .replace("MODULE_COUNT", &modules.len().to_string()),
     );
+    output.push_str("static const size_t kiln_graph_startup_indices[] = {");
+    for (position, index) in startup_indices.iter().enumerate() {
+        if position != 0 {
+            output.push_str(", ");
+        }
+        output.push_str(&index.to_string());
+    }
+    output.push_str("};\n");
     render_graph_roots(&mut output, modules);
     for index in 0..modules.len() {
         writeln!(
@@ -6220,7 +6259,7 @@ static int kiln_graph_enter(void *opaque) {
     writeln!(
         evaluation,
         "    while (graph->current_module < (size_t){}) {{\n        switch (graph->current_module) {{",
-        modules.len()
+        startup_indices.len()
     )
     .unwrap();
     let mut helper_defs = String::new();
@@ -6296,7 +6335,8 @@ static int kiln_graph_enter(void *opaque) {
                         return KILN_C99_CONTROL_ERROR;
                     }}
                 }}
-                {}_publish_exports({exports});"#,
+                {}_publish_exports({exports});
+                state->phase = KILN_MODULE_EVALUATED;"#,
                 module.symbol
             )
             .unwrap();
@@ -6429,6 +6469,7 @@ static int kiln_graph_enter(void *opaque) {
                     return KILN_C99_THROWN;
                 }}
                 {}_publish_exports({exports});
+                state->phase = KILN_MODULE_EVALUATED;
             }}"#,
                 module.symbol
             )
@@ -6467,7 +6508,7 @@ static int kiln_graph_enter(void *opaque) {
     for (index, (node, module)) in modules.iter().enumerate() {
         emit_module_case(index, node, module)?;
     }
-    for index in 0..modules.len() {
+    for (startup_order, &index) in startup_indices.iter().enumerate() {
         let is_async = modules[index]
             .0
             .program
@@ -6476,9 +6517,9 @@ static int kiln_graph_enter(void *opaque) {
             .iter()
             .any(|i| matches!(i, kiln_ir::Instruction::Await | kiln_ir::Instruction::Yield));
         if is_async {
-            writeln!(evaluation, "        case {index}: {{ status = kiln_graph_eval_module_{index}(graph); graph->result = graph->module_states[{index}].result; if (status != 0) return status; if (!graph->module_states[{index}].module_settling) graph->current_module++; return 0; }}").unwrap();
+            writeln!(evaluation, "        case {startup_order}: {{ status = kiln_graph_eval_module_{index}(graph); graph->result = graph->module_states[{index}].result; if (status != 0) return status; if (!graph->module_states[{index}].module_settling) graph->current_module++; return 0; }}").unwrap();
         } else {
-            writeln!(evaluation, "        case {index}: {{ status = kiln_graph_ensure_module(graph, (size_t){index}); graph->result = graph->module_states[{index}].result; if (status != 0) return status; graph->current_module++; return 0; }}").unwrap();
+            writeln!(evaluation, "        case {startup_order}: {{ status = kiln_graph_ensure_module(graph, (size_t){index}); graph->result = graph->module_states[{index}].result; if (status != 0) return status; graph->current_module++; return 0; }}").unwrap();
         }
     }
     evaluation.push_str(
@@ -6494,10 +6535,11 @@ static int kiln_graph_enter(void *opaque) {
     output.push_str(
         "static int kiln_graph_ensure_module(kiln_graph_context *graph, size_t index) {\n",
     );
+    output.push_str("    int status;\n");
     output.push_str("    if (graph == NULL || index >= (size_t)");
     output.push_str(&modules.len().to_string());
     output.push_str(
-        ") return KILN_C99_CONTROL_ERROR;\n    if (graph->module_states[index].phase == KILN_MODULE_EVALUATED) return 0;\n    if (graph->module_states[index].phase == KILN_MODULE_EVALUATING) return 0;\n    switch (index) {\n",
+        ") return KILN_C99_CONTROL_ERROR;\n    if (graph->module_states[index].phase == KILN_MODULE_EVALUATED) return 0;\n    if (graph->module_states[index].phase == KILN_MODULE_FAILED) return graph->module_states[index].failure_status;\n    if (graph->module_states[index].phase == KILN_MODULE_EVALUATING) return 0;\n    graph->module_states[index].phase = KILN_MODULE_EVALUATING;\n    switch (index) {\n",
     );
     for index in 0..modules.len() {
         writeln!(output, "        case {index}: {{").unwrap();
@@ -6505,7 +6547,7 @@ static int kiln_graph_enter(void *opaque) {
             if let Some(&provider) = indices.get(&dependency.target) {
                 writeln!(
                     output,
-                    "            {}status = kiln_graph_ensure_module(graph, (size_t){provider}); if (status != KILN_C99_OK) return status;",
+                    "            {}status = kiln_graph_ensure_module(graph, (size_t){provider}); if (status != KILN_C99_OK) {{ graph->module_states[index].result = graph->module_states[{provider}].result; return status; }}",
                     if dependency_index == 0 { "int " } else { "" }
                 )
                 .unwrap();
@@ -6513,7 +6555,7 @@ static int kiln_graph_enter(void *opaque) {
         }
         writeln!(
             output,
-            "            return kiln_graph_eval_module_{index}(graph);\n        }}"
+            "            status = kiln_graph_eval_module_{index}(graph);\n            if (status != KILN_C99_OK) {{ graph->module_states[index].phase = KILN_MODULE_FAILED; graph->module_states[index].failure_status = status; return status; }}\n            return 0;\n        }}"
         )
         .unwrap();
     }
@@ -6546,7 +6588,7 @@ static int kiln_cli_run_realm(int argc, char **argv, int writes_result) {
     writeln!(
         output,
         r#"    while (status == 0 && (graph.current_module < (size_t){} || !graph.roots_registered)) {{
-        if (graph.current_module < (size_t){} && graph.module_states[graph.current_module].module_settling) {{
+        if (graph.current_module < (size_t){} && graph.module_states[kiln_graph_startup_indices[graph.current_module]].module_settling) {{
             phase = "the turn loop";
             status = kiln_realm_drive(realm, &graph.host, &graph.result);
             if (status != 0) break;
@@ -6555,8 +6597,8 @@ static int kiln_cli_run_realm(int argc, char **argv, int writes_result) {
         status = kiln_realm_enter(realm, kiln_graph_enter, &graph);
     }}
         if (status == 0) {{ phase = "the turn loop"; status = kiln_realm_drive(realm, &graph.host, &graph.result); }}"#,
-        modules.len(),
-        modules.len()
+        startup_indices.len(),
+        startup_indices.len()
     )
     .unwrap();
     output.push_str(

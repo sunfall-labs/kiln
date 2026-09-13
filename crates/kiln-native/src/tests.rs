@@ -4949,6 +4949,85 @@ fn native_dynamic_import_uses_importer_identity_for_relative_modules() {
 }
 
 #[test]
+fn native_dynamic_import_initializes_once_and_stays_lazy() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping dynamic lifecycle integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-dynamic-import-lifecycle");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).expect("write root package");
+    fs::write(
+        root.path.join("static.mjs"),
+        "globalThis.staticCount = 1;\n",
+    )
+    .expect("write static dependency");
+    fs::write(
+        root.path.join("static2.mjs"),
+        "globalThis.staticOther = 2;\n",
+    )
+    .expect("write second static dependency");
+    fs::write(
+        root.path.join("used.mjs"),
+        "globalThis.usedCount = (globalThis.usedCount || 0) + 1; export const value = 42;\n",
+    )
+    .expect("write used dynamic module");
+    fs::write(
+        root.path.join("unused.mjs"),
+        "globalThis.unusedCount = (globalThis.unusedCount || 0) + 1; export const value = 7;\n",
+    )
+    .expect("write unused dynamic module");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "import './static.mjs';\n\
+         import './static2.mjs';\n\
+         function unused() { return import('./unused.mjs'); }\n\
+         if (false) unused();\n\
+         const first = await import('./used.mjs');\n\
+         const second = await import('./used.mjs');\n\
+         console.log(globalThis.staticCount, globalThis.usedCount, globalThis.unusedCount || 0, first === second, first.value);\n",
+    )
+    .expect("write lifecycle entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("dynamic lifecycle graph compiles");
+    assert!(
+        graph
+            .dynamic_dependencies(graph.entry())
+            .iter()
+            .any(|dependency| dependency.specifier == "./unused.mjs"),
+        "{:?}",
+        graph.dynamic_dependencies(graph.entry())
+    );
+    for (profile, name) in [
+        (NativeProfile::Dev, "dev"),
+        (NativeProfile::Release, "release"),
+    ] {
+        let report = NativeBuilder::new(
+            test_cache(root.path.join(format!("cache-{name}"))),
+            toolchain.clone(),
+        )
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join(format!("program-{name}")),
+                profile,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .expect("dynamic lifecycle graph builds and runs");
+        assert_eq!(report.stdout, b"1 1 0 true 42\n", "profile {name}");
+    }
+}
+
+#[test]
 fn a_second_build_reuses_every_material_artifact_and_runs() {
     let Some(toolchain) = Toolchain::discover().ok() else {
         eprintln!("skipping native integration: no C compiler found");
