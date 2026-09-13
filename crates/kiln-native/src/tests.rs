@@ -5237,6 +5237,39 @@ fn native_runtime_failures_keep_distinct_captured_bases() {
 }
 
 #[test]
+fn native_dynamic_and_runtime_same_specifier_have_separate_frontiers() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-lazy-frontier-kind");
+    let package = root.path.join("pkg");
+    fs::create_dir_all(&package).expect("create package");
+    fs::write(
+        package.join("package.json"),
+        r#"{"exports":{"require":"./c.cjs","import":"./i.mjs"}}"#,
+    )
+    .expect("write package exports");
+    fs::write(package.join("c.cjs"), "module.exports = 1;").expect("write cjs target");
+    fs::write(package.join("i.mjs"), "export default 2;").expect("write esm target");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "import { createRequire } from 'node:module'; createRequire(import.meta.url)('./pkg'); import('./pkg');\n",
+    )
+    .expect("write shared lazy frontier entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build shared lazy frontier graph");
+    let plan = native_graph_plan(&graph).expect("both lazy frontiers are supported");
+    assert!(plan.failures.is_empty());
+    assert!(plan.runtime_failures.is_empty());
+    assert_eq!(plan.excluded.len(), 0);
+}
+
+#[test]
 fn native_failed_dynamic_closure_preserves_shared_successful_dependencies() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
