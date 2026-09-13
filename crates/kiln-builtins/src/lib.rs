@@ -443,4 +443,21 @@ declare_ts_builtins! {
             "workerData",
         ],
     },
+    Module {
+        variant: Module,
+        file: "node/module.ts",
+        logical_path: "node:module.ts",
+        source_const: MODULE_SOURCE,
+        exports_const: MODULE_EXPORTS,
+        sample_source_check: "export class Module",
+        presence_test: module_builtin_source_is_present,
+        compilation_test: module_builtin_compiles_cleanly,
+        exports: [
+            "Module",
+            "builtinModules",
+            "createRequire",
+            "default",
+            "isBuiltin",
+        ],
+    },
 }

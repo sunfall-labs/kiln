@@ -262,7 +262,13 @@ const BUILTINS: &[BuiltinAbi] = &[
         // namespace object for this name, so `typeof require("node:module")` was "object" in
         // one engine and "function" in the other, from the same bytecode.
         specifier: "node:module",
-        exports: &["createRequire", "default"],
+        exports: &[
+            "Module",
+            "builtinModules",
+            "createRequire",
+            "default",
+            "isBuiltin",
+        ],
         commonjs: CommonJsProjection::Callable {
             export: "default",
             properties: &[],
