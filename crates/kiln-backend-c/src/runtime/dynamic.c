@@ -1813,9 +1813,11 @@ static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
 /* Dynamic import option validation is shared by every generated importer. Keeping it in the
  * runtime means the launcher and shared wrapper cannot drift in their object/enumeration rules. */
 static int kiln_c99_validate_dynamic_import_options(kiln_host *host, kiln_value options, int depth,
-                                                    kiln_value *thrown) {
+                                                    kiln_value *thrown, int *attribute_type) {
     kiln_value attrs;
+    if (attribute_type != NULL) *attribute_type = 0;
     kiln_value keys;
+    kiln_value entries;
     size_t index;
     int status;
     if (options.tag == KILN_VALUE_UNDEFINED) return KILN_C99_OK;
@@ -1834,16 +1836,27 @@ static int kiln_c99_validate_dynamic_import_options(kiln_host *host, kiln_value 
     }
     status = kiln_c99_own_keys(host, attrs, &keys, depth, thrown);
     if (status != KILN_C99_OK) return status;
+    status = kiln_c99_new_array(&entries);
+    if (status != KILN_C99_OK) return status;
     for (index = 0; index < kiln_c99_array_of(keys)->count; ++index) {
         kiln_value key = kiln_val_to_boundary(kiln_c99_array_of(keys)->elements[index]);
         kiln_value value;
         if (key.tag != KILN_VALUE_STRING) continue;
         status = kiln_c99_get(host, attrs, key.ptr, key.len, &value, depth, thrown);
         if (status != KILN_C99_OK) return status;
-        if (key.len != 4 || memcmp(key.ptr, "type", 4) != 0) {
-            /* Reads for every key happen before this validation, as EnumerableOwnProperties does. */
-            continue;
-        }
+        kiln_value entry;
+        status = kiln_c99_new_array(&entry);
+        if (status == KILN_C99_OK) status = kiln_c99_array_push(entry, key);
+        if (status == KILN_C99_OK) status = kiln_c99_array_push(entry, value);
+        if (status == KILN_C99_OK) status = kiln_c99_array_push(entries, entry);
+        if (status != KILN_C99_OK) return status;
+    }
+    /* Validate only after all enumerable getters have run. */
+    for (index = 0; index < kiln_c99_array_of(entries)->count; ++index) {
+        kiln_value entry = kiln_val_to_boundary(kiln_c99_array_of(entries)->elements[index]);
+        kiln_value key = kiln_val_to_boundary(kiln_c99_array_of(entry)->elements[0]);
+        kiln_value value = kiln_val_to_boundary(kiln_c99_array_of(entry)->elements[1]);
+        if (key.len != 4 || memcmp(key.ptr, "type", 4) != 0) continue;
         if (value.tag != KILN_VALUE_STRING) {
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                         "import attribute values must be strings");
@@ -1852,10 +1865,12 @@ static int kiln_c99_validate_dynamic_import_options(kiln_host *host, kiln_value 
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                         "unsupported import attribute `type`");
         }
+        if (attribute_type != NULL) *attribute_type = 1;
     }
     /* Unknown keys are rejected only after all enumerable values have been read. */
-    for (index = 0; index < kiln_c99_array_of(keys)->count; ++index) {
-        kiln_value key = kiln_val_to_boundary(kiln_c99_array_of(keys)->elements[index]);
+    for (index = 0; index < kiln_c99_array_of(entries)->count; ++index) {
+        kiln_value entry = kiln_val_to_boundary(kiln_c99_array_of(entries)->elements[index]);
+        kiln_value key = kiln_val_to_boundary(kiln_c99_array_of(entry)->elements[0]);
         if (key.tag == KILN_VALUE_STRING &&
             (key.len != 4 || memcmp(key.ptr, "type", 4) != 0)) {
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,

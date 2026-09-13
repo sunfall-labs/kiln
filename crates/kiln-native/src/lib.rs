@@ -5245,60 +5245,6 @@ fn find_opentui_library(project_root: &Path) -> Option<PathBuf> {
     None
 }
 
-fn dynamic_import_validation_c() -> &'static str {
-    r#"
-static int kiln_validate_dynamic_import_options(kiln_host *host, kiln_value options, int depth, kiln_value *thrown) {
-    kiln_value attrs;
-    kiln_value keys;
-    size_t index;
-    kiln_value length;
-    int status;
-    extern int kiln_c99_own_keys(kiln_host *, kiln_value, kiln_value *, int, kiln_value *);
-    extern int kiln_c99_get_computed(kiln_host *, kiln_value, kiln_value, kiln_value *, int, kiln_value *);
-    extern kiln_value kiln_c99_value(uint32_t, uint64_t, const char *, size_t);
-    if (options.tag == KILN_VALUE_UNDEFINED) return KILN_C99_OK;
-    if (options.tag == KILN_VALUE_NULL || options.tag == KILN_VALUE_BOOLEAN ||
-        options.tag == KILN_VALUE_NUMBER || options.tag == KILN_VALUE_STRING) {
-        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "import options must be an object");
-    }
-    status = kiln_c99_get(host, options, "with", 4, &attrs, depth, thrown);
-    if (status != KILN_C99_OK) return status;
-    if (attrs.tag == KILN_VALUE_UNDEFINED) return KILN_C99_OK;
-    if (attrs.tag == KILN_VALUE_NULL || attrs.tag == KILN_VALUE_BOOLEAN ||
-        attrs.tag == KILN_VALUE_NUMBER || attrs.tag == KILN_VALUE_STRING) {
-        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "import attributes must be an object");
-    }
-    status = kiln_c99_own_keys(host, attrs, &keys, depth, thrown);
-    if (status != KILN_C99_OK) return status;
-    status = kiln_c99_get(host, keys, "length", 6, &length, depth, thrown);
-    if (status != KILN_C99_OK || length.tag != KILN_VALUE_NUMBER) return status;
-    { double count; memcpy(&count, &length.bits, sizeof(count));
-    if (count < 0 || count > 1000000) return KILN_C99_OK;
-    for (index = 0; index < (size_t)count; ++index) {
-        kiln_value key;
-        kiln_value value;
-        { double number = (double)index; uint64_t bits; memcpy(&bits, &number, sizeof(bits));
-        status = kiln_c99_get_computed(host, keys, kiln_c99_value(KILN_VALUE_NUMBER, bits, NULL, 0), &key, depth, thrown); }
-        if (status != KILN_C99_OK) return status;
-        if (key.tag != KILN_VALUE_STRING) continue;
-        status = kiln_c99_get(host, attrs, key.ptr, key.len, &value, depth, thrown);
-        if (status != KILN_C99_OK) return status;
-        if (key.len != 4 || memcmp(key.ptr, "type", 4) != 0) {
-            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "unsupported import attribute");
-        }
-        if (value.tag != KILN_VALUE_STRING) {
-            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "import attribute values must be strings");
-        }
-        if (value.len != 4 || memcmp(value.ptr, "file", 4) != 0) {
-            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "unsupported import attribute `type`");
-        }
-    }
-    }
-    return KILN_C99_OK;
-}
-"#
-}
-
 fn write_launcher_dynamic_import(
     output: &mut String,
     graph: &ModuleGraph,
@@ -5308,8 +5254,8 @@ fn write_launcher_dynamic_import(
     let opentui_path = find_opentui_library(graph.project_root());
     output.push_str(
         r#"
-extern int kiln_c99_validate_dynamic_import_options(kiln_host *, kiln_value, int, kiln_value *);
-int kiln_graph_dynamic_import(kiln_host *host, kiln_value specifier, kiln_value options, kiln_value *promise, int depth, kiln_value *thrown) {
+extern int kiln_c99_validate_dynamic_import_options(kiln_host *, kiln_value, int, kiln_value *, int *);
+int kiln_graph_dynamic_import(kiln_host *host, const char *importer, kiln_value specifier, kiln_value options, kiln_value *promise, int depth, kiln_value *thrown) {
     if (promise == NULL) return KILN_C99_CONTROL_ERROR;
     if (specifier.tag != KILN_VALUE_STRING) {
         kiln_value primitive = kiln_c99_undefined();
@@ -5325,8 +5271,9 @@ int kiln_graph_dynamic_import(kiln_host *host, kiln_value specifier, kiln_value 
         (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, "invalid import specifier");
         return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);
     }
+    int attribute_type = 0;
     { kiln_value validation_thrown = kiln_c99_undefined();
-      int attr_status = kiln_c99_validate_dynamic_import_options(host, options, depth, &validation_thrown);
+      int attr_status = kiln_c99_validate_dynamic_import_options(host, options, depth, &validation_thrown, &attribute_type);
       if (attr_status != KILN_C99_OK) {
           kiln_value *reason = attr_status == KILN_C99_THROWN ? &validation_thrown : &validation_thrown;
           return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), reason, 1, depth, thrown);
@@ -5420,37 +5367,39 @@ import_attributes_valid:
     }
 "#,
     );
-    let mut seen_specifiers = std::collections::HashSet::new();
     for (index, (node, _)) in modules.iter().enumerate() {
-        let mut specifiers_for_module = std::collections::BTreeSet::new();
-        specifiers_for_module.insert(logical_paths[index].clone());
+        let mut resolutions = std::collections::BTreeSet::new();
+        resolutions.insert((logical_paths[index].clone(), index));
         if let Some(stripped) = logical_paths[index].strip_prefix("./") {
-            specifiers_for_module.insert(stripped.to_owned());
+            resolutions.insert((stripped.to_owned(), index));
         } else {
-            specifiers_for_module.insert(format!("./{}", logical_paths[index]));
+            resolutions.insert((format!("./{}", logical_paths[index]), index));
         }
         if let ModuleSource::NodeBuiltin(builtin) = node.source {
-            specifiers_for_module.insert(builtin.specifier().to_owned());
+            resolutions.insert((builtin.specifier().to_owned(), index));
             if let Some(stripped) = builtin.specifier().strip_prefix("node:") {
-                specifiers_for_module.insert(stripped.to_owned());
+                resolutions.insert((stripped.to_owned(), index));
             }
         }
-        for (other_node, _) in modules {
+        for (other_index, (other_node, _)) in modules.iter().enumerate() {
             for dep in &other_node.dependencies {
                 if dep.target == node.path {
-                    specifiers_for_module.insert(dep.specifier.clone());
+                    resolutions.insert((dep.specifier.clone(), other_index));
                 }
             }
         }
-        for spec in specifiers_for_module {
-            if !seen_specifiers.insert(spec.clone()) {
-                continue;
-            }
+        for (spec, importer_index) in resolutions {
             let c_spec = native_c_string(&spec);
             let len = spec.len();
+            let importer = native_c_string(&modules[importer_index].1.symbol);
+            let attribute_guard = if matches!(node.source, ModuleSource::Asset) {
+                " && attribute_type == 1"
+            } else {
+                " && attribute_type == 0"
+            };
             writeln!(
                 output,
-                "    if (specifier.len == (size_t){len} && memcmp(specifier.ptr, {c_spec}, (size_t){len}) == 0) {{"
+                "    if (importer != NULL && strcmp(importer, {importer}) == 0{attribute_guard} && specifier.len == (size_t){len} && memcmp(specifier.ptr, {c_spec}, (size_t){len}) == 0) {{"
             )
             .unwrap();
             if modules[index].0.source == ModuleSource::CommonJs {
@@ -5487,8 +5436,8 @@ fn write_shared_wrapper_dynamic_import(
     let opentui_path = find_opentui_library(graph.project_root());
     output.push_str(
         r#"
-extern int kiln_c99_validate_dynamic_import_options(kiln_host *, kiln_value, int, kiln_value *);
-int kiln_graph_dynamic_import(kiln_host *host, kiln_value specifier, kiln_value options, kiln_value *promise, int depth, kiln_value *thrown) {
+extern int kiln_c99_validate_dynamic_import_options(kiln_host *, kiln_value, int, kiln_value *, int *);
+int kiln_graph_dynamic_import(kiln_host *host, const char *importer, kiln_value specifier, kiln_value options, kiln_value *promise, int depth, kiln_value *thrown) {
     if (promise == NULL) return KILN_C99_CONTROL_ERROR;
     if (specifier.tag != KILN_VALUE_STRING) {
         kiln_value primitive = kiln_c99_undefined();
@@ -5504,8 +5453,9 @@ int kiln_graph_dynamic_import(kiln_host *host, kiln_value specifier, kiln_value 
         (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, "invalid import specifier");
         return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);
     }
+    int attribute_type = 0;
     { kiln_value validation_thrown = kiln_c99_undefined();
-      int attr_status = kiln_c99_validate_dynamic_import_options(host, options, depth, &validation_thrown);
+      int attr_status = kiln_c99_validate_dynamic_import_options(host, options, depth, &validation_thrown, &attribute_type);
       if (attr_status != KILN_C99_OK) {
           return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &validation_thrown, 1, depth, thrown);
       }
@@ -5599,37 +5549,39 @@ import_attributes_valid:
     if (kiln_shared_namespaces != NULL) {
 "#,
     );
-    let mut seen_specifiers = std::collections::HashSet::new();
     for (index, (node, _)) in modules.iter().enumerate() {
-        let mut specifiers_for_module = std::collections::BTreeSet::new();
-        specifiers_for_module.insert(logical_paths[index].clone());
+        let mut resolutions = std::collections::BTreeSet::new();
+        resolutions.insert((logical_paths[index].clone(), index));
         if let Some(stripped) = logical_paths[index].strip_prefix("./") {
-            specifiers_for_module.insert(stripped.to_owned());
+            resolutions.insert((stripped.to_owned(), index));
         } else {
-            specifiers_for_module.insert(format!("./{}", logical_paths[index]));
+            resolutions.insert((format!("./{}", logical_paths[index]), index));
         }
         if let ModuleSource::NodeBuiltin(builtin) = node.source {
-            specifiers_for_module.insert(builtin.specifier().to_owned());
+            resolutions.insert((builtin.specifier().to_owned(), index));
             if let Some(stripped) = builtin.specifier().strip_prefix("node:") {
-                specifiers_for_module.insert(stripped.to_owned());
+                resolutions.insert((stripped.to_owned(), index));
             }
         }
-        for (other_node, _) in modules {
+        for (other_index, (other_node, _)) in modules.iter().enumerate() {
             for dep in &other_node.dependencies {
                 if dep.target == node.path {
-                    specifiers_for_module.insert(dep.specifier.clone());
+                    resolutions.insert((dep.specifier.clone(), other_index));
                 }
             }
         }
-        for spec in specifiers_for_module {
-            if !seen_specifiers.insert(spec.clone()) {
-                continue;
-            }
+        for (spec, importer_index) in resolutions {
             let c_spec = native_c_string(&spec);
             let len = spec.len();
+            let importer = native_c_string(&modules[importer_index].1.symbol);
+            let attribute_guard = if matches!(node.source, ModuleSource::Asset) {
+                " && attribute_type == 1"
+            } else {
+                " && attribute_type == 0"
+            };
             writeln!(
                 output,
-                "        if (specifier.len == (size_t){len} && memcmp(specifier.ptr, {c_spec}, (size_t){len}) == 0) {{"
+                "        if (importer != NULL && strcmp(importer, {importer}) == 0{attribute_guard} && specifier.len == (size_t){len} && memcmp(specifier.ptr, {c_spec}, (size_t){len}) == 0) {{"
             )
             .unwrap();
             if modules[index].0.source == ModuleSource::CommonJs {
