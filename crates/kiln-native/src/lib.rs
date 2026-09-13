@@ -4004,6 +4004,17 @@ fn graph_topology_digest(
             bytes.extend_from_slice(index.to_string().as_bytes());
             bytes.push(0);
         }
+        for dependency in graph.dynamic_dependencies(&node.path) {
+            bytes.extend_from_slice(b"dynamic:");
+            bytes.extend_from_slice(dependency.specifier.as_bytes());
+            bytes.push(0);
+            let index = indices
+                .get(&dependency.target)
+                .copied()
+                .unwrap_or(usize::MAX);
+            bytes.extend_from_slice(index.to_string().as_bytes());
+            bytes.push(0);
+        }
         for import in &node.program.imports {
             bytes.extend_from_slice(import.source.as_bytes());
             bytes.push(0);
@@ -4046,6 +4057,17 @@ fn graph_shared_topology_digest(
         bytes.extend_from_slice(module.symbol.as_bytes());
         bytes.push(0);
         for dependency in &node.dependencies {
+            bytes.extend_from_slice(dependency.specifier.as_bytes());
+            bytes.push(0);
+            let index = indices
+                .get(&dependency.target)
+                .copied()
+                .unwrap_or(usize::MAX);
+            bytes.extend_from_slice(index.to_string().as_bytes());
+            bytes.push(0);
+        }
+        for dependency in graph.dynamic_dependencies(&node.path) {
+            bytes.extend_from_slice(b"dynamic:");
             bytes.extend_from_slice(dependency.specifier.as_bytes());
             bytes.push(0);
             let index = indices
@@ -4325,6 +4347,9 @@ fn native_executable_graph(
             if node.source == ModuleSource::CommonJs || !removable {
                 mark_live(&dependency.target, &mut live, &mut queue);
             }
+        }
+        for dependency in graph.dynamic_dependencies(&node.path) {
+            mark_live(&dependency.target, &mut live, &mut queue);
         }
 
         for (import_index, import) in node.program.imports.iter().enumerate() {
@@ -5382,7 +5407,11 @@ import_attributes_valid:
             }
         }
         for (other_index, (other_node, _)) in modules.iter().enumerate() {
-            for dep in &other_node.dependencies {
+            for dep in other_node
+                .dependencies
+                .iter()
+                .chain(graph.dynamic_dependencies(&other_node.path).iter())
+            {
                 if dep.target == node.path {
                     resolutions.insert((dep.specifier.clone(), other_index));
                 }
@@ -5564,7 +5593,11 @@ import_attributes_valid:
             }
         }
         for (other_index, (other_node, _)) in modules.iter().enumerate() {
-            for dep in &other_node.dependencies {
+            for dep in other_node
+                .dependencies
+                .iter()
+                .chain(graph.dynamic_dependencies(&other_node.path).iter())
+            {
                 if dep.target == node.path {
                     resolutions.insert((dep.specifier.clone(), other_index));
                 }
