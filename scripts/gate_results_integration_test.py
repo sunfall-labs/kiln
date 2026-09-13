@@ -115,6 +115,7 @@ class GateResultsCliIntegrationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.aggregate_document["verdict"], "passed")
         self.assertEqual(sorted(self.aggregate_document["evidence"]["steps"]), sorted(names))
+        self.assertEqual(sorted(step["source"]["name"] for step in self.aggregate_document["steps"]), sorted(names))
         for path in paths:
             document = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(document["verdict"], "passed")
