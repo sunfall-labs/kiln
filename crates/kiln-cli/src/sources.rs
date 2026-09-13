@@ -326,12 +326,15 @@ pub(crate) fn include_reachable_dependencies(
         texts.push((entry_path.to_owned(), entry_text));
     }
 
-    let mut pending = vec![entry];
+    // Static imports from the entry are strict graph roots. Literal dynamic imports and
+    // CommonJS requires are runtime-reachable subtrees: capture anything that exists, but do not
+    // reject the whole snapshot when a descendant is unavailable.
+    let mut pending = vec![(entry, true)];
     let mut visited = HashSet::new();
     let mut resolutions = BTreeMap::new();
     let mut node_formats = BTreeMap::new();
 
-    while let Some(importer) = pending.pop() {
+    while let Some((importer, strict)) = pending.pop() {
         if !visited.insert(importer.clone()) {
             continue;
         }
@@ -387,7 +390,8 @@ pub(crate) fn include_reachable_dependencies(
             (frontend_oxc::parse(importer_path, importer_text), None)
         };
         let mut requests: Vec<(String, NodeRequestKind, bool)> = if commonjs {
-            static_requires.expect("CommonJS facts exist")
+            static_requires
+                .expect("CommonJS facts exist")
                 .into_iter()
                 .map(|specifier| (specifier, NodeRequestKind::Require, true))
                 .collect()
@@ -405,9 +409,9 @@ pub(crate) fn include_reachable_dependencies(
         // source and pinned Node format were never sent by the client.
         for target in kiln_ir::collect_dynamic_imports(&module.body) {
             if let kiln_ir::DynamicImportTarget::Static(specifier) = target
-                && !requests
-                    .iter()
-                    .any(|(existing, kind, _)| existing == &specifier && *kind == NodeRequestKind::Import)
+                && !requests.iter().any(|(existing, kind, _)| {
+                    existing == &specifier && *kind == NodeRequestKind::Import
+                })
             {
                 // Dynamic import always uses the import condition, even in a CommonJS module;
                 // a missing target remains a deferred runtime rejection rather than a build error.
@@ -427,9 +431,9 @@ pub(crate) fn include_reachable_dependencies(
                     // A CommonJS `require()` resolves when execution reaches it. Leaving an
                     // unresolved literal out of the pinned map lets the runtime throw inside the
                     // program's own `try/catch`; ESM imports remain strict graph dependencies.
-                    Err(_) if commonjs || !required => continue,
+                    Err(_) if commonjs || !required || !strict => continue,
                     Err(error) => return Err(Error::BadInput(error.to_string())),
-            };
+                };
             let target = resolved.module.path.clone();
             let asset = target
                 .extension()
@@ -505,7 +509,7 @@ pub(crate) fn include_reachable_dependencies(
                 indexes.insert(target.clone(), texts.len());
                 texts.push((target_path.to_owned(), target_text));
             }
-            pending.push(target);
+            pending.push((target, strict && required && !commonjs));
         }
     }
 
@@ -941,8 +945,11 @@ mod tests {
         tree.file("src/main.mjs");
         let entry = tree.0.join("src/main.mjs");
         let asset = tree.0.join("src/tree-sitter.wasm");
-        std::fs::write(&entry, "import wasm from './tree-sitter.wasm'; console.log(wasm);\n")
-            .expect("write entry");
+        std::fs::write(
+            &entry,
+            "import wasm from './tree-sitter.wasm'; console.log(wasm);\n",
+        )
+        .expect("write entry");
         std::fs::write(&asset, [0_u8, 159, 146, 150]).expect("write binary asset");
 
         let entry = entry.canonicalize().expect("entry");
@@ -959,7 +966,10 @@ mod tests {
         .expect("capture asset edge");
 
         assert_eq!(resolutions.len(), 1);
-        assert_eq!(resolutions[0].target, asset.canonicalize().unwrap().to_string_lossy());
+        assert_eq!(
+            resolutions[0].target,
+            asset.canonicalize().unwrap().to_string_lossy()
+        );
         assert_eq!(texts.len(), 1);
         assert_eq!(formats.len(), 1);
     }
@@ -968,9 +978,14 @@ mod tests {
     fn leaves_missing_literal_dynamic_import_deferred() {
         let tree = Tree::new("missing-dynamic-import");
         tree.file("src/main.mjs");
+        tree.file("src/optional.mjs");
         let entry = tree.0.join("src/main.mjs");
-        std::fs::write(&entry, "import('./optional.mjs').catch(() => {});\n")
-            .expect("write entry");
+        std::fs::write(&entry, "import('./optional.mjs').catch(() => {});\n").expect("write entry");
+        std::fs::write(
+            tree.0.join("src/optional.mjs"),
+            "import './missing.mjs'; export const optional = true;\n",
+        )
+        .expect("write optional module");
         let entry = entry.canonicalize().expect("entry");
         let mut texts = vec![(
             entry.to_string_lossy().into_owned(),
@@ -982,10 +997,33 @@ mod tests {
             &mut texts,
             true,
         )
-        .expect("missing dynamic target stays deferred");
-        assert!(resolutions.is_empty());
-        assert_eq!(texts.len(), 1);
-        assert_eq!(formats.len(), 1);
+        .expect("missing dynamic subtree dependency stays deferred");
+        assert_eq!(resolutions.len(), 1);
+        assert_eq!(resolutions[0].specifier, "./optional.mjs");
+        assert_eq!(texts.len(), 2);
+        assert_eq!(formats.len(), 2);
+    }
+
+    #[test]
+    fn missing_static_import_remains_strict() {
+        let tree = Tree::new("missing-static-import");
+        tree.file("src/main.mjs");
+        let entry = tree.0.join("src/main.mjs");
+        std::fs::write(&entry, "import './missing.mjs';\n").expect("write entry");
+        let entry = entry.canonicalize().expect("entry");
+        let mut texts = vec![(
+            entry.to_string_lossy().into_owned(),
+            std::fs::read_to_string(&entry).expect("read entry"),
+        )];
+
+        let error = include_reachable_dependencies(
+            &tree.0,
+            entry.to_str().expect("UTF-8 entry"),
+            &mut texts,
+            true,
+        )
+        .expect_err("missing static target must fail the snapshot");
+        assert!(error.to_string().contains("missing.mjs"));
     }
 
     /// The project walk skips every dot-directory, so nothing under `.scratch/` is in the
@@ -1117,7 +1155,7 @@ mod tests {
         let entry = tree.0.join("main.cjs");
         std::fs::write(
             &entry,
-            "try { require('not-installed'); } catch { console.log('caught'); }",
+            "if (false) require('./missing.cjs');\nimport('./missing.mjs').catch(() => {});\n",
         )
         .expect("write entry");
         let canonical = entry.canonicalize().expect("canonical entry");
