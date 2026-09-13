@@ -4,7 +4,11 @@
 //! accepts ordinary strings and returns [`kiln_hir`] values, so an Oxc upgrade cannot leak AST
 //! types or arena lifetimes into the query database, interpreter, or backends.
 
-use std::{collections::HashSet, path::Path, sync::Arc};
+use std::{
+    collections::{BTreeSet, HashSet},
+    path::Path,
+    sync::Arc,
+};
 
 use kiln_hir::{
     AssignmentOperator as HirAssignmentOperator, BinaryOperator as HirBinaryOperator, Diagnostic,
@@ -17,7 +21,7 @@ use kiln_hir::{
     UnaryOperator as HirUnaryOperator, VariableDeclarator as HirVariableDeclarator,
     VariableKind as HirVariableKind,
 };
-use oxc_allocator::Allocator;
+use oxc_allocator::{Allocator, TakeIn};
 use oxc_ast::ast::{
     ArrayExpressionElement, ForStatementInit, ForStatementLeft, SimpleAssignmentTarget,
 };
@@ -32,6 +36,8 @@ use oxc_ast::{
     },
 };
 use oxc_diagnostics::OxcDiagnostic;
+use oxc_ecmascript::BoundNames;
+use oxc_minifier::{CompressOptions, Compressor};
 use oxc_parser::{ParseOptions, Parser};
 use oxc_semantic::{IsGlobalReference, SemanticBuilder};
 use oxc_span::{GetSpan, SourceType, Span};
@@ -56,6 +62,27 @@ pub fn parse(path: &str, source: &str) -> Module {
         source_type = source_type.with_module(true);
     }
     parse_source(Some(path), source, source_type)
+}
+
+/// Parse an ESM module after specializing its directly declared exports to a
+/// closed-world demanded set and running Oxc's conservative DCE pass.
+///
+/// Export forms that cannot be safely converted back into an ordinary local
+/// declaration remain observable roots. The caller must relink the returned
+/// module because its import and export interface may be smaller.
+pub fn parse_dce(path: &str, source: &str, demanded_exports: &BTreeSet<String>) -> Module {
+    let mut source_type = SourceType::from_path(Path::new(path))
+        .unwrap_or_else(|_| SourceType::default().with_module(true));
+    if !path.ends_with(".cjs") {
+        source_type = source_type.with_module(true);
+    }
+    parse_source_in_context(
+        Some(path),
+        source,
+        source_type,
+        None,
+        Some(demanded_exports),
+    )
 }
 
 /// Parse with an explicit ECMAScript goal, independent of Oxc's extension convention.
@@ -122,7 +149,13 @@ impl EvalSyntax {
 /// nothing else.
 pub fn parse_eval(path: &str, source: &str, allow: &EvalSyntax) -> Module {
     let inferred = SourceType::from_path(Path::new(path)).unwrap_or_default();
-    parse_source_in_context(Some(path), source, inferred.with_script(true), Some(allow))
+    parse_source_in_context(
+        Some(path),
+        source,
+        inferred.with_script(true),
+        Some(allow),
+        None,
+    )
 }
 
 /// Parse a CommonJS file with Oxc's explicit wrapper-aware goal while preserving the owned HIR
@@ -385,8 +418,63 @@ fn parse_source_with_commonjs_requires(
     (lower_parsed(path, &parsed, source, source_type), requires)
 }
 
+/// Stop undemanded direct declarations from being implicit roots in Oxc's
+/// module liveness. The declaration remains in place as an ordinary local, so
+/// Oxc still preserves its initializer whenever that initializer can have an
+/// observable effect.
+fn expose_only_demanded_declarations<'a>(
+    allocator: &'a Allocator,
+    program: &mut oxc_ast::ast::Program<'a>,
+    demanded_exports: &BTreeSet<String>,
+) {
+    for statement in &mut program.body {
+        let should_deexport = match statement {
+            Statement::ExportDeclaration(export) => {
+                let mut demanded = false;
+                export.declaration.bound_names(&mut |identifier| {
+                    demanded |= demanded_exports.contains(identifier.name.as_str());
+                });
+                !demanded
+            }
+            _ => false,
+        };
+        if !should_deexport {
+            continue;
+        }
+        let Statement::ExportDeclaration(export) = statement.take_in(&allocator) else {
+            unreachable!("checked export declaration above")
+        };
+        *statement = export.unbox().declaration.into();
+    }
+}
+
+/// Oxc 0.147 can treat an unused inherited class as removable even though
+/// evaluating its heritage may throw (notably `class A extends Later {}`).
+/// Keep the entire module on Kiln's existing conservative path until that
+/// upstream edge is fixed.
+fn has_top_level_class_heritage(program: &oxc_ast::ast::Program<'_>) -> bool {
+    let variable_has_heritage = |declaration: &VariableDeclaration<'_>| {
+        declaration.declarations.iter().any(|declarator| {
+            matches!(
+                declarator.init.as_ref(),
+                Some(Expression::ClassExpression(class)) if class.heritage.is_some()
+            )
+        })
+    };
+    program.body.iter().any(|statement| match statement {
+        Statement::ClassDeclaration(class) => class.heritage.is_some(),
+        Statement::VariableDeclaration(declaration) => variable_has_heritage(declaration),
+        Statement::ExportDeclaration(export) => match &export.declaration {
+            Declaration::ClassDeclaration(class) => class.heritage.is_some(),
+            Declaration::VariableDeclaration(declaration) => variable_has_heritage(declaration),
+            _ => false,
+        },
+        _ => false,
+    })
+}
+
 fn parse_source(path: Option<&str>, source: &str, source_type: SourceType) -> Module {
-    parse_source_in_context(path, source, source_type, None)
+    parse_source_in_context(path, source, source_type, None, None)
 }
 
 fn parse_source_in_context(
@@ -394,6 +482,7 @@ fn parse_source_in_context(
     source: &str,
     source_type: SourceType,
     allow: Option<&EvalSyntax>,
+    demanded_exports: Option<&BTreeSet<String>>,
 ) -> Module {
     let allocator = Allocator::default();
     // A regular expression literal's *pattern* is a grammar of its own, and Oxc only runs it when
@@ -421,7 +510,25 @@ fn parse_source_in_context(
         parsed.diagnostics.extend(ret.diagnostics);
     }
 
-    lower_parsed_in_context(path, &parsed, source, source_type, allow)
+    if let Some(demanded_exports) = demanded_exports
+        && !parsed.panicked
+        && parsed.diagnostics.is_empty()
+        && early_errors(&parsed).is_empty()
+        && !has_top_level_class_heritage(&parsed.program)
+    {
+        expose_only_demanded_declarations(&allocator, &mut parsed.program, demanded_exports);
+        Compressor::new(&allocator)
+            .dead_code_elimination(&mut parsed.program, CompressOptions::dce());
+    }
+
+    lower_parsed_in_context(
+        path,
+        &parsed,
+        source,
+        source_type,
+        allow,
+        demanded_exports.is_some(),
+    )
 }
 
 fn lower_parsed(
@@ -430,7 +537,7 @@ fn lower_parsed(
     source: &str,
     source_type: SourceType,
 ) -> Module {
-    lower_parsed_in_context(path, parsed, source, source_type, None)
+    lower_parsed_in_context(path, parsed, source, source_type, None, false)
 }
 
 fn lower_parsed_in_context(
@@ -439,15 +546,55 @@ fn lower_parsed_in_context(
     source: &str,
     source_type: SourceType,
     allow: Option<&EvalSyntax>,
+    filter_module_record: bool,
 ) -> Module {
+    let module_statement_spans = parsed
+        .program
+        .body
+        .iter()
+        .filter(|statement| {
+            matches!(
+                statement,
+                Statement::ImportDeclaration(_)
+                    | Statement::ExportAllDeclaration(_)
+                    | Statement::ExportDefaultDeclaration(_)
+                    | Statement::ExportDeclaration(_)
+                    | Statement::ExportNamedDeclaration(_)
+                    | Statement::ExportFromDeclaration(_)
+            )
+        })
+        .map(|statement| (statement.span().start, statement.span().end))
+        .collect::<HashSet<_>>();
+    let import_binding_spans = parsed
+        .program
+        .body
+        .iter()
+        .filter_map(|statement| match statement {
+            Statement::ImportDeclaration(declaration) => declaration.specifiers.as_ref(),
+            _ => None,
+        })
+        .flatten()
+        .map(|specifier| match specifier {
+            ImportDeclarationSpecifier::ImportSpecifier(specifier) => specifier.local.span,
+            ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => specifier.local.span,
+            ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => specifier.local.span,
+        })
+        .map(|span| (span.start, span.end))
+        .collect::<HashSet<_>>();
     let mut requested_modules = parsed
         .module_record
         .requested_modules
         .iter()
-        .map(|(specifier, occurrences)| RequestedModule {
-            specifier: specifier.to_string(),
-            occurrences: occurrences
+        .filter_map(|(specifier, occurrences)| {
+            let occurrences = occurrences
                 .iter()
+                .filter(|occurrence| {
+                    !filter_module_record
+                        || module_statement_spans.contains(&(
+                            occurrence.statement_span.start,
+                            occurrence.statement_span.end,
+                        ))
+                })
                 .map(|occurrence| ModuleRequestOccurrence {
                     statement_span: span(occurrence.statement_span),
                     specifier_span: span(occurrence.span),
@@ -458,13 +605,22 @@ fn lower_parsed_in_context(
                         ModuleRequestKind::Export
                     },
                 })
-                .collect(),
+                .collect::<Vec<_>>();
+            (!occurrences.is_empty()).then(|| RequestedModule {
+                specifier: specifier.to_string(),
+                occurrences,
+            })
         })
         .collect::<Vec<_>>();
     let mut imports = parsed
         .module_record
         .import_entries
         .iter()
+        .filter(|entry| {
+            !filter_module_record
+                || import_binding_spans
+                    .contains(&(entry.local_name.span.start, entry.local_name.span.end))
+        })
         .map(|entry| Import {
             source: entry.module_request.name.to_string(),
             imported: lower_import_name(&entry.import_name),
@@ -563,10 +719,24 @@ fn lower_parsed_in_context(
         .local_export_entries
         .iter()
         .chain(parsed.module_record.indirect_export_entries.iter())
+        .filter(|entry| {
+            !filter_module_record
+                || module_statement_spans
+                    .contains(&(entry.statement_span.start, entry.statement_span.end))
+        })
         .map(lower_export)
         .collect::<Vec<_>>();
 
-    for entry in &parsed.module_record.star_export_entries {
+    for entry in parsed
+        .module_record
+        .star_export_entries
+        .iter()
+        .filter(|entry| {
+            !filter_module_record
+                || module_statement_spans
+                    .contains(&(entry.statement_span.start, entry.statement_span.end))
+        })
+    {
         exports.push(lower_export(entry));
     }
     exports.sort_by_key(|export| export.span.start);
@@ -3069,6 +3239,53 @@ mod tests {
         assert!(!module.panicked);
         assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
         assert_eq!(module.runtime_export_names(), ["answer", "default"]);
+    }
+
+    #[test]
+    fn dce_roots_only_demanded_direct_exports() {
+        let demanded = BTreeSet::from(["keep".to_owned()]);
+        let module = parse_dce(
+            "module.js",
+            r#"
+                export function keep() { return 1 }
+                export function drop() { return 2 }
+                export const effect = globalThis.observe()
+            "#,
+            &demanded,
+        );
+
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        assert_eq!(module.runtime_export_names(), ["keep"]);
+        assert!(module.body.iter().any(|statement| {
+            matches!(
+                &statement.kind,
+                HirStatementKind::Function(function)
+                    if function.name.as_deref() == Some("keep")
+            )
+        }));
+        assert!(!module.body.iter().any(|statement| {
+            matches!(
+                &statement.kind,
+                HirStatementKind::Function(function)
+                    if function.name.as_deref() == Some("drop")
+            )
+        }));
+        assert!(
+            module.body.len() > 1,
+            "the undemanded but effectful initializer must remain"
+        );
+    }
+
+    #[test]
+    fn dce_preserves_inherited_class_evaluation() {
+        let module = parse_dce(
+            "module.js",
+            "class Unused extends Later {} class Later {} console.log('continued')",
+            &BTreeSet::new(),
+        );
+
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        assert_eq!(module.body.len(), 3);
     }
 
     #[test]

@@ -563,6 +563,55 @@ impl kiln_module_graph::Frontend for OxcFrontend {
     }
 }
 
+#[test]
+fn release_dce_relinks_only_demanded_exports() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let project = TestDirectory::new("release-demand-dce");
+    let dependency = project.path.join("dependency.mjs");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &dependency,
+        "export function used() { return 42 } export function unused() { return 0 }",
+    )
+    .expect("write dependency");
+    fs::write(
+        &entry,
+        "import { used } from './dependency.mjs'; console.log(used())",
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build source graph");
+    let selected = kiln_liveness::select_executable_modules(
+        &graph,
+        &kiln_liveness::SelectionOptions::production(),
+    )
+    .expect("select live modules");
+    let demand = selected.demand();
+    let (reduced, demand) = reduced_graph(&graph, &demand).expect("reduce graph");
+    let (specialized, remapped) = dce_release_graph(&reduced, &demand);
+    let dependency = fs::canonicalize(dependency).expect("canonical dependency");
+    let node = specialized
+        .module(&dependency)
+        .expect("specialized dependency");
+
+    assert_eq!(node.program.program.functions.len(), 1);
+    assert_eq!(
+        node.program
+            .exports
+            .iter()
+            .map(|export| export.exported.as_str())
+            .collect::<Vec<_>>(),
+        ["used"]
+    );
+    assert_eq!(remapped.slots[&dependency].len(), 1);
+}
+
 fn shared_test_cache_root() -> PathBuf {
     static CACHE_DIR: OnceLock<PathBuf> = OnceLock::new();
     CACHE_DIR
