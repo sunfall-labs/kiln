@@ -103,7 +103,8 @@ they had already printed. Redirect each script to its own file and grep that.
 Two habits that waste the most. Rebuilding and re-measuring on every commit that lands on `main`
 -- a rebase costs a release build plus a cache-cold native compile of the prelude, and the number
 you get is a clock reading unless the change under test is yours. And running the whole Test262
-baseline to check a change that touches one chunk; `scripts/test262.sh` takes a chunk.
+baseline to check a change that touches one chunk; `scripts/test262.sh --out <report> --path
+<subtree>` runs a pinned subtree with the same memory cap as the whole-corpus command.
 
 ## Running the test corpora
 
@@ -137,8 +138,9 @@ the flag each such test fails saying so, so the reason distribution reads "35 ×
 and points at `scripts/thirdparty.sh`.
 
 **Test262 runs need a memory cap.** `scripts/test262.sh` pins its own checkout and runs the suite
-in a single `kiln test`, and that one process has repeatedly grown until it filled the disk. Run it
-under an explicit cap and watch it; do not point `kiln test` at the corpus by hand.
+or an explicit `--path` subtree in a single `kiln test`, and that one process has repeatedly grown
+until it filled the disk. The script applies the cap to either form; do not point `kiln test` at the
+corpus by hand.
 
 **Keep the corpus outside `/tmp`.** A scratchpad checkout under `/private/tmp` is on borrowed time:
 macOS's periodic cleaner empties it on a day boundary, and on 2026-09-04 it took the whole

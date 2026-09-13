@@ -93,7 +93,8 @@ Focused validation on the consolidation worktree:
 - `mbx test -p kiln-conformance --lib`: 69 passed; log `.scratch/consolidation-conformance.log`.
 - `mbx run -p kiln-cli --bin kiln -- test conformance/regress --node`: 14 passed; log
   `.scratch/consolidation-regress.log`.
-- Pinned Test262 dynamic-import chunk, checkout `771005236e...c0172`, run with the same
-  `run_limited` memory-cap helper as `scripts/test262.sh`: 1,550 passed, 57 failed, 293
-  unsupported across 1,900 selected variants. Full log `.scratch/consolidation-test262-dynamic-import.log`;
-  this focused corpus result is recorded for diagnosis and is not a green Test262 claim.
+- Pinned Test262 dynamic-import subtree, checkout `771005236e...c0172`, run through
+  `scripts/test262.sh --out .scratch/consolidation-test262-script.json --path
+  language/expressions/dynamic-import`: 1,550 passed, 57 failed, 293 unsupported across 1,900
+  selected variants. Full log `.scratch/consolidation-test262-script.log`; this focused corpus
+  result is recorded for diagnosis and is not a green Test262 claim.
