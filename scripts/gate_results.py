@@ -77,7 +77,7 @@ def validate(doc: dict[str, Any]) -> dict[str, Any]:
         raise ResultError("result envelope has no source kind")
     if not isinstance(source.get("code_snapshot_sha256"), str) or not source["code_snapshot_sha256"]:
         raise ResultError("result envelope has no code snapshot identity")
-    if source.get("kind") in {"process", "workspace", "conformance", "test262"} and doc.get("verdict") == "passed" and not isinstance(source.get("binary_sha256"), str):
+    if source.get("kind") in {"process", "workspace", "conformance", "test262"} and doc.get("verdict") == "passed" and (not isinstance(source.get("binary_sha256"), str) or not source["binary_sha256"]):
         raise ResultError("passed executable step has no binary identity")
     evidence = doc.get("evidence")
     if not isinstance(evidence, dict) or not isinstance(evidence.get("log"), str) or not evidence["log"]:
@@ -92,7 +92,11 @@ def validate(doc: dict[str, Any]) -> dict[str, Any]:
     failed = _nonnegative(counts.get("failed"), "counts.failed")
     if passed + failed > total:
         raise ResultError("counts passed + failed exceeds total")
-    categories = [value for key, value in counts.items() if key != "total"]
+    categories = []
+    for key, value in counts.items():
+        if key == "total":
+            continue
+        categories.append(_nonnegative(value, f"outcomes.{key}"))
     if sum(categories) != total:
         raise ResultError("outcome counts do not sum to total")
     if total == 0 and verdict != "infrastructure":
@@ -101,7 +105,7 @@ def validate(doc: dict[str, Any]) -> dict[str, Any]:
 
 
 def _envelope(source: str, kind: str, log: str, status: int, total: int, passed: int, failed: int, *, verdict: str | None = None, **extra: Any) -> dict[str, Any]:
-    snapshot = __import__("os").environ.get("KILN_CODE_SNAPSHOT_SHA256") or code_snapshot()
+    snapshot = os.environ.get("KILN_CODE_SNAPSHOT_SHA256") or code_snapshot()
     verdict = verdict or ("passed" if status == 0 and failed == 0 else "failed")
     breakdown = extra.pop("outcome_extra", {})
     outcomes = {"total": total, "passed": passed, "failed": failed, **breakdown}
@@ -125,7 +129,7 @@ def workspace(log: str, status: int) -> dict[str, Any]:
     passed = sum(int(p) for p, _, _ in rows)
     failed = sum(int(f) for _, f, _ in rows)
     ignored = sum(int(i) for _, _, i in rows)
-    minimum = int(__import__("os").environ.get("KILN_GATE_MIN_PASSED", "500"))
+    minimum = int(os.environ.get("KILN_GATE_MIN_PASSED", "500"))
     if passed < minimum:
         raise ResultError(f"workspace tests passed {passed}, below the floor of {minimum}")
     return _envelope("workspace tests", "workspace", log, status, passed + failed + ignored, passed, failed, suites=len(rows), outcome_extra={"ignored": ignored})
@@ -151,7 +155,7 @@ def conformance(log: str, status: int, document: str | None = None) -> dict[str,
         expected = {"total": len(tests), "passed": counts["pass"], "failed": counts["fail"], "unsupported": counts["unsupported"], "skipped": counts["skipped"]}
         if not isinstance(totals, dict) or any(totals.get(key) != value for key, value in expected.items() if key in totals):
             raise ResultError("conformance totals disagree with test outcomes")
-    return _envelope("conformance", "conformance", log, status, len(tests), counts["pass"], counts["fail"], outcome_extra={"unsupported": counts["unsupported"], "skipped": counts["skipped"]}, result_document=str(Path(document).resolve()))
+    return _envelope("conformance", "conformance", log, status, len(tests), counts["pass"], counts["fail"], outcome_extra={"unsupported": counts["unsupported"], "skipped": counts["skipped"], "not-yet-runnable": counts["not-yet-runnable"]}, result_document=str(Path(document).resolve()))
 
 
 def test262(log: str, status: int) -> dict[str, Any]:
@@ -251,7 +255,7 @@ def main() -> int:
         return 0 if doc["verdict"] == "passed" else 1
     except (OSError, ResultError) as exc:
         try:
-            snapshot = __import__("os").environ.get("KILN_CODE_SNAPSHOT_SHA256") or code_snapshot()
+            snapshot = os.environ.get("KILN_CODE_SNAPSHOT_SHA256") or code_snapshot()
         except ResultError:
             snapshot = "unavailable"
         evidence_path = args.log or args.directory or "."
