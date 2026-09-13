@@ -55,6 +55,57 @@ Design:
 - Bench-gate: router must not regress warm dispatch numbers.
 - Init tables (step 4) follow the same pattern afterward.
 
+## Step 3 implementation checklist (v1: node-group router)
+
+Mechanism: per-program group mask → `-D KILN_RETAIN_GROUP_X` flags on the
+prelude compile → `#ifdef` guards on dispatch group blocks AND `install_*`
+calls in `globals.c`. Mask folds into the prelude cache key. Steps 3+4 share
+this mechanism (init pinning makes dispatch-only pruning pointless for
+`NodeEvent`/`NodeStream`: `globals.c:97,192-202` installs them on every
+`process`/stdio object).
+
+v1 mask rules (final):
+- Base CORE always: `Direct ArrayLookup StringDispatch Generic Temporal*
+  DateSetter MathNumber` (+ rang-dispatched iterators, no bit).
+- `NodeHttp NodeResponse NodeServer NodeNet` += http-family/net imports
+  (superset mapping: Http/Https/Http2 ⇒ all four + Stream + Event;
+  Net ⇒ Net + Server + Stream + Event). Graph `dependencies` cover CJS
+  literal requires; successful builds resolve every require statically, so
+  no separate require-bail is needed.
+- `NodeEvent NodeStream` += above, or `Builtin::Process` retained, or
+  computed access present (only `process` and `globalThis` dynamics can
+  reach them without imports; user-object dynamics implicate nothing).
+- `Buffer` += buffer import, retained `Builtin::Buffer`, or computed access
+  (`globalThis[k]` can yield the `Buffer` global).
+- `NodePath NodeUtil NodeDiagnostics` += matching builtin import only.
+- Bail to full mask: direct eval, `new Function`, retained `Builtin::Eval`,
+  any `dynamic_imports`, `has_dynamic_import`.
+- `process.on`-style access needs no name table: it always retains
+  `Builtin::Process`, which keeps Event/Stream by rule above.
+- FS/crypto/url codes audited `Direct`-only: those builtins need no groups.
+  (Re-verify by grepping rows when implementing; any non-`Direct` FS row
+  joins the mapping table instead.)
+
+1. facts: `retained_groups(graph, demand, members) -> u32` bitmask.
+   Inputs: selected-graph `NodeBuiltin` nodes (exact builtin→groups table,
+   conservative supersets e.g. http ⇒ {HTTP,RESPONSE,SERVER,NET,STREAM,EVENT});
+   retained `Builtin::Buffer` ⇒ `Buffer` group; demanded event-ish names
+   (`on/once/emit/...`, small hand table) ⇒ `NodeEvent` (covers `process.on`
+   without imports); retained literal `"node:*"` requires; bail to full mask
+   on open world / dynamic import / non-literal require / any CJS with
+   unresolvable requires.
+2. backend-c: `#ifdef` guards on the 10 node-ish group blocks in
+   `dispatch.c`, grouped fast-paths in `calls.c`, `read.c:87` header path,
+   and `install_*` calls in `globals.c`. Core groups + `Direct` never guarded.
+3. kiln-native: mask → `-D` flags in prelude `CompileOptions` + mask digest
+   in `prelude_object_options`/key (single + graph paths; single-program
+   path uses full mask — no import table, same rule as provider selector).
+4. explain: print retained group list in the Demanded Members section.
+5. Tests: mask unit tests (no-node ⇒ core-only; http ⇒ superset; dynamic ⇒
+   full); conformance/node + server corpora must pass with router on;
+   `mise run bench` before/after (dispatch hot path).
+6. Measure with `binary-sizes.sh`; Effect target is observability-only.
+
 ## Plan (remaining)
 2. **Retained method-code set (2–3d):** facts analysis over retained IR
    listing every `KILN_C99_METHOD_*` code the executable can invoke, plus

@@ -316,6 +316,103 @@ fn executable_demanded_members_names_builtins_and_computed() {
     assert!(!members.has_open_world, "{members:?}");
 }
 
+#[test]
+fn retained_method_groups_drops_node_groups_without_demand() {
+    use kiln_backend_c::facts::{
+        CORE_METHOD_GROUPS, PRUNABLE_METHOD_GROUPS, method_groups as groups,
+    };
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    fn mask_for(entry_name: &str, files: &[(&str, &str)]) -> u32 {
+        let project = TestDirectory::new("kiln-group-mask");
+        for (name, source) in files {
+            fs::write(project.path.join(name), source).expect("write mask fixture");
+        }
+        let graph = ModuleGraph::build_node(
+            &project.path.join(entry_name),
+            NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("mask graph");
+        let demand = executable_demand(&graph, NativeProfile::Dev).expect("demand");
+        let members =
+            kiln_backend_c::facts::analyze_demanded_members(&graph, &demand.live, &demand.slots);
+        retained_method_groups(&graph, &demand, &members)
+    }
+
+    assert_eq!(
+        mask_for("main.mjs", &[("main.mjs", "console.log(1 + 2);\n")]),
+        CORE_METHOD_GROUPS,
+        "a program with no node use keeps core groups only"
+    );
+    let http_mask = mask_for(
+        "main.mjs",
+        &[(
+            "main.mjs",
+            "import http from 'node:http';\nconsole.log(typeof http.createServer);\n",
+        )],
+    );
+    for group in [
+        groups::NODE_HTTP,
+        groups::NODE_RESPONSE,
+        groups::NODE_SERVER,
+        groups::NODE_NET,
+        groups::NODE_STREAM,
+        groups::NODE_EVENT,
+    ] {
+        assert!(
+            http_mask & group != 0,
+            "node:http keeps its groups: {http_mask:#x}"
+        );
+    }
+    assert_eq!(
+        http_mask & groups::NODE_PATH,
+        0,
+        "unrelated groups still drop"
+    );
+    let buffer_mask = mask_for(
+        "main.mjs",
+        &[("main.mjs", "console.log(Buffer.from('hi').length);\n")],
+    );
+    assert!(
+        buffer_mask & groups::BUFFER != 0,
+        "the Buffer global keeps its group"
+    );
+    assert_eq!(
+        buffer_mask & groups::NODE_HTTP,
+        0,
+        "Buffer alone keeps no HTTP groups"
+    );
+    let fs_mask = mask_for(
+        "main.mjs",
+        &[(
+            "main.mjs",
+            "import fs from 'node:fs';\nconsole.log(typeof fs.readFile);\n",
+        )],
+    );
+    assert_eq!(
+        fs_mask & PRUNABLE_METHOD_GROUPS,
+        groups::NODE_STREAM | groups::NODE_EVENT,
+        "node:fs keeps only stream/event groups: {fs_mask:#x}"
+    );
+    let dynamic_mask = mask_for(
+        "main.mjs",
+        &[
+            (
+                "main.mjs",
+                "import('./dep.mjs').then((m) => console.log(m.a));\n",
+            ),
+            ("dep.mjs", "export const a = 1;\n"),
+        ],
+    );
+    assert_eq!(
+        dynamic_mask,
+        CORE_METHOD_GROUPS | PRUNABLE_METHOD_GROUPS,
+        "dynamic import keeps the full table"
+    );
+}
+
 struct OxcFrontend;
 
 #[test]
