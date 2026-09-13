@@ -226,6 +226,11 @@ static int kiln_c99_builtin_has_member(uint64_t builtin, const char *key, size_t
     case KILN_C99_BUILTIN_DATA_VIEW_PROTOTYPE:
         if (kiln_c99_is_data_view_member(key, key_len)) return 1;
         break;
+    case KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE:
+        if (kiln_c99_same_name(key, key_len, "slice") ||
+            kiln_c99_same_name(key, key_len, "byteLength") ||
+            kiln_c99_is_array_buffer_member(key, key_len)) return 1;
+        break;
     default:
         break;
     }
@@ -345,7 +350,8 @@ static int kiln_c99_has_property(kiln_host *host, kiln_value target, const char 
     }
     if (target.tag == KILN_VALUE_ARRAY_BUFFER) {
         *answer = kiln_c99_same_name(key, key_len, "byteLength") ||
-                  kiln_c99_same_name(key, key_len, "constructor");
+                  kiln_c99_same_name(key, key_len, "constructor") ||
+                  kiln_c99_same_name(key, key_len, "slice");
         return KILN_C99_OK;
     }
     if (target.tag == KILN_VALUE_DATA_VIEW) {

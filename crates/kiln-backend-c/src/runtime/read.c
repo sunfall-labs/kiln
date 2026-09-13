@@ -1260,7 +1260,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                           {KILN_C99_BUILTIN_NUMBER_PROTOTYPE, KILN_C99_BUILTIN_NUMBER},
                           {KILN_C99_BUILTIN_FUNCTION_PROTOTYPE, KILN_C99_BUILTIN_FUNCTION},
                           {KILN_C99_BUILTIN_PROMISE_PROTOTYPE, KILN_C99_BUILTIN_PROMISE},
-                          {KILN_C99_BUILTIN_DATA_VIEW_PROTOTYPE, KILN_C99_BUILTIN_DATA_VIEW}};
+                          {KILN_C99_BUILTIN_DATA_VIEW_PROTOTYPE, KILN_C99_BUILTIN_DATA_VIEW},
+                          {KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE, KILN_C99_BUILTIN_ARRAY_BUFFER}};
             size_t owner;
             for (owner = 0; owner < sizeof owners / sizeof *owners; ++owner) {
                 if (target.bits == owners[owner].table) {
@@ -1349,6 +1350,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 {KILN_C99_BUILTIN_FUNCTION, KILN_C99_BUILTIN_FUNCTION_PROTOTYPE},
                 {KILN_C99_BUILTIN_PROMISE, KILN_C99_BUILTIN_PROMISE_PROTOTYPE},
                 {KILN_C99_BUILTIN_DATA_VIEW, KILN_C99_BUILTIN_DATA_VIEW_PROTOTYPE},
+                {KILN_C99_BUILTIN_ARRAY_BUFFER, KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE},
                 {KILN_C99_BUILTIN_SYMBOL, KILN_C99_BUILTIN_SYMBOL_PROTOTYPE}};
             size_t pair;
             for (pair = 0; pair < sizeof prototypes / sizeof *prototypes; ++pair) {
@@ -1395,6 +1397,14 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
          * guess is a wrong answer and nothing in this repository feature-detects on it. Both are
          * work with an owner, and until somebody does it a refusal names the member and stops the
          * program at the cause. */
+        if (!kiln_c99_is_namespace(target.bits) &&
+            kiln_c99_same_name(key, key_len, "length")) {
+            double arity;
+            if (kiln_c99_builtin_length(target.bits, &arity)) {
+                *out = kiln_c99_number(arity);
+                return KILN_C99_OK;
+            }
+        }
         if (!kiln_c99_is_namespace(target.bits) &&
             (kiln_c99_same_name(key, key_len, "length") ||
              kiln_c99_same_name(key, key_len, "prototype"))) {
@@ -1454,6 +1464,26 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 }
                 KILN_C99_ABSENT("not a member of Symbol.prototype; Symbol.prototype only owns "
                                 "toString, valueOf, description, @@toPrimitive, and constructor",
+                                out);
+            }
+            if (target.bits == KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE) {
+                if (kiln_c99_same_name(key, key_len, "slice")) {
+                    *out = kiln_c99_method(KILN_C99_METHOD_SLICE);
+                    return KILN_C99_OK;
+                }
+                if (kiln_c99_same_name(key, key_len, "constructor")) {
+                    *out = kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_BUFFER);
+                    return KILN_C99_OK;
+                }
+                if (kiln_c99_same_name(key, key_len, "byteLength")) {
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                                "get byteLength: receiver does not have the required internal slot");
+                }
+                if (kiln_c99_is_array_buffer_member(key, key_len)) {
+                    KILN_C99_REFUSE("an ArrayBuffer.prototype member this backend has not implemented");
+                }
+                KILN_C99_ABSENT("not a member of ArrayBuffer.prototype; kiln_c99_is_array_buffer_member holds "
+                                "the ones that are",
                                 out);
             }
             if (target.bits == KILN_C99_BUILTIN_FUNCTION) {

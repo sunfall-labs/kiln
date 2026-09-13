@@ -370,6 +370,7 @@ static const char *kiln_c99_method_name(uint64_t code);
  * listed like one numbered in a block. Defined beside the method index, after the list closes. */
 static uint64_t kiln_c99_method_code_end(void);
 static const char *kiln_c99_builtin_name(uint64_t builtin);
+static int kiln_c99_builtin_length(uint64_t builtin, double *out);
 static int kiln_c99_is_namespace(uint64_t builtin);
 static int kiln_c99_changes_length(uint64_t code);
 static int kiln_c99_reads_only(uint64_t code);

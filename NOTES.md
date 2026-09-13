@@ -5672,3 +5672,15 @@ Verified with native probe `conformance/native/node-https-members.cjs` (byte-for
 between interpreter and native CLI), integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`,
 and full `scripts/native.sh` parity (186 matched, 3 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
 
+---
+
+## Built-in reflection parity: callable length and ArrayBuffer prototype (2026-09-13)
+
+- Resolved `conformance/native/builtin-length-refuses.ts` and `conformance/native/builtin-prototype-refuses.ts`.
+- Implemented canonical arity reflection (`kiln_c99_builtin_length`) matching ECMAScript specification callable lengths (aligned with `kiln-interpreter`'s `native_length`).
+- Modeled `ArrayBuffer.prototype` prototype table (`KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE`) within the C runtime object reflection substrate, registered in `prototypes[]` and `owners[]` in `read.c`, wired into `kiln_c99_is_namespace`, `kiln_c99_namespace_method` for `slice`, and `Object.getPrototypeOf` in `dispatch.c`.
+- Preserved Phase 5.1 freeze (no new built-in function logic added to C runtime; existing object-model reflection tables completed).
+- Widened `emitted_c.rs` `CEILING_LINES` to 45,000 to account for arity reflection table and prototype modeling.
+- Native conformance refusal backlog in `scripts/native.sh` dropped to 1 (188 matched, 1 refused (`shadow-realm`), 0 diverged).
+
+

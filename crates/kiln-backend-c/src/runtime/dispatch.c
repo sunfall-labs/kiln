@@ -5076,6 +5076,10 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 *result = kiln_c99_builtin(KILN_C99_BUILTIN_DATA_VIEW_PROTOTYPE);
                 return KILN_C99_OK;
             }
+            if (subject.tag == KILN_VALUE_ARRAY_BUFFER) {
+                *result = kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE);
+                return KILN_C99_OK;
+            }
             if (subject.tag == KILN_VALUE_FUNCTION || subject.tag == KILN_VALUE_METHOD ||
                 subject.tag == KILN_VALUE_BOUND) {
                 /* A function keeps a relinked prototype on its store, which is where
