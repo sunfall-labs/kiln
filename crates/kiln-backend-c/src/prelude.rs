@@ -3993,7 +3993,6 @@ static int kiln_c99_is_array_buffer_member(const char *key, size_t key_len) {
                                           "maxByteLength",
                                           "resizable",
                                           "resize",
-                                          "slice",
                                           "sliceToImmutable",
                                           "transfer",
                                           "transferToFixedLength",

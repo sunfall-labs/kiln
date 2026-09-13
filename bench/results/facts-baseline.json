@@ -188511,20 +188511,2515 @@
         },
         {
           "path": ".kiln/builtins/url.builtin",
-          "immutable_bindings": [
-            "URL",
-            "default",
-            "fileURLToPath",
-            "parse",
-            "pathToFileURL"
-          ],
           "functions": [
             {
               "name": "<top-level>",
               "return_type": "Undefined",
-              "pure": true,
-              "can_throw": false,
-              "reads_arguments": false
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "MakeFunction",
+                  "detail": "proto #0"
+                },
+                {
+                  "id": 1,
+                  "kind": "MakeFunction",
+                  "detail": "proto #1"
+                },
+                {
+                  "id": 2,
+                  "kind": "MakeFunction",
+                  "detail": "proto #2"
+                },
+                {
+                  "id": 3,
+                  "kind": "MakeFunction",
+                  "detail": "proto #3"
+                },
+                {
+                  "id": 4,
+                  "kind": "MakeFunction",
+                  "detail": "proto #4"
+                },
+                {
+                  "id": 5,
+                  "kind": "MakeFunction",
+                  "detail": "proto #5"
+                },
+                {
+                  "id": 6,
+                  "kind": "MakeFunction",
+                  "detail": "proto #6"
+                },
+                {
+                  "id": 7,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 8,
+                  "kind": "MakeFunction",
+                  "detail": "proto #7"
+                },
+                {
+                  "id": 9,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"@@private:0:%brand\""
+                },
+                {
+                  "id": 10,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 11,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 12,
+                  "kind": "MakeFunction",
+                  "detail": "proto #8"
+                },
+                {
+                  "id": 13,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 14,
+                  "kind": "MakeFunction",
+                  "detail": "proto #10"
+                },
+                {
+                  "id": 15,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 16,
+                  "kind": "MakeFunction",
+                  "detail": "proto #11"
+                },
+                {
+                  "id": 17,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 18,
+                  "kind": "MakeFunction",
+                  "detail": "proto #12"
+                },
+                {
+                  "id": 19,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 20,
+                  "kind": "MakeFunction",
+                  "detail": "proto #13"
+                },
+                {
+                  "id": 21,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 22,
+                  "kind": "MakeFunction",
+                  "detail": "proto #14"
+                },
+                {
+                  "id": 23,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 24,
+                  "kind": "MakeFunction",
+                  "detail": "proto #16"
+                },
+                {
+                  "id": 25,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 26,
+                  "kind": "MakeFunction",
+                  "detail": "proto #17"
+                },
+                {
+                  "id": 27,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 28,
+                  "kind": "MakeFunction",
+                  "detail": "proto #18"
+                },
+                {
+                  "id": 29,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 30,
+                  "kind": "GetProperty",
+                  "detail": "\"iterator\""
+                },
+                {
+                  "id": 31,
+                  "kind": "MakeFunction",
+                  "detail": "proto #19"
+                },
+                {
+                  "id": 32,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 33,
+                  "kind": "MakeFunction",
+                  "detail": "proto #20"
+                },
+                {
+                  "id": 34,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 35,
+                  "kind": "MakeFunction",
+                  "detail": "proto #22"
+                },
+                {
+                  "id": 36,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 37,
+                  "kind": "MakeFunction",
+                  "detail": "proto #24"
+                },
+                {
+                  "id": 38,
+                  "kind": "GetProperty",
+                  "detail": "\"URLSearchParams\""
+                },
+                {
+                  "id": 39,
+                  "kind": "GetProperty",
+                  "detail": "\"URLSearchParams\""
+                },
+                {
+                  "id": 40,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 41,
+                  "kind": "MakeFunction",
+                  "detail": "proto #25"
+                },
+                {
+                  "id": 42,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"@@private:1:%brand\""
+                },
+                {
+                  "id": 43,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 44,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 45,
+                  "kind": "MakeFunction",
+                  "detail": "proto #26"
+                },
+                {
+                  "id": 46,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 47,
+                  "kind": "MakeFunction",
+                  "detail": "proto #27"
+                },
+                {
+                  "id": 49,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"default\""
+                },
+                {
+                  "id": 50,
+                  "kind": "GetProperty",
+                  "detail": "\"URL\""
+                },
+                {
+                  "id": 51,
+                  "kind": "GetProperty",
+                  "detail": "\"URL\""
+                },
+                {
+                  "id": 53,
+                  "kind": "GetProperty",
+                  "detail": "\"protocol\""
+                },
+                {
+                  "id": 54,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"URL\""
+                },
+                {
+                  "id": 55,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"URL\""
+                },
+                {
+                  "id": 56,
+                  "kind": "GetProperty",
+                  "detail": "\"URLSearchParams\""
+                },
+                {
+                  "id": 57,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"URLSearchParams\""
+                }
+              ]
+            },
+            {
+              "name": "fileURLToPath",
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Unknown",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "returned_sites": [
+                7
+              ],
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "GetProperty",
+                  "detail": "\"href\""
+                },
+                {
+                  "id": 2,
+                  "kind": "CallMethod",
+                  "detail": "\"startsWith\""
+                },
+                {
+                  "id": 4,
+                  "kind": "CallMethod",
+                  "detail": "\"slice\""
+                },
+                {
+                  "id": 5,
+                  "kind": "CallMethod",
+                  "detail": "\"startsWith\""
+                },
+                {
+                  "id": 6,
+                  "kind": "CallMethod",
+                  "detail": "\"slice\""
+                },
+                {
+                  "id": 7,
+                  "kind": "Call"
+                },
+                {
+                  "id": 8,
+                  "kind": "GetProperty",
+                  "detail": "\"length\""
+                },
+                {
+                  "id": 9,
+                  "kind": "CallMethod",
+                  "detail": "\"charCodeAt\""
+                }
+              ]
+            },
+            {
+              "name": "pathToFileURL",
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Unknown",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "sites": [
+                {
+                  "id": 1,
+                  "kind": "CallMethod",
+                  "detail": "\"startsWith\""
+                },
+                {
+                  "id": 2,
+                  "kind": "Call"
+                }
+              ]
+            },
+            {
+              "name": "parse",
+              "parameter_types": [
+                "Unknown",
+                "Unknown",
+                "Unknown"
+              ],
+              "return_type": "Unknown",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "Call"
+                },
+                {
+                  "id": 2,
+                  "kind": "CallMethod",
+                  "detail": "\"indexOf\""
+                },
+                {
+                  "id": 3,
+                  "kind": "CallMethod",
+                  "detail": "\"slice\""
+                },
+                {
+                  "id": 4,
+                  "kind": "CallMethod",
+                  "detail": "\"slice\""
+                },
+                {
+                  "id": 5,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"hash\""
+                },
+                {
+                  "id": 6,
+                  "kind": "CallMethod",
+                  "detail": "\"indexOf\""
+                },
+                {
+                  "id": 7,
+                  "kind": "CallMethod",
+                  "detail": "\"slice\""
+                },
+                {
+                  "id": 8,
+                  "kind": "CallMethod",
+                  "detail": "\"slice\""
+                },
+                {
+                  "id": 9,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"search\""
+                },
+                {
+                  "id": 10,
+                  "kind": "CallMethod",
+                  "detail": "\"slice\""
+                },
+                {
+                  "id": 11,
+                  "kind": "CallMethod",
+                  "detail": "\"create\""
+                },
+                {
+                  "id": 12,
+                  "kind": "CallMethod",
+                  "detail": "\"split\""
+                },
+                {
+                  "id": 13,
+                  "kind": "GetProperty",
+                  "detail": "\"length\""
+                },
+                {
+                  "id": 14,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 15,
+                  "kind": "GetProperty",
+                  "detail": "\"length\""
+                },
+                {
+                  "id": 16,
+                  "kind": "CallMethod",
+                  "detail": "\"indexOf\""
+                },
+                {
+                  "id": 17,
+                  "kind": "CallMethod",
+                  "detail": "\"slice\""
+                },
+                {
+                  "id": 18,
+                  "kind": "Call"
+                },
+                {
+                  "id": 19,
+                  "kind": "Call"
+                },
+                {
+                  "id": 20,
+                  "kind": "CallMethod",
+                  "detail": "\"slice\""
+                },
+                {
+                  "id": 21,
+                  "kind": "Call"
+                },
+                {
+                  "id": 22,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 23,
+                  "kind": "CallMethod",
+                  "detail": "\"isArray\""
+                },
+                {
+                  "id": 24,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 25,
+                  "kind": "CallMethod",
+                  "detail": "\"push\""
+                },
+                {
+                  "id": 26,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 27,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 28,
+                  "kind": "SetComputedStrict"
+                },
+                {
+                  "id": 29,
+                  "kind": "SetComputedStrict"
+                },
+                {
+                  "id": 30,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"query\""
+                },
+                {
+                  "id": 31,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"query\""
+                },
+                {
+                  "id": 32,
+                  "kind": "CallMethod",
+                  "detail": "\"exec\""
+                },
+                {
+                  "id": 33,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 34,
+                  "kind": "CallMethod",
+                  "detail": "\"toLowerCase\""
+                },
+                {
+                  "id": 35,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"protocol\""
+                },
+                {
+                  "id": 36,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 37,
+                  "kind": "GetProperty",
+                  "detail": "\"length\""
+                },
+                {
+                  "id": 38,
+                  "kind": "CallMethod",
+                  "detail": "\"slice\""
+                },
+                {
+                  "id": 39,
+                  "kind": "CallMethod",
+                  "detail": "\"startsWith\""
+                },
+                {
+                  "id": 40,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"slashes\""
+                },
+                {
+                  "id": 41,
+                  "kind": "CallMethod",
+                  "detail": "\"slice\""
+                },
+                {
+                  "id": 42,
+                  "kind": "CallMethod",
+                  "detail": "\"indexOf\""
+                },
+                {
+                  "id": 43,
+                  "kind": "CallMethod",
+                  "detail": "\"slice\""
+                },
+                {
+                  "id": 44,
+                  "kind": "CallMethod",
+                  "detail": "\"slice\""
+                },
+                {
+                  "id": 45,
+                  "kind": "CallMethod",
+                  "detail": "\"indexOf\""
+                },
+                {
+                  "id": 46,
+                  "kind": "CallMethod",
+                  "detail": "\"slice\""
+                },
+                {
+                  "id": 47,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"auth\""
+                },
+                {
+                  "id": 48,
+                  "kind": "CallMethod",
+                  "detail": "\"slice\""
+                },
+                {
+                  "id": 49,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"host\""
+                },
+                {
+                  "id": 50,
+                  "kind": "CallMethod",
+                  "detail": "\"lastIndexOf\""
+                },
+                {
+                  "id": 51,
+                  "kind": "CallMethod",
+                  "detail": "\"slice\""
+                },
+                {
+                  "id": 52,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"hostname\""
+                },
+                {
+                  "id": 53,
+                  "kind": "CallMethod",
+                  "detail": "\"slice\""
+                },
+                {
+                  "id": 54,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"port\""
+                },
+                {
+                  "id": 55,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"hostname\""
+                },
+                {
+                  "id": 56,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"pathname\""
+                },
+                {
+                  "id": 57,
+                  "kind": "GetProperty",
+                  "detail": "\"search\""
+                },
+                {
+                  "id": 58,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"path\""
+                }
+              ]
+            },
+            {
+              "name": "format",
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Unknown",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "returned_sites": [
+                0
+              ],
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "CallMethod",
+                  "detail": "\"toString\""
+                },
+                {
+                  "id": 1,
+                  "kind": "GetProperty",
+                  "detail": "\"protocol\""
+                },
+                {
+                  "id": 2,
+                  "kind": "GetProperty",
+                  "detail": "\"protocol\""
+                },
+                {
+                  "id": 3,
+                  "kind": "GetProperty",
+                  "detail": "\"protocol\""
+                },
+                {
+                  "id": 4,
+                  "kind": "CallMethod",
+                  "detail": "\"endsWith\""
+                },
+                {
+                  "id": 5,
+                  "kind": "GetProperty",
+                  "detail": "\"slashes\""
+                },
+                {
+                  "id": 6,
+                  "kind": "GetProperty",
+                  "detail": "\"protocol\""
+                },
+                {
+                  "id": 7,
+                  "kind": "GetProperty",
+                  "detail": "\"auth\""
+                },
+                {
+                  "id": 8,
+                  "kind": "GetProperty",
+                  "detail": "\"auth\""
+                },
+                {
+                  "id": 9,
+                  "kind": "GetProperty",
+                  "detail": "\"host\""
+                },
+                {
+                  "id": 10,
+                  "kind": "GetProperty",
+                  "detail": "\"host\""
+                },
+                {
+                  "id": 11,
+                  "kind": "GetProperty",
+                  "detail": "\"hostname\""
+                },
+                {
+                  "id": 12,
+                  "kind": "GetProperty",
+                  "detail": "\"hostname\""
+                },
+                {
+                  "id": 13,
+                  "kind": "GetProperty",
+                  "detail": "\"port\""
+                },
+                {
+                  "id": 14,
+                  "kind": "GetProperty",
+                  "detail": "\"port\""
+                },
+                {
+                  "id": 15,
+                  "kind": "GetProperty",
+                  "detail": "\"pathname\""
+                },
+                {
+                  "id": 16,
+                  "kind": "GetProperty",
+                  "detail": "\"pathname\""
+                },
+                {
+                  "id": 17,
+                  "kind": "GetProperty",
+                  "detail": "\"search\""
+                },
+                {
+                  "id": 18,
+                  "kind": "GetProperty",
+                  "detail": "\"search\""
+                },
+                {
+                  "id": 19,
+                  "kind": "CallMethod",
+                  "detail": "\"startsWith\""
+                },
+                {
+                  "id": 20,
+                  "kind": "GetProperty",
+                  "detail": "\"search\""
+                },
+                {
+                  "id": 21,
+                  "kind": "GetProperty",
+                  "detail": "\"search\""
+                },
+                {
+                  "id": 22,
+                  "kind": "GetProperty",
+                  "detail": "\"query\""
+                },
+                {
+                  "id": 23,
+                  "kind": "GetProperty",
+                  "detail": "\"query\""
+                },
+                {
+                  "id": 24,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 25,
+                  "kind": "GetProperty",
+                  "detail": "\"query\""
+                },
+                {
+                  "id": 26,
+                  "kind": "CallMethod",
+                  "detail": "\"keys\""
+                },
+                {
+                  "id": 27,
+                  "kind": "GetProperty",
+                  "detail": "\"length\""
+                },
+                {
+                  "id": 28,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 29,
+                  "kind": "Call"
+                },
+                {
+                  "id": 30,
+                  "kind": "GetProperty",
+                  "detail": "\"query\""
+                },
+                {
+                  "id": 31,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 32,
+                  "kind": "Call"
+                },
+                {
+                  "id": 33,
+                  "kind": "CallMethod",
+                  "detail": "\"push\""
+                },
+                {
+                  "id": 34,
+                  "kind": "CallMethod",
+                  "detail": "\"join\""
+                },
+                {
+                  "id": 35,
+                  "kind": "GetProperty",
+                  "detail": "\"query\""
+                },
+                {
+                  "id": 36,
+                  "kind": "GetProperty",
+                  "detail": "\"hash\""
+                },
+                {
+                  "id": 37,
+                  "kind": "GetProperty",
+                  "detail": "\"hash\""
+                },
+                {
+                  "id": 38,
+                  "kind": "CallMethod",
+                  "detail": "\"startsWith\""
+                },
+                {
+                  "id": 39,
+                  "kind": "GetProperty",
+                  "detail": "\"hash\""
+                },
+                {
+                  "id": 40,
+                  "kind": "GetProperty",
+                  "detail": "\"hash\""
+                }
+              ]
+            },
+            {
+              "name": "urlToHttpOptions",
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Unknown",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "GetProperty",
+                  "detail": "\"protocol\""
+                },
+                {
+                  "id": 1,
+                  "kind": "GetProperty",
+                  "detail": "\"hostname\""
+                },
+                {
+                  "id": 2,
+                  "kind": "GetProperty",
+                  "detail": "\"hostname\""
+                },
+                {
+                  "id": 3,
+                  "kind": "CallMethod",
+                  "detail": "\"startsWith\""
+                },
+                {
+                  "id": 4,
+                  "kind": "GetProperty",
+                  "detail": "\"hostname\""
+                },
+                {
+                  "id": 5,
+                  "kind": "CallMethod",
+                  "detail": "\"slice\""
+                },
+                {
+                  "id": 6,
+                  "kind": "GetProperty",
+                  "detail": "\"hostname\""
+                },
+                {
+                  "id": 7,
+                  "kind": "GetProperty",
+                  "detail": "\"hash\""
+                },
+                {
+                  "id": 8,
+                  "kind": "GetProperty",
+                  "detail": "\"search\""
+                },
+                {
+                  "id": 9,
+                  "kind": "GetProperty",
+                  "detail": "\"pathname\""
+                },
+                {
+                  "id": 10,
+                  "kind": "GetProperty",
+                  "detail": "\"pathname\""
+                },
+                {
+                  "id": 11,
+                  "kind": "Call"
+                },
+                {
+                  "id": 12,
+                  "kind": "GetProperty",
+                  "detail": "\"search\""
+                },
+                {
+                  "id": 13,
+                  "kind": "Call"
+                },
+                {
+                  "id": 14,
+                  "kind": "GetProperty",
+                  "detail": "\"href\""
+                },
+                {
+                  "id": 16,
+                  "kind": "GetProperty",
+                  "detail": "\"port\""
+                },
+                {
+                  "id": 17,
+                  "kind": "GetProperty",
+                  "detail": "\"port\""
+                },
+                {
+                  "id": 18,
+                  "kind": "GetProperty",
+                  "detail": "\"port\""
+                },
+                {
+                  "id": 19,
+                  "kind": "GetProperty",
+                  "detail": "\"port\""
+                },
+                {
+                  "id": 20,
+                  "kind": "Call"
+                },
+                {
+                  "id": 21,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"port\""
+                },
+                {
+                  "id": 22,
+                  "kind": "GetProperty",
+                  "detail": "\"username\""
+                },
+                {
+                  "id": 23,
+                  "kind": "GetProperty",
+                  "detail": "\"password\""
+                },
+                {
+                  "id": 24,
+                  "kind": "GetProperty",
+                  "detail": "\"username\""
+                },
+                {
+                  "id": 25,
+                  "kind": "Call"
+                },
+                {
+                  "id": 26,
+                  "kind": "Call"
+                },
+                {
+                  "id": 27,
+                  "kind": "GetProperty",
+                  "detail": "\"password\""
+                },
+                {
+                  "id": 28,
+                  "kind": "Call"
+                },
+                {
+                  "id": 29,
+                  "kind": "Call"
+                },
+                {
+                  "id": 30,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"auth\""
+                }
+              ]
+            },
+            {
+              "name": "domainToASCII",
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Unknown",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "returned_sites": [
+                0
+              ],
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "Call"
+                }
+              ]
+            },
+            {
+              "name": "domainToUnicode",
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Unknown",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "returned_sites": [
+                0
+              ],
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "Call"
+                }
+              ]
+            },
+            {
+              "name": "URLSearchParamsPolyfill",
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Undefined",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "sites": [
+                {
+                  "id": 1,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"@@private:0:%brand\""
+                },
+                {
+                  "id": 2,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 3,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"_entries\""
+                },
+                {
+                  "id": 4,
+                  "kind": "CallMethod",
+                  "detail": "\"startsWith\""
+                },
+                {
+                  "id": 5,
+                  "kind": "CallMethod",
+                  "detail": "\"slice\""
+                },
+                {
+                  "id": 6,
+                  "kind": "GetProperty",
+                  "detail": "\"length\""
+                },
+                {
+                  "id": 7,
+                  "kind": "CallMethod",
+                  "detail": "\"split\""
+                },
+                {
+                  "id": 8,
+                  "kind": "GetProperty",
+                  "detail": "\"length\""
+                },
+                {
+                  "id": 9,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 10,
+                  "kind": "CallMethod",
+                  "detail": "\"indexOf\""
+                },
+                {
+                  "id": 11,
+                  "kind": "CallMethod",
+                  "detail": "\"slice\""
+                },
+                {
+                  "id": 12,
+                  "kind": "CallMethod",
+                  "detail": "\"replace\""
+                },
+                {
+                  "id": 13,
+                  "kind": "Call"
+                },
+                {
+                  "id": 14,
+                  "kind": "CallMethod",
+                  "detail": "\"replace\""
+                },
+                {
+                  "id": 15,
+                  "kind": "Call"
+                },
+                {
+                  "id": 16,
+                  "kind": "CallMethod",
+                  "detail": "\"slice\""
+                },
+                {
+                  "id": 17,
+                  "kind": "CallMethod",
+                  "detail": "\"replace\""
+                },
+                {
+                  "id": 18,
+                  "kind": "Call"
+                },
+                {
+                  "id": 19,
+                  "kind": "GetProperty",
+                  "detail": "\"_entries\""
+                },
+                {
+                  "id": 20,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 21,
+                  "kind": "CallMethod",
+                  "detail": "\"push\""
+                },
+                {
+                  "id": 22,
+                  "kind": "CallMethod",
+                  "detail": "\"isArray\""
+                },
+                {
+                  "id": 23,
+                  "kind": "GetProperty",
+                  "detail": "\"length\""
+                },
+                {
+                  "id": 24,
+                  "kind": "GetProperty",
+                  "detail": "\"_entries\""
+                },
+                {
+                  "id": 25,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 26,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 27,
+                  "kind": "Call"
+                },
+                {
+                  "id": 28,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 29,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 30,
+                  "kind": "Call"
+                },
+                {
+                  "id": 31,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 32,
+                  "kind": "CallMethod",
+                  "detail": "\"push\""
+                },
+                {
+                  "id": 33,
+                  "kind": "CallMethod",
+                  "detail": "\"keys\""
+                },
+                {
+                  "id": 34,
+                  "kind": "GetProperty",
+                  "detail": "\"length\""
+                },
+                {
+                  "id": 35,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 36,
+                  "kind": "GetProperty",
+                  "detail": "\"_entries\""
+                },
+                {
+                  "id": 37,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 38,
+                  "kind": "Call"
+                },
+                {
+                  "id": 39,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 40,
+                  "kind": "CallMethod",
+                  "detail": "\"push\""
+                }
+              ]
+            },
+            {
+              "parameter_types": [
+                "Unknown",
+                "Unknown"
+              ],
+              "return_type": "Undefined",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "GetProperty",
+                  "detail": "\"_entries\""
+                },
+                {
+                  "id": 1,
+                  "kind": "Call"
+                },
+                {
+                  "id": 2,
+                  "kind": "Call"
+                },
+                {
+                  "id": 3,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 4,
+                  "kind": "CallMethod",
+                  "detail": "\"push\""
+                }
+              ]
+            },
+            {
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Boolean",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "CallMethod",
+                  "detail": "\"@@iterator\""
+                },
+                {
+                  "id": 1,
+                  "kind": "GetProperty",
+                  "detail": "\"next\""
+                },
+                {
+                  "id": 2,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 5,
+                  "kind": "GetProperty",
+                  "detail": "\"done\""
+                },
+                {
+                  "id": 6,
+                  "kind": "GetProperty",
+                  "detail": "\"value\""
+                },
+                {
+                  "id": 7,
+                  "kind": "GetProperty",
+                  "detail": "\"return\""
+                },
+                {
+                  "id": 8,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 10,
+                  "kind": "GetProperty",
+                  "detail": "\"return\""
+                },
+                {
+                  "id": 11,
+                  "kind": "NewArray"
+                }
+              ]
+            },
+            {
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Undefined",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "Call"
+                },
+                {
+                  "id": 1,
+                  "kind": "GetProperty",
+                  "detail": "\"_entries\""
+                },
+                {
+                  "id": 2,
+                  "kind": "MakeFunction",
+                  "detail": "proto #9"
+                },
+                {
+                  "id": 3,
+                  "kind": "CallMethod",
+                  "detail": "\"filter\""
+                },
+                {
+                  "id": 4,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"_entries\""
+                }
+              ]
+            },
+            {
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Unknown",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "returned_sites": [
+                8
+              ],
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "Call"
+                },
+                {
+                  "id": 1,
+                  "kind": "GetProperty",
+                  "detail": "\"_entries\""
+                },
+                {
+                  "id": 2,
+                  "kind": "GetProperty",
+                  "detail": "\"length\""
+                },
+                {
+                  "id": 3,
+                  "kind": "GetProperty",
+                  "detail": "\"_entries\""
+                },
+                {
+                  "id": 4,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 5,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 6,
+                  "kind": "GetProperty",
+                  "detail": "\"_entries\""
+                },
+                {
+                  "id": 7,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 8,
+                  "kind": "GetComputed"
+                }
+              ]
+            },
+            {
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Object",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "returned_sites": [
+                1
+              ],
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "Call"
+                },
+                {
+                  "id": 1,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 2,
+                  "kind": "GetProperty",
+                  "detail": "\"_entries\""
+                },
+                {
+                  "id": 3,
+                  "kind": "GetProperty",
+                  "detail": "\"length\""
+                },
+                {
+                  "id": 4,
+                  "kind": "GetProperty",
+                  "detail": "\"_entries\""
+                },
+                {
+                  "id": 5,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 6,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 7,
+                  "kind": "GetProperty",
+                  "detail": "\"_entries\""
+                },
+                {
+                  "id": 8,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 9,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 10,
+                  "kind": "CallMethod",
+                  "detail": "\"push\""
+                }
+              ]
+            },
+            {
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Boolean",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "Call"
+                },
+                {
+                  "id": 1,
+                  "kind": "GetProperty",
+                  "detail": "\"_entries\""
+                },
+                {
+                  "id": 2,
+                  "kind": "GetProperty",
+                  "detail": "\"length\""
+                },
+                {
+                  "id": 3,
+                  "kind": "GetProperty",
+                  "detail": "\"_entries\""
+                },
+                {
+                  "id": 4,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 5,
+                  "kind": "GetComputed"
+                }
+              ]
+            },
+            {
+              "parameter_types": [
+                "Unknown",
+                "Unknown"
+              ],
+              "return_type": "Undefined",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "Call"
+                },
+                {
+                  "id": 1,
+                  "kind": "Call"
+                },
+                {
+                  "id": 2,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 3,
+                  "kind": "GetProperty",
+                  "detail": "\"_entries\""
+                },
+                {
+                  "id": 4,
+                  "kind": "GetProperty",
+                  "detail": "\"length\""
+                },
+                {
+                  "id": 5,
+                  "kind": "GetProperty",
+                  "detail": "\"_entries\""
+                },
+                {
+                  "id": 6,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 7,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 8,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 9,
+                  "kind": "CallMethod",
+                  "detail": "\"push\""
+                },
+                {
+                  "id": 10,
+                  "kind": "GetProperty",
+                  "detail": "\"_entries\""
+                },
+                {
+                  "id": 11,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 12,
+                  "kind": "CallMethod",
+                  "detail": "\"push\""
+                },
+                {
+                  "id": 13,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 14,
+                  "kind": "CallMethod",
+                  "detail": "\"push\""
+                },
+                {
+                  "id": 15,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"_entries\""
+                }
+              ]
+            },
+            {
+              "parameter_types": [
+                "Unknown",
+                "Unknown"
+              ],
+              "return_type": "Number",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 1,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 2,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 3,
+                  "kind": "GetComputed"
+                }
+              ]
+            },
+            {
+              "return_type": "Undefined",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "GetProperty",
+                  "detail": "\"_entries\""
+                },
+                {
+                  "id": 1,
+                  "kind": "MakeFunction",
+                  "detail": "proto #15"
+                },
+                {
+                  "id": 2,
+                  "kind": "CallMethod",
+                  "detail": "\"sort\""
+                }
+              ]
+            },
+            {
+              "return_type": "Unknown",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "returned_sites": [
+                16
+              ],
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 1,
+                  "kind": "GetProperty",
+                  "detail": "\"_entries\""
+                },
+                {
+                  "id": 2,
+                  "kind": "GetProperty",
+                  "detail": "\"length\""
+                },
+                {
+                  "id": 3,
+                  "kind": "GetProperty",
+                  "detail": "\"_entries\""
+                },
+                {
+                  "id": 4,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 5,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 6,
+                  "kind": "Call"
+                },
+                {
+                  "id": 7,
+                  "kind": "CallMethod",
+                  "detail": "\"replace\""
+                },
+                {
+                  "id": 8,
+                  "kind": "GetProperty",
+                  "detail": "\"_entries\""
+                },
+                {
+                  "id": 9,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 10,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 11,
+                  "kind": "Call"
+                },
+                {
+                  "id": 12,
+                  "kind": "CallMethod",
+                  "detail": "\"replace\""
+                },
+                {
+                  "id": 13,
+                  "kind": "Call"
+                },
+                {
+                  "id": 14,
+                  "kind": "Call"
+                },
+                {
+                  "id": 15,
+                  "kind": "CallMethod",
+                  "detail": "\"push\""
+                },
+                {
+                  "id": 16,
+                  "kind": "CallMethod",
+                  "detail": "\"join\""
+                }
+              ]
+            },
+            {
+              "parameter_types": [
+                "Unknown",
+                "Unknown"
+              ],
+              "return_type": "Undefined",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "GetProperty",
+                  "detail": "\"_entries\""
+                },
+                {
+                  "id": 1,
+                  "kind": "GetProperty",
+                  "detail": "\"length\""
+                },
+                {
+                  "id": 2,
+                  "kind": "GetProperty",
+                  "detail": "\"_entries\""
+                },
+                {
+                  "id": 3,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 4,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 5,
+                  "kind": "GetProperty",
+                  "detail": "\"_entries\""
+                },
+                {
+                  "id": 6,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 7,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 8,
+                  "kind": "CallMethod",
+                  "detail": "\"call\""
+                }
+              ]
+            },
+            {
+              "return_type": "Unknown",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "GetProperty",
+                  "detail": "\"_entries\""
+                },
+                {
+                  "id": 1,
+                  "kind": "GetProperty",
+                  "detail": "\"iterator\""
+                }
+              ]
+            },
+            {
+              "return_type": "Unknown",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "GetProperty",
+                  "detail": "\"_entries\""
+                },
+                {
+                  "id": 1,
+                  "kind": "GetProperty",
+                  "detail": "\"iterator\""
+                }
+              ]
+            },
+            {
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Unknown",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "returned_sites": [
+                6
+              ],
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "CallMethod",
+                  "detail": "\"@@iterator\""
+                },
+                {
+                  "id": 1,
+                  "kind": "GetProperty",
+                  "detail": "\"next\""
+                },
+                {
+                  "id": 2,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 5,
+                  "kind": "GetProperty",
+                  "detail": "\"done\""
+                },
+                {
+                  "id": 6,
+                  "kind": "GetProperty",
+                  "detail": "\"value\""
+                },
+                {
+                  "id": 7,
+                  "kind": "GetProperty",
+                  "detail": "\"return\""
+                },
+                {
+                  "id": 8,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 10,
+                  "kind": "GetProperty",
+                  "detail": "\"return\""
+                },
+                {
+                  "id": 11,
+                  "kind": "NewArray"
+                }
+              ]
+            },
+            {
+              "return_type": "Unknown",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "GetProperty",
+                  "detail": "\"_entries\""
+                },
+                {
+                  "id": 1,
+                  "kind": "MakeFunction",
+                  "detail": "proto #21"
+                },
+                {
+                  "id": 2,
+                  "kind": "CallMethod",
+                  "detail": "\"map\""
+                },
+                {
+                  "id": 3,
+                  "kind": "GetProperty",
+                  "detail": "\"iterator\""
+                }
+              ]
+            },
+            {
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Unknown",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "returned_sites": [
+                10
+              ],
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "CallMethod",
+                  "detail": "\"@@iterator\""
+                },
+                {
+                  "id": 1,
+                  "kind": "GetProperty",
+                  "detail": "\"next\""
+                },
+                {
+                  "id": 2,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 5,
+                  "kind": "GetProperty",
+                  "detail": "\"done\""
+                },
+                {
+                  "id": 6,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 9,
+                  "kind": "GetProperty",
+                  "detail": "\"done\""
+                },
+                {
+                  "id": 10,
+                  "kind": "GetProperty",
+                  "detail": "\"value\""
+                },
+                {
+                  "id": 11,
+                  "kind": "GetProperty",
+                  "detail": "\"return\""
+                },
+                {
+                  "id": 12,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 14,
+                  "kind": "GetProperty",
+                  "detail": "\"return\""
+                },
+                {
+                  "id": 15,
+                  "kind": "NewArray"
+                }
+              ]
+            },
+            {
+              "return_type": "Unknown",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "GetProperty",
+                  "detail": "\"_entries\""
+                },
+                {
+                  "id": 1,
+                  "kind": "MakeFunction",
+                  "detail": "proto #23"
+                },
+                {
+                  "id": 2,
+                  "kind": "CallMethod",
+                  "detail": "\"map\""
+                },
+                {
+                  "id": 3,
+                  "kind": "GetProperty",
+                  "detail": "\"iterator\""
+                }
+              ]
+            },
+            {
+              "name": "URL",
+              "parameter_types": [
+                "Unknown",
+                "Unknown"
+              ],
+              "return_type": "Undefined",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "sites": [
+                {
+                  "id": 1,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"@@private:1:%brand\""
+                },
+                {
+                  "id": 2,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"href\""
+                },
+                {
+                  "id": 3,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"origin\""
+                },
+                {
+                  "id": 4,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"protocol\""
+                },
+                {
+                  "id": 5,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"username\""
+                },
+                {
+                  "id": 6,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"password\""
+                },
+                {
+                  "id": 7,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"host\""
+                },
+                {
+                  "id": 8,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"hostname\""
+                },
+                {
+                  "id": 9,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"port\""
+                },
+                {
+                  "id": 10,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"pathname\""
+                },
+                {
+                  "id": 11,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"search\""
+                },
+                {
+                  "id": 12,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"searchParams\""
+                },
+                {
+                  "id": 13,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"hash\""
+                },
+                {
+                  "id": 14,
+                  "kind": "Call"
+                },
+                {
+                  "id": 15,
+                  "kind": "GetProperty",
+                  "detail": "\"href\""
+                },
+                {
+                  "id": 16,
+                  "kind": "Call"
+                },
+                {
+                  "id": 17,
+                  "kind": "Call"
+                },
+                {
+                  "id": 18,
+                  "kind": "GetProperty",
+                  "detail": "\"protocol\""
+                },
+                {
+                  "id": 20,
+                  "kind": "CallMethod",
+                  "detail": "\"startsWith\""
+                },
+                {
+                  "id": 21,
+                  "kind": "GetProperty",
+                  "detail": "\"protocol\""
+                },
+                {
+                  "id": 22,
+                  "kind": "CallMethod",
+                  "detail": "\"startsWith\""
+                },
+                {
+                  "id": 23,
+                  "kind": "GetProperty",
+                  "detail": "\"protocol\""
+                },
+                {
+                  "id": 24,
+                  "kind": "Call"
+                },
+                {
+                  "id": 25,
+                  "kind": "GetProperty",
+                  "detail": "\"host\""
+                },
+                {
+                  "id": 26,
+                  "kind": "Call"
+                },
+                {
+                  "id": 27,
+                  "kind": "Call"
+                },
+                {
+                  "id": 28,
+                  "kind": "CallMethod",
+                  "detail": "\"test\""
+                },
+                {
+                  "id": 29,
+                  "kind": "GetProperty",
+                  "detail": "\"pathname\""
+                },
+                {
+                  "id": 30,
+                  "kind": "CallMethod",
+                  "detail": "\"lastIndexOf\""
+                },
+                {
+                  "id": 31,
+                  "kind": "CallMethod",
+                  "detail": "\"slice\""
+                },
+                {
+                  "id": 32,
+                  "kind": "GetProperty",
+                  "detail": "\"protocol\""
+                },
+                {
+                  "id": 33,
+                  "kind": "Call"
+                },
+                {
+                  "id": 34,
+                  "kind": "GetProperty",
+                  "detail": "\"host\""
+                },
+                {
+                  "id": 35,
+                  "kind": "Call"
+                },
+                {
+                  "id": 36,
+                  "kind": "Call"
+                },
+                {
+                  "id": 37,
+                  "kind": "Call"
+                },
+                {
+                  "id": 38,
+                  "kind": "Call"
+                },
+                {
+                  "id": 39,
+                  "kind": "GetProperty",
+                  "detail": "\"protocol\""
+                },
+                {
+                  "id": 40,
+                  "kind": "Call"
+                },
+                {
+                  "id": 42,
+                  "kind": "GetProperty",
+                  "detail": "\"protocol\""
+                },
+                {
+                  "id": 43,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"protocol\""
+                },
+                {
+                  "id": 44,
+                  "kind": "GetProperty",
+                  "detail": "\"hostname\""
+                },
+                {
+                  "id": 45,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"hostname\""
+                },
+                {
+                  "id": 46,
+                  "kind": "GetProperty",
+                  "detail": "\"port\""
+                },
+                {
+                  "id": 47,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"port\""
+                },
+                {
+                  "id": 48,
+                  "kind": "GetProperty",
+                  "detail": "\"host\""
+                },
+                {
+                  "id": 49,
+                  "kind": "GetProperty",
+                  "detail": "\"port\""
+                },
+                {
+                  "id": 50,
+                  "kind": "GetProperty",
+                  "detail": "\"hostname\""
+                },
+                {
+                  "id": 51,
+                  "kind": "Call"
+                },
+                {
+                  "id": 52,
+                  "kind": "GetProperty",
+                  "detail": "\"port\""
+                },
+                {
+                  "id": 53,
+                  "kind": "Call"
+                },
+                {
+                  "id": 54,
+                  "kind": "GetProperty",
+                  "detail": "\"hostname\""
+                },
+                {
+                  "id": 55,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"host\""
+                },
+                {
+                  "id": 56,
+                  "kind": "GetProperty",
+                  "detail": "\"pathname\""
+                },
+                {
+                  "id": 57,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"pathname\""
+                },
+                {
+                  "id": 58,
+                  "kind": "GetProperty",
+                  "detail": "\"search\""
+                },
+                {
+                  "id": 59,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"search\""
+                },
+                {
+                  "id": 60,
+                  "kind": "GetProperty",
+                  "detail": "\"hash\""
+                },
+                {
+                  "id": 61,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"hash\""
+                },
+                {
+                  "id": 62,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"username\""
+                },
+                {
+                  "id": 63,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"password\""
+                },
+                {
+                  "id": 64,
+                  "kind": "GetProperty",
+                  "detail": "\"auth\""
+                },
+                {
+                  "id": 65,
+                  "kind": "GetProperty",
+                  "detail": "\"auth\""
+                },
+                {
+                  "id": 66,
+                  "kind": "CallMethod",
+                  "detail": "\"indexOf\""
+                },
+                {
+                  "id": 67,
+                  "kind": "GetProperty",
+                  "detail": "\"auth\""
+                },
+                {
+                  "id": 68,
+                  "kind": "CallMethod",
+                  "detail": "\"slice\""
+                },
+                {
+                  "id": 69,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"username\""
+                },
+                {
+                  "id": 70,
+                  "kind": "GetProperty",
+                  "detail": "\"auth\""
+                },
+                {
+                  "id": 71,
+                  "kind": "CallMethod",
+                  "detail": "\"slice\""
+                },
+                {
+                  "id": 72,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"password\""
+                },
+                {
+                  "id": 73,
+                  "kind": "GetProperty",
+                  "detail": "\"auth\""
+                },
+                {
+                  "id": 74,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"username\""
+                },
+                {
+                  "id": 75,
+                  "kind": "GetProperty",
+                  "detail": "\"protocol\""
+                },
+                {
+                  "id": 76,
+                  "kind": "Call"
+                },
+                {
+                  "id": 77,
+                  "kind": "GetProperty",
+                  "detail": "\"host\""
+                },
+                {
+                  "id": 78,
+                  "kind": "Call"
+                },
+                {
+                  "id": 79,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"origin\""
+                },
+                {
+                  "id": 80,
+                  "kind": "GetProperty",
+                  "detail": "\"protocol\""
+                },
+                {
+                  "id": 81,
+                  "kind": "Call"
+                },
+                {
+                  "id": 82,
+                  "kind": "GetProperty",
+                  "detail": "\"auth\""
+                },
+                {
+                  "id": 83,
+                  "kind": "GetProperty",
+                  "detail": "\"auth\""
+                },
+                {
+                  "id": 84,
+                  "kind": "Call"
+                },
+                {
+                  "id": 85,
+                  "kind": "GetProperty",
+                  "detail": "\"host\""
+                },
+                {
+                  "id": 86,
+                  "kind": "Call"
+                },
+                {
+                  "id": 87,
+                  "kind": "GetProperty",
+                  "detail": "\"pathname\""
+                },
+                {
+                  "id": 88,
+                  "kind": "Call"
+                },
+                {
+                  "id": 89,
+                  "kind": "GetProperty",
+                  "detail": "\"search\""
+                },
+                {
+                  "id": 90,
+                  "kind": "Call"
+                },
+                {
+                  "id": 91,
+                  "kind": "GetProperty",
+                  "detail": "\"hash\""
+                },
+                {
+                  "id": 92,
+                  "kind": "Call"
+                },
+                {
+                  "id": 93,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"href\""
+                },
+                {
+                  "id": 94,
+                  "kind": "GetProperty",
+                  "detail": "\"search\""
+                },
+                {
+                  "id": 96,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"searchParams\""
+                }
+              ]
+            },
+            {
+              "return_type": "Unknown",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "returned_sites": [
+                0
+              ],
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "GetProperty",
+                  "detail": "\"href\""
+                }
+              ]
+            },
+            {
+              "return_type": "Unknown",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "returned_sites": [
+                0
+              ],
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "GetProperty",
+                  "detail": "\"href\""
+                }
+              ]
             }
           ]
         },
