@@ -3395,52 +3395,6 @@ where
     }
 }
 
-/// A builtin participates in ordinary graph linking but has no source body to parse. Its empty
-/// program carries only the export shape needed by the linker; execution materializes those
-/// exports directly from the interpreter's canonical builtin table without entering the VM.
-fn builtin_module_program(builtin: NodeBuiltin) -> ModuleProgram {
-    // Resolution can recognize future surface before execution advertises it. An empty export
-    // table means importing a name fails at link time rather than producing a placeholder.
-    let names = node_builtin_export_names(builtin.specifier()).unwrap_or(&[]);
-    ModuleProgram {
-        program: Program {
-            version: BYTECODE_VERSION,
-            constants: vec![],
-            code: vec![Instruction::Return],
-            local_count: names.len() as u32,
-            functions: vec![],
-            template_sites: vec![],
-            // A builtin has no source body at all, which is why it has no functions either.
-            source: "".into(),
-        },
-        dependencies: vec![],
-        imports: vec![],
-        exports: names
-            .iter()
-            .enumerate()
-            .map(|(slot, name)| ExportBinding {
-                exported: (*name).to_owned(),
-                local_slot: slot as u32,
-            })
-            .collect(),
-        // A builtin is a module, and a module is strict. The body is one `Return`, so this
-        // decides nothing that runs; saying it anyway keeps the answer the same whether the
-        // node came from the compiler or from here.
-        strictness: kiln_ir::Strictness {
-            body: true,
-            functions: vec![],
-        },
-        link_facts: kiln_ir::ModuleLinkFacts {
-            node_runtime_requests: Vec::new(),
-            immutable_bindings: names.iter().map(|s| (*s).to_owned()).collect(),
-            direct_eval: false,
-            new_function: false,
-            dynamic_imports: vec![],
-            removable_declarations: vec![],
-        },
-    }
-}
-
 /// A JSON node has one immutable module binding whose value is materialized directly by the
 /// loader. The value itself remains an ordinary mutable JavaScript object, matching Node's
 /// cached `require()` result and ESM default export behavior.
