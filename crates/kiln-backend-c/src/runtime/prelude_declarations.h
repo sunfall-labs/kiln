@@ -168,6 +168,7 @@ extern kiln_value kiln_c99_copy_text(const char *text, size_t len);
 extern kiln_val kiln_c99_val_from_text(const char *bytes, size_t len);
 extern int kiln_c99_new_array_with_capacity(kiln_value *out, size_t capacity, int is_numeric);
 extern kiln_value kiln_c99_control_diagnostic(void);
+extern int kiln_c99_diagnostic_available(void);
 extern void kiln_c99_forget_handled_throw(void);
 extern void kiln_c99_note_refusal(const char *site, size_t instruction, const char *operation, size_t depth);
 extern kiln_value kiln_c99_text(kiln_value value);
