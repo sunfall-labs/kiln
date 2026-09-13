@@ -8,12 +8,13 @@ fn main() {
                 eprintln!("source-digest requires an explicit repository root");
                 std::process::exit(2);
             });
-            println!(
-                "{}",
-                kiln_native_provider_contract::source_digest(&root)
-                    .expect("source digest")
-                    .to_hex()
-            );
+            match kiln_native_provider_contract::source_digest(&root) {
+                Ok(digest) => println!("{}", digest.to_hex()),
+                Err(error) => {
+                    eprintln!("source digest failed for {}: {error}", root.display());
+                    std::process::exit(1);
+                }
+            }
         }
         Some("contract") => println!(
             "{}",
