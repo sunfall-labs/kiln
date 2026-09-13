@@ -146,6 +146,44 @@ fn delayed_exported_async_import_uses_defining_module_referrer() {
 }
 
 #[test]
+fn failed_dynamic_module_is_evaluated_once_and_reuses_rejection() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        "let first;\n\
+         import('./bad.mjs').catch(error => { first = error; return import('./bad.mjs').catch(error => error); }).then(second => {\n\
+           console.log(globalThis.count);\n\
+           console.log(first === second);\n\
+         });",
+    );
+    project.write(
+        "bad.mjs",
+        "globalThis.count = (globalThis.count || 0) + 1; throw new Error('boom');",
+    );
+
+    let graph = Arc::new(project.graph(&entry).expect("build failure cache graph"));
+    let loader = GraphModuleLoader::new(Arc::clone(&graph));
+    let mut host = TestHost::default();
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default().with_module_loader_service(Arc::new(loader)),
+        )
+        .expect("execute repeated failed imports");
+    assert!(
+        host.output.iter().any(|line| line == "1"),
+        "{:?}",
+        host.output
+    );
+    assert!(
+        host.output.iter().any(|line| line == "true"),
+        "{:?}",
+        host.output
+    );
+}
+
+#[test]
 fn failed_dynamic_subtree_is_deferred_until_import() {
     let project = TempProject::new();
     let entry = project.write("main.mjs", "import('./optional.mjs');");
