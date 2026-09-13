@@ -2882,6 +2882,7 @@ fn native_builtin_supported_exports(
         NodeBuiltin::QueryString => &["decode", "default", "parse"],
         NodeBuiltin::Url => &["URL", "default", "fileURLToPath", "parse", "pathToFileURL"],
         NodeBuiltin::Buffer => kiln_builtins::BUFFER_EXPORTS,
+        NodeBuiltin::StringDecoder => kiln_builtins::STRING_DECODER_EXPORTS,
         NodeBuiltin::AsyncHooks => &["AsyncLocalStorage", "AsyncResource", "default"],
         NodeBuiltin::Crypto => &["createHash", "default", "randomUUID"],
         _ => &[],
