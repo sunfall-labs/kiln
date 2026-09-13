@@ -3214,11 +3214,12 @@ exports[1] = performance;"#,
         ),
         NodeBuiltin::FsPromises => Some(
             r#"kiln_value unmaterialized = kiln_c99_method(KILN_C99_METHOD_NODE_BUILTIN_UNMATERIALIZED);
+kiln_value mkdir = kiln_c99_method(KILN_C99_METHOD_NODE_FS_MKDIR);
 kiln_value read_file = kiln_c99_method(KILN_C99_METHOD_NODE_FS_READ_FILE);
 kiln_value stat = kiln_c99_method(KILN_C99_METHOD_NODE_FS_STAT);
 kiln_value write_file = kiln_c99_method(KILN_C99_METHOD_NODE_FS_WRITE_FILE);
 exports[0] = unmaterialized;
-exports[1] = unmaterialized;
+exports[1] = mkdir;
 exports[2] = read_file;
 exports[3] = stat;
 exports[4] = write_file;"#,

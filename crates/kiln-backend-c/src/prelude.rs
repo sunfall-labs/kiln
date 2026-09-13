@@ -1065,6 +1065,7 @@ method_ids! {
     (KILN_C99_METHOD_NODE_READABLE_SET_RAW_MODE, 504, NodeStream),
     (KILN_C99_METHOD_NODE_OS_HOMEDIR, 505, Direct),
     (KILN_C99_METHOD_NODE_OS_TMPDIR, 506, Direct),
+    (KILN_C99_METHOD_NODE_FS_MKDIR, 507, Direct),
 }
 
 /// The hook a host installs when it lets a program make a second realm.
@@ -3181,6 +3182,7 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_NODE_READABLE_SET_RAW_MODE),
     emit_method_define!(KILN_C99_METHOD_NODE_OS_HOMEDIR),
     emit_method_define!(KILN_C99_METHOD_NODE_OS_TMPDIR),
+    emit_method_define!(KILN_C99_METHOD_NODE_FS_MKDIR),
     emit_method_define!(KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE),
     emit_method_define!(KILN_C99_METHOD_NODE_QUERYSTRING_PARSE),
     r#"
