@@ -55,6 +55,7 @@ pub struct ResolvedModule {
 /// Builtins supported by Kiln's Node compatibility adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum NodeBuiltin {
+    Process,
     Assert,
     Buffer,
     AsyncHooks,
@@ -86,6 +87,7 @@ pub enum NodeBuiltin {
 
 impl NodeBuiltin {
     pub const ALL: &[Self] = &[
+        Self::Process,
         Self::Assert,
         Self::Buffer,
         Self::AsyncHooks,
@@ -117,6 +119,7 @@ impl NodeBuiltin {
 
     pub fn parse(specifier: &str) -> Option<Self> {
         Some(match specifier.strip_prefix("node:").unwrap_or(specifier) {
+            "process" => Self::Process,
             "assert" | "assert/strict" => Self::Assert,
             "buffer" => Self::Buffer,
             "async_hooks" => Self::AsyncHooks,
@@ -150,6 +153,7 @@ impl NodeBuiltin {
 
     pub const fn specifier(self) -> &'static str {
         match self {
+            Self::Process => "node:process",
             Self::Assert => "node:assert",
             Self::Buffer => "node:buffer",
             Self::AsyncHooks => "node:async_hooks",
