@@ -6154,6 +6154,7 @@ typedef struct kiln_launcher_promise_view {
     kiln_value value;
 } kiln_launcher_promise_view;
 
+typedef struct kiln_graph_context kiln_graph_context;
 struct kiln_graph_context {
     kiln_host host;
     kiln_value result;
@@ -6499,9 +6500,19 @@ static int kiln_graph_enter(void *opaque) {
         ") return KILN_C99_CONTROL_ERROR;\n    if (graph->module_states[index].phase == KILN_MODULE_EVALUATED) return 0;\n    if (graph->module_states[index].phase == KILN_MODULE_EVALUATING) return 0;\n    switch (index) {\n",
     );
     for index in 0..modules.len() {
+        writeln!(output, "        case {index}: {{").unwrap();
+        for dependency in &modules[index].0.dependencies {
+            if let Some(&provider) = indices.get(&dependency.target) {
+                writeln!(
+                    output,
+                    "            int status = kiln_graph_ensure_module(graph, (size_t){provider}); if (status != KILN_C99_OK) return status;"
+                )
+                .unwrap();
+            }
+        }
         writeln!(
             output,
-            "        case {index}: return kiln_graph_eval_module_{index}(graph);"
+            "            return kiln_graph_eval_module_{index}(graph);\n        }}"
         )
         .unwrap();
     }
