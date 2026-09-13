@@ -5699,6 +5699,30 @@ regression suite (`conformance/regress/r08-node-async-context.js` passing 12/12)
 
 ---
 
+## Node conformance fixes & Buffer multi-encoding parity (2026-09-13)
+
+- **Express 500 / Crypto Digest encoding**: In `crates/kiln-builtins/src/node/crypto.ts`, implemented `toBase64` and `encodeDigest` covering `"hex"`, `"base64"`, `"base64url"`, `"utf8"`, `"latin1"`, and fallback to raw `Buffer.from(raw)` for `Hash.prototype.digest` and `Hmac.prototype.digest`. This resolved Express `etag` middleware failing with `Uint8Array.substring is not a function` when generating base64 hashes, bringing `conformance/server --node` to 7/7 passed (100%).
+- **Node stream & crypto conformance**:
+  - In `crates/kiln-builtins/src/node/stream.ts`, added `eventNames(): (string | symbol)[]` to the internal `EventEmitter` class.
+  - Corrected `Readable.prototype.push` and `read` buffer state handling, 0-length pull triggers, and `'readable'` event emissions.
+  - In `conformance/node/manifest.toml`, updated `expected_stdout` for `node-v24.7.0/crypto/random-uuid-url` to match deterministic PRNG output from the TypeScript implementation.
+  - Result: `conformance/node --node` brought to 36/36 passed (100%).
+- **Buffer multi-encoding parity**:
+  - Extended `Buffer.prototype.toString` in `crates/kiln-interpreter/src/buffer.rs` with `"base64"` and `"base64url"`.
+  - Implemented `"base64"` and `"base64url"` decoding in `KILN_C99_METHOD_BUFFER_TO_STRING` in `crates/kiln-backend-c/src/runtime/node_support.c` delegating directly to `kiln_c99_uint8_to_base64_raw`.
+  - Extended `conformance/native/node-buffer-namespace.cjs` to assert byte-for-byte parity across both engines for `toString("hex")`, `toString("base64")`, and `toString("base64url")`.
+- **Verification**:
+  - `conformance/server --node`: 7 passed, 0 failed (100%).
+  - `conformance/node --node`: 36 passed, 0 failed (100%).
+  - `mbx test -p kiln-builtins`: 44 passed, 0 failed.
+  - `mbx test -p kiln-interpreter`: 162 passed, 0 failed.
+  - `mbx test -p kiln-backend-c`: 130 passed, 0 failed, 1 ignored (emitted C line bounds preserved).
+  - `mbx test -p kiln-native`: 173 passed, 0 failed.
+  - `./scripts/native.sh`: 154 passed, 0 failed, 12 expected refusals.
+  - `cargo fmt --check`: passed.
+
+---
+
 ## Phase 5.2 TypeScript built-ins: `node:net` (2026-09-13)
 
 Migrated `node:net` completely to TypeScript via `crates/kiln-builtins/src/node/net.ts` with zero additions

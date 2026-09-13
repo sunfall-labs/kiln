@@ -213,11 +213,11 @@ pub(crate) fn property(prop: &str) -> Option<Value> {
             Native::NodeCryptoGetRandomValues,
             RealmId::PRIMARY,
         )),
-        "createHash" => Some(Value::Native(
+        "createHash" | "Hash" => Some(Value::Native(
             Native::NodeCryptoCreateHash,
             RealmId::PRIMARY,
         )),
-        "createHmac" => Some(Value::Native(
+        "createHmac" | "Hmac" => Some(Value::Native(
             Native::NodeCryptoCreateHmac,
             RealmId::PRIMARY,
         )),
