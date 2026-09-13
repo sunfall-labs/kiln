@@ -1843,7 +1843,7 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
     },
     AbsentAnswer {
         function: "kiln_c99_get_own_kind",
-        sites: 27,
+        sites: 28,
         proved_by: "one membership predicate per receiver kind -- kiln_c99_is_array_member, \
                     kiln_c99_is_string_member, kiln_c99_is_date_member, \
                     kiln_c99_is_collection_member and the kiln_c99_collection_kind_member \
@@ -2743,6 +2743,7 @@ enum kiln_value_tag {
 #define KILN_C99_BUILTIN_URL 63
 #define KILN_C99_BUILTIN_BUFFER 64
 #define KILN_C99_BUILTIN_SYMBOL_PROTOTYPE 96
+#define KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE 97
 
 /* Array methods, part two.
  *

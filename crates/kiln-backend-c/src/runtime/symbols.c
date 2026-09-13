@@ -291,6 +291,7 @@ static int kiln_c99_is_namespace(uint64_t builtin) {
            /* `DataView.prototype` is a table, and therefore a namespace here; `DataView` itself
             * is a constructor and is not, so `typeof DataView === "function"` stays true. */
            builtin == KILN_C99_BUILTIN_DATA_VIEW_PROTOTYPE ||
+           builtin == KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_SYMBOL_PROTOTYPE ||
            (builtin >= KILN_C99_BUILTIN_INT8_ARRAY_PROTOTYPE &&
             builtin <= KILN_C99_BUILTIN_FLOAT64_ARRAY_PROTOTYPE);

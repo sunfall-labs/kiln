@@ -168,6 +168,7 @@ KILN_VALUE_RETURN_SIGNAL = 28
 #define KILN_C99_BUILTIN_URL 63
 #define KILN_C99_BUILTIN_BUFFER 64
 #define KILN_C99_BUILTIN_SYMBOL_PROTOTYPE 96
+#define KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE 97
 #define KILN_C99_METHOD_ARRAY_AT 200
 #define KILN_C99_METHOD_ARRAY_FIND 201
 #define KILN_C99_METHOD_ARRAY_FIND_INDEX 202
@@ -1152,6 +1153,7 @@ static kiln_value kiln_c99_from_units(const uint16_t *units, size_t count);
 static const char *kiln_c99_method_name(uint64_t code);
 static uint64_t kiln_c99_method_code_end(void);
 static const char *kiln_c99_builtin_name(uint64_t builtin);
+static int kiln_c99_builtin_length(uint64_t builtin, double *out);
 static int kiln_c99_is_namespace(uint64_t builtin);
 static int kiln_c99_changes_length(uint64_t code);
 static int kiln_c99_reads_only(uint64_t code);
@@ -1671,6 +1673,7 @@ static int kiln_c99_exponential_text(kiln_value *out, int negative, const char *
 static int kiln_c99_precision_text(kiln_value *out, int negative, const char *mantissa,
 static int kiln_c99_number_in_radix(kiln_value *out, double value, int radix) {
 static const char *kiln_c99_builtin_name(uint64_t builtin) {
+static int kiln_c99_builtin_length(uint64_t builtin, double *out) {
 static int kiln_c99_expand_replacement(kiln_text *out, const uint16_t *pattern,
 static kiln_value kiln_c99_new_target;
 static int kiln_c99_inheriting_new_target;
