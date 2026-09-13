@@ -21,7 +21,25 @@ realm. The dependency remained suspended at top-level await and its importer obs
 uninitialised binding. The landing change queues that job through `with_realm_mut`; the focused module graph
 regression and interpreter suite pass.
 
-After that fix, interpreted ghui reaches OpenTUI's explicit platform check and reports:
+The explicit `kiln:process` capability is now implemented for both execution engines. Its public
+surface is:
+
+    run(command, args?, { input?, signal? }) -> Promise<{ stdout, stderr, exitCode, signal }>
+
+Type and option validation, binary length-framed request encoding, AbortSignal cleanup, and result
+shaping live in the TypeScript facade. Tokio owns process spawning, pipes, status collection, and
+kill-and-wait cancellation. The native bridge accepts only normalized request bytes and returns a
+rooted completion record; it does not duplicate public validation or object shaping. Realm shutdown
+drains process cleanup tasks before aborting unrelated host work.
+
+Permanent parity coverage is `conformance/native/process-run.cjs`, executed by `scripts/native.sh`;
+the focused checks are `mbx test -p kiln-runtime --offline` and
+`mbx test -p kiln-native-number-ffi --offline`. The fixture covers binary input containing NUL,
+stdout/stderr, nonzero exit status, signal nullability, and AbortSignal cancellation in interpreter
+and generated native C execution.
+
+The remaining renderer work is tracked separately. Earlier probes reached OpenTUI's explicit
+platform check and reported:
 
     opentui is not supported on the current platform: kiln-undefined
 
