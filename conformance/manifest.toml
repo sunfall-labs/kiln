@@ -1381,3 +1381,22 @@ min-nan throws TypeError
 number-sym throws TypeError
 """
 
+[[test]]
+id = "regress/r14-dynamic-import-attributes"
+group = "regress"
+source = "regress/r14-dynamic-import-attributes.mjs"
+status = "runnable"
+features = ["dynamic-import", "import-attributes", "promise-rejection"]
+catches = """
+Dynamic import must coerce its specifier before reading import attributes, invoke each getter once,
+and turn a throwing attribute getter into a rejected Promise. Ordinary imports accept no options or
+an empty `with` object, while unsupported types reject by name.
+"""
+expected_stdout = """
+returned promise
+TypeError unsupported import attribute `type`
+specifier,with,type
+throwing returned promise
+getter rejection getter boom
+42 42
+"""
