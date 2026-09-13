@@ -6836,15 +6836,18 @@ fn shared_graph_wrapper_emits_and_links_without_static_value_arrays() {
         }
     })
     .expect("construct shared graph");
+    let mut emission = NativeRealmPolicy::default().emission();
+    emission.decoupled_prelude = true;
     let modules = graph
         .modules()
         .map(|node| {
             (
                 node,
-                emit_module_with_logical_path(
+                emit_module_with_logical_path_and_policy(
                     &node.program,
                     &logical_module_path(graph.project_root(), &node.path)
                         .expect("logical module path"),
+                    emission.clone(),
                 )
                 .expect("module emits"),
             )
@@ -6933,6 +6936,7 @@ fn shared_graph_wrapper_emits_and_links_without_static_value_arrays() {
         position_independent: true,
         ..CompileOptions::default()
     };
+    materialize_prelude_header(&root.path).expect("write prelude header");
     let mut objects = Vec::with_capacity(modules.len() + 1);
     for (index, (_, module)) in modules.iter().enumerate() {
         let source = root.path.join(format!("module-{index}.c"));
@@ -6943,6 +6947,17 @@ fn shared_graph_wrapper_emits_and_links_without_static_value_arrays() {
             .expect("compile module source");
         objects.push(object);
     }
+    let prelude_source = root.path.join("prelude.c");
+    let prelude_object = root.path.join("prelude.o");
+    fs::write(
+        &prelude_source,
+        kiln_backend_c::runtime_prelude_source_with_policy(&emission),
+    )
+    .expect("write prelude source");
+    toolchain
+        .compile_c(&prelude_source, &prelude_object, &compile_options)
+        .expect("compile prelude source");
+    objects.push(prelude_object);
     let wrapper_object = root.path.join("wrapper.o");
     toolchain
         .compile_c(&wrapper_source, &wrapper_object, &compile_options)
