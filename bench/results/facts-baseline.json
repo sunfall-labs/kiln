@@ -65809,6 +65809,16 @@
                   "id": 135,
                   "kind": "CallMethod",
                   "detail": "\"delete\""
+                },
+                {
+                  "id": 136,
+                  "kind": "GetProperty",
+                  "detail": "\"_compilations\""
+                },
+                {
+                  "id": 137,
+                  "kind": "CallMethod",
+                  "detail": "\"delete\""
                 }
               ]
             },
@@ -88118,7 +88128,7 @@
                 {
                   "id": 131,
                   "kind": "MakeFunction",
-                  "detail": "proto #244"
+                  "detail": "proto #245"
                 },
                 {
                   "id": 132,
@@ -88128,7 +88138,7 @@
                 {
                   "id": 133,
                   "kind": "MakeFunction",
-                  "detail": "proto #246"
+                  "detail": "proto #247"
                 },
                 {
                   "id": 134,
@@ -88138,7 +88148,7 @@
                 {
                   "id": 135,
                   "kind": "MakeFunction",
-                  "detail": "proto #247"
+                  "detail": "proto #248"
                 },
                 {
                   "id": 136,
@@ -88148,7 +88158,7 @@
                 {
                   "id": 137,
                   "kind": "MakeFunction",
-                  "detail": "proto #248"
+                  "detail": "proto #249"
                 },
                 {
                   "id": 138,
@@ -88158,7 +88168,7 @@
                 {
                   "id": 139,
                   "kind": "MakeFunction",
-                  "detail": "proto #249"
+                  "detail": "proto #250"
                 },
                 {
                   "id": 140,
@@ -88168,7 +88178,7 @@
                 {
                   "id": 141,
                   "kind": "MakeFunction",
-                  "detail": "proto #250"
+                  "detail": "proto #251"
                 },
                 {
                   "id": 142,
@@ -88178,7 +88188,7 @@
                 {
                   "id": 143,
                   "kind": "MakeFunction",
-                  "detail": "proto #252"
+                  "detail": "proto #253"
                 },
                 {
                   "id": 144,
@@ -88188,7 +88198,7 @@
                 {
                   "id": 145,
                   "kind": "MakeFunction",
-                  "detail": "proto #253"
+                  "detail": "proto #254"
                 },
                 {
                   "id": 146,
@@ -88198,7 +88208,7 @@
                 {
                   "id": 147,
                   "kind": "MakeFunction",
-                  "detail": "proto #254"
+                  "detail": "proto #255"
                 },
                 {
                   "id": 148,
@@ -88208,7 +88218,7 @@
                 {
                   "id": 149,
                   "kind": "MakeFunction",
-                  "detail": "proto #255"
+                  "detail": "proto #256"
                 },
                 {
                   "id": 150,
@@ -88218,7 +88228,7 @@
                 {
                   "id": 151,
                   "kind": "MakeFunction",
-                  "detail": "proto #256"
+                  "detail": "proto #257"
                 },
                 {
                   "id": 152,
@@ -88228,7 +88238,7 @@
                 {
                   "id": 153,
                   "kind": "MakeFunction",
-                  "detail": "proto #259"
+                  "detail": "proto #260"
                 },
                 {
                   "id": 154,
@@ -88243,7 +88253,7 @@
                 {
                   "id": 156,
                   "kind": "MakeFunction",
-                  "detail": "proto #263"
+                  "detail": "proto #264"
                 },
                 {
                   "id": 157,
@@ -88253,7 +88263,7 @@
                 {
                   "id": 158,
                   "kind": "MakeFunction",
-                  "detail": "proto #264"
+                  "detail": "proto #265"
                 },
                 {
                   "id": 159,
@@ -88263,7 +88273,7 @@
                 {
                   "id": 160,
                   "kind": "MakeFunction",
-                  "detail": "proto #265"
+                  "detail": "proto #266"
                 },
                 {
                   "id": 161,
@@ -88273,7 +88283,7 @@
                 {
                   "id": 162,
                   "kind": "MakeFunction",
-                  "detail": "proto #266"
+                  "detail": "proto #267"
                 },
                 {
                   "id": 163,
@@ -88303,7 +88313,7 @@
                 {
                   "id": 168,
                   "kind": "MakeFunction",
-                  "detail": "proto #274"
+                  "detail": "proto #275"
                 },
                 {
                   "id": 169,
@@ -88313,7 +88323,7 @@
                 {
                   "id": 170,
                   "kind": "MakeFunction",
-                  "detail": "proto #275"
+                  "detail": "proto #276"
                 },
                 {
                   "id": 171,
@@ -88323,7 +88333,7 @@
                 {
                   "id": 172,
                   "kind": "MakeFunction",
-                  "detail": "proto #277"
+                  "detail": "proto #278"
                 },
                 {
                   "id": 173,
@@ -88336,7 +88346,7 @@
                 {
                   "id": 175,
                   "kind": "MakeFunction",
-                  "detail": "proto #278"
+                  "detail": "proto #279"
                 },
                 {
                   "id": 176,
@@ -88355,7 +88365,7 @@
                 {
                   "id": 179,
                   "kind": "MakeFunction",
-                  "detail": "proto #279"
+                  "detail": "proto #280"
                 },
                 {
                   "id": 180,
@@ -88375,7 +88385,7 @@
                 {
                   "id": 183,
                   "kind": "MakeFunction",
-                  "detail": "proto #280"
+                  "detail": "proto #281"
                 },
                 {
                   "id": 184,
@@ -88385,7 +88395,7 @@
                 {
                   "id": 185,
                   "kind": "MakeFunction",
-                  "detail": "proto #281"
+                  "detail": "proto #282"
                 },
                 {
                   "id": 186,
@@ -88395,7 +88405,7 @@
                 {
                   "id": 187,
                   "kind": "MakeFunction",
-                  "detail": "proto #282"
+                  "detail": "proto #283"
                 },
                 {
                   "id": 188,
@@ -88405,7 +88415,7 @@
                 {
                   "id": 189,
                   "kind": "MakeFunction",
-                  "detail": "proto #283"
+                  "detail": "proto #284"
                 },
                 {
                   "id": 190,
@@ -88415,7 +88425,7 @@
                 {
                   "id": 191,
                   "kind": "MakeFunction",
-                  "detail": "proto #284"
+                  "detail": "proto #285"
                 },
                 {
                   "id": 192,
@@ -88430,7 +88440,7 @@
                 {
                   "id": 194,
                   "kind": "MakeFunction",
-                  "detail": "proto #285"
+                  "detail": "proto #286"
                 },
                 {
                   "id": 195,
@@ -88440,7 +88450,7 @@
                 {
                   "id": 196,
                   "kind": "MakeFunction",
-                  "detail": "proto #286"
+                  "detail": "proto #287"
                 },
                 {
                   "id": 197,
@@ -88455,7 +88465,7 @@
                 {
                   "id": 199,
                   "kind": "MakeFunction",
-                  "detail": "proto #287"
+                  "detail": "proto #288"
                 },
                 {
                   "id": 200,
@@ -88468,7 +88478,7 @@
                 {
                   "id": 203,
                   "kind": "MakeFunction",
-                  "detail": "proto #288"
+                  "detail": "proto #289"
                 },
                 {
                   "id": 204,
@@ -88493,37 +88503,37 @@
                 {
                   "id": 208,
                   "kind": "MakeFunction",
-                  "detail": "proto #289"
+                  "detail": "proto #290"
                 },
                 {
                   "id": 209,
                   "kind": "MakeFunction",
-                  "detail": "proto #290"
+                  "detail": "proto #291"
                 },
                 {
                   "id": 210,
                   "kind": "MakeFunction",
-                  "detail": "proto #291"
+                  "detail": "proto #292"
                 },
                 {
                   "id": 211,
                   "kind": "MakeFunction",
-                  "detail": "proto #292"
+                  "detail": "proto #293"
                 },
                 {
                   "id": 212,
                   "kind": "MakeFunction",
-                  "detail": "proto #293"
+                  "detail": "proto #294"
                 },
                 {
                   "id": 213,
                   "kind": "MakeFunction",
-                  "detail": "proto #294"
+                  "detail": "proto #295"
                 },
                 {
                   "id": 214,
                   "kind": "MakeFunction",
-                  "detail": "proto #295"
+                  "detail": "proto #296"
                 },
                 {
                   "id": 215,
@@ -88537,7 +88547,7 @@
                 {
                   "id": 217,
                   "kind": "MakeFunction",
-                  "detail": "proto #296"
+                  "detail": "proto #297"
                 },
                 {
                   "id": 218,
@@ -88572,7 +88582,7 @@
                 {
                   "id": 224,
                   "kind": "MakeFunction",
-                  "detail": "proto #297"
+                  "detail": "proto #298"
                 },
                 {
                   "id": 225,
@@ -88582,7 +88592,7 @@
                 {
                   "id": 226,
                   "kind": "MakeFunction",
-                  "detail": "proto #298"
+                  "detail": "proto #299"
                 },
                 {
                   "id": 228,
@@ -88596,7 +88606,7 @@
                 {
                   "id": 230,
                   "kind": "MakeFunction",
-                  "detail": "proto #299"
+                  "detail": "proto #300"
                 },
                 {
                   "id": 231,
@@ -88616,7 +88626,7 @@
                 {
                   "id": 234,
                   "kind": "MakeFunction",
-                  "detail": "proto #301"
+                  "detail": "proto #302"
                 },
                 {
                   "id": 235,
@@ -88626,17 +88636,17 @@
                 {
                   "id": 236,
                   "kind": "MakeFunction",
-                  "detail": "proto #302"
+                  "detail": "proto #303"
                 },
                 {
                   "id": 237,
                   "kind": "MakeFunction",
-                  "detail": "proto #304"
+                  "detail": "proto #305"
                 },
                 {
                   "id": 238,
                   "kind": "MakeFunction",
-                  "detail": "proto #305"
+                  "detail": "proto #306"
                 },
                 {
                   "id": 239,
@@ -88660,7 +88670,7 @@
                 {
                   "id": 243,
                   "kind": "MakeFunction",
-                  "detail": "proto #306"
+                  "detail": "proto #307"
                 },
                 {
                   "id": 245,
@@ -88674,7 +88684,7 @@
                 {
                   "id": 247,
                   "kind": "MakeFunction",
-                  "detail": "proto #307"
+                  "detail": "proto #308"
                 },
                 {
                   "id": 248,
@@ -88699,7 +88709,7 @@
                 {
                   "id": 252,
                   "kind": "MakeFunction",
-                  "detail": "proto #308"
+                  "detail": "proto #309"
                 },
                 {
                   "id": 253,
@@ -88709,7 +88719,7 @@
                 {
                   "id": 254,
                   "kind": "MakeFunction",
-                  "detail": "proto #309"
+                  "detail": "proto #310"
                 },
                 {
                   "id": 255,
@@ -88719,7 +88729,7 @@
                 {
                   "id": 256,
                   "kind": "MakeFunction",
-                  "detail": "proto #310"
+                  "detail": "proto #311"
                 },
                 {
                   "id": 257,
@@ -88729,7 +88739,7 @@
                 {
                   "id": 258,
                   "kind": "MakeFunction",
-                  "detail": "proto #311"
+                  "detail": "proto #312"
                 },
                 {
                   "id": 259,
@@ -88739,7 +88749,7 @@
                 {
                   "id": 260,
                   "kind": "MakeFunction",
-                  "detail": "proto #313"
+                  "detail": "proto #314"
                 },
                 {
                   "id": 261,
@@ -88749,7 +88759,7 @@
                 {
                   "id": 262,
                   "kind": "MakeFunction",
-                  "detail": "proto #314"
+                  "detail": "proto #315"
                 },
                 {
                   "id": 263,
@@ -88758,7 +88768,7 @@
                 {
                   "id": 264,
                   "kind": "MakeFunction",
-                  "detail": "proto #315"
+                  "detail": "proto #316"
                 },
                 {
                   "id": 265,
@@ -88793,7 +88803,7 @@
                 {
                   "id": 271,
                   "kind": "MakeFunction",
-                  "detail": "proto #317"
+                  "detail": "proto #318"
                 },
                 {
                   "id": 272,
@@ -88802,7 +88812,7 @@
                 {
                   "id": 273,
                   "kind": "MakeFunction",
-                  "detail": "proto #318"
+                  "detail": "proto #319"
                 },
                 {
                   "id": 274,
@@ -88837,7 +88847,7 @@
                 {
                   "id": 280,
                   "kind": "MakeFunction",
-                  "detail": "proto #320"
+                  "detail": "proto #321"
                 },
                 {
                   "id": 281,
@@ -88846,7 +88856,7 @@
                 {
                   "id": 282,
                   "kind": "MakeFunction",
-                  "detail": "proto #321"
+                  "detail": "proto #322"
                 },
                 {
                   "id": 283,
@@ -88881,7 +88891,7 @@
                 {
                   "id": 289,
                   "kind": "MakeFunction",
-                  "detail": "proto #323"
+                  "detail": "proto #324"
                 },
                 {
                   "id": 290,
@@ -88890,7 +88900,7 @@
                 {
                   "id": 291,
                   "kind": "MakeFunction",
-                  "detail": "proto #324"
+                  "detail": "proto #325"
                 },
                 {
                   "id": 292,
@@ -88925,7 +88935,7 @@
                 {
                   "id": 298,
                   "kind": "MakeFunction",
-                  "detail": "proto #330"
+                  "detail": "proto #331"
                 },
                 {
                   "id": 299,
@@ -88934,7 +88944,7 @@
                 {
                   "id": 300,
                   "kind": "MakeFunction",
-                  "detail": "proto #331"
+                  "detail": "proto #332"
                 },
                 {
                   "id": 301,
@@ -88959,12 +88969,12 @@
                 {
                   "id": 305,
                   "kind": "MakeFunction",
-                  "detail": "proto #332"
+                  "detail": "proto #333"
                 },
                 {
                   "id": 306,
                   "kind": "MakeFunction",
-                  "detail": "proto #335"
+                  "detail": "proto #336"
                 },
                 {
                   "id": 307,
@@ -88992,7 +89002,7 @@
                 {
                   "id": 312,
                   "kind": "MakeFunction",
-                  "detail": "proto #336"
+                  "detail": "proto #337"
                 },
                 {
                   "id": 313,
@@ -89022,7 +89032,7 @@
                 {
                   "id": 318,
                   "kind": "MakeFunction",
-                  "detail": "proto #337"
+                  "detail": "proto #338"
                 },
                 {
                   "id": 319,
@@ -89037,7 +89047,7 @@
                 {
                   "id": 321,
                   "kind": "MakeFunction",
-                  "detail": "proto #338"
+                  "detail": "proto #339"
                 },
                 {
                   "id": 323,
@@ -89046,7 +89056,7 @@
                 {
                   "id": 324,
                   "kind": "MakeFunction",
-                  "detail": "proto #339"
+                  "detail": "proto #340"
                 },
                 {
                   "id": 325,
@@ -89081,7 +89091,7 @@
                 {
                   "id": 331,
                   "kind": "MakeFunction",
-                  "detail": "proto #341"
+                  "detail": "proto #342"
                 },
                 {
                   "id": 332,
@@ -89090,7 +89100,7 @@
                 {
                   "id": 333,
                   "kind": "MakeFunction",
-                  "detail": "proto #342"
+                  "detail": "proto #343"
                 },
                 {
                   "id": 334,
@@ -89125,12 +89135,12 @@
                 {
                   "id": 340,
                   "kind": "MakeFunction",
-                  "detail": "proto #344"
+                  "detail": "proto #345"
                 },
                 {
                   "id": 341,
                   "kind": "MakeFunction",
-                  "detail": "proto #345"
+                  "detail": "proto #346"
                 },
                 {
                   "id": 343,
@@ -89139,7 +89149,7 @@
                 {
                   "id": 344,
                   "kind": "MakeFunction",
-                  "detail": "proto #346"
+                  "detail": "proto #347"
                 },
                 {
                   "id": 345,
@@ -89174,7 +89184,7 @@
                 {
                   "id": 351,
                   "kind": "MakeFunction",
-                  "detail": "proto #353"
+                  "detail": "proto #354"
                 },
                 {
                   "id": 352,
@@ -89183,12 +89193,12 @@
                 {
                   "id": 353,
                   "kind": "MakeFunction",
-                  "detail": "proto #354"
+                  "detail": "proto #355"
                 },
                 {
                   "id": 354,
                   "kind": "MakeFunction",
-                  "detail": "proto #357"
+                  "detail": "proto #358"
                 },
                 {
                   "id": 355,
@@ -89197,7 +89207,7 @@
                 {
                   "id": 356,
                   "kind": "MakeFunction",
-                  "detail": "proto #358"
+                  "detail": "proto #359"
                 },
                 {
                   "id": 357,
@@ -93097,7 +93107,31 @@
                   "detail": "\"error\""
                 },
                 {
+                  "id": 26,
+                  "kind": "GetProperty",
+                  "detail": "\"return\""
+                },
+                {
                   "id": 27,
+                  "kind": "CallMethod",
+                  "detail": "\"call\""
+                },
+                {
+                  "id": 28,
+                  "kind": "Call"
+                },
+                {
+                  "id": 29,
+                  "kind": "GetProperty",
+                  "detail": "\"error\""
+                },
+                {
+                  "id": 30,
+                  "kind": "GetProperty",
+                  "detail": "\"error\""
+                },
+                {
+                  "id": 32,
                   "kind": "Call"
                 }
               ]
@@ -97916,6 +97950,18 @@
               ]
             },
             {
+              "return_type": "Undefined",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "NewArray"
+                }
+              ]
+            },
+            {
               "name": "run",
               "return_type": "Undefined",
               "pure": false,
@@ -98133,6 +98179,30 @@
                 {
                   "id": 49,
                   "kind": "Call"
+                },
+                {
+                  "id": 50,
+                  "kind": "GetProperty",
+                  "detail": "\"signal\""
+                },
+                {
+                  "id": 51,
+                  "kind": "CallMethod",
+                  "detail": "\"removeEventListener\""
+                },
+                {
+                  "id": 52,
+                  "kind": "CallMethod",
+                  "detail": "\"delete\""
+                },
+                {
+                  "id": 53,
+                  "kind": "MakeFunction",
+                  "detail": "proto #239"
+                },
+                {
+                  "id": 54,
+                  "kind": "Call"
                 }
               ]
             },
@@ -98249,7 +98319,7 @@
                 {
                   "id": 4,
                   "kind": "MakeFunction",
-                  "detail": "proto #239"
+                  "detail": "proto #240"
                 },
                 {
                   "id": 5,
@@ -98259,7 +98329,7 @@
                 {
                   "id": 6,
                   "kind": "MakeFunction",
-                  "detail": "proto #240"
+                  "detail": "proto #241"
                 },
                 {
                   "id": 7,
@@ -98274,12 +98344,12 @@
                 {
                   "id": 10,
                   "kind": "MakeFunction",
-                  "detail": "proto #241"
+                  "detail": "proto #242"
                 },
                 {
                   "id": 11,
                   "kind": "MakeFunction",
-                  "detail": "proto #242"
+                  "detail": "proto #243"
                 },
                 {
                   "id": 12,
@@ -98377,7 +98447,7 @@
                 {
                   "id": 14,
                   "kind": "MakeFunction",
-                  "detail": "proto #243"
+                  "detail": "proto #244"
                 }
               ]
             },
@@ -98416,7 +98486,7 @@
                 {
                   "id": 0,
                   "kind": "MakeFunction",
-                  "detail": "proto #245"
+                  "detail": "proto #246"
                 },
                 {
                   "id": 1,
@@ -98572,7 +98642,7 @@
                 {
                   "id": 2,
                   "kind": "MakeFunction",
-                  "detail": "proto #251"
+                  "detail": "proto #252"
                 },
                 {
                   "id": 3,
@@ -98677,7 +98747,7 @@
                 {
                   "id": 0,
                   "kind": "MakeFunction",
-                  "detail": "proto #257"
+                  "detail": "proto #258"
                 },
                 {
                   "id": 1,
@@ -98695,7 +98765,7 @@
                 {
                   "id": 0,
                   "kind": "MakeFunction",
-                  "detail": "proto #258"
+                  "detail": "proto #259"
                 }
               ]
             },
@@ -98767,7 +98837,7 @@
                 {
                   "id": 0,
                   "kind": "MakeFunction",
-                  "detail": "proto #260"
+                  "detail": "proto #261"
                 },
                 {
                   "id": 1,
@@ -98832,7 +98902,7 @@
                 {
                   "id": 2,
                   "kind": "MakeFunction",
-                  "detail": "proto #261"
+                  "detail": "proto #262"
                 }
               ]
             },
@@ -98926,7 +98996,7 @@
                 {
                   "id": 0,
                   "kind": "MakeFunction",
-                  "detail": "proto #267"
+                  "detail": "proto #268"
                 },
                 {
                   "id": 1,
@@ -98936,7 +99006,7 @@
                 {
                   "id": 2,
                   "kind": "MakeFunction",
-                  "detail": "proto #268"
+                  "detail": "proto #269"
                 },
                 {
                   "id": 3,
@@ -98966,7 +99036,7 @@
                 {
                   "id": 0,
                   "kind": "MakeFunction",
-                  "detail": "proto #270"
+                  "detail": "proto #271"
                 },
                 {
                   "id": 1,
@@ -99115,7 +99185,7 @@
                 {
                   "id": 2,
                   "kind": "MakeFunction",
-                  "detail": "proto #276"
+                  "detail": "proto #277"
                 },
                 {
                   "id": 3,
@@ -99734,6 +99804,26 @@
                   "id": 18,
                   "kind": "GetProperty",
                   "detail": "\"error\""
+                },
+                {
+                  "id": 19,
+                  "kind": "GetProperty",
+                  "detail": "\"return\""
+                },
+                {
+                  "id": 20,
+                  "kind": "CallMethod",
+                  "detail": "\"call\""
+                },
+                {
+                  "id": 21,
+                  "kind": "GetProperty",
+                  "detail": "\"error\""
+                },
+                {
+                  "id": 22,
+                  "kind": "GetProperty",
+                  "detail": "\"error\""
                 }
               ]
             },
@@ -99754,7 +99844,7 @@
                 {
                   "id": 0,
                   "kind": "MakeFunction",
-                  "detail": "proto #300"
+                  "detail": "proto #301"
                 },
                 {
                   "id": 1,
@@ -99833,7 +99923,7 @@
                 {
                   "id": 13,
                   "kind": "MakeFunction",
-                  "detail": "proto #303"
+                  "detail": "proto #304"
                 }
               ]
             },
@@ -100142,7 +100232,7 @@
                 {
                   "id": 14,
                   "kind": "MakeFunction",
-                  "detail": "proto #312"
+                  "detail": "proto #313"
                 }
               ]
             },
@@ -100269,7 +100359,7 @@
                 {
                   "id": 0,
                   "kind": "MakeFunction",
-                  "detail": "proto #316"
+                  "detail": "proto #317"
                 },
                 {
                   "id": 1,
@@ -100432,12 +100522,13 @@
                 },
                 {
                   "id": 27,
-                  "kind": "Call"
+                  "kind": "GetProperty",
+                  "detail": "\"return\""
                 },
                 {
                   "id": 28,
-                  "kind": "GetProperty",
-                  "detail": "\"_source\""
+                  "kind": "CallMethod",
+                  "detail": "\"call\""
                 },
                 {
                   "id": 29,
@@ -100445,22 +100536,22 @@
                 },
                 {
                   "id": 30,
-                  "kind": "CallMethod",
-                  "detail": "\"next\""
+                  "kind": "GetProperty",
+                  "detail": "\"error\""
                 },
                 {
                   "id": 31,
-                  "kind": "Call"
+                  "kind": "GetProperty",
+                  "detail": "\"error\""
                 },
                 {
                   "id": 32,
-                  "kind": "GetProperty",
-                  "detail": "\"done\""
+                  "kind": "Call"
                 },
                 {
                   "id": 33,
                   "kind": "GetProperty",
-                  "detail": "\"value\""
+                  "detail": "\"_source\""
                 },
                 {
                   "id": 34,
@@ -100469,7 +100560,7 @@
                 {
                   "id": 35,
                   "kind": "CallMethod",
-                  "detail": "\"_selector\""
+                  "detail": "\"next\""
                 },
                 {
                   "id": 36,
@@ -100477,21 +100568,22 @@
                 },
                 {
                   "id": 37,
-                  "kind": "Call"
+                  "kind": "GetProperty",
+                  "detail": "\"done\""
                 },
                 {
                   "id": 38,
-                  "kind": "Call"
+                  "kind": "GetProperty",
+                  "detail": "\"value\""
                 },
                 {
                   "id": 39,
-                  "kind": "GetProperty",
-                  "detail": "\"return\""
+                  "kind": "Call"
                 },
                 {
                   "id": 40,
                   "kind": "CallMethod",
-                  "detail": "\"call\""
+                  "detail": "\"_selector\""
                 },
                 {
                   "id": 41,
@@ -100499,35 +100591,33 @@
                 },
                 {
                   "id": 42,
-                  "kind": "GetProperty",
-                  "detail": "\"error\""
+                  "kind": "Call"
                 },
                 {
                   "id": 43,
-                  "kind": "GetProperty",
-                  "detail": "\"error\""
+                  "kind": "Call"
                 },
                 {
-                  "id": 45,
+                  "id": 44,
                   "kind": "GetProperty",
                   "detail": "\"return\""
                 },
                 {
-                  "id": 46,
+                  "id": 45,
                   "kind": "CallMethod",
                   "detail": "\"call\""
                 },
                 {
-                  "id": 47,
+                  "id": 46,
                   "kind": "Call"
                 },
                 {
-                  "id": 48,
+                  "id": 47,
                   "kind": "GetProperty",
                   "detail": "\"error\""
                 },
                 {
-                  "id": 49,
+                  "id": 48,
                   "kind": "GetProperty",
                   "detail": "\"error\""
                 },
@@ -100554,6 +100644,54 @@
                   "id": 54,
                   "kind": "GetProperty",
                   "detail": "\"error\""
+                },
+                {
+                  "id": 55,
+                  "kind": "GetProperty",
+                  "detail": "\"return\""
+                },
+                {
+                  "id": 56,
+                  "kind": "CallMethod",
+                  "detail": "\"call\""
+                },
+                {
+                  "id": 57,
+                  "kind": "Call"
+                },
+                {
+                  "id": 58,
+                  "kind": "GetProperty",
+                  "detail": "\"error\""
+                },
+                {
+                  "id": 59,
+                  "kind": "GetProperty",
+                  "detail": "\"error\""
+                },
+                {
+                  "id": 60,
+                  "kind": "GetProperty",
+                  "detail": "\"return\""
+                },
+                {
+                  "id": 61,
+                  "kind": "CallMethod",
+                  "detail": "\"call\""
+                },
+                {
+                  "id": 62,
+                  "kind": "Call"
+                },
+                {
+                  "id": 63,
+                  "kind": "GetProperty",
+                  "detail": "\"error\""
+                },
+                {
+                  "id": 64,
+                  "kind": "GetProperty",
+                  "detail": "\"error\""
                 }
               ]
             },
@@ -100572,7 +100710,7 @@
                 {
                   "id": 0,
                   "kind": "MakeFunction",
-                  "detail": "proto #319"
+                  "detail": "proto #320"
                 },
                 {
                   "id": 1,
@@ -100651,7 +100789,7 @@
                 {
                   "id": 0,
                   "kind": "MakeFunction",
-                  "detail": "proto #322"
+                  "detail": "proto #323"
                 },
                 {
                   "id": 1,
@@ -100759,7 +100897,7 @@
                 {
                   "id": 0,
                   "kind": "MakeFunction",
-                  "detail": "proto #325"
+                  "detail": "proto #326"
                 },
                 {
                   "id": 1,
@@ -100773,17 +100911,17 @@
                 {
                   "id": 4,
                   "kind": "MakeFunction",
-                  "detail": "proto #326"
+                  "detail": "proto #327"
                 },
                 {
                   "id": 5,
                   "kind": "MakeFunction",
-                  "detail": "proto #327"
+                  "detail": "proto #328"
                 },
                 {
                   "id": 6,
                   "kind": "MakeFunction",
-                  "detail": "proto #328"
+                  "detail": "proto #329"
                 },
                 {
                   "id": 8,
@@ -100868,7 +101006,7 @@
                 {
                   "id": 0,
                   "kind": "MakeFunction",
-                  "detail": "proto #329"
+                  "detail": "proto #330"
                 },
                 {
                   "id": 1,
@@ -101033,7 +101171,7 @@
                 {
                   "id": 0,
                   "kind": "MakeFunction",
-                  "detail": "proto #333"
+                  "detail": "proto #334"
                 },
                 {
                   "id": 1,
@@ -101047,7 +101185,7 @@
                 {
                   "id": 3,
                   "kind": "MakeFunction",
-                  "detail": "proto #334"
+                  "detail": "proto #335"
                 }
               ]
             },
@@ -101289,6 +101427,30 @@
                   "id": 28,
                   "kind": "GetProperty",
                   "detail": "\"error\""
+                },
+                {
+                  "id": 29,
+                  "kind": "GetProperty",
+                  "detail": "\"return\""
+                },
+                {
+                  "id": 30,
+                  "kind": "CallMethod",
+                  "detail": "\"call\""
+                },
+                {
+                  "id": 31,
+                  "kind": "Call"
+                },
+                {
+                  "id": 32,
+                  "kind": "GetProperty",
+                  "detail": "\"error\""
+                },
+                {
+                  "id": 33,
+                  "kind": "GetProperty",
+                  "detail": "\"error\""
                 }
               ]
             },
@@ -101307,7 +101469,7 @@
                 {
                   "id": 0,
                   "kind": "MakeFunction",
-                  "detail": "proto #340"
+                  "detail": "proto #341"
                 },
                 {
                   "id": 1,
@@ -101486,6 +101648,30 @@
                   "id": 28,
                   "kind": "GetProperty",
                   "detail": "\"error\""
+                },
+                {
+                  "id": 29,
+                  "kind": "GetProperty",
+                  "detail": "\"return\""
+                },
+                {
+                  "id": 30,
+                  "kind": "CallMethod",
+                  "detail": "\"call\""
+                },
+                {
+                  "id": 31,
+                  "kind": "Call"
+                },
+                {
+                  "id": 32,
+                  "kind": "GetProperty",
+                  "detail": "\"error\""
+                },
+                {
+                  "id": 33,
+                  "kind": "GetProperty",
+                  "detail": "\"error\""
                 }
               ]
             },
@@ -101504,7 +101690,7 @@
                 {
                   "id": 0,
                   "kind": "MakeFunction",
-                  "detail": "proto #343"
+                  "detail": "proto #344"
                 },
                 {
                   "id": 1,
@@ -101685,7 +101871,7 @@
                 {
                   "id": 1,
                   "kind": "MakeFunction",
-                  "detail": "proto #348"
+                  "detail": "proto #349"
                 },
                 {
                   "id": 2,
@@ -101760,12 +101946,12 @@
                 {
                   "id": 0,
                   "kind": "MakeFunction",
-                  "detail": "proto #347"
+                  "detail": "proto #348"
                 },
                 {
                   "id": 1,
                   "kind": "MakeFunction",
-                  "detail": "proto #349"
+                  "detail": "proto #350"
                 },
                 {
                   "id": 2,
@@ -101934,7 +102120,7 @@
                 {
                   "id": 47,
                   "kind": "MakeFunction",
-                  "detail": "proto #350"
+                  "detail": "proto #351"
                 },
                 {
                   "id": 48,
@@ -101962,7 +102148,7 @@
                 {
                   "id": 53,
                   "kind": "MakeFunction",
-                  "detail": "proto #351"
+                  "detail": "proto #352"
                 },
                 {
                   "id": 54,
@@ -102004,7 +102190,7 @@
                 {
                   "id": 0,
                   "kind": "MakeFunction",
-                  "detail": "proto #352"
+                  "detail": "proto #353"
                 },
                 {
                   "id": 1,
@@ -102064,7 +102250,7 @@
                 {
                   "id": 0,
                   "kind": "MakeFunction",
-                  "detail": "proto #355"
+                  "detail": "proto #356"
                 },
                 {
                   "id": 1,
@@ -102086,7 +102272,7 @@
                 {
                   "id": 0,
                   "kind": "MakeFunction",
-                  "detail": "proto #356"
+                  "detail": "proto #357"
                 }
               ]
             },
@@ -168996,6 +169182,10 @@
                 {
                   "id": 6,
                   "kind": "Call"
+                },
+                {
+                  "id": 7,
+                  "kind": "Call"
                 }
               ]
             },
@@ -225126,6 +225316,30 @@
                   "id": 23,
                   "kind": "GetProperty",
                   "detail": "\"error\""
+                },
+                {
+                  "id": 24,
+                  "kind": "GetProperty",
+                  "detail": "\"done\""
+                },
+                {
+                  "id": 25,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 26,
+                  "kind": "CallMethod",
+                  "detail": "\"call\""
+                },
+                {
+                  "id": 27,
+                  "kind": "GetProperty",
+                  "detail": "\"error\""
+                },
+                {
+                  "id": 28,
+                  "kind": "GetProperty",
+                  "detail": "\"error\""
                 }
               ]
             },
@@ -227418,6 +227632,31 @@
                 },
                 {
                   "id": 28,
+                  "kind": "GetProperty",
+                  "detail": "\"done\""
+                },
+                {
+                  "id": 29,
+                  "kind": "GetProperty",
+                  "detail": "\"return\""
+                },
+                {
+                  "id": 30,
+                  "kind": "CallMethod",
+                  "detail": "\"call\""
+                },
+                {
+                  "id": 31,
+                  "kind": "GetProperty",
+                  "detail": "\"error\""
+                },
+                {
+                  "id": 32,
+                  "kind": "GetProperty",
+                  "detail": "\"error\""
+                },
+                {
+                  "id": 33,
                   "kind": "CallMethod",
                   "detail": "\"complete\""
                 }
@@ -232891,40 +233130,42 @@
                 },
                 {
                   "id": 27,
-                  "kind": "CallMethod",
-                  "detail": "\"remove\""
+                  "kind": "GetProperty",
+                  "detail": "\"done\""
                 },
                 {
                   "id": 28,
                   "kind": "GetProperty",
-                  "detail": "\"initialTeardown\""
+                  "detail": "\"return\""
                 },
                 {
                   "id": 29,
-                  "kind": "Call"
+                  "kind": "CallMethod",
+                  "detail": "\"call\""
                 },
                 {
                   "id": 30,
-                  "kind": "Call"
+                  "kind": "GetProperty",
+                  "detail": "\"error\""
                 },
                 {
                   "id": 31,
                   "kind": "GetProperty",
-                  "detail": "\"errors\""
+                  "detail": "\"error\""
                 },
                 {
                   "id": 32,
-                  "kind": "NewArray"
+                  "kind": "CallMethod",
+                  "detail": "\"remove\""
                 },
                 {
                   "id": 33,
                   "kind": "GetProperty",
-                  "detail": "\"_finalizers\""
+                  "detail": "\"initialTeardown\""
                 },
                 {
                   "id": 34,
-                  "kind": "SetPropertyStrict",
-                  "detail": "\"_finalizers\""
+                  "kind": "Call"
                 },
                 {
                   "id": 35,
@@ -232932,109 +233173,107 @@
                 },
                 {
                   "id": 36,
-                  "kind": "CallMethod",
-                  "detail": "\"next\""
-                },
-                {
-                  "id": 37,
-                  "kind": "GetProperty",
-                  "detail": "\"done\""
-                },
-                {
-                  "id": 38,
-                  "kind": "GetProperty",
-                  "detail": "\"value\""
-                },
-                {
-                  "id": 39,
-                  "kind": "Call"
-                },
-                {
-                  "id": 40,
-                  "kind": "NewArray"
-                },
-                {
-                  "id": 41,
-                  "kind": "NewArray"
-                },
-                {
-                  "id": 42,
-                  "kind": "Call"
-                },
-                {
-                  "id": 43,
-                  "kind": "Call"
-                },
-                {
-                  "id": 44,
                   "kind": "GetProperty",
                   "detail": "\"errors\""
                 },
                 {
-                  "id": 45,
+                  "id": 37,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 38,
+                  "kind": "GetProperty",
+                  "detail": "\"_finalizers\""
+                },
+                {
+                  "id": 39,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"_finalizers\""
+                },
+                {
+                  "id": 40,
                   "kind": "Call"
                 },
                 {
-                  "id": 46,
-                  "kind": "Call"
-                },
-                {
-                  "id": 47,
-                  "kind": "CallMethod",
-                  "detail": "\"push\""
-                },
-                {
-                  "id": 48,
+                  "id": 41,
                   "kind": "CallMethod",
                   "detail": "\"next\""
                 },
                 {
-                  "id": 49,
+                  "id": 42,
                   "kind": "GetProperty",
                   "detail": "\"done\""
                 },
                 {
-                  "id": 50,
+                  "id": 43,
                   "kind": "GetProperty",
-                  "detail": "\"return\""
+                  "detail": "\"value\""
+                },
+                {
+                  "id": 44,
+                  "kind": "Call"
+                },
+                {
+                  "id": 45,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 46,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 47,
+                  "kind": "Call"
+                },
+                {
+                  "id": 48,
+                  "kind": "Call"
+                },
+                {
+                  "id": 49,
+                  "kind": "GetProperty",
+                  "detail": "\"errors\""
+                },
+                {
+                  "id": 50,
+                  "kind": "Call"
                 },
                 {
                   "id": 51,
-                  "kind": "CallMethod",
-                  "detail": "\"call\""
+                  "kind": "Call"
                 },
                 {
                   "id": 52,
-                  "kind": "GetProperty",
-                  "detail": "\"error\""
+                  "kind": "CallMethod",
+                  "detail": "\"push\""
                 },
                 {
                   "id": 53,
+                  "kind": "CallMethod",
+                  "detail": "\"next\""
+                },
+                {
+                  "id": 54,
                   "kind": "GetProperty",
-                  "detail": "\"error\""
+                  "detail": "\"done\""
                 },
                 {
                   "id": 55,
                   "kind": "GetProperty",
-                  "detail": "\"done\""
-                },
-                {
-                  "id": 56,
-                  "kind": "GetProperty",
                   "detail": "\"return\""
                 },
                 {
-                  "id": 57,
+                  "id": 56,
                   "kind": "CallMethod",
                   "detail": "\"call\""
                 },
                 {
-                  "id": 58,
+                  "id": 57,
                   "kind": "GetProperty",
                   "detail": "\"error\""
                 },
                 {
-                  "id": 59,
+                  "id": 58,
                   "kind": "GetProperty",
                   "detail": "\"error\""
                 },
@@ -233060,6 +233299,56 @@
                 },
                 {
                   "id": 64,
+                  "kind": "GetProperty",
+                  "detail": "\"error\""
+                },
+                {
+                  "id": 65,
+                  "kind": "GetProperty",
+                  "detail": "\"done\""
+                },
+                {
+                  "id": 66,
+                  "kind": "GetProperty",
+                  "detail": "\"return\""
+                },
+                {
+                  "id": 67,
+                  "kind": "CallMethod",
+                  "detail": "\"call\""
+                },
+                {
+                  "id": 68,
+                  "kind": "GetProperty",
+                  "detail": "\"error\""
+                },
+                {
+                  "id": 69,
+                  "kind": "GetProperty",
+                  "detail": "\"error\""
+                },
+                {
+                  "id": 70,
+                  "kind": "GetProperty",
+                  "detail": "\"done\""
+                },
+                {
+                  "id": 71,
+                  "kind": "GetProperty",
+                  "detail": "\"return\""
+                },
+                {
+                  "id": 72,
+                  "kind": "CallMethod",
+                  "detail": "\"call\""
+                },
+                {
+                  "id": 73,
+                  "kind": "GetProperty",
+                  "detail": "\"error\""
+                },
+                {
+                  "id": 74,
                   "kind": "GetProperty",
                   "detail": "\"error\""
                 }
@@ -234768,6 +235057,11 @@
                   "id": 4,
                   "kind": "CallMethod",
                   "detail": "\"unsubscribe\""
+                },
+                {
+                  "id": 5,
+                  "kind": "CallMethod",
+                  "detail": "\"unsubscribe\""
                 }
               ]
             },
@@ -234798,6 +235092,11 @@
                 },
                 {
                   "id": 4,
+                  "kind": "CallMethod",
+                  "detail": "\"unsubscribe\""
+                },
+                {
+                  "id": 5,
                   "kind": "CallMethod",
                   "detail": "\"unsubscribe\""
                 }
@@ -235248,6 +235547,31 @@
                 },
                 {
                   "id": 28,
+                  "kind": "GetProperty",
+                  "detail": "\"error\""
+                },
+                {
+                  "id": 29,
+                  "kind": "GetProperty",
+                  "detail": "\"done\""
+                },
+                {
+                  "id": 30,
+                  "kind": "GetProperty",
+                  "detail": "\"return\""
+                },
+                {
+                  "id": 31,
+                  "kind": "CallMethod",
+                  "detail": "\"call\""
+                },
+                {
+                  "id": 32,
+                  "kind": "GetProperty",
+                  "detail": "\"error\""
+                },
+                {
+                  "id": 33,
                   "kind": "GetProperty",
                   "detail": "\"error\""
                 }
@@ -252214,6 +252538,20 @@
                 },
                 {
                   "id": 35,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"flags\""
+                },
+                {
+                  "id": 36,
+                  "kind": "Call"
+                },
+                {
+                  "id": 37,
+                  "kind": "GetProperty",
+                  "detail": "\"flags\""
+                },
+                {
+                  "id": 38,
                   "kind": "SetPropertyStrict",
                   "detail": "\"flags\""
                 }
