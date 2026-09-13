@@ -294,6 +294,25 @@ static void kiln_c99_forget_handled_throw(void) {
     }
 }
 
+void kiln_c99_publish_diagnostic(void) {
+    if (!kiln_realm_is_active() || kiln_c99_diagnostic_site == NULL ||
+        kiln_c99_diagnostic_operation == NULL) return;
+    const char *detail = kiln_c99_diagnostic_detail;
+    const char *function = kiln_c99_diagnostic_function;
+    (void)kiln_realm_diagnostic_note(
+        (const uint8_t *)kiln_c99_diagnostic_site, (uint64_t)strlen(kiln_c99_diagnostic_site),
+        (uint64_t)kiln_c99_diagnostic_instruction,
+        (const uint8_t *)kiln_c99_diagnostic_operation,
+        (uint64_t)strlen(kiln_c99_diagnostic_operation),
+        (uint64_t)kiln_c99_diagnostic_depth,
+        (const uint8_t *)(detail == NULL ? "" : detail),
+        (uint64_t)(detail == NULL ? 0 : strlen(detail)),
+        (const uint8_t *)(function == NULL ? "" : function),
+        (uint64_t)(function == NULL ? 0 : kiln_c99_diagnostic_function_len),
+        kiln_c99_diagnostic_method, kiln_c99_diagnostic_receiver_tag,
+        kiln_c99_diagnostic_has_method);
+}
+
 static void kiln_c99_note_refusal(const char *site, size_t instruction,
                                   const char *operation, size_t depth) {
     /* Runtime helpers do not own a bytecode instruction and deliberately pass no site. The
@@ -310,7 +329,7 @@ static void kiln_c99_note_refusal(const char *site, size_t instruction,
     if (kiln_c99_diagnostic_site != NULL &&
         kiln_c99_diagnostic_operation != NULL &&
         strcmp(kiln_c99_diagnostic_operation, "FunctionBody") != 0 &&
-        depth <= kiln_c99_diagnostic_depth && kiln_c99_diagnostic_function == NULL) return;
+        depth <= kiln_c99_diagnostic_depth) return;
     kiln_c99_diagnostic_site = site;
     kiln_c99_diagnostic_instruction = instruction;
     kiln_c99_diagnostic_operation = operation;
@@ -328,19 +347,7 @@ static void kiln_c99_note_refusal(const char *site, size_t instruction,
             kiln_c99_diagnostic_has_method = 0;
         }
     }
-    if (kiln_realm_is_active()) {
-        const char *detail = kiln_c99_diagnostic_detail;
-        const char *function = kiln_c99_diagnostic_function;
-        (void)kiln_realm_diagnostic_note(
-            (const uint8_t *)site, (uint64_t)strlen(site), (uint64_t)instruction,
-            (const uint8_t *)operation, (uint64_t)strlen(operation), (uint64_t)depth,
-            (const uint8_t *)(detail == NULL ? "" : detail),
-            (uint64_t)(detail == NULL ? 0 : strlen(detail)),
-            (const uint8_t *)(function == NULL ? "" : function),
-            (uint64_t)(function == NULL ? 0 : kiln_c99_diagnostic_function_len),
-            kiln_c99_diagnostic_method, kiln_c99_diagnostic_receiver_tag,
-            kiln_c99_diagnostic_has_method);
-    }
+    kiln_c99_publish_diagnostic();
 }
 
 
