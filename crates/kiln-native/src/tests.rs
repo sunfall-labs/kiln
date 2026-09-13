@@ -6997,6 +6997,49 @@ fn native_host_clock_is_explicit_while_default_date_stays_at_epoch() {
 }
 
 #[test]
+#[ignore = "requires kiln:process builtin from the integration host"]
+fn native_host_process_completion_beats_realm_timeout() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native host process timing: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-host-process-timing");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).expect("write root package");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "import { run } from 'kiln:process';\n\
+         const result = await Promise.race([\n\
+           run('/bin/sh', ['-c', 'sleep 0.05; printf done']).then(() => 'process'),\n\
+           new Promise(resolve => setTimeout(() => resolve('timeout'), 500)),\n\
+         ]);\n\
+         console.log(result);\n",
+    )
+    .expect("write process timing entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build host process timing graph");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::host_clock(),
+                march_native: false,
+            },
+        )
+        .expect("run host process timing graph");
+    assert_eq!(report.stdout, b"process\n");
+}
+
+#[test]
 fn native_entropy_policy_is_reproducible_or_explicitly_host_backed() {
     let Some(toolchain) = Toolchain::discover().ok() else {
         eprintln!("skipping native entropy integration: no C compiler found");
