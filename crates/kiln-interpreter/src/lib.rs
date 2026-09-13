@@ -33068,26 +33068,63 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             stack_height: self.stack.len(),
             native_depth: self.native_depth,
         });
-        let outcome = self
-            .read_property(options, "with", instruction)
-            .and_then(|with| {
-                if matches!(with, Value::Undefined) {
-                    return Ok(Ok(None));
-                }
-                match self.read_property(&with, "type", instruction) {
-                    Ok(Value::String(value)) => {
-                        Ok(Ok(Some(ImportAttributes { type_: Some(value) })))
+        let outcome = if !is_an_object(options) {
+            Ok(Err(build_error(
+                ErrorKind::Type,
+                &[Value::String("import options must be an object".into())],
+            )))
+        } else {
+            self.read_property(options, "with", instruction)
+                .and_then(|with| {
+                    if matches!(with, Value::Undefined) {
+                        return Ok(Ok(None));
                     }
-                    Ok(Value::Undefined) => Ok(Ok(Some(ImportAttributes { type_: None }))),
-                    Ok(_) => Ok(Err(build_error(
-                        ErrorKind::Type,
-                        &[Value::String(
-                            "import attribute type must be a string".into(),
-                        )],
-                    ))),
-                    Err(error) => Err(error),
-                }
-            });
+                    if !is_an_object(&with) {
+                        return Ok(Err(build_error(
+                            ErrorKind::Type,
+                            &[Value::String("import attributes must be an object".into())],
+                        )));
+                    }
+                    let mut type_value = None;
+                    for key in self.own_keys(&with, instruction)? {
+                        let Some((_, attributes)) =
+                            self.own_state(&with, &Value::String(key.clone()), instruction)?
+                        else {
+                            continue;
+                        };
+                        if !attributes.enumerable {
+                            continue;
+                        }
+                        let value = self.read_property(&with, &key, instruction)?;
+                        if key == "type" {
+                            type_value = Some(value);
+                        } else {
+                            return Ok(Err(build_error(
+                                ErrorKind::Type,
+                                &[Value::String("unsupported import attribute".into())],
+                            )));
+                        }
+                    }
+                    let Some(value) = type_value else {
+                        return Ok(Ok(Some(ImportAttributes { type_: None })));
+                    };
+                    match value {
+                        Value::String(value) if value == "file" => {
+                            Ok(Ok(Some(ImportAttributes { type_: Some(value) })))
+                        }
+                        Value::String(_) => Ok(Err(build_error(
+                            ErrorKind::Type,
+                            &[Value::String("unsupported import attribute type".into())],
+                        ))),
+                        _ => Ok(Err(build_error(
+                            ErrorKind::Type,
+                            &[Value::String(
+                                "import attribute values must be strings".into(),
+                            )],
+                        ))),
+                    }
+                })
+        };
         self.handlers.truncate(installed);
         match outcome {
             Ok(Ok(attributes)) => Ok(Ok(attributes)),

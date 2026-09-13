@@ -5245,6 +5245,39 @@ fn find_opentui_library(project_root: &Path) -> Option<PathBuf> {
     None
 }
 
+fn dynamic_import_validation_c() -> &'static str {
+    r#"
+static int kiln_validate_dynamic_import_options(kiln_host *host, kiln_value options, int depth, kiln_value *thrown) {
+    kiln_value attrs;
+    kiln_value value;
+    int status;
+    if (options.tag == KILN_VALUE_UNDEFINED) return KILN_C99_OK;
+    if (options.tag == KILN_VALUE_NULL || options.tag == KILN_VALUE_BOOLEAN ||
+        options.tag == KILN_VALUE_NUMBER || options.tag == KILN_VALUE_STRING) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "import options must be an object");
+    }
+    status = kiln_c99_get(host, options, "with", 4, &attrs, depth, thrown);
+    if (status != KILN_C99_OK) return status;
+    if (attrs.tag == KILN_VALUE_UNDEFINED) return KILN_C99_OK;
+    if (attrs.tag == KILN_VALUE_NULL || attrs.tag == KILN_VALUE_BOOLEAN ||
+        attrs.tag == KILN_VALUE_NUMBER || attrs.tag == KILN_VALUE_STRING) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "import attributes must be an object");
+    }
+    status = kiln_c99_get(host, attrs, "type", 4, &value, depth, thrown);
+    if (status != KILN_C99_OK) return status;
+    {
+        if (value.tag != KILN_VALUE_STRING) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "import attribute values must be strings");
+        }
+        if (value.len != 4 || memcmp(value.ptr, "file", 4) != 0) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "unsupported import attribute type");
+        }
+    }
+    return KILN_C99_OK;
+}
+"#
+}
+
 fn write_launcher_dynamic_import(
     output: &mut String,
     graph: &ModuleGraph,
@@ -5252,6 +5285,7 @@ fn write_launcher_dynamic_import(
     logical_paths: &[String],
 ) {
     let opentui_path = find_opentui_library(graph.project_root());
+    output.push_str(dynamic_import_validation_c());
     output.push_str(
         r#"
 int kiln_graph_dynamic_import(kiln_host *host, kiln_value specifier, kiln_value options, kiln_value *promise, int depth, kiln_value *thrown) {
@@ -5270,25 +5304,12 @@ int kiln_graph_dynamic_import(kiln_host *host, kiln_value specifier, kiln_value 
         (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, "invalid import specifier");
         return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);
     }
-    if (options.tag == KILN_VALUE_UNDEFINED) goto import_attributes_valid;
-    kiln_value attrs = kiln_c99_undefined();
-    int attr_status = kiln_c99_get(host, options, "with", 4, &attrs, depth, thrown);
-    if (attr_status != KILN_C99_OK) {
-        if (thrown != NULL) return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), thrown, 1, depth, thrown);
-        return attr_status;
-    }
-    if (attrs.tag == KILN_VALUE_UNDEFINED) goto import_attributes_valid;
-    kiln_value type = kiln_c99_undefined();
-    attr_status = kiln_c99_get(host, attrs, "type", 4, &type, depth, thrown);
-    if (attr_status != KILN_C99_OK) {
-        if (thrown != NULL) return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), thrown, 1, depth, thrown);
-        return attr_status;
-    }
-    if (type.tag == KILN_VALUE_UNDEFINED) goto import_attributes_valid;
-    if (type.tag != KILN_VALUE_STRING || type.len != 4 || memcmp(type.ptr, "file", 4) != 0) {
-        kiln_value err = kiln_c99_undefined();
-        (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, "unsupported import attribute type");
-        return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);
+    { kiln_value validation_thrown = kiln_c99_undefined();
+      int attr_status = kiln_validate_dynamic_import_options(host, options, depth, &validation_thrown);
+      if (attr_status != KILN_C99_OK) {
+          kiln_value *reason = attr_status == KILN_C99_THROWN ? &validation_thrown : &validation_thrown;
+          return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), reason, 1, depth, thrown);
+      }
     }
 import_attributes_valid:
     if (specifier.len >= 14 && memcmp(specifier.ptr, "@opentui/core-", 14) == 0) {
@@ -5443,6 +5464,7 @@ fn write_shared_wrapper_dynamic_import(
     logical_paths: &[String],
 ) {
     let opentui_path = find_opentui_library(graph.project_root());
+    output.push_str(dynamic_import_validation_c());
     output.push_str(
         r#"
 int kiln_graph_dynamic_import(kiln_host *host, kiln_value specifier, kiln_value options, kiln_value *promise, int depth, kiln_value *thrown) {
@@ -5461,23 +5483,11 @@ int kiln_graph_dynamic_import(kiln_host *host, kiln_value specifier, kiln_value 
         (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, "invalid import specifier");
         return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);
     }
-    if (options.tag == KILN_VALUE_UNDEFINED) goto import_attributes_valid;
-    kiln_value attrs = kiln_c99_undefined();
-    int attr_status = kiln_c99_get(host, options, "with", 4, &attrs, depth, thrown);
-    if (attr_status != KILN_C99_OK) {
-        if (thrown != NULL) return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), thrown, 1, depth, thrown);
-        return attr_status;
-    }
-    kiln_value type = kiln_c99_undefined();
-    attr_status = kiln_c99_get(host, attrs, "type", 4, &type, depth, thrown);
-    if (attr_status != KILN_C99_OK) {
-        if (thrown != NULL) return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), thrown, 1, depth, thrown);
-        return attr_status;
-    }
-    if (type.tag != KILN_VALUE_STRING || type.len != 4 || memcmp(type.ptr, "file", 4) != 0) {
-        kiln_value err = kiln_c99_undefined();
-        (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, "unsupported import attribute type");
-        return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);
+    { kiln_value validation_thrown = kiln_c99_undefined();
+      int attr_status = kiln_validate_dynamic_import_options(host, options, depth, &validation_thrown);
+      if (attr_status != KILN_C99_OK) {
+          return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &validation_thrown, 1, depth, thrown);
+      }
     }
 import_attributes_valid:
     if (specifier.tag != KILN_VALUE_STRING || (specifier.len != 0 && specifier.ptr == NULL)) {

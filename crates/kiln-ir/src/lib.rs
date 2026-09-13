@@ -606,14 +606,19 @@ impl Program {
 
     /// Whether this program or any nested function prototype contains [`Instruction::DynamicImport`].
     pub fn has_dynamic_import(&self) -> bool {
-        self.code
-            .iter()
-            .any(|inst| matches!(inst, Instruction::DynamicImport | Instruction::DynamicImportWithOptions))
-            || self.functions.iter().any(|f| {
-                f.code
-                    .iter()
-                    .any(|inst| matches!(inst, Instruction::DynamicImport | Instruction::DynamicImportWithOptions))
+        self.code.iter().any(|inst| {
+            matches!(
+                inst,
+                Instruction::DynamicImport | Instruction::DynamicImportWithOptions
+            )
+        }) || self.functions.iter().any(|f| {
+            f.code.iter().any(|inst| {
+                matches!(
+                    inst,
+                    Instruction::DynamicImport | Instruction::DynamicImportWithOptions
+                )
             })
+        })
     }
 }
 
