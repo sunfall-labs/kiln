@@ -1563,6 +1563,93 @@ fn node_builtin_assert_commonjs_require_evaluates_cleanly() {
 }
 
 #[test]
+fn node_builtin_events_evaluates_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.js",
+        concat!(
+            "import EventEmitter, { EventEmitter as EE } from 'node:events';",
+            "const ee = new EventEmitter();",
+            "let count = 0;",
+            "ee.on('ping', () => { count++; });",
+            "ee.once('ping', () => { count += 10; });",
+            "ee.emit('ping');",
+            "ee.emit('ping');",
+            "console.log('events ok', count, ee.addListener === ee.on, EventEmitter === EE);",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with events builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute events builtin");
+    assert_eq!(host.output, ["events ok 12 true true"]);
+}
+
+#[test]
+fn node_builtin_events_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const EventEmitter = require('node:events');",
+            "const ee = new EventEmitter();",
+            "let val = '';",
+            "ee.on('test', (x) => { val = x; });",
+            "ee.emit('test', 'hello');",
+            "module.exports = {",
+            "  isFn: typeof EventEmitter === 'function',",
+            "  name: EventEmitter.name,",
+            "  defaultEq: EventEmitter.default === EventEmitter,",
+            "  val,",
+            "};",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import bridge from './bridge.cjs';",
+            "console.log(bridge.isFn, bridge.name, bridge.defaultEq, bridge.val);",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with events builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute events builtin cjs");
+    assert_eq!(host.output, ["true EventEmitter true hello"]);
+}
+
+#[test]
 fn node_net_connect_is_a_typed_virtual_module_export() {
     let project = TempProject::new();
     let entry = project.write(

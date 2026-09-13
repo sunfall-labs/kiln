@@ -1040,55 +1040,14 @@ console.log(edges.missing === "", edges[""], edges["empty-value"] === "", edges.
 }
 
 #[test]
-fn node_events_has_a_native_runtime_module_materializer() {
+fn node_events_is_a_ts_builtin_and_https_has_a_native_runtime_materializer() {
     use kiln_module_resolver::NodeBuiltin;
 
-    let module = ModuleProgram {
-        program: Program {
-            source: "".into(),
-            version: BYTECODE_VERSION,
-            constants: Vec::new(),
-            code: vec![Instruction::Return],
-            local_count: 2,
-            functions: Vec::new(),
-            template_sites: Vec::new(),
-        },
-        dependencies: Vec::new(),
-        imports: Vec::new(),
-        exports: vec![
-            ExportBinding {
-                exported: "EventEmitter".to_owned(),
-                local_slot: 0,
-            },
-            ExportBinding {
-                exported: "default".to_owned(),
-                local_slot: 1,
-            },
-        ],
-        strictness: kiln_ir::Strictness::default(),
-        ..Default::default()
-    };
-    let node = kiln_module_graph::ModuleNode {
-        path: PathBuf::from("/.kiln/builtins/events.builtin"),
-        source: ModuleSource::NodeBuiltin(NodeBuiltin::Events),
-        program: module,
-        data: None,
-        dependencies: Vec::new(),
-    };
-    let emitted = emit_native_graph_module(
-        &node,
-        ".kiln/builtins/events.builtin",
-        &NativeRealmPolicy::default(),
-    )
-    .expect("events materializes");
-
-    assert!(
-        emitted
-            .source
-            .contains("KILN_C99_METHOD_NODE_EVENT_EMITTER")
-    );
-    assert!(emitted.source.contains("exports[0] = constructor;"));
-    assert!(emitted.source.contains("exports[1] = constructor;"));
+    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Events));
+    assert!(native_builtin_supports_export(
+        NodeBuiltin::Events,
+        "EventEmitter"
+    ));
     assert!(native_builtin_body(NodeBuiltin::Https).is_some());
     assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Path));
     assert!(native_builtin_supports_export(NodeBuiltin::Path, "join"));
@@ -8432,4 +8391,101 @@ fn native_node_assert_commonjs_require_builds_and_runs() {
     );
     let stdout = String::from_utf8_lossy(&result.stdout);
     assert_eq!(stdout.trim(), "cjs-assert: function assert true true");
+}
+
+#[test]
+fn native_node_events_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-events-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import EventEmitter, { EventEmitter as EE } from 'node:events';\n",
+            "const ee = new EventEmitter();\n",
+            "let count = 0;\n",
+            "ee.on('add', (x) => { count += x; });\n",
+            "ee.once('add', (x) => { count += x * 10; });\n",
+            "ee.emit('add', 2);\n",
+            "ee.emit('add', 3);\n",
+            "console.log('events-test:', count, ee.addListener === ee.on, EventEmitter === EE);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("events_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run events binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert_eq!(stdout.trim(), "events-test: 25 true true");
+}
+
+#[test]
+fn native_node_events_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-events-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const EventEmitter = require('node:events');\n",
+            "const ee = new EventEmitter();\n",
+            "let received = '';\n",
+            "ee.on('data', (d) => { received = d; });\n",
+            "ee.emit('data', 'payload');\n",
+            "console.log('cjs-events:', typeof EventEmitter, EventEmitter.name, EventEmitter.default === EventEmitter, received);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("events_cjs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run events cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "cjs-events: function EventEmitter true payload"
+    );
 }
