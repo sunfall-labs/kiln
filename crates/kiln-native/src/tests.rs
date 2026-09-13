@@ -1342,36 +1342,27 @@ writeFile({path:?}, 'héllo').then(() => readFile({path:?}, 'utf8')).then((text)
 }
 
 #[test]
-fn node_http_native_materializer_matches_the_authoritative_export_order() {
+fn node_http_is_typescript_builtin_and_supports_exports() {
     use kiln_module_resolver::NodeBuiltin;
 
-    // These indices were six slots wide and started at `Server`, which is the layout that
-    // shipped and did not work: the authoritative list is eight names beginning
-    // `IncomingMessage, METHODS, Server`, so every slot sat two low. `default` resolved to
-    // `request` and `typeof http` answered "function" where node answers "object";
-    // `createServer` resolved to `get`, so the first real server refused with "a function is
-    // not a request options object". Node is the arbiter on both and the corrected layout
-    // Slot 1 held `undefined` too until `METHODS` was materialized. It is a constant array,
-    // so the alignment slot it used to be became a wrong answer once the CommonJS projection
-    // started publishing a stand-in callable for every unbuilt name: `typeof http.METHODS`
-    // answered "function" against the interpreter's "object".
-    let body = native_builtin_body(NodeBuiltin::Http).expect("http materializes");
-    assert!(body.contains("exports[0] = kiln_c99_undefined();"));
-    assert!(body.contains("exports[1] = methods;"));
-    assert!(body.contains("exports[2] = server;"));
-    assert!(body.contains("exports[3] = server_response;"));
-    assert!(body.contains("exports[4] = create_server;"));
-    assert!(body.contains("exports[5] = namespace;"));
-    assert!(body.contains("exports[6] = get;"));
-    assert!(body.contains("exports[7] = request;"));
-    assert!(body.contains("KILN_C99_METHOD_NODE_HTTP_SERVER"));
-    assert!(body.contains("KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE"));
-    assert!(body.contains("KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER"));
+    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Http));
+    assert!(native_builtin_supports_export(
+        NodeBuiltin::Http,
+        "IncomingMessage"
+    ));
+    assert!(native_builtin_supports_export(NodeBuiltin::Http, "METHODS"));
     assert!(native_builtin_supports_export(NodeBuiltin::Http, "Server"));
     assert!(native_builtin_supports_export(
         NodeBuiltin::Http,
         "ServerResponse"
     ));
+    assert!(native_builtin_supports_export(
+        NodeBuiltin::Http,
+        "createServer"
+    ));
+    assert!(native_builtin_supports_export(NodeBuiltin::Http, "default"));
+    assert!(native_builtin_supports_export(NodeBuiltin::Http, "get"));
+    assert!(native_builtin_supports_export(NodeBuiltin::Http, "request"));
 }
 
 #[test]
@@ -10357,4 +10348,88 @@ fn native_node_net_commonjs_require_builds_and_runs() {
     );
     let stdout = String::from_utf8_lossy(&result.stdout);
     assert!(stdout.contains("cjs-net: object function function function true"));
+}
+
+#[test]
+fn native_node_http_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-http-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import http, { createServer, Server, ServerResponse, METHODS } from 'node:http';\n",
+            "console.log('http-ts:', typeof http, typeof createServer, typeof Server, typeof ServerResponse, Array.isArray(METHODS), http.default === http);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("http_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run http binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("http-ts: object function function function true true"));
+}
+
+#[test]
+fn native_node_http_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-http-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const http = require('node:http');\n",
+            "console.log('cjs-http:', typeof http, typeof http.createServer, typeof http.Server, typeof http.ServerResponse, Array.isArray(http.METHODS), http.default === http);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("http_cjs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run http cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("cjs-http: object function function function true true"));
 }

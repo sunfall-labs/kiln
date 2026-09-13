@@ -5749,3 +5749,18 @@ launcher without polluting `globalThis` (leaving `global-surface.ts` with exact 
 Verified with native probe `conformance/native/node-net-members.cjs` (byte-for-byte identical output between
 interpreter and native CLI), HTTP close contract (`scripts/check-http-close-contract.sh`), native integration
 tests in `kiln-native`, and full `scripts/native.sh` parity (190 matched, 1 refused, 0 diverged).
+
+---
+
+## Phase 5.2 TypeScript built-ins: `node:http` (2026-09-13)
+
+Migrated `node:http` completely to TypeScript via `crates/kiln-builtins/src/node/http.ts` with zero additions
+to the C runtime prelude (`crates/kiln-backend-c/src/runtime/` strictly frozen per Phase 5.1).
+Implemented canonical exports (`IncomingMessage`, `METHODS`, `Server`, `ServerResponse`, `createServer`, `default`, `get`, `request`),
+bridging to `process.getBuiltinModule("http")` under Node host mode and `process.__kilnNativeModules.http` under native mode,
+wiring `KILN_C99_METHOD_NODE_HTTP_SERVER`, `KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE`, `KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER`,
+`KILN_C99_METHOD_NODE_HTTP_GET`, and `KILN_C99_METHOD_NODE_HTTP_REQUEST` through the graph launcher.
+Verified with native probe `conformance/native/node-http-members.cjs` (byte-for-byte identical output between
+interpreter and native CLI), HTTP close contract (`scripts/check-http-close-contract.sh`), native integration
+tests in `kiln-native`, and full `scripts/native.sh` parity (191 matched, 1 refused, 0 diverged).
+

@@ -2960,19 +2960,7 @@ fn native_builtin_supported_exports(
             "toArrayBuffer",
         ],
         NodeBuiltin::Net => kiln_builtins::NET_EXPORTS,
-        // `METHODS` is a constant array rather than a function, so it costs nothing to answer and
-        // a placeholder served it worst: the unmaterialized-callable fallback made
-        // `typeof http.METHODS` "function" against the interpreter's "object", which is a wrong
-        // answer rather than a refusal.
-        NodeBuiltin::Http => &[
-            "METHODS",
-            "Server",
-            "ServerResponse",
-            "createServer",
-            "default",
-            "get",
-            "request",
-        ],
+        NodeBuiltin::Http => kiln_builtins::HTTP_EXPORTS,
         NodeBuiltin::Util => kiln_builtins::UTIL_EXPORTS,
         NodeBuiltin::DiagnosticsChannel => kiln_builtins::DIAGNOSTICS_CHANNEL_EXPORTS,
         NodeBuiltin::Https => kiln_builtins::HTTPS_EXPORTS,
@@ -5646,6 +5634,27 @@ static int kiln_install_native_modules(kiln_host *host) {
     status = kiln_c99_put(host, net_obj, "createServer", 12, net_create_server, 0, NULL);
     if (status != KILN_C99_OK) return status;
     status = kiln_c99_put(host, modules_obj, "net", 3, net_obj, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+
+    kiln_value http_obj = kiln_c99_undefined();
+    status = kiln_c99_new_object(&http_obj);
+    if (status != KILN_C99_OK) return status;
+    kiln_value http_server = (kiln_value){ 11, 0, { 403 /* KILN_C99_METHOD_NODE_HTTP_SERVER */ } };
+    kiln_value http_server_response = (kiln_value){ 11, 0, { 426 /* KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE */ } };
+    kiln_value http_create_server = (kiln_value){ 11, 0, { 275 /* KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER */ } };
+    kiln_value http_get = (kiln_value){ 11, 0, { 280 /* KILN_C99_METHOD_NODE_HTTP_GET */ } };
+    kiln_value http_request = (kiln_value){ 11, 0, { 281 /* KILN_C99_METHOD_NODE_HTTP_REQUEST */ } };
+    status = kiln_c99_put(host, http_obj, "Server", 6, http_server, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, http_obj, "ServerResponse", 14, http_server_response, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, http_obj, "createServer", 12, http_create_server, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, http_obj, "get", 3, http_get, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, http_obj, "request", 7, http_request, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, modules_obj, "http", 4, http_obj, 0, NULL);
     if (status != KILN_C99_OK) return status;
 
     status = kiln_c99_put(host, proc_obj, "__kilnNativeModules", 19, modules_obj, 0, NULL);
