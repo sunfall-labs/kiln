@@ -76,52 +76,29 @@ macro_rules! define_native_artifact_family {
 native_artifact_catalogue!(define_native_artifact_family);
 
 impl NativeArtifactFamily {
-    fn for_key(kind: ArtifactKind, backend: &Backend, abi: &str) -> Option<Self> {
-        let name = backend.as_str();
-        Some(match (kind, name, abi.contains("module-api-")) {
-            (ArtifactKind::GeneratedC, "c", _) if abi.contains("host-") => Self::ModuleSource,
-            (ArtifactKind::GeneratedC, "native-runtime-source", _) => Self::RuntimeSource,
-            (ArtifactKind::GeneratedC, "native-prelude-source", _) => Self::PreludeSource,
-            (ArtifactKind::GeneratedC, "native-launcher-source", _) => Self::LauncherSource,
-            (ArtifactKind::GeneratedC, "native-graph-launcher-source", _) => {
-                Self::GraphLauncherSource
-            }
-            (ArtifactKind::GeneratedC, "native-shared-library-source", true) => {
-                Self::SharedModuleSource
-            }
-            (ArtifactKind::GeneratedC, "native-shared-graph-wrapper-source", _) => {
-                Self::SharedGraphWrapperSource
-            }
-            (ArtifactKind::RuntimeLibrary, "rust-native-number-provider", _) => {
-                Self::NumberProvider
-            }
-            (ArtifactKind::NativeObject, "c", _) if abi.contains("runtime-") => {
-                Self::RuntimeModuleObject
-            }
-            (ArtifactKind::NativeObject, "c", _) => Self::ModuleObject,
-            (ArtifactKind::NativeObject, "native-runtime", _) => Self::RuntimeObject,
-            (ArtifactKind::NativeObject, "native-runtime-prelude", _) => Self::PreludeObject,
-            (ArtifactKind::NativeObject, "native-launcher", _) => Self::LauncherObject,
-            (ArtifactKind::NativeObject, "native-shared-library", true) => {
-                Self::SharedLibraryObject
-            }
-            (ArtifactKind::NativeObject, "native-shared-prelude", true) => {
-                Self::SharedPreludeObject
-            }
-            (ArtifactKind::NativeObject, "native-shared-graph-module", _) => {
-                Self::SharedGraphModuleObject
-            }
-            (ArtifactKind::NativeObject, "native-shared-graph-wrapper", _) => {
-                Self::SharedGraphWrapperObject
-            }
-            (ArtifactKind::NativeObject, "native-graph-launcher", _) => Self::GraphLauncherObject,
-            (ArtifactKind::NativeObject, "native-shared-graph", _) => Self::SharedGraphObject,
-            // The shared-library backend is also used for the final linked artifact. Its ABI
-            // distinguishes the ordinary and graph variants at the link-input level.
-            (ArtifactKind::LinkedArtifact, "native-shared-library", _) => Self::SharedLibraryLink,
-            (ArtifactKind::LinkedArtifact, "native-shared-graph", _) => Self::SharedGraphLink,
-            _ => return None,
-        })
+    fn artifact_kind(self) -> ArtifactKind {
+        match self {
+            Self::ModuleSource
+            | Self::RuntimeSource
+            | Self::PreludeSource
+            | Self::LauncherSource
+            | Self::GraphLauncherSource
+            | Self::SharedModuleSource
+            | Self::SharedGraphWrapperSource => ArtifactKind::GeneratedC,
+            Self::NumberProvider => ArtifactKind::RuntimeLibrary,
+            Self::ModuleObject
+            | Self::RuntimeModuleObject
+            | Self::RuntimeObject
+            | Self::PreludeObject
+            | Self::LauncherObject
+            | Self::SharedLibraryObject
+            | Self::SharedPreludeObject
+            | Self::SharedGraphModuleObject
+            | Self::SharedGraphWrapperObject
+            | Self::SharedGraphObject
+            | Self::GraphLauncherObject => ArtifactKind::NativeObject,
+            Self::SharedLibraryLink | Self::SharedGraphLink => ArtifactKind::LinkedArtifact,
+        }
     }
 
     fn backend_abi(
@@ -235,6 +212,36 @@ impl NativeArtifactFamily {
             Self::SharedGraphLink => "shared-graph-link".into(),
         }
     }
+
+    /// Construct the complete cache key for this explicitly selected producer family.
+    /// Backend and ABI policy live here so producers cannot accidentally create an identity
+    /// which eviction does not know how to retain.
+    fn key(
+        self,
+        compiler: impl Into<String>,
+        target: &str,
+        profile: CacheProfile,
+        options: Digest,
+        inputs: impl IntoIterator<Item = Digest>,
+    ) -> ArtifactKey {
+        let (backend, abi) = self.backend_abi(
+            &module_abi_identity(),
+            &runtime_abi_identity(),
+            &shared_embedding_abi_identity(),
+        );
+        ArtifactKey::new(
+            self.artifact_kind(),
+            compiler,
+            backend,
+            &abi,
+            target,
+            "generic",
+            profile,
+            "none",
+            options,
+            inputs,
+        )
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -248,8 +255,6 @@ fn key(
     options: Digest,
     inputs: impl IntoIterator<Item = Digest>,
 ) -> ArtifactKey {
-    // All production key construction passes through the family catalogue used by eviction.
-    let _family = NativeArtifactFamily::for_key(kind.clone(), &backend, abi);
     ArtifactKey::new(
         kind, compiler, backend, abi, target, "generic", profile, "none", options, inputs,
     )
@@ -646,71 +651,33 @@ impl NativeBuilder {
         let tool = self.toolchain.identity();
         let target = target_identity(tool);
         let compiler = compiler_identity(tool);
-        let module_abi = module_abi_identity();
-        let runtime_abi = runtime_abi_identity();
-        let embedding_abi = shared_embedding_abi_identity();
         let provider = self.number_provider()?;
         let mut identities = BTreeSet::new();
 
-        let mut allow = |compiler: String, backend: Backend, abi: &str, profile| {
-            identities.insert(cache_identity(compiler, backend, abi, &target, profile));
-        };
-
-        // Deterministic generated sources are always stored under the debug cache profile. Graph
-        // module sources share the ordinary module-source identity byte-for-byte.
-        allow(
-            format!("kiln-c-abi-{C_ABI_VERSION}-generator-{C_GENERATOR_VERSION}"),
-            Backend::C,
-            &module_abi,
-            CacheProfile::Debug,
-        );
-        allow(
-            format!("kiln-runtime-{NATIVE_RUNTIME_VERSION}"),
-            Backend::Custom("native-runtime-source".to_owned()),
-            &runtime_abi,
-            CacheProfile::Debug,
-        );
-        allow(
-            format!("kiln-runtime-prelude-{NATIVE_PRELUDE_VERSION}"),
-            Backend::Custom("native-prelude-source".to_owned()),
-            &runtime_abi,
-            CacheProfile::Debug,
-        );
-        allow(
-            format!("kiln-launcher-{NATIVE_RUNTIME_VERSION}"),
-            Backend::Custom("native-launcher-source".to_owned()),
-            &runtime_abi,
-            CacheProfile::Debug,
-        );
-        allow(
-            format!("kiln-graph-launcher-{NATIVE_RUNTIME_VERSION}"),
-            Backend::Custom("native-graph-launcher-source".to_owned()),
-            &runtime_abi,
-            CacheProfile::Debug,
-        );
-        allow(
-            format!("kiln-c-abi-{C_ABI_VERSION}-module-api-{EMBEDDING_MODULE_API_VERSION}"),
-            Backend::Custom("native-shared-library-source".to_owned()),
-            &embedding_abi,
-            CacheProfile::Debug,
-        );
-        allow(
-            format!(
-                "kiln-shared-graph-wrapper-{NATIVE_RUNTIME_VERSION}-module-api-{EMBEDDING_MODULE_API_VERSION}"
-            ),
-            Backend::Custom("native-shared-graph-wrapper-source".to_owned()),
-            &runtime_abi,
-            CacheProfile::Debug,
-        );
-
-        // The Rust number provider is profile-independent and is cached as one release archive.
-        allow(
-            provider.identity,
-            Backend::Custom("rust-native-number-provider".to_owned()),
-            &native_number_abi_identity(),
-            CacheProfile::Release,
-        );
-
+        // Sources are debug identities; the provider is one release archive.
+        for family in NativeArtifactFamily::SOURCES {
+            let compiler = if matches!(family, NativeArtifactFamily::NumberProvider) {
+                provider.identity.clone()
+            } else {
+                family.compiler_version()
+            };
+            let profile = if matches!(family, NativeArtifactFamily::NumberProvider) {
+                CacheProfile::Release
+            } else {
+                CacheProfile::Debug
+            };
+            identities.insert(
+                family
+                    .key(
+                        compiler,
+                        &target,
+                        profile,
+                        Digest::hash(b"identity representative"),
+                        [],
+                    )
+                    .identity_digest(),
+            );
+        }
         for profile in [
             NativeProfile::Dev,
             NativeProfile::Check,
@@ -718,47 +685,18 @@ impl NativeBuilder {
             NativeProfile::Profile,
         ] {
             let profile = profile.cache();
-            for (backend, abi) in [
-                (Backend::C, module_abi.as_str()),
-                (
-                    Backend::Custom("native-runtime".to_owned()),
-                    runtime_abi.as_str(),
-                ),
-                (
-                    Backend::Custom("native-runtime-prelude".to_owned()),
-                    runtime_abi.as_str(),
-                ),
-                (
-                    Backend::Custom("native-launcher".to_owned()),
-                    runtime_abi.as_str(),
-                ),
-                (Backend::C, runtime_abi.as_str()),
-                (
-                    Backend::Custom("native-shared-library".to_owned()),
-                    embedding_abi.as_str(),
-                ),
-                (
-                    Backend::Custom("native-shared-prelude".to_owned()),
-                    embedding_abi.as_str(),
-                ),
-                (
-                    Backend::Custom("native-shared-graph-module".to_owned()),
-                    module_abi.as_str(),
-                ),
-                (
-                    Backend::Custom("native-shared-graph-wrapper".to_owned()),
-                    runtime_abi.as_str(),
-                ),
-                (
-                    Backend::Custom("native-shared-graph".to_owned()),
-                    runtime_abi.as_str(),
-                ),
-                (
-                    Backend::Custom("native-graph-launcher".to_owned()),
-                    runtime_abi.as_str(),
-                ),
-            ] {
-                allow(compiler.clone(), backend, abi, profile.clone());
+            for family in NativeArtifactFamily::OBJECTS {
+                identities.insert(
+                    family
+                        .key(
+                            compiler.clone(),
+                            &target,
+                            profile.clone(),
+                            Digest::hash(b"identity representative"),
+                            [],
+                        )
+                        .identity_digest(),
+                );
             }
         }
 
