@@ -309,7 +309,7 @@ fn demand_only_get_builtin_module_evaluates_the_requested_ts_builtin() {
     let project = TempProject::new();
     let entry = project.write(
         "main.mjs",
-        "console.log(typeof process.getBuiltinModule('node:path').join);",
+        "const first = process.getBuiltinModule('node:path'); const second = process.getBuiltinModule('node:path'); console.log(typeof first.join, first === second);",
     );
     let graph = ModuleGraph::build_node(
         &entry,
@@ -326,7 +326,7 @@ fn demand_only_get_builtin_module_evaluates_the_requested_ts_builtin() {
             ExecutionCapabilities::default(),
         )
         .expect("execute demand-only getBuiltinModule");
-    assert_eq!(host.output, ["function"]);
+    assert_eq!(host.output, ["function true"]);
 }
 
 #[test]
@@ -2038,7 +2038,8 @@ fn node_builtin_fs_ts_evaluates_and_exports_cleanly() {
         concat!(
             "import fs, { existsSync, promises, readFileSync } from 'node:fs';\n",
             "import { readFile } from 'node:fs/promises';\n",
-            "console.log(typeof fs, typeof existsSync, typeof promises, typeof readFileSync, typeof readFile, fs.default === fs);\n",
+            "const viaProcess = process.getBuiltinModule('node:fs'); const repeated = process.getBuiltinModule('node:fs');\n",
+            "console.log(typeof fs, typeof existsSync, typeof promises, typeof readFileSync, typeof readFile, fs.default === fs, viaProcess === fs, viaProcess === repeated);\n",
         ),
     );
     let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
@@ -2065,7 +2066,7 @@ fn node_builtin_fs_ts_evaluates_and_exports_cleanly() {
         .expect("execute fs builtin");
     assert_eq!(
         host.output,
-        ["object function object function function true"]
+        ["object function object function function true true true"]
     );
 }
 
