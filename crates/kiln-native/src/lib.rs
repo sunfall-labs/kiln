@@ -80,6 +80,89 @@ fn reduced_graph(
     graph.reduce_to_live(demand).map_err(NativeError::Graph)
 }
 
+/// Specialize direct ESM exports to the closed-world demand, then let Oxc
+/// remove the newly unreferenced local declarations using its purity model.
+///
+/// The source text predates graph reduction, so compiled imports are reconciled
+/// by local binding name with the reduced graph. That both discards already
+/// dead bindings and preserves synthetic re-export retargeting. A module whose
+/// demanded interface cannot be recovered keeps its original program.
+fn dce_release_graph(
+    graph: &ModuleGraph,
+    demand: &kiln_module_graph::LiveDemand,
+) -> (ModuleGraph, kiln_module_graph::LiveDemand) {
+    let mut replacements = BTreeMap::new();
+    let mut remapped = demand.clone();
+
+    for node in graph.modules() {
+        if node.source != ModuleSource::Source {
+            continue;
+        }
+        if node.program.program.source.is_empty() {
+            continue;
+        }
+        let demanded_slots = demand.slots.get(&node.path).cloned().unwrap_or_default();
+        let demanded_names = node
+            .program
+            .exports
+            .iter()
+            .filter(|export| demanded_slots.contains(&export.local_slot))
+            .map(|export| export.exported.clone())
+            .collect::<BTreeSet<_>>();
+        let Some(path) = node.path.to_str() else {
+            continue;
+        };
+        let hir = frontend_oxc::parse_dce(path, &node.program.program.source, &demanded_names);
+        let Ok(mut program) = kiln_ir::compile_module(&hir) else {
+            continue;
+        };
+
+        let mut imports = Vec::new();
+        for mut import in program.imports {
+            let Some(linked) = node
+                .program
+                .imports
+                .iter()
+                .find(|candidate| candidate.local == import.local)
+            else {
+                continue;
+            };
+            import.source.clone_from(&linked.source);
+            import.imported.clone_from(&linked.imported);
+            imports.push(import);
+        }
+        program.imports = imports;
+        program.dependencies.clone_from(&node.program.dependencies);
+
+        let replacement_slots = program
+            .exports
+            .iter()
+            .filter(|export| demanded_names.contains(&export.exported))
+            .map(|export| export.local_slot)
+            .collect::<BTreeSet<_>>();
+        let replacement_names = program
+            .exports
+            .iter()
+            .filter(|export| replacement_slots.contains(&export.local_slot))
+            .map(|export| export.exported.clone())
+            .collect::<BTreeSet<_>>();
+        if !demanded_names.is_subset(&replacement_names) {
+            continue;
+        }
+
+        remapped.slots.insert(node.path.clone(), replacement_slots);
+        replacements.insert(node.path.clone(), program);
+    }
+
+    match graph.replace_programs_and_relink(replacements) {
+        Ok(graph) => (graph, remapped),
+        // Optimization must not turn a valid linked program into a build
+        // failure. An unfamiliar export/re-export shape keeps the already
+        // reduced graph and its original slot numbering.
+        Err(_) => (graph.clone(), demand.clone()),
+    }
+}
+
 // Select the budget only on a generated-C cache miss. Warm builds must not rerun liveness,
 // and the cache payload must remember the actual policy used to compile the emitted body.
 fn emit_graph_module_for_profile(
@@ -1312,7 +1395,12 @@ impl NativeBuilder {
             &kiln_liveness::SelectionOptions::development(),
         )
         .map_err(NativeError::Graph)?;
-        let (reduced, _) = reduced_graph(graph, &demand)?;
+        let (reduced, demand) = reduced_graph(graph, &demand)?;
+        let (reduced, demand) = if options.profile == NativeProfile::Release {
+            dce_release_graph(&reduced, &demand)
+        } else {
+            (reduced, demand)
+        };
         let graph = &reduced;
         let mut emission = options.realm.emission();
         emission.compact = options.profile != NativeProfile::Profile;
@@ -1327,7 +1415,12 @@ impl NativeBuilder {
         let emitted_modules = emit_indexed(nodes.len(), "shared graph module emission", |index| {
             let node = nodes[index];
             let logical_path = logical_module_path(graph.project_root(), &node.path)?;
-            let module_emission = emission.clone();
+            let mut module_emission = emission.clone();
+            if matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs) {
+                module_emission.live_module_slots = Some(Arc::new(
+                    demand.slots.get(&node.path).cloned().unwrap_or_default(),
+                ));
+            }
             cached_graph_module(
                 &self.cache,
                 &target,
@@ -1860,6 +1953,11 @@ impl NativeBuilder {
         // live edges. With everything live this is the identity transform.
         let demand = selected.demand();
         let (reduced, demand) = reduced_graph(graph, &demand)?;
+        let (reduced, demand) = if options.profile == NativeProfile::Release {
+            dce_release_graph(&reduced, &demand)
+        } else {
+            (reduced, demand)
+        };
         let graph = &reduced;
         // Dispatch-group mask for the prelude: same closed-world selection,
         // so the `-D` flags below only ever remove what nothing retained can

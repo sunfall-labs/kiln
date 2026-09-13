@@ -751,6 +751,44 @@ impl ModuleGraph {
         Some(patched)
     }
 
+    /// Replace several programs and rebuild the graph's export tables.
+    ///
+    /// Unlike [`Self::patch_module`], this accepts a smaller import/export
+    /// interface. It is intended for a closed-world specialization that has
+    /// already reduced the graph to live nodes and reconciled every replacement
+    /// with the node's resolved dependencies. Relinking is all-or-nothing: an
+    /// invalid replacement returns the ordinary graph error and leaves `self`
+    /// untouched.
+    pub fn replace_programs_and_relink(
+        &self,
+        mut replacements: BTreeMap<PathBuf, ModuleProgram>,
+    ) -> Result<Self, ModuleGraphError> {
+        let mut modules = BTreeMap::new();
+        for path in self.order.iter() {
+            let mut node = self
+                .module_node(path)
+                .ok_or_else(|| ModuleGraphError::InternalMissingModule { path: path.clone() })?
+                .clone();
+            if let Some(program) = replacements.remove(path) {
+                node.program = program;
+            }
+            modules.insert(path.clone(), node);
+        }
+        if let Some((path, _)) = replacements.into_iter().next() {
+            return Err(ModuleGraphError::InternalMissingModule { path });
+        }
+        let export_resolutions = resolve_exports(&modules, &self.order)?;
+        validate_links(&modules, &self.order, &export_resolutions)?;
+        Ok(Self {
+            entry: self.entry.clone(),
+            project_root: self.project_root.clone(),
+            modules: Arc::new(modules),
+            order: Arc::clone(&self.order),
+            export_resolutions: Arc::new(export_resolutions),
+            patched_modules: Arc::new(BTreeMap::new()),
+        })
+    }
+
     /// Return the subgraph of live modules as a self-consistent graph.
     ///
     /// Filters `modules` and `order` to `demand.live` (dependency-first
