@@ -44,13 +44,22 @@ class GateResultTests(unittest.TestCase):
         for counts in ({"total": 0, "passed": 0, "failed": 0}, {"total": 1, "passed": 2, "failed": 0}):
             with self.assertRaises(results.ResultError):
                 results.validate({"schema": 1, "verdict": "passed", "source": {"kind": "x", "code_snapshot_sha256": "snapshot"}, "outcomes": counts, "evidence": {"log": "run.log"}})
+        with self.assertRaises(results.ResultError):
+            results.validate({"schema": 1, "verdict": "passed", "source": {"kind": "x", "code_snapshot_sha256": "snapshot"}, "outcomes": {"total": 1, "passed": -1, "failed": 2}, "evidence": {"log": "run.log"}})
 
     def test_conformance_reads_structured_document(self):
         log = self.log("pass g01\nfail g02\n")
         document = self.root / "results.json"
         document.write_text(json.dumps({"schema": 1, "tests": [{"id": "g01", "outcome": "pass"}, {"id": "g02", "outcome": "fail"}]}))
         doc = results.conformance(log, 1, str(document))
-        self.assertEqual(doc["outcomes"], {"total": 2, "passed": 1, "failed": 1, "unsupported": 0, "skipped": 0})
+        self.assertEqual(doc["outcomes"], {"total": 2, "passed": 1, "failed": 1, "unsupported": 0, "skipped": 0, "not-yet-runnable": 0})
+
+    def test_test262_preserves_unsupported_and_skipped(self):
+        document = self.root / "test262.json"
+        document.write_text(json.dumps({"status": "passed", "expected_chunks": ["c"], "chunks": {"c": {"total": 3, "passed": 1, "failed": 0, "unsupported": 1, "skipped": 1}}, "counts": {"total": 3, "passed": 1, "failed": 0, "unsupported": 1, "skipped": 1}, "source": {"commit": "pin"}, "regressions": []}))
+        doc = results.test262_document(self.log("baseline\n"), 0, str(document))
+        self.assertEqual(doc["outcomes"]["unsupported"], 1)
+        self.assertEqual(doc["outcomes"]["skipped"], 1)
 
     def test_process_aggregate_rejects_missing_and_mixed_snapshots(self):
         for name, snapshot in (("build", "a"), ("tests", "b")):
