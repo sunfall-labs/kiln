@@ -29,7 +29,7 @@ use kiln_ir::{
 };
 use kiln_module_resolver::{
     ModuleResolver, NodeBuiltin, NodeModuleFormat, NodeRequestKind, PathRole, ResolutionKind,
-    ResolutionPolicy, ResolvedModule, SUPPORTED_EXTENSIONS,
+    ResolutionPolicy, ResolvedModule, SUPPORTED_EXTENSIONS, is_asset_extension,
 };
 use kiln_runtime::{ClockCapability, RealmCapabilities, RealmRuntime};
 
@@ -141,6 +141,9 @@ pub enum ModuleSource {
     Source,
     CommonJs,
     Json,
+    /// A file imported with `with { type: "file" }`. Assets are path values, not source text;
+    /// retaining this identity prevents binary files from crossing a UTF-8 loader boundary.
+    Asset,
     NodeBuiltin(NodeBuiltin),
 }
 
@@ -150,6 +153,7 @@ pub enum ModuleSource {
 pub enum ModulePayload {
     Program(ModuleProgram),
     JsonText(String),
+    AssetPath(PathBuf),
 }
 
 /// An entry-rooted module graph. ESM cycles are rejected during construction; CommonJS `require`
@@ -501,6 +505,11 @@ impl ModuleGraph {
         R: ResolutionPolicy,
     {
         Self::build_with_typed_policy(entry, resolver, move |path, source_kind| {
+            if source_kind == ModuleSource::Asset
+                || path.extension().and_then(|value| value.to_str()).is_some_and(is_asset_extension)
+            {
+                return Ok(ModulePayload::AssetPath(path.to_path_buf()));
+            }
             let source = loader
                 .load(path)
                 .map_err(|error| ModuleGraphError::Source {
@@ -1355,6 +1364,17 @@ impl ModuleGraph {
                 values.insert(path.clone(), HashMap::from([("default".to_owned(), value)]));
                 continue;
             }
+            if module_node.source == ModuleSource::Asset {
+                let path = module_node.data.as_deref().ok_or_else(|| ModuleGraphError::Source {
+                    path: path.clone(),
+                    message: "asset module has no path metadata".to_owned(),
+                })?;
+                values.insert(
+                    module_node.path.clone(),
+                    HashMap::from([("default".to_owned(), Value::String(path.to_owned()))]),
+                );
+                continue;
+            }
             if module_node.source == ModuleSource::CommonJs {
                 if path == &self.entry {
                     commonjs_loader
@@ -1882,6 +1902,9 @@ where
                     Some(VisitState::Visiting) => continue,
                     None => {
                         let source = match source {
+                            ModuleSource::Source if path.extension()
+                                .and_then(|extension| extension.to_str())
+                                .is_some_and(is_asset_extension) => ModuleSource::Asset,
                             ModuleSource::Source if !self.typed_sources => ModuleSource::Source,
                             ModuleSource::Source => {
                                 if path
@@ -1935,6 +1958,16 @@ where
                                 };
                                 (json_module_program(), Some(text))
                             }
+                            ModuleSource::Asset => {
+                                let ModulePayload::AssetPath(asset) = (self.provider)(&path, source)?
+                                else {
+                                    return Err(ModuleGraphError::Source {
+                                        path: path.clone(),
+                                        message: "asset provider returned a non-asset payload".to_owned(),
+                                    });
+                                };
+                                (json_module_program(), Some(asset.to_string_lossy().into_owned()))
+                            }
                             ModuleSource::NodeBuiltin(builtin) => {
                                 if let Some(source) = kiln_builtins::builtin_source(builtin) {
                                     let path_str = kiln_builtins::builtin_logical_path(builtin);
@@ -1979,6 +2012,11 @@ where
                             };
                             let source = if let Some(builtin) = resolved.builtin() {
                                 ModuleSource::NodeBuiltin(builtin)
+                            } else if resolved.path.extension()
+                                .and_then(|extension| extension.to_str())
+                                .is_some_and(is_asset_extension)
+                            {
+                                ModuleSource::Asset
                             } else if !self.typed_sources {
                                 ModuleSource::Source
                             } else if resolved

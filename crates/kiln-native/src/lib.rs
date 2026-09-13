@@ -3041,6 +3041,25 @@ fn emit_native_graph_module_with_policy(
                 policy.clone(),
             )?)
         }
+        ModuleSource::Asset => {
+            let path = node.data.as_deref().ok_or_else(|| {
+                NativeError::Graph(ModuleGraphError::Source {
+                    path: node.path.clone(),
+                    message: "asset module has no path metadata".to_owned(),
+                })
+            })?;
+            let body = format!(
+                "exports[0] = kiln_c99_copy_text({}, (size_t){});",
+                native_c_string(path),
+                path.len()
+            );
+            Ok(emit_runtime_module_with_logical_path_and_policy(
+                &node.program,
+                logical_path,
+                &body,
+                policy.clone(),
+            )?)
+        }
         ModuleSource::Source => Ok(emit_module_with_logical_path_and_policy(
             &node.program,
             logical_path,
@@ -5021,7 +5040,7 @@ fn native_graph_export_count(node: &kiln_module_graph::ModuleNode) -> usize {
 /// CommonJS projection; loaders never guess that `default` or export zero happens to be suitable.
 fn native_commonjs_projection_index(node: &kiln_module_graph::ModuleNode) -> Option<usize> {
     match node.source {
-        ModuleSource::Json => Some(0),
+        ModuleSource::Json | ModuleSource::Asset => Some(0),
         ModuleSource::NodeBuiltin(builtin) if kiln_builtins::is_ts_builtin(builtin) => node
             .program
             .exports

@@ -4476,9 +4476,10 @@ impl Compiler {
                 // reads an import attribute yet, but a getter written in one still runs.
                 if let Some(options) = options {
                     self.expression(options);
-                    self.code.push(Instruction::Pop);
+                    self.code.push(Instruction::DynamicImportWithOptions);
+                } else {
+                    self.code.push(Instruction::DynamicImport);
                 }
-                self.code.push(Instruction::DynamicImport);
             }
             ExpressionKind::Chain { expression: inner } => {
                 self.chains.push(Vec::new());

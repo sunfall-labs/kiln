@@ -37,6 +37,28 @@ impl TempProject {
 }
 
 #[test]
+fn binary_asset_is_retained_as_an_explicit_path_module() {
+    let project = TempProject::new();
+    let asset = project.root.join("tree-sitter.wasm");
+    fs::write(&asset, [0_u8, 159, 146, 150]).expect("write binary asset");
+    let entry = project.write(
+        "main.mjs",
+        "import wasm from './tree-sitter.wasm' with { type: 'file' }; console.log(wasm);",
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        kiln_module_resolver::ModuleResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        frontend_oxc::parse,
+    )
+    .expect("build asset graph");
+    let node = graph.module(&asset).expect("asset node");
+    assert_eq!(node.source, ModuleSource::Asset);
+    let expected = fs::canonicalize(&asset).unwrap();
+    assert_eq!(node.data.as_deref(), Some(expected.to_string_lossy().as_ref()));
+}
+
+#[test]
 fn node_graph_records_package_commonjs_source_identity() {
     let project = TempProject::new();
     fs::create_dir_all(project.root.join("node_modules/pkg")).unwrap();
