@@ -7218,6 +7218,7 @@ fn render_shared_wrapper_roots(
     .unwrap();
 }
 
+#[cfg(test)]
 fn graph_shared_wrapper_source(
     graph: &ModuleGraph,
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
