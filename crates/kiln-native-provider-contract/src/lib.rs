@@ -89,6 +89,38 @@ impl ProviderManifest {
     }
 }
 
+pub fn manifest(
+    target: String,
+    rustc: String,
+    source: String,
+    archive: String,
+    deployment: String,
+    libc: String,
+    http: bool,
+) -> ProviderManifest {
+    let c = contract();
+    ProviderManifest {
+        schema: c.schema,
+        provider: c.provider.to_owned(),
+        provider_abi: c.provider_abi,
+        format_version: c.format_version,
+        parse_version: c.parse_version,
+        rust_target: target,
+        rustc_identity: rustc,
+        source_sha256: source,
+        archive_sha256: archive,
+        archive: if http { c.full_archive } else { c.slim_archive }.to_owned(),
+        linkage: "static".to_owned(),
+        pic: true,
+        profile: c.profile.to_owned(),
+        cpu_features: "generic".to_owned(),
+        deployment,
+        libc_baseline: libc,
+        exports: c.exports.into_iter().map(str::to_owned).collect(),
+        http,
+    }
+}
+
 macro_rules! export_names {
     ($(($feature:ident, $name:ident, $sig:ident);)*) => { vec![$(stringify!($name)),*] };
 }
