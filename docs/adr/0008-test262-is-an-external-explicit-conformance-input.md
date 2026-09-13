@@ -41,13 +41,16 @@ Its failure state lives under the Kiln project, not in an external Test262 check
 request executes the selected batch in one resident process so the everyday command does not pay
 one compiler startup per test.
 
-The full upstream lane is `scripts/test262.sh`. It fetches Test262 into a temporary checkout,
-requires the exact pinned commit `771005236e88a909635104e03ba12559688c0172`, verifies a clean
-checkout, and invokes `kiln test <checkout>/test` through the normal resident daemon path. The
-machine-readable report retains the schema-1 per-variant results and adds the pin, discovered
-test-file count, executed verdict count, elapsed milliseconds, and executed-tests-per-second
-throughput. A local checkout may be supplied for offline reruns, but it must pass the same commit
-and cleanliness checks.
+The full upstream lane is `scripts/test262.sh`. The three script entrypoints delegate checkout,
+pin, physical subtree, empty-corpus, memory-cap, and result-document policy to the shared
+`scripts/test262_corpus.py` module. Managed fetches stage and validate the exact pinned commit
+`771005236e88a909635104e03ba12559688c0172`, then publish it to the durable per-machine cache;
+an explicitly supplied checkout is validated in place and is never removed or replaced. The
+runner invokes `kiln test <checkout>/test` through the normal resident daemon path. The
+machine-readable report retains the schema-1 per-variant results and adds the pin, selected path,
+discovered test-file count, executed verdict count, elapsed milliseconds, and
+executed-tests-per-second throughput. The chunk baseline uses the same validator and execution
+policy while retaining its separate per-chunk comparison and update rules.
 
 ## Consequences
 

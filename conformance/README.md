@@ -213,9 +213,10 @@ non-zero so it can name per-test regressions.
 ### Pinned upstream lane
 
 The complete upstream Test262 suite is never vendored. `scripts/test262.sh` fetches commit
-`771005236e88a909635104e03ba12559688c0172` from [tc39/test262](https://github.com/tc39/test262),
-checks that the detached checkout is clean and contains the expected `harness/` and `test/`
-layout, then invokes the existing daemon-backed batch command:
+`771005236e88a909635104e03ba12559688c0172` from [tc39/test262](https://github.com/tc39/test262)
+into the durable managed cache through `scripts/test262_corpus.py`, checks that the detached
+checkout is clean and contains the expected `harness/` and `test/` layout, then invokes the
+existing daemon-backed batch command:
 
 ```sh
 bash scripts/test262.sh --out target/test262/results.json
