@@ -190,9 +190,10 @@ pub fn verify_function_graph(graph: &FunctionGraph) -> Result<(), VerifierError>
             Terminator::Suspend {
                 resume, delegate, ..
             } => {
-                // Not an edge: the body returns, and a later call re-enters at the target
-                // through the dispatch switch with nothing of this activation alive. What
-                // crosses is spilled into the frame and comes back through the target's phis.
+                // These are synthetic edges: the body returns, and a later call re-enters at the
+                // target through the dispatch switch. The graph still records them so resume
+                // phis have complete inputs; the emitter implements the edge with frame loads,
+                // never a C goto.
                 if !block_map.contains_key(resume) {
                     return Err(VerifierError::UnknownBlock(*resume));
                 }
