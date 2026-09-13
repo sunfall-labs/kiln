@@ -387,6 +387,48 @@ fn demand_only_get_builtin_module_evaluates_the_requested_ts_builtin() {
 }
 
 #[test]
+fn commonjs_resolve_accepts_builtin_aliases_and_kiln_process() {
+    let project = TempProject::new();
+    let importer = project.write("main.cjs", "module.exports = 1;");
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("resolver");
+
+    for (specifier, expected) in [
+        ("fs", kiln_module_resolver::NodeBuiltin::Fs),
+        ("node:fs", kiln_module_resolver::NodeBuiltin::Fs),
+        ("assert/strict", kiln_module_resolver::NodeBuiltin::Assert),
+        ("kiln:process", kiln_module_resolver::NodeBuiltin::Process),
+    ] {
+        let resolved = resolver
+            .resolve(specifier, &importer)
+            .unwrap_or_else(|error| panic!("resolve {specifier}: {error}"));
+        assert_eq!(resolved.builtin(), Some(expected), "specifier {specifier}");
+    }
+
+    // The resolver contract above is the same path used by CommonJS `require.resolve`; the
+    // public graph path must still initialize the canonical TS builtin projection on demand.
+    let entry = project.write(
+        "public.mjs",
+        "const fs = process.getBuiltinModule('fs'); const nodeFs = process.getBuiltinModule('node:fs'); const processBuiltin = process.getBuiltinModule('kiln:process'); console.log(fs === nodeFs, typeof processBuiltin.run);",
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        frontend_oxc::parse,
+    )
+    .expect("build builtin public graph");
+    let mut host = TestHost::default();
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute builtin public graph");
+    assert_eq!(host.output, ["true function"]);
+}
+
+#[test]
 fn create_require_uses_its_captured_file_as_the_resolution_base() {
     let project = TempProject::new();
     fs::create_dir_all(project.root.join("nested")).unwrap();

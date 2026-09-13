@@ -3969,6 +3969,52 @@ fn node_buffer_statics_are_enumerable_own_properties() {
 }
 
 #[test]
+fn node_builtin_own_keys_follow_the_authoritative_ts_exports() {
+    let cases = [
+        ("node:querystring", Native::NodeQueryString, "parse"),
+        ("node:util", Native::NodeUtil, "format"),
+        ("node:url", Native::NodeUrl, "parse"),
+        (
+            "node:diagnostics_channel",
+            Native::NodeDiagnosticsChannel,
+            "channel",
+        ),
+        ("node:perf_hooks", Native::NodePerfHooks, "performance"),
+    ];
+    let intrinsics = Intrinsics::default();
+    for (specifier, native, representative_export) in cases {
+        let value = Value::Native(native, RealmId::PRIMARY);
+        let keys = own_property_keys(&intrinsics, &value);
+        let exports = kiln_builtins::builtin_exports_for_specifier(specifier)
+            .expect("builtin has an authoritative TS export list");
+        assert!(
+            exports.contains(&representative_export),
+            "{specifier} representative export must come from the TS contract"
+        );
+        assert!(
+            keys.iter().any(|key| key == representative_export),
+            "{specifier}.{representative_export} must be an own key"
+        );
+        for key in &keys {
+            assert_eq!(
+                own_attributes(&intrinsics, &value, key),
+                Some(Attributes::DEFAULT),
+                "{specifier}.{key} must be an actual own property"
+            );
+        }
+        assert!(!exports.is_empty(), "{specifier} has a TS export contract");
+    }
+    assert!(
+        !own_property_keys(
+            &intrinsics,
+            &Value::Native(Native::NodeHttp, RealmId::PRIMARY)
+        )
+        .iter()
+        .any(|key| key == "METHODS")
+    );
+}
+
+#[test]
 fn return_signal_rejected_promise_does_not_surface_as_unhandled_rejection() {
     let program = Program {
         source: "".into(),
