@@ -285,6 +285,44 @@ fn executable_module_sizes_reports_retained_and_dropped() {
     assert_eq!(dep2.retained_functions, 0);
 }
 
+#[test]
+fn executable_demanded_members_names_builtins_and_computed() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let project = TestDirectory::new("kiln-demanded-members");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "const xs = [1];\nxs.push(2);\nconst o = { log(x) { return x; } };\no.log(xs[0]);\nconst key = 'length';\nconst n = xs[key];\nsetTimeout(() => o.log(n), 0);\n",
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("members graph");
+    let demand =
+        executable_demand(&graph, NativeProfile::Dev).expect("demand");
+    let members = kiln_backend_c::facts::analyze_demanded_members(
+        &graph,
+        &demand.live,
+        &demand.slots,
+    );
+    assert!(members.names.contains("push"), "{members:?}");
+    assert!(members.names.contains("log"), "{members:?}");
+    assert!(
+        members.builtins.contains("SetTimeout"),
+        "{members:?}"
+    );
+    assert!(
+        members.has_computed_access,
+        "xs[key] names nothing statically: {members:?}"
+    );
+    assert!(!members.has_open_world, "{members:?}");
+}
+
 struct OxcFrontend;
 
 #[test]
