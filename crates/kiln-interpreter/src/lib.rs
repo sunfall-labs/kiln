@@ -33086,6 +33086,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         )));
                     }
                     let mut type_value = None;
+                    let mut entries = Vec::new();
                     for key in self.own_keys(&with, instruction)? {
                         let Some((_, attributes)) =
                             self.own_state(&with, &Value::String(key.clone()), instruction)?
@@ -33096,6 +33097,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             continue;
                         }
                         let value = self.read_property(&with, &key, instruction)?;
+                        entries.push((key, value));
+                    }
+                    for (key, value) in entries {
                         if key == "type" {
                             type_value = Some(value);
                         } else {
