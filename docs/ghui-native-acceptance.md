@@ -1,7 +1,8 @@
 # Native ghui acceptance probe
 
-The live acceptance passed on the production app fixture `66d07dd9` with the local process
-capability adapter at `9484c3f`. The compiler/integration checkout was `01aaaca5` and the exact
+The live acceptance passed on app source fixture `afd00085f5aa925bb8220a091f932b1bc21e1ac8` with
+the local process capability adapter at `9484c3f`. The compiler production revision was `66d07dd9`
+and the integration checkout used for the build was `01aaaca5`. The exact
 verified binary was `/Users/alee/Developer/Personal/ghui-process-capability/.scratch/ghui-live/ghui-66d07dd9`
 (SHA-256 `e112a489242695ad94a14bb6b16f1f47e96a9243792ebe88a8399fe8d6c7fefc`, 112,840,824 bytes,
 mtime 2026-09-13 05:00:24). The build log is

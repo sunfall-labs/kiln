@@ -11,8 +11,9 @@ diagnosable and predictable.
 
 ## What is established
 
-The verified production app is `66d07dd9`, built against integration `01aaaca5` with adapter
-`9484c3f`. Binary SHA-256 is
+The verified app source fixture is `afd00085f5aa925bb8220a091f932b1bc21e1ac8`, using adapter
+`9484c3f`; it was built with compiler production revision `66d07dd9` from integration
+`01aaaca5`. Binary SHA-256 is
 `e112a489242695ad94a14bb6b16f1f47e96a9243792ebe88a8399fe8d6c7fefc` (112,840,824 bytes).
 
 The same application exposed a module scheduler bug in the interpreter: a dynamic-import job was
