@@ -5957,6 +5957,26 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         }
         return kiln_c99_invoke_string_method(result, code, receiver, args, argc);
     }
+    if (receiver.tag == KILN_VALUE_ARRAY_BUFFER) {
+        if (code == KILN_C99_METHOD_SLICE) {
+            kiln_typed_buffer *buffer = kiln_c99_typed_buffer_of(receiver);
+            size_t start = kiln_c99_relative_index(argc > 0 ? args[0] : kiln_c99_undefined(),
+                                                   buffer->byte_length, 0);
+            size_t end = kiln_c99_relative_index(argc > 1 ? args[1] : kiln_c99_undefined(),
+                                                 buffer->byte_length, buffer->byte_length);
+            size_t count = end >= start ? end - start : 0;
+            status = kiln_c99_new_typed_buffer(result, count);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            if (count != 0 && buffer->bytes != NULL) {
+                kiln_typed_buffer *copy = kiln_c99_typed_buffer_of(*result);
+                memcpy(copy->bytes, buffer->bytes + start, count);
+            }
+            return KILN_C99_OK;
+        }
+        KILN_C99_REFUSE("an ArrayBuffer method this backend has not implemented");
+    }
     if (receiver.tag == KILN_VALUE_TYPED_ARRAY) {
         kiln_typed_array *view = kiln_c99_typed_array_of(receiver);
         if (code == KILN_C99_METHOD_ARRAY_GENERIC_MAP ||
