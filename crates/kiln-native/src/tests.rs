@@ -5028,6 +5028,66 @@ fn native_dynamic_import_initializes_once_and_stays_lazy() {
 }
 
 #[test]
+fn native_failed_dynamic_dependency_is_cached_with_original_error() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping dynamic failure integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-dynamic-failure-cache");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).expect("write root package");
+    fs::write(
+        root.path.join("dep.mjs"),
+        "globalThis.depCount = (globalThis.depCount || 0) + 1; throw 'boom';\n",
+    )
+    .expect("write throwing dependency");
+    fs::write(
+        root.path.join("target.mjs"),
+        "import './dep.mjs'; globalThis.targetCount = (globalThis.targetCount || 0) + 1;\n",
+    )
+    .expect("write dependent module");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "const first = await import('./target.mjs').catch(error => error);\n\
+         const second = await import('./target.mjs').catch(error => error);\n\
+         console.log(globalThis.depCount, globalThis.targetCount || 0, first === second, first);\n",
+    )
+    .expect("write failure entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("dynamic failure graph compiles");
+    for (profile, name) in [
+        (NativeProfile::Dev, "dev"),
+        (NativeProfile::Release, "release"),
+    ] {
+        let report = NativeBuilder::new(
+            test_cache(root.path.join(format!("cache-{name}"))),
+            toolchain.clone(),
+        )
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join(format!("program-{name}")),
+                profile,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .expect("dynamic failure graph builds and runs");
+        assert_eq!(
+            report.stdout, b"1 0 true boom at unknown native operation\n",
+            "profile {name}"
+        );
+    }
+}
+
+#[test]
 fn a_second_build_reuses_every_material_artifact_and_runs() {
     let Some(toolchain) = Toolchain::discover().ok() else {
         eprintln!("skipping native integration: no C compiler found");

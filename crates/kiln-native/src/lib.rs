@@ -6292,7 +6292,7 @@ static int kiln_graph_enter(void *opaque) {
         if node.source == ModuleSource::CommonJs {
             writeln!(
                 evaluation,
-                "            status = kiln_graph_load_commonjs(&kiln_commonjs_{index}, result, result);\n            if (status != 0) {{ if (result->tag != KILN_VALUE_STRING || result->len == 0) {{ if (status == KILN_C99_HOST_ERROR && kiln_cli_last_host_error.tag == KILN_VALUE_STRING && kiln_cli_last_host_error.len != 0) *result = kiln_cli_last_host_error; else *result = kiln_graph_diagnostic(\"commonjs-evaluate\", {}); }} return status; }}",
+                "            status = kiln_graph_load_commonjs(&kiln_commonjs_{index}, result, result);\n            if (status != 0) {{ if (result->tag == KILN_VALUE_UNDEFINED) {{ if (status == KILN_C99_HOST_ERROR && kiln_cli_last_host_error.tag == KILN_VALUE_STRING && kiln_cli_last_host_error.len != 0) *result = kiln_cli_last_host_error; else *result = kiln_graph_diagnostic(\"commonjs-evaluate\", {}); }} return status; }}",
                 native_c_string(&logical_paths[index])
             )
             .unwrap();
@@ -6327,7 +6327,7 @@ static int kiln_graph_enter(void *opaque) {
                 kiln_launcher_promise_view *promise = (kiln_launcher_promise_view *)(uintptr_t)state->active_promise.bits;
                 if (promise != NULL) {{
                     if (promise->state == 2 /* KILN_C99_REJECTED */) {{
-                        *result = kiln_cli_describe_error(promise->value);
+                        *result = promise->value;
                         return KILN_C99_THROWN;
                     }}
                     if (promise->state == 0 /* KILN_C99_PENDING */) {{
@@ -6450,7 +6450,7 @@ static int kiln_graph_enter(void *opaque) {
         );
         writeln!(
             evaluation,
-            "            if (status != 0) {{ if (result->tag != KILN_VALUE_STRING || result->len == 0) {{ if (status == KILN_C99_HOST_ERROR && kiln_cli_last_host_error.tag == KILN_VALUE_STRING && kiln_cli_last_host_error.len != 0) *result = kiln_cli_last_host_error; else *result = kiln_graph_diagnostic(\"module-enter\", {}); }} return status; }}",
+            "            if (status != 0) {{ if (result->tag == KILN_VALUE_UNDEFINED) {{ if (status == KILN_C99_HOST_ERROR && kiln_cli_last_host_error.tag == KILN_VALUE_STRING && kiln_cli_last_host_error.len != 0) *result = kiln_cli_last_host_error; else *result = kiln_graph_diagnostic(\"module-enter\", {}); }} return status; }}",
             native_c_string(&logical_paths[index])
         )
         .unwrap();
@@ -6465,7 +6465,7 @@ static int kiln_graph_enter(void *opaque) {
                     return 0;
                 }}
                 if (promise != NULL && promise->state == 2 /* KILN_C99_REJECTED */) {{
-                    *result = kiln_cli_describe_error(promise->value);
+                    *result = promise->value;
                     return KILN_C99_THROWN;
                 }}
                 {}_publish_exports({exports});
@@ -6547,7 +6547,7 @@ static int kiln_graph_enter(void *opaque) {
             if let Some(&provider) = indices.get(&dependency.target) {
                 writeln!(
                     output,
-                    "            {}status = kiln_graph_ensure_module(graph, (size_t){provider}); if (status != KILN_C99_OK) {{ graph->module_states[index].result = graph->module_states[{provider}].result; return status; }}",
+                    "            {}status = kiln_graph_ensure_module(graph, (size_t){provider}); if (status != KILN_C99_OK) {{ graph->module_states[index].result = graph->module_states[{provider}].result; graph->module_states[index].phase = KILN_MODULE_FAILED; graph->module_states[index].failure_status = status; return status; }}",
                     if dependency_index == 0 { "int " } else { "" }
                 )
                 .unwrap();
