@@ -551,12 +551,12 @@ fn pinned_js_format_survives_graph_entry_without_reclassification() {
         "main.mjs",
         "import value from './dep.js'; console.log(value);",
     );
-    let dep = project.write("dep.js", "module.exports = 42;");
+    let dep = project.write("dep.js", "export default 42;");
     let dep_canonical = fs::canonicalize(&dep).unwrap();
     let resolver = PinnedPackageResolver::new_with_node_builtins_and_formats(
         &project.root,
         [(entry.clone(), "./dep.js".to_owned(), dep.clone())],
-        [(dep_canonical, NodeModuleFormat::CommonJs)],
+        [(dep_canonical, NodeModuleFormat::EsModule)],
     )
     .expect("pinned resolver");
     let graph = ModuleGraph::build_node(
@@ -570,7 +570,7 @@ fn pinned_js_format_survives_graph_entry_without_reclassification() {
         graph
             .modules()
             .find(|node| node.path.ends_with("dep.js"))
-            .is_some_and(|node| node.source == ModuleSource::CommonJs)
+            .is_some_and(|node| node.source == ModuleSource::Source)
     );
 }
 
