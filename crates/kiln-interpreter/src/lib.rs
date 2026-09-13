@@ -10392,6 +10392,74 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         arguments: &[Value],
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
+        if native == Native::ProcessStartRaw {
+            let bytes = match arguments.first() {
+                Some(Value::TypedArray(bytes)) => bytes.bytes(),
+                value => {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: format!(
+                            "process host request must be Uint8Array, received {}",
+                            value.map_or("undefined", Value::type_name)
+                        ),
+                    });
+                }
+            };
+            let request = kiln_runtime::decode_process_wire(&bytes).map_err(|error| {
+                ExecutionError::Host {
+                    instruction,
+                    message: format!("invalid process host request: {error:?}"),
+                }
+            })?;
+            let promise = PromiseState::pending();
+            let node = self.async_host.ok_or_else(|| ExecutionError::Host {
+                instruction,
+                message: "process.run requires the Node execution Adapter".into(),
+            })?;
+            let command = String::from_utf8(request.command).map_err(|_| {
+                ExecutionError::TypeErrorMessage {
+                    message: "process command must be UTF-8".into(),
+                }
+            })?;
+            let args = request
+                .args
+                .into_iter()
+                .map(|arg| {
+                    String::from_utf8(arg).map_err(|_| ExecutionError::TypeErrorMessage {
+                        message: "process argument must be UTF-8".into(),
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let id = unsafe {
+                ActiveAsyncHostOps::start(
+                    &mut *node,
+                    AsyncHostOp::ProcessRun {
+                        command,
+                        args,
+                        stdin: request.stdin,
+                    },
+                    true,
+                )
+            };
+            self.push_pending_host(PendingHostRequest {
+                request: id,
+                promise: Rc::clone(&promise),
+                conversion: HostResultConversion::Direct,
+            });
+            let mut result = ObjectData::default();
+            result.set("requestId", Value::Number(id.get() as f64));
+            result.set("promise", Value::Promise(promise));
+            return Ok(Value::Object(Rc::new(RefCell::new(result))));
+        }
+        if native == Native::ProcessCancelRaw {
+            let id = arguments.first().map(Value::as_number).unwrap_or(0.0) as u64;
+            let node = self.async_host.ok_or_else(|| ExecutionError::Host {
+                instruction,
+                message: "process.run requires the Node execution Adapter".into(),
+            })?;
+            return Ok(Value::Boolean(unsafe {
+                ActiveAsyncHostOps::cancel(&mut *node, RequestId::new(id))
+            }));
+        }
         let path = match arguments.first() {
             Some(Value::String(path)) => path.clone(),
             value => {
@@ -14422,7 +14490,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         if matches!(
             native,
-            Native::NodeFsReadFile
+            Native::ProcessStartRaw
+                | Native::ProcessCancelRaw
+                | Native::NodeFsReadFile
                 | Native::NodeFsWriteFile
                 | Native::NodeFsAppendFile
                 | Native::NodeFsStat
@@ -25306,6 +25376,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         globals.set_non_enumerable("Map", Value::Native(Native::MapConstructor, realm));
         globals.set_non_enumerable("performance", Value::Native(Native::Performance, realm));
         globals.set_non_enumerable("Reflect", Value::Native(Native::Reflect, realm));
+        globals.set_non_enumerable(
+            "__kilnHostProcessStart",
+            Value::Native(Native::ProcessStartRaw, realm),
+        );
+        globals.set_non_enumerable(
+            "__kilnHostProcessCancel",
+            Value::Native(Native::ProcessCancelRaw, realm),
+        );
         globals.set_non_enumerable(
             "Intl",
             Value::Native(Native::Intl(intl::Op::Namespace), realm),
@@ -37057,6 +37135,8 @@ fn call_native(
         | Native::ProcessHrtimeBigInt
         | Native::ProcessCwd
         | Native::ProcessKill
+        | Native::ProcessStartRaw
+        | Native::ProcessCancelRaw
         | Native::ProcessStdinSetRawMode
         | Native::UrlConstructor
         | Native::UrlSearchParamsGet
@@ -37177,6 +37257,30 @@ fn node_host_value(value: AsyncHostValue) -> Result<Value, ExecutionError> {
                     accepted.resource.id.get()
                 ),
             });
+        }
+        AsyncHostValue::ProcessOutput(output) => {
+            let mut object = ObjectData::default();
+            object.set(
+                "stdout",
+                node_host_value(AsyncHostValue::Bytes(output.stdout))?,
+            );
+            object.set(
+                "stderr",
+                node_host_value(AsyncHostValue::Bytes(output.stderr))?,
+            );
+            object.set(
+                "exitCode",
+                output
+                    .exit_code
+                    .map_or(Value::Null, |code| Value::Number(code as f64)),
+            );
+            object.set(
+                "signal",
+                output
+                    .signal
+                    .map_or(Value::Null, |signal| Value::Number(signal as f64)),
+            );
+            Value::Object(Rc::new(RefCell::new(object)))
         }
         AsyncHostValue::ResourceState(state) => {
             return Err(ExecutionError::Host {
