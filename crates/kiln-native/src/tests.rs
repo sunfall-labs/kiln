@@ -6445,7 +6445,7 @@ fn commonjs_shared_identity_includes_observable_absolute_path() {
                 )
             })
             .collect::<Vec<_>>();
-        let topology = graph_shared_topology_digest(&graph, &modules);
+        let topology = graph_shared_topology_digest(&graph, &modules, None);
         let public = graph_shared_public_digest(topology, &modules)
             .expect("CommonJS graph has absolute module paths");
         let module_sources = modules
@@ -6565,7 +6565,7 @@ fn shared_graph_wrapper_emits_and_links_without_static_value_arrays() {
         .collect::<Vec<_>>();
     let wrapper_symbol = format!(
         "kiln_shared_graph_{}",
-        graph_shared_topology_digest(&graph, &modules).to_hex()
+        graph_shared_topology_digest(&graph, &modules, None).to_hex()
     );
     let wrapper =
         graph_shared_wrapper_source(&graph, &modules, &wrapper_symbol).expect("wrapper emits");
