@@ -7996,3 +7996,60 @@ fn native_node_path_commonjs_require_builds_and_runs() {
     let stdout = String::from_utf8_lossy(&result.stdout);
     assert_eq!(stdout.trim(), "cjs-path: foo/bar true true");
 }
+
+#[test]
+fn executable_host_refusal_preserves_bounded_diagnostics() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let toolchain = match Toolchain::discover() {
+        Ok(toolchain) => toolchain,
+        Err(ToolchainError::NoCompiler { .. }) => return,
+        Err(error) => panic!("compiler probe failed: {error}"),
+    };
+    let project = TestDirectory::new("kiln-native-host-refusal-fs");
+    let entry = project.path.join("main.mjs");
+    fs::write(&entry, "console.log('ok');").expect("write fixture");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("source graph compiles");
+    let output = project.path.join("program");
+    let options = NativeBuildOptions::new(output, NativeProfile::Dev);
+    let report = project
+        .builder(toolchain)
+        .build_graph(&graph, &options)
+        .expect("native build succeeds");
+
+    let bad_result_path = project.path.join("nonexistent_dir").join("result.bin");
+    let out = Command::new(&report.output)
+        .env(
+            kiln_native_runtime::NATIVE_RESULT_PATH_ENV,
+            &bad_result_path,
+        )
+        .output_when_launchable()
+        .expect("run executable with bad result path");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        stderr, "kiln: the host refused an operation: filesystem access\n",
+        "stderr should preserve filesystem access refusal diagnostic"
+    );
+
+    if Path::new("/dev/full").exists() {
+        if let Ok(dev_full) = fs::OpenOptions::new().write(true).open("/dev/full") {
+            let out_io = Command::new(&report.output)
+                .stdout(dev_full)
+                .output_when_launchable()
+                .expect("run executable with full stdout");
+            assert!(!out_io.status.success());
+            let stderr_io = String::from_utf8_lossy(&out_io.stderr);
+            assert_eq!(
+                stderr_io, "kiln: the host refused an operation: terminal I/O\n",
+                "stderr should preserve terminal I/O refusal diagnostic"
+            );
+        }
+    }
+}

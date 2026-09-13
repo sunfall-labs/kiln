@@ -9,7 +9,7 @@
 use std::sync::OnceLock;
 
 /// Version of the generated native runtime source and its C ABI.
-pub const NATIVE_RUNTIME_VERSION: u32 = 10;
+pub const NATIVE_RUNTIME_VERSION: u32 = 11;
 
 /// Environment variable that enables private scalar-result sidecar emission by the CLI launcher.
 pub const NATIVE_RESULT_PATH_ENV: &str = "KILN_NATIVE_RESULT_PATH_V1";
@@ -318,7 +318,7 @@ const EMBEDDING_HEADER: &str = r#"/* Kiln native embedding ABI. */
 #include <stddef.h>
 #include <stdint.h>
 
-#define KILN_NATIVE_RUNTIME_VERSION 10
+#define KILN_NATIVE_RUNTIME_VERSION 11
 #define KILN_C_ABI_VERSION 1
 #define KILN_HOST_ABI_VERSION 3
 #define KILN_MODULE_API_VERSION 2
@@ -433,6 +433,8 @@ _Static_assert(offsetof(kiln_module_api_v2, dispose)
                        + sizeof(((kiln_module_api_v2 *)0)->read),
                "kiln_module_api_v2.dispose ABI offset");
 #endif
+
+extern kiln_value kiln_cli_last_host_error;
 
 #endif /* KILN_NATIVE_EMBEDDING_H */
 "#;
@@ -684,6 +686,8 @@ kiln_value kiln_cli_describe_error(kiln_value value) {
     return value;
 }
 
+kiln_value kiln_cli_last_host_error = { KILN_VALUE_UNDEFINED, 0, {0} };
+
 void kiln_cli_report_failure_in(int status, kiln_value value, const char *phase) {
     value = kiln_cli_describe_error(value);
     fputs("kiln: ", stderr);
@@ -726,7 +730,18 @@ void kiln_cli_report_failure_in(int status, kiln_value value, const char *phase)
         fputs("a binding was read before it was initialised\n", stderr);
         return;
     case KILN_C99_HOST_ERROR:
-        fputs("the host refused an operation\n", stderr);
+        fputs("the host refused an operation", stderr);
+        if (value.tag == KILN_VALUE_STRING && value.len != 0 && value.ptr != NULL) {
+            fputs(": ", stderr);
+            fwrite(value.ptr, 1, value.len, stderr);
+        } else if (kiln_cli_last_host_error.tag == KILN_VALUE_STRING && kiln_cli_last_host_error.len != 0 && kiln_cli_last_host_error.ptr != NULL) {
+            fputs(": ", stderr);
+            fwrite(kiln_cli_last_host_error.ptr, 1, kiln_cli_last_host_error.len, stderr);
+        } else if (phase != NULL) {
+            fputs(" in ", stderr);
+            fputs(phase, stderr);
+        }
+        fputc('\n', stderr);
         return;
     case KILN_C99_INVALID_ARGUMENT:
         fputs("an argument was not valid\n", stderr);
@@ -840,15 +855,41 @@ int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
     FILE *sink;
     (void)context;
     if (result == NULL || (argc != 0 && arguments == NULL)) {
+        kiln_cli_last_host_error = (kiln_value){ KILN_VALUE_STRING, 15, { .ptr = "host capability" } };
+        if (result != NULL) {
+            *result = kiln_cli_last_host_error;
+        }
         return KILN_C99_HOST_ERROR;
     }
     if (operation == KILN_HOST_OP_CLOCK_NOW) {
-        return argc == 0 ? kiln_cli_clock_now(result) : KILN_C99_HOST_ERROR;
+        if (argc != 0) {
+            kiln_cli_last_host_error = (kiln_value){ KILN_VALUE_STRING, 10, { .ptr = "clock time" } };
+            *result = kiln_cli_last_host_error;
+            return KILN_C99_HOST_ERROR;
+        }
+        int status = kiln_cli_clock_now(result);
+        if (status != KILN_C99_OK) {
+            kiln_cli_last_host_error = (kiln_value){ KILN_VALUE_STRING, 10, { .ptr = "clock time" } };
+            *result = kiln_cli_last_host_error;
+        }
+        return status;
     }
     if (operation == KILN_HOST_OP_ENTROPY_U64) {
-        return argc == 0 ? kiln_cli_entropy_u64(result) : KILN_C99_HOST_ERROR;
+        if (argc != 0) {
+            kiln_cli_last_host_error = (kiln_value){ KILN_VALUE_STRING, 7, { .ptr = "entropy" } };
+            *result = kiln_cli_last_host_error;
+            return KILN_C99_HOST_ERROR;
+        }
+        int status = kiln_cli_entropy_u64(result);
+        if (status != KILN_C99_OK) {
+            kiln_cli_last_host_error = (kiln_value){ KILN_VALUE_STRING, 7, { .ptr = "entropy" } };
+            *result = kiln_cli_last_host_error;
+        }
+        return status;
     }
     if (operation != KILN_HOST_OP_WRITE_STDOUT && operation != KILN_HOST_OP_WRITE_STDERR) {
+        kiln_cli_last_host_error = (kiln_value){ KILN_VALUE_STRING, 15, { .ptr = "host capability" } };
+        *result = kiln_cli_last_host_error;
         return KILN_C99_HOST_ERROR;
     }
     /* Which stream a line went to is observable -- a caller that redirects one and not the other
@@ -857,13 +898,19 @@ int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
     sink = operation == KILN_HOST_OP_WRITE_STDERR ? stderr : stdout;
     for (index = 0; index < argc; ++index) {
         if (index != 0 && fputc(' ', sink) == EOF) {
+            kiln_cli_last_host_error = (kiln_value){ KILN_VALUE_STRING, 12, { .ptr = "terminal I/O" } };
+            *result = kiln_cli_last_host_error;
             return KILN_C99_HOST_ERROR;
         }
         if (kiln_cli_write_value_to(sink, arguments[index]) != KILN_C99_OK) {
+            kiln_cli_last_host_error = (kiln_value){ KILN_VALUE_STRING, 12, { .ptr = "terminal I/O" } };
+            *result = kiln_cli_last_host_error;
             return KILN_C99_HOST_ERROR;
         }
     }
     if (fputc('\n', sink) == EOF || fflush(sink) != 0) {
+        kiln_cli_last_host_error = (kiln_value){ KILN_VALUE_STRING, 12, { .ptr = "terminal I/O" } };
+        *result = kiln_cli_last_host_error;
         return KILN_C99_HOST_ERROR;
     }
     *result = kiln_cli_undefined();
@@ -977,7 +1024,11 @@ int main(int argc, char **argv) {
         kiln_cli_report_failure_in(status, result, phase);
         return 1;
     }
-    return kiln_cli_write_result(result) == KILN_C99_OK ? 0 : 1;
+    if (kiln_cli_write_result(result) != KILN_C99_OK) {
+        kiln_cli_report_failure_in(KILN_C99_HOST_ERROR, (kiln_value){ KILN_VALUE_STRING, 17, { .ptr = "filesystem access" } }, "result write");
+        return 1;
+    }
+    return 0;
 }
 "#;
 
@@ -1013,7 +1064,7 @@ mod tests {
 
     #[test]
     fn runtime_identity_tracks_native_launcher_changes() {
-        assert_eq!(NATIVE_RUNTIME_VERSION, 10);
+        assert_eq!(NATIVE_RUNTIME_VERSION, 11);
         assert!(embedding_header().contains(&format!(
             "#define KILN_NATIVE_RUNTIME_VERSION {NATIVE_RUNTIME_VERSION}"
         )));
@@ -1550,6 +1601,9 @@ int main(void) {
                 + "kiln: call depth exceeded\n"
                 + "kiln: a binding was read before it was initialised\n"
                 + "kiln: the host refused an operation\n"
+                + "kiln: the host refused an operation: filesystem access\n"
+                + "kiln: the host refused an operation: terminal I/O\n"
+                + "kiln: the host refused an operation in the turn loop\n"
                 + "kiln: an argument was not valid\n"
                 + "kiln: the program stopped with status -99\n"
         );
@@ -1716,6 +1770,15 @@ int main(void) {
     kiln_cli_report_failure_in(KILN_C99_CALL_DEPTH_ERROR, value, NULL);
     kiln_cli_report_failure_in(KILN_C99_UNINITIALIZED_ERROR, value, NULL);
     kiln_cli_report_failure_in(KILN_C99_HOST_ERROR, value, NULL);
+    value.tag = KILN_VALUE_STRING;
+    value.ptr = "filesystem access";
+    value.len = sizeof("filesystem access") - 1;
+    kiln_cli_report_failure_in(KILN_C99_HOST_ERROR, value, NULL);
+    value.ptr = "terminal I/O";
+    value.len = sizeof("terminal I/O") - 1;
+    kiln_cli_report_failure_in(KILN_C99_HOST_ERROR, value, NULL);
+    value = (kiln_value){ KILN_VALUE_UNDEFINED, 0, {0} };
+    kiln_cli_report_failure_in(KILN_C99_HOST_ERROR, value, "the turn loop");
     kiln_cli_report_failure_in(KILN_C99_INVALID_ARGUMENT, value, NULL);
     kiln_cli_report_failure_in(-99, value, NULL);
     return 0;

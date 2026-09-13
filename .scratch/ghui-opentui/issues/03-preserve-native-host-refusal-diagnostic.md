@@ -1,6 +1,6 @@
 # Preserve the operation behind a native host refusal
 
-Status: ready-for-agent
+Status: resolved
 
 ## Failure
 

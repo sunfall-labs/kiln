@@ -5414,6 +5414,7 @@ extern int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
                               const kiln_value *arguments, kiln_value *result);
 extern int kiln_cli_write_result(kiln_value value);
 extern void kiln_cli_report_failure_in(int status, kiln_value value, const char *phase);
+extern kiln_value kiln_cli_last_host_error;
 extern kiln_value kiln_cli_describe_error(kiln_value value);
 extern int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value *out, int depth, kiln_value *thrown);
@@ -5431,6 +5432,7 @@ extern int kiln_realm_gc_mark_value(void *heap, const void *value);
 #define KILN_GC_PHASE_RESET 2
 #define KILN_C99_THROWN (-7)
 #define KILN_C99_CONTROL_ERROR (-2)
+#define KILN_C99_HOST_ERROR (-3)
 extern int kiln_c99_new_object(kiln_value *result);
 extern int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value value, int depth, kiln_value *thrown);
@@ -5723,7 +5725,7 @@ static int kiln_graph_enter(void *opaque) {
         if node.source == ModuleSource::CommonJs {
             writeln!(
                 evaluation,
-                "            status = kiln_graph_load_commonjs(&kiln_commonjs_{index}, result, result);\n            if (status != 0) {{ if (result->tag != KILN_VALUE_STRING || result->len == 0) *result = kiln_graph_diagnostic(\"commonjs-evaluate\", {}); return status; }}",
+                "            status = kiln_graph_load_commonjs(&kiln_commonjs_{index}, result, result);\n            if (status != 0) {{ if (result->tag != KILN_VALUE_STRING || result->len == 0) {{ if (status == KILN_C99_HOST_ERROR && kiln_cli_last_host_error.tag == KILN_VALUE_STRING && kiln_cli_last_host_error.len != 0) *result = kiln_cli_last_host_error; else *result = kiln_graph_diagnostic(\"commonjs-evaluate\", {}); }} return status; }}",
                 native_c_string(&logical_paths[index])
             )
             .unwrap();
@@ -5879,7 +5881,7 @@ static int kiln_graph_enter(void *opaque) {
         );
         writeln!(
             evaluation,
-            "            if (status != 0) {{ if (result->tag != KILN_VALUE_STRING || result->len == 0) *result = kiln_graph_diagnostic(\"module-enter\", {}); return status; }}",
+            "            if (status != 0) {{ if (result->tag != KILN_VALUE_STRING || result->len == 0) {{ if (status == KILN_C99_HOST_ERROR && kiln_cli_last_host_error.tag == KILN_VALUE_STRING && kiln_cli_last_host_error.len != 0) *result = kiln_cli_last_host_error; else *result = kiln_graph_diagnostic(\"module-enter\", {}); }} return status; }}",
             native_c_string(&logical_paths[index])
         )
         .unwrap();
@@ -6004,7 +6006,10 @@ static int kiln_cli_run_realm(int argc, char **argv, int writes_result) {
         }
     }
     if (status != 0) kiln_cli_report_failure_in(status, graph.result, phase);
-    if (writes_result && status == 0 && kiln_cli_write_result(graph.entry_result) != 0) status = 1;
+    if (writes_result && status == 0 && kiln_cli_write_result(graph.entry_result) != 0) {
+        kiln_cli_report_failure_in(KILN_C99_HOST_ERROR, (kiln_value){ KILN_VALUE_STRING, 17, { .ptr = "filesystem access" } }, "result write");
+        status = 1;
+    }
     destroy_status = kiln_realm_destroy(realm);
     if (status == 0) status = destroy_status;
     return status == 0 ? 0 : 1;
