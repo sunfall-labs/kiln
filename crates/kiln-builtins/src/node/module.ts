@@ -1,5 +1,7 @@
 // kiln-builtins: node:module implementation (Phase 5.2, ADR 0005)
 
+import { URL as NodeURL } from "node:url";
+
 export const builtinModules: string[] = [
   "assert",
   "assert/strict",
@@ -57,14 +59,28 @@ export function isBuiltin(moduleName: string): boolean {
   return builtinModules.indexOf(name) !== -1;
 }
 
-export function createRequire(_filename: string | any): (specifier: string) => any {
-  const globalRequire = (globalThis as any).require;
-  if (typeof globalRequire === "function") {
-    return globalRequire;
+export function createRequire(filename: string | any): (specifier: string) => any {
+  const isUrlObject =
+    filename instanceof NodeURL ||
+    (filename !== null && typeof filename === "object" && typeof filename.href === "string");
+  const isAbsoluteFilename =
+    typeof filename === "string" &&
+    (filename.startsWith("/") || /^[A-Za-z]:[\\/]/.test(filename));
+  const isFileUrlObject =
+    isUrlObject &&
+    (filename.protocol === "file:" ||
+      (typeof filename.href === "string" && filename.href.startsWith("file://")));
+  const isFileUrlString = typeof filename === "string" && filename.startsWith("file://");
+  if (typeof filename !== "string" && !isFileUrlObject ||
+      (typeof filename === "string" && !isAbsoluteFilename && !isFileUrlString)) {
+    throw new TypeError("The argument must be an absolute path or a file URL");
   }
-  return (specifier: string) => {
-    throw new Error(`Cannot find module '${specifier}'`);
-  };
+  // The host captures this immutable filename and binds the returned callable to the
+  // graph loader for that importer. Keeping the hook private prevents a process-global
+  // require from bypassing graph identity and cache ownership.
+  return __kilnHostModuleCreateRequire(
+    typeof filename === "string" ? filename : filename.href,
+  );
 }
 
 export class Module {

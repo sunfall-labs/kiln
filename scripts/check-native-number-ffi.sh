@@ -55,56 +55,12 @@ kiln_number_sha256_stream() {
 # the two identities independently of the packager so a checkout build and installed archive share
 # native cache entries.
 KILN_NUMBER_EXPECTED_SOURCE_DIGEST=$(
-	for KILN_NUMBER_SOURCE in \
-		Cargo.lock \
-		crates/kiln-artifact-cache/Cargo.toml \
-		crates/kiln-artifact-cache/src/eviction.rs \
-		crates/kiln-artifact-cache/src/lib.rs \
-		crates/kiln-digest/Cargo.toml \
-		crates/kiln-digest/src/lib.rs \
-		crates/kiln-host-abi/Cargo.toml \
-		crates/kiln-host-abi/src/lib.rs \
-		crates/kiln-number-core/Cargo.toml \
-		crates/kiln-number-core/src/lib.rs \
-		crates/kiln-native-number-ffi/Cargo.toml \
-		crates/kiln-native-number-ffi/src/ffi.rs \
-		crates/kiln-native-number-ffi/src/lib.rs \
-		crates/kiln-native-number-abi/Cargo.toml \
-		crates/kiln-native-number-abi/src/lib.rs \
-		crates/kiln-node-path/Cargo.toml \
-		crates/kiln-node-path/src/lib.rs \
-		crates/kiln-temporal/Cargo.toml \
-		crates/kiln-temporal/src/lib.rs \
-		crates/kiln-intl/Cargo.toml \
-		crates/kiln-intl/src/collator.rs \
-		crates/kiln-intl/src/datetime.rs \
-		crates/kiln-intl/src/displaynames.rs \
-		crates/kiln-intl/src/duration.rs \
-		crates/kiln-intl/src/lib.rs \
-		crates/kiln-intl/src/list.rs \
-		crates/kiln-intl/src/locale.rs \
-		crates/kiln-intl/src/number.rs \
-		crates/kiln-intl/src/parts.rs \
-		crates/kiln-intl/src/plurals.rs \
-		crates/kiln-intl/src/relative.rs \
-		crates/kiln-intl/src/segmenter.rs \
-		crates/kiln-json/Cargo.toml \
-		crates/kiln-json/src/lib.rs \
-		crates/kiln-json/src/scalar.rs \
-		crates/kiln-runtime/Cargo.toml \
-		crates/kiln-runtime/src/http_body.rs \
-		crates/kiln-runtime/src/http_client.rs \
-		crates/kiln-runtime/src/http_engine.rs \
-		crates/kiln-runtime/src/lib.rs \
-		crates/kiln-runtime/src/node_http.rs \
-		crates/kiln-runtime/src/node_http_agent.rs \
-		crates/kiln-runtime/src/node_net.rs \
-		crates/kiln-runtime/src/node_stream.rs \
-		crates/kiln-runtime/src/scripted_transport.rs; do
+	while IFS= read -r KILN_NUMBER_SOURCE || [[ -n $KILN_NUMBER_SOURCE ]]; do
+		[[ -z $KILN_NUMBER_SOURCE ]] && continue
 		KILN_NUMBER_SOURCE_SIZE=$(wc -c <"$KILN_NUMBER_SOURCE" | tr -d '[:space:]')
 		printf '%s\0%s\0' "$KILN_NUMBER_SOURCE" "$KILN_NUMBER_SOURCE_SIZE"
 		dd if="$KILN_NUMBER_SOURCE" bs=65536 2>/dev/null
-	done | kiln_number_sha256_stream
+	done < crates/kiln-native/provider-sources.txt | kiln_number_sha256_stream
 )
 KILN_NUMBER_MANIFEST_SOURCE_DIGEST=$(
 	sed -n 's/^  "source_sha256": "\([0-9a-f]*\)",$/\1/p' "$KILN_NUMBER_MANIFEST"

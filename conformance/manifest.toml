@@ -1381,3 +1381,58 @@ min-nan throws TypeError
 number-sym throws TypeError
 """
 
+[[test]]
+id = "regress/r14-dynamic-import-attributes"
+group = "regress"
+source = "regress/r14-dynamic-import-attributes.mjs"
+status = "runnable"
+features = ["dynamic-import", "import-attributes", "promise-rejection"]
+catches = """
+Dynamic import must coerce its specifier before reading import attributes, invoke each getter once,
+and turn a throwing attribute getter into a rejected Promise. Ordinary imports accept no options or
+an empty `with` object, while unsupported types reject by name.
+"""
+expected_stdout = """
+returned promise
+TypeError unsupported import attribute `type`
+specifier,with,type
+throwing returned promise
+getter rejection getter boom
+42 42
+options-null TypeError
+options-number TypeError
+options-symbol TypeError
+options-bigint TypeError
+with-null TypeError
+with-number TypeError
+with-symbol TypeError
+with-bigint TypeError
+type-number TypeError
+type-undefined TypeError
+type-unsupported TypeError
+unknown-attribute TypeError
+unknown-before-throw Error
+bad-before-throw Error
+asset-missing-type TypeError
+source-file-type TypeError
+throwing-attribute Error
+inherited-type ok
+non-enumerable-type ok
+"""
+
+[[test]]
+id = "regress/r15-async-generator-yield-star"
+group = "regress"
+source = "regress/r15-async-generator-yield-star.js"
+status = "runnable"
+features = ["async-generators", "yield-star", "for-await-of", "iterator-result-accessors", "abrupt-completion", "try-finally"]
+catches = """
+An async generator delegating with `yield*` must expose the delegated iterator result's value to
+`for await`, read each result accessor once, and resume its own catch/finally path when the value
+getter throws. The internal abrupt completion must not be sent back to the delegate's `throw`.
+"""
+expected_stdout = """
+42,9 done,value
+8 true done,value
+getter boom 0 true
+"""

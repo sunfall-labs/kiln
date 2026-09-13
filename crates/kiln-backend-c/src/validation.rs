@@ -380,6 +380,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
             feature: "a `with` statement in the native backend".to_owned(),
         }),
         Instruction::DynamicImport
+        | Instruction::DynamicImportWithOptions
         | Instruction::Const(_)
         | Instruction::LoadTemplateObject(_)
         | Instruction::LoadLocal(_)
@@ -781,6 +782,13 @@ pub(crate) fn stack_effect(
                 Err(underflow(1))
             } else {
                 Ok((height, false))
+            }
+        }
+        Instruction::DynamicImportWithOptions => {
+            if height < 2 {
+                Err(underflow(2))
+            } else {
+                Ok((height - 1, false))
             }
         }
         // Both write a slot in place and touch no stack.

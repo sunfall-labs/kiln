@@ -17,11 +17,12 @@ use kiln_hir::Module;
 use kiln_host_abi::HostOps;
 use kiln_interpreter::{
     Cell, CommonJsModuleLoader, CommonJsRequire, ExecutionCapabilities, ExecutionError,
-    ExecutionLimits, ExecutionResult, ModuleBinding, ModulePlan, ModuleRealmSession,
-    ModuleSelfExport, ModuleSelfImport, ModuleValueRef, PlannedModule, Value,
-    execute_module_in_runtime_with_loader, execute_node_module_in_session_with_loader,
-    node_builtin_commonjs_value, node_builtin_export_names, node_builtin_exports, ordinary_object,
-    own_data_property, parse_json_module, read_through_cell,
+    ExecutionLimits, ExecutionResult, ImportAttributes, ModuleBinding, ModuleLoadError,
+    ModuleLoadRequest, ModuleLoaderService, ModulePlan, ModuleRealmSession, ModuleSelfExport,
+    ModuleSelfImport, ModuleValueRef, PlannedModule, Value, execute_module_in_runtime_with_loader,
+    execute_node_module_in_session_with_loader, node_builtin_commonjs_value,
+    node_builtin_export_names, node_builtin_exports, ordinary_object, own_data_property,
+    parse_json_module, read_through_cell,
 };
 use kiln_ir::{
     BYTECODE_VERSION, CompileDiagnostic, ExportBinding, Instruction, ModuleProgram, Program,
@@ -29,7 +30,7 @@ use kiln_ir::{
 };
 use kiln_module_resolver::{
     ModuleResolver, NodeBuiltin, NodeModuleFormat, NodeRequestKind, PathRole, ResolutionKind,
-    ResolutionPolicy, ResolvedModule, SUPPORTED_EXTENSIONS,
+    ResolutionPolicy, ResolvedModule, SUPPORTED_EXTENSIONS, is_asset_extension,
 };
 use kiln_runtime::{ClockCapability, RealmCapabilities, RealmRuntime};
 
@@ -119,6 +120,33 @@ pub struct Dependency {
     pub target: PathBuf,
 }
 
+/// A literal lazy loader edge.  Unlike an ordinary dependency, its resolver base is captured
+/// from the `createRequire` call site (which may be a different file than the module containing
+/// the call), so both values are part of the graph identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeDependency {
+    pub importer: PathBuf,
+    pub specifier: String,
+    pub target: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeFailure {
+    pub importer: PathBuf,
+    pub specifier: String,
+    pub message: String,
+}
+fn runtime_importer_path(raw: &str) -> Result<PathBuf, String> {
+    if raw.starts_with("file:") {
+        let url =
+            url::Url::parse(raw).map_err(|error| format!("invalid file URL `{raw}`: {error}"))?;
+        return url
+            .to_file_path()
+            .map_err(|()| format!("file URL does not identify a local path: {raw}"));
+    }
+    Ok(PathBuf::from(raw))
+}
+
 /// Closed-world demand for one executable: which modules are live, which
 /// export slots each one must keep, and which import edges are live.
 ///
@@ -151,6 +179,8 @@ pub struct ModuleNode {
     /// modules and parsed once when the realm materializes the cached default export.
     pub data: Option<String>,
     pub dependencies: Vec<Dependency>,
+    /// Literal loader targets retained for lazy `createRequire`/`getBuiltinModule` lookup.
+    pub runtime_dependencies: Vec<RuntimeDependency>,
 }
 
 /// The provider responsible for one graph node.
@@ -159,6 +189,9 @@ pub enum ModuleSource {
     Source,
     CommonJs,
     Json,
+    /// A file imported with `with { type: "file" }`. Assets are path values, not source text;
+    /// retaining this identity prevents binary files from crossing a UTF-8 loader boundary.
+    Asset,
     NodeBuiltin(NodeBuiltin),
 }
 
@@ -168,6 +201,7 @@ pub enum ModuleSource {
 pub enum ModulePayload {
     Program(ModuleProgram),
     JsonText(String),
+    AssetPath(PathBuf),
 }
 
 /// An entry-rooted module graph. ESM cycles are rejected during construction; CommonJS `require`
@@ -184,6 +218,99 @@ pub struct ModuleGraph {
     export_resolutions: Arc<HashMap<PathBuf, BTreeMap<String, ResolvedExport>>>,
     /// Body replacements layered over the shared immutable graph storage.
     patched_modules: Arc<BTreeMap<PathBuf, ModuleNode>>,
+    dynamic_dependencies: Arc<HashMap<PathBuf, Vec<Dependency>>>,
+    dynamic_failures: Arc<BTreeMap<(PathBuf, String), String>>,
+    runtime_failures: Arc<BTreeMap<PathBuf, BTreeMap<(PathBuf, String), String>>>,
+}
+
+/// A realm-scoped dynamic importer backed by one immutable graph snapshot.
+///
+/// Requests carry their importer, so nested dynamic imports resolve against the module that
+/// issued them. The service owns the graph through `Arc`; no thread-local or process-global
+/// resolver state is involved.
+pub struct GraphModuleLoader {
+    graph: Arc<ModuleGraph>,
+}
+
+impl GraphModuleLoader {
+    pub fn new(graph: Arc<ModuleGraph>) -> Self {
+        Self { graph }
+    }
+}
+
+impl ModuleLoaderService for GraphModuleLoader {
+    fn load(&self, request: ModuleLoadRequest) -> Result<ModulePlan, ModuleLoadError> {
+        let importer = request
+            .importer
+            .as_deref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.graph.entry.clone());
+        let node = self.graph.module(&importer).ok_or_else(|| {
+            ModuleLoadError::NotFound(format!(
+                "importer `{}` is not in the module graph",
+                importer.display()
+            ))
+        })?;
+        if let Some(message) = self
+            .graph
+            .dynamic_failures
+            .get(&(importer.clone(), request.specifier.clone()))
+        {
+            return Err(ModuleLoadError::Unsupported(message.clone()));
+        }
+        let dependency = self
+            .graph
+            .dynamic_dependencies
+            .get(&importer)
+            .and_then(|dependencies| {
+                dependencies
+                    .iter()
+                    .find(|dependency| dependency.specifier == request.specifier)
+            })
+            .or_else(|| {
+                node.dependencies
+                    .iter()
+                    .find(|dependency| dependency.specifier == request.specifier)
+            })
+            .ok_or_else(|| {
+                ModuleLoadError::NotFound(format!(
+                    "could not resolve module `{}` from `{}`",
+                    request.specifier,
+                    importer.display()
+                ))
+            })?;
+        if dependency
+            .target
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(is_asset_extension)
+            && request.attributes.is_none()
+        {
+            return Err(ModuleLoadError::Unsupported(
+                "file asset imports require `with: { type: 'file' }`".to_owned(),
+            ));
+        }
+        if let Some(ImportAttributes { type_: Some(kind) }) = request.attributes {
+            if kind != "file" {
+                return Err(ModuleLoadError::Unsupported(
+                    "unsupported import attribute `type`".to_owned(),
+                ));
+            }
+            if self
+                .graph
+                .module(&dependency.target)
+                .is_none_or(|target| target.source != ModuleSource::Asset)
+            {
+                return Err(ModuleLoadError::Unsupported(format!(
+                    "module `{}` is not a file asset",
+                    dependency.target.display()
+                )));
+            }
+        }
+        self.graph
+            .import_plan_for(&dependency.target)
+            .map_err(|error| ModuleLoadError::Unsupported(error.to_string()))
+    }
 }
 
 /// Link-time identity of one visible export.
@@ -519,6 +646,14 @@ impl ModuleGraph {
         R: ResolutionPolicy,
     {
         Self::build_with_typed_policy(entry, resolver, move |path, source_kind| {
+            if source_kind == ModuleSource::Asset
+                || path
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(is_asset_extension)
+            {
+                return Ok(ModulePayload::AssetPath(path.to_path_buf()));
+            }
             let source = loader
                 .load(path)
                 .map_err(|error| ModuleGraphError::Source {
@@ -670,6 +805,12 @@ impl ModuleGraph {
             states: HashMap::new(),
             stack: Vec::new(),
             order: Vec::new(),
+            dynamic_dependencies: HashMap::new(),
+            dynamic_failures: HashMap::new(),
+            runtime_failures: BTreeMap::new(),
+            dynamic_work: Vec::new(),
+            runtime_work: Vec::new(),
+            dynamic_journal: None,
         };
         builder.visit(entry_path.clone())?;
         let export_resolutions = resolve_exports(&builder.modules, &builder.order)?;
@@ -681,6 +822,9 @@ impl ModuleGraph {
             order: Arc::new(builder.order),
             export_resolutions: Arc::new(export_resolutions),
             patched_modules: Arc::new(BTreeMap::new()),
+            dynamic_dependencies: Arc::new(builder.dynamic_dependencies),
+            dynamic_failures: Arc::new(builder.dynamic_failures.into_iter().collect()),
+            runtime_failures: Arc::new(builder.runtime_failures),
         })
     }
 
@@ -716,6 +860,58 @@ impl ModuleGraph {
 
     pub fn module_order(&self) -> &[PathBuf] {
         &self.order
+    }
+
+    /// Dependencies reached by literal `import()` from one importer.
+    pub fn dynamic_dependencies(&self, importer: impl AsRef<Path>) -> &[Dependency] {
+        self.dynamic_dependencies
+            .get(importer.as_ref())
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// Return the deferred failure recorded for one literal dynamic import, if any.
+    pub fn dynamic_failure(&self, importer: impl AsRef<Path>, specifier: &str) -> Option<&str> {
+        self.dynamic_failures
+            .get(&(importer.as_ref().to_path_buf(), specifier.to_owned()))
+            .map(String::as_str)
+    }
+
+    /// Return deferred dynamic failures in deterministic importer/specifier order.
+    pub fn dynamic_failures(&self) -> impl Iterator<Item = (&(PathBuf, String), &String)> {
+        self.dynamic_failures.iter()
+    }
+
+    pub fn runtime_failures(
+        &self,
+        owner: impl AsRef<Path>,
+    ) -> impl Iterator<Item = (&(PathBuf, String), &String)> {
+        self.runtime_failures
+            .get(owner.as_ref())
+            .into_iter()
+            .flat_map(BTreeMap::iter)
+    }
+
+    /// Return the entry module and all modules reachable through static dependencies.
+    ///
+    /// Dynamic imports are intentionally excluded: callers use this set to identify startup
+    /// evaluation and may materialize dynamic targets lazily.
+    pub fn statically_reachable(&self) -> BTreeSet<PathBuf> {
+        let mut reachable = BTreeSet::new();
+        let mut pending = vec![self.entry.clone()];
+        while let Some(path) = pending.pop() {
+            if !reachable.insert(path.clone()) {
+                continue;
+            }
+            if let Some(node) = self.module_node(&path) {
+                pending.extend(
+                    node.dependencies
+                        .iter()
+                        .map(|dependency| dependency.target.clone()),
+                );
+            }
+        }
+        reachable
     }
 
     /// Return a new graph with one source module's body replaced when its link shape is unchanged.
@@ -786,6 +982,9 @@ impl ModuleGraph {
             order: Arc::clone(&self.order),
             export_resolutions: Arc::new(export_resolutions),
             patched_modules: Arc::new(BTreeMap::new()),
+            dynamic_dependencies: Arc::clone(&self.dynamic_dependencies),
+            dynamic_failures: Arc::clone(&self.dynamic_failures),
+            runtime_failures: Arc::clone(&self.runtime_failures),
         })
     }
 
@@ -833,6 +1032,12 @@ impl ModuleGraph {
             let original_imports = std::mem::take(&mut node.program.imports);
             let original_dependencies = std::mem::take(&mut node.dependencies);
             node.dependencies = original_dependencies
+                .iter()
+                .filter(|dependency| demand.live.contains(&dependency.target))
+                .cloned()
+                .collect();
+            node.runtime_dependencies = node
+                .runtime_dependencies
                 .iter()
                 .filter(|dependency| demand.live.contains(&dependency.target))
                 .cloned()
@@ -940,6 +1145,39 @@ impl ModuleGraph {
                 slots.insert(path.clone(), set.clone());
             }
         }
+        // Dynamic imports are resolved by the loader attached to the reduced graph, so carry
+        // only importer/target pairs that still exist in this closed-world executable. A stale
+        // edge would let a lazy request reach a module the evaluator deliberately removed.
+        let dynamic_dependencies = self
+            .dynamic_dependencies
+            .iter()
+            .filter(|(importer, _)| demand.live.contains(*importer))
+            .map(|(importer, dependencies)| {
+                (
+                    importer.clone(),
+                    dependencies
+                        .iter()
+                        .filter(|dependency| demand.live.contains(&dependency.target))
+                        .cloned()
+                        .collect(),
+                )
+            })
+            .filter(|(_, dependencies): &(PathBuf, Vec<Dependency>)| !dependencies.is_empty())
+            .collect();
+        // Failed dynamic resolutions have no target to retain, but their importer-scoped error
+        // is observable and must survive reduction for a live importer.
+        let dynamic_failures = self
+            .dynamic_failures
+            .iter()
+            .filter(|((importer, _), _)| demand.live.contains(importer))
+            .map(|(key, message)| (key.clone(), message.clone()))
+            .collect();
+        let runtime_failures = self
+            .runtime_failures
+            .iter()
+            .filter(|(owner, _)| demand.live.contains(*owner))
+            .map(|(owner, failures)| (owner.clone(), failures.clone()))
+            .collect();
         Ok((
             Self {
                 entry: self.entry.clone(),
@@ -948,6 +1186,9 @@ impl ModuleGraph {
                 order: Arc::new(order),
                 export_resolutions: Arc::new(export_resolutions),
                 patched_modules: Arc::new(patched_modules),
+                dynamic_dependencies: Arc::new(dynamic_dependencies),
+                dynamic_failures: Arc::new(dynamic_failures),
+                runtime_failures: Arc::new(runtime_failures),
             },
             LiveDemand {
                 live: demand.live.clone(),
@@ -999,10 +1240,21 @@ impl ModuleGraph {
                         ));
                     }
                     kiln_ir::DynamicImportTarget::Static(specifier) => {
+                        if self.dynamic_failure(&node.path, specifier).is_some() {
+                            continue;
+                        }
                         let target_in_graph =
                             node.dependencies.iter().any(|d| {
                                 d.specifier == *specifier && self.module(&d.target).is_some()
                             }) || self.module(specifier).is_some()
+                                || self.dynamic_dependencies.get(&node.path).is_some_and(
+                                    |dependencies| {
+                                        dependencies.iter().any(|d| {
+                                            d.specifier == *specifier
+                                                && self.module(&d.target).is_some()
+                                        })
+                                    },
+                                )
                                 || node.path.parent().is_some_and(|dir| {
                                     let candidate = dir.join(specifier);
                                     self.module(&candidate).is_some()
@@ -1298,8 +1550,13 @@ impl ModuleGraph {
             }
         }
 
-        let position: HashMap<&Path, usize> = self
+        let static_reachable = self.statically_reachable();
+        let plan_order = self
             .order
+            .iter()
+            .filter(|path| static_reachable.contains(*path))
+            .collect::<Vec<_>>();
+        let position: HashMap<&Path, usize> = plan_order
             .iter()
             .enumerate()
             .map(|(index, path)| (path.as_path(), index))
@@ -1311,15 +1568,15 @@ impl ModuleGraph {
             })
         };
 
-        let mut modules = Vec::with_capacity(self.order.len());
-        for path in self.order.iter() {
+        let mut modules = Vec::with_capacity(plan_order.len());
+        for path in plan_order {
             let node = self
                 .module_node(path)
                 .ok_or_else(|| ModuleGraphError::InternalMissingModule { path: path.clone() })?;
             // Only a source module has a body to run. A JSON module, a CommonJS wrapper and a
             // Node builtin each need their own materialisation, and answering with an empty
             // namespace for one would be a wrong answer rather than a missing feature.
-            if node.source != ModuleSource::Source {
+            if node.source != ModuleSource::Source && node.source != ModuleSource::Asset {
                 return Err(ModuleGraphError::Source {
                     path: path.clone(),
                     message: format!(
@@ -1407,9 +1664,19 @@ impl ModuleGraph {
                 .get(path)
                 .map(|slots| slots.iter().copied().collect())
                 .unwrap_or_default();
+            let plan_program = if node.source == ModuleSource::Asset {
+                asset_module_program(node.data.as_deref().ok_or_else(|| {
+                    ModuleGraphError::Source {
+                        path: path.clone(),
+                        message: "asset module has no path metadata".to_owned(),
+                    }
+                })?)
+            } else {
+                export_epilogue(&node.program.program, slots)
+            };
             modules.push(PlannedModule {
                 key: path.to_string_lossy().into_owned(),
-                program: std::rc::Rc::new(export_epilogue(&node.program.program, slots)),
+                program: std::rc::Rc::new(plan_program),
                 bindings,
             });
         }
@@ -1424,6 +1691,47 @@ impl ModuleGraph {
             modules,
             namespace,
         })
+    }
+
+    /// Build a plan rooted at a particular graph node, retaining the immutable graph snapshot.
+    /// Dynamic imports use this instead of accidentally returning the original entry plan.
+    pub fn import_plan_for(&self, entry: impl AsRef<Path>) -> Result<ModulePlan, ModuleGraphError> {
+        let entry = entry.as_ref();
+        let canonical = if self.modules.contains_key(entry) {
+            entry.to_path_buf()
+        } else {
+            fs::canonicalize(entry).map_err(|_| ModuleGraphError::InternalMissingModule {
+                path: entry.to_path_buf(),
+            })?
+        };
+        if self.module_node(&canonical).is_none() {
+            return Err(ModuleGraphError::InternalMissingModule { path: canonical });
+        }
+        let mut rooted = self.clone();
+        rooted.entry = canonical;
+        let mut reachable = HashSet::new();
+        let mut pending = vec![rooted.entry.clone()];
+        while let Some(path) = pending.pop() {
+            if !reachable.insert(path.clone()) {
+                continue;
+            }
+            if let Some(node) = rooted.module_node(&path) {
+                pending.extend(
+                    node.dependencies
+                        .iter()
+                        .map(|dependency| dependency.target.clone()),
+                );
+            }
+        }
+        rooted.order = Arc::new(
+            rooted
+                .order
+                .iter()
+                .filter(|path| reachable.contains(*path))
+                .cloned()
+                .collect(),
+        );
+        rooted.import_plan()
     }
 
     /// Every visible export of `module`, paired with where in the plan its value will be.
@@ -1548,9 +1856,15 @@ impl ModuleGraph {
             limits,
             capabilities: capabilities.clone(),
             node,
+            pending_thrown: None,
+            ensuring_targets: HashSet::new(),
         };
 
+        let static_reachable = self.statically_reachable();
         for path in self.order.iter() {
+            if !static_reachable.contains(path) {
+                continue;
+            }
             let module_node = self
                 .module_node(path)
                 .ok_or_else(|| ModuleGraphError::InternalMissingModule { path: path.clone() })?;
@@ -1577,6 +1891,20 @@ impl ModuleGraph {
                         error,
                     })?;
                 values.insert(path.clone(), HashMap::from([("default".to_owned(), value)]));
+                continue;
+            }
+            if module_node.source == ModuleSource::Asset {
+                let path = module_node
+                    .data
+                    .as_deref()
+                    .ok_or_else(|| ModuleGraphError::Source {
+                        path: path.clone(),
+                        message: "asset module has no path metadata".to_owned(),
+                    })?;
+                values.insert(
+                    module_node.path.clone(),
+                    HashMap::from([("default".to_owned(), Value::String(path.to_owned()))]),
+                );
                 continue;
             }
             if module_node.source == ModuleSource::CommonJs {
@@ -1671,30 +1999,13 @@ impl ModuleGraph {
                     imports.push(Value::Cell(cell));
                     continue;
                 };
-                // `import * as ns` wants every export at once rather than one by name. The
-                // specification orders a namespace object's keys, so this sorts them: a hash map
-                // would otherwise make `Object.keys(ns)` differ run to run.
-                if import.imported == kiln_ir::NAMESPACE_IMPORT {
-                    let mut entries: Vec<(String, Value)> = provider
-                        .iter()
-                        .map(|(name, value)| (name.clone(), value.clone()))
-                        .collect();
-                    entries.sort_by(|left, right| left.0.cmp(&right.0));
-                    imports.push(kiln_interpreter::namespace_object(entries));
-                    continue;
-                }
-                let value = provider
-                    .get(&import.imported)
-                    .cloned()
-                    .or_else(|| {
-                        provider.get("default").and_then(|default_val| {
-                            own_data_property(default_val, &import.imported)
-                        })
-                    })
-                    .ok_or_else(|| ModuleGraphError::MissingExport {
-                        importer: path.clone(),
-                        provider: dependency.target.clone(),
-                        name: import.imported.clone(),
+                let value =
+                    linked_import_value(provider, &import.imported, false).ok_or_else(|| {
+                        ModuleGraphError::MissingExport {
+                            importer: path.clone(),
+                            provider: dependency.target.clone(),
+                            name: import.imported.clone(),
+                        }
                     })?;
                 imports.push(value);
             }
@@ -1725,6 +2036,7 @@ impl ModuleGraph {
                     path == &self.entry,
                     &mut commonjs_loader,
                     true,
+                    Some(path.to_string_lossy().as_ref()),
                 )
             } else {
                 execute_module_in_runtime_with_loader(
@@ -1737,6 +2049,7 @@ impl ModuleGraph {
                     capabilities.clone(),
                     &mut commonjs_loader,
                     true,
+                    Some(path.to_string_lossy().as_ref()),
                 )
             }
             .map_err(|error| {
@@ -1840,9 +2153,208 @@ struct CommonJsLoader<'graph, H: HostOps + ?Sized> {
     limits: ExecutionLimits,
     capabilities: ExecutionCapabilities,
     node: bool,
+    pending_thrown: Option<Value>,
+    ensuring_targets: HashSet<PathBuf>,
+}
+
+fn linked_import_value(
+    provider: &HashMap<String, Value>,
+    imported: &str,
+    read_cells: bool,
+) -> Option<Value> {
+    if imported == kiln_ir::NAMESPACE_IMPORT {
+        let mut entries: Vec<_> = provider
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.clone(),
+                    if read_cells {
+                        read_through_cell(value)
+                    } else {
+                        value.clone()
+                    },
+                )
+            })
+            .collect();
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        return Some(kiln_interpreter::namespace_object(entries));
+    }
+    provider
+        .get(imported)
+        .map(|value| {
+            if read_cells {
+                read_through_cell(value)
+            } else {
+                value.clone()
+            }
+        })
+        .or_else(|| {
+            provider
+                .get("default")
+                .and_then(|default_val| own_data_property(default_val, imported))
+        })
 }
 
 impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
+    fn ensure_target_value(
+        &mut self,
+        target: &Path,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        self.ensure_target_value_inner(target, instruction)
+    }
+
+    fn ensure_target_value_inner(
+        &mut self,
+        target: &Path,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        if let Some(cell) = self.commonjs_cache.get(target) {
+            self.execute_target(target, false)?;
+            return Ok(cell.borrow().clone());
+        }
+        if let Some(value) = self.builtin_commonjs.get(target) {
+            return Ok(value.clone());
+        }
+        if let Some(provider) = unsafe { (&*self.values).get(target) }
+            && let Some(value) = provider.get("default")
+        {
+            return Ok(read_through_cell(value));
+        }
+        let Some(module_node) = self.graph.module_node(target) else {
+            return Err(ExecutionError::Host {
+                instruction,
+                message: format!(
+                    "CommonJS runtime target `{}` is not in the graph",
+                    target.display()
+                ),
+            });
+        };
+        if !matches!(module_node.source, ModuleSource::NodeBuiltin(builtin) if kiln_builtins::is_ts_builtin(builtin))
+        {
+            return Err(ExecutionError::Host {
+                instruction,
+                message: format!(
+                    "CommonJS runtime target `{}` has no value",
+                    target.display()
+                ),
+            });
+        }
+        if !self.ensuring_targets.insert(target.to_path_buf()) {
+            return Err(ExecutionError::Host {
+                instruction,
+                message: format!("cyclic lazy builtin dependency at `{}`", target.display()),
+            });
+        }
+        let result = self.evaluate_ts_builtin_target(target, instruction, module_node);
+        self.ensuring_targets.remove(target);
+        return result;
+    }
+
+    fn evaluate_ts_builtin_target(
+        &mut self,
+        target: &Path,
+        instruction: usize,
+        module_node: &ModuleNode,
+    ) -> Result<Value, ExecutionError> {
+        let program = module_node.program.clone();
+        let mut imports = Vec::with_capacity(program.imports.len());
+        for import in &program.imports {
+            let dependency = module_node
+                .dependencies
+                .iter()
+                .find(|dependency| dependency.specifier == import.source)
+                .ok_or_else(|| ExecutionError::Host {
+                    instruction,
+                    message: format!(
+                        "lazy builtin `{}` has unresolved import `{}`",
+                        target.display(),
+                        import.source
+                    ),
+                })?;
+            if !unsafe { (&*self.values).contains_key(&dependency.target) }
+                && let Some(node) = self.graph.module_node(&dependency.target)
+            {
+                if node.source == ModuleSource::CommonJs {
+                    self.execute_target(&dependency.target, false)?;
+                } else if matches!(node.source, ModuleSource::NodeBuiltin(builtin) if kiln_builtins::is_ts_builtin(builtin))
+                {
+                    self.ensure_target_value(&dependency.target, instruction)?;
+                }
+            }
+            let provider = unsafe { (&*self.values).get(&dependency.target) }.ok_or_else(|| {
+                ExecutionError::Host {
+                    instruction,
+                    message: format!(
+                        "lazy builtin dependency `{}` has not been evaluated",
+                        dependency.target.display()
+                    ),
+                }
+            })?;
+            imports.push(
+                linked_import_value(provider, &import.imported, true).ok_or_else(|| {
+                    ExecutionError::Host {
+                        instruction,
+                        message: format!(
+                            "lazy builtin dependency `{}` has no export `{}`",
+                            dependency.target.display(),
+                            import.imported
+                        ),
+                    }
+                })?,
+            );
+        }
+        let result = unsafe {
+            if self.node {
+                execute_node_module_in_session_with_loader(
+                    &program,
+                    &imports,
+                    &[],
+                    &mut *self.host,
+                    self.limits,
+                    &mut *self.runtime,
+                    (&mut *self.node_session)
+                        .as_mut()
+                        .expect("Node mode owns a session"),
+                    self.capabilities.clone(),
+                    false,
+                    self,
+                    false,
+                    Some(target.to_string_lossy().as_ref()),
+                )
+            } else {
+                execute_module_in_runtime_with_loader(
+                    &program,
+                    &imports,
+                    &[],
+                    &mut *self.host,
+                    self.limits,
+                    &mut *self.runtime,
+                    self.capabilities.clone(),
+                    self,
+                    false,
+                    Some(target.to_string_lossy().as_ref()),
+                )
+            }
+        }?;
+        let exports = result
+            .exports
+            .into_iter()
+            .map(|export| (export.name, export.value))
+            .collect::<HashMap<_, _>>();
+        let value = exports
+            .get("default")
+            .cloned()
+            .ok_or_else(|| ExecutionError::Host {
+                instruction,
+                message: format!("lazy builtin `{}` has no default export", target.display()),
+            })?;
+        unsafe {
+            (&mut *self.values).insert(target.to_path_buf(), exports);
+        }
+        Ok(read_through_cell(&value))
+    }
+
     fn execute_target(&mut self, path: &Path, enter_runtime: bool) -> Result<(), ExecutionError> {
         match unsafe { (&*self.states).get(path).copied() } {
             Some(CommonJsExecutionState::Executing | CommonJsExecutionState::Done) => return Ok(()),
@@ -1961,6 +2473,7 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
                     is_entry,
                     self,
                     enter_runtime,
+                    Some(path.to_string_lossy().as_ref()),
                 )
             } else {
                 execute_module_in_runtime_with_loader(
@@ -1973,6 +2486,7 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
                     self.capabilities.clone(),
                     self,
                     enter_runtime,
+                    Some(path.to_string_lossy().as_ref()),
                 )
             }
         }?;
@@ -2022,6 +2536,75 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
 }
 
 impl<H: HostOps + ?Sized> CommonJsModuleLoader for CommonJsLoader<'_, H> {
+    fn record_thrown_value(&mut self, value: Value) {
+        self.pending_thrown = Some(value);
+    }
+
+    fn take_thrown_value(&mut self) -> Option<Value> {
+        self.pending_thrown.take()
+    }
+
+    fn get_builtin(
+        &mut self,
+        specifier: &str,
+        instruction: usize,
+    ) -> Result<Option<Value>, ExecutionError> {
+        if let Some(value) = node_builtin_commonjs_value(specifier) {
+            return Ok(Some(value));
+        }
+        let builtin = NodeBuiltin::parse(specifier).ok_or_else(|| ExecutionError::Host {
+            instruction,
+            message: format!("unknown builtin module `{specifier}`"),
+        })?;
+        let path = self.graph.modules.iter().find_map(|(path, node)| {
+            (node.source == ModuleSource::NodeBuiltin(builtin)).then_some(path)
+        });
+        let Some(path) = path else {
+            return Ok(None);
+        };
+        if unsafe { (&*self.values).get(path).is_none() } {
+            self.ensure_target_value(path, instruction)?;
+        }
+        let provider =
+            unsafe { (&*self.values).get(path) }.ok_or_else(|| ExecutionError::Host {
+                instruction,
+                message: format!("builtin module `{specifier}` has not been evaluated"),
+            })?;
+        let value = provider
+            .get("default")
+            .cloned()
+            .ok_or_else(|| ExecutionError::Host {
+                instruction,
+                message: format!("builtin module `{specifier}` has no default export"),
+            })?;
+        Ok(Some(read_through_cell(&value)))
+    }
+
+    fn create_require(
+        &mut self,
+        importer: &str,
+        _instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let path = if importer.starts_with("file:") {
+            url::Url::parse(importer)
+                .ok()
+                .and_then(|url| url.to_file_path().ok())
+                .ok_or_else(|| ExecutionError::TypeErrorMessage {
+                    message: format!("invalid module filename `{importer}`"),
+                })?
+        } else {
+            PathBuf::from(importer)
+        };
+        if !path.is_absolute() {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "The argument must be an absolute path or file URL".to_owned(),
+            });
+        }
+        Ok(Value::CommonJsRequire(std::rc::Rc::new(
+            CommonJsRequire::for_importer(path.to_string_lossy()),
+        )))
+    }
+
     fn load(
         &mut self,
         require: &CommonJsRequire,
@@ -2029,7 +2612,94 @@ impl<H: HostOps + ?Sized> CommonJsModuleLoader for CommonJsLoader<'_, H> {
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
         let Some(cell) = require.target_cell(specifier) else {
-            return Err(ExecutionError::Host {
+            if let Some(importer) = require.importer() {
+                if let Some(message) = self
+                    .graph
+                    .modules
+                    .values()
+                    .filter_map(|node| {
+                        self.graph
+                            .runtime_failures(&node.path)
+                            .find(|((base, requested), _)| {
+                                base == Path::new(importer) && requested == specifier
+                            })
+                            .map(|(_, message)| message.clone())
+                    })
+                    .next()
+                {
+                    return Err(ExecutionError::ModuleNotFound {
+                        instruction,
+                        message,
+                    });
+                }
+                let runtime_dependency = self
+                    .graph
+                    .modules
+                    .values()
+                    .flat_map(|node| node.runtime_dependencies.iter())
+                    .find(|dependency| {
+                        dependency.importer == Path::new(importer)
+                            && dependency.specifier == specifier
+                    })
+                    .cloned();
+                if let Some(dependency) = runtime_dependency {
+                    return self.ensure_target_value(&dependency.target, instruction);
+                }
+                if let Some(value) = node_builtin_commonjs_value(specifier) {
+                    return Ok(value);
+                }
+                if NodeBuiltin::parse(specifier).is_some_and(kiln_builtins::is_ts_builtin) {
+                    return self.get_builtin(specifier, instruction)?.ok_or_else(|| {
+                        ExecutionError::Host {
+                            instruction,
+                            message: format!("builtin module `{specifier}` is unavailable"),
+                        }
+                    });
+                }
+                let importer = PathBuf::from(importer);
+                let dependency = self
+                    .graph
+                    .module_node(&importer)
+                    .and_then(|node| {
+                        node.dependencies
+                            .iter()
+                            .find(|dependency| dependency.specifier == specifier)
+                            .cloned()
+                    })
+                    .ok_or_else(|| ExecutionError::ModuleNotFound {
+                        instruction,
+                        message: format!("Cannot find module '{specifier}'"),
+                    })?;
+                let target = dependency.target;
+                if let Some(cell) = self.commonjs_cache.get(&target) {
+                    self.execute_target(&target, false)?;
+                    return Ok(cell.borrow().clone());
+                }
+                if let Some(value) = self.builtin_commonjs.get(&target) {
+                    return Ok(value.clone());
+                }
+                if let Some(provider) = unsafe { (&*self.values).get(&target) } {
+                    if self.graph.module_node(&target).is_some_and(|node| {
+                        node.source == ModuleSource::Json
+                            || matches!(node.source, ModuleSource::NodeBuiltin(builtin) if kiln_builtins::is_ts_builtin(builtin))
+                    }) {
+                        return provider.get("default").cloned().ok_or_else(|| {
+                            ExecutionError::Host {
+                                instruction,
+                                message: format!("Target `{}` has no default", target.display()),
+                            }
+                        });
+                    }
+                }
+                return Err(ExecutionError::Host {
+                    instruction,
+                    message: format!(
+                        "CommonJS target `{}` has not been evaluated",
+                        target.display()
+                    ),
+                });
+            }
+            return Err(ExecutionError::ModuleNotFound {
                 instruction,
                 message: format!("CommonJS require target `{specifier}` is not in the graph"),
             });
@@ -2042,7 +2712,9 @@ impl<H: HostOps + ?Sized> CommonJsModuleLoader for CommonJsLoader<'_, H> {
             .cached_value(specifier)
             .ok_or_else(|| ExecutionError::Host {
                 instruction,
-                message: format!("CommonJS require target `{specifier}` is not in the graph"),
+                message: format!(
+                    "CommonJS require target `{specifier}` has a cell without a cached value"
+                ),
             })
     }
 }
@@ -2055,12 +2727,18 @@ struct Builder<P, R> {
     states: HashMap<PathBuf, VisitState>,
     stack: Vec<PathBuf>,
     order: Vec<PathBuf>,
+    dynamic_dependencies: HashMap<PathBuf, Vec<Dependency>>,
+    dynamic_failures: HashMap<(PathBuf, String), String>,
+    runtime_failures: BTreeMap<PathBuf, BTreeMap<(PathBuf, String), String>>,
+    dynamic_work: Vec<DynamicWork>,
+    runtime_work: Vec<RuntimeWork>,
+    dynamic_journal: Option<DynamicJournal>,
 }
 
 enum WorkItem {
     Enter {
         path: PathBuf,
-        source: ModuleSource,
+        source: Option<ModuleSource>,
     },
     /// A module whose own compilation is finished, waiting below its dependencies' work.
     ///
@@ -2068,6 +2746,39 @@ enum WorkItem {
     /// and boxed, because it is an order of magnitude larger than `Enter` and every item in the
     /// queue would otherwise be sized for it.
     Exit(Box<ModuleNode>),
+}
+
+struct DynamicWork {
+    importer: PathBuf,
+    specifier: String,
+    path: PathBuf,
+    source: ModuleSource,
+}
+
+struct RuntimeWork {
+    owner: PathBuf,
+    importer: PathBuf,
+    specifier: String,
+    path: PathBuf,
+    source: ModuleSource,
+}
+
+enum DeferredWork {
+    Dynamic(DynamicWork),
+    Runtime(RuntimeWork),
+}
+
+#[derive(Default)]
+struct DynamicJournal {
+    order_before: usize,
+    stack_before: usize,
+    dynamic_pending_before: usize,
+    runtime_pending_before: usize,
+    new_modules: Vec<PathBuf>,
+    new_states: Vec<PathBuf>,
+    new_dynamic_dependencies: Vec<(PathBuf, String)>,
+    new_failures: Vec<(PathBuf, String)>,
+    new_runtime_failures: Vec<(PathBuf, PathBuf, String)>,
 }
 
 #[derive(Clone, Copy)]
@@ -2082,10 +2793,244 @@ where
     R: ResolutionPolicy,
 {
     fn visit(&mut self, path: PathBuf) -> Result<(), ModuleGraphError> {
-        let mut work = vec![WorkItem::Enter {
-            path,
-            source: ModuleSource::Source,
-        }];
+        self.visit_static(path, None)?;
+        let export_resolutions = resolve_exports(&self.modules, &self.order)?;
+        validate_links(&self.modules, &self.order, &export_resolutions)?;
+        loop {
+            let Some(work) = self
+                .dynamic_work
+                .pop()
+                .map(DeferredWork::Dynamic)
+                .or_else(|| self.runtime_work.pop().map(DeferredWork::Runtime))
+            else {
+                break;
+            };
+            match work {
+                DeferredWork::Dynamic(dynamic) => {
+                    self.dynamic_journal = Some(DynamicJournal {
+                        order_before: self.order.len(),
+                        stack_before: self.stack.len(),
+                        dynamic_pending_before: self.dynamic_work.len(),
+                        runtime_pending_before: self.runtime_work.len(),
+                        ..DynamicJournal::default()
+                    });
+                    let result = self
+                        .visit_static(dynamic.path.clone(), Some(dynamic.source))
+                        .and_then(|_| {
+                            let export_resolutions = resolve_exports(&self.modules, &self.order)?;
+                            validate_links(&self.modules, &self.order, &export_resolutions)
+                        });
+                    let journal = self.dynamic_journal.take().expect("dynamic journal exists");
+                    if let Err(error) = result {
+                        self.rollback_dynamic(journal);
+                        self.remove_dynamic_dependency(&dynamic.importer, &dynamic.specifier);
+                        self.dynamic_failures.insert(
+                            (dynamic.importer, dynamic.specifier),
+                            format!("dynamic import failed: {error}"),
+                        );
+                    }
+                }
+                DeferredWork::Runtime(runtime) => {
+                    self.dynamic_journal = Some(DynamicJournal {
+                        order_before: self.order.len(),
+                        stack_before: self.stack.len(),
+                        dynamic_pending_before: self.dynamic_work.len(),
+                        runtime_pending_before: self.runtime_work.len(),
+                        ..DynamicJournal::default()
+                    });
+                    let result = self
+                        .visit_static(runtime.path.clone(), Some(runtime.source))
+                        .and_then(|_| {
+                            let export_resolutions = resolve_exports(&self.modules, &self.order)?;
+                            validate_links(&self.modules, &self.order, &export_resolutions)
+                        });
+                    let journal = self.dynamic_journal.take().expect("runtime journal exists");
+                    if let Err(error) = result {
+                        self.rollback_dynamic(journal);
+                        self.remove_runtime_dependency(
+                            &runtime.owner,
+                            &runtime.importer,
+                            &runtime.specifier,
+                        );
+                        self.record_runtime_failure(
+                            runtime.owner,
+                            runtime.importer,
+                            runtime.specifier,
+                            format!("runtime request failed: {error}"),
+                        );
+                    }
+                }
+            }
+        }
+        while let Some(runtime) = self.runtime_work.pop() {
+            self.dynamic_journal = Some(DynamicJournal {
+                order_before: self.order.len(),
+                stack_before: self.stack.len(),
+                runtime_pending_before: self.runtime_work.len(),
+                ..DynamicJournal::default()
+            });
+            let result = self
+                .visit_static(runtime.path.clone(), Some(runtime.source))
+                .and_then(|_| {
+                    let export_resolutions = resolve_exports(&self.modules, &self.order)?;
+                    validate_links(&self.modules, &self.order, &export_resolutions)
+                });
+            let journal = self.dynamic_journal.take().expect("runtime journal exists");
+            if let Err(error) = result {
+                self.rollback_runtime(journal);
+                self.remove_runtime_dependency(
+                    &runtime.owner,
+                    &runtime.importer,
+                    &runtime.specifier,
+                );
+                self.record_runtime_failure(
+                    runtime.owner,
+                    runtime.importer,
+                    runtime.specifier,
+                    format!("runtime request failed: {error}"),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn rollback_dynamic(&mut self, journal: DynamicJournal) {
+        self.dynamic_work.truncate(journal.dynamic_pending_before);
+        self.runtime_work.truncate(journal.runtime_pending_before);
+        self.stack.truncate(journal.stack_before);
+        self.order.truncate(journal.order_before);
+        for path in journal.new_modules {
+            self.modules.remove(&path);
+        }
+        for path in journal.new_states {
+            self.states.remove(&path);
+        }
+        for (importer, specifier) in journal.new_dynamic_dependencies {
+            if let Some(dependencies) = self.dynamic_dependencies.get_mut(&importer) {
+                if let Some(index) = dependencies
+                    .iter()
+                    .position(|dependency| dependency.specifier == specifier)
+                {
+                    dependencies.remove(index);
+                }
+                if dependencies.is_empty() {
+                    self.dynamic_dependencies.remove(&importer);
+                }
+            }
+        }
+        for key in journal.new_failures {
+            self.dynamic_failures.remove(&key);
+        }
+        for (owner, importer, specifier) in journal.new_runtime_failures {
+            if let Some(failures) = self.runtime_failures.get_mut(&owner) {
+                failures.remove(&(importer, specifier));
+                if failures.is_empty() {
+                    self.runtime_failures.remove(&owner);
+                }
+            }
+        }
+    }
+
+    fn rollback_runtime(&mut self, journal: DynamicJournal) {
+        self.runtime_work.truncate(journal.runtime_pending_before);
+        self.stack.truncate(journal.stack_before);
+        self.order.truncate(journal.order_before);
+        for path in journal.new_modules {
+            self.modules.remove(&path);
+        }
+        for path in journal.new_states {
+            self.states.remove(&path);
+        }
+    }
+
+    fn record_state(&mut self, path: &Path) {
+        if !self.states.contains_key(path) {
+            if let Some(journal) = &mut self.dynamic_journal {
+                journal.new_states.push(path.to_path_buf());
+            }
+        }
+        self.states.insert(path.to_path_buf(), VisitState::Visiting);
+    }
+
+    fn record_module(&mut self, node: ModuleNode) {
+        if !self.modules.contains_key(&node.path) {
+            if let Some(journal) = &mut self.dynamic_journal {
+                journal.new_modules.push(node.path.clone());
+            }
+        }
+        self.modules.insert(node.path.clone(), node);
+    }
+
+    fn record_dynamic_dependency(&mut self, path: &Path, dependency: Dependency) {
+        if let Some(journal) = &mut self.dynamic_journal {
+            journal
+                .new_dynamic_dependencies
+                .push((path.to_path_buf(), dependency.specifier.clone()));
+        }
+        self.dynamic_dependencies
+            .entry(path.to_path_buf())
+            .or_default()
+            .push(dependency);
+    }
+
+    fn remove_dynamic_dependency(&mut self, importer: &Path, specifier: &str) {
+        if let Some(dependencies) = self.dynamic_dependencies.get_mut(importer) {
+            if let Some(index) = dependencies
+                .iter()
+                .position(|dependency| dependency.specifier == specifier)
+            {
+                dependencies.remove(index);
+            }
+            if dependencies.is_empty() {
+                self.dynamic_dependencies.remove(importer);
+            }
+        }
+    }
+
+    fn record_dynamic_failure(&mut self, key: (PathBuf, String), message: String) {
+        if !self.dynamic_failures.contains_key(&key) {
+            if let Some(journal) = &mut self.dynamic_journal {
+                journal.new_failures.push(key.clone());
+            }
+        }
+        self.dynamic_failures.insert(key, message);
+    }
+
+    fn record_runtime_failure(
+        &mut self,
+        owner: PathBuf,
+        importer: PathBuf,
+        specifier: String,
+        message: String,
+    ) {
+        let key = (importer.clone(), specifier.clone());
+        let failures = self.runtime_failures.entry(owner.clone()).or_default();
+        if !failures.contains_key(&key) {
+            if let Some(journal) = &mut self.dynamic_journal {
+                journal.new_runtime_failures.push((
+                    owner.clone(),
+                    importer.clone(),
+                    specifier.clone(),
+                ));
+            }
+        }
+        failures.insert(key, message);
+    }
+
+    fn remove_runtime_dependency(&mut self, owner: &Path, importer: &Path, specifier: &str) {
+        if let Some(node) = self.modules.get_mut(owner) {
+            node.runtime_dependencies.retain(|dependency| {
+                !(dependency.importer == importer && dependency.specifier == specifier)
+            });
+        }
+    }
+
+    fn visit_static(
+        &mut self,
+        path: PathBuf,
+        source: Option<ModuleSource>,
+    ) -> Result<(), ModuleGraphError> {
+        let mut work = vec![WorkItem::Enter { path, source }];
         while let Some(item) = work.pop() {
             match item {
                 WorkItem::Enter { path, source } => match self.states.get(&path).copied() {
@@ -2106,34 +3051,47 @@ where
                     Some(VisitState::Visiting) => continue,
                     None => {
                         let source = match source {
-                            ModuleSource::Source if !self.typed_sources => ModuleSource::Source,
-                            ModuleSource::Source => {
-                                if path
-                                    .extension()
-                                    .and_then(|extension| extension.to_str())
-                                    .is_some_and(kiln_data_formats::is_data_extension)
+                            Some(source) => source,
+                            None => match ModuleSource::Source {
+                                ModuleSource::Source
+                                    if path
+                                        .extension()
+                                        .and_then(|extension| extension.to_str())
+                                        .is_some_and(is_asset_extension) =>
                                 {
-                                    ModuleSource::Json
-                                } else {
-                                    match self
-                                        .resolver
-                                        .node_format(&ResolvedModule {
-                                            path: path.clone(),
-                                            kind: ResolutionKind::Relative,
-                                        })
-                                        .map_err(|error| ModuleGraphError::Resolve {
-                                            importer: path.clone(),
-                                            specifier: String::new(),
-                                            error,
-                                        })? {
-                                        Some(NodeModuleFormat::CommonJs) => ModuleSource::CommonJs,
-                                        _ => ModuleSource::Source,
+                                    ModuleSource::Asset
+                                }
+                                ModuleSource::Source if !self.typed_sources => ModuleSource::Source,
+                                ModuleSource::Source => {
+                                    if path
+                                        .extension()
+                                        .and_then(|extension| extension.to_str())
+                                        .is_some_and(kiln_data_formats::is_data_extension)
+                                    {
+                                        ModuleSource::Json
+                                    } else {
+                                        match self
+                                            .resolver
+                                            .node_format(&ResolvedModule {
+                                                path: path.clone(),
+                                                kind: ResolutionKind::Relative,
+                                            })
+                                            .map_err(|error| ModuleGraphError::Resolve {
+                                                importer: path.clone(),
+                                                specifier: String::new(),
+                                                error,
+                                            })? {
+                                            Some(NodeModuleFormat::CommonJs) => {
+                                                ModuleSource::CommonJs
+                                            }
+                                            _ => ModuleSource::Source,
+                                        }
                                     }
                                 }
-                            }
-                            source => source,
+                                source => source,
+                            },
                         };
-                        self.states.insert(path.clone(), VisitState::Visiting);
+                        self.record_state(&path);
                         self.stack.push(path.clone());
                         let (program, data) = match source {
                             ModuleSource::Source | ModuleSource::CommonJs => {
@@ -2159,6 +3117,21 @@ where
                                 };
                                 (json_module_program(), Some(text))
                             }
+                            ModuleSource::Asset => {
+                                let ModulePayload::AssetPath(asset) =
+                                    (self.provider)(&path, source)?
+                                else {
+                                    return Err(ModuleGraphError::Source {
+                                        path: path.clone(),
+                                        message: "asset provider returned a non-asset payload"
+                                            .to_owned(),
+                                    });
+                                };
+                                (
+                                    json_module_program(),
+                                    Some(asset.to_string_lossy().into_owned()),
+                                )
+                            }
                             ModuleSource::NodeBuiltin(builtin) => {
                                 if let Some(source) = kiln_builtins::builtin_source(builtin) {
                                     let path_str = kiln_builtins::builtin_logical_path(builtin);
@@ -2177,6 +3150,10 @@ where
                         };
                         validate_exports(&path, &program)?;
                         let mut dependencies = Vec::with_capacity(program.dependencies.len());
+                        let mut runtime_dependencies = Vec::new();
+                        let mut dynamic_dependencies = Vec::new();
+                        let mut dynamic_sources = Vec::new();
+                        let mut runtime_sources = Vec::new();
                         let mut dependency_sources = Vec::with_capacity(program.dependencies.len());
                         let request = if source == ModuleSource::CommonJs {
                             NodeRequestKind::Require
@@ -2203,6 +3180,13 @@ where
                             };
                             let source = if let Some(builtin) = resolved.builtin() {
                                 ModuleSource::NodeBuiltin(builtin)
+                            } else if resolved
+                                .path
+                                .extension()
+                                .and_then(|extension| extension.to_str())
+                                .is_some_and(is_asset_extension)
+                            {
+                                ModuleSource::Asset
                             } else if !self.typed_sources {
                                 ModuleSource::Source
                             } else if resolved
@@ -2230,23 +3214,208 @@ where
                             });
                             dependency_sources.push(source);
                         }
+                        for request in &program.link_facts.node_runtime_requests {
+                            let importer = match runtime_importer_path(&request.importer) {
+                                Ok(importer) => importer,
+                                Err(message) => {
+                                    self.record_runtime_failure(
+                                        path.clone(),
+                                        PathBuf::from(&request.importer),
+                                        request.specifier.clone(),
+                                        format!(
+                                            "runtime request failed for {}: {}",
+                                            request.specifier, message
+                                        ),
+                                    );
+                                    continue;
+                                }
+                            };
+                            let resolved = match self.resolver.resolve_for_request(
+                                &request.specifier,
+                                &importer,
+                                NodeRequestKind::Require,
+                            ) {
+                                Ok(resolved) => resolved,
+                                Err(error) => {
+                                    // `createRequire` and `getBuiltinModule` execute lazily. An
+                                    // unavailable literal is therefore a catchable runtime
+                                    // failure, just like a dynamic import that cannot be resolved;
+                                    // it must not make graph construction fail eagerly.
+                                    self.record_runtime_failure(
+                                        path.clone(),
+                                        importer.clone(),
+                                        request.specifier.clone(),
+                                        format!(
+                                            "runtime request failed to resolve {} from {}: {}",
+                                            request.specifier,
+                                            importer.display(),
+                                            error
+                                        ),
+                                    );
+                                    continue;
+                                }
+                            };
+                            let runtime_source = if let Some(builtin) = resolved.builtin() {
+                                ModuleSource::NodeBuiltin(builtin)
+                            } else if !self.typed_sources {
+                                ModuleSource::Source
+                            } else if resolved
+                                .path
+                                .extension()
+                                .and_then(|e| e.to_str())
+                                .is_some_and(kiln_data_formats::is_data_extension)
+                            {
+                                ModuleSource::Json
+                            } else {
+                                match self.resolver.node_format(&resolved) {
+                                    Ok(Some(NodeModuleFormat::CommonJs)) => ModuleSource::CommonJs,
+                                    Ok(_) => ModuleSource::Source,
+                                    Err(error) => {
+                                        self.record_runtime_failure(
+                                            path.clone(),
+                                            importer.clone(),
+                                            request.specifier.clone(),
+                                            format!(
+                                                "runtime request failed while classifying {}: {}",
+                                                request.specifier, error
+                                            ),
+                                        );
+                                        continue;
+                                    }
+                                }
+                            };
+                            runtime_dependencies.push(RuntimeDependency {
+                                importer,
+                                specifier: request.specifier.clone(),
+                                target: resolved.path,
+                            });
+                            runtime_sources.push(runtime_source);
+                        }
+                        // Closed-world native dynamic imports need their statically literal
+                        // targets materialized too. This is especially important for file
+                        // assets: their bytes must never pass through the source loader.
+                        for target in &program.link_facts.dynamic_imports {
+                            let kiln_ir::DynamicImportTarget::Static(specifier) = target else {
+                                continue;
+                            };
+                            let resolved = match self.resolver.resolve_for_request(
+                                specifier,
+                                &path,
+                                NodeRequestKind::Import,
+                            ) {
+                                Ok(resolved) => resolved,
+                                Err(error) => {
+                                    self.record_dynamic_failure(
+                                        (path.clone(), specifier.clone()),
+                                        format!(
+                                            "dynamic import failed: could not resolve {} from {}: {}",
+                                            specifier,
+                                            path.display(),
+                                            error
+                                        ),
+                                    );
+                                    continue;
+                                }
+                            };
+                            let target_path = resolved.path.clone();
+                            let node_format = if self.typed_sources
+                                && resolved.builtin().is_none()
+                                && !target_path
+                                    .extension()
+                                    .and_then(|ext| ext.to_str())
+                                    .is_some_and(is_asset_extension)
+                                && !target_path
+                                    .extension()
+                                    .and_then(|ext| ext.to_str())
+                                    .is_some_and(kiln_data_formats::is_data_extension)
+                            {
+                                match self.resolver.node_format(&resolved) {
+                                    Ok(format) => format,
+                                    Err(error) => {
+                                        self.record_dynamic_failure(
+                                            (path.clone(), specifier.clone()),
+                                            format!(
+                                                "dynamic import failed while classifying {}: {}",
+                                                specifier, error
+                                            ),
+                                        );
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                None
+                            };
+                            let source = if let Some(builtin) = resolved.builtin() {
+                                ModuleSource::NodeBuiltin(builtin)
+                            } else if target_path
+                                .extension()
+                                .and_then(|ext| ext.to_str())
+                                .is_some_and(is_asset_extension)
+                            {
+                                ModuleSource::Asset
+                            } else if target_path
+                                .extension()
+                                .and_then(|ext| ext.to_str())
+                                .is_some_and(kiln_data_formats::is_data_extension)
+                            {
+                                ModuleSource::Json
+                            } else if !self.typed_sources {
+                                ModuleSource::Source
+                            } else if node_format == Some(NodeModuleFormat::CommonJs) {
+                                ModuleSource::CommonJs
+                            } else {
+                                ModuleSource::Source
+                            };
+                            dynamic_dependencies.push(Dependency {
+                                specifier: specifier.clone(),
+                                target: target_path,
+                            });
+                            for dependency in dynamic_dependencies.drain(..) {
+                                self.record_dynamic_dependency(&path, dependency);
+                            }
+                            dynamic_sources.push(source);
+                        }
 
                         // LIFO work preserves the original source order: the first dependency is
                         // entered first, while Exit remains below all child work.
                         work.push(WorkItem::Exit(Box::new(ModuleNode {
-                            path,
+                            path: path.clone(),
                             source,
                             program,
                             data,
                             dependencies: dependencies.clone(),
+                            runtime_dependencies: runtime_dependencies.clone(),
                         })));
                         for (dependency, source) in
                             dependencies.into_iter().zip(dependency_sources).rev()
                         {
                             work.push(WorkItem::Enter {
                                 path: dependency.target,
+                                source: Some(source),
+                            });
+                        }
+                        for (dependency, source) in runtime_dependencies
+                            .iter()
+                            .cloned()
+                            .zip(runtime_sources.iter().cloned())
+                        {
+                            self.runtime_work.push(RuntimeWork {
+                                owner: path.clone(),
+                                importer: dependency.importer,
+                                specifier: dependency.specifier,
+                                path: dependency.target,
                                 source,
                             });
+                        }
+                        if let Some(dynamic) = self.dynamic_dependencies.get(&path).cloned() {
+                            for (dependency, source) in dynamic.iter().zip(dynamic_sources).rev() {
+                                self.dynamic_work.push(DynamicWork {
+                                    importer: path.clone(),
+                                    specifier: dependency.specifier.clone(),
+                                    path: dependency.target.clone(),
+                                    source,
+                                });
+                            }
                         }
                     }
                 },
@@ -2254,7 +3423,7 @@ where
                     self.stack.pop();
                     self.states.insert(node.path.clone(), VisitState::Done);
                     self.order.push(node.path.clone());
-                    self.modules.insert(node.path.clone(), *node);
+                    self.record_module(*node);
                 }
             }
         }
@@ -2298,6 +3467,7 @@ fn builtin_module_program(builtin: NodeBuiltin) -> ModuleProgram {
             functions: vec![],
         },
         link_facts: kiln_ir::ModuleLinkFacts {
+            node_runtime_requests: Vec::new(),
             immutable_bindings: names.iter().map(|s| (*s).to_owned()).collect(),
             direct_eval: false,
             new_function: false,
@@ -2333,12 +3503,29 @@ fn json_module_program() -> ModuleProgram {
             functions: vec![],
         },
         link_facts: kiln_ir::ModuleLinkFacts {
+            node_runtime_requests: Vec::new(),
             immutable_bindings: vec!["default".to_owned()],
             direct_eval: false,
             new_function: false,
             dynamic_imports: vec![],
             removable_declarations: vec![],
         },
+    }
+}
+
+fn asset_module_program(path: &str) -> Program {
+    Program {
+        version: BYTECODE_VERSION,
+        constants: vec![kiln_ir::Constant::String(path.to_owned())],
+        code: vec![
+            Instruction::Const(0),
+            Instruction::NewArray { count: 1 },
+            Instruction::Return,
+        ],
+        local_count: 0,
+        functions: vec![],
+        template_sites: vec![],
+        source: "".into(),
     }
 }
 

@@ -15,8 +15,16 @@ use std::path::{Path, PathBuf};
 /// Source extensions understood by the initial filesystem resolver.
 pub const SUPPORTED_EXTENSIONS: &[&str] = &[
     "js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx", "json", "json5", "jsonc", "yaml", "yml",
-    "toml",
+    "toml", "wasm", "scm",
 ];
+
+/// Binary or opaque file extensions accepted by `import(..., { with: { type: "file" } })`.
+/// These are resolved as path assets and never passed through a UTF-8 source loader.
+pub const ASSET_EXTENSIONS: &[&str] = &["wasm", "scm"];
+
+pub fn is_asset_extension(extension: &str) -> bool {
+    ASSET_EXTENSIONS.contains(&extension)
+}
 
 /// Whether a resolved request was written as an explicit relative or absolute specifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -55,6 +63,7 @@ pub struct ResolvedModule {
 /// Builtins supported by Kiln's Node compatibility adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum NodeBuiltin {
+    Process,
     Assert,
     Buffer,
     AsyncHooks,
@@ -86,6 +95,7 @@ pub enum NodeBuiltin {
 
 impl NodeBuiltin {
     pub const ALL: &[Self] = &[
+        Self::Process,
         Self::Assert,
         Self::Buffer,
         Self::AsyncHooks,
@@ -117,6 +127,7 @@ impl NodeBuiltin {
 
     pub fn parse(specifier: &str) -> Option<Self> {
         Some(match specifier.strip_prefix("node:").unwrap_or(specifier) {
+            "kiln:process" => Self::Process,
             "assert" | "assert/strict" => Self::Assert,
             "buffer" => Self::Buffer,
             "async_hooks" => Self::AsyncHooks,
@@ -150,6 +161,7 @@ impl NodeBuiltin {
 
     pub const fn specifier(self) -> &'static str {
         match self {
+            Self::Process => "kiln:process",
             Self::Assert => "node:assert",
             Self::Buffer => "node:buffer",
             Self::AsyncHooks => "node:async_hooks",
@@ -184,7 +196,11 @@ impl NodeBuiltin {
         project_root
             .join(".kiln")
             .join("builtins")
-            .join(self.specifier().trim_start_matches("node:"))
+            .join(
+                self.specifier()
+                    .trim_start_matches("node:")
+                    .trim_start_matches("kiln:"),
+            )
             .with_extension("builtin")
     }
 }
@@ -199,7 +215,14 @@ impl ResolvedModule {
         let stem = file.strip_suffix(".builtin")?;
         let parent = components.next()?.as_os_str().to_str()?;
         let name = if parent == "builtins" {
-            stem.to_owned()
+            // `kiln:process` is the one explicit Kiln namespace. Its virtual path uses the
+            // unprefixed stem for compatibility with the existing builtin path layout, so
+            // preserve that identity here without making `node:process` a Node builtin.
+            if stem == "process" {
+                "kiln:process".to_owned()
+            } else {
+                stem.to_owned()
+            }
         } else {
             format!("{parent}/{stem}")
         };
@@ -2132,10 +2155,14 @@ mod tests {
             NodeBuiltin::WorkerThreads,
         ] {
             assert_eq!(NodeBuiltin::parse(builtin.specifier()), Some(builtin));
-            assert_eq!(
-                NodeBuiltin::parse(builtin.specifier().trim_start_matches("node:")),
-                Some(builtin)
-            );
+            if builtin == NodeBuiltin::Process {
+                assert_eq!(NodeBuiltin::parse("kiln:process"), Some(builtin));
+            } else {
+                assert_eq!(
+                    NodeBuiltin::parse(builtin.specifier().trim_start_matches("node:")),
+                    Some(builtin)
+                );
+            }
         }
     }
 

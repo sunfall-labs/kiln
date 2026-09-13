@@ -5,7 +5,7 @@
 //! types or arena lifetimes into the query database, interpreter, or backends.
 
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     path::Path,
     sync::Arc,
 };
@@ -15,8 +15,8 @@ use kiln_hir::{
     Export, ExportName, ExportOrigin, Expression as HirExpression,
     ExpressionKind as HirExpressionKind, Function as HirFunction, Import, ImportName, Item,
     ItemKind, ListElement, Literal as HirLiteral, LogicalOperator as HirLogicalOperator, Module,
-    ModuleRequestKind, ModuleRequestOccurrence, Parameter as HirParameter, RequestedModule,
-    SourceGoal, SourceKind, Span as HirSpan, Statement as HirStatement,
+    ModuleRequestKind, ModuleRequestOccurrence, NodeRuntimeRequest, Parameter as HirParameter,
+    RequestedModule, SourceGoal, SourceKind, Span as HirSpan, Statement as HirStatement,
     StatementKind as HirStatementKind, TypeAnnotation as HirTypeAnnotation,
     UnaryOperator as HirUnaryOperator, VariableDeclarator as HirVariableDeclarator,
     VariableKind as HirVariableKind,
@@ -39,6 +39,7 @@ use oxc_diagnostics::OxcDiagnostic;
 use oxc_ecmascript::BoundNames;
 use oxc_minifier::{CompressOptions, Compressor};
 use oxc_parser::{ParseOptions, Parser};
+use oxc_semantic::SymbolId;
 use oxc_semantic::{IsGlobalReference, SemanticBuilder};
 use oxc_span::{GetSpan, SourceType, Span};
 use oxc_syntax::module_record::{
@@ -174,6 +175,253 @@ pub fn parse_commonjs(path: &str, source: &str) -> Module {
 pub fn parse_commonjs_with_requires(path: &str, source: &str) -> (Module, Vec<String>) {
     let inferred = SourceType::from_path(Path::new(path)).unwrap_or_default();
     parse_source_with_commonjs_requires(Some(path), source, inferred.with_commonjs(true))
+}
+
+/// Discover literal Node loader requests without guessing from identifier spelling.
+///
+/// Oxc's semantic pass gives every reference its resolved symbol, which is the only reliable way
+/// to distinguish an imported `createRequire` from a same-named parameter or local function. The
+/// returned facts remain lazy graph edges; this pass never resolves or evaluates them.
+pub fn discover_node_runtime_requests(path: &str, source: &str) -> Vec<NodeRuntimeRequest> {
+    let allocator = Allocator::default();
+    let mut source_type = SourceType::from_path(Path::new(path)).unwrap_or_default();
+    if Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        == Some("cjs")
+    {
+        source_type = source_type.with_commonjs(true);
+    }
+    let parsed = Parser::new(&allocator, source, source_type)
+        .with_options(ParseOptions {
+            parse_regular_expression: true,
+            ..ParseOptions::default()
+        })
+        .parse();
+    if parsed.panicked || !parsed.diagnostics.is_empty() {
+        return Vec::new();
+    }
+    let semantic = SemanticBuilder::new()
+        .with_build_nodes(true)
+        .build(&parsed.program)
+        .semantic;
+    discover_node_runtime_requests_from_semantic(path, &parsed.program, &semantic)
+}
+
+fn discover_node_runtime_requests_from_semantic(
+    path: &str,
+    program: &oxc_ast::ast::Program<'_>,
+    semantic: &oxc_semantic::Semantic<'_>,
+) -> Vec<NodeRuntimeRequest> {
+    let scoping = semantic.scoping();
+    let mut create_symbols = HashSet::<SymbolId>::new();
+    let mut module_symbols = HashMap::<SymbolId, String>::new();
+    for statement in &program.body {
+        let Statement::ImportDeclaration(import) = statement else {
+            continue;
+        };
+        if import.source.value != "node:module" && import.source.value != "module" {
+            continue;
+        }
+        let Some(specifiers) = &import.specifiers else {
+            continue;
+        };
+        for specifier in specifiers {
+            let ImportDeclarationSpecifier::ImportSpecifier(specifier) = specifier else {
+                continue;
+            };
+            let imported = match &specifier.imported {
+                oxc_ast::ast::ModuleExportName::IdentifierName(name) => name.name.as_str(),
+                oxc_ast::ast::ModuleExportName::IdentifierReference(name) => name.name.as_str(),
+                oxc_ast::ast::ModuleExportName::StringLiteral(name) => name.value.as_str(),
+            };
+            if imported == "createRequire"
+                && let Some(symbol) = specifier.local.symbol_id.get()
+            {
+                create_symbols.insert(symbol);
+            }
+        }
+    }
+
+    fn is_global_require_of_module(
+        expression: &Expression<'_>,
+        scoping: &oxc_semantic::Scoping,
+    ) -> bool {
+        let Expression::CallExpression(call) = expression else {
+            return false;
+        };
+        let Expression::Identifier(identifier) = &call.callee else {
+            return false;
+        };
+        if identifier.name != "require" || !identifier.is_global_reference(scoping) {
+            return false;
+        }
+        matches!(
+            call.arguments.first().and_then(Argument::as_expression),
+            Some(Expression::StringLiteral(literal))
+                if literal.value == "node:module" || literal.value == "module"
+        )
+    }
+
+    fn literal_argument(call: &oxc_ast::ast::CallExpression<'_>) -> Option<String> {
+        let Some(Argument::StringLiteral(literal)) = call.arguments.first() else {
+            return None;
+        };
+        Some(literal.value.to_string())
+    }
+
+    fn imported_factory_base(
+        call: &oxc_ast::ast::CallExpression<'_>,
+        create_symbols: &HashSet<SymbolId>,
+        module_symbols: &HashMap<SymbolId, String>,
+        scoping: &oxc_semantic::Scoping,
+        path: &str,
+    ) -> Option<String> {
+        let base = match &call.callee {
+            Expression::Identifier(identifier) => identifier
+                .reference_id
+                .get()
+                .and_then(|reference| scoping.get_reference(reference).symbol_id())
+                .and_then(|symbol| create_symbols.contains(&symbol).then(|| path.to_owned())),
+            Expression::StaticMemberExpression(member)
+                if member.property.name == "createRequire" =>
+            {
+                let Expression::Identifier(identifier) = &member.object else {
+                    return None;
+                };
+                identifier
+                    .reference_id
+                    .get()
+                    .and_then(|reference| scoping.get_reference(reference).symbol_id())
+                    .and_then(|symbol| module_symbols.get(&symbol).cloned())
+            }
+            _ => None,
+        };
+        let argument = call.arguments.first().and_then(Argument::as_expression)?;
+        if matches!(argument, Expression::StaticMemberExpression(member) if member.property.name == "url" && matches!(member.object, Expression::ImportMeta(_)))
+            || matches!(argument, Expression::Identifier(identifier) if identifier.name == "__filename" && identifier.is_global_reference(scoping))
+        {
+            return base;
+        }
+        if let Expression::StringLiteral(literal) = argument
+            && (literal.value.starts_with('/') || literal.value.starts_with("file:"))
+        {
+            return Some(literal.value.to_string());
+        }
+        None
+    }
+
+    create_symbols.retain(|symbol| !scoping.symbol_is_mutated(*symbol));
+    let mut require_symbols = HashMap::new();
+    // First collect CommonJS `const m = require("node:module")` symbols. Do this as a separate
+    // pass because semantic node order is an AST walk detail, not a source-order contract.
+    for node in semantic.nodes() {
+        let AstKind::VariableDeclarator(declarator) = node.kind() else {
+            continue;
+        };
+        let Some(init) = &declarator.init else {
+            continue;
+        };
+        let BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
+            continue;
+        };
+        if let Some(symbol) = identifier.symbol_id.get() {
+            if !scoping.symbol_is_mutated(symbol) && is_global_require_of_module(init, scoping) {
+                module_symbols.insert(symbol, path.to_owned());
+            }
+        }
+    }
+    // Track only aliases initialized from the proven imported/module factory. A shadowed local
+    // with the same spelling has a different SymbolId and therefore cannot enter this set.
+    for node in semantic.nodes() {
+        let AstKind::VariableDeclarator(declarator) = node.kind() else {
+            continue;
+        };
+        let Some(init) = &declarator.init else {
+            continue;
+        };
+        let BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
+            continue;
+        };
+        if let Some(symbol) = identifier.symbol_id.get() {
+            if scoping.symbol_is_mutated(symbol) {
+                continue;
+            }
+            let Expression::CallExpression(factory) = init else {
+                continue;
+            };
+            if let Some(base) =
+                imported_factory_base(factory, &create_symbols, &module_symbols, scoping, path)
+            {
+                require_symbols.insert(symbol, base);
+            }
+        }
+    }
+
+    let mut requests = Vec::new();
+    for node in semantic.nodes() {
+        let AstKind::CallExpression(call) = node.kind() else {
+            continue;
+        };
+        if let Expression::Identifier(identifier) = &call.callee {
+            let Some(reference) = identifier.reference_id.get() else {
+                continue;
+            };
+            let Some(symbol) = scoping.get_reference(reference).symbol_id() else {
+                continue;
+            };
+            let Some(importer) = require_symbols.get(&symbol) else {
+                continue;
+            };
+            let Some(specifier) = literal_argument(call) else {
+                continue;
+            };
+            requests.push(NodeRuntimeRequest {
+                specifier,
+                importer: importer.clone(),
+            });
+            continue;
+        } else if let Expression::CallExpression(factory) = &call.callee {
+            let Some(importer) =
+                imported_factory_base(factory, &create_symbols, &module_symbols, scoping, path)
+            else {
+                continue;
+            };
+            let Some(specifier) = literal_argument(call) else {
+                continue;
+            };
+            requests.push(NodeRuntimeRequest {
+                specifier,
+                importer,
+            });
+            continue;
+        } else if let Expression::StaticMemberExpression(member) = &call.callee {
+            let Expression::Identifier(process) = &member.object else {
+                continue;
+            };
+            if process.name != "process"
+                || member.property.name != "getBuiltinModule"
+                || !process.is_global_reference(scoping)
+            {
+                continue;
+            }
+            let Some(specifier) = literal_argument(call) else {
+                continue;
+            };
+            requests.push(NodeRuntimeRequest {
+                specifier,
+                importer: path.to_owned(),
+            });
+            continue;
+        } else {
+            continue;
+        }
+    }
+    requests.sort_by(|left, right| left.specifier.cmp(&right.specifier));
+    requests.dedup_by(|left, right| {
+        left.specifier == right.specifier && left.importer == right.importer
+    });
+    requests
 }
 
 fn strip_jsonc_comments(input: &str) -> String {
@@ -381,8 +629,8 @@ fn parse_source_with_commonjs_requires(
         parsed.diagnostics.extend(ret.diagnostics);
     }
 
-    let requires = if parsed.panicked || !parsed.diagnostics.is_empty() {
-        Vec::new()
+    let (requires, node_runtime_requests) = if parsed.panicked || !parsed.diagnostics.is_empty() {
+        (Vec::new(), Vec::new())
     } else {
         let semantic = SemanticBuilder::new()
             .with_build_nodes(true)
@@ -410,12 +658,21 @@ fn parse_source_with_commonjs_requires(
             .collect::<Vec<_>>();
         requires.sort_by_key(|(start, _)| *start);
         let mut seen = HashSet::new();
-        requires
-            .into_iter()
-            .filter_map(|(_, value)| seen.insert(value.clone()).then_some(value))
-            .collect()
+        (
+            requires
+                .into_iter()
+                .filter_map(|(_, value)| seen.insert(value.clone()).then_some(value))
+                .collect(),
+            discover_node_runtime_requests_from_semantic(
+                path.unwrap_or("inline.cjs"),
+                &parsed.program,
+                &semantic,
+            ),
+        )
     };
-    (lower_parsed(path, &parsed, source, source_type), requires)
+    let mut module = lower_parsed(path, &parsed, source, source_type);
+    module.node_runtime_requests = node_runtime_requests;
+    (module, requires)
 }
 
 /// Stop undemanded direct declarations from being implicit roots in Oxc's
@@ -520,15 +777,29 @@ fn parse_source_in_context(
         Compressor::new(&allocator)
             .dead_code_elimination(&mut parsed.program, CompressOptions::dce());
     }
-
-    lower_parsed_in_context(
+    let node_runtime_requests = if parsed.panicked || !parsed.diagnostics.is_empty() {
+        Vec::new()
+    } else {
+        let semantic = SemanticBuilder::new()
+            .with_build_nodes(true)
+            .build(&parsed.program)
+            .semantic;
+        discover_node_runtime_requests_from_semantic(
+            path.unwrap_or("inline.js"),
+            &parsed.program,
+            &semantic,
+        )
+    };
+    let mut module = lower_parsed_in_context(
         path,
         &parsed,
         source,
         source_type,
         allow,
         demanded_exports.is_some(),
-    )
+    );
+    module.node_runtime_requests = node_runtime_requests;
+    module
 }
 
 fn lower_parsed(
@@ -787,6 +1058,7 @@ fn lower_parsed_in_context(
         exports,
         diagnostics,
         panicked: parsed.panicked,
+        node_runtime_requests: Vec::new(),
     };
     module.check_isolate_escapes();
     module
@@ -3200,6 +3472,55 @@ mod tests {
         "#;
         let (_, requires) = parse_commonjs_with_requires("fixture.cjs", source);
         assert_eq!(requires, ["./first", "./nested", "./last"]);
+    }
+
+    #[test]
+    fn node_runtime_discovery_follows_imported_bindings_and_rejects_shadowing() {
+        let source = r#"
+            import { createRequire } from "node:module";
+            const req = createRequire(import.meta.url);
+            req("node:path");
+            createRequire(import.meta.url)("node:url");
+            process.getBuiltinModule("node:util");
+            function shadow(createRequire) {
+                createRequire(import.meta.url)("node:fs");
+            }
+            function local() {
+                const createRequire = () => () => {};
+                createRequire(import.meta.url)("node:os");
+            }
+        "#;
+        let mut requests = discover_node_runtime_requests("fixture.mjs", source);
+        requests.sort_by(|left, right| left.specifier.cmp(&right.specifier));
+        assert_eq!(
+            requests
+                .into_iter()
+                .map(|request| request.specifier)
+                .collect::<Vec<_>>(),
+            ["node:path", "node:url", "node:util"]
+        );
+    }
+
+    #[test]
+    fn node_runtime_discovery_follows_commonjs_module_alias() {
+        let source = r#"
+            const m = require("node:module");
+            const req = m.createRequire(__filename);
+            req("node:path");
+            m.createRequire(__filename)("node:url");
+            function shadow(m) {
+                m.createRequire(__filename)("node:fs");
+            }
+        "#;
+        let mut requests = discover_node_runtime_requests("fixture.cjs", source);
+        requests.sort_by(|left, right| left.specifier.cmp(&right.specifier));
+        assert_eq!(
+            requests
+                .into_iter()
+                .map(|request| request.specifier)
+                .collect::<Vec<_>>(),
+            ["node:path", "node:url"]
+        );
     }
 
     #[test]

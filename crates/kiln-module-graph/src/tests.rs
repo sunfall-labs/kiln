@@ -1,7 +1,9 @@
 use super::*;
 use kiln_host_abi::{HostError, HostOp, HostValue};
 use kiln_ir::{BYTECODE_VERSION, Instruction, Program};
-use kiln_module_resolver::{NodePackageResolver, NodeRuntimeResolver};
+use kiln_module_resolver::{
+    NodeModuleFormat, NodePackageResolver, NodeRuntimeResolver, PinnedPackageResolver,
+};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
@@ -24,7 +26,10 @@ impl TempProject {
     fn write(&self, name: &str, source: &str) -> PathBuf {
         let path = self.root.join(name);
         fs::write(&path, source).expect("write source");
-        path
+        // ModuleGraph canonicalizes its entry and module keys. Returning the same identity from
+        // the fixture keeps hand-built LiveDemand values faithful to the production API even on
+        // macOS, where temp_dir may expose /var while canonicalize returns /private/var.
+        fs::canonicalize(path).expect("canonical fixture path")
     }
 
     fn graph(&self, entry: &Path) -> Result<ModuleGraph, ModuleGraphError> {
@@ -34,6 +39,612 @@ impl TempProject {
 
         ModuleGraph::build(entry, &self.root, load, frontend_oxc::parse)
     }
+}
+
+#[test]
+fn binary_asset_is_retained_as_an_explicit_path_module() {
+    let project = TempProject::new();
+    let asset = project.root.join("tree-sitter.wasm");
+    fs::write(&asset, [0_u8, 159, 146, 150]).expect("write binary asset");
+    let entry = project.write(
+        "main.mjs",
+        "import wasm from './tree-sitter.wasm' with { type: 'file' }; console.log(wasm);",
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        kiln_module_resolver::ModuleResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        OxcFrontend,
+    )
+    .expect("build asset graph");
+    let node = graph.module(&asset).expect("asset node");
+    assert_eq!(node.source, ModuleSource::Asset);
+    let expected = fs::canonicalize(&asset).unwrap();
+    assert_eq!(
+        node.data.as_deref(),
+        Some(expected.to_string_lossy().as_ref())
+    );
+}
+
+#[test]
+fn create_require_literal_is_retained_as_lazy_runtime_dependency() {
+    let project = TempProject::new();
+    let dependency = project.write("dep.cjs", "module.exports = 42;");
+    let entry = project.write(
+        "main.mjs",
+        "import { createRequire } from 'node:module'; const req = createRequire(import.meta.url); req('./dep.cjs');",
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        frontend_oxc::parse,
+    )
+    .expect("build createRequire graph");
+    let node = graph.module(&entry).expect("entry node");
+    assert_eq!(
+        node.runtime_dependencies
+            .iter()
+            .map(|dependency| dependency.target.clone())
+            .collect::<Vec<_>>(),
+        vec![dependency.clone()]
+    );
+    assert_eq!(node.runtime_dependencies[0].specifier, "./dep.cjs");
+    assert_eq!(node.runtime_dependencies[0].importer, entry);
+    assert!(
+        graph.module(&dependency).is_some(),
+        "lazy target is in closure"
+    );
+    assert!(
+        !graph.statically_reachable().contains(&dependency),
+        "lazy target is not startup evaluation"
+    );
+}
+
+#[test]
+fn create_require_uses_its_captured_file_as_the_resolution_base_dynamic_compat() {
+    let project = TempProject::new();
+    fs::create_dir_all(project.root.join("nested")).unwrap();
+    let base = project.write("nested/base.cjs", "module.exports = 1;");
+    let dependency = project.write("nested/dep.cjs", "module.exports = 42;");
+    let entry = project.write(
+        "main.mjs",
+        &format!(
+            "import {{ createRequire }} from 'node:module'; const req = createRequire('{}'); req('./dep.cjs');",
+            base.display()
+        ),
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        frontend_oxc::parse,
+    )
+    .expect("build captured-base graph");
+    let node = graph.module(&entry).expect("entry node");
+    assert_eq!(node.runtime_dependencies.len(), 1);
+    assert_eq!(node.runtime_dependencies[0].importer, base);
+    assert_eq!(node.runtime_dependencies[0].target, dependency);
+}
+
+#[test]
+fn unresolved_create_require_is_a_deferred_runtime_failure_dynamic_compat() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        "import { createRequire } from 'node:module'; const req = createRequire(import.meta.url); req('./missing.cjs');",
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        frontend_oxc::parse,
+    )
+    .expect("unresolved lazy target is deferred");
+    assert!(graph.module(&entry).is_some());
+    assert_eq!(graph.runtime_failures(&entry).count(), 1);
+    let ((importer, specifier), message) = graph.runtime_failures(&entry).next().unwrap();
+    assert_eq!(importer, &entry);
+    assert_eq!(specifier, "./missing.cjs");
+    assert!(message.contains("runtime request failed"));
+}
+
+#[test]
+fn runtime_target_nested_dynamic_import_is_drained() {
+    let project = TempProject::new();
+    let runtime = project.write("runtime.cjs", "import('./dep.mjs'); module.exports = 1;");
+    let dependency = project.write("dep.mjs", "export default 42;");
+    let entry = project.write(
+        "main.mjs",
+        &format!(
+            "import {{ createRequire }} from 'node:module'; createRequire(import.meta.url)('./{}');",
+            runtime.file_name().unwrap().to_string_lossy()
+        ),
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        frontend_oxc::parse,
+    )
+    .expect("nested deferred work is drained");
+    assert!(graph.module(&runtime).is_some());
+    assert!(graph.module(&dependency).is_some());
+}
+
+#[test]
+fn invalid_runtime_target_becomes_catchable_failure() {
+    let project = TempProject::new();
+    let runtime = project.write("broken.cjs", "function (");
+    let entry = project.write(
+        "main.mjs",
+        &format!(
+            "import {{ createRequire }} from 'node:module'; createRequire(import.meta.url)('./{}');",
+            runtime.file_name().unwrap().to_string_lossy()
+        ),
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        frontend_oxc::parse,
+    )
+    .expect("invalid lazy target is deferred");
+    assert_eq!(graph.runtime_failures(&entry).count(), 1);
+    assert!(graph.module(&runtime).is_none());
+}
+
+#[test]
+fn create_require_executes_a_lazy_commonjs_runtime_target() {
+    let project = TempProject::new();
+    project.write("dep.cjs", "module.exports = 42;");
+    let entry = project.write(
+        "main.mjs",
+        "import { createRequire } from 'node:module'; const req = createRequire(import.meta.url); const path = req('node:path'); const pathAgain = req('node:path'); console.log(req('./dep.cjs'), path.basename('x/y'), path === pathAgain);",
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        frontend_oxc::parse,
+    )
+    .expect("build lazy runtime execution graph");
+    let mut host = TestHost::default();
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute lazy runtime target");
+    assert_eq!(host.output, ["42 y true"]);
+}
+
+#[test]
+fn runtime_commonjs_cycle_preserves_partially_initialized_exports() {
+    let project = TempProject::new();
+    project.write(
+        "a.cjs",
+        "exports.name = 'a'; const b = require('./b.cjs'); exports.peer = b.name;",
+    );
+    project.write(
+        "b.cjs",
+        "exports.name = 'b'; const a = require('./a.cjs'); exports.peer = a.name;",
+    );
+    let entry = project.write(
+        "main.mjs",
+        "import { createRequire } from 'node:module'; const a = createRequire(import.meta.url)('./a.cjs'); console.log(a.name, a.peer);",
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        OxcFrontend,
+    )
+    .expect("build runtime CommonJS cycle");
+    assert!(graph.module(project.root.join("b.cjs")).is_some());
+    let mut host = TestHost::default();
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute runtime CommonJS cycle");
+    assert_eq!(host.output, ["a b"]);
+}
+
+#[test]
+fn create_require_url_object_passes_its_href_to_the_host() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        "import { createRequire } from 'node:module'; const req = createRequire(new URL(import.meta.url)); console.log(typeof req);",
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        frontend_oxc::parse,
+    )
+    .expect("build URL createRequire graph");
+    let mut host = TestHost::default();
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute URL createRequire");
+    assert_eq!(host.output, ["function"]);
+}
+
+#[test]
+fn demand_only_ts_builtin_evaluates_its_ts_dependency() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        "import { createRequire } from 'node:module'; const req = createRequire(import.meta.url); console.log(typeof req('node:module').createRequire);",
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        frontend_oxc::parse,
+    )
+    .expect("build demand-only builtin graph");
+    let mut host = TestHost::default();
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute demand-only builtin dependency");
+    assert_eq!(host.output, ["function"]);
+}
+
+#[test]
+fn demand_only_get_builtin_module_evaluates_the_requested_ts_builtin() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        "const first = process.getBuiltinModule('node:path'); const second = process.getBuiltinModule('node:path'); console.log(typeof first.join, first === second);",
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        frontend_oxc::parse,
+    )
+    .expect("build demand-only getBuiltinModule graph");
+    let mut host = TestHost::default();
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute demand-only getBuiltinModule");
+    assert_eq!(host.output, ["function true"]);
+}
+
+#[test]
+fn create_require_uses_its_captured_file_as_the_resolution_base() {
+    let project = TempProject::new();
+    fs::create_dir_all(project.root.join("nested")).unwrap();
+    let base = project.write("nested/base.cjs", "module.exports = 1;");
+    let dependency = project.write("nested/dep.cjs", "module.exports = 42;");
+    let entry = project.write(
+        "main.mjs",
+        &format!(
+            "import {{ createRequire }} from 'node:module'; const req = createRequire('{}'); req('./dep.cjs');",
+            base.display()
+        ),
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        frontend_oxc::parse,
+    )
+    .expect("build captured-base graph");
+    let node = graph.module(&entry).expect("entry node");
+    assert_eq!(node.runtime_dependencies.len(), 1);
+    assert_eq!(node.runtime_dependencies[0].importer, base);
+    assert_eq!(node.runtime_dependencies[0].target, dependency);
+}
+
+#[test]
+fn unresolved_create_require_is_a_deferred_runtime_failure() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        "import { createRequire } from 'node:module'; const req = createRequire(import.meta.url); let caught = false; try { req('./missing.cjs'); } catch (_) { caught = true; } console.log(caught);",
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        frontend_oxc::parse,
+    )
+    .expect("unresolved lazy target is deferred");
+    assert!(graph.module(&entry).is_some());
+    assert_eq!(graph.runtime_failures(&entry).count(), 1);
+    let ((importer, specifier), message) = graph.runtime_failures(&entry).next().unwrap();
+    assert_eq!(importer, &entry);
+    assert_eq!(specifier, "./missing.cjs");
+    assert!(message.contains("runtime request failed"));
+    let mut host = TestHost::default();
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute deferred runtime failure");
+    assert_eq!(host.output, ["true"]);
+}
+
+#[test]
+fn dynamic_loader_resolves_against_the_requesting_module() {
+    let project = TempProject::new();
+    fs::create_dir_all(project.root.join("a")).unwrap();
+    fs::create_dir_all(project.root.join("b")).unwrap();
+    project.write("a/same.mjs", "export default 'a';");
+    project.write("b/same.mjs", "export default 'b';");
+    let entry = project.write(
+        "main.mjs",
+        "export const a = import('./a/entry.mjs'); export const b = import('./b/entry.mjs');",
+    );
+    project.write("a/entry.mjs", "export default import('./same.mjs');");
+    project.write("b/entry.mjs", "export default import('./same.mjs');");
+    let graph = Arc::new(project.graph(&entry).expect("build nested dynamic graph"));
+    let loader = GraphModuleLoader::new(Arc::clone(&graph));
+    let a = graph
+        .module(project.root.join("a/entry.mjs"))
+        .unwrap()
+        .path
+        .clone();
+    let b = graph
+        .module(project.root.join("b/entry.mjs"))
+        .unwrap()
+        .path
+        .clone();
+    let a_plan = loader
+        .load(ModuleLoadRequest {
+            importer: Some(a.to_string_lossy().into_owned()),
+            specifier: "./same.mjs".into(),
+            attributes: None,
+        })
+        .unwrap_or_else(|_| panic!("a loader request failed"));
+    let b_plan = loader
+        .load(ModuleLoadRequest {
+            importer: Some(b.to_string_lossy().into_owned()),
+            specifier: "./same.mjs".into(),
+            attributes: None,
+        })
+        .unwrap_or_else(|_| panic!("b loader request failed"));
+    assert!(a_plan.key.ends_with("/a/same.mjs"));
+    assert!(b_plan.key.ends_with("/b/same.mjs"));
+}
+
+#[test]
+fn delayed_exported_async_import_uses_defining_module_referrer() {
+    let project = TempProject::new();
+    fs::create_dir_all(project.root.join("src")).unwrap();
+    let entry = project.write(
+        "main.mjs",
+        "import('./src/processCapability.mjs').then(ns => ns.run().then(ns => console.log(ns.source)));\n\
+         import('./dep.mjs').then(ns => console.log(ns.source));",
+    );
+    project.write(
+        "src/processCapability.mjs",
+        "export const run = async () => { await Promise.resolve(); return import('./dep.mjs'); };",
+    );
+    project.write("src/dep.mjs", "export const source = 'src';");
+    project.write("dep.mjs", "export const source = 'entry';");
+
+    let graph = Arc::new(project.graph(&entry).expect("build referrer graph"));
+    let loader = GraphModuleLoader::new(Arc::clone(&graph));
+    let mut host = TestHost::default();
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default().with_module_loader_service(Arc::new(loader)),
+        )
+        .expect("execute delayed imports");
+    assert!(
+        host.output.iter().any(|line| line == "src"),
+        "{:?}",
+        host.output
+    );
+    assert!(
+        host.output.iter().any(|line| line == "entry"),
+        "{:?}",
+        host.output
+    );
+}
+
+#[test]
+fn failed_dynamic_module_is_evaluated_once_and_reuses_rejection() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        "let first;\n\
+         import('./bad.mjs').catch(error => { first = error; return import('./bad.mjs').catch(error => error); }).then(second => {\n\
+           console.log(globalThis.count);\n\
+           console.log(first === second);\n\
+         });",
+    );
+    project.write(
+        "bad.mjs",
+        "globalThis.count = (globalThis.count || 0) + 1; throw new Error('boom');",
+    );
+
+    let graph = Arc::new(project.graph(&entry).expect("build failure cache graph"));
+    let loader = GraphModuleLoader::new(Arc::clone(&graph));
+    let mut host = TestHost::default();
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default().with_module_loader_service(Arc::new(loader)),
+        )
+        .expect("execute repeated failed imports");
+    assert!(
+        host.output.iter().any(|line| line == "1"),
+        "{:?}",
+        host.output
+    );
+    assert!(
+        host.output.iter().any(|line| line == "true"),
+        "{:?}",
+        host.output
+    );
+}
+
+#[test]
+fn failed_dynamic_subtree_is_deferred_until_import() {
+    let project = TempProject::new();
+    let entry = project.write("main.mjs", "import('./optional.mjs');");
+    project.write(
+        "optional.mjs",
+        "import './missing.mjs'; export const value = 1;",
+    );
+    let graph = Arc::new(project.graph(&entry).expect("optional subtree is deferred"));
+    assert_eq!(graph.module_count(), 1);
+    assert!(
+        graph.dynamic_dependencies(&entry).is_empty(),
+        "failed dynamic targets must not remain in the successful edge map"
+    );
+
+    let loader = GraphModuleLoader::new(Arc::clone(&graph));
+    let error = match loader.load(ModuleLoadRequest {
+        importer: Some(entry.canonicalize().unwrap().to_string_lossy().into_owned()),
+        specifier: "./optional.mjs".into(),
+        attributes: None,
+    }) {
+        Ok(_) => panic!("importing the failed subtree must reject"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(error, ModuleLoadError::Unsupported(message) if message.contains("missing.mjs"))
+    );
+}
+
+#[test]
+fn failed_dynamic_subtree_rolls_back_link_errors() {
+    let project = TempProject::new();
+    let entry = project.write("main.mjs", "import('./optional.mjs');");
+    project.write(
+        "optional.mjs",
+        "import { missing } from './dep.mjs'; export const value = missing;",
+    );
+    project.write("dep.mjs", "export const present = 1;");
+    let graph = project
+        .graph(&entry)
+        .expect("link failure is deferred with the dynamic subtree");
+    assert_eq!(graph.module_count(), 1);
+    let loader = GraphModuleLoader::new(Arc::new(graph));
+    let error = match loader.load(ModuleLoadRequest {
+        importer: Some(entry.canonicalize().unwrap().to_string_lossy().into_owned()),
+        specifier: "./optional.mjs".into(),
+        attributes: None,
+    }) {
+        Ok(_) => panic!("importing the link-failed subtree must reject"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, ModuleLoadError::Unsupported(message) if message.contains("missing")));
+}
+
+#[test]
+fn failed_dynamic_subtree_rolls_back_compile_errors() {
+    let project = TempProject::new();
+    let entry = project.write("main.mjs", "import('./optional.mjs');");
+    project.write("optional.mjs", "export const = 1;");
+    let graph = project
+        .graph(&entry)
+        .expect("compile failure is deferred with the dynamic subtree");
+    assert_eq!(graph.module_count(), 1);
+}
+
+#[test]
+fn failed_dynamic_import_rejects_and_can_be_caught_by_interpreter() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        "import('./optional.mjs').catch(error => console.log(error.message));",
+    );
+    project.write("optional.mjs", "import './missing.mjs';");
+    let graph = Arc::new(project.graph(&entry).expect("dynamic failure is deferred"));
+    let mut host = TestHost::default();
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default()
+                .with_module_loader_service(Arc::new(GraphModuleLoader::new(Arc::clone(&graph)))),
+        )
+        .expect("caught dynamic import rejection");
+    assert!(
+        host.output
+            .iter()
+            .any(|line| line.contains("dynamic import failed")),
+        "unexpected output: {:?}",
+        host.output
+    );
+}
+
+#[test]
+fn failed_dynamic_sibling_does_not_rollback_successful_sibling() {
+    let project = TempProject::new();
+    let entry = project.write("main.mjs", "import('./bad.mjs'); import('./good.mjs');");
+    project.write("bad.mjs", "import './missing.mjs';");
+    project.write("good.mjs", "export const value = 42;");
+    let graph = Arc::new(project.graph(&entry).expect("one dynamic sibling failed"));
+    assert_eq!(graph.module_count(), 2);
+    let loader = GraphModuleLoader::new(Arc::clone(&graph));
+    let plan = loader
+        .load(ModuleLoadRequest {
+            importer: Some(entry.canonicalize().unwrap().to_string_lossy().into_owned()),
+            specifier: "./good.mjs".into(),
+            attributes: None,
+        })
+        .unwrap_or_else(|_| panic!("successful dynamic sibling remains loadable"));
+    assert!(plan.key.ends_with("/good.mjs"));
+}
+
+#[test]
+fn failed_static_subtree_still_rejects_graph_build() {
+    let project = TempProject::new();
+    let entry = project.write("main.mjs", "import './optional.mjs';");
+    project.write("optional.mjs", "import './missing.mjs';");
+    let error = project
+        .graph(&entry)
+        .expect_err("a static bad dependency remains fatal");
+    assert!(error.to_string().contains("missing.mjs"));
+}
+
+#[test]
+fn literal_dynamic_module_is_not_evaluated_with_static_entry() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        "console.log('entry'); if (false) import('./side.mjs');",
+    );
+    project.write("side.mjs", "console.log('side'); export const value = 1;");
+    let graph = project.graph(&entry).expect("build dynamic graph");
+    let mut host = TestHost::default();
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute entry");
+    assert_eq!(host.output, ["entry"]);
 }
 
 #[test]
@@ -472,6 +1083,66 @@ fn node_executes_commonjs_named_export_and_reexport_interop() {
         .expect("execute mixed graph");
     assert_eq!(host.into_stdout(), "fragment-value <div/>\n");
     assert_eq!(execution.value, Value::Undefined);
+}
+
+#[test]
+fn pinned_js_format_survives_graph_entry_without_reclassification() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        "import value from './dep.js'; console.log(value);",
+    );
+    let dep = project.write("dep.js", "export default 42;");
+    let dep_canonical = fs::canonicalize(&dep).unwrap();
+    let resolver = PinnedPackageResolver::new_with_node_builtins_and_formats(
+        &project.root,
+        [(entry.clone(), "./dep.js".to_owned(), dep.clone())],
+        [(dep_canonical, NodeModuleFormat::EsModule)],
+    )
+    .expect("pinned resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("pinned CommonJS graph");
+    assert!(
+        graph
+            .modules()
+            .find(|node| node.path.ends_with("dep.js"))
+            .is_some_and(|node| node.source == ModuleSource::Source)
+    );
+}
+
+#[test]
+fn dynamic_only_pinned_js_format_selects_commonjs_source() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        "const value = await import('./dep.js'); console.log(value.default);",
+    );
+    let dep = project.write("dep.js", "module.exports = 42;");
+    let dep_canonical = fs::canonicalize(&dep).unwrap();
+    let resolver = PinnedPackageResolver::new_with_node_builtins_and_formats(
+        &project.root,
+        [(entry.clone(), "./dep.js".to_owned(), dep.clone())],
+        [(dep_canonical, NodeModuleFormat::CommonJs)],
+    )
+    .expect("pinned resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("dynamic-only pinned CommonJS graph");
+    assert!(
+        graph
+            .modules()
+            .find(|node| node.path.ends_with("dep.js"))
+            .is_some_and(|node| node.source == ModuleSource::CommonJs)
+    );
 }
 
 #[test]
@@ -1405,7 +2076,8 @@ fn node_builtin_fs_ts_evaluates_and_exports_cleanly() {
         concat!(
             "import fs, { existsSync, promises, readFileSync } from 'node:fs';\n",
             "import { readFile } from 'node:fs/promises';\n",
-            "console.log(typeof fs, typeof existsSync, typeof promises, typeof readFileSync, typeof readFile, fs.default === fs);\n",
+            "const viaProcess = process.getBuiltinModule('node:fs'); const repeated = process.getBuiltinModule('node:fs');\n",
+            "console.log(typeof fs, typeof existsSync, typeof promises, typeof readFileSync, typeof readFile, fs.default === fs, viaProcess === fs, viaProcess === repeated);\n",
         ),
     );
     let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
@@ -1432,7 +2104,7 @@ fn node_builtin_fs_ts_evaluates_and_exports_cleanly() {
         .expect("execute fs builtin");
     assert_eq!(
         host.output,
-        ["object function object function function true"]
+        ["object function object function function true true true"]
     );
 }
 
@@ -2660,19 +3332,14 @@ fn node_builtin_worker_threads_commonjs_require_evaluates_cleanly() {
 #[test]
 fn node_builtin_module_evaluates_cleanly() {
     let project = TempProject::new();
+    let main_path = project.root.join("main file.mjs");
+    let main_url = url::Url::from_file_path(&main_path)
+        .expect("main path URL")
+        .to_string();
     let entry = project.write(
-        "main.mjs",
-        concat!(
-            "import defaultModule, { Module, createRequire, builtinModules, isBuiltin } from 'node:module';\n",
-            "console.log(\n",
-            "  typeof defaultModule === 'function',\n",
-            "  defaultModule === Module,\n",
-            "  typeof createRequire === 'function',\n",
-            "  Array.isArray(builtinModules),\n",
-            "  isBuiltin('fs'),\n",
-            "  isBuiltin('node:path'),\n",
-            "  isBuiltin('unknown_xyz'),\n",
-            ");\n",
+        "main file.mjs",
+        &format!(
+            "import defaultModule, {{ Module, createRequire, builtinModules, isBuiltin }} from 'node:module';\nconst viaProcess = process.getBuiltinModule('node:module');\nconst viaRequireModule = createRequire('/virtual/main.cjs')('node:module');\nconst viaFileUrl = createRequire({main_url:?})('node:module');\nlet relativeCaught = false; try {{ createRequire('relative.cjs'); }} catch (_) {{ relativeCaught = true; }}\nlet missingCaught = false; try {{ createRequire('/virtual/main.cjs')('./missing.cjs'); }} catch (error) {{ missingCaught = error instanceof Error; }}\nconsole.log(typeof defaultModule === 'function', defaultModule === Module, typeof createRequire === 'function', Array.isArray(builtinModules), isBuiltin('fs'), isBuiltin('node:path'), isBuiltin('unknown_xyz'), viaProcess === Module, viaProcess === viaRequireModule, viaFileUrl === Module, relativeCaught, missingCaught);\n",
         ),
     );
     let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
@@ -2697,7 +3364,10 @@ fn node_builtin_module_evaluates_cleanly() {
             ExecutionCapabilities::default(),
         )
         .expect("execute module builtin");
-    assert_eq!(host.output, ["true true true true true true false"]);
+    assert_eq!(
+        host.output,
+        ["true true true true true true false true true true true true"]
+    );
 }
 
 #[test]
@@ -2741,6 +3411,77 @@ fn node_builtin_module_commonjs_require_evaluates_cleanly() {
         )
         .expect("execute module builtin cjs");
     assert_eq!(host.output, ["true true true true true"]);
+}
+
+#[test]
+fn commonjs_loader_preserves_thrown_object_identity() {
+    let project = TempProject::new();
+    project.write("marker.cjs", "module.exports = { tag: 'marker' };\n");
+    project.write(
+        "thrower.cjs",
+        "const marker = require('./marker.cjs'); throw marker;\n",
+    );
+    project.write(
+        "bridge.cjs",
+        "const marker = require('./marker.cjs'); try { require('./thrower.cjs'); } catch (error) { module.exports = error === marker; }\n",
+    );
+    let entry = project.write(
+        "main.mjs",
+        "import ok from './bridge.cjs'; console.log(ok);\n",
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("Node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build thrown identity graph");
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute thrown identity graph");
+    assert_eq!(host.output, ["true"]);
+}
+
+#[test]
+fn commonjs_loader_clears_nested_thrown_values_before_next_require() {
+    let project = TempProject::new();
+    project.write("a.cjs", "module.exports = { tag: 'a' };\n");
+    project.write("b.cjs", "module.exports = { tag: 'b' };\n");
+    project.write("success.cjs", "module.exports = 7;\n");
+    project.write("inner.cjs", "const a = require('./a.cjs'); throw a;\n");
+    project.write(
+        "bridge.cjs",
+        "const b = require('./b.cjs'); try { require('./inner.cjs'); } catch (error) { if (error.tag !== 'a') throw { tag: 'wrong-inner' }; } if (require('./success.cjs') !== 7) throw { tag: 'wrong-success' }; throw b;\n",
+    );
+    project.write(
+        "result.cjs",
+        "const b = require('./b.cjs'); try { require('./bridge.cjs'); } catch (error) { module.exports = error === b; }\n",
+    );
+    let entry = project.write(
+        "main.mjs",
+        "import ok from './result.cjs'; console.log(ok);\n",
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("Node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build nested thrown identity graph");
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute nested thrown identity graph");
+    assert_eq!(host.output, ["true"]);
 }
 
 #[test]
@@ -4994,6 +5735,26 @@ fn reduce_to_live_with_everything_live_is_identity() {
     let (reduced, remapped) = graph.reduce_to_live(&demand).expect("identity reduction");
     assert_eq!(reduced, graph);
     assert_eq!(remapped.live_imports, demand.live_imports);
+}
+
+#[test]
+fn reduce_to_live_keeps_live_importer_failures_and_drops_dead_dynamic_edges() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        "import('./optional.mjs'); import('./missing.mjs');\n",
+    );
+    project.write("optional.mjs", "export const value = 1;\n");
+    let graph = project.graph(&entry).expect("fixture graph");
+
+    let demand = LiveDemand {
+        live: BTreeSet::from([entry.clone()]),
+        ..LiveDemand::default()
+    };
+    let (reduced, _) = graph.reduce_to_live(&demand).expect("reduction");
+
+    assert!(reduced.dynamic_dependencies(&entry).is_empty());
+    assert!(reduced.dynamic_failure(&entry, "./missing.mjs").is_some());
 }
 
 #[test]

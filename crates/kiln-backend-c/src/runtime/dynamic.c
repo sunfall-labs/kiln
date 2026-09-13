@@ -1,4 +1,76 @@
 
+/* Generated graph launchers provide the completion hook when module promises need to publish
+ * their namespace. Keeping the symbol weak lets ordinary realms use this runtime file without a
+ * graph launcher. */
+__attribute__((weak)) int kiln_graph_module_completion(kiln_host *host, uint32_t module_index,
+                                                       int rejected, const kiln_value *value,
+                                                       kiln_value *result, int depth,
+                                                       kiln_value *thrown) {
+    (void)host;
+    (void)module_index;
+    (void)rejected;
+    (void)value;
+    (void)result;
+    (void)depth;
+    (void)thrown;
+    return kiln_c99_internal_status("generated module completion callback");
+}
+
+static int kiln_c99_module_completion_body(kiln_call_context *ctx, kiln_val *result,
+                                           kiln_val *upvalues, const kiln_val *receiver,
+                                           const kiln_val *args, size_t argc) {
+    kiln_host *host = ctx ? ctx->host : NULL;
+    kiln_value *thrown = ctx ? ctx->thrown : NULL;
+    int depth = ctx ? ctx->depth : 0;
+    kiln_value value = argc > 0 ? kiln_val_to_boundary(args[0]) : kiln_c99_undefined();
+    uint32_t module_index = (uint32_t)kiln_c99_as_number(kiln_val_to_boundary(upvalues[0]));
+    int rejected = (int)kiln_c99_as_number(kiln_val_to_boundary(upvalues[1]));
+    kiln_value boundary_result = kiln_c99_undefined();
+    int status = kiln_graph_module_completion(host, module_index, rejected, &value,
+                                              &boundary_result, depth, thrown);
+    *result = kiln_val_from_boundary(boundary_result);
+    return status;
+}
+
+int kiln_c99_module_completion(kiln_host *host, kiln_value input_promise,
+                               uint32_t module_index, kiln_value *out_promise,
+                               int depth, kiln_value *thrown) {
+    kiln_val captured[2];
+    kiln_value fulfilled;
+    kiln_value rejected;
+    kiln_value handlers[2];
+    int status;
+    if (out_promise == NULL || input_promise.tag != KILN_VALUE_PROMISE)
+        KILN_C99_REFUSE_INTERNAL("module completion requires a promise output and input");
+    captured[0] = kiln_val_from_boundary(kiln_c99_number((double)module_index));
+    captured[1] = kiln_val_from_boundary(kiln_c99_number(0.0));
+    status = kiln_c99_make_closure(&fulfilled, kiln_c99_module_completion_body,
+                                   "module completion", 17, "", 0, "module completion",
+                                   0, 1, 0, 0, 0, 0, 0, 0, KILN_VAL_UNDEFINED,
+                                   KILN_VAL_UNDEFINED, 0, 16, 0, 0, captured, 2);
+    if (status != KILN_C99_OK) return status;
+    kiln_c99_gc_keep_alive(&fulfilled);
+    kiln_c99_gc_keep_alive(&input_promise);
+    captured[1] = kiln_val_from_boundary(kiln_c99_number(1.0));
+    status = kiln_c99_make_closure(&rejected, kiln_c99_module_completion_body,
+                                   "module completion", 17, "", 0, "module completion",
+                                   0, 1, 0, 0, 0, 0, 0, 0, KILN_VAL_UNDEFINED,
+                                   KILN_VAL_UNDEFINED, 0, 16, 0, 0, captured, 2);
+    if (status != KILN_C99_OK) return status;
+    kiln_c99_gc_keep_alive(&fulfilled);
+    kiln_c99_gc_keep_alive(&rejected);
+    kiln_c99_gc_keep_alive(&input_promise);
+    handlers[0] = fulfilled;
+    handlers[1] = rejected;
+    status = kiln_c99_invoke_method(host, out_promise, KILN_C99_METHOD_THEN,
+                                    input_promise, handlers, 2, depth, thrown);
+    kiln_c99_gc_keep_alive(&input_promise);
+    kiln_c99_gc_keep_alive(&handlers);
+    kiln_c99_gc_keep_alive(&fulfilled);
+    kiln_c99_gc_keep_alive(&rejected);
+    return status;
+}
+
 typedef struct kiln_dyn_binding {
     char *name;
     size_t name_len;
@@ -1809,4 +1881,75 @@ static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
                                  0, 0, 0, 0, 0, 0, KILN_VAL_UNDEFINED,
                                  KILN_VAL_UNDEFINED, 0, 16, 0, 0,
                                  val_upvalues, 3);
+}
+/* Dynamic import option validation is shared by every generated importer. Keeping it in the
+ * runtime means the launcher and shared wrapper cannot drift in their object/enumeration rules. */
+static int kiln_c99_validate_dynamic_import_options(kiln_host *host, kiln_value options, int depth,
+                                                    kiln_value *thrown, int *attribute_type) {
+    kiln_value attrs;
+    if (attribute_type != NULL) *attribute_type = 0;
+    kiln_value keys;
+    kiln_value entries;
+    size_t index;
+    int status;
+    if (options.tag == KILN_VALUE_UNDEFINED) return KILN_C99_OK;
+    if (options.tag == KILN_VALUE_NULL || options.tag == KILN_VALUE_BOOLEAN ||
+        options.tag == KILN_VALUE_NUMBER || options.tag == KILN_VALUE_STRING ||
+        options.tag == KILN_VALUE_SYMBOL || options.tag == KILN_VALUE_BIGINT) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "import options must be an object");
+    }
+    status = kiln_c99_get(host, options, "with", 4, &attrs, depth, thrown);
+    if (status != KILN_C99_OK) return status;
+    if (attrs.tag == KILN_VALUE_UNDEFINED) return KILN_C99_OK;
+    if (attrs.tag == KILN_VALUE_NULL || attrs.tag == KILN_VALUE_BOOLEAN ||
+        attrs.tag == KILN_VALUE_NUMBER || attrs.tag == KILN_VALUE_STRING ||
+        attrs.tag == KILN_VALUE_SYMBOL || attrs.tag == KILN_VALUE_BIGINT) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "import attributes must be an object");
+    }
+    status = kiln_c99_own_keys(host, attrs, &keys, depth, thrown);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_new_array(&entries);
+    if (status != KILN_C99_OK) return status;
+    for (index = 0; index < kiln_c99_array_of(keys)->count; ++index) {
+        kiln_value key = kiln_val_to_boundary(kiln_c99_array_of(keys)->elements[index]);
+        kiln_value value;
+        if (key.tag != KILN_VALUE_STRING) continue;
+        status = kiln_c99_get(host, attrs, key.ptr, key.len, &value, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        kiln_value entry;
+        status = kiln_c99_new_array(&entry);
+        if (status == KILN_C99_OK) status = kiln_c99_array_push(entry, key);
+        if (status == KILN_C99_OK) status = kiln_c99_array_push(entry, value);
+        if (status == KILN_C99_OK) status = kiln_c99_array_push(entries, entry);
+        if (status != KILN_C99_OK) return status;
+    }
+    /* Validate only after all enumerable getters have run. */
+    for (index = 0; index < kiln_c99_array_of(entries)->count; ++index) {
+        kiln_value entry = kiln_val_to_boundary(kiln_c99_array_of(entries)->elements[index]);
+        kiln_value key = kiln_val_to_boundary(kiln_c99_array_of(entry)->elements[0]);
+        kiln_value value = kiln_val_to_boundary(kiln_c99_array_of(entry)->elements[1]);
+        if (key.len != 4 || memcmp(key.ptr, "type", 4) != 0) continue;
+        if (value.tag != KILN_VALUE_STRING) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "import attribute values must be strings");
+        }
+        if (value.len != 4 || memcmp(value.ptr, "file", 4) != 0) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "unsupported import attribute `type`");
+        }
+        if (attribute_type != NULL) *attribute_type = 1;
+    }
+    /* Unknown keys are rejected only after all enumerable values have been read. */
+    for (index = 0; index < kiln_c99_array_of(entries)->count; ++index) {
+        kiln_value entry = kiln_val_to_boundary(kiln_c99_array_of(entries)->elements[index]);
+        kiln_value key = kiln_val_to_boundary(kiln_c99_array_of(entry)->elements[0]);
+        if (key.tag == KILN_VALUE_STRING &&
+            (key.len != 4 || memcmp(key.ptr, "type", 4) != 0)) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "unsupported import attribute");
+        }
+    }
+    return KILN_C99_OK;
 }

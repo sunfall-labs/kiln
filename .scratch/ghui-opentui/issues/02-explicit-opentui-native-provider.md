@@ -22,11 +22,9 @@ that Kiln does not implement.
 
 ## Implementation status
 
-The provider ABI now owns dynamic-library handles, prepared libffi call interfaces, typed calls,
+The provider ABI owns dynamic-library handles, prepared libffi call interfaces, typed calls,
 same-thread callbacks, and precise error retrieval. Focused tests exercise a real `strlen` call,
 stale-handle rejection after close, mixed integer/floating-point calls, callback round trips, and
-active-callback unregistration refusal. The packaged static archive includes the new ABI group in
-its export and source-identity checks.
-
-Still required: expose the provider through the generated C runtime, implement the TypeScript
-`node:ffi` facade, add borrowed ArrayBuffer views and callback rooting, then run OpenTUI itself.
+active-callback unregistration refusal. The packaged static archive includes the ABI group in its
+export and source-identity checks. The generated C bridge, TypeScript facade, borrowed views, and
+callback rooting have mock coverage; the live ghui adapter remains under verification.

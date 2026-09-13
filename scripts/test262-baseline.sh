@@ -47,10 +47,17 @@ KILN_BIN="${KILN_TEST262_KILN:-target/release/kiln}"
 [[ -x $KILN_BIN ]] || die "no kiln binary at $KILN_BIN (build with: mbx build --release -p kiln-cli)"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/kiln-test262-baseline.XXXXXXXX")"
+LOG_ROOT="${KILN_TEST262_LOG_DIR:-$PWD/target/test262-baseline-logs}"
+mkdir -p "$LOG_ROOT"
+LOG_DIR="$(mktemp -d "$LOG_ROOT/run.XXXXXXXX")"
+export KILN_TEST262_LOG_DIR="$LOG_DIR"
 trap 'rm -rf "$WORK"' EXIT
 
 python3 - "$KILN_BIN" "$CHECKOUT/test" "$BASELINE" "$WORK" "$UPDATE" "$TEST262_COMMIT" <<'PY'
-import json, os, subprocess, sys
+import json, os, pathlib, subprocess, sys
+
+sys.path.insert(0, str(pathlib.Path.cwd() / "scripts"))
+from test262_memory import run_limited, verify_effective_cap
 
 kiln, root, baseline_path, work, update, commit = sys.argv[1:7]
 update = update == "1"
@@ -80,15 +87,35 @@ if not chunks:
         chunks.extend(f"{top}/{c}" for c in children) if children else chunks.append(top)
 
 measured, regressions, gains = {}, [], []
+try:
+    verify_effective_cap()
+except Exception as error:
+    sys.exit(f"memory cap verification failed: {error}; logs retained at {os.environ['KILN_TEST262_LOG_DIR']}")
 for index, chunk in enumerate(chunks, 1):
     path = os.path.join(root, chunk)
     if not os.path.isdir(path):
         sys.exit(f"baseline names {chunk}, which is not in the checkout")
     out = os.path.join(work, chunk.replace("/", "_") + ".json")
-    subprocess.run([kiln, "--one-shot", "test", path, "--out", out],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-    with open(out) as handle:
-        totals = json.load(handle)["totals"]
+    log = os.path.join(os.environ["KILN_TEST262_LOG_DIR"], chunk.replace("/", "_") + ".log")
+    with open(log, "w", encoding="utf-8") as stream:
+        completed, exceeded = run_limited([kiln, "--one-shot", "test", path, "--out", out],
+                                          stdout=stream, stderr=subprocess.STDOUT)
+    if exceeded:
+        sys.exit(f"chunk {chunk} exceeded memory cap; full log: {log}")
+    if not os.path.isfile(out):
+        sys.exit(f"chunk {chunk} wrote no result document (exit {completed.returncode}); full log: {log}")
+    try:
+        with open(out, encoding="utf-8") as handle:
+            document = json.load(handle)
+        totals = document["totals"]
+        passed, failed = int(totals["passed"]), int(totals["failed"])
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        sys.exit(f"chunk {chunk} has invalid result ({error}); full log: {log}")
+    # A chunk can be non-empty while every selected case is currently unsupported. Treat that
+    # as measured coverage; only a selected count of zero indicates an empty/missing corpus.
+    total = int(totals.get("total", 0))
+    if total <= 0:
+        sys.exit(f"chunk {chunk} has zero test results; full log: {log}")
     passed, failed = totals["passed"], totals["failed"]
     measured[chunk] = {"passed": passed, "failed": failed}
     was = baseline["chunks"].get(chunk)

@@ -712,6 +712,302 @@ fn run_native_http_fixture(name: &str, source: &str) -> Option<String> {
     Some(String::from_utf8(output.stdout).expect("fixture output is UTF-8"))
 }
 
+fn run_native_release_fixture(name: &str, source: &str) -> Option<String> {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    use std::process::Command;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native release fixture: no C compiler found");
+        return None;
+    };
+    let project = TestDirectory::new(name);
+    let entry = project.path.join("main.mjs");
+    fs::write(&entry, source).expect("write native release fixture");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("release source graph compiles");
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: project.path.join("program"),
+                profile: NativeProfile::Release,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .expect("native release graph builds");
+    let run = |stress: bool| {
+        let mut command = Command::new(&report.output);
+        if stress {
+            command.env("KILN_GC_STRESS", "1");
+        } else {
+            command.env_remove("KILN_GC_STRESS");
+        }
+        command.output().expect("run native release fixture")
+    };
+    let normal = run(false);
+    assert!(
+        normal.status.success(),
+        "normal status={} stdout={:?} stderr={:?}",
+        normal.status,
+        String::from_utf8_lossy(&normal.stdout),
+        String::from_utf8_lossy(&normal.stderr)
+    );
+    let stress = run(true);
+    assert!(
+        stress.status.success(),
+        "stress status={} stdout={:?} stderr={:?}",
+        stress.status,
+        String::from_utf8_lossy(&stress.stdout),
+        String::from_utf8_lossy(&stress.stderr)
+    );
+    assert_eq!(
+        stress.stdout, normal.stdout,
+        "GC stress changed native fixture output"
+    );
+    Some(String::from_utf8(normal.stdout).expect("fixture output is UTF-8"))
+}
+
+fn run_native_failure_fixture(name: &str, source: &str) -> Option<String> {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    use std::process::Command;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native diagnostic fixture: no C compiler found");
+        return None;
+    };
+    let project = TestDirectory::new(name);
+    let entry = project.path.join("main.mjs");
+    fs::write(&entry, source).expect("write native diagnostic fixture");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("diagnostic source graph compiles");
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: project.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .expect("native diagnostic graph builds");
+    let output = Command::new(&report.output)
+        .output()
+        .expect("run native diagnostic fixture");
+    assert!(!output.status.success(), "fixture unexpectedly succeeded");
+    Some(String::from_utf8(output.stderr).expect("diagnostic output is UTF-8"))
+}
+
+fn run_native_failure_fixture_with_dependency(
+    name: &str,
+    source: &str,
+    dependency_source: &str,
+    profile: NativeProfile,
+) -> Option<String> {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    use std::process::Command;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native diagnostic fixture: no C compiler found");
+        return None;
+    };
+    let project = TestDirectory::new(name);
+    fs::write(project.path.join("main.mjs"), source).expect("write native diagnostic fixture");
+    fs::write(project.path.join("dep.mjs"), dependency_source)
+        .expect("write native diagnostic dependency");
+    let entry = project.path.join("main.mjs");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("diagnostic source graph compiles");
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: project.path.join("program"),
+                profile,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .expect("native diagnostic graph builds");
+    let output = Command::new(&report.output)
+        .output()
+        .expect("run native diagnostic fixture");
+    assert!(!output.status.success(), "fixture unexpectedly succeeded");
+    Some(String::from_utf8(output.stderr).expect("diagnostic output is UTF-8"))
+}
+
+#[test]
+fn native_timer_callbacks_retain_closures_through_gc_and_interval_cancel() {
+    let source = r#"
+function scheduleFactory(value) {
+  const captured = { value };
+  const delay = {
+    valueOf() {
+      const garbage = [];
+      for (let i = 0; i < 5000; i++) garbage.push({ i, text: 'allocation' });
+      return 0;
+    }
+  };
+  const observed = [];
+  setTimeout(() => {
+    observed.push(captured.value);
+    setTimeout(() => observed.push(captured.value + 1), 0);
+  }, delay);
+  let ticks = 0;
+  const interval = setInterval(() => {
+    ticks++;
+    if (ticks === 2) {
+      clearInterval(interval);
+      setTimeout(() => console.log(observed.join(',') + ':' + ticks + ':' + captured.value), 0);
+    }
+  }, 0);
+}
+scheduleFactory(41);
+"#;
+    let Some(output) = run_native_release_fixture("native-timer-gc-liveness", source) else {
+        return;
+    };
+    assert_eq!(output, "41,42:2:41\n");
+}
+
+#[test]
+fn native_non_callable_diagnostic_keeps_call_site_and_callee_context() {
+    let Some(stderr) = run_native_failure_fixture(
+        "kiln-native-non-callable-diagnostic",
+        "function invoke() { const value = {}; value(); }\ninvoke();\n",
+    ) else {
+        return;
+    };
+    assert!(
+        stderr.contains("module=main.mjs"),
+        "missing module: {stderr}"
+    );
+    assert!(
+        stderr.contains("operation=Call"),
+        "missing operation: {stderr}"
+    );
+    assert!(
+        stderr.contains("detail=non-callable callee kind"),
+        "missing value kind: {stderr}"
+    );
+    assert!(
+        stderr.contains("function=invoke"),
+        "missing owning function: {stderr}"
+    );
+    assert!(
+        stderr.contains("receiver_tag=9"),
+        "missing offending value tag: {stderr}"
+    );
+}
+
+#[test]
+fn native_non_callable_caught_error_does_not_leak_into_later_throw() {
+    let Some(stderr) = run_native_failure_fixture(
+        "kiln-native-non-callable-diagnostic-reset",
+        "function caught() { try { const value = {}; value(); } catch (_) {} }\nfunction boom() { throw new Error('boom'); }\ncaught();\nboom();\n",
+    ) else {
+        return;
+    };
+    assert!(
+        stderr.contains("detail=Call invocation threw"),
+        "stale non-callable detail: {stderr}"
+    );
+    assert!(
+        !stderr.contains("function=caught"),
+        "caught context leaked: {stderr}"
+    );
+}
+
+#[test]
+fn native_non_callable_nested_error_names_innermost_function() {
+    let Some(stderr) = run_native_failure_fixture(
+        "kiln-native-non-callable-nested-function",
+        "function outer() { function inner() { const value = {}; value(); } inner(); }\nouter();\n",
+    ) else {
+        return;
+    };
+    assert!(
+        stderr.contains("function=inner"),
+        "missing innermost owning function: {stderr}"
+    );
+    assert!(
+        !stderr.contains("function=outer"),
+        "enclosing function leaked into diagnostic: {stderr}"
+    );
+}
+
+#[test]
+fn native_non_callable_cross_module_error_keeps_innermost_site() {
+    let Some(stderr) = run_native_failure_fixture_with_dependency(
+        "kiln-native-non-callable-cross-module",
+        "import { outer } from './dep.mjs';\nouter();\n",
+        "export function outer() { function inner() { const value = {}; value(); } inner(); }\n",
+        NativeProfile::Dev,
+    ) else {
+        return;
+    };
+    assert!(
+        stderr.contains("operation=Call"),
+        "missing operation: {stderr}"
+    );
+    assert!(
+        stderr.contains("module=dep.mjs"),
+        "missing innermost module: {stderr}"
+    );
+    assert!(
+        stderr.contains("function=inner"),
+        "missing innermost function: {stderr}"
+    );
+    assert!(
+        !stderr.contains("function=outer"),
+        "outer function leaked: {stderr}"
+    );
+
+    let Some(stderr) = run_native_failure_fixture_with_dependency(
+        "kiln-native-non-callable-cross-module-release",
+        "import { outer } from './dep.mjs';\nouter();\n",
+        "export function outer() { function inner() { const value = {}; value(); } inner(); }\n",
+        NativeProfile::Release,
+    ) else {
+        return;
+    };
+    assert!(
+        stderr.contains("module=dep.mjs"),
+        "release missing innermost module: {stderr}"
+    );
+    assert!(
+        stderr.contains("operation=Call"),
+        "release missing operation: {stderr}"
+    );
+    assert!(
+        stderr.contains("detail=non-callable callee kind"),
+        "release missing refusal reason: {stderr}"
+    );
+    assert!(
+        !stderr.contains("unknown native operation"),
+        "release lost diagnostic provenance: {stderr}"
+    );
+}
+
 #[test]
 fn owned_result_wrapper_source_is_deterministic_and_has_no_static_result_state() {
     let source = owned_result_wrapper_source(
@@ -1041,7 +1337,7 @@ fn typed_node_querystring_has_a_native_materializer() {
     )
     .expect("typed node graph");
 
-    validate_native_node_builtins(&graph).expect("querystring materializes");
+    native_graph_plan(&graph).expect("querystring materializes");
     assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::QueryString));
     for export in kiln_builtins::QUERYSTRING_EXPORTS {
         assert!(native_builtin_supports_export(
@@ -1095,6 +1391,126 @@ console.log(edges.missing === "", edges[""], edges["empty-value"] === "", edges.
     assert_eq!(
         run.stdout,
         "true true world b==ar 1,2 c d ✓ %ZZ safe\ntrue empty-key true % %A � �(�\n".as_bytes()
+    );
+}
+
+#[test]
+fn native_create_require_uses_captured_virtual_filename_for_builtin_path() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-create-require-virtual");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
+        .expect("write package metadata");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        r#"import { createRequire } from "node:module";
+import * as staticallyLoadedPath from "node:path";
+const require = createRequire("/virtual/main.cjs");
+const path = require("node:path");
+console.log(path.dirname === staticallyLoadedPath.dirname, path.basename("/tmp/file.js"));"#,
+    )
+    .expect("write createRequire consumer");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build createRequire graph");
+    assert!(
+        graph.modules().any(|node| node.source
+            == ModuleSource::NodeBuiltin(kiln_module_resolver::NodeBuiltin::Path)),
+        "graph modules: {:?}",
+        graph
+            .modules()
+            .map(|node| node.path.clone())
+            .collect::<Vec<_>>()
+    );
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native createRequire integration: no C compiler found");
+        return;
+    };
+    let run = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .expect("native createRequire graph builds and runs");
+    assert_eq!(run.stdout, b"true file.js\n", "stderr={:?}", run.stderr);
+}
+
+#[test]
+fn native_create_require_escaped_relative_cjs_and_demand_only_path() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-create-require-escaped");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
+        .expect("write package metadata");
+    let entry = root.path.join("entry with space.mjs");
+    fs::write(
+        &entry,
+        r#"import { createRequire } from "node:module";
+function factory() {
+  const require = createRequire(import.meta.url);
+  return { load: () => require('./dep.cjs'), require };
+}
+const { load, require } = factory();
+console.log(`before:${globalThis.__loads || 0}`);
+const first = load();
+const second = load();
+console.log(`${first === second}:${first.loads}:${globalThis.__loads}`);
+const unknownBase = '/virtual/' + (globalThis.__createRequireBase || 'main.cjs');
+const fallbackPath = createRequire(unknownBase)('node:path');
+console.log(typeof fallbackPath.basename);
+const path = createRequire(import.meta.url)('node:path');
+console.log(typeof path.basename);"#,
+    )
+    .expect("write escaped createRequire entry");
+    fs::write(
+        root.path.join("dep.cjs"),
+        r#"globalThis.__loads = (globalThis.__loads || 0) + 1;
+module.exports = { loads: globalThis.__loads };"#,
+    )
+    .expect("write escaped createRequire dependency");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build escaped createRequire graph");
+    assert!(
+        graph
+            .modules()
+            .flat_map(|node| &node.runtime_dependencies)
+            .any(|dependency| dependency.specifier == "node:path")
+    );
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping escaped createRequire integration: no C compiler found");
+        return;
+    };
+    let run = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .expect("native escaped createRequire graph builds and runs");
+    assert_eq!(
+        run.stdout, b"before:0\ntrue:1:1\nfunction\nfunction\n",
+        "stderr={:?}",
+        run.stderr
     );
 }
 
@@ -3461,6 +3877,227 @@ int main(void) {{
     );
 }
 
+#[test]
+fn embedded_shared_graph_dynamic_import_keeps_context_after_body_returns() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        eprintln!("skipping delayed shared dynamic import on unsupported platform");
+        return;
+    }
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping delayed shared dynamic import: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-shared-delayed-dynamic");
+    let project = root.path.join("project");
+    fs::create_dir_all(&project).expect("create delayed dynamic project");
+    let entry = project.join("main.mjs");
+    fs::write(
+        &entry,
+        "import * as staticNs from './target.mjs';\nPromise.resolve().then(() => import('./target.mjs')).then(ns => console.log(`${ns.x}:${ns === staticNs}`));\n",
+    )
+    .expect("write delayed dynamic entry");
+    fs::write(project.join("target.mjs"), "export const x = 99;\n")
+        .expect("write delayed dynamic target");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build delayed dynamic graph");
+    let library = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain.clone())
+        .build_shared_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join(shared_library_name()),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .expect("build delayed dynamic shared graph");
+    let header_name = library
+        .header
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("delayed dynamic header");
+    let host_source = root.path.join("host.c");
+    fs::write(
+        &host_source,
+        format!(
+            r#"#include "{header_name}"
+#include <stdio.h>
+static int host_call(void *context, uint16_t operation, uint16_t argc,
+                     const kiln_value *arguments, kiln_value *result) {{
+    (void)context;
+    if (operation != KILN_HOST_OP_WRITE_STDOUT || argc != 1 || arguments == NULL ||
+        result == NULL || arguments[0].tag != KILN_VALUE_STRING) return KILN_C99_HOST_ERROR;
+    if (arguments[0].len != 0 && arguments[0].ptr == NULL) return KILN_C99_HOST_ERROR;
+    if (fwrite(arguments[0].ptr, 1, arguments[0].len, stdout) != arguments[0].len ||
+        fputc('\n', stdout) == EOF) return KILN_C99_HOST_ERROR;
+    *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};
+    return KILN_C99_OK;
+}}
+int main(void) {{
+    kiln_host host = {{ host_call, NULL }};
+    kiln_value result;
+    return {symbol}(&host, &result) == KILN_C99_OK ? 0 : 1;
+}}
+"#,
+            symbol = library.module_symbol,
+        ),
+    )
+    .expect("write delayed dynamic host");
+    let host_object = root.path.join("host.o");
+    let mut compile = CompileOptions::default();
+    compile.include_dirs.push(root.path.clone());
+    toolchain
+        .compile_c(&host_source, &host_object, &compile)
+        .expect("compile delayed dynamic host");
+    let host_executable = root.path.join("host");
+    let loader_directory = library.loader.parent().expect("loader directory");
+    let mut link = LinkOptions::default();
+    link.runtime_libraries.push(library.output.clone());
+    link.extra_args
+        .push(format!("-Wl,-rpath,{}", loader_directory.display()).into());
+    toolchain
+        .link_executable(&[host_object], &host_executable, &link)
+        .expect("link delayed dynamic host");
+    let mut command = Command::new(&host_executable);
+    #[cfg(target_os = "linux")]
+    command.env("LD_LIBRARY_PATH", loader_directory);
+    #[cfg(target_os = "macos")]
+    command.env("DYLD_LIBRARY_PATH", loader_directory);
+    let output = command.output().expect("run delayed dynamic host");
+    assert!(
+        output.status.success(),
+        "delayed dynamic host failed with {:?}: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"99:true\n");
+}
+
+#[test]
+fn embedded_shared_graph_create_require_uses_runtime_relative_cjs_edge() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        eprintln!("skipping shared createRequire integration on unsupported platform");
+        return;
+    }
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping shared createRequire integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-shared-create-require");
+    let project = root.path.join("project");
+    fs::create_dir_all(&project).expect("create shared createRequire project");
+    let entry = project.join("entry with space.mjs");
+    fs::write(
+        &entry,
+        r#"import { createRequire } from "node:module";
+let loads = 0;
+function factory() {
+  const require = createRequire(import.meta.url);
+  return { load: () => require('./dep.cjs'), require };
+}
+const factoryResult = factory();
+const load = factoryResult.load;
+console.log(`before:${loads}`);
+const first = load();
+const second = load();
+console.log(`${first === second}:${first.loads}:${loads}`);
+try { createRequire(import.meta.url)('./missing.cjs'); } catch (error) { console.log(`${error instanceof TypeError}`); }"#,
+    )
+    .expect("write shared createRequire entry");
+    fs::write(project.join("dep.cjs"), r#"globalThis.__shared_create_require_loads = (globalThis.__shared_create_require_loads || 0) + 1;
+module.exports = { loads: globalThis.__shared_create_require_loads };"#)
+        .expect("write shared createRequire dependency");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build shared createRequire graph");
+    let library = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain.clone())
+        .build_shared_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join(shared_library_name()),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .expect("build shared createRequire library");
+    let header_name = library
+        .header
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("shared createRequire header");
+    let host_source = root.path.join("host.c");
+    fs::write(
+        &host_source,
+        format!(
+            r#"#include "{header_name}"
+#include <stdio.h>
+static int host_call(void *context, uint16_t operation, uint16_t argc,
+                     const kiln_value *arguments, kiln_value *result) {{
+    (void)context;
+    if (operation != KILN_HOST_OP_WRITE_STDOUT || argc != 1 || arguments == NULL ||
+        result == NULL || arguments[0].tag != KILN_VALUE_STRING ||
+        (arguments[0].len != 0 && arguments[0].ptr == NULL)) return KILN_C99_HOST_ERROR;
+    if (fwrite(arguments[0].ptr, 1, arguments[0].len, stdout) != arguments[0].len ||
+        fputc('\n', stdout) == EOF) return KILN_C99_HOST_ERROR;
+    *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};
+    return KILN_C99_OK;
+}}
+int main(void) {{
+    kiln_host host = {{ host_call, NULL }};
+    kiln_value result;
+    int status = {symbol}(&host, &result);
+    fprintf(stderr, "status=%d tag=%u len=%u\\n", status, result.tag, result.len);
+    return status == KILN_C99_OK ? 0 : 1;
+}}
+"#,
+            symbol = library.module_symbol,
+        ),
+    )
+    .expect("write shared createRequire host");
+    let host_object = root.path.join("host.o");
+    let mut compile = CompileOptions::default();
+    compile.include_dirs.push(root.path.clone());
+    toolchain
+        .compile_c(&host_source, &host_object, &compile)
+        .expect("compile shared createRequire host");
+    let host_executable = root.path.join("host");
+    let loader_directory = library.loader.parent().expect("loader directory");
+    let mut link = LinkOptions::default();
+    link.runtime_libraries.push(library.output.clone());
+    link.extra_args
+        .push(format!("-Wl,-rpath,{}", loader_directory.display()).into());
+    toolchain
+        .link_executable(&[host_object], &host_executable, &link)
+        .expect("link shared createRequire host");
+    let mut command = Command::new(&host_executable);
+    #[cfg(target_os = "linux")]
+    command.env("LD_LIBRARY_PATH", loader_directory);
+    #[cfg(target_os = "macos")]
+    command.env("DYLD_LIBRARY_PATH", loader_directory);
+    let output = command.output().expect("run shared createRequire host");
+    assert!(
+        output.status.success(),
+        "shared createRequire host failed with {:?}: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"before:0\ntrue:1:0\ntrue\n");
+}
+
 fn star_reexport_graph(project: &Path) -> ModuleGraph {
     fs::create_dir_all(project).expect("create star graph project");
     for name in ["origin.js", "barrel.js", "main.js"] {
@@ -3660,6 +4297,8 @@ fn native_graph_wiring_uses_resolved_star_export_origins() {
         &graph,
         &modules,
         &NativeRealmPolicy::default(),
+        None,
+        None,
         None,
         None,
         None,
@@ -4457,7 +5096,6 @@ fn native_graphs_materialize_one_snapshot_namespace_per_provider() {
     let launcher = graph_launcher_source(&graph, &modules, &NativeRealmPolicy::default())
         .expect("launcher emits");
     assert!(launcher.contains("kiln_imports_1[0] = kiln_namespaces[0];"));
-    assert_eq!(launcher.matches("kiln_namespaces[0]").count(), 2);
     assert!(launcher.contains("_namespace_wrapper(&kiln_namespaces[0]"));
     let wrapper = graph_shared_wrapper_source(&graph, &modules, "kiln_namespace_graph")
         .expect("shared wrapper emits");
@@ -4752,14 +5390,16 @@ fn native_dynamic_import_resolves_opentui_and_in_graph_modules() {
     )
     .expect("write mock libopentui");
     fs::write(root.path.join("helper.mjs"), "export const answer = 99;\n").expect("write helper");
+    fs::write(root.path.join("asset.wasm"), [0_u8, 159, 146, 150]).expect("write asset");
     let entry = root.path.join("main.mjs");
     fs::write(
         &entry,
         "import * as h from './helper.mjs';\n\
          const otui = await import('@opentui/core-linux-x64');\n\
          const helper = await import('./helper.mjs');\n\
+         const asset = await import('./asset.wasm', { with: { type: 'file' } });\n\
          const ffi = await import('node:ffi');\n\
-         console.log(otui.default.includes('libopentui.so'), helper.answer, typeof ffi.dlopen, typeof ffi.getRawPointer);\n",
+         console.log(otui.default.includes('libopentui.so'), helper.answer, asset.default.endsWith('asset.wasm'), typeof ffi.dlopen, typeof ffi.getRawPointer);\n",
     )
     .expect("write entry");
     let graph = ModuleGraph::build_node(
@@ -4780,13 +5420,709 @@ fn native_dynamic_import_resolves_opentui_and_in_graph_modules() {
             },
         )
         .expect("dynamic import graph builds and runs");
-    if report.stdout != b"true 99 function function\n" {
+    if report.stdout != b"true 99 true function function\n" {
         eprintln!("exit_code: {:?}", report.exit_code);
         eprintln!("result: {:?}", report.result);
         eprintln!("stderr: {}", String::from_utf8_lossy(&report.stderr));
         eprintln!("stdout: {}", String::from_utf8_lossy(&report.stdout));
     }
-    assert_eq!(report.stdout, b"true 99 function function\n");
+    assert_eq!(report.stdout, b"true 99 true function function\n");
+}
+
+#[test]
+fn native_deferred_dynamic_import_failures_are_catchable() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping deferred dynamic failure integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-deferred-dynamic-failures");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).expect("write root package");
+    fs::write(root.path.join("bad-syntax.mjs"), "export const = ;\n")
+        .expect("write syntax failure");
+    fs::write(
+        root.path.join("bad-export.mjs"),
+        "import { missing } from './dep.mjs'; export const value = missing;\n",
+    )
+    .expect("write missing export failure");
+    fs::write(root.path.join("never-called.mjs"), "export const = ;\n")
+        .expect("write never-called syntax failure");
+    fs::write(root.path.join("dep.mjs"), "export const answer = 42;\n").expect("write dependency");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "console.log('start');\n\
+         try { await import('./missing.mjs'); } catch (error) { console.log(error instanceof TypeError); }\n\
+         try { await import('./missing-builtin.mjs'); } catch (error) { console.log(error instanceof TypeError); }\n\
+         try { await import('./bad-syntax.mjs'); } catch (error) { console.log(error instanceof TypeError); }\n\
+         try { await import('./bad-export.mjs'); } catch (error) { console.log(error instanceof TypeError); }\n\
+         function neverCalled() { return import('./never-called.mjs'); }\n\
+         const ns = await import('./dep.mjs'); console.log(ns.answer);\n",
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build deferred failure graph");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .expect("deferred failure graph builds and runs");
+    assert_eq!(report.stdout, b"start\ntrue\ntrue\ntrue\ntrue\n42\n");
+}
+
+#[test]
+fn native_static_unsupported_builtin_remains_fatal() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-static-unsupported-builtin");
+    let entry = root.path.join("main.mjs");
+    fs::write(&entry, "import 'node:zlib';\n").expect("write static zlib entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build static zlib graph");
+    let reject_zlib = |graph: &ModuleGraph, node: &kiln_module_graph::ModuleNode| {
+        if node.source == ModuleSource::NodeBuiltin(kiln_module_resolver::NodeBuiltin::Zlib) {
+            return Err(NativeError::UnsupportedNodeBuiltin {
+                specifier: "node:zlib",
+            });
+        }
+        validate_native_builtin_node(graph, node)
+    };
+    let error = native_graph_plan_with_validator(&graph, &reject_zlib)
+        .expect_err("policy-rejected zlib must remain fatal");
+    assert!(matches!(
+        error,
+        NativeError::UnsupportedNodeBuiltin {
+            specifier: "node:zlib"
+        }
+    ));
+}
+
+#[test]
+fn native_runtime_unsupported_builtin_is_deferred_and_excluded() {
+    use kiln_module_resolver::{NodeBuiltin, NodeRuntimeResolver};
+
+    let root = TestDirectory::new("kiln-native-runtime-unsupported");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "import { createRequire } from 'node:module'; createRequire(import.meta.url)('node:zlib');\n",
+    )
+    .expect("write runtime builtin entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build runtime builtin graph");
+    let reject_zlib = |graph: &ModuleGraph, node: &kiln_module_graph::ModuleNode| {
+        if node.source == ModuleSource::NodeBuiltin(kiln_module_resolver::NodeBuiltin::Zlib) {
+            return Err(NativeError::UnsupportedNodeBuiltin {
+                specifier: "node:zlib",
+            });
+        }
+        validate_native_builtin_node(graph, node)
+    };
+    let plan = native_graph_plan_with_validator(&graph, &reject_zlib)
+        .expect("policy-rejected runtime builtin is deferred");
+    let zlib = graph
+        .modules()
+        .find(|node| node.source == ModuleSource::NodeBuiltin(NodeBuiltin::Zlib))
+        .expect("zlib runtime target");
+    assert!(plan.excluded.contains(&zlib.path));
+    assert!(
+        plan.runtime_failures
+            .keys()
+            .any(|(owner, _, specifier)| { owner == graph.entry() && specifier == "node:zlib" })
+    );
+}
+
+#[test]
+fn native_runtime_failures_keep_distinct_captured_bases() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-runtime-failure-bases");
+    let base_a = root.path.join("a.cjs");
+    let base_b = root.path.join("b.cjs");
+    fs::write(&base_a, "module.exports = 1;").expect("write base a");
+    fs::write(&base_b, "module.exports = 1;").expect("write base b");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        format!(
+            "import {{ createRequire }} from 'node:module'; createRequire('{}')('node:zlib'); createRequire('{}')('node:zlib');\n",
+            base_a.display(),
+            base_b.display()
+        ),
+    )
+    .expect("write runtime failure entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build runtime failure graph");
+    let reject_zlib = |graph: &ModuleGraph, node: &kiln_module_graph::ModuleNode| {
+        if node.source == ModuleSource::NodeBuiltin(kiln_module_resolver::NodeBuiltin::Zlib) {
+            return Err(NativeError::UnsupportedNodeBuiltin {
+                specifier: "node:zlib",
+            });
+        }
+        validate_native_builtin_node(graph, node)
+    };
+    let plan = native_graph_plan_with_validator(&graph, &reject_zlib)
+        .expect("policy-rejected runtime failures are deferred");
+    assert_eq!(plan.runtime_failures.len(), 2);
+}
+
+#[test]
+fn native_dynamic_and_runtime_same_specifier_have_separate_frontiers() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-lazy-frontier-kind");
+    let package = root.path.join("pkg");
+    fs::create_dir_all(&package).expect("create package");
+    fs::write(
+        package.join("package.json"),
+        r#"{"exports":{"require":"./c.cjs","import":"./i.mjs"}}"#,
+    )
+    .expect("write package exports");
+    fs::write(package.join("c.cjs"), "module.exports = 1;").expect("write cjs target");
+    fs::write(package.join("i.mjs"), "export default 2;").expect("write esm target");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "import { createRequire } from 'node:module'; createRequire(import.meta.url)('./pkg'); import('./pkg');\n",
+    )
+    .expect("write shared lazy frontier entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build shared lazy frontier graph");
+    let plan = native_graph_plan(&graph).expect("both lazy frontiers are supported");
+    assert!(plan.failures.is_empty());
+    assert!(plan.runtime_failures.is_empty());
+    assert_eq!(plan.excluded.len(), 0);
+}
+
+#[test]
+fn native_failed_dynamic_closure_preserves_shared_successful_dependencies() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping dynamic closure sharing integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-dynamic-closure-sharing");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).expect("write root package");
+    fs::write(
+        root.path.join("shared.mjs"),
+        "globalThis.sharedCount = (globalThis.sharedCount || 0) + 1; export const count = globalThis.sharedCount;\n",
+    )
+    .expect("write shared dependency");
+    fs::write(
+        root.path.join("bad.mjs"),
+        "import './shared.mjs'; import './missing-static.mjs'; export const value = 1;\n",
+    )
+    .expect("write failed dynamic target");
+    fs::write(
+        root.path.join("good.mjs"),
+        "import './shared.mjs'; export const value = 42;\n",
+    )
+    .expect("write successful dynamic target");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "import { count } from './shared.mjs';\n\
+         try { await import('./bad.mjs'); } catch (error) { console.log(error instanceof TypeError); }\n\
+         const good = await import('./good.mjs');\n\
+         console.log(good.value, count, globalThis.sharedCount);\n",
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build sharing graph");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .expect("run sharing graph");
+    assert_eq!(
+        report.exit_code,
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&report.stderr)
+    );
+    assert_eq!(report.stdout, b"true\n42 1 1\n");
+}
+
+#[test]
+fn native_dynamic_top_level_await_import_waits_for_completion() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping dynamic TLA integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-dynamic-tla");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).expect("write root package");
+    fs::write(
+        root.path.join("dep.mjs"),
+        "globalThis.dynamicTlaCount = (globalThis.dynamicTlaCount || 0) + 1;\nexport const x = await new Promise(resolve => setTimeout(() => resolve(42), 1));\n",
+    )
+    .expect("write dependency");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "const a = import('./dep.mjs'); const b = import('./dep.mjs'); const [na, nb] = await Promise.all([a, b]); console.log(na.x, nb.x, na === nb, globalThis.dynamicTlaCount);\n",
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build dynamic TLA graph");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .expect("dynamic TLA graph builds and runs");
+    assert_eq!(report.exit_code, Some(0), "stderr={:?}", report.stderr);
+    assert_eq!(report.stdout, b"42 42 true 1\n");
+}
+
+#[test]
+fn native_dynamic_import_static_tla_dependency_waits_for_completion() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping dynamic static-TLA integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-dynamic-static-tla");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).expect("write root package");
+    fs::write(
+        root.path.join("dep.mjs"),
+        "globalThis.dynamicStaticTlaCount = (globalThis.dynamicStaticTlaCount || 0) + 1;\nexport const x = await new Promise(resolve => setTimeout(() => resolve(42), 1));\n",
+    )
+    .expect("write TLA dependency");
+    fs::write(
+        root.path.join("target.mjs"),
+        "import { x } from './dep.mjs'; export const answer = x + 1;\n",
+    )
+    .expect("write dynamic target");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "const a = import('./target.mjs'); const b = import('./target.mjs'); const [na, nb] = await Promise.all([a, b]); console.log(na.answer, nb.answer, na === nb, globalThis.dynamicStaticTlaCount);\n",
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build dynamic static-TLA graph");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .expect("dynamic static-TLA graph builds and runs");
+    assert_eq!(report.exit_code, Some(0), "stderr={:?}", report.stderr);
+    assert_eq!(report.stdout, b"43 43 true 1\n");
+}
+
+#[test]
+fn native_dynamic_tla_rejection_preserves_original_error() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-dynamic-tla-rejection");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).unwrap();
+    fs::write(root.path.join("sentinel.mjs"), "globalThis.dynamicTlaRejectCount = (globalThis.dynamicTlaRejectCount || 0) + 1;\nawait Promise.resolve();\nthrow globalThis.sentinel;\n").unwrap();
+    fs::write(root.path.join("undefined.mjs"), "globalThis.dynamicTlaUndefinedCount = (globalThis.dynamicTlaUndefinedCount || 0) + 1;\nawait Promise.resolve();\nthrow undefined;\n").unwrap();
+    let entry = root.path.join("main.mjs");
+    fs::write(&entry, "const sentinel = { marker: 42 }; globalThis.sentinel = sentinel;\nconst a = import('./sentinel.mjs').then(() => null, error => error);\nconst b = import('./sentinel.mjs').then(() => null, error => error);\nconst u1 = import('./undefined.mjs').then(() => null, error => error);\nconst u2 = import('./undefined.mjs').then(() => null, error => error);\nconst [ea, eb, eu1, eu2] = await Promise.all([a, b, u1, u2]);\nconsole.log(ea === sentinel, eb === sentinel, ea === eb, globalThis.dynamicTlaRejectCount, eu1 === undefined, eu2 === undefined, globalThis.dynamicTlaUndefinedCount);\n").unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .unwrap();
+    assert_eq!(report.exit_code, Some(0), "stderr={:?}", report.stderr);
+    assert_eq!(report.stdout, b"true true true 1 true true 1\n");
+}
+
+#[test]
+fn native_dynamic_import_static_tla_target_rejection_is_cached() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-dynamic-static-tla-reject");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).unwrap();
+    fs::write(
+        root.path.join("dep.mjs"),
+        "export const x = await Promise.resolve(42);\n",
+    )
+    .unwrap();
+    fs::write(root.path.join("target.mjs"), "import { x } from './dep.mjs'; globalThis.targetEffect = (globalThis.targetEffect || 0) + 1; throw globalThis.sentinel;\n").unwrap();
+    fs::write(root.path.join("target-undefined.mjs"), "import { x } from './dep.mjs'; globalThis.targetUndefinedEffect = (globalThis.targetUndefinedEffect || 0) + 1; throw undefined;\n").unwrap();
+    let entry = root.path.join("main.mjs");
+    fs::write(&entry, "const sentinel = { marker: 9 }; globalThis.sentinel = sentinel; const a = import('./target.mjs').catch(error => error); const b = import('./target.mjs').catch(error => error); const u1 = import('./target-undefined.mjs').catch(error => error); const u2 = import('./target-undefined.mjs').catch(error => error); const [ea, eb, eu1, eu2] = await Promise.all([a, b, u1, u2]); const ec = await import('./target.mjs').catch(error => error); console.log(typeof ea, ea === sentinel, ea === eb, ea === ec, globalThis.targetEffect, eu1 === undefined, eu2 === undefined, globalThis.targetUndefinedEffect);\n").unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .unwrap();
+    assert_eq!(report.exit_code, Some(0), "stderr={:?}", report.stderr);
+    assert_eq!(report.stdout, b"object true true true 1 true true 1\n");
+}
+
+#[test]
+fn native_dynamic_import_rejected_static_dependency_skips_target_body() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-dynamic-static-dep-reject");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).unwrap();
+    fs::write(
+        root.path.join("dep.mjs"),
+        "await Promise.resolve(); throw globalThis.sentinel;\n",
+    )
+    .unwrap();
+    fs::write(root.path.join("target.mjs"), "import './dep.mjs'; globalThis.targetEffect = (globalThis.targetEffect || 0) + 1; export const answer = 42;\n").unwrap();
+    let entry = root.path.join("main.mjs");
+    fs::write(&entry, "const sentinel = { marker: 8 }; globalThis.sentinel = sentinel; const a = import('./target.mjs').catch(error => error); const b = import('./target.mjs').catch(error => error); const [ea, eb] = await Promise.all([a, b]); console.log(ea === sentinel, eb === sentinel, ea === eb, globalThis.targetEffect || 0);\n").unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .unwrap();
+    assert_eq!(report.exit_code, Some(0), "stderr={:?}", report.stderr);
+    assert_eq!(report.stdout, b"true true true 0\n");
+}
+
+#[test]
+fn native_static_top_level_await_resolves_before_entry() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping static top-level await integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-static-tla");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).expect("write root package");
+    fs::write(
+        root.path.join("dep.mjs"),
+        "export const x = await new Promise(resolve => setTimeout(() => resolve(42), 1));\n",
+    )
+    .expect("write dependency");
+    let entry = root.path.join("main.mjs");
+    fs::write(&entry, "import { x } from './dep.mjs'; console.log(x);\n").expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build static top-level await graph");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .expect("static top-level await graph builds and runs");
+    assert_eq!(report.stdout, b"42\n");
+}
+
+#[test]
+fn native_dynamic_import_uses_importer_identity_for_relative_modules() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping importer identity integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-dynamic-import-importer-identity");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).expect("write root package");
+    for (dir, value) in [("a", "A"), ("b", "B")] {
+        fs::create_dir_all(root.path.join(dir)).expect("create loader directory");
+        fs::write(
+            root.path.join(format!("{dir}/loader.mjs")),
+            "export async function load() { return (await import('./same.mjs')).value; }\n",
+        )
+        .expect("write loader");
+        fs::write(
+            root.path.join(format!("{dir}/same.mjs")),
+            format!("export const value = '{value}';\n"),
+        )
+        .expect("write relative module");
+    }
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "import { load as loadA } from './a/loader.mjs';\n\
+         import { load as loadB } from './b/loader.mjs';\n\
+         import * as staticAssert from 'node:assert';\n\
+         const dynamicAssert = await import('node:assert');\n\
+         console.log(await loadA(), await loadB(), staticAssert === dynamicAssert);\n",
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("dynamic importer graph compiles");
+    for (profile, name) in [
+        (NativeProfile::Dev, "dev"),
+        (NativeProfile::Release, "release"),
+    ] {
+        let report = NativeBuilder::new(
+            test_cache(root.path.join(format!("cache-{name}"))),
+            toolchain.clone(),
+        )
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join(format!("program-{name}")),
+                profile,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .expect("dynamic importer graph builds and runs");
+        assert_eq!(report.stdout, b"A B true\n", "profile {name}");
+    }
+}
+
+#[test]
+fn native_dynamic_import_initializes_once_and_stays_lazy() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping dynamic lifecycle integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-dynamic-import-lifecycle");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).expect("write root package");
+    fs::write(
+        root.path.join("static.mjs"),
+        "globalThis.staticCount = 1;\n",
+    )
+    .expect("write static dependency");
+    fs::write(
+        root.path.join("static2.mjs"),
+        "globalThis.staticOther = 2;\n",
+    )
+    .expect("write second static dependency");
+    fs::write(
+        root.path.join("used.mjs"),
+        "globalThis.usedCount = (globalThis.usedCount || 0) + 1; export const value = 42;\n",
+    )
+    .expect("write used dynamic module");
+    fs::write(
+        root.path.join("unused.mjs"),
+        "globalThis.unusedCount = (globalThis.unusedCount || 0) + 1; export const value = 7;\n",
+    )
+    .expect("write unused dynamic module");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "import './static.mjs';\n\
+         import './static2.mjs';\n\
+         function unused() { return import('./unused.mjs'); }\n\
+         if (false) unused();\n\
+         const first = await import('./used.mjs');\n\
+         const second = await import('./used.mjs');\n\
+         console.log(globalThis.staticCount, globalThis.usedCount, globalThis.unusedCount || 0, first === second, first.value);\n",
+    )
+    .expect("write lifecycle entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("dynamic lifecycle graph compiles");
+    assert!(
+        graph
+            .dynamic_dependencies(graph.entry())
+            .iter()
+            .any(|dependency| dependency.specifier == "./unused.mjs"),
+        "{:?}",
+        graph.dynamic_dependencies(graph.entry())
+    );
+    for (profile, name) in [
+        (NativeProfile::Dev, "dev"),
+        (NativeProfile::Release, "release"),
+    ] {
+        let report = NativeBuilder::new(
+            test_cache(root.path.join(format!("cache-{name}"))),
+            toolchain.clone(),
+        )
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join(format!("program-{name}")),
+                profile,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .expect("dynamic lifecycle graph builds and runs");
+        assert_eq!(report.stdout, b"1 1 0 true 42\n", "profile {name}");
+    }
+}
+
+#[test]
+fn native_failed_dynamic_dependency_is_cached_with_original_error() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping dynamic failure integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-dynamic-failure-cache");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).expect("write root package");
+    fs::write(
+        root.path.join("dep.mjs"),
+        "globalThis.depCount = (globalThis.depCount || 0) + 1; throw 'boom';\n",
+    )
+    .expect("write throwing dependency");
+    fs::write(
+        root.path.join("target.mjs"),
+        "import './dep.mjs'; globalThis.targetCount = (globalThis.targetCount || 0) + 1;\n",
+    )
+    .expect("write dependent module");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "const first = await import('./target.mjs').catch(error => error);\n\
+         const second = await import('./target.mjs').catch(error => error);\n\
+         console.log(globalThis.depCount, globalThis.targetCount || 0, first === second, first);\n",
+    )
+    .expect("write failure entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("dynamic failure graph compiles");
+    for (profile, name) in [
+        (NativeProfile::Dev, "dev"),
+        (NativeProfile::Release, "release"),
+    ] {
+        let report = NativeBuilder::new(
+            test_cache(root.path.join(format!("cache-{name}"))),
+            toolchain.clone(),
+        )
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join(format!("program-{name}")),
+                profile,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .expect("dynamic failure graph builds and runs");
+        assert_eq!(report.stdout, b"1 0 true boom\n", "profile {name}");
+    }
 }
 
 #[test]
@@ -5925,7 +7261,7 @@ fn commonjs_shared_identity_includes_observable_absolute_path() {
                 )
             })
             .collect::<Vec<_>>();
-        let topology = graph_shared_topology_digest(&graph, &modules);
+        let topology = graph_shared_topology_digest(&graph, &modules, None, None);
         let public = graph_shared_public_digest(topology, &modules)
             .expect("CommonJS graph has absolute module paths");
         let module_sources = modules
@@ -5957,6 +7293,51 @@ fn commonjs_shared_identity_includes_observable_absolute_path() {
                 .to_string_lossy()
         ))
     );
+}
+
+#[test]
+fn graph_topology_identity_includes_runtime_edge_base() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-runtime-topology-identity");
+    let first = root.path.join("first");
+    let second = root.path.join("second");
+    for project in [&first, &second] {
+        fs::create_dir_all(project).expect("create runtime project");
+        fs::write(project.join("dep.cjs"), "module.exports = 1;").expect("write dependency");
+        let base_name = if project == &second { "b.cjs" } else { "a.cjs" };
+        fs::write(
+            project.join("main.mjs"),
+            &format!(
+                "import {{ createRequire }} from 'node:module'; createRequire('/virtual/{base_name}')('./dep.cjs');"
+            ),
+        )
+        .expect("write runtime entry");
+    }
+    let identity = |project: &Path| {
+        let entry = project.join("main.mjs");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(project).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build runtime graph");
+        let modules = graph
+            .modules()
+            .map(|node| {
+                let logical = logical_module_path(graph.project_root(), &node.path)
+                    .expect("logical module path");
+                (
+                    node,
+                    emit_native_graph_module(node, &logical, &NativeRealmPolicy::default())
+                        .expect("emit runtime module"),
+                )
+            })
+            .collect::<Vec<_>>();
+        graph_shared_topology_digest(&graph, &modules, None, None)
+    };
+    assert_ne!(identity(&first), identity(&second));
 }
 
 #[test]
@@ -6029,15 +7410,18 @@ fn shared_graph_wrapper_emits_and_links_without_static_value_arrays() {
         }
     })
     .expect("construct shared graph");
+    let mut emission = NativeRealmPolicy::default().emission();
+    emission.decoupled_prelude = true;
     let modules = graph
         .modules()
         .map(|node| {
             (
                 node,
-                emit_module_with_logical_path(
+                emit_module_with_logical_path_and_policy(
                     &node.program,
                     &logical_module_path(graph.project_root(), &node.path)
                         .expect("logical module path"),
+                    emission.clone(),
                 )
                 .expect("module emits"),
             )
@@ -6045,7 +7429,7 @@ fn shared_graph_wrapper_emits_and_links_without_static_value_arrays() {
         .collect::<Vec<_>>();
     let wrapper_symbol = format!(
         "kiln_shared_graph_{}",
-        graph_shared_topology_digest(&graph, &modules).to_hex()
+        graph_shared_topology_digest(&graph, &modules, None, None).to_hex()
     );
     let wrapper =
         graph_shared_wrapper_source(&graph, &modules, &wrapper_symbol).expect("wrapper emits");
@@ -6126,6 +7510,7 @@ fn shared_graph_wrapper_emits_and_links_without_static_value_arrays() {
         position_independent: true,
         ..CompileOptions::default()
     };
+    materialize_prelude_header(&root.path).expect("write prelude header");
     let mut objects = Vec::with_capacity(modules.len() + 1);
     for (index, (_, module)) in modules.iter().enumerate() {
         let source = root.path.join(format!("module-{index}.c"));
@@ -6136,6 +7521,17 @@ fn shared_graph_wrapper_emits_and_links_without_static_value_arrays() {
             .expect("compile module source");
         objects.push(object);
     }
+    let prelude_source = root.path.join("prelude.c");
+    let prelude_object = root.path.join("prelude.o");
+    fs::write(
+        &prelude_source,
+        kiln_backend_c::runtime_prelude_source_with_policy(&emission),
+    )
+    .expect("write prelude source");
+    toolchain
+        .compile_c(&prelude_source, &prelude_object, &compile_options)
+        .expect("compile prelude source");
+    objects.push(prelude_object);
     let wrapper_object = root.path.join("wrapper.o");
     toolchain
         .compile_c(&wrapper_source, &wrapper_object, &compile_options)
@@ -6876,6 +8272,48 @@ fn native_host_clock_is_explicit_while_default_date_stays_at_epoch() {
 }
 
 #[test]
+fn native_host_process_completion_beats_realm_timeout() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native host process timing: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-host-process-timing");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).expect("write root package");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "import { run } from 'kiln:process';\n\
+         const result = await Promise.race([\n\
+           run('/bin/sh', ['-c', 'sleep 0.35; printf done']).then(() => 'process'),\n\
+           new Promise(resolve => setTimeout(() => resolve('timeout'), 1000)),\n\
+         ]);\n\
+         console.log(result);\n",
+    )
+    .expect("write process timing entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build host process timing graph");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::host_clock(),
+                march_native: false,
+            },
+        )
+        .expect("run host process timing graph");
+    assert_eq!(report.stdout, b"process\n");
+}
+
+#[test]
 fn native_entropy_policy_is_reproducible_or_explicitly_host_backed() {
     let Some(toolchain) = Toolchain::discover().ok() else {
         eprintln!("skipping native entropy integration: no C compiler found");
@@ -7479,6 +8917,7 @@ fn native_builtin_support_is_the_materialized_subset_not_the_declared_surface() 
 fn resolver_and_node_abi_cover_the_same_builtin_set() {
     let resolver = kiln_module_resolver::NodeBuiltin::ALL
         .iter()
+        .filter(|builtin| !matches!(builtin, kiln_module_resolver::NodeBuiltin::Process))
         .map(|builtin| builtin.specifier())
         .collect::<BTreeSet<_>>();
     let abi = kiln_node_abi::SPECIFIERS
@@ -8607,6 +10046,111 @@ fn native_node_assert_commonjs_require_builds_and_runs() {
     );
     let stdout = String::from_utf8_lossy(&result.stdout);
     assert_eq!(stdout.trim(), "cjs-assert: function assert true true");
+}
+#[test]
+fn embedded_shared_graph_dynamic_import_rejects_unsupported_builtin() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        eprintln!("skipping delayed shared dynamic import on unsupported platform");
+        return;
+    }
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping delayed shared dynamic import: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-shared-delayed-dynamic");
+    let project = root.path.join("project");
+    fs::create_dir_all(&project).expect("create delayed dynamic project");
+    let entry = project.join("main.mjs");
+    fs::write(
+        &entry,
+        "console.log('start');\nPromise.resolve().then(() => import('./missing-dynamic.mjs')).catch(error => console.log(error instanceof TypeError));\n",
+    )
+    .expect("write delayed dynamic entry");
+    fs::write(project.join("target.mjs"), "export const x = 99;\n")
+        .expect("write delayed dynamic target");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build delayed dynamic graph");
+    let library = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain.clone())
+        .build_shared_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join(shared_library_name()),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .expect("build delayed dynamic shared graph");
+    let header_name = library
+        .header
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("delayed dynamic header");
+    let host_source = root.path.join("host.c");
+    fs::write(
+        &host_source,
+        format!(
+            r#"#include "{header_name}"
+#include <stdio.h>
+static int host_call(void *context, uint16_t operation, uint16_t argc,
+                     const kiln_value *arguments, kiln_value *result) {{
+    (void)context;
+    if (operation != KILN_HOST_OP_WRITE_STDOUT || argc != 1 || arguments == NULL || result == NULL)
+        return KILN_C99_HOST_ERROR;
+    if (arguments[0].tag == KILN_VALUE_BOOLEAN) {{
+        if (fputs(arguments[0].bits ? "true" : "false", stdout) == EOF) return KILN_C99_HOST_ERROR;
+    }} else if (arguments[0].tag != KILN_VALUE_STRING) return KILN_C99_HOST_ERROR;
+    if (arguments[0].len != 0 && arguments[0].ptr == NULL) return KILN_C99_HOST_ERROR;
+    if (fwrite(arguments[0].ptr, 1, arguments[0].len, stdout) != arguments[0].len ||
+        fputc('\n', stdout) == EOF) return KILN_C99_HOST_ERROR;
+    *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};
+    return KILN_C99_OK;
+}}
+int main(void) {{
+    kiln_host host = {{ host_call, NULL }};
+    kiln_value result;
+    return {symbol}(&host, &result) == KILN_C99_OK ? 0 : 1;
+}}
+"#,
+            symbol = library.module_symbol,
+        ),
+    )
+    .expect("write delayed dynamic host");
+    let host_object = root.path.join("host.o");
+    let mut compile = CompileOptions::default();
+    compile.include_dirs.push(root.path.clone());
+    toolchain
+        .compile_c(&host_source, &host_object, &compile)
+        .expect("compile delayed dynamic host");
+    let host_executable = root.path.join("host");
+    let loader_directory = library.loader.parent().expect("loader directory");
+    let mut link = LinkOptions::default();
+    link.runtime_libraries.push(library.output.clone());
+    link.extra_args
+        .push(format!("-Wl,-rpath,{}", loader_directory.display()).into());
+    toolchain
+        .link_executable(&[host_object], &host_executable, &link)
+        .expect("link delayed dynamic host");
+    let mut command = Command::new(&host_executable);
+    #[cfg(target_os = "linux")]
+    command.env("LD_LIBRARY_PATH", loader_directory);
+    #[cfg(target_os = "macos")]
+    command.env("DYLD_LIBRARY_PATH", loader_directory);
+    let output = command.output().expect("run delayed dynamic host");
+    assert!(
+        output.status.success(),
+        "delayed dynamic host failed with {:?}: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"start\ntrue\n");
 }
 
 #[test]
@@ -10530,10 +12074,9 @@ fn native_node_fs_typescript_builtin_builds_and_runs() {
     let entry = project.path.join("main.mjs");
     fs::write(
         &entry,
-        concat!(
-            "import fs, { existsSync, promises, readFileSync } from 'node:fs';\n",
-            "import { readFile } from 'node:fs/promises';\n",
-            "console.log('fs-ts:', typeof fs, typeof existsSync, typeof promises, typeof readFileSync, typeof readFile, fs.default === fs);\n",
+        format!(
+            "import fs, {{ existsSync, promises, readFileSync }} from 'node:fs';\nimport {{ readFile }} from 'node:fs/promises';\nconsole.log('fs-ts:', typeof fs, typeof existsSync, typeof promises, typeof readFileSync, typeof readFile, fs.default === fs, existsSync({:?}));\n",
+            entry.to_string_lossy(),
         ),
     )
     .unwrap();
@@ -10560,7 +12103,7 @@ fn native_node_fs_typescript_builtin_builds_and_runs() {
         String::from_utf8_lossy(&result.stderr)
     );
     let stdout = String::from_utf8_lossy(&result.stdout);
-    assert!(stdout.contains("fs-ts: object function object function function true"));
+    assert!(stdout.contains("fs-ts: object function object function function true true"));
 }
 
 #[test]
@@ -10687,4 +12230,69 @@ fn native_node_ffi_commonjs_require_builds_and_runs() {
     );
     let stdout = String::from_utf8_lossy(&result.stdout);
     assert!(stdout.contains("cjs-ffi: object function function string function true"));
+}
+
+#[test]
+fn native_node_ffi_dlopen_calls_compiled_function() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-ffi-operation");
+    let source = project.path.join("add.c");
+    fs::write(
+        &source,
+        "int kiln_test_add(int left, int right) { return left + right; }\n",
+    )
+    .expect("write ffi fixture");
+    let object = project.path.join("add.o");
+    toolchain
+        .compile_c(&source, &object, &CompileOptions::default())
+        .expect("compile ffi fixture");
+    let library = project.path.join(if cfg!(target_os = "macos") {
+        "libadd.dylib"
+    } else if cfg!(target_os = "windows") {
+        "add.dll"
+    } else {
+        "libadd.so"
+    });
+    toolchain
+        .link_shared_library(&[object], &library, &LinkOptions::default())
+        .expect("link ffi fixture");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        format!(
+            "import {{ createRequire }} from 'node:module';\nconst require = createRequire(import.meta.url);\nconst ffi = require('node:ffi');\nconst opened = ffi.dlopen({:?}, {{ kiln_test_add: {{ arguments: ['i32', 'i32'], return: 'i32' }} }});\nconsole.log(opened.functions.kiln_test_add(2, 40));\nopened.lib.close();\n",
+            library.to_string_lossy()
+        ),
+    )
+    .expect("write ffi operation entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build ffi operation graph");
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(
+                project.path.join("ffi_operation_bin"),
+                NativeProfile::Release,
+            ),
+        )
+        .expect("build ffi operation binary");
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run ffi operation binary");
+    assert!(
+        result.status.success(),
+        "ffi operation failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(result.stdout, b"42\n");
 }

@@ -1,4 +1,6 @@
 
+void kiln_c99_publish_diagnostic(void);
+
 static kiln_value kiln_c99_builtin(uint64_t code) {
     return kiln_c99_value(KILN_VALUE_BUILTIN, code, NULL, 0);
 }
@@ -349,7 +351,8 @@ static int kiln_c99_invoke_closure_body(kiln_host *host, kiln_val *result,
     ctx.frame = frame;
     ctx.depth = depth + 1;
     status = closure->body(&ctx, result, closure->upvalues, &receiver, args, argc);
-    if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL) {
+    if ((status == KILN_C99_CONTROL_ERROR || status == KILN_C99_THROWN) &&
+        kiln_c99_diagnostic_site == NULL) {
         kiln_c99_diagnostic_site = closure->diagnostic_source;
         kiln_c99_diagnostic_operation = "FunctionBody";
         kiln_c99_diagnostic_function = closure->name;
@@ -384,12 +387,29 @@ static int kiln_c99_invoke_closure_body(kiln_host *host, kiln_val *result,
 static void kiln_c99_attribute_body_refusal(const kiln_closure *closure, int depth) {
     kiln_c99_diagnostic_site = closure->diagnostic_source;
     kiln_c99_diagnostic_operation = "FunctionBody";
-    kiln_c99_diagnostic_function = closure->name;
-    kiln_c99_diagnostic_function_len = closure->name_len;
+    if (kiln_c99_diagnostic_function == NULL) {
+        kiln_c99_diagnostic_function = closure->name;
+        kiln_c99_diagnostic_function_len = closure->name_len;
+    }
     kiln_c99_diagnostic_depth = (size_t)(depth + 1);
-    kiln_c99_diagnostic_receiver_tag = KILN_VALUE_FUNCTION;
-    kiln_c99_diagnostic_detail =
-        "generated function body refused before an instruction owned the failure";
+    if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = KILN_VALUE_FUNCTION;
+    if (kiln_c99_diagnostic_detail == NULL) {
+        kiln_c99_diagnostic_detail =
+            "generated function body refused before an instruction owned the failure";
+    }
+}
+
+static void kiln_c99_attribute_body_function(const kiln_closure *closure) {
+    if (kiln_c99_diagnostic_function == NULL) {
+        kiln_c99_diagnostic_function = closure->name;
+        kiln_c99_diagnostic_function_len = closure->name_len;
+        /* A generated instruction may already have recorded the site in the realm before this
+         * closure returns. Re-publish the completed cold record so the rendered control value
+         * sees the function name too. */
+        if (kiln_c99_diagnostic_site != NULL && kiln_c99_diagnostic_operation != NULL) {
+            kiln_c99_publish_diagnostic();
+        }
+    }
 }
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -410,8 +430,13 @@ static inline int kiln_c99_invoke_closure(kiln_host *host, kiln_val *result,
         ctx.frame = frame;
         ctx.depth = depth + 1;
         quick = closure->body(&ctx, result, closure->upvalues, &receiver, args, argc);
-        if (quick == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL) {
-            kiln_c99_attribute_body_refusal(closure, depth);
+        if (quick == KILN_C99_CONTROL_ERROR) {
+            if (kiln_c99_diagnostic_site == NULL) kiln_c99_attribute_body_refusal(closure, depth);
+            else kiln_c99_attribute_body_function(closure);
+        } else if (quick == KILN_C99_THROWN) {
+            /* Ordinary JavaScript throws get their generic call detail from the caller. Only
+             * add the owning function here; a FunctionBody fallback would suppress that detail. */
+            kiln_c99_attribute_body_function(closure);
         }
         kiln_c99_diagnostic_active_depth = saved_depth;
         return quick;

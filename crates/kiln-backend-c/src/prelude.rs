@@ -929,6 +929,8 @@ method_ids! {
     (KILN_C99_METHOD_NODE_CRYPTO_RANDOM_UUID, 394, Direct),
     (KILN_C99_METHOD_NODE_CRYPTO_CREATE_HASH, 395, Direct),
     (KILN_C99_METHOD_PROCESS_NEXT_TICK, 396, Direct),
+    (KILN_C99_METHOD_PROCESS_START_RAW, 508, Direct),
+    (KILN_C99_METHOD_PROCESS_CANCEL_RAW, 509, Direct),
     (KILN_C99_METHOD_PROCESS_HRTIME, 397, Direct),
     (KILN_C99_METHOD_PROCESS_HRTIME_BIGINT, 398, Direct),
     (KILN_C99_METHOD_PROCESS_CWD, 399, Direct),
@@ -1068,8 +1070,8 @@ method_ids! {
     (KILN_C99_METHOD_NODE_FS_MKDIR, 507, Direct),
     // Private bootstrap bridges for Uint8Array codecs (ADR 0005).
     // Captured and deleted by the compiled builtin bootstrap before user code runs.
-    (KILN_C99_METHOD_UINT8_TO_HEX_RAW, 508, Direct),
-    (KILN_C99_METHOD_UINT8_TO_BASE64_RAW, 509, Direct),
+    (KILN_C99_METHOD_UINT8_TO_HEX_RAW, 510, Direct),
+    (KILN_C99_METHOD_UINT8_TO_BASE64_RAW, 511, Direct),
 }
 
 /// The hook a host installs when it lets a program make a second realm.
@@ -1718,6 +1720,11 @@ pub(crate) struct InternalRefusal {
 /// has to justify is how a gate stops meaning anything.
 pub(crate) const REFUSAL_INTERNAL_STATUS: &[InternalRefusal] = &[
     InternalRefusal {
+        function: "kiln_c99_module_completion",
+        sites: 1,
+        converted_by: "the dynamic importer, which propagates its control status",
+    },
+    InternalRefusal {
         function: "kiln_c99_json_build",
         sites: 5,
         converted_by: "JSON.parse, which turns it into a SyntaxError the program can catch",
@@ -2301,6 +2308,10 @@ macro_rules! header_prefix {
  * other status because those mean "this cannot be done" and this one means "the program said
  * so": a `catch` takes this and must not take the others. */
 #define KILN_C99_THROWN (-7)
+/* Internal host dispatch used by the graph launcher for importer-bound CommonJS requires.
+ * This is an operation number, not a field in kiln_host, so the two-word host ABI remains
+ * stable across the standalone and generated runtimes. */
+#define KILN_C99_HOST_MODULE_CREATE_REQUIRE UINT16_C(0x7FF0)
 
 #if defined(__GNUC__) || defined(__clang__)
 #define KILN_LIKELY(x) __builtin_expect(!!(x), 1)
@@ -3420,6 +3431,8 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_NODE_CRYPTO_RANDOM_UUID),
     emit_method_define!(KILN_C99_METHOD_NODE_CRYPTO_CREATE_HASH),
     emit_method_define!(KILN_C99_METHOD_PROCESS_NEXT_TICK),
+    emit_method_define!(KILN_C99_METHOD_PROCESS_START_RAW),
+    emit_method_define!(KILN_C99_METHOD_PROCESS_CANCEL_RAW),
     emit_method_define!(KILN_C99_METHOD_PROCESS_HRTIME),
     emit_method_define!(KILN_C99_METHOD_PROCESS_HRTIME_BIGINT),
     emit_method_define!(KILN_C99_METHOD_PROCESS_CWD),

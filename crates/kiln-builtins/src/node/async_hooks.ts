@@ -1,8 +1,11 @@
 // kiln-builtins: node:async_hooks implementation (Phase 5.2, ADR 0005)
 
+// AsyncLocalStorage and AsyncResource have language-level implementations in this
+// module. A private host capability may replace them, but the public builtin
+// loader must never recursively ask for this module while it is evaluating.
 const nativeModule =
-  typeof process !== "undefined" && typeof (process as any).getBuiltinModule === "function"
-    ? (process as any).getBuiltinModule("async_hooks")
+  typeof process !== "undefined"
+    ? (process as any).__kilnNativeModules?.async_hooks
     : null;
 
 const storageMap = new WeakMap<object, any>();

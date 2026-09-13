@@ -224,69 +224,24 @@ KILN_PROVIDER_ARCHIVE_DIGEST=$(kiln_provider_sha256_file "$KILN_PROVIDER_ARCHIVE
 KILN_PROVIDER_RUSTC_DIGEST=$("$KILN_PROVIDER_RUSTC" -vV | kiln_provider_sha256_stream)
 KILN_PROVIDER_LISTED="$(mktemp)"
 KILN_PROVIDER_SOURCE_DIGEST=$(
-	for KILN_PROVIDER_SOURCE in \
-		Cargo.lock \
-		crates/kiln-artifact-cache/Cargo.toml \
-		crates/kiln-artifact-cache/src/eviction.rs \
-		crates/kiln-artifact-cache/src/lib.rs \
-		crates/kiln-digest/Cargo.toml \
-		crates/kiln-digest/src/lib.rs \
-		crates/kiln-host-abi/Cargo.toml \
-		crates/kiln-host-abi/src/lib.rs \
-		crates/kiln-number-core/Cargo.toml \
-		crates/kiln-number-core/src/lib.rs \
-		crates/kiln-native-number-ffi/Cargo.toml \
-		crates/kiln-native-number-ffi/src/ffi.rs \
-		crates/kiln-native-number-ffi/src/lib.rs \
-		crates/kiln-native-number-abi/Cargo.toml \
-		crates/kiln-native-number-abi/src/lib.rs \
-		crates/kiln-node-path/Cargo.toml \
-		crates/kiln-node-path/src/lib.rs \
-		crates/kiln-temporal/Cargo.toml \
-		crates/kiln-temporal/src/lib.rs \
-		crates/kiln-intl/Cargo.toml \
-		crates/kiln-intl/src/collator.rs \
-		crates/kiln-intl/src/datetime.rs \
-		crates/kiln-intl/src/displaynames.rs \
-		crates/kiln-intl/src/duration.rs \
-		crates/kiln-intl/src/lib.rs \
-		crates/kiln-intl/src/list.rs \
-		crates/kiln-intl/src/locale.rs \
-		crates/kiln-intl/src/number.rs \
-		crates/kiln-intl/src/parts.rs \
-		crates/kiln-intl/src/plurals.rs \
-		crates/kiln-intl/src/relative.rs \
-		crates/kiln-intl/src/segmenter.rs \
-		crates/kiln-json/Cargo.toml \
-		crates/kiln-json/src/lib.rs \
-		crates/kiln-json/src/scalar.rs \
-		crates/kiln-runtime/Cargo.toml \
-		crates/kiln-runtime/src/http_body.rs \
-		crates/kiln-runtime/src/http_client.rs \
-		crates/kiln-runtime/src/http_engine.rs \
-		crates/kiln-runtime/src/lib.rs \
-		crates/kiln-runtime/src/node_http.rs \
-		crates/kiln-runtime/src/node_http_agent.rs \
-		crates/kiln-runtime/src/node_net.rs \
-		crates/kiln-runtime/src/node_stream.rs \
-		crates/kiln-runtime/src/scripted_transport.rs; do
+	while IFS= read -r KILN_PROVIDER_SOURCE || [[ -n $KILN_PROVIDER_SOURCE ]]; do
+		[[ -z $KILN_PROVIDER_SOURCE ]] && continue
 		KILN_PROVIDER_SIZE=$(wc -c <"$KILN_PROVIDER_SOURCE" | tr -d '[:space:]')
 		printf '%s\n' "$KILN_PROVIDER_SOURCE" >>"$KILN_PROVIDER_LISTED"
 		printf '%s\0%s\0' "$KILN_PROVIDER_SOURCE" "$KILN_PROVIDER_SIZE"
 		dd if="$KILN_PROVIDER_SOURCE" bs=65536 2>/dev/null
-	done | kiln_provider_sha256_stream
+	done < crates/kiln-native/provider-sources.txt | kiln_provider_sha256_stream
 )
 
-# The identity above is a hand-written list, and a hand-written list of inputs has one failure
-# mode: a file that belongs in it and is not. That file's contents then cannot change the digest,
+# The manifest is intentionally explicit, and an explicit list of inputs has one failure mode: a
+# file that belongs in it and is not. That file's contents then cannot change the digest,
 # so a stale archive is reused and the native link fails with `undefined reference` -- or worse,
 # links something whose behaviour moved. `kiln-node-path` was exactly that on 2026-09-02.
 #
 # rustc already knows the answer and writes it down, so ask it rather than a reviewer. Everything
 # the compiler read from this workspace must be named in the list; anything else is a file whose
-# edits the digest cannot see. The three copies of the list are checked against each other by
-# `kiln-cli`'s `script_hygiene`, which is a consistency check -- three identical wrong lists pass
-# it. This is the completeness check.
+# edits the digest cannot see. The compiler and both scripts consume the same manifest; `kiln-cli`'s
+# `script_hygiene` test keeps that shared boundary present. This is the completeness check.
 KILN_PROVIDER_DEP_INFO="$KILN_PROVIDER_TARGET_DIR/$KILN_PROVIDER_TARGET/provider/libkiln_native_number_ffi.d"
 if [[ -f $KILN_PROVIDER_DEP_INFO ]]; then
 	KILN_PROVIDER_ROOT="$(kiln_repo_root)"
@@ -303,9 +258,7 @@ if [[ -f $KILN_PROVIDER_DEP_INFO ]]; then
 	if [[ -n $KILN_PROVIDER_UNLISTED ]]; then
 		printf 'the provider archive is compiled from workspace sources the identity list does not name:\n%s\n' \
 			"$KILN_PROVIDER_UNLISTED" >&2
-		printf 'add them to source_digest in crates/kiln-native/src/number_provider.rs and to the\n' >&2
-		printf 'matching lists in scripts/package-native-number-provider.sh and\n' >&2
-		printf 'scripts/check-native-number-ffi.sh, or their edits cannot invalidate the archive.\n' >&2
+		printf 'add them to crates/kiln-native/provider-sources.txt, or their edits cannot invalidate the archive.\n' >&2
 		exit 1
 	fi
 fi

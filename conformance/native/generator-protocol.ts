@@ -75,6 +75,47 @@ function* outer(): Generator<number | string> {
 }
 console.log([...outer()]);
 
+// The value sent into a delegated yield can have a different type from the yielded value, and
+// the delegate's completion value can be an object. Both values cross synthetic resume edges.
+function* sentInner(): Generator<number, { received: string }, string> {
+  const received = yield 10;
+  return { received };
+}
+function* sentOuter(): Generator<number, { received: string }, string> {
+  return yield* sentInner();
+}
+const sentGenerator = sentOuter();
+console.log("delegate sent", sentGenerator.next(), sentGenerator.next("text"));
+
+// throw() enters the delegate and its return value becomes the outer yield* result.
+function* catchingInner(): Generator<number, string, never> {
+  try {
+    yield 20;
+  } catch (error) {
+    return `caught ${String(error)}`;
+  }
+}
+function* catchingOuter(): Generator<number, string> {
+  return yield* catchingInner();
+}
+const thrown = catchingOuter();
+console.log("delegate throw", thrown.next(), thrown.throw("boom"));
+
+// return() closes the delegate, runs its finally, and returns the caller's value from the outer
+// generator. The internal return signal must not leak as an iteration value.
+function* closingInner(): Generator<number, never> {
+  try {
+    yield 30;
+  } finally {
+    console.log("delegate finally");
+  }
+}
+function* closingOuter(): Generator<number, string> {
+  return yield* closingInner();
+}
+const returned = closingOuter();
+console.log("delegate return", returned.next(), returned.return("closed"));
+
 // A generator method on an object, and one on a class, are the same thing reached two ways.
 const collection = { *[Symbol.iterator]() { yield "a"; yield "b"; } };
 class Range {

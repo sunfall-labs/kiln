@@ -5596,7 +5596,6 @@ between interpreter and native CLI), integration tests in `kiln-builtins`, `kiln
 and full `scripts/native.sh` parity (179 matched, 5 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
 
 ---
-<<<<<<< HEAD
 
 ## Phase 5.2 TypeScript built-ins: `node:crypto` (2026-09-13)
 

@@ -983,9 +983,10 @@ fn runtime_prelude_size() {
     // `runtime/numbers.c`, and folding the JSON integer path into it gave 30 back. 44,500.
     //
     // Widened on 2026-09-13, at 44,631 lines: built-in arity reflection table and ArrayBuffer
-    // prototype modeling in the C runtime object reflection substrate. 45,000.
+    // prototype modeling in the C runtime object reflection substrate. The process completion
+    // ABI and its diagnostic/error helpers then brought the prelude to 45,012 lines; 45,200.
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 45_000;
+    const CEILING_LINES: usize = 45_200;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
