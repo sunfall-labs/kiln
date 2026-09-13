@@ -22,7 +22,7 @@ console.log('returned promise');
 try {
   await loaded;
 } catch (error) {
-  console.log(error.constructor.name, error.message);
+  console.log(error.name, error.message);
 }
 console.log(events.join(','));
 
