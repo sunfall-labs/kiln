@@ -106,3 +106,20 @@ Candidate log/report: `.scratch/test262-candidate-wrapper.log` and `.scratch/tes
 comparison log/report: `.scratch/test262-baseline-wrapper.log` and `.scratch/test262-baseline.json`.
 The report records `path: "language/expressions/dynamic-import"`; empty roots and paths outside
 the physical `test/` tree are rejected before invoking Kiln.
+
+## Consolidation acceptance
+
+The consolidation branch merged `origin/main` revision `a17651c3` in `74ad` and retained the
+loader policy, per-run resolver bases, graph-owned failure identity, TS builtin demand loading,
+and shared graph/executable cache paths. The final focused slice is about 1,184 net lines after
+removing duplicate policy and ambient state. The workspace follow-up passed 79 suites (1,764
+passed, 0 failed, 7 ignored); the native parity follow-up recorded 195 matches, 1 intentional
+ShadowRealm refusal, and 0 divergences. These are targeted follow-ups to the earlier full gate,
+whose initial facts result was corrected by commits `803c416a` and `a1caa284`.
+
+The RXJS timing baseline was refreshed from a fresh `origin/main` worktree at `a17651c3`, using
+its release CLI SHA-256 `ab50bac8fd87af175a3cb41f480605d27ae44745ccc1cdd1535b41d3fe9593c3`,
+2 warmups, and 7 passes. The new baseline median is 21.56 ms (previous stale value: 16.48 ms).
+The consolidation CLI measured 22.02 ms against that baseline, +2.1%, with no regression under
+the existing threshold. Logs are `.scratch/rxjs-baseline-update.log` and
+`.scratch/rxjs-candidate-verify.log`; the paired output proof is `.scratch/rxjs-main-vs-consolidation.log`.

@@ -37,8 +37,8 @@
       "min_ms": 7.31
     },
     "rxjs": {
-      "median_ms": 16.48,
-      "min_ms": 16.31
+      "median_ms": 21.56,
+      "min_ms": 20.29
     },
     "semver": {
       "median_ms": 6.36,
