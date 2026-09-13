@@ -15384,7 +15384,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         match native {
             Native::ProcessGetBuiltinModule => match arguments.first() {
                 Some(Value::String(name))
-                    if kiln_module_resolver::NodeBuiltin::parse(name).is_some() =>
+                    if kiln_builtins::ts_builtin_specifiers()
+                        .into_iter()
+                        .any(|specifier| {
+                            specifier == name
+                                || specifier
+                                    .strip_prefix("node:")
+                                    .is_some_and(|bare| bare == name)
+                        }) =>
                 {
                     if let Some(loader) = self.commonjs_loader {
                         return unsafe { (&mut *loader).get_builtin(name, instruction) }
