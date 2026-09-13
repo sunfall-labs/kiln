@@ -255,6 +255,21 @@ impl NativeArtifactFamily {
             inputs,
         )
     }
+
+    fn source_key(
+        self,
+        target: &str,
+        options: Digest,
+        inputs: impl IntoIterator<Item = Digest>,
+    ) -> ArtifactKey {
+        self.key(
+            self.compiler_version(),
+            target,
+            CacheProfile::Debug,
+            options,
+            inputs,
+        )
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -864,20 +879,16 @@ impl NativeBuilder {
         let (number_provider, number_provider_digest, _, number_provider_http) =
             self.cached_number_provider_with_http(&target, true)?;
 
-        let module_source_key = NativeArtifactFamily::ModuleSource.key(
-            format!("kiln-c-abi-{C_ABI_VERSION}-generator-{C_GENERATOR_VERSION}"),
+        let module_source_key = NativeArtifactFamily::ModuleSource.source_key(
             &target,
-            CacheProfile::Debug,
             Digest::hash(b"deterministic-c11"),
             [Digest::hash(module.source.as_bytes())],
         );
         let (module_source, module_source_digest, generated_c_hit) =
             self.cached_payload(&module_source_key, module.source.as_bytes())?;
 
-        let runtime_source_key = NativeArtifactFamily::RuntimeSource.key(
-            format!("kiln-runtime-{NATIVE_RUNTIME_VERSION}"),
+        let runtime_source_key = NativeArtifactFamily::RuntimeSource.source_key(
             &target,
-            CacheProfile::Debug,
             Digest::hash(b"portable-runtime-c11"),
             [Digest::hash(runtime.as_bytes())],
         );
@@ -885,20 +896,16 @@ impl NativeBuilder {
             self.cached_payload(&runtime_source_key, runtime.as_bytes())?;
 
         let prelude_source = kiln_backend_c::runtime_prelude_source_with_policy(&emission);
-        let prelude_source_key = NativeArtifactFamily::PreludeSource.key(
-            format!("kiln-runtime-prelude-{NATIVE_PRELUDE_VERSION}"),
+        let prelude_source_key = NativeArtifactFamily::PreludeSource.source_key(
             &target,
-            CacheProfile::Debug,
             Digest::hash(b"portable-prelude-c11"),
             [Digest::hash(prelude_source.as_bytes())],
         );
         let (prelude_bytes, prelude_source_digest, _) =
             self.cached_payload(&prelude_source_key, prelude_source.as_bytes())?;
 
-        let launcher_source_key = NativeArtifactFamily::LauncherSource.key(
-            format!("kiln-launcher-{NATIVE_RUNTIME_VERSION}"),
+        let launcher_source_key = NativeArtifactFamily::LauncherSource.source_key(
             &target,
-            CacheProfile::Debug,
             Digest::hash(b"portable-launcher-c11"),
             [Digest::hash(launcher.as_bytes())],
         );
@@ -1245,10 +1252,8 @@ impl NativeBuilder {
         );
         let (base_source, base_source_digest, _) =
             self.cached_payload(&module_source_key, module.source.as_bytes())?;
-        let shared_source_key = NativeArtifactFamily::SharedModuleSource.key(
-            format!("kiln-c-abi-{C_ABI_VERSION}-module-api-{EMBEDDING_MODULE_API_VERSION}"),
+        let shared_source_key = NativeArtifactFamily::SharedModuleSource.source_key(
             &target,
-            CacheProfile::Debug,
             Digest::hash(b"deterministic-c11-owned-result-v2"),
             [base_source_digest, Digest::hash(module_wrapper.as_bytes())],
         );
@@ -1278,10 +1283,8 @@ impl NativeBuilder {
             [module_source_digest, prelude_header_digest()],
         );
         let prelude_source = kiln_backend_c::runtime_prelude_source_with_policy(&emission);
-        let prelude_source_key = NativeArtifactFamily::PreludeSource.key(
-            format!("kiln-runtime-prelude-{NATIVE_PRELUDE_VERSION}"),
+        let prelude_source_key = NativeArtifactFamily::PreludeSource.source_key(
             &target,
-            CacheProfile::Debug,
             Digest::hash(b"portable-prelude-c11"),
             [Digest::hash(prelude_source.as_bytes())],
         );
@@ -1647,12 +1650,8 @@ impl NativeBuilder {
                 )
             })
             .collect::<Vec<_>>();
-        let wrapper_source_key = NativeArtifactFamily::SharedGraphWrapperSource.key(
-            format!(
-                "kiln-shared-graph-wrapper-{NATIVE_RUNTIME_VERSION}-module-api-{EMBEDDING_MODULE_API_VERSION}"
-            ),
+        let wrapper_source_key = NativeArtifactFamily::SharedGraphWrapperSource.source_key(
             &target,
-            CacheProfile::Debug,
             Digest::hash(b"deterministic-c11-shared-graph-wrapper-owned-result-v2"),
             [Digest::hash(wrapper.as_bytes()), topology],
         );
@@ -1735,10 +1734,8 @@ impl NativeBuilder {
             [wrapper_source_digest, topology],
         );
         let prelude_source = kiln_backend_c::runtime_prelude_source_with_policy(&emission);
-        let prelude_source_key = NativeArtifactFamily::PreludeSource.key(
-            format!("kiln-runtime-prelude-{NATIVE_PRELUDE_VERSION}"),
+        let prelude_source_key = NativeArtifactFamily::PreludeSource.source_key(
             &target,
-            CacheProfile::Debug,
             Digest::hash(b"portable-prelude-c11"),
             [Digest::hash(prelude_source.as_bytes())],
         );
@@ -2179,39 +2176,31 @@ impl NativeBuilder {
                 )
             })
             .collect::<Vec<_>>();
-        let bootstrap_source_key = NativeArtifactFamily::ModuleSource.key(
-            format!("kiln-c-abi-{C_ABI_VERSION}-generator-{C_GENERATOR_VERSION}"),
+        let bootstrap_source_key = NativeArtifactFamily::ModuleSource.source_key(
             &target,
-            CacheProfile::Debug,
             Digest::hash(b"native-builtin-bootstrap-c11"),
             [Digest::hash(bootstrap.source.as_bytes())],
         );
         module_sources
             .push(self.cached_payload(&bootstrap_source_key, bootstrap.source.as_bytes())?);
-        let runtime_source_key = NativeArtifactFamily::RuntimeSource.key(
-            format!("kiln-runtime-{NATIVE_RUNTIME_VERSION}"),
+        let runtime_source_key = NativeArtifactFamily::RuntimeSource.source_key(
             &target,
-            CacheProfile::Debug,
             Digest::hash(b"portable-runtime-c11"),
             [Digest::hash(runtime.as_bytes())],
         );
         let (runtime_bytes, runtime_source_digest, runtime_generated_c_cache_hit) =
             self.cached_payload(&runtime_source_key, runtime.as_bytes())?;
         let prelude_source = kiln_backend_c::runtime_prelude_source_with_policy(&emission);
-        let prelude_source_key = NativeArtifactFamily::PreludeSource.key(
-            format!("kiln-runtime-prelude-{NATIVE_PRELUDE_VERSION}"),
+        let prelude_source_key = NativeArtifactFamily::PreludeSource.source_key(
             &target,
-            CacheProfile::Debug,
             Digest::hash(b"portable-prelude-c11"),
             [Digest::hash(prelude_source.as_bytes())],
         );
         let (prelude_bytes, prelude_source_digest, _) =
             self.cached_payload(&prelude_source_key, prelude_source.as_bytes())?;
 
-        let launcher_source_key = NativeArtifactFamily::GraphLauncherSource.key(
-            format!("kiln-graph-launcher-{NATIVE_RUNTIME_VERSION}"),
+        let launcher_source_key = NativeArtifactFamily::GraphLauncherSource.source_key(
             &target,
-            CacheProfile::Debug,
             Digest::hash(b"portable-graph-launcher-c11"),
             [
                 Digest::hash(launcher.as_bytes()),
@@ -3239,10 +3228,8 @@ fn cached_graph_module(
     let input = Digest::hash(
         format!("{:?}", (&node.program, node.source, logical_path, policy)).as_bytes(),
     );
-    let cache_key = NativeArtifactFamily::ModuleSource.key(
-        format!("kiln-c-abi-{C_ABI_VERSION}-generator-{C_GENERATOR_VERSION}"),
+    let cache_key = NativeArtifactFamily::ModuleSource.source_key(
         target,
-        CacheProfile::Debug,
         Digest::hash(b"native-graph-emission-input-v2"),
         [
             input,
