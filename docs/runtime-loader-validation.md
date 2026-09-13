@@ -31,26 +31,46 @@ as a focused validation; this record does not claim a new full-gate run.
 
 ## GHUI live acceptance
 
-The latest clean compiler revision was `6c3dff62`, with compiler SHA-256
+The live-session compiler revision was `6c3dff62`, with compiler SHA-256
 `fd7ecb9dd263e3a7a4bff7c3f4a2b65b5c374c77a685ebecf31db9aac6aa3d6c`. The GHUI binary SHA-256 was
 `e020f2b3817746b6b5d25647e6d90a53c2276485020e1b93531a72b98e6f9472`, size 116,275,880 bytes, at
 `app/.scratch/ghui-live/ghui-6c3dff62`. Build log: `.scratch/ghui-6c3dff62-build.log` (emit
 9,629 ms, compile 38,354 ms, link 11,796 ms).
 
-The live transcript `.scratch/ghui-live/ghui-6c3dff62-live.log` passed real HOME, repository
-navigation, PR 50 and issues 15, PR 3 detail view with markdown scrolling, Escape navigation,
+The live transcript `.scratch/ghui-live/6c3dff62-live.log` passed real HOME, repository
+navigation, PR count 50+ and issues 15, PR 3 detail view with markdown scrolling, Escape navigation,
 `q` terminal restoration, and exit 0. No GitHub mutations or observed timeout occurred.
+
+## Final release build
+
+The app root for this artifact is `~/Developer/Personal/ghui-process-capability`.
+
+At final integration HEAD `4c32b75f`, the release CLI SHA-256 was
+`a64abc98c4da896cb20369dd3b0b4e2a9aadff3b111db96f5084c56bbf7ec838`. The GHUI artifact at
+`app/.scratch/ghui-live/ghui-final` has SHA-256
+`e020f2b3817746b6b5d25647e6d90a53c2276485020e1b93531a72b98e6f9472`, matching the live-proven
+artifact. Final build logs are `.scratch/ghui-final-build-4c32b75f.log` (object/executable cache hits, fresh C emission 9,141 ms),
+`.scratch/ghui-final-cli-build-4c32b75f.log`, and `.scratch/ghui-final-fmt-4c32b75f.log`. The
+regression log `.scratch/ghui-final-regress-4c32b75f.log` is the exact-HEAD `mbx run -p kiln-cli --
+test conformance/regress --node` run and passed 14/14.
 
 ## Additional evidence and limits
 
 The graph and builtin focused logs are `.scratch/ghui-final-graph.log` and
-`.scratch/ghui-final-builtins.log`. Native focused GC-stress and real-FFI dlopen/close checks
-passed; the full native run before the FFI additions recorded 205 passed, 0 failed, and 2
-ignored. Workspace follow-up recorded 1,382 passed across 73 targets, then the facts-only check
+`.scratch/ghui-final-builtins.log`. Native focused GC-stress and real-FFI dlopen/close checks passed. Before the final callable-name
+correction, the native parity run recorded 194 matches, 1 ShadowRealm refusal, and 1 divergence;
+after the correction, normal and GC-stress callable diffs are zero, with the direct interpreter probe
+passing. The older full native run before the FFI additions recorded 205 passed, 0 failed, and 2
+ignored; no full native rerun is claimed after the final correction. Workspace follow-up recorded 1,382 passed across 73 targets, then the facts-only check
 completed 31 targets cleanly. Backend checks recorded 131 unit and 36 emitted tests passing.
 
 Third-party validation recorded 17 interpreted matches and 17 native matches, with 0 refused, 0
 diverged, and 5 absent in `.scratch/ghui-final-thirdparty.log`.
 
-Native parity, performance comparison, final rebuild, and push validation remain pending. These
-records do not claim `mise run gate` is clean.
+The paired short performance comparison is recorded in `.scratch/thirdparty-paired-final.log`; two
+warmups and five interleaved passes produced equal outputs. Median milliseconds (baseline 047 vs
+candidate 4c) were immer 4.592/4.315, ms 4.264/4.304, rxjs 21.532/21.308, and uuid 4.894/4.506.
+No meaningful regression was observed; this is launcher-inclusive evidence, not a steady-state benchmark.
+
+The full gate was run earlier; subsequent failures were addressed with targeted checks, without a
+second full-gate run. Validation is complete; landing/push is not recorded here.
