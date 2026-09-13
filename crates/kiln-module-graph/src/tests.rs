@@ -150,6 +150,51 @@ fn unresolved_create_require_is_a_deferred_runtime_failure() {
 }
 
 #[test]
+fn runtime_target_nested_dynamic_import_is_drained() {
+    let project = TempProject::new();
+    let runtime = project.write("runtime.cjs", "import('./dep.mjs'); module.exports = 1;");
+    let dependency = project.write("dep.mjs", "export default 42;");
+    let entry = project.write(
+        "main.mjs",
+        &format!(
+            "import {{ createRequire }} from 'node:module'; createRequire(import.meta.url)('./{}');",
+            runtime.file_name().unwrap().to_string_lossy()
+        ),
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        frontend_oxc::parse,
+    )
+    .expect("nested deferred work is drained");
+    assert!(graph.module(&runtime).is_some());
+    assert!(graph.module(&dependency).is_some());
+}
+
+#[test]
+fn invalid_runtime_target_becomes_catchable_failure() {
+    let project = TempProject::new();
+    let runtime = project.write("broken.cjs", "function (");
+    let entry = project.write(
+        "main.mjs",
+        &format!(
+            "import {{ createRequire }} from 'node:module'; createRequire(import.meta.url)('./{}');",
+            runtime.file_name().unwrap().to_string_lossy()
+        ),
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        frontend_oxc::parse,
+    )
+    .expect("invalid lazy target is deferred");
+    assert_eq!(graph.runtime_failures(&entry).count(), 1);
+    assert!(graph.module(&runtime).is_none());
+}
+
+#[test]
 fn dynamic_loader_resolves_against_the_requesting_module() {
     let project = TempProject::new();
     fs::create_dir_all(project.root.join("a")).unwrap();

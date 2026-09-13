@@ -2383,11 +2383,17 @@ struct RuntimeWork {
     source: ModuleSource,
 }
 
+enum DeferredWork {
+    Dynamic(DynamicWork),
+    Runtime(RuntimeWork),
+}
+
 #[derive(Default)]
 struct DynamicJournal {
     order_before: usize,
     stack_before: usize,
-    pending_before: usize,
+    dynamic_pending_before: usize,
+    runtime_pending_before: usize,
     new_modules: Vec<PathBuf>,
     new_states: Vec<PathBuf>,
     new_dynamic_dependencies: Vec<(PathBuf, String)>,
@@ -2409,63 +2415,78 @@ where
         self.visit_static(path, None)?;
         let export_resolutions = resolve_exports(&self.modules, &self.order)?;
         validate_links(&self.modules, &self.order, &export_resolutions)?;
-        while let Some(dynamic) = self.dynamic_work.pop() {
-            self.dynamic_journal = Some(DynamicJournal {
-                order_before: self.order.len(),
-                stack_before: self.stack.len(),
-                pending_before: self.dynamic_work.len(),
-                ..DynamicJournal::default()
-            });
-            let result = self
-                .visit_static(dynamic.path.clone(), Some(dynamic.source))
-                .and_then(|_| {
-                    let export_resolutions = resolve_exports(&self.modules, &self.order)?;
-                    validate_links(&self.modules, &self.order, &export_resolutions)
-                });
-            let journal = self.dynamic_journal.take().expect("dynamic journal exists");
-            if let Err(error) = result {
-                self.rollback_dynamic(journal);
-                self.remove_dynamic_dependency(&dynamic.importer, &dynamic.specifier);
-                self.dynamic_failures.insert(
-                    (dynamic.importer, dynamic.specifier),
-                    format!("dynamic import failed: {error}"),
-                );
-            }
-        }
-        while let Some(runtime) = self.runtime_work.pop() {
-            self.dynamic_journal = Some(DynamicJournal {
-                order_before: self.order.len(),
-                stack_before: self.stack.len(),
-                pending_before: self.runtime_work.len(),
-                ..DynamicJournal::default()
-            });
-            let result = self
-                .visit_static(runtime.path.clone(), Some(runtime.source))
-                .and_then(|_| {
-                    let export_resolutions = resolve_exports(&self.modules, &self.order)?;
-                    validate_links(&self.modules, &self.order, &export_resolutions)
-                });
-            let journal = self.dynamic_journal.take().expect("runtime journal exists");
-            if let Err(error) = result {
-                self.rollback_runtime(journal);
-                self.remove_runtime_dependency(
-                    &runtime.owner,
-                    &runtime.importer,
-                    &runtime.specifier,
-                );
-                self.record_runtime_failure(
-                    runtime.owner,
-                    runtime.importer,
-                    runtime.specifier,
-                    format!("runtime request failed: {error}"),
-                );
+        loop {
+            let Some(work) = self
+                .dynamic_work
+                .pop()
+                .map(DeferredWork::Dynamic)
+                .or_else(|| self.runtime_work.pop().map(DeferredWork::Runtime))
+            else {
+                break;
+            };
+            match work {
+                DeferredWork::Dynamic(dynamic) => {
+                    self.dynamic_journal = Some(DynamicJournal {
+                        order_before: self.order.len(),
+                        stack_before: self.stack.len(),
+                        dynamic_pending_before: self.dynamic_work.len(),
+                        runtime_pending_before: self.runtime_work.len(),
+                        ..DynamicJournal::default()
+                    });
+                    let result = self
+                        .visit_static(dynamic.path.clone(), Some(dynamic.source))
+                        .and_then(|_| {
+                            let export_resolutions = resolve_exports(&self.modules, &self.order)?;
+                            validate_links(&self.modules, &self.order, &export_resolutions)
+                        });
+                    let journal = self.dynamic_journal.take().expect("dynamic journal exists");
+                    if let Err(error) = result {
+                        self.rollback_dynamic(journal);
+                        self.remove_dynamic_dependency(&dynamic.importer, &dynamic.specifier);
+                        self.dynamic_failures.insert(
+                            (dynamic.importer, dynamic.specifier),
+                            format!("dynamic import failed: {error}"),
+                        );
+                    }
+                }
+                DeferredWork::Runtime(runtime) => {
+                    self.dynamic_journal = Some(DynamicJournal {
+                        order_before: self.order.len(),
+                        stack_before: self.stack.len(),
+                        dynamic_pending_before: self.dynamic_work.len(),
+                        runtime_pending_before: self.runtime_work.len(),
+                        ..DynamicJournal::default()
+                    });
+                    let result = self
+                        .visit_static(runtime.path.clone(), Some(runtime.source))
+                        .and_then(|_| {
+                            let export_resolutions = resolve_exports(&self.modules, &self.order)?;
+                            validate_links(&self.modules, &self.order, &export_resolutions)
+                        });
+                    let journal = self.dynamic_journal.take().expect("runtime journal exists");
+                    if let Err(error) = result {
+                        self.rollback_dynamic(journal);
+                        self.remove_runtime_dependency(
+                            &runtime.owner,
+                            &runtime.importer,
+                            &runtime.specifier,
+                        );
+                        self.record_runtime_failure(
+                            runtime.owner,
+                            runtime.importer,
+                            runtime.specifier,
+                            format!("runtime request failed: {error}"),
+                        );
+                    }
+                }
             }
         }
         Ok(())
     }
 
     fn rollback_dynamic(&mut self, journal: DynamicJournal) {
-        self.dynamic_work.truncate(journal.pending_before);
+        self.dynamic_work.truncate(journal.dynamic_pending_before);
+        self.runtime_work.truncate(journal.runtime_pending_before);
         self.stack.truncate(journal.stack_before);
         self.order.truncate(journal.order_before);
         for path in journal.new_modules {
@@ -2489,18 +2510,6 @@ where
         }
         for key in journal.new_failures {
             self.dynamic_failures.remove(&key);
-        }
-    }
-
-    fn rollback_runtime(&mut self, journal: DynamicJournal) {
-        self.runtime_work.truncate(journal.pending_before);
-        self.stack.truncate(journal.stack_before);
-        self.order.truncate(journal.order_before);
-        for path in journal.new_modules {
-            self.modules.remove(&path);
-        }
-        for path in journal.new_states {
-            self.states.remove(&path);
         }
     }
 
