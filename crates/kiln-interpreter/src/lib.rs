@@ -15510,6 +15510,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // the stable virtual root and never consults the embedding process.
             Native::ProcessCwd => Ok(Value::String("/".to_owned())),
             Native::ProcessKill => Ok(Value::Boolean(true)),
+            Native::ProcessStdinSetRawMode => {
+                let mode = arguments.first().map(Value::is_truthy).unwrap_or(false);
+                if let Value::Object(obj) = receiver {
+                    obj.borrow_mut().set("isRaw", Value::Boolean(mode));
+                }
+                Ok(receiver.clone())
+            }
             // Copying reads each property, and a read is a call when the property is an
             // accessor -- which is why this cannot be a pure transformation of its arguments.
             Native::ObjectAssign => {
@@ -25241,18 +25248,36 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         );
         // These identify the realm's captured standard streams; they do not expose ambient file
         // descriptors or make them terminals. `node:tty.isatty` consequently remains false.
-        process.set(
-            "stdin",
-            ordinary_object([("fd".to_owned(), Value::Number(0.0))]),
-        );
-        process.set(
-            "stdout",
-            ordinary_object([("fd".to_owned(), Value::Number(1.0))]),
-        );
-        process.set(
-            "stderr",
-            ordinary_object([("fd".to_owned(), Value::Number(2.0))]),
-        );
+        let stdin = node_readable(&[], None);
+        if let Value::Object(stdin_obj) = &stdin {
+            let mut data = stdin_obj.borrow_mut();
+            data.set("fd", Value::Number(0.0));
+            data.set("isTTY", Value::Boolean(false));
+            data.set("isRaw", Value::Boolean(false));
+            data.set_non_enumerable(
+                "setRawMode",
+                Value::Native(Native::ProcessStdinSetRawMode, RealmId::PRIMARY),
+            );
+        }
+        process.set("stdin", stdin);
+
+        let stdout = node_writable(&[], None);
+        if let Value::Object(stdout_obj) = &stdout {
+            let mut data = stdout_obj.borrow_mut();
+            data.set("fd", Value::Number(1.0));
+            data.set("isTTY", Value::Boolean(false));
+            data.set("columns", Value::Number(80.0));
+            data.set("rows", Value::Number(24.0));
+        }
+        process.set("stdout", stdout);
+
+        let stderr = node_writable(&[], None);
+        if let Value::Object(stderr_obj) = &stderr {
+            let mut data = stderr_obj.borrow_mut();
+            data.set("fd", Value::Number(2.0));
+            data.set("isTTY", Value::Boolean(false));
+        }
+        process.set("stderr", stderr);
         process.set_non_enumerable(
             "hrtime",
             Value::Native(Native::ProcessHrtime, RealmId::PRIMARY),
@@ -36674,6 +36699,7 @@ fn call_native(
         | Native::ProcessHrtimeBigInt
         | Native::ProcessCwd
         | Native::ProcessKill
+        | Native::ProcessStdinSetRawMode
         | Native::UrlConstructor
         | Native::UrlSearchParamsGet
         | Native::UrlSearchParamsHas

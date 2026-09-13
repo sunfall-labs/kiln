@@ -192,6 +192,7 @@ mod realm {
     const OP_TCP_READ: u32 = 10;
     const OP_TCP_WRITE: u32 = 11;
     const OP_TCP_SHUTDOWN: u32 = 12;
+    const OP_STDIN_READ: u32 = 13;
 
     const VALUE_UNDEFINED: u32 = 0;
     const VALUE_BYTES: u32 = 1;
@@ -1164,6 +1165,9 @@ mod realm {
             },
             OP_TCP_SHUTDOWN => AsyncHostOp::TcpShutdown {
                 stream: ResourceId::new(view.resource),
+            },
+            OP_STDIN_READ => AsyncHostOp::StdinRead {
+                max_bytes: usize::try_from(view.argument).ok()?,
             },
             _ => return None,
         })

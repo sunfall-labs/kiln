@@ -154,6 +154,8 @@ pub enum AsyncHostOp {
     TcpWrite { stream: ResourceId, data: Vec<u8> },
     /// Shut down the write half of a stream.
     TcpShutdown { stream: ResourceId },
+    /// Read up to `max_bytes` from the host's standard input. Empty bytes represent EOF.
+    StdinRead { max_bytes: usize },
 }
 
 /// Stable resource category that does not expose executor or operating-system types.

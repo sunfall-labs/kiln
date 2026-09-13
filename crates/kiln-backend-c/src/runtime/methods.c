@@ -435,6 +435,7 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_OBJECT_IS_FROZEN: return "isFrozen";
     case KILN_C99_METHOD_OBJECT_PREVENT_EXTENSIONS: return "preventExtensions";
     case KILN_C99_METHOD_OBJECT_IS_EXTENSIBLE: return "isExtensible";
+    case KILN_C99_METHOD_NODE_READABLE_SET_RAW_MODE: return "setRawMode";
     default: return NULL;
     }
 }
