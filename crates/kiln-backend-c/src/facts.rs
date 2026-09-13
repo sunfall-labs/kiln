@@ -263,6 +263,103 @@ pub fn format_demanded_members(demanded: &DemandedMembers) -> String {
     out
 }
 
+/// Method dispatch group bits for the demand-driven prelude router.
+///
+/// Values mirror the `KILN_C99_GROUP_*` defines in `prelude.rs` exactly; the
+/// `method_registry_covers_every_group` test fails if the C table ever uses a
+/// bit this module does not classify, forcing the new group into either the
+/// always-core set or the prunable set.
+pub mod method_groups {
+    pub const DIRECT: u32 = 1;
+    pub const ARRAY_LOOKUP: u32 = 2;
+    pub const STRING_DISPATCH: u32 = 4;
+    pub const GENERIC: u32 = 8;
+    pub const TEMPORAL: u32 = 16;
+    pub const TEMPORAL_FROM: u32 = 32;
+    pub const TEMPORAL_COMPARE: u32 = 64;
+    pub const TEMPORAL_NOW_READ: u32 = 128;
+    pub const TEMPORAL_OP: u32 = 256;
+    pub const DATE_SETTER: u32 = 512;
+    pub const NODE_EVENT: u32 = 1024;
+    pub const NODE_NET: u32 = 2048;
+    pub const NODE_SERVER: u32 = 4096;
+    pub const NODE_HTTP: u32 = 8192;
+    pub const NODE_RESPONSE: u32 = 16384;
+    pub const BUFFER: u32 = 32768;
+    pub const NODE_UTIL: u32 = 65536;
+    pub const NODE_DIAGNOSTICS: u32 = 131072;
+    pub const NODE_STREAM: u32 = 262144;
+    pub const NODE_PATH: u32 = 524288;
+    pub const MATH_NUMBER: u32 = 1048576;
+}
+
+/// Groups the router always retains: core dispatch plus Temporal, whose use
+/// is invisible to import signals (a global namespace, not a builtin).
+pub const CORE_METHOD_GROUPS: u32 = method_groups::DIRECT
+    | method_groups::ARRAY_LOOKUP
+    | method_groups::STRING_DISPATCH
+    | method_groups::GENERIC
+    | method_groups::TEMPORAL
+    | method_groups::TEMPORAL_FROM
+    | method_groups::TEMPORAL_COMPARE
+    | method_groups::TEMPORAL_NOW_READ
+    | method_groups::TEMPORAL_OP
+    | method_groups::DATE_SETTER
+    | method_groups::MATH_NUMBER;
+
+/// Groups the router may drop when no demand implicates them.
+pub const PRUNABLE_METHOD_GROUPS: u32 = method_groups::NODE_EVENT
+    | method_groups::NODE_NET
+    | method_groups::NODE_SERVER
+    | method_groups::NODE_HTTP
+    | method_groups::NODE_RESPONSE
+    | method_groups::BUFFER
+    | method_groups::NODE_UTIL
+    | method_groups::NODE_DIAGNOSTICS
+    | method_groups::NODE_STREAM
+    | method_groups::NODE_PATH;
+
+/// Human names for a group mask, in canonical dispatch order.
+pub fn method_group_names(mask: u32) -> Vec<&'static str> {
+    const ALL: [(u32, &str); 21] = [
+        (method_groups::DIRECT, "Direct"),
+        (method_groups::ARRAY_LOOKUP, "ArrayLookup"),
+        (method_groups::STRING_DISPATCH, "StringDispatch"),
+        (method_groups::GENERIC, "Generic"),
+        (method_groups::TEMPORAL, "Temporal"),
+        (method_groups::TEMPORAL_FROM, "TemporalFrom"),
+        (method_groups::TEMPORAL_COMPARE, "TemporalCompare"),
+        (method_groups::TEMPORAL_NOW_READ, "TemporalNowRead"),
+        (method_groups::TEMPORAL_OP, "TemporalOp"),
+        (method_groups::DATE_SETTER, "DateSetter"),
+        (method_groups::NODE_EVENT, "NodeEvent"),
+        (method_groups::NODE_NET, "NodeNet"),
+        (method_groups::NODE_SERVER, "NodeServer"),
+        (method_groups::NODE_HTTP, "NodeHttp"),
+        (method_groups::NODE_RESPONSE, "NodeResponse"),
+        (method_groups::BUFFER, "Buffer"),
+        (method_groups::NODE_UTIL, "NodeUtil"),
+        (method_groups::NODE_DIAGNOSTICS, "NodeDiagnostics"),
+        (method_groups::NODE_STREAM, "NodeStream"),
+        (method_groups::NODE_PATH, "NodePath"),
+        (method_groups::MATH_NUMBER, "MathNumber"),
+    ];
+    ALL.into_iter()
+        .filter(|(bit, _)| mask & bit != 0)
+        .map(|(_, name)| name)
+        .collect()
+}
+
+/// Format a retained dispatch-group mask as a `kiln build --explain` section.
+pub fn format_retained_groups(mask: u32) -> String {
+    let mut out = String::new();
+    out.push_str("Retained dispatch groups:\n");
+    for name in method_group_names(mask) {
+        let _ = writeln!(out, "  {name}");
+    }
+    out
+}
+
 impl ProgramFacts {
     /// Format these facts as human-readable explanation output for `kiln build --explain`.
     pub fn format_explain(&self) -> String {
@@ -1278,14 +1375,30 @@ mod tests {
         };
         let text = format_demanded_members(&demanded);
         assert!(text.contains("Demanded Members"), "{text}");
-        assert!(
-            text.contains("2 distinct names, 1 builtins"),
-            "{text}"
-        );
+        assert!(text.contains("2 distinct names, 1 builtins"), "{text}");
         assert!(text.contains("computed access: true"), "{text}");
         assert!(text.contains("open world: false"), "{text}");
         assert!(text.contains("  log"), "{text}");
         assert!(text.contains("  SetTimeout"), "{text}");
+    }
+
+    #[test]
+    fn method_registry_covers_every_group() {
+        let mut used = 0u32;
+        for method in crate::prelude::METHOD_IDS {
+            used |= method.groups;
+        }
+        let known = CORE_METHOD_GROUPS | PRUNABLE_METHOD_GROUPS;
+        assert_eq!(
+            used & !known,
+            0,
+            "method table uses group bits this module does not classify: {used:#x}"
+        );
+        assert_eq!(
+            CORE_METHOD_GROUPS & PRUNABLE_METHOD_GROUPS,
+            0,
+            "a group cannot be both core and prunable"
+        );
     }
 
     #[test]

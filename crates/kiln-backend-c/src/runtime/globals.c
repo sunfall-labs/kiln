@@ -107,7 +107,13 @@ static int kiln_c99_process_object(kiln_value *out) {
         return KILN_C99_OK;
     }
     status = kiln_c99_new_object(process);
+    /* Demand-driven prelude: `process` is an emitter only in builds that
+     * retain the event group (see `retained_method_groups`). Reaching this
+     * initializer requires the `process` global, which retains the group,
+     * so a build without it never constructs `process` this way. */
+#if KILN_RETAIN_GROUP_NODE_EVENT
     if (status == KILN_C99_OK) status = kiln_c99_install_event_emitter_methods(*process);
+#endif
     if (status == KILN_C99_OK) status = kiln_c99_new_object(&env);
     if (status == KILN_C99_OK && kiln_c99_environ != NULL) {
         for (char **entry_ptr = kiln_c99_environ; *entry_ptr != NULL; ++entry_ptr) {
@@ -221,8 +227,12 @@ static int kiln_c99_process_object(kiln_value *out) {
     }
     if (status == KILN_C99_OK) {
         status = kiln_c99_new_object(&stream);
+#if KILN_RETAIN_GROUP_NODE_EVENT
         if (status == KILN_C99_OK) status = kiln_c99_install_event_emitter_methods(stream);
+#endif
+#if KILN_RETAIN_GROUP_NODE_STREAM
         if (status == KILN_C99_OK) status = kiln_c99_install_readable_methods(stream);
+#endif
         if (status == KILN_C99_OK) {
             kiln_value queue;
             status = kiln_c99_new_array(&queue);
@@ -243,8 +253,12 @@ static int kiln_c99_process_object(kiln_value *out) {
     }
     if (status == KILN_C99_OK) {
         status = kiln_c99_new_object(&stream);
+#if KILN_RETAIN_GROUP_NODE_EVENT
         if (status == KILN_C99_OK) status = kiln_c99_install_event_emitter_methods(stream);
+#endif
+#if KILN_RETAIN_GROUP_NODE_STREAM
         if (status == KILN_C99_OK) status = kiln_c99_install_writable_methods(stream);
+#endif
         if (status == KILN_C99_OK)
             status = kiln_c99_put(NULL, stream, "fd", 2, kiln_c99_number(1.0), 0, NULL);
         if (status == KILN_C99_OK) {
@@ -267,8 +281,12 @@ static int kiln_c99_process_object(kiln_value *out) {
     }
     if (status == KILN_C99_OK) {
         status = kiln_c99_new_object(&stream);
+#if KILN_RETAIN_GROUP_NODE_EVENT
         if (status == KILN_C99_OK) status = kiln_c99_install_event_emitter_methods(stream);
+#endif
+#if KILN_RETAIN_GROUP_NODE_STREAM
         if (status == KILN_C99_OK) status = kiln_c99_install_writable_methods(stream);
+#endif
         if (status == KILN_C99_OK)
             status = kiln_c99_put(NULL, stream, "fd", 2, kiln_c99_number(2.0), 0, NULL);
         if (status == KILN_C99_OK)

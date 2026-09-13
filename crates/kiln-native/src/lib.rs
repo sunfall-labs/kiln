@@ -117,6 +117,51 @@ fn prelude_object_options(base: Digest, profile: NativeProfile) -> Digest {
     Digest::hash(&identity)
 }
 
+/// Prelude object options folded with a dispatch-group mask.
+///
+/// A full mask returns today's identity byte-for-byte: programs that retain
+/// every group reuse every cached prelude object. Any dropped group extends
+/// the identity so masked preludes never alias unmasked ones.
+fn prelude_object_options_masked(base: Digest, profile: NativeProfile, mask: u32) -> Digest {
+    use kiln_backend_c::facts::{CORE_METHOD_GROUPS, PRUNABLE_METHOD_GROUPS};
+    let unmasked = prelude_object_options(base, profile);
+    if mask == CORE_METHOD_GROUPS | PRUNABLE_METHOD_GROUPS {
+        return unmasked;
+    }
+    let mut identity = Vec::with_capacity(unmasked.as_bytes().len() + std::mem::size_of::<u32>());
+    identity.extend_from_slice(unmasked.as_bytes());
+    identity.extend_from_slice(&mask.to_le_bytes());
+    Digest::hash(&identity)
+}
+
+/// `-D` flags compiling dispatch groups out of the prelude.
+///
+/// One `-DKILN_RETAIN_GROUP_<name>=0` per dropped prunable group; a full mask
+/// yields no flags, so fully retained builds compile exactly today's prelude.
+fn prelude_group_defines(mask: u32) -> Vec<std::ffi::OsString> {
+    use kiln_backend_c::facts::method_groups as groups;
+    const FLAGS: [(u32, &str); 10] = [
+        (groups::NODE_EVENT, "KILN_RETAIN_GROUP_NODE_EVENT"),
+        (groups::NODE_NET, "KILN_RETAIN_GROUP_NODE_NET"),
+        (groups::NODE_SERVER, "KILN_RETAIN_GROUP_NODE_SERVER"),
+        (groups::NODE_HTTP, "KILN_RETAIN_GROUP_NODE_HTTP"),
+        (groups::NODE_RESPONSE, "KILN_RETAIN_GROUP_NODE_RESPONSE"),
+        (groups::BUFFER, "KILN_RETAIN_GROUP_BUFFER"),
+        (groups::NODE_UTIL, "KILN_RETAIN_GROUP_NODE_UTIL"),
+        (
+            groups::NODE_DIAGNOSTICS,
+            "KILN_RETAIN_GROUP_NODE_DIAGNOSTICS",
+        ),
+        (groups::NODE_STREAM, "KILN_RETAIN_GROUP_NODE_STREAM"),
+        (groups::NODE_PATH, "KILN_RETAIN_GROUP_NODE_PATH"),
+    ];
+    FLAGS
+        .iter()
+        .filter(|(bit, _)| mask & bit == 0)
+        .map(|(_, name)| std::ffi::OsString::from(format!("-D{name}=0")))
+        .collect()
+}
+
 fn prelude_header_digest() -> Digest {
     Digest::hash(runtime_prelude_header().as_bytes())
 }
@@ -1776,6 +1821,22 @@ impl NativeBuilder {
         let module_abi = module_abi_identity();
         let target = target_identity(&identity);
         let selected = native_executable_graph(graph, options.profile)?;
+        // Dispatch-group mask for the prelude: same closed-world selection,
+        // so the `-D` flags below only ever remove what nothing retained can
+        // reach. Computed once; the explain path recomputes it out-of-band.
+        let group_mask = {
+            let demand = ExecutableDemand {
+                live: selected
+                    .modules
+                    .iter()
+                    .map(|node| node.path.clone())
+                    .collect(),
+                slots: selected.live_export_slots.clone(),
+            };
+            let members =
+                kiln_backend_c::facts::analyze_demanded_members(graph, &demand.live, &demand.slots);
+            retained_method_groups(graph, &demand, &members)
+        };
         let nodes = selected.modules;
         let emitted_modules = emit_indexed(nodes.len(), "graph module emission", |index| {
             let node = nodes[index];
@@ -1950,6 +2011,12 @@ impl NativeBuilder {
         if profile == NativeProfile::Release {
             configure_release_prelude_compile(&mut prelude_compile_options);
         }
+        // Dispatch groups the program cannot reach compile out of the prelude
+        // (see the `#if KILN_RETAIN_GROUP_*` guards). A full mask yields no
+        // flags: fully retained builds compile exactly today's prelude.
+        prelude_compile_options
+            .extra_args
+            .extend(prelude_group_defines(group_mask));
         let module_compile_options = modules
             .iter()
             .map(|(_, module)| module.generic_only)
@@ -2006,7 +2073,7 @@ impl NativeBuilder {
             &runtime_abi,
             &target,
             profile.cache(),
-            prelude_object_options(object_options, profile),
+            prelude_object_options_masked(object_options, profile, group_mask),
             [prelude_source_digest],
         );
         let runtime_key = key(
@@ -4416,6 +4483,121 @@ pub fn executable_demand(
             .collect(),
         slots: selected.live_export_slots,
     })
+}
+
+/// Method dispatch groups retained by one executable, as a bitmask over
+/// `kiln_backend_c::facts::method_groups`.
+///
+/// Core groups always; node-ish groups only on demand. A group is implicated
+/// by an imported node builtin (conservative supersets: an HTTP server also
+/// needs net/stream/event implementations), by the `Buffer`/`Process` globals
+/// behind retained `LoadBuiltin`s, or by computed access (which can resolve
+/// through `process` and `globalThis`). Direct eval, `new Function`,
+/// indirect `eval`, and dynamic imports keep the full table: their targets
+/// are unknowable. Successful builds resolve every static require, so CJS
+/// literal requires are already covered by the graph edges below.
+pub fn retained_method_groups(
+    graph: &ModuleGraph,
+    demand: &ExecutableDemand,
+    members: &kiln_backend_c::facts::DemandedMembers,
+) -> u32 {
+    use kiln_backend_c::facts::{
+        CORE_METHOD_GROUPS, PRUNABLE_METHOD_GROUPS, method_groups as groups,
+    };
+    use kiln_module_resolver::NodeBuiltin;
+
+    const FULL: u32 = CORE_METHOD_GROUPS | PRUNABLE_METHOD_GROUPS;
+
+    // Builtin globals with group-backed methods behind them.
+    let uses_buffer = members
+        .builtins
+        .iter()
+        .any(|name| name.as_str() == "Buffer");
+    // `process.stdout` is a stream and `process.on` an emitter: touching the
+    // `process` global can reach both implementations without any import.
+    let uses_process = members
+        .builtins
+        .iter()
+        .any(|name| name.as_str() == "Process");
+    // `process[k]()` and `globalThis[k]()` dynamics resolve through process
+    // members (events/streams) and globals (`Buffer`); user objects implicate
+    // nothing the router serves.
+    let dynamic = members.has_computed_access;
+    // Indirect `eval` runs arbitrary code.
+    let indirect_eval = members.builtins.iter().any(|name| name.as_str() == "Eval");
+
+    // Imported node builtins, from resolved graph edges: ESM imports and CJS
+    // literal requires alike. Unknown `node:*` specifiers bail: failing closed
+    // keeps a program working.
+    fn builtin_groups(builtin: &NodeBuiltin) -> Option<u32> {
+        use NodeBuiltin::*;
+        Some(match builtin {
+            Http | Https | Http2 => {
+                groups::NODE_HTTP
+                    | groups::NODE_RESPONSE
+                    | groups::NODE_SERVER
+                    | groups::NODE_NET
+                    | groups::NODE_STREAM
+                    | groups::NODE_EVENT
+            }
+            Net => {
+                groups::NODE_NET | groups::NODE_SERVER | groups::NODE_STREAM | groups::NODE_EVENT
+            }
+            Events => groups::NODE_EVENT,
+            Stream => groups::NODE_STREAM | groups::NODE_EVENT,
+            Buffer => groups::BUFFER,
+            Path => groups::NODE_PATH,
+            Util => groups::NODE_UTIL,
+            DiagnosticsChannel => groups::NODE_DIAGNOSTICS,
+            Fs | FsPromises => groups::NODE_STREAM | groups::NODE_EVENT,
+            // Audited `Direct`-only (see phase1-PRD): no groups implicated.
+            Assert | Console | Crypto | Dns | Module | Os | Tty | Zlib | StringDecoder
+            | QueryString | Url | WorkerThreads | PerfHooks | AsyncHooks => 0,
+            // `dlopen` hands out raw pointers: anything is reachable.
+            Ffi => return None,
+        })
+    }
+
+    let mut mask = CORE_METHOD_GROUPS;
+    if uses_buffer || dynamic {
+        mask |= groups::BUFFER;
+    }
+    if uses_process || dynamic {
+        mask |= groups::NODE_EVENT | groups::NODE_STREAM;
+    }
+    for node in graph.modules() {
+        if !demand.live.contains(&node.path) {
+            continue;
+        }
+        // Dynamic import targets and `new Function` bodies are unknowable.
+        if !node.program.link_facts.dynamic_imports.is_empty()
+            || node.program.program.has_dynamic_import()
+            || node.program.link_facts.new_function
+            || indirect_eval
+        {
+            return FULL;
+        }
+        for dependency in &node.dependencies {
+            let target = graph.module(&dependency.target);
+            match target.map(|module| &module.source) {
+                Some(ModuleSource::NodeBuiltin(builtin)) => match builtin_groups(builtin) {
+                    Some(groups) => mask |= groups,
+                    None => return FULL,
+                },
+                // An explicit `node:` specifier that resolved anywhere else is
+                // unexpected; failing closed keeps the program working.
+                _ if dependency.specifier.starts_with("node:") => return FULL,
+                _ => {}
+            }
+        }
+    }
+    // The members walk already bails the open world (direct eval, dynamic
+    // import) into `has_open_world`; `new Function` and indirect eval are
+    // checked above, so reaching here is closed.
+    if members.has_open_world {
+        return FULL;
+    }
+    mask
 }
 
 /// Per-module retained-size attribution for an executable graph.

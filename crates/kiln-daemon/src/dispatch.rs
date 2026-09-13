@@ -1654,6 +1654,8 @@ pub(crate) fn native_build_graph(
                         &demand.slots,
                     );
                     text.push_str(&kiln_backend_c::facts::format_demanded_members(&members));
+                    let mask = kiln_native::retained_method_groups(graph, &demand, &members);
+                    text.push_str(&kiln_backend_c::facts::format_retained_groups(mask));
                 }
                 Some(text)
             } else {
