@@ -183,13 +183,10 @@ fn no_script_launches_a_shell_function_through_a_binary_launcher() {
 
 /// The provider's source identity is spelled out in three places that must agree exactly.
 ///
-/// `source_digest` in `kiln-native` decides whether a cached native artifact may be reused; the
-/// packager writes the same digest into the shipped manifest; the smoke script recomputes it to
-/// prove the two match. All three hash the file list *in order*, so a path added to one and not
-/// the others silently changes nothing until a checkout build and an installed archive stop
-/// sharing cache entries — a divergence that shows up as "works on my machine" much later.
+/// The Rust fallback, packager, and smoke script all consume one ordered manifest, so a provider
+/// input cannot be added to only one cache identity implementation.
 #[test]
-fn the_provider_source_identity_list_is_the_same_in_all_three_places() {
+fn the_provider_source_manifest_is_shared_and_complete() {
     let root = repo_root();
     let rust = std::fs::read_to_string(root.join("crates/kiln-native/src/number_provider.rs"))
         .expect("number_provider.rs is readable");
@@ -201,10 +198,7 @@ fn the_provider_source_identity_list_is_the_same_in_all_three_places() {
     let manifest_text =
         std::fs::read_to_string(root.join("crates/kiln-native/provider-sources.txt"))
             .expect("provider source manifest is readable");
-    let paths: Vec<_> = manifest_text
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .collect();
+    let paths: Vec<_> = manifest_text.lines().collect();
 
     assert!(
         paths.len() > 10,
@@ -212,9 +206,34 @@ fn the_provider_source_identity_list_is_the_same_in_all_three_places() {
         paths.len(),
     );
     assert!(
-        paths.windows(2).all(|pair| pair[0] != pair[1]),
-        "provider source manifest contains duplicate adjacent entries: {paths:?}",
+        paths.first() == Some(&"crates/kiln-native/provider-sources.txt"),
+        "provider source manifest must hash itself first: {paths:?}",
     );
+    let unique = paths.iter().collect::<BTreeSet<_>>();
+    assert_eq!(
+        unique.len(),
+        paths.len(),
+        "provider source manifest contains duplicate entries: {paths:?}",
+    );
+    for path in &paths {
+        assert!(
+            !path.is_empty(),
+            "provider source manifest contains a blank entry"
+        );
+        assert_eq!(
+            *path,
+            path.trim(),
+            "provider source manifest entry has surrounding whitespace: {path:?}"
+        );
+        assert!(
+            !path.chars().any(char::is_whitespace),
+            "provider source manifest entry contains whitespace: {path:?}",
+        );
+        assert!(
+            root.join(path).is_file(),
+            "provider source manifest names a missing file: {path}"
+        );
+    }
     for (name, source, marker) in [
         ("Rust source digest", rust, "provider-sources.txt"),
         (
