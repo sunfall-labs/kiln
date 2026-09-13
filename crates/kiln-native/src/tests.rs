@@ -4849,6 +4849,44 @@ fn native_dynamic_import_resolves_opentui_and_in_graph_modules() {
 }
 
 #[test]
+fn native_static_top_level_await_resolves_before_entry() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping static top-level await integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-static-tla");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).expect("write root package");
+    fs::write(
+        root.path.join("dep.mjs"),
+        "export const x = await new Promise(resolve => setTimeout(() => resolve(42), 1));\n",
+    )
+    .expect("write dependency");
+    let entry = root.path.join("main.mjs");
+    fs::write(&entry, "import { x } from './dep.mjs'; console.log(x);\n").expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build static top-level await graph");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .expect("static top-level await graph builds and runs");
+    assert_eq!(report.stdout, b"42\n");
+}
+
+#[test]
 fn native_dynamic_import_uses_importer_identity_for_relative_modules() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
