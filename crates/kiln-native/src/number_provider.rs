@@ -534,70 +534,16 @@ fn build_from_source(
 }
 
 fn source_digest(root: &Path) -> Result<Digest, NumberProviderError> {
-    let paths = [
-        "Cargo.lock",
-        // Leaf crates the archive links, found by asking the compiler what it read rather than
-        // by remembering: an edit to any of these changes the archive, so it has to change the
-        // identity too. The packager fails the build if this list stops covering rustc's answer.
-        "crates/kiln-artifact-cache/Cargo.toml",
-        "crates/kiln-artifact-cache/src/eviction.rs",
-        "crates/kiln-artifact-cache/src/lib.rs",
-        "crates/kiln-digest/Cargo.toml",
-        "crates/kiln-digest/src/lib.rs",
-        "crates/kiln-host-abi/Cargo.toml",
-        "crates/kiln-host-abi/src/lib.rs",
-        "crates/kiln-number-core/Cargo.toml",
-        "crates/kiln-number-core/src/lib.rs",
-        "crates/kiln-native-number-ffi/Cargo.toml",
-        "crates/kiln-native-number-ffi/src/ffi.rs",
-        "crates/kiln-native-number-ffi/src/lib.rs",
-        "crates/kiln-native-number-abi/Cargo.toml",
-        "crates/kiln-native-number-abi/src/lib.rs",
-        // `node:path`'s algorithms, compiled into this archive so a generated program and the
-        // interpreter answer `dirname` from one implementation. Same reasoning as the calendar
-        // adapter below: leave it out of the identity and a native run keeps linking yesterday's
-        // `basename` while the interpreter, which links the crate directly, has already moved.
-        "crates/kiln-node-path/Cargo.toml",
-        "crates/kiln-node-path/src/lib.rs",
-        // The calendar engine's adapter. It is compiled *into* this archive under the `temporal`
-        // feature, so a change to it changes the archive -- and leaving it out of the identity is
-        // how a native run keeps linking yesterday's calendar while the interpreter, which links
-        // the crate directly, has already moved. That is a divergence nothing in the build fails
-        // to warn about, which is the worst kind.
-        "crates/kiln-temporal/Cargo.toml",
-        "crates/kiln-temporal/src/lib.rs",
-        "crates/kiln-intl/Cargo.toml",
-        "crates/kiln-intl/src/collator.rs",
-        "crates/kiln-intl/src/datetime.rs",
-        "crates/kiln-intl/src/displaynames.rs",
-        "crates/kiln-intl/src/duration.rs",
-        "crates/kiln-intl/src/lib.rs",
-        "crates/kiln-intl/src/list.rs",
-        "crates/kiln-intl/src/locale.rs",
-        "crates/kiln-intl/src/number.rs",
-        "crates/kiln-intl/src/parts.rs",
-        "crates/kiln-intl/src/plurals.rs",
-        "crates/kiln-intl/src/relative.rs",
-        "crates/kiln-intl/src/segmenter.rs",
-        // `JSON.parse`'s reader, compiled into the archive under the `json` feature and linked by
-        // the interpreter directly, for the same reason as the two above.
-        "crates/kiln-json/Cargo.toml",
-        "crates/kiln-json/src/lib.rs",
-        "crates/kiln-json/src/scalar.rs",
-        "crates/kiln-runtime/Cargo.toml",
-        "crates/kiln-runtime/src/http_body.rs",
-        "crates/kiln-runtime/src/http_client.rs",
-        "crates/kiln-runtime/src/http_engine.rs",
-        "crates/kiln-runtime/src/lib.rs",
-        "crates/kiln-runtime/src/process_wire.rs",
-        "crates/kiln-runtime/src/node_http.rs",
-        "crates/kiln-runtime/src/node_http_agent.rs",
-        "crates/kiln-runtime/src/node_net.rs",
-        "crates/kiln-runtime/src/node_stream.rs",
-        "crates/kiln-runtime/src/scripted_transport.rs",
-    ];
+    // Keep this ordered list in one repository manifest. The packager and installed-layout
+    // checker consume the same file, so a new provider input cannot silently land in only one
+    // of the three identity implementations.
+    const SOURCE_LIST: &str = include_str!("../provider-sources.txt");
     let mut identity = Vec::new();
-    for relative in paths {
+    for relative in SOURCE_LIST
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
         let bytes = read(&root.join(relative), "read number-provider source")?;
         identity.extend_from_slice(relative.as_bytes());
         identity.push(0);

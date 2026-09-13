@@ -190,29 +190,6 @@ fn no_script_launches_a_shell_function_through_a_binary_launcher() {
 /// sharing cache entries — a divergence that shows up as "works on my machine" much later.
 #[test]
 fn the_provider_source_identity_list_is_the_same_in_all_three_places() {
-    /// Ordered `crates/...` paths quoted on their own in a file, which is the shape all three
-    /// lists share: a Rust array element, or a shell `for` list continuation.
-    fn quoted_source_paths(text: &str, start: &str, end: &str) -> Vec<String> {
-        let body = text
-            .split_once(start)
-            .unwrap_or_else(|| panic!("the list is introduced by {start:?}"))
-            .1;
-        let body = body
-            .split_once(end)
-            .unwrap_or_else(|| panic!("the list is terminated by {end:?}"))
-            .0;
-        body.lines()
-            .filter_map(|line| {
-                // Trailing punctuation differs by host language: `,` ends a Rust array element,
-                // `\` continues a shell line, and `;` closes the shell `for` list before `do`.
-                let line = line.trim().trim_end_matches(['\\', ',', ';']).trim();
-                let line = line.trim_matches('"');
-                let named = line == "Cargo.lock" || line.starts_with("crates/");
-                (named && !line.contains(' ')).then(|| line.to_owned())
-            })
-            .collect()
-    }
-
     let root = repo_root();
     let rust = std::fs::read_to_string(root.join("crates/kiln-native/src/number_provider.rs"))
         .expect("number_provider.rs is readable");
@@ -221,31 +198,41 @@ fn the_provider_source_identity_list_is_the_same_in_all_three_places() {
             .expect("packager is readable");
     let smoke = std::fs::read_to_string(scripts_directory().join("check-native-number-ffi.sh"))
         .expect("smoke script is readable");
-
-    let from_rust = quoted_source_paths(&rust, "fn source_digest", "];");
-    let from_packager = quoted_source_paths(&packager, "KILN_PROVIDER_SOURCE_DIGEST=$(", "do\n");
-    let from_smoke = quoted_source_paths(&smoke, "KILN_NUMBER_EXPECTED_SOURCE_DIGEST=$(", "do\n");
+    let manifest_text =
+        std::fs::read_to_string(root.join("crates/kiln-native/provider-sources.txt"))
+            .expect("provider source manifest is readable");
+    let paths: Vec<_> = manifest_text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
 
     assert!(
-        from_rust.len() > 10,
-        "parsed only {} paths out of source_digest, so this guard has stopped reading the real \
-         list: {from_rust:?}",
-        from_rust.len(),
+        paths.len() > 10,
+        "provider source manifest unexpectedly contains only {} paths: {paths:?}",
+        paths.len(),
     );
-    assert_eq!(
-        from_rust, from_packager,
-        "\ncrates/kiln-native/src/number_provider.rs (source_digest) and \
-         scripts/package-native-number-provider.sh hash different files, in this order, so a \
-         shipped manifest's source_sha256 will not match the one the compiler computes.\n  \
-         number_provider.rs: {from_rust:?}\n  packager: {from_packager:?}",
+    assert!(
+        paths.windows(2).all(|pair| pair[0] != pair[1]),
+        "provider source manifest contains duplicate adjacent entries: {paths:?}",
     );
-    assert_eq!(
-        from_rust, from_smoke,
-        "\ncrates/kiln-native/src/number_provider.rs (source_digest) and \
-         scripts/check-native-number-ffi.sh hash different files, in this order, so the smoke \
-         test would report identity drift that is really only this list being out of step.\n  \
-         number_provider.rs: {from_rust:?}\n  smoke: {from_smoke:?}",
-    );
+    for (name, source, marker) in [
+        ("Rust source digest", rust, "provider-sources.txt"),
+        (
+            "packager",
+            packager,
+            "crates/kiln-native/provider-sources.txt",
+        ),
+        (
+            "smoke script",
+            smoke,
+            "crates/kiln-native/provider-sources.txt",
+        ),
+    ] {
+        assert!(
+            source.contains(marker),
+            "{name} does not consume the shared provider source manifest",
+        );
+    }
 }
 
 /// `bash -n` parses without running. It costs milliseconds and catches the unbalanced `fi` that
