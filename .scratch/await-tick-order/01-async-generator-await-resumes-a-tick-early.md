@@ -1,6 +1,6 @@
 # An `await` inside an async generator's consumer resumes a tick early, and a thenable is not adopted
 
-**Status:** open
+**Status:** closed (resolved 2026-09-13)
 
 Found 2026-09-06 while proving that the direct await continuation (`kiln_c99_then_continue`)
 preserves ordering. It does: the program below prints the same thing on the runtime before and
@@ -36,3 +36,11 @@ wrap-in-a-promise path took; `kiln_c99_settle` follows a promise but not a thena
 Triage: bug, native backend, conformance. Neither is reached by the corpus; the probe
 `conformance/native/await-resumes-directly.js` deliberately leaves both out so that it can guard
 the ordering the two engines do share.
+
+## Resolution
+
+Resolved 2026-09-13:
+1. `kiln_c99_settle` and `kiln_c99_await_suspend` adopt thenables (references with callable `.then` property) using `ADOPT_STEP` to call `.then(resolve, reject)`, resolving intermediate promises in accordance with ECMAScript PromiseResolveThenableJob.
+2. In `kiln_c99_async_generator_step`, `yield` awaits its operand (with continuation mode 2) before settling the consumer's step promise with `{ value, done: false }`. Rejections from the awaited yield operand are thrown back into the generator context at the yield site.
+3. Added conformance test `conformance/native/async-generator-await-tick-order.js` covering both defects and confirming 3-way parity across Node, Kiln interpreter, and Kiln native.
+

@@ -1,6 +1,5 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 803
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -33,6 +32,36 @@ expression: abi_surface(prelude)
 #else
 #define KILN_LIKELY(x) (x)
 #define KILN_UNLIKELY(x) (x)
+#endif
+#ifndef KILN_RETAIN_GROUP_NODE_EVENT
+#define KILN_RETAIN_GROUP_NODE_EVENT 1
+#endif
+#ifndef KILN_RETAIN_GROUP_NODE_NET
+#define KILN_RETAIN_GROUP_NODE_NET 1
+#endif
+#ifndef KILN_RETAIN_GROUP_NODE_SERVER
+#define KILN_RETAIN_GROUP_NODE_SERVER 1
+#endif
+#ifndef KILN_RETAIN_GROUP_NODE_HTTP
+#define KILN_RETAIN_GROUP_NODE_HTTP 1
+#endif
+#ifndef KILN_RETAIN_GROUP_NODE_RESPONSE
+#define KILN_RETAIN_GROUP_NODE_RESPONSE 1
+#endif
+#ifndef KILN_RETAIN_GROUP_BUFFER
+#define KILN_RETAIN_GROUP_BUFFER 1
+#endif
+#ifndef KILN_RETAIN_GROUP_NODE_UTIL
+#define KILN_RETAIN_GROUP_NODE_UTIL 1
+#endif
+#ifndef KILN_RETAIN_GROUP_NODE_DIAGNOSTICS
+#define KILN_RETAIN_GROUP_NODE_DIAGNOSTICS 1
+#endif
+#ifndef KILN_RETAIN_GROUP_NODE_STREAM
+#define KILN_RETAIN_GROUP_NODE_STREAM 1
+#endif
+#ifndef KILN_RETAIN_GROUP_NODE_PATH
+#define KILN_RETAIN_GROUP_NODE_PATH 1
 #endif
 static const char *kiln_c99_diagnostic_site = NULL;
 static const char *kiln_c99_diagnostic_operation = NULL;
@@ -1673,6 +1702,8 @@ static int kiln_c99_realm_value_slot(uint32_t key, kiln_value **out) {
 static int kiln_c99_atomics_object(kiln_value *out) {
 static int kiln_c99_console_object(kiln_value *out) {
 static int kiln_c99_process_object(kiln_value *out) {
+#if KILN_RETAIN_GROUP_NODE_EVENT
+#endif
 #if defined(KILN_NODE_ENV_PRODUCTION)
 #endif
 #if defined(__linux__)
@@ -1684,7 +1715,19 @@ static int kiln_c99_process_object(kiln_value *out) {
 #elif defined(__aarch64__) || defined(_M_ARM64)
 #else
 #endif
+#if KILN_RETAIN_GROUP_NODE_EVENT
+#endif
+#if KILN_RETAIN_GROUP_NODE_STREAM
+#endif
+#if KILN_RETAIN_GROUP_NODE_EVENT
+#endif
+#if KILN_RETAIN_GROUP_NODE_STREAM
+#endif
 #if defined(__unix__) || defined(__APPLE__)
+#endif
+#if KILN_RETAIN_GROUP_NODE_EVENT
+#endif
+#if KILN_RETAIN_GROUP_NODE_STREAM
 #endif
 static int kiln_c99_global_object(kiln_value *out) {
 static int kiln_c99_global_object_val(kiln_val *out) {
@@ -1872,6 +1915,8 @@ static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value 
 static kiln_value *kiln_c99_exotic_store(kiln_value target) {
 static int kiln_c99_store_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char *key,
+#if KILN_RETAIN_GROUP_NODE_HTTP
+#endif
 static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_get_ikey(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_site_learn(kiln_c99_site *site, const kiln_object *object, const char *key,
@@ -2047,6 +2092,33 @@ static int kiln_c99_generator_delegate_return(kiln_host *host, kiln_generator *f
 static int kiln_c99_generator_delegate_throw(kiln_host *host, kiln_generator *frame, kiln_value thrown_val,
 static int kiln_c99_default_require(void *context, kiln_host *host, kiln_value specifier,
 static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, uint64_t code,
+#if KILN_RETAIN_GROUP_NODE_EVENT
+#endif
+#if KILN_RETAIN_GROUP_NODE_NET || KILN_RETAIN_GROUP_NODE_HTTP || KILN_RETAIN_GROUP_NODE_STREAM
+#endif
+#if KILN_RETAIN_GROUP_NODE_NET
+#endif
+#if KILN_RETAIN_GROUP_NODE_HTTP
+#endif
+#if KILN_RETAIN_GROUP_NODE_NET || KILN_RETAIN_GROUP_NODE_SERVER
+#endif
+#if KILN_RETAIN_GROUP_NODE_RESPONSE
+#endif
+#if KILN_RETAIN_GROUP_NODE_NET
+#endif
+#if KILN_RETAIN_GROUP_BUFFER
+#endif
+#if KILN_RETAIN_GROUP_NODE_UTIL
+#endif
+#if KILN_RETAIN_GROUP_NODE_DIAGNOSTICS
+#endif
+#if KILN_RETAIN_GROUP_NODE_STREAM
+#endif
+#if KILN_RETAIN_GROUP_NODE_PATH
+#endif
+#if KILN_RETAIN_GROUP_NODE_EVENT
+#else
+#endif
 static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value source, int depth,
 static int kiln_c99_is_symbol_key(const char *key, size_t key_len) {
 static int kiln_c99_builtin_has_member(uint64_t builtin, const char *key, size_t key_len) {
@@ -2072,6 +2144,8 @@ static int kiln_c99_descriptor_field(kiln_host *host, kiln_value descriptor, con
 static int kiln_c99_define_property(kiln_host *host, kiln_value target, const char *key,
 static int kiln_c99_define_properties(kiln_host *host, kiln_value target, kiln_value descriptors,
 static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const char *key,
+#if KILN_RETAIN_GROUP_NODE_HTTP
+#endif
 static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kiln_value key,
 static int kiln_c99_set_function_name(kiln_value function, kiln_value key, const char *prefix) {
 static int kiln_c99_define_private(kiln_value target, const char *key, size_t key_len,
@@ -2179,7 +2253,9 @@ static int kiln_c99_schedule(kiln_promise *promise, const kiln_reaction *reactio
 static int kiln_c99_settle(kiln_value promise, kiln_value value, int rejected) {
 static int kiln_c99_new_settler(kiln_value *out, kiln_value promise, int rejects) {
 static int kiln_c99_then(kiln_value promise, kiln_value on_fulfilled, kiln_value on_rejected,
+static int kiln_c99_then_continue_mode(kiln_value promise, kiln_value generator, int mode) {
 static int kiln_c99_then_continue(kiln_value promise, kiln_value generator) {
+static int kiln_c99_await_suspend(kiln_host *host, kiln_value generator, kiln_value produced,
 static void kiln_c99_publish_turn_refusal(int status, kiln_value produced, kiln_value *thrown) {
 static int kiln_c99_run_job(kiln_microtask *task, kiln_host *host, kiln_value *thrown) {
 static int kiln_c99_promise_jobs_pending(void *context) {
@@ -2229,6 +2305,14 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
 static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues,
 static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
 static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value callee,
+#if KILN_RETAIN_GROUP_BUFFER
+#endif
+#if KILN_RETAIN_GROUP_NODE_HTTP
+#endif
+#if KILN_RETAIN_GROUP_NODE_EVENT
+#endif
+#if KILN_RETAIN_GROUP_NODE_STREAM
+#endif
 static int kiln_c99_super_call(kiln_host *host, kiln_value *produced, kiln_value parent,
 static int kiln_c99_adopt_super(kiln_value *receiver, kiln_value produced) {
 static int kiln_c99_call_val(kiln_host *host, kiln_val *result, kiln_val callee,
