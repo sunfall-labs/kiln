@@ -5445,18 +5445,18 @@ impl Compiler {
             match &field.key {
                 ObjectKey::Private(name) => {
                     let name = self.constant_index(Constant::String(self.private_key(name)));
-                    self.emit_field_value(field);
+                    self.emit_field_value(field, Some(&static_home));
                     self.code.push(self.set_property_instruction(name));
                 }
                 ObjectKey::Static(key) => {
                     let name = self.constant_index(Constant::String(key.clone()));
-                    self.emit_field_value(field);
+                    self.emit_field_value(field, Some(&static_home));
                     self.code.push(self.set_property_instruction(name));
                 }
                 ObjectKey::Computed(key) => {
                     self.expression(key);
                     self.guard_static_prototype_key();
-                    self.emit_field_value(field);
+                    self.emit_field_value(field, Some(&static_home));
                     self.code.push(self.set_computed_instruction());
                 }
             }
@@ -5716,7 +5716,7 @@ impl Compiler {
     /// inline: `super.x` reads through the class's home object -- which the caller has already
     /// pushed -- and `new.target` is `undefined` rather than whatever constructed the instance.
     /// Both are restored afterwards, because the code around the initialiser is not in one.
-    fn emit_field_value(&mut self, field: &ClassField) {
+    fn emit_field_value(&mut self, field: &ClassField, static_this: Option<&str>) {
         let outer_super_property = std::mem::replace(&mut self.super_property, true);
         let outer_field_initialiser = std::mem::replace(&mut self.field_initialiser, true);
         // An initialiser is its own function to the language, so its `this` is the instance
@@ -5724,6 +5724,9 @@ impl Compiler {
         // field only runs after `super()` anyway; a *static* one is emitted where the class is
         // defined, which may be inside a derived constructor that has not called it yet.
         let outer_this_binding = self.this_binding.take();
+        if let Some(binding) = static_this {
+            self.this_binding = Some(binding.to_owned());
+        }
         match &field.value {
             Some(value) => self.expression(value),
             None => self.push_constant(Constant::Undefined),
@@ -5846,7 +5849,7 @@ impl Compiler {
             if let Some(binding) = name_binding {
                 // The name was computed and converted once, where the class is defined.
                 self.load_captured_binding(binding);
-                self.emit_field_value(field);
+                self.emit_field_value(field, None);
                 self.code.push(self.set_computed_instruction());
                 self.code.push(Instruction::Pop);
                 continue;
@@ -5854,17 +5857,17 @@ impl Compiler {
             match &field.key {
                 ObjectKey::Private(name) => {
                     let name = self.constant_index(Constant::String(self.private_key(name)));
-                    self.emit_field_value(field);
+                    self.emit_field_value(field, None);
                     self.code.push(self.set_property_instruction(name));
                 }
                 ObjectKey::Static(key) => {
                     let name = self.constant_index(Constant::String(key.clone()));
-                    self.emit_field_value(field);
+                    self.emit_field_value(field, None);
                     self.code.push(self.set_property_instruction(name));
                 }
                 ObjectKey::Computed(key) => {
                     self.expression(key);
-                    self.emit_field_value(field);
+                    self.emit_field_value(field, None);
                     self.code.push(self.set_computed_instruction());
                 }
             }
