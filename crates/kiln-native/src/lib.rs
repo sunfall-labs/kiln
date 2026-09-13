@@ -6558,6 +6558,25 @@ static int kiln_graph_enter(void *opaque) {
             );
         }
 
+        let static_dependencies: Vec<usize> = node
+            .dependencies
+            .iter()
+            .filter(|dependency| {
+                node.program
+                    .dependencies
+                    .iter()
+                    .any(|specifier| specifier == &dependency.specifier)
+            })
+            .filter_map(|dependency| indices.get(&dependency.target).copied())
+            .collect();
+        for (dependency_cursor, provider_index) in static_dependencies.iter().enumerate() {
+            writeln!(
+                evaluation,
+                "            if (state->dependency_cursor == (size_t){dependency_cursor}) {{ status = kiln_graph_ensure_module(graph, (size_t){provider_index}); if (status != KILN_C99_OK) return status; state->dependency_cursor++; if (kiln_graph_module_promise(graph, (size_t){provider_index})->tag == 16 /* KILN_VALUE_PROMISE */) {{ status = kiln_graph_prepare_completion(graph, (size_t){index}); if (status != KILN_C99_OK) return status; status = kiln_c99_module_completion(host, *kiln_graph_module_promise(graph, (size_t){provider_index}), (uint32_t){index}, &continuation_promise, 1, NULL); if (status != KILN_C99_OK) return status; state->module_settling = 1; return 0; }} }}"
+            )
+            .unwrap();
+        }
+
         for (import_index, import) in node.program.imports.iter().enumerate() {
             if live_imports
                 .is_some_and(|imports| !imports.contains(&(node.path.clone(), import_index)))
@@ -6704,6 +6723,9 @@ static int kiln_graph_enter(void *opaque) {
         if !is_async {
             evaluation.push_str("    state->phase = KILN_MODULE_EVALUATED;\n");
         }
+        evaluation.push_str("    if (state->completion_resolve.tag != KILN_VALUE_UNDEFINED) { kiln_value settled = kiln_c99_undefined(); status = kiln_c99_call(host, &settled, state->completion_resolve, kiln_c99_undefined(), &kiln_namespaces[");
+        evaluation.push_str(&index.to_string());
+        evaluation.push_str("], 1, 0, NULL); if (status != KILN_C99_OK) return status; }\n");
         evaluation.push_str("    return 0;\n}\n");
         Ok(())
     };
@@ -6712,7 +6734,7 @@ static int kiln_graph_enter(void *opaque) {
     }
     helper_defs.push_str("int kiln_graph_module_completion(kiln_host *host, uint32_t index, int rejected, const kiln_value *value, kiln_value *result, int depth, kiln_value *thrown) {\n    kiln_graph_context *graph = (kiln_graph_context *)host->context;\n    int status = KILN_C99_OK;\n    (void)depth; (void)thrown;\n    if (graph == NULL || result == NULL || value == NULL) return KILN_C99_CONTROL_ERROR;\n    switch (index) {\n");
     for (index, (node, module)) in modules.iter().enumerate() {
-        helper_defs.push_str(&format!("        case {index}: {{\n            kiln_graph_module_state *state = &graph->module_states[{index}];\n            kiln_value settled = kiln_c99_undefined();\n            if (rejected) {{ state->result = *value; state->phase = KILN_MODULE_FAILED; state->failure_status = KILN_C99_THROWN; state->module_settling = 0; *result = *value; if (state->completion_reject.tag != KILN_VALUE_UNDEFINED) {{ (void)kiln_c99_call(host, &settled, state->completion_reject, kiln_c99_undefined(), value, 1, depth, NULL); }} return KILN_C99_OK; }}\n            if (state->phase == KILN_MODULE_EVALUATED) {{ *result = kiln_namespaces[{index}]; return KILN_C99_OK; }}\n", index = index));
+        helper_defs.push_str(&format!("        case {index}: {{\n            kiln_graph_module_state *state = &graph->module_states[{index}];\n            kiln_value settled = kiln_c99_undefined();\n            if (rejected) {{ state->result = *value; state->phase = KILN_MODULE_FAILED; state->failure_status = KILN_C99_THROWN; state->module_settling = 0; *result = *value; if (state->completion_reject.tag != KILN_VALUE_UNDEFINED) {{ (void)kiln_c99_call(host, &settled, state->completion_reject, kiln_c99_undefined(), value, 1, depth, NULL); }} return KILN_C99_OK; }}\n            if (!state->body_started) {{ state->module_settling = 0; status = kiln_graph_eval_module_{index}(graph); if (status != KILN_C99_OK) return status; *result = kiln_c99_undefined(); return KILN_C99_OK; }}\n            if (state->phase == KILN_MODULE_EVALUATED) {{ *result = kiln_namespaces[{index}]; return KILN_C99_OK; }}\n", index = index));
         let is_async = node
             .program
             .program

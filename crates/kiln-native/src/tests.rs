@@ -5181,15 +5181,33 @@ fn native_dynamic_import_static_tla_dependency_waits_for_completion() {
 #[test]
 fn native_dynamic_tla_rejection_preserves_original_error() {
     use kiln_module_resolver::NodeRuntimeResolver;
-    let Some(toolchain) = Toolchain::discover().ok() else { return };
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        return;
+    };
     let root = TestDirectory::new("kiln-native-dynamic-tla-rejection");
     fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).unwrap();
     fs::write(root.path.join("sentinel.mjs"), "globalThis.dynamicTlaRejectCount = (globalThis.dynamicTlaRejectCount || 0) + 1;\nawait Promise.resolve();\nthrow globalThis.sentinel;\n").unwrap();
     fs::write(root.path.join("undefined.mjs"), "globalThis.dynamicTlaUndefinedCount = (globalThis.dynamicTlaUndefinedCount || 0) + 1;\nawait Promise.resolve();\nthrow undefined;\n").unwrap();
     let entry = root.path.join("main.mjs");
     fs::write(&entry, "const sentinel = { marker: 42 }; globalThis.sentinel = sentinel;\nconst a = import('./sentinel.mjs').then(() => null, error => error);\nconst b = import('./sentinel.mjs').then(() => null, error => error);\nconst u1 = import('./undefined.mjs').then(() => null, error => error);\nconst u2 = import('./undefined.mjs').then(() => null, error => error);\nconst [ea, eb, eu1, eu2] = await Promise.all([a, b, u1, u2]);\nconsole.log(ea === sentinel, eb === sentinel, ea === eb, globalThis.dynamicTlaRejectCount, eu1 === undefined, eu2 === undefined, globalThis.dynamicTlaUndefinedCount);\n").unwrap();
-    let graph = ModuleGraph::build_node(&entry, NodeRuntimeResolver::new(&root.path).unwrap(), |path: &Path| fs::read_to_string(path), OxcFrontend).unwrap();
-    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain).run_graph(&graph, &NativeBuildOptions { output: root.path.join("program"), profile: NativeProfile::Dev, realm: NativeRealmPolicy::default(), march_native: false }).unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .unwrap();
     assert_eq!(report.stdout, b"true true true 1 true true 1\n");
 }
 
