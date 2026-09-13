@@ -1149,6 +1149,11 @@ fn node_events_is_a_ts_builtin_and_https_has_a_native_runtime_materializer() {
     assert!(native_builtin_supports_export(NodeBuiltin::Path, "join"));
     assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Assert));
     assert!(native_builtin_supports_export(NodeBuiltin::Assert, "ok"));
+    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Zlib));
+    assert!(native_builtin_supports_export(
+        NodeBuiltin::Zlib,
+        "deflateSync"
+    ));
 }
 
 #[test]
@@ -9881,4 +9886,94 @@ fn native_node_http2_commonjs_require_builds_and_runs() {
     );
     let stdout = String::from_utf8_lossy(&result.stdout);
     assert!(stdout.contains("cjs-http2: object function true"));
+}
+
+#[test]
+fn native_node_zlib_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-zlib-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import zlib, { constants, deflateSync, inflateSync, gzipSync, gunzipSync } from 'node:zlib';\n",
+            "const def = deflateSync('native zlib string');\n",
+            "const inf = inflateSync(def);\n",
+            "const gz = gzipSync('native gzip string');\n",
+            "const ungz = gunzipSync(gz);\n",
+            "console.log('zlib-ts:', typeof zlib, constants.Z_OK === 0, inf.toString() === 'native zlib string', ungz.toString() === 'native gzip string');\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("zlib_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run zlib binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("zlib-ts: object true true true"));
+}
+
+#[test]
+fn native_node_zlib_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-zlib-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const zlib = require('node:zlib');\n",
+            "const def = zlib.deflateSync('native zlib cjs');\n",
+            "const inf = zlib.inflateSync(def);\n",
+            "console.log('cjs-zlib:', typeof zlib, zlib.constants.Z_OK === 0, inf.toString() === 'native zlib cjs');\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("zlib_cjs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run zlib cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("cjs-zlib: object true true"));
 }
