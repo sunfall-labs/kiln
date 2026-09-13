@@ -425,7 +425,11 @@ pub(crate) fn include_reachable_dependencies(
                     // A CommonJS `require()` resolves when execution reaches it. Leaving an
                     // unresolved literal out of the pinned map lets the runtime throw inside the
                     // program's own `try/catch`; ESM imports remain strict graph dependencies.
-                    Err(_) if commonjs || !required => continue,
+                    // Host-specific URL modules such as `bun:sqlite` belong to an optional
+                    // runtime branch.  They are intentionally outside Kiln's Node capability;
+                    // leave them deferred so importing the supported sibling branch does not
+                    // decode or resolve an unavailable host module during synchronization.
+                    Err(_) if commonjs || !required || specifier.starts_with("bun:") => continue,
                     Err(error) => return Err(Error::BadInput(error.to_string())),
             };
             let target = resolved.module.path.clone();
@@ -958,6 +962,30 @@ mod tests {
 
         assert_eq!(resolutions.len(), 1);
         assert_eq!(resolutions[0].target, asset.canonicalize().unwrap().to_string_lossy());
+        assert_eq!(texts.len(), 1);
+        assert_eq!(formats.len(), 1);
+    }
+
+    #[test]
+    fn leaves_missing_literal_dynamic_import_deferred() {
+        let tree = Tree::new("missing-dynamic-import");
+        tree.file("src/main.mjs");
+        let entry = tree.0.join("src/main.mjs");
+        std::fs::write(&entry, "import('./optional.mjs').catch(() => {});\n")
+            .expect("write entry");
+        let entry = entry.canonicalize().expect("entry");
+        let mut texts = vec![(
+            entry.to_string_lossy().into_owned(),
+            std::fs::read_to_string(&entry).expect("read entry"),
+        )];
+        let (resolutions, formats) = include_reachable_dependencies(
+            &tree.0,
+            entry.to_str().expect("UTF-8 entry"),
+            &mut texts,
+            true,
+        )
+        .expect("missing dynamic target stays deferred");
+        assert!(resolutions.is_empty());
         assert_eq!(texts.len(), 1);
         assert_eq!(formats.len(), 1);
     }
