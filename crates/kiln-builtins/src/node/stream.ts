@@ -100,6 +100,16 @@ class EventEmitter {
     if (!this._events || !this._events[event]) return [];
     return this._events[event].slice();
   }
+
+  eventNames(): (string | symbol)[] {
+    if (!this._events || this._eventsCount === 0) return [];
+    const keys = Object.keys(this._events);
+    const symbols = typeof Object.getOwnPropertySymbols === "function"
+      ? Object.getOwnPropertySymbols(this._events)
+      : [];
+    const all: (string | symbol)[] = (keys as (string | symbol)[]).concat(symbols);
+    return all.filter((key) => this._events[key] !== undefined);
+  }
 }
 
 export class Stream extends EventEmitter {
@@ -194,6 +204,36 @@ export class Readable extends Stream {
     }
   }
 
+  addListener(event: string | symbol, listener: Function): this {
+    super.addListener(event, listener);
+    if (event === "readable") {
+      const state = this._readableState;
+      if (state.length > 0 || state.ended) {
+        if (typeof process !== "undefined" && typeof process.nextTick === "function") {
+          process.nextTick(() => {
+            if (!this.destroyed) this.emit("readable");
+          });
+        } else {
+          setTimeout(() => {
+            if (!this.destroyed) this.emit("readable");
+          }, 0);
+        }
+      } else if (!state.reading && !state.ended) {
+        state.reading = true;
+        if (typeof process !== "undefined" && typeof process.nextTick === "function") {
+          process.nextTick(() => {
+            if (!this.destroyed && !state.ended) this._read(state.highWaterMark);
+          });
+        } else {
+          setTimeout(() => {
+            if (!this.destroyed && !state.ended) this._read(state.highWaterMark);
+          }, 0);
+        }
+      }
+    }
+    return this;
+  }
+
   _read(_size?: number): void {}
 
   read(size?: number): any {
@@ -206,11 +246,11 @@ export class Readable extends Stream {
       }
       return null;
     }
+    let res: any;
     if (size === undefined || size >= state.length) {
       const chunks = state.buffer;
       state.buffer = [];
       state.length = 0;
-      let res: any;
       if (chunks.length === 1) {
         res = chunks[0];
       } else if (typeof (globalThis as any).Buffer !== "undefined" && typeof (globalThis as any).Buffer.concat === "function") {
@@ -223,23 +263,38 @@ export class Readable extends Stream {
         this.readableEnded = true;
         this.emit("end");
       }
-      return res;
+    } else {
+      // Sliced read
+      const chunk = state.buffer.shift();
+      state.length -= (chunk && chunk.length) || 0;
+      res = chunk;
     }
-    // Sliced read
-    const chunk = state.buffer.shift();
-    state.length -= (chunk && chunk.length) || 0;
-    return chunk;
+    if (!state.ended && state.length < state.highWaterMark && this.listeners("readable").length > 0) {
+      state.reading = true;
+      if (typeof process !== "undefined" && typeof process.nextTick === "function") {
+        process.nextTick(() => {
+          if (!this.destroyed && !state.ended) this._read(state.highWaterMark);
+        });
+      } else {
+        setTimeout(() => {
+          if (!this.destroyed && !state.ended) this._read(state.highWaterMark);
+        }, 0);
+      }
+    }
+    return res;
   }
 
   push(chunk: any, encoding?: string): boolean {
     const state = this._readableState;
     if (chunk === null) {
       state.ended = true;
+      state.reading = false;
       if (state.length === 0 && !state.endEmitted) {
         state.endEmitted = true;
         this.readableEnded = true;
         this.emit("end");
       }
+      this.emit("readable");
       return false;
     }
     if (typeof chunk === "string" && state.encoding) {
@@ -247,9 +302,26 @@ export class Readable extends Stream {
     } else if (typeof chunk === "string" && typeof (globalThis as any).Buffer !== "undefined") {
       chunk = (globalThis as any).Buffer.from(chunk, encoding);
     }
+    if (chunk === "" || (chunk && typeof chunk.length === "number" && chunk.length === 0)) {
+      if (!state.ended && this.listeners("readable").length > 0) {
+        state.reading = true;
+        if (typeof process !== "undefined" && typeof process.nextTick === "function") {
+          process.nextTick(() => {
+            if (!this.destroyed && !state.ended) this._read(state.highWaterMark);
+          });
+        } else {
+          setTimeout(() => {
+            if (!this.destroyed && !state.ended) this._read(state.highWaterMark);
+          }, 0);
+        }
+      }
+      return state.length < state.highWaterMark;
+    }
     state.buffer.push(chunk);
     state.length += (chunk && chunk.length) || 0;
+    state.reading = state.length < state.highWaterMark;
     this.emit("data", chunk);
+    this.emit("readable");
     return state.length < state.highWaterMark;
   }
 

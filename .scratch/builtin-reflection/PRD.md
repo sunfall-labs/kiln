@@ -1,6 +1,6 @@
 # PRD: Built-in Reflection Parity (Arities & ArrayBuffer.prototype)
 
-Status: proposed
+Status: resolved
 Branch: `feat/builtin-reflection-parity`
 
 ## Problem Statement
