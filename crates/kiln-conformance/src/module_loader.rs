@@ -7,7 +7,6 @@
 //! plan. Nothing here evaluates anything; the machine that asked is still running, and a module
 //! and its importer have to share one realm.
 
-use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 use frontend_oxc::parse_with_goal;
@@ -15,71 +14,31 @@ use kiln_hir::SourceGoal;
 use kiln_interpreter::{
     ImportAttributes, ModuleLoadError, ModuleLoadRequest, ModuleLoaderService, ModulePlan,
 };
-use kiln_module_graph::{ModuleGraph, ModuleGraphError, ModuleSource, ResolveError};
+use kiln_module_graph::{ModuleGraph, ModuleGraphError};
 
-thread_local! {
-    /// The directory a bare relative specifier is resolved against.
-    ///
-    /// A compiled program does not carry the path it came from, so the referrer cannot travel
-    /// with the request. Every Test262 fixture is a sibling of the test that imports it -- the
-    /// corpus never reaches above its own directory -- so the test's directory is the referrer
-    /// for the whole graph, and recording it here is exact rather than approximate *for this
-    /// corpus*. A host whose modules import across directories needs the referrer itself.
-    static BASE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+pub(crate) struct ConformanceModuleLoader {
+    base: Option<PathBuf>,
 }
 
-/// Give this thread's VMs a module loader rooted at `base`.
-///
-/// Called at the top of every run rather than once at startup, for the same reason the source
-/// compiler is: a conformance run creates a VM per case, and the base directory is a property of
-/// the case rather than of the process.
-/// Record the directory a bare relative specifier resolves against.
-///
-/// The loader itself is now handed over as an [`ExecutionCapabilities`] entry rather than
-/// installed globally, so this only carries the base path. `3440edd9` made capabilities explicit
-/// and removed this file with them; nothing wired the loader into the new capability, and every
-/// run-time `import()` in the corpus began answering "no module loader is installed" -- 533
-/// variants, all in `language/expressions/dynamic-import`, with no test failing to say so.
-pub(crate) fn set_base(base: &Path) {
-    BASE.with(|slot| *slot.borrow_mut() = Some(base.to_path_buf()));
+impl ConformanceModuleLoader {
+    pub(crate) fn new(base: Option<PathBuf>) -> Self {
+        Self { base }
+    }
 }
-
-pub(crate) fn load(
-    specifier: &str,
-    attributes: Option<&ImportAttributes>,
-) -> Result<ModulePlan, ModuleLoadError> {
-    let Some(base) = BASE.with(|slot| slot.borrow().clone()) else {
-        return Err(ModuleLoadError::Unsupported(
-            "no directory was recorded to resolve `import()` against".to_owned(),
-        ));
-    };
-    load_from(&base, specifier, attributes)
-}
-
-pub(crate) struct ConformanceModuleLoader;
 
 impl ModuleLoaderService for ConformanceModuleLoader {
     fn load(&self, request: ModuleLoadRequest) -> Result<ModulePlan, ModuleLoadError> {
-        if request
-            .attributes
-            .as_ref()
-            .and_then(|attributes| attributes.type_.as_deref())
-            .is_some_and(|kind| kind != "file")
-        {
-            return Err(ModuleLoadError::Unsupported(
-                "unsupported import attribute `type`".to_owned(),
-            ));
-        }
-        if let Some(importer) = request.importer {
-            return load_from(
-                Path::new(&importer)
-                    .parent()
-                    .unwrap_or_else(|| Path::new(".")),
-                &request.specifier,
-                request.attributes.as_ref(),
-            );
-        }
-        load(&request.specifier, request.attributes.as_ref())
+        let base = request
+            .importer
+            .as_deref()
+            .map(Path::new)
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .or_else(|| self.base.clone())
+            .ok_or_else(|| {
+                ModuleLoadError::NotFound("dynamic import request has no importer".to_owned())
+            })?;
+        load_from(&base, &request.specifier, request.attributes.as_ref())
     }
 }
 
@@ -93,17 +52,9 @@ fn load_from(
     })?;
     let graph = ModuleGraph::build_with_module_provider(&entry, base, compile_module_at)
         .map_err(classify)?;
-    if attributes.and_then(|attributes| attributes.type_.as_deref()) == Some("file")
-        && graph
-            .module(&entry)
-            .is_none_or(|module| module.source != ModuleSource::Asset)
-    {
-        return Err(ModuleLoadError::Unsupported(format!(
-            "module `{}` is not a file asset",
-            entry.display()
-        )));
-    }
-    graph.import_plan().map_err(classify)
+    graph
+        .import_plan_for_request(&entry, attributes)
+        .map_err(classify)
 }
 
 /// Compile one module straight from disk, with no harness and no strictness directive.
@@ -173,5 +124,71 @@ fn classify(error: ModuleGraphError) -> ModuleLoadError {
     }
 }
 
-/// Kept for the resolver's error type, which [`classify`] reads through the graph's.
-const _: Option<ResolveError> = None;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn loader_instances_keep_explicit_bases_and_importers_isolated() {
+        let root = std::env::temp_dir().join(format!(
+            "kiln-conformance-loader-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        let first = root.join("first");
+        let second = root.join("second");
+        fs::create_dir_all(first.join("nested")).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        fs::write(first.join("dep.mjs"), "export default 'first';").unwrap();
+        fs::write(first.join("nested/dep.mjs"), "export default 'nested';").unwrap();
+        fs::write(second.join("dep.mjs"), "export default 'second';").unwrap();
+
+        let first_loader = ConformanceModuleLoader::new(Some(first.clone()));
+        let second_loader = ConformanceModuleLoader::new(Some(second.clone()));
+        let first_plan = first_loader
+            .load(ModuleLoadRequest {
+                importer: None,
+                specifier: "./dep.mjs".into(),
+                attributes: None,
+            })
+            .unwrap_or_else(|_| panic!("first loader request failed"));
+        let second_plan = second_loader
+            .load(ModuleLoadRequest {
+                importer: None,
+                specifier: "./dep.mjs".into(),
+                attributes: None,
+            })
+            .unwrap_or_else(|_| panic!("second loader request failed"));
+        assert!(first_plan.key.ends_with("/first/dep.mjs"));
+        assert!(second_plan.key.ends_with("/second/dep.mjs"));
+
+        let nested_importer = first.join("nested/main.mjs");
+        let nested_plan = first_loader
+            .load(ModuleLoadRequest {
+                importer: Some(nested_importer.to_string_lossy().into_owned()),
+                specifier: "./dep.mjs".into(),
+                attributes: None,
+            })
+            .unwrap_or_else(|_| panic!("nested loader request failed"));
+        assert!(nested_plan.key.ends_with("/first/nested/dep.mjs"));
+
+        let source_error = match first_loader.load(ModuleLoadRequest {
+            importer: None,
+            specifier: "./dep.mjs".into(),
+            attributes: Some(ImportAttributes {
+                type_: Some("file".into()),
+            }),
+        }) {
+            Err(error) => error,
+            Ok(_) => panic!("source modules must reject file attributes"),
+        };
+        assert!(
+            matches!(source_error, ModuleLoadError::Unsupported(message) if message.contains("not a file asset"))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+}

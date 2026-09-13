@@ -57,5 +57,5 @@ pub use worker::InterpreterWorker;
 
 /// Explicit frontend capability for runtime `eval` and `Function` compilation.
 pub fn source_compiler_capability() -> kiln_interpreter::ExecutionCapabilities {
-    source_compiler::capabilities()
+    source_compiler::capabilities(None)
 }
