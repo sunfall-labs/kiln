@@ -4,6 +4,10 @@ fn main() {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("source-digest") => {
+            if args.len() > 1 {
+                eprintln!("source-digest accepts exactly one root");
+                std::process::exit(2);
+            }
             let root = args.next().map(PathBuf::from).unwrap_or_else(|| {
                 eprintln!("source-digest requires an explicit repository root");
                 std::process::exit(2);
@@ -16,12 +20,14 @@ fn main() {
                 }
             }
         }
-        Some("contract") => println!(
+        Some("contract") if args.next().is_none() => println!(
             "{}",
             serde_json::to_string(&kiln_native_provider_contract::contract()).unwrap()
         ),
-        Some("abi") => println!("{}", kiln_native_provider_contract::contract().provider_abi),
-        Some("exports") => println!(
+        Some("abi") if args.next().is_none() => {
+            println!("{}", kiln_native_provider_contract::contract().provider_abi)
+        }
+        Some("exports") if args.next().is_none() => println!(
             "{}",
             kiln_native_provider_contract::contract().exports.join(" ")
         ),
