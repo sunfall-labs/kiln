@@ -618,6 +618,11 @@ pub enum Native {
     CollectionEntries(bool),
     /// `Function`, which programs reach for through `Function.prototype`.
     FunctionConstructor,
+    /// `GeneratorFunction` and `AsyncGeneratorFunction` constructors and prototypes.
+    GeneratorFunctionConstructor,
+    GeneratorFunctionPrototype,
+    AsyncGeneratorFunctionConstructor,
+    AsyncGeneratorFunctionPrototype,
     /// `eval` as a *value*: the global function, reached by any route but a direct call.
     ///
     /// A direct `eval(...)` never becomes this. It compiles to [`Instruction::DirectEval`],
@@ -1195,6 +1200,15 @@ impl Native {
             PrototypeTable::IteratorFor(kind) => iterator_prototype_method(kind, name),
             PrototypeTable::Generator => generator_prototype_method(false, name),
             PrototypeTable::AsyncGenerator => generator_prototype_method(true, name),
+            PrototypeTable::AsyncIterator => match name {
+                key if key == WellKnown::AsyncIterator.property_key() => {
+                    Value::Native(Native::IteratorSelf, RealmId::PRIMARY)
+                }
+                key if key == WellKnown::ToStringTag.property_key() => {
+                    Value::String("AsyncIterator".to_owned())
+                }
+                _ => Value::Undefined,
+            },
             PrototypeTable::Boolean => boolean_method(name),
             PrototypeTable::Symbol => symbol_method(name),
             PrototypeTable::BigInt => bigint_method(name),
@@ -1591,31 +1605,66 @@ impl Native {
                 Self::PrototypeOf(PrototypeTable::Function),
                 RealmId::PRIMARY,
             )),
+            (Self::AsyncGeneratorFunctionConstructor, "prototype") => Some(Value::Native(
+                Self::AsyncGeneratorFunctionPrototype,
+                RealmId::PRIMARY,
+            )),
+            (Self::AsyncGeneratorFunctionConstructor, "name") => {
+                Some(Value::String("AsyncGeneratorFunction".to_owned()))
+            }
+            (Self::AsyncGeneratorFunctionConstructor, "length") => Some(Value::Number(1.0)),
+            (Self::AsyncGeneratorFunctionPrototype, "constructor") => Some(Value::Native(
+                Self::AsyncGeneratorFunctionConstructor,
+                RealmId::PRIMARY,
+            )),
+            (Self::AsyncGeneratorFunctionPrototype, "prototype") => Some(Value::Native(
+                Self::PrototypeOf(PrototypeTable::AsyncGenerator),
+                RealmId::PRIMARY,
+            )),
+            (Self::AsyncGeneratorFunctionPrototype, key)
+                if key == WellKnown::ToStringTag.property_key() =>
+            {
+                Some(Value::String("AsyncGeneratorFunction".to_owned()))
+            }
+            (Self::GeneratorFunctionConstructor, "prototype") => Some(Value::Native(
+                Self::GeneratorFunctionPrototype,
+                RealmId::PRIMARY,
+            )),
+            (Self::GeneratorFunctionConstructor, "name") => {
+                Some(Value::String("GeneratorFunction".to_owned()))
+            }
+            (Self::GeneratorFunctionConstructor, "length") => Some(Value::Number(1.0)),
+            (Self::GeneratorFunctionPrototype, "constructor") => Some(Value::Native(
+                Self::GeneratorFunctionConstructor,
+                RealmId::PRIMARY,
+            )),
+            (Self::GeneratorFunctionPrototype, "prototype") => Some(Value::Native(
+                Self::PrototypeOf(PrototypeTable::Generator),
+                RealmId::PRIMARY,
+            )),
+            (Self::GeneratorFunctionPrototype, key)
+                if key == WellKnown::ToStringTag.property_key() =>
+            {
+                Some(Value::String("GeneratorFunction".to_owned()))
+            }
             // A method table's `constructor` is the built-in it belongs to, which is what
             // `Object.prototype.constructor` has to answer for a plain-object check to work.
-            // `%GeneratorPrototype%.constructor` is `%GeneratorFunction.prototype%` in the
-            // specification -- an intrinsic this engine has no object for. Publishing the
-            // `Function` constructor instead would answer a plausible lie to
-            // `Object.getPrototypeOf(g()).constructor`, so it publishes nothing.
-            // `%ArrayIteratorPrototype%` and its four siblings publish none either: the
-            // specification gives them no `constructor`, and the tag is how a program tells one
-            // kind of iterator from another.
+            // `%GeneratorPrototype%.constructor` is `%GeneratorFunction.prototype%`.
+            // `%AsyncGeneratorPrototype%.constructor` is `%AsyncGeneratorFunction.prototype%`.
+            // `%ArrayIteratorPrototype%` and its siblings publish none: the specification gives them
+            // no `constructor`, and the tag is how a program tells one kind of iterator from another.
             (
-                Self::PrototypeOf(
-                    PrototypeTable::Generator
-                    | PrototypeTable::AsyncGenerator
-                    | PrototypeTable::IteratorFor(_),
-                ),
+                Self::PrototypeOf(PrototypeTable::AsyncIterator | PrototypeTable::IteratorFor(_)),
                 "constructor",
             ) => None,
             (Self::PrototypeOf(table), "constructor") => Some(Value::Native(
                 match table {
                     // Caught by the arm above, which publishes no `constructor` for them.
-                    PrototypeTable::Generator
-                    | PrototypeTable::AsyncGenerator
-                    | PrototypeTable::IteratorFor(_) => {
+                    PrototypeTable::AsyncIterator | PrototypeTable::IteratorFor(_) => {
                         unreachable!("these tables answer `constructor` above")
                     }
+                    PrototypeTable::Generator => Self::GeneratorFunctionPrototype,
+                    PrototypeTable::AsyncGenerator => Self::AsyncGeneratorFunctionPrototype,
                     PrototypeTable::Object => Self::ObjectConstructor,
                     PrototypeTable::Array => Self::ArrayConstructor,
                     PrototypeTable::String => Self::StringConstructor,
