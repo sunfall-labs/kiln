@@ -1101,6 +1101,16 @@ fn node_events_is_a_ts_builtin_and_https_has_a_native_runtime_materializer() {
         "Console"
     ));
     assert!(native_builtin_supports_export(NodeBuiltin::Console, "log"));
+    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Tty));
+    assert!(native_builtin_supports_export(NodeBuiltin::Tty, "isatty"));
+    assert!(native_builtin_supports_export(
+        NodeBuiltin::Tty,
+        "ReadStream"
+    ));
+    assert!(native_builtin_supports_export(
+        NodeBuiltin::Tty,
+        "WriteStream"
+    ));
     assert!(native_builtin_body(NodeBuiltin::Https).is_some());
     assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Path));
     assert!(native_builtin_supports_export(NodeBuiltin::Path, "join"));
@@ -9280,4 +9290,88 @@ fn native_node_console_commonjs_require_builds_and_runs() {
     let stdout = String::from_utf8_lossy(&result.stdout);
     assert!(stdout.contains("cjs-console-works"));
     assert!(stdout.contains("cjs-console: object function function function true"));
+}
+
+#[test]
+fn native_node_tty_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-tty-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import nodeTty, { isatty, ReadStream, WriteStream } from 'node:tty';\n",
+            "console.log('tty-ts:', typeof nodeTty, typeof isatty, typeof ReadStream, typeof WriteStream, nodeTty.default === nodeTty, isatty(-1));\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("tty_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run tty binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("tty-ts: object function function function true false"));
+}
+
+#[test]
+fn native_node_tty_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-tty-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const t = require('node:tty');\n",
+            "console.log('cjs-tty:', typeof t, typeof t.isatty, typeof t.ReadStream, typeof t.WriteStream, t.default === t, t.isatty(-1));\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("tty_cjs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run tty cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("cjs-tty: object function function function true false"));
 }
