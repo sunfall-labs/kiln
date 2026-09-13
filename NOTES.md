@@ -5500,3 +5500,17 @@ integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`, an
 (171 matched, 5 refused, 0 diverged). Updated facts baseline for `bundle:postcss` reflecting `node:url`'s transition to a typed module.
 Per explicit user instructions and AGENTS.md rules, avoided costly whole-workspace gate runs mid-flight to preserve shared CPU resources.
 
+---
+
+## Phase 5.2 TypeScript built-ins: `node:diagnostics_channel` (2026-09-13)
+
+Migrated `node:diagnostics_channel` completely to TypeScript via `crates/kiln-builtins/src/node/diagnostics_channel.ts`
+with zero additions to the C runtime prelude (Phase 5.1 freeze strictly honored). Implemented all 8 canonical
+exports (`Channel`, `TracingChannel`, `channel`, `default`, `hasSubscribers`, `subscribe`, `tracingChannel`, `unsubscribe`).
+Provided pure TypeScript implementations of `Channel` (with registry caching, subscription management, and `runStores` context execution)
+and `TracingChannel` (`start`, `end`, `asyncStart`, `asyncEnd`, `error` subchannels with `traceSync` and `tracePromise`).
+Verified with native probe `conformance/native/node-diagnostics-channel-members.cjs` (byte-for-byte identical output between
+interpreter and native CLI), integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`, and full
+`scripts/native.sh` parity (173 matched, 5 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
+
+
