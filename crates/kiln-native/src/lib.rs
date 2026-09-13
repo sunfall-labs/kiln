@@ -4572,7 +4572,7 @@ pub fn retained_method_groups(
             DiagnosticsChannel => groups::NODE_DIAGNOSTICS,
             Fs | FsPromises => groups::NODE_STREAM | groups::NODE_EVENT,
             // Audited `Direct`-only (see phase1-PRD): no groups implicated.
-            Assert | Console | Crypto | Dns | Module | Os | Tty | Zlib | StringDecoder
+            Assert | Console | Crypto | Dns | Module | Os | Tty | Zlib | StringDecoder | Process
             | QueryString | Url | WorkerThreads | PerfHooks | AsyncHooks => 0,
             // `dlopen` hands out raw pointers: anything is reachable.
             Ffi => return None,

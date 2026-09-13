@@ -1592,6 +1592,8 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         code == KILN_C99_METHOD_NODE_STAT_IS_DIRECTORY) {
         return kiln_c99_node_fs(host, result, code, receiver, args, argc, depth, thrown);
     }
+    if (code == KILN_C99_METHOD_PROCESS_START_RAW || code == KILN_C99_METHOD_PROCESS_CANCEL_RAW)
+        return kiln_c99_node_process_raw(host, result, code, args, argc, depth, thrown);
 #if KILN_RETAIN_GROUP_NODE_PATH
     if ((groups & KILN_C99_GROUP_NODE_PATH)) {
         return kiln_c99_node_path(result, code, args, argc, thrown);

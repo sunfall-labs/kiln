@@ -105,6 +105,9 @@ extern const char *kiln_c99_builtin_name(uint64_t builtin);
 extern int kiln_c99_visible_arguments(kiln_value *out);
 extern int kiln_c99_atomics_object(kiln_value *out);
 extern int kiln_c99_process_object(kiln_value *out);
+extern int kiln_c99_node_process_raw(kiln_host *host, kiln_value *result, uint64_t code,
+                                     const kiln_value *args, size_t argc, int depth,
+                                     kiln_value *thrown);
 extern int kiln_c99_global_object(kiln_value *out);
 extern int kiln_c99_global_binding(kiln_value *out, const char *name, size_t name_len, int *found);
 extern int kiln_c99_declare_global(const char *name, size_t name_len, int configurable);

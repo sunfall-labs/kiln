@@ -1540,6 +1540,67 @@ static int kiln_c99_node_fs_complete(void *opaque, const kiln_async_completion *
     return kiln_c99_settle(work->promise, value, 0);
 }
 
+static void kiln_c99_node_drop_process(void *opaque) { kiln_c99_gc_release(opaque); }
+
+static int kiln_c99_node_process_complete(void *opaque, const kiln_async_completion *completion,
+                                          void *host, void *thrown) {
+    kiln_node_process_completion *work = (kiln_node_process_completion *)opaque;
+    kiln_value result, stdout_value, stderr_value;
+    int status;
+    (void)host; (void)thrown;
+    if (work == NULL || completion == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (completion->status != KILN_REALM_ASYNC_OK)
+        return kiln_c99_settle(work->promise, kiln_c99_copy_text("process host operation failed", 29), 1);
+    if (completion->value_kind != KILN_REALM_ASYNC_PROCESS_OUTPUT)
+        KILN_C99_REFUSE("process host completion had no output");
+    status = kiln_c99_new_object(&result);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_typed_alloc(&stdout_value, KILN_TYPED_UINT8, (size_t)completion->bytes_len);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_typed_alloc(&stderr_value, KILN_TYPED_UINT8, (size_t)completion->stderr_len);
+    if (status != KILN_C99_OK) return status;
+    if (completion->bytes_len) memcpy(kiln_c99_typed_array_of(stdout_value)->buffer->bytes, completion->bytes, (size_t)completion->bytes_len);
+    if (completion->stderr_len) memcpy(kiln_c99_typed_array_of(stderr_value)->buffer->bytes, completion->stderr_bytes, (size_t)completion->stderr_len);
+    kiln_c99_typed_array_of(stdout_value)->is_buffer = 1;
+    kiln_c99_typed_array_of(stderr_value)->is_buffer = 1;
+    status = kiln_c99_put(NULL, result, "stdout", 6, stdout_value, 0, NULL);
+    if (status == KILN_C99_OK) status = kiln_c99_put(NULL, result, "stderr", 6, stderr_value, 0, NULL);
+    if (status == KILN_C99_OK) status = kiln_c99_put(NULL, result, "exitCode", 8, completion->exit_code == INT32_MIN ? kiln_c99_null() : kiln_c99_number((double)completion->exit_code), 0, NULL);
+    if (status == KILN_C99_OK) status = kiln_c99_put(NULL, result, "signal", 6, completion->signal == INT32_MIN ? kiln_c99_null() : kiln_c99_number((double)completion->signal), 0, NULL);
+    if (status == KILN_C99_OK) status = kiln_c99_settle(work->promise, result, 0);
+    return status;
+}
+
+int kiln_c99_node_process_raw(kiln_host *host, kiln_value *result, uint64_t code,
+                              const kiln_value *args, size_t argc, int depth, kiln_value *thrown) {
+    (void)host; (void)depth;
+    if (code == KILN_C99_METHOD_PROCESS_CANCEL_RAW) {
+        uint64_t request = argc && args[0].tag == KILN_VALUE_NUMBER ? (uint64_t)kiln_c99_as_number(args[0]) : 0;
+        *result = kiln_c99_boolean(kiln_realm_cancel_active_request(request) == KILN_C99_OK);
+        return KILN_C99_OK;
+    }
+    kiln_value bytes = argc ? args[0] : kiln_c99_undefined();
+    kiln_value promise, pair;
+    kiln_node_process_completion *work;
+    kiln_async_host_op operation = {0};
+    uint64_t request = 0;
+    if (bytes.tag != KILN_VALUE_TYPED_ARRAY) return kiln_c99_throw_not_a(thrown, bytes, "Uint8Array request");
+    status:
+    if (kiln_c99_new_promise(&promise) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;
+    work = (kiln_node_process_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_PROCESS_COMPLETION, sizeof *work);
+    if (work == NULL) return KILN_C99_OUT_OF_MEMORY;
+    work->promise = promise;
+    operation.operation = KILN_REALM_OP_PROCESS_RUN; operation.flags = 1;
+    operation.bytes = kiln_c99_typed_array_of(bytes)->buffer->bytes + kiln_c99_typed_array_of(bytes)->byte_offset;
+    operation.bytes_len = kiln_c99_typed_array_of(bytes)->length;
+    int status_code = kiln_realm_start_active_host_op(&operation, kiln_c99_node_process_complete, kiln_c99_node_drop_process, work, &request);
+    if (status_code != KILN_C99_OK) return status_code;
+    if (kiln_c99_new_object(&pair) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;
+    kiln_c99_put(NULL, pair, "requestId", 9, kiln_c99_number((double)request), 0, NULL);
+    kiln_c99_put(NULL, pair, "promise", 7, promise, 0, NULL);
+    *result = pair; return KILN_C99_OK;
+}
+
 static int kiln_c99_node_fs_encoding(kiln_host *host, kiln_value option, int *utf8,
                                      int depth, kiln_value *thrown) {
     kiln_value encoding;
