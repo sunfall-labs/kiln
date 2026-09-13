@@ -408,7 +408,50 @@ fn commonjs_resolve_accepts_builtin_aliases_and_kiln_process() {
     // public graph path must still initialize the canonical TS builtin projection on demand.
     let entry = project.write(
         "public.cjs",
-        "console.log(require.resolve('fs'), require.resolve('node:fs'), require.resolve('assert/strict'), require.resolve('kiln:process')); const resolve = require.resolve; console.log(resolve('fs'), require.resolve.call(undefined, 'node:fs'), require.resolve.apply(undefined, ['assert/strict']), require.resolve.bind(null)('kiln:process')); const receiver = { value: 7, read() { return this.value; } }; console.log(receiver.read(), receiver.read.call({ value: 8 }), receiver.read.apply({ value: 9 }, []), receiver.read.bind({ value: 10 })()); const fs = process.getBuiltinModule('fs'); const nodeFs = process.getBuiltinModule('node:fs'); const processBuiltin = process.getBuiltinModule('kiln:process'); console.log(fs === nodeFs, typeof processBuiltin.run);",
+        r#"
+console.log(
+  require.resolve('fs'),
+  require.resolve('node:fs'),
+  require.resolve('assert/strict'),
+  require.resolve('kiln:process'),
+);
+const resolve = require.resolve;
+console.log(
+  resolve('fs'),
+  require.resolve.call(undefined, 'node:fs'),
+  require.resolve.apply(undefined, ['assert/strict']),
+  require.resolve.bind(null)('kiln:process'),
+);
+const receiver = { value: 7, read() { return this.value; } };
+console.log(
+  receiver.read(),
+  receiver.read.call({ value: 8 }),
+  receiver.read.apply({ value: 9 }, []),
+  receiver.read.bind({ value: 10 })(),
+);
+const values = [];
+const firstLength = values.push(1);
+values.push.call(values, 2);
+Array.prototype.push.apply(values, [3, 4]);
+Array.prototype.push.bind(values)(5);
+console.log(values.join(','), firstLength);
+const callableProxy = new Proxy((value) => this.base + value, {
+  apply(_target, receiver, args) { return receiver.base + args[0]; },
+});
+console.log(callableProxy.call({ base: 6 }, 4));
+const revoked = Proxy.revocable(() => 1, {});
+revoked.revoke();
+let revokedFailed = false;
+try { revoked.proxy(); } catch { revokedFailed = true; }
+let nonCallableFailed = false;
+try { new Proxy({}, { apply() {} })(); } catch { nonCallableFailed = true; }
+console.log(revokedFailed, nonCallableFailed);
+new Promise((resolve) => { const settle = resolve; settle(11); }).then((value) => console.log(value));
+const fs = process.getBuiltinModule('fs');
+const nodeFs = process.getBuiltinModule('node:fs');
+const processBuiltin = process.getBuiltinModule('kiln:process');
+console.log(fs === nodeFs, typeof processBuiltin.run);
+"#,
     );
     let graph = ModuleGraph::build_node(
         &entry,
@@ -431,7 +474,11 @@ fn commonjs_resolve_accepts_builtin_aliases_and_kiln_process() {
             "fs node:fs assert/strict kiln:process",
             "fs node:fs assert/strict kiln:process",
             "7 8 9 10",
+            "1,2,3,4,5 1",
+            "10",
+            "true true",
             "true function",
+            "11",
         ]
     );
 }
