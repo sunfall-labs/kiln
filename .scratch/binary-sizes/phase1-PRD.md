@@ -19,10 +19,18 @@ Roots that keep everything (all in the single concatenated prelude TU):
   (`kiln-native-number-ffi`: `default = ["realm"]`); archive granularity
   decides what the linker can drop. Measurement pending.
 
-## Plan
+## Status
 
-1. **Visibility (0.5d):** add `prelude_object` bytes to `ArtifactSizes` +
-   build output. Cannot measure Phase 1 without it.
+- Step 1 landed: prelude bytes + cache-hit in report (`PROTOCOL_VERSION` 29).
+- Step 2 landed: `analyze_demanded_members` — Effect hello shows 787
+  distinct names, 35 builtins, computed access, closed world. The computed
+  flag means the router (step 3) needs receiver-type joins, not just names.
+- Track A phase 1 landed: `http` / `realm-http` features, defaults
+  unchanged (slim rlib: 0 hyper refs vs 3378). Caveat: slim FFI config still
+  unifies `kiln-runtime/http` on via defaults — packaging must disable
+  defaults or invert them; no link-time enforcement yet.
+
+## Plan (remaining)
 2. **Retained method-code set (2–3d):** facts analysis over retained IR
    listing every `KILN_C99_METHOD_*` code the executable can invoke, plus
    entry/bootstrap/launcher needs. Unit-tested by comparing against codes
