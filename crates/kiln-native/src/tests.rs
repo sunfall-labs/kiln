@@ -1241,7 +1241,7 @@ fn live_cache_identity_catalogue_covers_every_stage_and_profile_family() {
     // The ordinary shared-library object and its final link share one toolchain identity by
     // design; identity digests intentionally omit artifact kind and link inputs. Every other
     // catalogued family/profile contributes a distinct identity.
-    assert_eq!(identities.len(), 52);
+    assert_eq!(identities.len(), 53);
 
     let tool = builder.toolchain().identity();
     let target = target_identity(tool);
@@ -1270,6 +1270,18 @@ fn live_cache_identity_catalogue_covers_every_stage_and_profile_family() {
             } else {
                 CacheProfile::Debug
             },
+        )));
+    }
+    for want_http in [true, false] {
+        let provider = builder
+            .number_provider_variant(want_http)
+            .expect("provider variant identity");
+        assert!(identities.contains(&cache_identity(
+            provider.identity,
+            Backend::Custom("rust-native-number-provider".to_owned()),
+            &native_number_abi_identity(),
+            &target,
+            CacheProfile::Release,
         )));
     }
     for profile in [

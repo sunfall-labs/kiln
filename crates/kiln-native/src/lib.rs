@@ -570,6 +570,7 @@ pub struct NativeBuilder {
     cache: ArtifactCache,
     toolchain: Toolchain,
     number_provider: OnceLock<Result<NumberProvider, String>>,
+    number_provider_slim: OnceLock<Result<NumberProvider, String>>,
 }
 
 fn cache_with_optional_shared(cache_root: impl Into<PathBuf>) -> ArtifactCache {
@@ -643,6 +644,7 @@ impl NativeBuilder {
             cache,
             toolchain,
             number_provider: OnceLock::new(),
+            number_provider_slim: OnceLock::new(),
         }
     }
 
@@ -665,27 +667,21 @@ impl NativeBuilder {
         let tool = self.toolchain.identity();
         let target = target_identity(tool);
         let compiler = compiler_identity(tool);
-        let provider = self.number_provider()?;
         let mut identities = BTreeSet::new();
 
-        // Sources are debug identities; the provider is one release archive.
+        // Sources are debug identities; each provider variant is a release archive. Resolve both
+        // through the same cached loader used by producers so the catalogue never interprets the
+        // provider's opaque structured identity or rebuilds a variant per lookup.
         for family in NativeArtifactFamily::SOURCES {
-            let compiler = if matches!(family, NativeArtifactFamily::NumberProvider) {
-                provider.identity.clone()
-            } else {
-                family.compiler_version()
-            };
-            let profile = if matches!(family, NativeArtifactFamily::NumberProvider) {
-                CacheProfile::Release
-            } else {
-                CacheProfile::Debug
-            };
+            if matches!(family, NativeArtifactFamily::NumberProvider) {
+                continue;
+            }
             identities.insert(
                 family
                     .key(
-                        compiler,
+                        family.compiler_version(),
                         &target,
-                        profile,
+                        CacheProfile::Debug,
                         Digest::hash(b"identity representative"),
                         [],
                     )
@@ -713,6 +709,20 @@ impl NativeBuilder {
                 );
             }
         }
+        for want_http in [true, false] {
+            let provider = self.number_provider_variant(want_http)?;
+            identities.insert(
+                NativeArtifactFamily::NumberProvider
+                    .key(
+                        provider.identity,
+                        &target,
+                        CacheProfile::Release,
+                        Digest::hash(b"identity representative"),
+                        [],
+                    )
+                    .identity_digest(),
+            );
+        }
 
         Ok(identities)
     }
@@ -721,6 +731,19 @@ impl NativeBuilder {
         self.number_provider
             .get_or_init(|| {
                 number_provider::discover(self.toolchain.identity())
+                    .map_err(|error| error.to_string())
+            })
+            .clone()
+            .map_err(|message| NativeError::NumberProvider { message })
+    }
+
+    fn number_provider_variant(&self, want_http: bool) -> Result<NumberProvider, NativeError> {
+        if want_http {
+            return self.number_provider();
+        }
+        self.number_provider_slim
+            .get_or_init(|| {
+                number_provider::discover_with_http(self.toolchain.identity(), false)
                     .map_err(|error| error.to_string())
             })
             .clone()
@@ -744,17 +767,7 @@ impl NativeBuilder {
         target: &str,
         want_http: bool,
     ) -> Result<(Arc<[u8]>, Digest, bool, bool), NativeError> {
-        let provider = if want_http {
-            self.number_provider()?
-        } else {
-            // The shared slot caches the full archive; a slim resolution is per-build so the
-            // two variants cannot alias there either.
-            number_provider::discover_with_http(self.toolchain.identity(), false).map_err(
-                |error| NativeError::NumberProvider {
-                    message: error.to_string(),
-                },
-            )?
-        };
+        let provider = self.number_provider_variant(want_http)?;
         let provider_key = NativeArtifactFamily::NumberProvider.key(
             &provider.identity,
             target,
@@ -2684,23 +2697,6 @@ impl NativeBuilder {
             .expect("a build that constructs cache keys can enumerate its live identities");
         if identities.contains(&key.identity_digest()) {
             return;
-        }
-        // The slim provider archive is the same key family as the full one: its identity
-        // names `;http=false;` where the catalogued full identity names `;http=true;`, with
-        // a different archive digest for the smaller bytes. Accept the slim key when its
-        // full twin is catalogued, so the catalogue keeps one entry per family per variant
-        // set rather than one per build configuration.
-        if key.backend == Backend::Custom("rust-native-number-provider".to_owned())
-            && key.compiler_version.contains(";http=false;")
-        {
-            let mut twin = key.clone();
-            twin.compiler_version = self
-                .number_provider()
-                .expect("a build that links the slim provider can resolve its full twin")
-                .identity;
-            if identities.contains(&twin.identity_digest()) {
-                return;
-            }
         }
         assert!(
             identities.contains(&key.identity_digest()),
