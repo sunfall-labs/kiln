@@ -23,12 +23,37 @@ Roots that keep everything (all in the single concatenated prelude TU):
 
 - Step 1 landed: prelude bytes + cache-hit in report (`PROTOCOL_VERSION` 29).
 - Step 2 landed: `analyze_demanded_members` — Effect hello shows 787
-  distinct names, 35 builtins, computed access, closed world. The computed
-  flag means the router (step 3) needs receiver-type joins, not just names.
+  distinct names, 35 builtins, computed access, closed world.
 - Track A phase 1 landed: `http` / `realm-http` features, defaults
-  unchanged (slim rlib: 0 hyper refs vs 3378). Caveat: slim FFI config still
-  unifies `kiln-runtime/http` on via defaults — packaging must disable
-  defaults or invert them; no link-time enforcement yet.
+  unchanged (slim rlib: 0 hyper refs vs 3378). Track A phase 2 (packaging +
+  selector) running in background.
+- Step 3 audit done (see below); implementation next.
+
+## Step 3 design (demand-driven dispatch router)
+
+Audit findings:
+- Only direct implementation FUNCTION calls root code; integer code
+  comparisons (`calls.c:77`, guards everywhere) root nothing.
+- The chain root is `kiln_c99_invoke_method_dispatch` (`dispatch.c:1158`)
+  plus grouped fast-paths in `calls.c:97-120` and `read.c:87`.
+- Several `NODE_*` codes sit in the always-core `Direct` group
+  (`NODE_ASYNC_RESOURCE`, `PROCESS_NEXT_TICK`, `NODE_HTTP_SERVER_RESPONSE`
+  at `prelude.rs:926-958`): those implementations stay regardless.
+- Droppable groups (no unconditional prelude-internal references):
+  `NodeEvent`, `NodeNet`, `NodeServer`, `NodeHttp`, `NodeResponse`,
+  `Buffer`, `NodeUtil`, `NodeDiagnostics`, `NodeStream`, `NodePath`.
+
+Design:
+- Split the dispatch chain + grouped fast-paths into per-group functions in
+  their own sections (mechanical move, same order, same code).
+- facts computes the retained group mask from: selected-graph `NodeBuiltin`
+  nodes (exact), retained `Builtin` variants, retained `"node:*"` string
+  constants (literal dynamic requires); open world / computed-require keeps
+  everything (same trust basis as liveness).
+- The router itself is generated into the launcher TU (already per-program,
+  no new compile unit), calling retained groups in canonical order.
+- Bench-gate: router must not regress warm dispatch numbers.
+- Init tables (step 4) follow the same pattern afterward.
 
 ## Plan (remaining)
 2. **Retained method-code set (2–3d):** facts analysis over retained IR
