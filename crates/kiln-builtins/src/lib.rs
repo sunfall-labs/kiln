@@ -623,7 +623,7 @@ declare_ts_builtins! {
         logical_path: "node:async_hooks.ts",
         source_const: ASYNC_HOOKS_SOURCE,
         exports_const: ASYNC_HOOKS_EXPORTS,
-        sample_source_check: "export class AsyncLocalStorage",
+        sample_source_check: "export const AsyncLocalStorage",
         presence_test: async_hooks_builtin_source_is_present,
         compilation_test: async_hooks_builtin_compiles_cleanly,
         exports: [

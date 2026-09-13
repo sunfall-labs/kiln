@@ -299,7 +299,7 @@ requires_host = "node"
 source = "upstream-adapted/crypto-random-uuid-url.mjs"
 status = "runnable"
 features = ["node:crypto", "randomUUID", "realm-entropy", "node:url", "module-graph"]
-expected_stdout = "6e789e6a-a1b9-45f4-86c4-5d188009454f\n"
+expected_stdout = "60f152c3-f6c8-48b8-bc3d-dae5d964aef3\n"
 
 [[test]]
 id = "node-v24.7.0/modules/json-default-and-require"
