@@ -1683,7 +1683,7 @@ pub fn build_function_graph(
                 }
                 Instruction::YieldStar(target) => {
                     height = after(inst, height, pc);
-                    // YieldStar consumes iterator + yielded value and resumes with one sent
+                    // YieldStar consumes wrapped flag + iterator + yielded value and resumes with one sent
                     // value, so the post-instruction height is exactly the spilled depth plus
                     // the synthetic resume slot. Do not subtract again: that dropped the final
                     // phi input for delegates with a value already below the pair.
@@ -2332,6 +2332,7 @@ pub fn build_function_graph(
                 Instruction::YieldStar(target) => {
                     let value = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
                     let iterator = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
+                    let _wrapped = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
                     let spilled = frame.stack.clone();
                     let resume_block = pc_to_containing_block(pc + 1);
                     let exit_block = pc_to_containing_block(*target as usize);
@@ -3703,13 +3704,14 @@ mod dead_phi_tests {
             mapped_arguments: false,
             local_count: 1,
             code: vec![
+                Instruction::Const(0),      // wrapped flag placeholder
                 Instruction::Const(0),      // iterator placeholder
                 Instruction::Const(0),      // yielded value
-                Instruction::YieldStar(7),  // synthetic edges to pc 3 and pc 7
+                Instruction::YieldStar(8),  // synthetic edges to pc 4 and pc 8
                 Instruction::StoreLocal(0), // resume sent value
                 Instruction::Jump(0),       // loop back to the delegate
                 Instruction::Const(0),      // ordinary done value
-                Instruction::Jump(7),       // ordinary predecessor of the exit
+                Instruction::Jump(8),       // ordinary predecessor of the exit
                 Instruction::Return,
             ],
             upvalues: Vec::new(),
