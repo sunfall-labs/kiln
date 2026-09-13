@@ -98,3 +98,11 @@ Focused validation on the consolidation worktree:
   language/expressions/dynamic-import`: 1,550 passed, 57 failed, 293 unsupported across 1,900
   selected variants. Full log `.scratch/consolidation-test262-script.log`; this focused corpus
   result is recorded for diagnosis and is not a green Test262 claim.
+
+The runner's selected-path contract was then checked against the same pinned checkout and memory
+cap with both the consolidation binary and the previous integration binary. Both discovered 1,900
+variants and produced identical per-case outcomes: 1,550 passed, 57 failed, and 293 unsupported.
+Candidate log/report: `.scratch/test262-candidate-wrapper.log` and `.scratch/test262-candidate.json`;
+comparison log/report: `.scratch/test262-baseline-wrapper.log` and `.scratch/test262-baseline.json`.
+The report records `path: "language/expressions/dynamic-import"`; empty roots and paths outside
+the physical `test/` tree are rejected before invoking Kiln.
