@@ -7,11 +7,13 @@
 use kiln_module_resolver::NodeBuiltin;
 
 pub const OS_SOURCE: &str = include_str!("node/os.ts");
+pub const PATH_SOURCE: &str = include_str!("node/path.ts");
 
 /// Return the TypeScript source code for a builtin if it has been migrated to TypeScript.
 pub fn builtin_source(builtin: NodeBuiltin) -> Option<&'static str> {
     match builtin {
         NodeBuiltin::Os => Some(OS_SOURCE),
+        NodeBuiltin::Path => Some(PATH_SOURCE),
         _ => None,
     }
 }
@@ -45,10 +47,28 @@ pub const OS_EXPORTS: &[&str] = &[
     "version",
 ];
 
+pub const PATH_EXPORTS: &[&str] = &[
+    "basename",
+    "default",
+    "delimiter",
+    "dirname",
+    "extname",
+    "format",
+    "isAbsolute",
+    "join",
+    "normalize",
+    "parse",
+    "posix",
+    "relative",
+    "resolve",
+    "sep",
+];
+
 /// Return the supported exports for a builtin if it is a TypeScript builtin.
 pub fn builtin_supported_exports(builtin: NodeBuiltin) -> Option<&'static [&'static str]> {
     match builtin {
         NodeBuiltin::Os => Some(OS_EXPORTS),
+        NodeBuiltin::Path => Some(PATH_EXPORTS),
         _ => None,
     }
 }
@@ -57,6 +77,7 @@ pub fn builtin_supported_exports(builtin: NodeBuiltin) -> Option<&'static [&'sta
 pub fn builtin_logical_path(builtin: NodeBuiltin) -> &'static str {
     match builtin {
         NodeBuiltin::Os => "node:os.ts",
+        NodeBuiltin::Path => "node:path.ts",
         _ => "",
     }
 }
@@ -113,6 +134,35 @@ mod tests {
             assert!(
                 exported_names.contains(name),
                 "node:os program must export `{name}`"
+            );
+        }
+    }
+
+    #[test]
+    fn path_builtin_source_is_present() {
+        assert!(is_ts_builtin(NodeBuiltin::Path));
+        assert!(
+            builtin_source(NodeBuiltin::Path)
+                .unwrap()
+                .contains("export function join")
+        );
+    }
+
+    #[test]
+    fn path_builtin_compiles_cleanly() {
+        let logical_path = builtin_logical_path(NodeBuiltin::Path);
+        let hir = frontend_oxc::parse(logical_path, PATH_SOURCE);
+        let program =
+            kiln_ir::compile_module(&hir).expect("node:path should compile to IR without error");
+        let exported_names: std::collections::BTreeSet<_> = program
+            .exports
+            .iter()
+            .map(|e| e.exported.as_str())
+            .collect();
+        for name in PATH_EXPORTS {
+            assert!(
+                exported_names.contains(name),
+                "node:path program must export `{name}`"
             );
         }
     }

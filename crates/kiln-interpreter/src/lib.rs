@@ -20948,24 +20948,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .first()
                     .map(Value::to_display_string)
                     .unwrap_or_default();
+                if require.target_cell(&specifier).is_some() {
+                    if let Some(loader) = self.commonjs_loader {
+                        return unsafe { (&mut *loader).load(require, &specifier, instruction) };
+                    }
+                    if let Some(target) = require.get(&specifier) {
+                        return Ok(target);
+                    }
+                }
                 if let Some(builtin) = node_builtin_commonjs_value(&specifier) {
                     return Ok(builtin);
                 }
-                if require.target_cell(&specifier).is_none() {
-                    self.throw_error(
-                        ErrorKind::Error,
-                        format!("Cannot find module '{specifier}'"),
-                        instruction,
-                    )?;
-                    return Ok(Value::Undefined);
-                }
-                if let Some(loader) = self.commonjs_loader {
-                    return unsafe { (&mut *loader).load(require, &specifier, instruction) };
-                }
-                require.get(&specifier).ok_or_else(|| ExecutionError::Host {
+                self.throw_error(
+                    ErrorKind::Error,
+                    format!("Cannot find module '{specifier}'"),
                     instruction,
-                    message: format!("CommonJS require target `{specifier}` is not in the graph"),
-                })
+                )?;
+                Ok(Value::Undefined)
             }
             Value::CommonJsResolve(require) => {
                 let specifier = arguments

@@ -900,7 +900,7 @@ fn node_events_has_a_native_runtime_module_materializer() {
     assert!(emitted.source.contains("exports[0] = constructor;"));
     assert!(emitted.source.contains("exports[1] = constructor;"));
     assert!(native_builtin_body(NodeBuiltin::Https).is_some());
-    assert!(native_builtin_body(NodeBuiltin::Path).is_some());
+    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Path));
     assert!(native_builtin_supports_export(NodeBuiltin::Path, "join"));
 }
 
@@ -914,7 +914,7 @@ fn node_net_has_one_native_runtime_module_materializer() {
     assert!(body.contains("exports[1] = connect;"));
     assert!(body.contains("exports[2] = create_server;"));
     assert!(native_builtin_body(NodeBuiltin::Https).is_some());
-    assert!(native_builtin_body(NodeBuiltin::Path).is_some());
+    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Path));
     assert!(native_builtin_supports_export(NodeBuiltin::Path, "resolve"));
 }
 
@@ -7117,7 +7117,7 @@ fn native_builtin_support_is_the_materialized_subset_not_the_declared_surface() 
         "basename"
     ));
     assert!(native_builtin_supports_export(NodeBuiltin::Path, "dirname"));
-    assert!(!native_builtin_supports_export(NodeBuiltin::Path, "format"));
+    assert!(native_builtin_supports_export(NodeBuiltin::Path, "format"));
     assert!(native_builtin_supports_export(NodeBuiltin::Os, "hostname"));
     assert!(native_builtin_supports_export(NodeBuiltin::Os, "platform"));
     assert!(!native_builtin_supports_export(
@@ -7900,4 +7900,99 @@ fn native_node_os_commonjs_require_builds_and_runs() {
     );
     let stdout = String::from_utf8_lossy(&result.stdout);
     assert_eq!(stdout.trim(), "cjs-os: function function true function");
+}
+
+#[test]
+fn native_node_path_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-path-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import path, { join, resolve, dirname, basename, extname, parse, format, posix, sep } from 'node:path';\n",
+            "console.log('path-test:', join('a', 'b'), resolve('/x', 'y'), dirname('/a/b/c.js'), basename('a/b.txt'), extname('a.txt'), sep === '/');\n",
+            "console.log('parse-test:', JSON.stringify(parse('/a/b/c.txt')));\n",
+            "console.log('format-test:', format({ dir: '/x/y', base: 'z.txt' }));\n",
+            "console.log('posix-test:', path.posix === path);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("path_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run path binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert_eq!(
+        stdout.trim(),
+        concat!(
+            "path-test: a/b /x/y /a/b b.txt .txt true\n",
+            "parse-test: {\"root\":\"/\",\"dir\":\"/a/b\",\"base\":\"c.txt\",\"ext\":\".txt\",\"name\":\"c\"}\n",
+            "format-test: /x/y/z.txt\n",
+            "posix-test: true"
+        )
+    );
+}
+
+#[test]
+fn native_node_path_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-path-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const path = require('node:path');\n",
+            "console.log('cjs-path:', path.join('foo', 'bar'), path.posix === path, path.default === path);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("path_cjs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run path cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert_eq!(stdout.trim(), "cjs-path: foo/bar true true");
 }
