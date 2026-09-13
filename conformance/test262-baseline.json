@@ -17,12 +17,12 @@
       "passed": 40
     },
     "built-ins/Array": {
-      "failed": 219,
-      "passed": 5898
+      "failed": 215,
+      "passed": 5902
     },
     "built-ins/ArrayBuffer": {
-      "failed": 30,
-      "passed": 412
+      "failed": 26,
+      "passed": 416
     },
     "built-ins/ArrayIteratorPrototype": {
       "failed": 8,
@@ -33,24 +33,24 @@
       "passed": 208
     },
     "built-ins/AsyncFromSyncIteratorPrototype": {
-      "failed": 48,
-      "passed": 28
+      "failed": 12,
+      "passed": 64
     },
     "built-ins/AsyncFunction": {
-      "failed": 14,
-      "passed": 22
+      "failed": 8,
+      "passed": 28
     },
     "built-ins/AsyncGeneratorFunction": {
-      "failed": 28,
-      "passed": 18
+      "failed": 8,
+      "passed": 38
     },
     "built-ins/AsyncGeneratorPrototype": {
-      "failed": 52,
-      "passed": 44
+      "failed": 34,
+      "passed": 62
     },
     "built-ins/AsyncIteratorPrototype": {
-      "failed": 26,
-      "passed": 0
+      "failed": 20,
+      "passed": 6
     },
     "built-ins/Atomics": {
       "failed": 12,
@@ -85,16 +85,16 @@
       "passed": 92
     },
     "built-ins/Function": {
-      "failed": 104,
-      "passed": 789
+      "failed": 100,
+      "passed": 793
     },
     "built-ins/GeneratorFunction": {
-      "failed": 26,
-      "passed": 20
+      "failed": 8,
+      "passed": 38
     },
     "built-ins/GeneratorPrototype": {
-      "failed": 24,
-      "passed": 98
+      "failed": 6,
+      "passed": 116
     },
     "built-ins/Infinity": {
       "failed": 0,
@@ -169,8 +169,8 @@
       "passed": 116
     },
     "built-ins/SharedArrayBuffer": {
-      "failed": 10,
-      "passed": 198
+      "failed": 6,
+      "passed": 202
     },
     "built-ins/String": {
       "failed": 180,
@@ -197,8 +197,8 @@
       "passed": 18
     },
     "built-ins/TypedArray": {
-      "failed": 273,
-      "passed": 2603
+      "failed": 269,
+      "passed": 2607
     },
     "built-ins/TypedArrayConstructors": {
       "failed": 122,
@@ -377,8 +377,8 @@
       "passed": 3
     },
     "language/expressions": {
-      "failed": 463,
-      "passed": 20507
+      "failed": 330,
+      "passed": 20640
     },
     "language/function-code": {
       "failed": 4,
@@ -441,8 +441,8 @@
       "passed": 160
     },
     "language/statements": {
-      "failed": 369,
-      "passed": 17633
+      "failed": 309,
+      "passed": 17693
     },
     "language/types": {
       "failed": 6,
@@ -477,8 +477,8 @@
       "passed": 6
     },
     "staging/sm": {
-      "failed": 668,
-      "passed": 1928
+      "failed": 649,
+      "passed": 1947
     },
     "staging/source-phase-imports": {
       "failed": 0,
