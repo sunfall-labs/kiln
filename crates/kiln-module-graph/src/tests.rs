@@ -408,7 +408,7 @@ fn commonjs_resolve_accepts_builtin_aliases_and_kiln_process() {
     // public graph path must still initialize the canonical TS builtin projection on demand.
     let entry = project.write(
         "public.cjs",
-        "console.log(require.resolve('fs'), require.resolve('node:fs'), require.resolve('assert/strict'), require.resolve('kiln:process')); const fs = process.getBuiltinModule('fs'); const nodeFs = process.getBuiltinModule('node:fs'); const processBuiltin = process.getBuiltinModule('kiln:process'); console.log(fs === nodeFs, typeof processBuiltin.run);",
+        "console.log(require.resolve('fs'), require.resolve('node:fs'), require.resolve('assert/strict'), require.resolve('kiln:process')); const resolve = require.resolve; console.log(resolve('fs'), require.resolve.call(undefined, 'node:fs'), require.resolve.apply(undefined, ['assert/strict']), require.resolve.bind(null)('kiln:process')); const receiver = { value: 7, read() { return this.value; } }; console.log(receiver.read(), receiver.read.call({ value: 8 }), receiver.read.apply({ value: 9 }, []), receiver.read.bind({ value: 10 })()); const fs = process.getBuiltinModule('fs'); const nodeFs = process.getBuiltinModule('node:fs'); const processBuiltin = process.getBuiltinModule('kiln:process'); console.log(fs === nodeFs, typeof processBuiltin.run);",
     );
     let graph = ModuleGraph::build_node(
         &entry,
@@ -427,7 +427,12 @@ fn commonjs_resolve_accepts_builtin_aliases_and_kiln_process() {
         .expect("execute builtin public graph");
     assert_eq!(
         host.output,
-        ["fs node:fs assert/strict kiln:process", "true function"]
+        [
+            "fs node:fs assert/strict kiln:process",
+            "fs node:fs assert/strict kiln:process",
+            "7 8 9 10",
+            "true function",
+        ]
     );
 }
 
