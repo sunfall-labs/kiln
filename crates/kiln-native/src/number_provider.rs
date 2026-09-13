@@ -12,7 +12,6 @@ pub(crate) use kiln_native_number_abi::PROVIDER_ABI_VERSION;
 use kiln_native_number_abi::PROVIDER_EXPORTS;
 use kiln_native_provider_contract as provider_contract;
 use kiln_native_toolchain::ToolIdentity;
-use serde::Deserialize;
 
 pub(crate) const PROVIDER_SCHEMA_VERSION: u16 = provider_contract::SCHEMA_VERSION;
 const PROVIDER_NAME: &str = provider_contract::PROVIDER_NAME;
@@ -138,35 +137,7 @@ impl std::error::Error for NumberProviderError {
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ArchiveManifest {
-    schema: u16,
-    provider: String,
-    provider_abi: u32,
-    format_version: u32,
-    parse_version: u32,
-    rust_target: String,
-    rustc_identity: String,
-    source_sha256: String,
-    archive_sha256: String,
-    archive: String,
-    linkage: String,
-    pic: bool,
-    profile: String,
-    cpu_features: String,
-    deployment: String,
-    libc_baseline: String,
-    exports: Vec<String>,
-    /// Which provider variant this manifest describes. Missing (all manifests shipped before
-    /// the slim variant) means the full archive: the default is full everywhere, never slim.
-    #[serde(default = "default_manifest_http")]
-    http: bool,
-}
-
-fn default_manifest_http() -> bool {
-    true
-}
+type ArchiveManifest = provider_contract::ProviderManifest;
 
 pub(crate) fn discover(identity: &ToolIdentity) -> Result<NumberProvider, NumberProviderError> {
     discover_with_http(identity, true)
@@ -517,13 +488,32 @@ fn build_from_source(
     }
     let archive = read(&archive_path, "read source-built number-provider archive")?;
     let archive_digest = Digest::hash(&archive);
-    let identity = format!(
-        "schema={PROVIDER_SCHEMA_VERSION};provider={PROVIDER_NAME};abi={PROVIDER_ABI_VERSION};format={NUMBER_FORMAT_VERSION};parse={NUMBER_PARSE_VERSION};target={rust_target};rustc={};source={source_digest};archive={archive_digest};linkage=static;pic=true;profile=release;cpu=generic;http={want_http};deployment={};libc={};exports={}",
-        rustc_digest_identity,
-        env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_default(),
-        env::var("KILN_LIBC_BASELINE").unwrap_or_default(),
-        PROVIDER_EXPORTS.join(","),
-    );
+    let identity = provider_contract::ProviderManifest {
+        schema: PROVIDER_SCHEMA_VERSION,
+        provider: PROVIDER_NAME.to_owned(),
+        provider_abi: PROVIDER_ABI_VERSION,
+        format_version: NUMBER_FORMAT_VERSION,
+        parse_version: NUMBER_PARSE_VERSION,
+        rust_target: rust_target.clone(),
+        rustc_identity: rustc_digest_identity,
+        source_sha256: source_digest.to_hex(),
+        archive_sha256: archive_digest.to_hex(),
+        archive: if want_http {
+            provider_contract::FULL_ARCHIVE
+        } else {
+            provider_contract::SLIM_ARCHIVE
+        }
+        .to_owned(),
+        linkage: "static".to_owned(),
+        pic: true,
+        profile: PROVIDER_PROFILE.to_owned(),
+        cpu_features: "generic".to_owned(),
+        deployment: env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_default(),
+        libc_baseline: env::var("KILN_LIBC_BASELINE").unwrap_or_default(),
+        exports: PROVIDER_EXPORTS.iter().map(ToString::to_string).collect(),
+        http: want_http,
+    }
+    .identity();
     Ok(NumberProvider {
         archive: archive.into(),
         archive_digest,
@@ -555,26 +545,7 @@ fn is_sha256_identity(value: &str) -> bool {
 }
 
 fn manifest_identity(manifest: &ArchiveManifest) -> String {
-    format!(
-        "schema={};provider={};abi={};format={};parse={};target={};rustc={};source={};archive={};linkage={};pic={};profile={};cpu={};http={};deployment={};libc={};exports={}",
-        manifest.schema,
-        manifest.provider,
-        manifest.provider_abi,
-        manifest.format_version,
-        manifest.parse_version,
-        manifest.rust_target,
-        manifest.rustc_identity,
-        manifest.source_sha256,
-        manifest.archive_sha256,
-        manifest.linkage,
-        manifest.pic,
-        manifest.profile,
-        manifest.cpu_features,
-        manifest.http,
-        manifest.deployment,
-        manifest.libc_baseline,
-        manifest.exports.join(","),
-    )
+    manifest.identity()
 }
 
 fn require_compatible_target(
