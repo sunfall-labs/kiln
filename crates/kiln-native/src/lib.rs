@@ -3041,6 +3041,25 @@ fn emit_native_graph_module_with_policy(
                 policy.clone(),
             )?)
         }
+        ModuleSource::Asset => {
+            let path = node.data.as_deref().ok_or_else(|| {
+                NativeError::Graph(ModuleGraphError::Source {
+                    path: node.path.clone(),
+                    message: "asset module has no path metadata".to_owned(),
+                })
+            })?;
+            let body = format!(
+                "exports[0] = kiln_c99_copy_text({}, (size_t){});",
+                native_c_string(path),
+                path.len()
+            );
+            Ok(emit_runtime_module_with_logical_path_and_policy(
+                &node.program,
+                logical_path,
+                &body,
+                policy.clone(),
+            )?)
+        }
         ModuleSource::Source => Ok(emit_module_with_logical_path_and_policy(
             &node.program,
             logical_path,
@@ -5021,7 +5040,7 @@ fn native_graph_export_count(node: &kiln_module_graph::ModuleNode) -> usize {
 /// CommonJS projection; loaders never guess that `default` or export zero happens to be suitable.
 fn native_commonjs_projection_index(node: &kiln_module_graph::ModuleNode) -> Option<usize> {
     match node.source {
-        ModuleSource::Json => Some(0),
+        ModuleSource::Json | ModuleSource::Asset => Some(0),
         ModuleSource::NodeBuiltin(builtin) if kiln_builtins::is_ts_builtin(builtin) => node
             .program
             .exports
@@ -5226,6 +5245,60 @@ fn find_opentui_library(project_root: &Path) -> Option<PathBuf> {
     None
 }
 
+fn dynamic_import_validation_c() -> &'static str {
+    r#"
+static int kiln_validate_dynamic_import_options(kiln_host *host, kiln_value options, int depth, kiln_value *thrown) {
+    kiln_value attrs;
+    kiln_value keys;
+    size_t index;
+    kiln_value length;
+    int status;
+    extern int kiln_c99_own_keys(kiln_host *, kiln_value, kiln_value *, int, kiln_value *);
+    extern int kiln_c99_get_computed(kiln_host *, kiln_value, kiln_value, kiln_value *, int, kiln_value *);
+    extern kiln_value kiln_c99_value(uint32_t, uint64_t, const char *, size_t);
+    if (options.tag == KILN_VALUE_UNDEFINED) return KILN_C99_OK;
+    if (options.tag == KILN_VALUE_NULL || options.tag == KILN_VALUE_BOOLEAN ||
+        options.tag == KILN_VALUE_NUMBER || options.tag == KILN_VALUE_STRING) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "import options must be an object");
+    }
+    status = kiln_c99_get(host, options, "with", 4, &attrs, depth, thrown);
+    if (status != KILN_C99_OK) return status;
+    if (attrs.tag == KILN_VALUE_UNDEFINED) return KILN_C99_OK;
+    if (attrs.tag == KILN_VALUE_NULL || attrs.tag == KILN_VALUE_BOOLEAN ||
+        attrs.tag == KILN_VALUE_NUMBER || attrs.tag == KILN_VALUE_STRING) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "import attributes must be an object");
+    }
+    status = kiln_c99_own_keys(host, attrs, &keys, depth, thrown);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_get(host, keys, "length", 6, &length, depth, thrown);
+    if (status != KILN_C99_OK || length.tag != KILN_VALUE_NUMBER) return status;
+    { double count; memcpy(&count, &length.bits, sizeof(count));
+    if (count < 0 || count > 1000000) return KILN_C99_OK;
+    for (index = 0; index < (size_t)count; ++index) {
+        kiln_value key;
+        kiln_value value;
+        { double number = (double)index; uint64_t bits; memcpy(&bits, &number, sizeof(bits));
+        status = kiln_c99_get_computed(host, keys, kiln_c99_value(KILN_VALUE_NUMBER, bits, NULL, 0), &key, depth, thrown); }
+        if (status != KILN_C99_OK) return status;
+        if (key.tag != KILN_VALUE_STRING) continue;
+        status = kiln_c99_get(host, attrs, key.ptr, key.len, &value, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (key.len != 4 || memcmp(key.ptr, "type", 4) != 0) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "unsupported import attribute");
+        }
+        if (value.tag != KILN_VALUE_STRING) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "import attribute values must be strings");
+        }
+        if (value.len != 4 || memcmp(value.ptr, "file", 4) != 0) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "unsupported import attribute `type`");
+        }
+    }
+    }
+    return KILN_C99_OK;
+}
+"#
+}
+
 fn write_launcher_dynamic_import(
     output: &mut String,
     graph: &ModuleGraph,
@@ -5233,15 +5306,33 @@ fn write_launcher_dynamic_import(
     logical_paths: &[String],
 ) {
     let opentui_path = find_opentui_library(graph.project_root());
+    output.push_str(dynamic_import_validation_c());
     output.push_str(
         r#"
-int kiln_graph_dynamic_import(kiln_host *host, kiln_value specifier, kiln_value *promise, int depth, kiln_value *thrown) {
+int kiln_graph_dynamic_import(kiln_host *host, kiln_value specifier, kiln_value options, kiln_value *promise, int depth, kiln_value *thrown) {
     if (promise == NULL) return KILN_C99_CONTROL_ERROR;
+    if (specifier.tag != KILN_VALUE_STRING) {
+        kiln_value primitive = kiln_c99_undefined();
+        int specifier_status = kiln_c99_to_primitive(host, specifier, KILN_C99_HINT_STRING, &primitive, depth, thrown);
+        if (specifier_status != KILN_C99_OK) {
+            if (thrown != NULL) return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), thrown, 1, depth, thrown);
+            return specifier_status;
+        }
+        specifier = kiln_c99_text(primitive);
+    }
     if (specifier.tag != KILN_VALUE_STRING || (specifier.len != 0 && specifier.ptr == NULL)) {
         kiln_value err = kiln_c99_undefined();
         (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, "invalid import specifier");
         return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);
     }
+    { kiln_value validation_thrown = kiln_c99_undefined();
+      int attr_status = kiln_validate_dynamic_import_options(host, options, depth, &validation_thrown);
+      if (attr_status != KILN_C99_OK) {
+          kiln_value *reason = attr_status == KILN_C99_THROWN ? &validation_thrown : &validation_thrown;
+          return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), reason, 1, depth, thrown);
+      }
+    }
+import_attributes_valid:
     if (specifier.len >= 14 && memcmp(specifier.ptr, "@opentui/core-", 14) == 0) {
         if (kiln_opentui_namespace.tag != KILN_VALUE_UNDEFINED) {
             return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_RESOLVE, kiln_c99_undefined(), &kiln_opentui_namespace, 1, depth, thrown);
@@ -5394,10 +5485,32 @@ fn write_shared_wrapper_dynamic_import(
     logical_paths: &[String],
 ) {
     let opentui_path = find_opentui_library(graph.project_root());
+    output.push_str(dynamic_import_validation_c());
     output.push_str(
         r#"
-int kiln_graph_dynamic_import(kiln_host *host, kiln_value specifier, kiln_value *promise, int depth, kiln_value *thrown) {
+int kiln_graph_dynamic_import(kiln_host *host, kiln_value specifier, kiln_value options, kiln_value *promise, int depth, kiln_value *thrown) {
     if (promise == NULL) return KILN_C99_CONTROL_ERROR;
+    if (specifier.tag != KILN_VALUE_STRING) {
+        kiln_value primitive = kiln_c99_undefined();
+        int specifier_status = kiln_c99_to_primitive(host, specifier, KILN_C99_HINT_STRING, &primitive, depth, thrown);
+        if (specifier_status != KILN_C99_OK) {
+            if (thrown != NULL) return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), thrown, 1, depth, thrown);
+            return specifier_status;
+        }
+        specifier = kiln_c99_text(primitive);
+    }
+    if (specifier.tag != KILN_VALUE_STRING || (specifier.len != 0 && specifier.ptr == NULL)) {
+        kiln_value err = kiln_c99_undefined();
+        (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, "invalid import specifier");
+        return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);
+    }
+    { kiln_value validation_thrown = kiln_c99_undefined();
+      int attr_status = kiln_validate_dynamic_import_options(host, options, depth, &validation_thrown);
+      if (attr_status != KILN_C99_OK) {
+          return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &validation_thrown, 1, depth, thrown);
+      }
+    }
+import_attributes_valid:
     if (specifier.tag != KILN_VALUE_STRING || (specifier.len != 0 && specifier.ptr == NULL)) {
         kiln_value err = kiln_c99_undefined();
         (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, "invalid import specifier");
@@ -5824,17 +5937,20 @@ extern int kiln_realm_gc_mark_value(void *heap, const void *value);
 #define KILN_C99_THROWN (-7)
 #define KILN_C99_CONTROL_ERROR (-2)
 #define KILN_C99_HOST_ERROR (-3)
+#define KILN_C99_HINT_STRING 1
+#define KILN_C99_BUILTIN_TYPE_ERROR 11 /* prelude.rs ErrorKind::Type ABI */
 extern int kiln_c99_new_object(kiln_value *result);
 extern int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value value, int depth, kiln_value *thrown);
 extern kiln_value kiln_c99_copy_text(const char *text, size_t len);
 extern kiln_value kiln_c99_undefined(void);
+extern int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int hint, kiln_value *out, int depth, kiln_value *thrown);
+extern kiln_value kiln_c99_text(kiln_value value);
 extern int kiln_c99_throw_error(kiln_value *out, uint64_t kind, const char *message);
 extern int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
                                   kiln_value receiver, const kiln_value *args, size_t argc,
                                   int depth, kiln_value *thrown);
 #define KILN_C99_OK 0
-#define KILN_C99_BUILTIN_TYPE_ERROR 3
 #define KILN_C99_METHOD_PROMISE_RESOLVE 110
 #define KILN_C99_METHOD_PROMISE_REJECT 111
 "#,
@@ -6825,6 +6941,8 @@ extern int kiln_realm_gc_unregister_roots(kiln_gc_roots_fn roots, void *context)
 extern int kiln_realm_gc_mark_value(void *heap, const void *value);
 #define KILN_GC_ROOT_SURVIVES_TEARDOWN 1u
 #define KILN_GC_PHASE_RESET 2
+#define KILN_C99_HINT_STRING 1
+#define KILN_C99_BUILTIN_TYPE_ERROR 11 /* prelude.rs ErrorKind::Type ABI */
 extern int kiln_realm_is_active(void);
 
 typedef int (*kiln_graph_module_fn)(kiln_host *host, kiln_value *result,
@@ -6840,12 +6958,13 @@ extern int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
                         kiln_value value, int depth, kiln_value *thrown);
 extern kiln_value kiln_c99_copy_text(const char *text, size_t len);
 extern kiln_value kiln_c99_undefined(void);
+extern int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int hint, kiln_value *out, int depth, kiln_value *thrown);
+extern kiln_value kiln_c99_text(kiln_value value);
 extern int kiln_c99_throw_error(kiln_value *out, uint64_t kind, const char *message);
 extern int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
                                   kiln_value receiver, const kiln_value *args, size_t argc,
                                   int depth, kiln_value *thrown);
 #define KILN_C99_OK 0
-#define KILN_C99_BUILTIN_TYPE_ERROR 3
 #define KILN_C99_METHOD_PROMISE_RESOLVE 110
 #define KILN_C99_METHOD_PROMISE_REJECT 111
 static __thread kiln_value *kiln_shared_namespaces = NULL;

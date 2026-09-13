@@ -15,8 +15,16 @@ use std::path::{Path, PathBuf};
 /// Source extensions understood by the initial filesystem resolver.
 pub const SUPPORTED_EXTENSIONS: &[&str] = &[
     "js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx", "json", "json5", "jsonc", "yaml", "yml",
-    "toml",
+    "toml", "wasm", "scm",
 ];
+
+/// Binary or opaque file extensions accepted by `import(..., { with: { type: "file" } })`.
+/// These are resolved as path assets and never passed through a UTF-8 source loader.
+pub const ASSET_EXTENSIONS: &[&str] = &["wasm", "scm"];
+
+pub fn is_asset_extension(extension: &str) -> bool {
+    ASSET_EXTENSIONS.contains(&extension)
+}
 
 /// Whether a resolved request was written as an explicit relative or absolute specifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
