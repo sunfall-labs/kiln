@@ -834,7 +834,22 @@ fn native_non_callable_cross_module_error_keeps_innermost_site() {
     ) else {
         return;
     };
-    assert!(!stderr.is_empty(), "release produced no diagnostic output");
+    assert!(
+        stderr.contains("module=dep.mjs"),
+        "release missing innermost module: {stderr}"
+    );
+    assert!(
+        stderr.contains("operation=Call"),
+        "release missing operation: {stderr}"
+    );
+    assert!(
+        stderr.contains("detail=non-callable callee kind"),
+        "release missing refusal reason: {stderr}"
+    );
+    assert!(
+        !stderr.contains("unknown native operation"),
+        "release lost diagnostic provenance: {stderr}"
+    );
 }
 
 #[test]
