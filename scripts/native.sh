@@ -102,7 +102,7 @@ run_probe() {
 	local name
 	name="$(basename -- "$probe")"
 	local adapter=""
-	if [[ $name == *.cjs || $name == *.mjs ]]; then
+	if [[ $name == *.cjs ]]; then
 		adapter="--node"
 	fi
 	name="${name%.*}"
