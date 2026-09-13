@@ -805,6 +805,7 @@ mod tests {
             ("crates/kiln-runtime/src/http_client.rs", b"client\n"),
             ("crates/kiln-runtime/src/http_engine.rs", b"engine\n"),
             ("crates/kiln-runtime/src/lib.rs", b"runtime\n"),
+            ("crates/kiln-runtime/src/process_wire.rs", b"wire\n"),
             ("crates/kiln-runtime/src/node_http.rs", b"http\n"),
             ("crates/kiln-runtime/src/node_http_agent.rs", b"agent\n"),
             ("crates/kiln-runtime/src/node_net.rs", b"net\n"),
@@ -819,10 +820,15 @@ mod tests {
                 .expect("create source identity fixture directory");
             fs::write(path, bytes).expect("write source identity fixture");
         }
+        let source_list = root.0.join("crates/kiln-native/provider-sources.txt");
+        fs::create_dir_all(source_list.parent().expect("source list has parent"))
+            .expect("create source list directory");
+        fs::write(source_list, include_str!("../provider-sources.txt"))
+            .expect("write source identity manifest");
 
         assert_eq!(
             source_digest(&root.0).expect("hash source identity fixture"),
-            Digest::from_hex("7df4c50c7f7c42e82fc76f55e9271ba73b87e2209d0311a06193dfb4afe59e2f")
+            Digest::from_hex("eb5e22a45e4217c32809a61899fb5160b534adb5c58bcef3829704a0ccfa6ecd")
                 .expect("fixture digest")
         );
     }
