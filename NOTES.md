@@ -5596,6 +5596,7 @@ between interpreter and native CLI), integration tests in `kiln-builtins`, `kiln
 and full `scripts/native.sh` parity (179 matched, 5 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
 
 ---
+<<<<<<< HEAD
 
 ## Phase 5.2 TypeScript built-ins: `node:crypto` (2026-09-13)
 
@@ -5609,6 +5610,14 @@ Verified with native probe `conformance/native/node-crypto-members.cjs` (byte-fo
 between interpreter and native CLI), integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`,
 and full `scripts/native.sh` parity (180 matched, 5 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
 
+---
 
+## Ambient TypeScript prelude & intrinsics: `Uint8Array` codecs and JSON reviver/replacer (2026-09-13)
 
-
+Implemented the long-term architectural solution per ADR 0005 and the Phase 5.1/5.2 freeze:
+- Pure JS/TS semantics for `Uint8Array.prototype.toHex`, `Uint8Array.prototype.toBase64(options)`, `JSON.parse` with revivers, and `JSON.stringify` with replacers via the ambient TypeScript runtime bootstrap (`crates/kiln-native/src/lib.rs`).
+- Native intrinsics in C (`crates/kiln-backend-c/src/runtime/foundation.c`) handle only the low-level byte transformations (`__kilnUint8ToHex`, `__kilnUint8ToBase64`), with argument validation, options parsing (e.g. `alphabet: "base64" | "base64url"`, `omitPadding: boolean`), and reviver/replacer recursion running in JavaScript.
+- Updated `crates/kiln-backend-c/src/runtime/read.c` and `enumeration.c` so typed array instances and prototypes consult the prototype's dynamic callable store for installed methods when native method dispatch is 0.
+- Resolved both `conformance/native/typed-array-codecs-refuse.ts` and `conformance/native/json-roundtrip-edge-refuses.js`.
+- Native conformance backlog in `scripts/native.sh` dropped from 5 to 3 refusals (182 matched, 3 refused, 0 diverged).
+- Rebased cleanly on `main`.

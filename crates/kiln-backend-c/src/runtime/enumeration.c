@@ -385,6 +385,39 @@ static int kiln_c99_has_property(kiln_host *host, kiln_value target, const char 
                       kiln_c99_same_name(key, key_len, "propertyIsEnumerable") ||
                       kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_HAS_OWN_PROPERTY,
                                              KILN_C99_METHOD_OBJECT_VALUE_OF) != 0;
+            if (!*answer) {
+                kiln_value concrete_proto =
+                    kiln_c99_builtin(kiln_c99_typed_prototype(view->kind));
+                kiln_value store;
+                if (kiln_c99_callable_store(concrete_proto, &store, 0) == KILN_C99_OK &&
+                    store.tag == KILN_VALUE_OBJECT) {
+                    kiln_object *properties = kiln_c99_object_of(store);
+                    size_t pidx;
+                    if (properties->shape != NULL) kiln_c99_ensure_dictionary(properties);
+                    for (pidx = 0; pidx < properties->count; ++pidx) {
+                        if (kiln_c99_same_key(&properties->properties[pidx], key, key_len)) {
+                            *answer = 1;
+                            break;
+                        }
+                    }
+                }
+                if (!*answer) {
+                    kiln_value common_proto =
+                        kiln_c99_builtin(KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE);
+                    if (kiln_c99_callable_store(common_proto, &store, 0) == KILN_C99_OK &&
+                        store.tag == KILN_VALUE_OBJECT) {
+                        kiln_object *properties = kiln_c99_object_of(store);
+                        size_t pidx;
+                        if (properties->shape != NULL) kiln_c99_ensure_dictionary(properties);
+                        for (pidx = 0; pidx < properties->count; ++pidx) {
+                            if (kiln_c99_same_key(&properties->properties[pidx], key, key_len)) {
+                                *answer = 1;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
         }
         return KILN_C99_OK;
     }
@@ -570,6 +603,22 @@ static int kiln_c99_typed_prototype_own(kiln_value target, const char *key, size
                  kiln_c99_same_name(key, key_len, "BYTES_PER_ELEMENT");
     } else {
         *found = kiln_c99_typed_prototype_method(key, key_len) != 0;
+    }
+    if (!*found) {
+        kiln_value store;
+        if (kiln_c99_callable_store(target, &store, 0) == KILN_C99_OK &&
+            store.tag == KILN_VALUE_OBJECT) {
+            kiln_object *properties = kiln_c99_object_of(store);
+            size_t pidx;
+            if (properties->shape != NULL) kiln_c99_ensure_dictionary(properties);
+            for (pidx = 0; pidx < properties->count; ++pidx) {
+                if (kiln_c99_same_key(&properties->properties[pidx], key, key_len)) {
+                    *found = 1;
+                    *enumerable = properties->properties[pidx].enumerable;
+                    break;
+                }
+            }
+        }
     }
     return 1;
 }
