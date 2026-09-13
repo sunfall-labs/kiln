@@ -682,17 +682,36 @@ fn run_native_release_fixture(name: &str, source: &str) -> Option<String> {
             },
         )
         .expect("native release graph builds");
-    let output = Command::new(&report.output)
-        .output()
-        .expect("run native release fixture");
+    let run = |stress: bool| {
+        let mut command = Command::new(&report.output);
+        if stress {
+            command.env("KILN_GC_STRESS", "1");
+        } else {
+            command.env_remove("KILN_GC_STRESS");
+        }
+        command.output().expect("run native release fixture")
+    };
+    let normal = run(false);
     assert!(
-        output.status.success(),
-        "status={} stdout={:?} stderr={:?}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        normal.status.success(),
+        "normal status={} stdout={:?} stderr={:?}",
+        normal.status,
+        String::from_utf8_lossy(&normal.stdout),
+        String::from_utf8_lossy(&normal.stderr)
     );
-    Some(String::from_utf8(output.stdout).expect("fixture output is UTF-8"))
+    let stress = run(true);
+    assert!(
+        stress.status.success(),
+        "stress status={} stdout={:?} stderr={:?}",
+        stress.status,
+        String::from_utf8_lossy(&stress.stdout),
+        String::from_utf8_lossy(&stress.stderr)
+    );
+    assert_eq!(
+        stress.stdout, normal.stdout,
+        "GC stress changed native fixture output"
+    );
+    Some(String::from_utf8(normal.stdout).expect("fixture output is UTF-8"))
 }
 
 fn run_native_failure_fixture(name: &str, source: &str) -> Option<String> {
