@@ -54,3 +54,8 @@ add per-operation telemetry and distinguish foreground detail requests from sile
 The repository-wide gate was still running at the time of this acceptance record (`558b05c6`). Native
 parity had an independently investigated callable-name divergence; native stress and push checks were
 pending. This document records the ghui acceptance only and does not claim the overall gate complete.
+
+The four facts-baseline updates accepted during this gate come from backend commit `ecfad131`, which
+models generator suspension and `yield*` resume edges in the CFG. The resulting narrower return facts
+and added returned sites are covered by `conformance/native/generator-protocol.ts`; they are separate
+from the ghui live acceptance.
