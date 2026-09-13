@@ -288,6 +288,7 @@ fn key(
     )
 }
 
+#[cfg(test)]
 fn cache_identity(
     compiler: impl Into<String>,
     backend: Backend,
@@ -1232,7 +1233,6 @@ impl NativeBuilder {
         let paths = SharedLibraryPaths::new(workspace.path());
         let identity = self.toolchain.identity().clone();
         let profile = options.profile;
-        let module_abi = module_abi_identity();
         let embedding_abi = shared_embedding_abi_identity();
         let target = target_identity(&identity);
         let compiler = compiler_identity(&identity);
@@ -1240,13 +1240,8 @@ impl NativeBuilder {
         // Keep the plain generated unit on the same cache identity as executable builds.  The
         // shared-only adapter is cached as a second generated-C artifact, so building a DSO does
         // not poison the reusable non-PIC module source cache.
-        let module_source_key = key(
-            ArtifactKind::GeneratedC,
-            format!("kiln-c-abi-{C_ABI_VERSION}-generator-{C_GENERATOR_VERSION}"),
-            Backend::C,
-            &module_abi,
+        let module_source_key = NativeArtifactFamily::ModuleSource.source_key(
             &target,
-            CacheProfile::Debug,
             Digest::hash(b"deterministic-c11"),
             [Digest::hash(module.source.as_bytes())],
         );
@@ -3191,6 +3186,7 @@ if (typeof JSON !== "undefined") {
 }
 "#;
 
+#[cfg(test)]
 fn emit_native_graph_module(
     node: &kiln_module_graph::ModuleNode,
     logical_path: &str,
