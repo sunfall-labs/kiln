@@ -410,7 +410,9 @@ static int kiln_c99_global_object(kiln_value *out) {
                      {"setImmediate", KILN_C99_METHOD_SET_IMMEDIATE},
                      {"clearImmediate", KILN_C99_METHOD_CLEAR_IMMEDIATE},
                      /* Captured and deleted by the compiled builtin bootstrap before user code. */
-                     {"__kilnIntlSegment", KILN_C99_METHOD_INTL_SEGMENT_RAW}};
+                     {"__kilnIntlSegment", KILN_C99_METHOD_INTL_SEGMENT_RAW},
+                     {"__kilnUint8ToHex", KILN_C99_METHOD_UINT8_TO_HEX_RAW},
+                     {"__kilnUint8ToBase64", KILN_C99_METHOD_UINT8_TO_BASE64_RAW}};
     size_t index;
     int status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_GLOBALS, &globals);
     if (status != KILN_C99_OK) return status;

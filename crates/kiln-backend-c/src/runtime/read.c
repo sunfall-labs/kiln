@@ -548,6 +548,33 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                                   ? KILN_C99_METHOD_ARRAY_VALUES
                                   : kiln_c99_typed_prototype_method(key, key_len);
             if (method == 0) {
+                kiln_value concrete_proto =
+                    kiln_c99_builtin(kiln_c99_typed_prototype(view->kind));
+                kiln_value store;
+                if (kiln_c99_callable_store(concrete_proto, &store, 0) == KILN_C99_OK &&
+                    store.tag == KILN_VALUE_OBJECT) {
+                    kiln_object *properties = kiln_c99_object_of(store);
+                    size_t pidx;
+                    if (properties->shape != NULL) kiln_c99_ensure_dictionary(properties);
+                    for (pidx = 0; pidx < properties->count; ++pidx) {
+                        if (kiln_c99_same_key(&properties->properties[pidx], key, key_len)) {
+                            return kiln_c99_get(host, store, key, key_len, out, depth, thrown);
+                        }
+                    }
+                }
+                kiln_value common_proto =
+                    kiln_c99_builtin(KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE);
+                if (kiln_c99_callable_store(common_proto, &store, 0) == KILN_C99_OK &&
+                    store.tag == KILN_VALUE_OBJECT) {
+                    kiln_object *properties = kiln_c99_object_of(store);
+                    size_t pidx;
+                    if (properties->shape != NULL) kiln_c99_ensure_dictionary(properties);
+                    for (pidx = 0; pidx < properties->count; ++pidx) {
+                        if (kiln_c99_same_key(&properties->properties[pidx], key, key_len)) {
+                            return kiln_c99_get(host, store, key, key_len, out, depth, thrown);
+                        }
+                    }
+                }
                 if (kiln_c99_is_typed_array_member(view->kind == KILN_TYPED_UINT8, key, key_len)) {
                     /* A real member this backend has not grown yet. `undefined` would be a
                      * silent wrong answer -- the program would call it and get a TypeError
@@ -1150,6 +1177,22 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                     return KILN_C99_OK;
                 }
                 method = kiln_c99_typed_prototype_method(key, key_len);
+                if (method == 0 && concrete) {
+                    kiln_value common_proto =
+                        kiln_c99_builtin(KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE);
+                    kiln_value store;
+                    if (kiln_c99_callable_store(common_proto, &store, 0) == KILN_C99_OK &&
+                        store.tag == KILN_VALUE_OBJECT) {
+                        kiln_object *properties = kiln_c99_object_of(store);
+                        size_t pidx;
+                        if (properties->shape != NULL) kiln_c99_ensure_dictionary(properties);
+                        for (pidx = 0; pidx < properties->count; ++pidx) {
+                            if (kiln_c99_same_key(&properties->properties[pidx], key, key_len)) {
+                                return kiln_c99_get(host, store, key, key_len, out, depth, thrown);
+                            }
+                        }
+                    }
+                }
                 if (method == 0) {
                     /* The same question the *instance* read asks two hundred lines above, and it
                      * was missing here: a real member of the prototype that this backend has not

@@ -2739,6 +2739,152 @@ Console.prototype.Console = Console;
 if (typeof console !== "undefined") {
     console.Console = Console;
 }
+
+const __kilnUint8ToHex = globalThis.__kilnUint8ToHex;
+delete globalThis.__kilnUint8ToHex;
+const __kilnUint8ToBase64 = globalThis.__kilnUint8ToBase64;
+delete globalThis.__kilnUint8ToBase64;
+
+if (typeof Uint8Array !== "undefined" && Uint8Array.prototype) {
+    Uint8Array.prototype.toHex = function toHex() {
+        if (!(this instanceof Uint8Array)) {
+            throw new TypeError("toHex called on incompatible receiver");
+        }
+        return __kilnUint8ToHex(this);
+    };
+
+    Uint8Array.prototype.toBase64 = function toBase64(options) {
+        if (!(this instanceof Uint8Array)) {
+            throw new TypeError("toBase64 called on incompatible receiver");
+        }
+        let url = false;
+        let omitPadding = false;
+        if (options !== undefined) {
+            if (typeof options !== "object" || options === null) {
+                throw new TypeError("options must be an object");
+            }
+            if (options.alphabet !== undefined) {
+                const alphabet = String(options.alphabet);
+                if (alphabet === "base64url") {
+                    url = true;
+                } else if (alphabet === "base64") {
+                    url = false;
+                } else {
+                    throw new TypeError('alphabet must be "base64" or "base64url"');
+                }
+            }
+            omitPadding = Boolean(options.omitPadding);
+        }
+        return __kilnUint8ToBase64(this, url, omitPadding);
+    };
+}
+
+if (typeof JSON !== "undefined") {
+    const __kilnOriginalParse = JSON.parse;
+    const __kilnOriginalStringify = JSON.stringify;
+
+    JSON.parse = function parse(text, reviver) {
+        const root = __kilnOriginalParse(text);
+        if (typeof reviver !== "function") return root;
+
+        function internalize(holder, name) {
+            const val = holder[name];
+            if (val && typeof val === "object") {
+                if (Array.isArray(val)) {
+                    for (let i = 0; i < val.length; i++) {
+                        const newElement = internalize(val, String(i));
+                        if (newElement === undefined) {
+                            delete val[i];
+                        } else {
+                            val[i] = newElement;
+                        }
+                    }
+                } else {
+                    for (const key of Object.keys(val)) {
+                        const newProperty = internalize(val, key);
+                        if (newProperty === undefined) {
+                            delete val[key];
+                        } else {
+                            val[key] = newProperty;
+                        }
+                    }
+                }
+            }
+            return reviver.call(holder, name, val);
+        }
+
+        return internalize({ "": root }, "");
+    };
+
+    JSON.stringify = function stringify(value, replacer, space) {
+        if (typeof replacer !== "function" && !Array.isArray(replacer)) {
+            return __kilnOriginalStringify(value, replacer, space);
+        }
+        let replacerFn = null;
+        let propertyList = null;
+        if (typeof replacer === "function") {
+            replacerFn = replacer;
+        } else if (Array.isArray(replacer)) {
+            propertyList = [];
+            for (let i = 0; i < replacer.length; i++) {
+                const item = replacer[i];
+                if (typeof item === "string" || typeof item === "number") {
+                    const str = String(item);
+                    if (propertyList.indexOf(str) === -1) {
+                        propertyList.push(str);
+                    }
+                }
+            }
+        }
+
+        const stack = [];
+        function serialize(holder, key) {
+            let val = holder[key];
+            if (val && typeof val === "object" && typeof val.toJSON === "function") {
+                val = val.toJSON(key);
+            }
+            if (replacerFn !== null) {
+                val = replacerFn.call(holder, key, val);
+            }
+            if (val === undefined || typeof val === "function" || typeof val === "symbol") {
+                return undefined;
+            }
+            if (val === null || typeof val !== "object") {
+                return val;
+            }
+            if (stack.indexOf(val) !== -1) {
+                throw new TypeError("Converting circular structure to JSON");
+            }
+            stack.push(val);
+            let res;
+            if (Array.isArray(val)) {
+                res = [];
+                for (let i = 0; i < val.length; i++) {
+                    const item = serialize(val, String(i));
+                    res.push(item === undefined ? null : item);
+                }
+            } else {
+                res = {};
+                const keys = propertyList !== null ? propertyList : Object.keys(val);
+                for (let i = 0; i < keys.length; i++) {
+                    const k = keys[i];
+                    if (Object.prototype.hasOwnProperty.call(val, k)) {
+                        const propVal = serialize(val, k);
+                        if (propVal !== undefined) {
+                            res[k] = propVal;
+                        }
+                    }
+                }
+            }
+            stack.pop();
+            return res;
+        }
+
+        const transformed = serialize({ "": value }, "");
+        if (transformed === undefined) return undefined;
+        return __kilnOriginalStringify(transformed, undefined, space);
+    };
+}
 "#;
 
 fn native_builtin_bootstrap_module(

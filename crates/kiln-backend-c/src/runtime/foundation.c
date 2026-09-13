@@ -988,6 +988,106 @@ static int kiln_c99_intl_segment_raw(kiln_value *out, const kiln_value *args, si
     return KILN_C99_OK;
 }
 
+static int kiln_c99_uint8_to_hex_raw(kiln_value *out, const kiln_value *args, size_t argc,
+                                     kiln_value *thrown) {
+    static const char hex_digits[] = "0123456789abcdef";
+    const uint8_t *raw_bytes;
+    char *hex_str;
+    size_t i;
+    kiln_value target = argc > 0 ? args[0] : kiln_c99_undefined();
+    if (target.tag != KILN_VALUE_TYPED_ARRAY ||
+        kiln_c99_typed_array_of(target)->kind != KILN_TYPED_UINT8) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "toHex called on incompatible receiver");
+    }
+    kiln_typed_array *view = kiln_c99_typed_array_of(target);
+    if (view->length == 0 || view->buffer == NULL || view->buffer->bytes == NULL) {
+        *out = kiln_c99_copy_text("", 0);
+        return KILN_C99_OK;
+    }
+    if (view->length > ((size_t)-1) / 2) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    raw_bytes = (const uint8_t *)view->buffer->bytes + view->byte_offset;
+    hex_str = (char *)malloc(view->length * 2 + 1);
+    if (hex_str == NULL) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    for (i = 0; i < view->length; ++i) {
+        uint8_t byte = raw_bytes[i];
+        hex_str[i * 2] = hex_digits[(byte >> 4) & 0xf];
+        hex_str[i * 2 + 1] = hex_digits[byte & 0xf];
+    }
+    hex_str[view->length * 2] = '\0';
+    *out = kiln_c99_copy_text(hex_str, view->length * 2);
+    free(hex_str);
+    return KILN_C99_OK;
+}
+
+static inline char kiln_c99_base64_char(uint8_t value, int url) {
+    if (value <= 25) return (char)('A' + value);
+    if (value <= 51) return (char)('a' + value - 26);
+    if (value <= 61) return (char)('0' + value - 52);
+    if (value == 62) return url ? '-' : '+';
+    return url ? '_' : '/';
+}
+
+static int kiln_c99_uint8_to_base64_raw(kiln_value *out, const kiln_value *args, size_t argc,
+                                        kiln_value *thrown) {
+    kiln_value target = argc > 0 ? args[0] : kiln_c99_undefined();
+    if (target.tag != KILN_VALUE_TYPED_ARRAY ||
+        kiln_c99_typed_array_of(target)->kind != KILN_TYPED_UINT8) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "toBase64 called on incompatible receiver");
+    }
+    kiln_typed_array *view = kiln_c99_typed_array_of(target);
+    int url = argc > 1 ? kiln_c99_truthy(args[1]) : 0;
+    int omit_padding = argc > 2 ? kiln_c99_truthy(args[2]) : 0;
+    if (view->length == 0 || view->buffer == NULL || view->buffer->bytes == NULL) {
+        *out = kiln_c99_copy_text("", 0);
+        return KILN_C99_OK;
+    }
+    if (view->length > ((size_t)-1) / 4) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    const uint8_t *raw_bytes = (const uint8_t *)view->buffer->bytes + view->byte_offset;
+    size_t chunks = (view->length + 2) / 3;
+    size_t max_len = chunks * 4;
+    char *b64_str = (char *)malloc(max_len + 1);
+    if (b64_str == NULL) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    size_t out_idx = 0;
+    size_t i;
+    for (i = 0; i < view->length; i += 3) {
+        size_t rem = view->length - i;
+        uint32_t b0 = raw_bytes[i];
+        uint32_t b1 = rem > 1 ? raw_bytes[i + 1] : 0;
+        uint32_t b2 = rem > 2 ? raw_bytes[i + 2] : 0;
+        uint32_t packed = (b0 << 16) | (b1 << 8) | b2;
+        char d0 = kiln_c99_base64_char((uint8_t)((packed >> 18) & 0x3f), url);
+        char d1 = kiln_c99_base64_char((uint8_t)((packed >> 12) & 0x3f), url);
+        char d2 = kiln_c99_base64_char((uint8_t)((packed >> 6) & 0x3f), url);
+        char d3 = kiln_c99_base64_char((uint8_t)(packed & 0x3f), url);
+        b64_str[out_idx++] = d0;
+        b64_str[out_idx++] = d1;
+        if (rem >= 2) {
+            b64_str[out_idx++] = d2;
+        } else if (!omit_padding) {
+            b64_str[out_idx++] = '=';
+        }
+        if (rem >= 3) {
+            b64_str[out_idx++] = d3;
+        } else if (!omit_padding) {
+            b64_str[out_idx++] = '=';
+        }
+    }
+    b64_str[out_idx] = '\0';
+    *out = kiln_c99_copy_text(b64_str, out_idx);
+    free(b64_str);
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_ffi_raise(kiln_value *thrown) {
     const uint8_t *bytes = NULL;
     uint64_t len = 0;
