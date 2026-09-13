@@ -1876,6 +1876,7 @@ static kiln_value kiln_c99_control_diagnostic(void) {
 #undef KILN_DIAGNOSTIC_DECIMAL
 static void kiln_c99_forget_handled_throw(void) {
 void kiln_c99_publish_diagnostic(void) {
+int kiln_c99_diagnostic_available(void) {
 static void kiln_c99_note_refusal(const char *site, size_t instruction,
 static int kiln_c99_text_append_grow(kiln_text *text, const char *bytes, size_t len) {
 static int kiln_c99_text_append_c(kiln_text *text, const char *literal) {
