@@ -88,14 +88,16 @@ validate_checkout() {
 
 resolve_test_root() {
 	local test_root candidate
-	test_root="$CHECKOUT/test"
+	test_root="$(cd -- "$CHECKOUT/test" && pwd -P)" || die "cannot resolve Test262 test root"
 	if [[ -z $TEST_PATH ]]; then
+		find "$test_root" -type f -print -quit | grep -q . \
+			|| die "Test262 test directory is empty"
 		printf '%s\n' "$test_root"
 		return
 	fi
 	[[ $TEST_PATH != /* && $TEST_PATH != .. && $TEST_PATH != ../* && $TEST_PATH != */../* && $TEST_PATH != */.. ]] \
 		|| die "--path must be a relative subtree inside test/"
-	candidate="$(cd -- "$test_root" && cd -- "$TEST_PATH" 2>/dev/null && pwd)" \
+	candidate="$(cd -- "$test_root" && cd -- "$TEST_PATH" 2>/dev/null && pwd -P)" \
 		|| die "--path does not name a directory under test/: $TEST_PATH"
 	case "$candidate/" in
 		"$test_root"/*) ;;
@@ -145,7 +147,7 @@ TEST_ROOT="$(resolve_test_root)"
 # rather than merely supervising an uncapped resident daemon.
 set +e
 STDOUT_LOG="$LOG_DIR/test262.log"
-python3 - "$KILN_BIN" "$TEST_ROOT" "$RAW_RESULTS" "$RESULTS" "$TEST262_REPOSITORY" "$TEST262_COMMIT" "$STDOUT_LOG" <<-'PY'
+python3 - "$KILN_BIN" "$TEST_ROOT" "$RAW_RESULTS" "$RESULTS" "$TEST262_REPOSITORY" "$TEST262_COMMIT" "$STDOUT_LOG" "$TEST_PATH" <<-'PY'
 import json
 import os
 import pathlib
@@ -156,7 +158,7 @@ import time
 sys.path.insert(0, str(pathlib.Path.cwd() / "scripts"))
 from test262_memory import run_limited, verify_effective_cap
 
-	kiln, test_root, raw_path, result_path, repository, commit, stdout_path = sys.argv[1:]
+	kiln, test_root, raw_path, result_path, repository, commit, stdout_path, selected_path = sys.argv[1:]
 	try:
 	    verify_effective_cap()
 	except Exception as error:
@@ -208,6 +210,7 @@ executed = outcomes["pass"] + outcomes["fail"]
 report.update(
     {
         "corpus": "test262",
+        "path": selected_path or ".",
         "test262": {"repository": repository, "commit": commit},
         "discovered": len(paths),
         "executed": executed,
