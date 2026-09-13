@@ -27,51 +27,44 @@ macro_rules! declare_ts_builtins {
             ];
         )*
 
-        /// Return the TypeScript source code for a builtin if it has been migrated to TypeScript.
-        #[allow(unreachable_patterns)]
-        pub fn builtin_source(builtin: NodeBuiltin) -> Option<&'static str> {
+        /// Return the authoritative TypeScript source for every resolver builtin.
+        pub fn builtin_source(builtin: NodeBuiltin) -> &'static str {
             match builtin {
-                $(NodeBuiltin::$variant => Some($source_const),)*
-                _ => None,
+                $(NodeBuiltin::$variant => $source_const,)*
             }
         }
 
-        /// Whether the builtin is implemented as a TypeScript module.
+        /// Every resolver builtin is implemented as a TypeScript module.
         pub fn is_ts_builtin(builtin: NodeBuiltin) -> bool {
-            builtin_source(builtin).is_some()
+            let _ = builtin;
+            true
         }
 
-        /// Whether a module specifier names a builtin whose authoritative implementation is
-        /// embedded TypeScript rather than the interpreter's legacy Native namespace.
+        /// Whether a specifier names a resolver builtin with an authoritative TS implementation.
         pub fn is_ts_builtin_specifier(specifier: &str) -> bool {
-            NodeBuiltin::parse(specifier).is_some_and(is_ts_builtin)
+            NodeBuiltin::parse(specifier).is_some()
         }
 
-        /// The canonical specifiers whose values must come from graph evaluation.
+        /// The canonical specifiers whose values come from graph evaluation.
         pub fn ts_builtin_specifiers() -> Vec<&'static str> {
             NodeBuiltin::ALL
                 .iter()
                 .copied()
-                .filter(|builtin| is_ts_builtin(*builtin))
                 .map(NodeBuiltin::specifier)
                 .collect()
         }
 
-        /// Return the supported exports for a builtin if it is a TypeScript builtin.
-        #[allow(unreachable_patterns)]
-        pub fn builtin_supported_exports(builtin: NodeBuiltin) -> Option<&'static [&'static str]> {
+        /// Return the supported exports for every resolver builtin.
+        pub fn builtin_supported_exports(builtin: NodeBuiltin) -> &'static [&'static str] {
             match builtin {
-                $(NodeBuiltin::$variant => Some($exports_const),)*
-                _ => None,
+                $(NodeBuiltin::$variant => $exports_const,)*
             }
         }
 
         /// Logical path with `.ts` extension for frontend parsing.
-        #[allow(unreachable_patterns)]
         pub fn builtin_logical_path(builtin: NodeBuiltin) -> &'static str {
             match builtin {
                 $(NodeBuiltin::$variant => $logical_path,)*
-                _ => "",
             }
         }
 
@@ -82,12 +75,7 @@ macro_rules! declare_ts_builtins {
             $(
                 #[test]
                 fn $presence_test() {
-                    assert!(is_ts_builtin(NodeBuiltin::$variant));
-                    assert!(
-                        builtin_source(NodeBuiltin::$variant)
-                            .unwrap()
-                            .contains($sample)
-                    );
+                    assert!(builtin_source(NodeBuiltin::$variant).contains($sample));
                 }
 
                 #[test]
