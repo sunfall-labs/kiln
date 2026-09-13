@@ -469,6 +469,7 @@ static int kiln_c99_run_next_tick(void *work, void *host_pointer, void *thrown_p
     status = kiln_c99_call(host, &produced, task->callback, kiln_c99_undefined(),
                            task->argc == 0 ? NULL : task->args, task->argc, 0, thrown);
     kiln_c99_publish_turn_refusal(status, produced, thrown);
+    kiln_c99_gc_keep_alive(task);
     return status;
 }
 
@@ -487,6 +488,10 @@ static int kiln_c99_run_timer(void *work, void *host_pointer, void *thrown_point
     status = kiln_c99_call(host, &produced, timer->callback, kiln_c99_undefined(),
                            timer->argc == 0 ? NULL : timer->args, timer->argc, 0, thrown);
     kiln_c99_publish_turn_refusal(status, produced, thrown);
+    /* The Realm removes one shot work from its queue before entering the callback. Keep the
+     * payload live through the callback's final use; otherwise an optimized build can retire
+     * this pointer while its callback's captures are still live. */
+    kiln_c99_gc_keep_alive(timer);
     return status;
 }
 
