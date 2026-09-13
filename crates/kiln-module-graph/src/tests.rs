@@ -55,7 +55,53 @@ fn binary_asset_is_retained_as_an_explicit_path_module() {
     let node = graph.module(&asset).expect("asset node");
     assert_eq!(node.source, ModuleSource::Asset);
     let expected = fs::canonicalize(&asset).unwrap();
-    assert_eq!(node.data.as_deref(), Some(expected.to_string_lossy().as_ref()));
+    assert_eq!(
+        node.data.as_deref(),
+        Some(expected.to_string_lossy().as_ref())
+    );
+}
+
+#[test]
+fn dynamic_loader_resolves_against_the_requesting_module() {
+    let project = TempProject::new();
+    fs::create_dir_all(project.root.join("a")).unwrap();
+    fs::create_dir_all(project.root.join("b")).unwrap();
+    project.write("a/same.mjs", "export default 'a';");
+    project.write("b/same.mjs", "export default 'b';");
+    let entry = project.write(
+        "main.mjs",
+        "export const a = import('./a/entry.mjs'); export const b = import('./b/entry.mjs');",
+    );
+    project.write("a/entry.mjs", "export default import('./same.mjs');");
+    project.write("b/entry.mjs", "export default import('./same.mjs');");
+    let graph = Arc::new(project.graph(&entry).expect("build nested dynamic graph"));
+    let loader = GraphModuleLoader::new(Arc::clone(&graph));
+    let a = graph
+        .module(project.root.join("a/entry.mjs"))
+        .unwrap()
+        .path
+        .clone();
+    let b = graph
+        .module(project.root.join("b/entry.mjs"))
+        .unwrap()
+        .path
+        .clone();
+    let a_plan = loader
+        .load(ModuleLoadRequest {
+            importer: Some(a.to_string_lossy().into_owned()),
+            specifier: "./same.mjs".into(),
+            attributes: None,
+        })
+        .unwrap_or_else(|_| panic!("a loader request failed"));
+    let b_plan = loader
+        .load(ModuleLoadRequest {
+            importer: Some(b.to_string_lossy().into_owned()),
+            specifier: "./same.mjs".into(),
+            attributes: None,
+        })
+        .unwrap_or_else(|_| panic!("b loader request failed"));
+    assert!(a_plan.key.ends_with("/a/same.mjs"));
+    assert!(b_plan.key.ends_with("/b/same.mjs"));
 }
 
 #[test]
