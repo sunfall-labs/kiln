@@ -5445,3 +5445,17 @@ flushing on `end()`. Added integration tests in `kiln-module-graph` and `kiln-na
 Per user guidance and AGENTS.md rules, gate/gate-quick was not re-run mid-flight as targeted tests
 and native parity verified the changes cleanly without wasting shared CPU budget on costly whole-workspace runs.
 
+---
+
+## Phase 5.2 TypeScript built-ins: `node:querystring` (2026-09-13)
+
+Migrated `node:querystring` completely from C runtime to TypeScript via `crates/kiln-builtins/src/node/querystring.ts`
+with zero additions to the C runtime prelude (Phase 5.1 freeze strictly honored). Implemented all 7 canonical
+exports (`decode`, `default`, `encode`, `escape`, `parse`, `stringify`, `unescape`) with robust UTF-8 percent-decoding
+with replacement character (`\uFFFD`) and definition-style own property insertion via `Object.defineProperty` for
+safe `__proto__` data preservation on `Object.create(null)` dictionaries. Verified with native probe
+`conformance/native/node-querystring-members.cjs` (byte-for-byte identical between interpreter and native CLI),
+integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`, and `scripts/native.sh` (168 matched,
+0 diverged). In accordance with user instructions, avoided expensive gate re-runs mid-flight to preserve shared CPU resources.
+
+

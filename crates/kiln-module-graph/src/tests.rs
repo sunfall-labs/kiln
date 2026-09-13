@@ -1829,6 +1829,105 @@ fn node_builtin_string_decoder_commonjs_require_evaluates_cleanly() {
 }
 
 #[test]
+fn node_builtin_querystring_evaluates_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import querystring, { parse, decode, stringify, encode, escape, unescape } from 'node:querystring';",
+            "const q1 = parse('name=ferret&color=purple&tags=fluffy&tags=quick');",
+            "const s1 = stringify({ a: '1', b: ['2', '3'] });",
+            "const esc = escape('a b&c=d');",
+            "const unesc = unescape('a+b%26c%3Dd');",
+            "console.log(",
+            "  parse === decode,",
+            "  stringify === encode,",
+            "  querystring.parse === parse,",
+            "  querystring.default === querystring,",
+            "  q1.name === 'ferret',",
+            "  q1.color === 'purple',",
+            "  q1.tags.join(','),",
+            "  s1,",
+            "  esc,",
+            "  unesc,",
+            ");",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with querystring builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute querystring builtin");
+    assert_eq!(
+        host.output,
+        ["true true true true true true fluffy,quick a=1&b=2&b=3 a%20b%26c%3Dd a b&c=d"]
+    );
+}
+
+#[test]
+fn node_builtin_querystring_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const qs = require('node:querystring');",
+            "const parsed = qs.decode('x=10&y=20');",
+            "const str = qs.encode({ x: 10 });",
+            "module.exports = {",
+            "  isObj: typeof qs === 'object',",
+            "  isFn: typeof qs.parse === 'function',",
+            "  selfEq: qs.default === qs,",
+            "  x: parsed.x,",
+            "  y: parsed.y,",
+            "  str,",
+            "};",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import bridge from './bridge.cjs';",
+            "console.log(bridge.isObj, bridge.isFn, bridge.selfEq, bridge.x, bridge.y, bridge.str);",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with querystring builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute querystring builtin cjs");
+    assert_eq!(host.output, ["true true true 10 20 x=10"]);
+}
+
+#[test]
 fn node_net_connect_is_a_typed_virtual_module_export() {
     let project = TempProject::new();
     let entry = project.write(

@@ -982,9 +982,8 @@ fn typed_node_querystring_has_a_native_materializer() {
     .expect("typed node graph");
 
     validate_native_node_builtins(&graph).expect("querystring materializes");
-    let body = native_builtin_body(NodeBuiltin::QueryString).expect("materializer body");
-    assert!(body.contains("KILN_C99_METHOD_NODE_QUERYSTRING_PARSE"));
-    for export in ["decode", "default", "parse"] {
+    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::QueryString));
+    for export in kiln_builtins::QUERYSTRING_EXPORTS {
         assert!(native_builtin_supports_export(
             NodeBuiltin::QueryString,
             export
@@ -1058,6 +1057,11 @@ fn node_events_is_a_ts_builtin_and_https_has_a_native_runtime_materializer() {
     assert!(native_builtin_supports_export(
         NodeBuiltin::StringDecoder,
         "StringDecoder"
+    ));
+    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::QueryString));
+    assert!(native_builtin_supports_export(
+        NodeBuiltin::QueryString,
+        "parse"
     ));
     assert!(native_builtin_body(NodeBuiltin::Https).is_some());
     assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Path));
@@ -8678,4 +8682,100 @@ fn native_node_string_decoder_commonjs_require_builds_and_runs() {
     );
     let stdout = String::from_utf8_lossy(&result.stdout);
     assert_eq!(stdout.trim(), "cjs-sd: object function true world");
+}
+
+#[test]
+fn native_node_querystring_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-querystring-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import qs, { parse, decode, stringify, encode, escape, unescape } from 'node:querystring';\n",
+            "const parsed = parse('alpha=1&beta=2&alpha=3');\n",
+            "const str = stringify({ foo: 'bar', baz: ['a', 'b'] });\n",
+            "const esc = escape('a/b?c=d');\n",
+            "const unesc = unescape('a%2Fb%3Fc%3Dd');\n",
+            "console.log('qs-ts:', typeof parse, parse === decode, stringify === encode, qs.parse === parse, qs.default === qs, parsed.alpha.join(','), parsed.beta, str, esc, unesc);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("qs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run querystring binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "qs-ts: function true true true true 1,3 2 foo=bar&baz=a&baz=b a%2Fb%3Fc%3Dd a/b?c=d"
+    );
+}
+
+#[test]
+fn native_node_querystring_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-querystring-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const qs = require('node:querystring');\n",
+            "const parsed = qs.parse('user=alice&role=admin');\n",
+            "const res = qs.stringify({ ok: true });\n",
+            "console.log('cjs-qs:', typeof qs, typeof qs.parse, qs.default === qs, parsed.user, parsed.role, res);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("qs_cjs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run querystring cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "cjs-qs: object function true alice admin ok=true"
+    );
 }

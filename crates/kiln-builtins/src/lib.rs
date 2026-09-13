@@ -237,4 +237,23 @@ declare_ts_builtins! {
             "sep",
         ],
     },
+    QueryString {
+        variant: QueryString,
+        file: "node/querystring.ts",
+        logical_path: "node:querystring.ts",
+        source_const: QUERYSTRING_SOURCE,
+        exports_const: QUERYSTRING_EXPORTS,
+        sample_source_check: "export function parse",
+        presence_test: querystring_builtin_source_is_present,
+        compilation_test: querystring_builtin_compiles_cleanly,
+        exports: [
+            "decode",
+            "default",
+            "encode",
+            "escape",
+            "parse",
+            "stringify",
+            "unescape",
+        ],
+    },
 }
