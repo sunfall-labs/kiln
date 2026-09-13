@@ -65,6 +65,8 @@ await verdict('unknown-before-throw', import('./r14-dynamic-import-target.mjs', 
 await verdict('bad-before-throw', import('./r14-dynamic-import-target.mjs', {
   with: { type: 'json', get later() { throw new Error('later getter'); } },
 }));
+await verdict('asset-missing-type', import('./r14-dynamic-import-asset.wasm'));
+await verdict('source-file-type', import('./r14-dynamic-import-target.mjs', { with: { type: 'file' } }));
 await verdict('throwing-attribute', import('./r14-dynamic-import-target.mjs', {
   with: { get type() { throw new Error('type boom'); } },
 }));
