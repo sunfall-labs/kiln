@@ -96,6 +96,17 @@ macro_rules! declare_ts_builtins {
 }
 
 declare_ts_builtins! {
+    Process {
+        variant: Process,
+        file: "node/process.ts",
+        logical_path: "node:process.ts",
+        source_const: PROCESS_SOURCE,
+        exports_const: PROCESS_EXPORTS,
+        sample_source_check: "export async function run",
+        presence_test: process_builtin_source_is_present,
+        compilation_test: process_builtin_compiles_cleanly,
+        exports: ["default", "run"],
+    },
     Assert {
         variant: Assert,
         file: "node/assert.ts",
