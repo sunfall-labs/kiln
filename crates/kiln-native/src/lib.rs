@@ -5256,6 +5256,11 @@ fn write_launcher_dynamic_import(
         r#"
 int kiln_graph_dynamic_import(kiln_host *host, kiln_value specifier, kiln_value options, kiln_value *promise, int depth, kiln_value *thrown) {
     if (promise == NULL) return KILN_C99_CONTROL_ERROR;
+    if (specifier.tag != KILN_VALUE_STRING || (specifier.len != 0 && specifier.ptr == NULL)) {
+        kiln_value err = kiln_c99_undefined();
+        (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, "invalid import specifier");
+        return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);
+    }
     if (options.tag == KILN_VALUE_UNDEFINED) goto import_attributes_valid;
     kiln_value attrs = kiln_c99_undefined();
     int attr_status = kiln_c99_get(host, options, "with", 4, &attrs, depth, thrown);
@@ -5276,11 +5281,6 @@ int kiln_graph_dynamic_import(kiln_host *host, kiln_value specifier, kiln_value 
         return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);
     }
 import_attributes_valid:
-    if (specifier.tag != KILN_VALUE_STRING || (specifier.len != 0 && specifier.ptr == NULL)) {
-        kiln_value err = kiln_c99_undefined();
-        (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, "invalid import specifier");
-        return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);
-    }
     if (specifier.len >= 14 && memcmp(specifier.ptr, "@opentui/core-", 14) == 0) {
         if (kiln_opentui_namespace.tag != KILN_VALUE_UNDEFINED) {
             return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_RESOLVE, kiln_c99_undefined(), &kiln_opentui_namespace, 1, depth, thrown);
