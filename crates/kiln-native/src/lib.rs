@@ -4032,6 +4032,15 @@ fn graph_topology_digest(
             bytes.push(0);
         }
     }
+    for ((importer, specifier), message) in graph.dynamic_failures() {
+        bytes.extend_from_slice(b"dynamic-failure:");
+        bytes.extend_from_slice(importer.to_string_lossy().as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(specifier.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(message.as_bytes());
+        bytes.push(0);
+    }
     Digest::hash(&bytes)
 }
 
@@ -4087,6 +4096,15 @@ fn graph_shared_topology_digest(
             bytes.extend_from_slice(export.exported.as_bytes());
             bytes.push(0);
         }
+    }
+    for ((importer, specifier), message) in graph.dynamic_failures() {
+        bytes.extend_from_slice(b"dynamic-failure:");
+        bytes.extend_from_slice(importer.to_string_lossy().as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(specifier.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(message.as_bytes());
+        bytes.push(0);
     }
     Digest::hash(&bytes)
 }
@@ -5414,6 +5432,24 @@ import_attributes_valid:
     }
 "#,
     );
+    for ((importer_path, specifier), message) in graph.dynamic_failures() {
+        let Some(importer_index) = modules
+            .iter()
+            .position(|(node, _)| node.path == *importer_path)
+        else {
+            continue;
+        };
+        let importer = native_c_string(&modules[importer_index].1.symbol);
+        let c_spec = native_c_string(specifier);
+        let c_message = native_c_string(message);
+        writeln!(
+            output,
+            "    if (importer != NULL && strcmp(importer, {importer}) == 0 && specifier.tag == KILN_VALUE_STRING && specifier.len == (size_t){} && memcmp(specifier.ptr, {c_spec}, (size_t){}) == 0) {{ kiln_value err = kiln_c99_undefined(); (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, {c_message}); return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown); }}",
+            specifier.len(),
+            specifier.len()
+        )
+        .unwrap();
+    }
     for (index, (node, _)) in modules.iter().enumerate() {
         let mut resolutions = std::collections::BTreeSet::new();
         resolutions.insert((logical_paths[index].clone(), index));
@@ -6292,7 +6328,7 @@ static int kiln_graph_enter(void *opaque) {
         if node.source == ModuleSource::CommonJs {
             writeln!(
                 evaluation,
-                "            status = kiln_graph_load_commonjs(&kiln_commonjs_{index}, result, result);\n            if (status != 0) {{ if (result->tag == KILN_VALUE_UNDEFINED) {{ if (status == KILN_C99_HOST_ERROR && kiln_cli_last_host_error.tag == KILN_VALUE_STRING && kiln_cli_last_host_error.len != 0) *result = kiln_cli_last_host_error; else *result = kiln_graph_diagnostic(\"commonjs-evaluate\", {}); }} return status; }}",
+                "            status = kiln_graph_load_commonjs(&kiln_commonjs_{index}, result, result);\n            if (status != 0) {{ if (status != KILN_C99_THROWN && result->tag == KILN_VALUE_UNDEFINED) {{ if (status == KILN_C99_HOST_ERROR && kiln_cli_last_host_error.tag == KILN_VALUE_STRING && kiln_cli_last_host_error.len != 0) *result = kiln_cli_last_host_error; else *result = kiln_graph_diagnostic(\"commonjs-evaluate\", {}); }} return status; }}",
                 native_c_string(&logical_paths[index])
             )
             .unwrap();
@@ -6450,7 +6486,7 @@ static int kiln_graph_enter(void *opaque) {
         );
         writeln!(
             evaluation,
-            "            if (status != 0) {{ if (result->tag == KILN_VALUE_UNDEFINED) {{ if (status == KILN_C99_HOST_ERROR && kiln_cli_last_host_error.tag == KILN_VALUE_STRING && kiln_cli_last_host_error.len != 0) *result = kiln_cli_last_host_error; else *result = kiln_graph_diagnostic(\"module-enter\", {}); }} return status; }}",
+            "            if (status != 0) {{ if (status != KILN_C99_THROWN && result->tag == KILN_VALUE_UNDEFINED) {{ if (status == KILN_C99_HOST_ERROR && kiln_cli_last_host_error.tag == KILN_VALUE_STRING && kiln_cli_last_host_error.len != 0) *result = kiln_cli_last_host_error; else *result = kiln_graph_diagnostic(\"module-enter\", {}); }} return status; }}",
             native_c_string(&logical_paths[index])
         )
         .unwrap();
