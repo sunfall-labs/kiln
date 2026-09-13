@@ -1063,6 +1063,8 @@ method_ids! {
     (KILN_C99_METHOD_NODE_EVENT_LISTENER_COUNT, 502, NodeEvent),
     (KILN_C99_METHOD_PROCESS_KILL, 503, Direct),
     (KILN_C99_METHOD_NODE_READABLE_SET_RAW_MODE, 504, NodeStream),
+    (KILN_C99_METHOD_NODE_OS_HOMEDIR, 505, Direct),
+    (KILN_C99_METHOD_NODE_OS_TMPDIR, 506, Direct),
 }
 
 /// The hook a host installs when it lets a program make a second realm.
@@ -2193,7 +2195,7 @@ const _: () = assert_refusals_name_themselves(
 /// `kiln_c99_key_len`. The pass that set it classified all ninety sites on 2026-09-07: fourteen
 /// took a shape or property key and became `kiln_c99_key_len`, one became the property's stored
 /// `key_len`, and these are the rest.
-pub const C_STRING_LENGTH_SITES: usize = 75;
+pub const C_STRING_LENGTH_SITES: usize = 77;
 
 /// How far the `strlen(` scan may skip after reading the last byte of its seven-byte window:
 /// the Horspool shift, as `refusal_scan_shift` is for the refusal scan, so the const evaluator
@@ -3177,6 +3179,8 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_NODE_EVENT_LISTENER_COUNT),
     emit_method_define!(KILN_C99_METHOD_PROCESS_KILL),
     emit_method_define!(KILN_C99_METHOD_NODE_READABLE_SET_RAW_MODE),
+    emit_method_define!(KILN_C99_METHOD_NODE_OS_HOMEDIR),
+    emit_method_define!(KILN_C99_METHOD_NODE_OS_TMPDIR),
     emit_method_define!(KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE),
     emit_method_define!(KILN_C99_METHOD_NODE_QUERYSTRING_PARSE),
     r#"
