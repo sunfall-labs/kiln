@@ -6446,7 +6446,7 @@ static int kiln_graph_enter(void *opaque) {
     for index in 0..modules.len() {
         writeln!(
             evaluation,
-            "        case {index}: {{ status = kiln_graph_eval_module_{index}(graph); if (status != 0) return status; if (!graph->module_states[{index}].module_settling) graph->current_module++; return 0; }}"
+            "        case {index}: {{ status = kiln_graph_eval_module_{index}(graph); graph->result = graph->module_states[{index}].result; if (status != 0) return status; if (!graph->module_states[{index}].module_settling) graph->current_module++; return 0; }}"
         )
         .unwrap();
     }
