@@ -67,7 +67,17 @@ step() {
 	printf '\n=== %s\n' "$name"
 	local status=0
 	"$@" >"$temporary" 2>&1 || status=$?
-	if [[ -s $logfile ]]; then rm -f "$temporary"; else mv -f "$temporary" "$logfile"; fi
+	if [[ -s $logfile ]]; then
+		# The command wrote the raw stream directly to the final log.  Preserve the filtered
+		# aggregate too; the gate's crate total and failure names are part of the evidence.
+		{
+			printf '\n--- gate summary ---\n'
+			cat "$temporary"
+		} >>"$logfile"
+		rm -f "$temporary"
+	else
+		mv -f "$temporary" "$logfile"
+	fi
 	echo "full log: $logfile"
 	tail -20 "$logfile" || true
 	if [[ $status -eq 0 ]]; then return 0; fi
