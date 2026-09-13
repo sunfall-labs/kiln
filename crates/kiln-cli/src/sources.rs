@@ -1149,13 +1149,13 @@ mod tests {
     }
 
     #[test]
-    fn node_commonjs_missing_require_is_left_for_runtime_catch() {
+    fn node_commonjs_conditional_require_and_import_are_deferred() {
         let tree = Tree::new("commonjs-optional-require");
         tree.file("main.cjs");
         let entry = tree.0.join("main.cjs");
         std::fs::write(
             &entry,
-            "if (false) require('./missing.cjs');\nimport('./missing.mjs').catch(() => {});\n",
+            "if (false) require('./missing.cjs');\nif (false) import('./missing.mjs');\n",
         )
         .expect("write entry");
         let canonical = entry.canonicalize().expect("canonical entry");
