@@ -59,7 +59,11 @@ def validate_checkout(checkout: pathlib.Path, *, minimum_files: int = 1) -> path
 
 
 def fetch_managed(destination: pathlib.Path | None = None, *, minimum_files: int = 1000) -> pathlib.Path:
-    destination = (destination or default_checkout()).expanduser().resolve(strict=False)
+    requested = pathlib.Path(destination or default_checkout()).expanduser()
+    requested = pathlib.Path(os.path.abspath(requested))
+    if os.path.lexists(requested) and requested.is_symlink():
+        raise CorpusError(f"managed checkout destination is a symlink; refusing to replace it: {requested}")
+    destination = requested.resolve(strict=False)
     if destination.exists() and (destination / ".git").exists():
         try:
             return validate_checkout(destination, minimum_files=minimum_files)

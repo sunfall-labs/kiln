@@ -108,6 +108,22 @@ class CorpusPolicyTests(unittest.TestCase):
                     corpus.command_fetch(type("Args", (), {"destination": None})())
             self.assertTrue(marker.exists())
 
+    def test_managed_fetch_rejects_live_and_broken_destination_symlinks(self):
+        source, head = self.valid()
+        destination_root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, destination_root, ignore_errors=True)
+        target = destination_root / "target"
+        target.write_text("preserve")
+        live = destination_root / "live"
+        live.symlink_to(target)
+        broken = destination_root / "broken"
+        broken.symlink_to(destination_root / "missing")
+        with mock.patch.object(corpus, "COMMIT", head), mock.patch.object(corpus, "REPOSITORY", f"file://{source}"):
+            for link in (live, broken):
+                with self.assertRaisesRegex(corpus.CorpusError, "symlink"):
+                    corpus.fetch_managed(link, minimum_files=1)
+        self.assertEqual(target.read_text(), "preserve")
+
 
 if __name__ == "__main__":
     unittest.main()
