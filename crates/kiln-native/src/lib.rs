@@ -5691,7 +5691,7 @@ fn write_graph_commonjs_shared_setup(
 ) {
     writeln!(
         output,
-        "    status = {module_symbol}_commonjs_wrapper(import_arrays[{index}], (size_t)5, {}, (size_t){}, {}, (size_t){}, kiln_commonjs_require_{index}, &commonjs_graph);\n    if (status != KILN_C99_OK) goto cleanup;\n    export_arrays[{index}][0] = import_arrays[{index}][0];\n    commonjs_modules[{index}] = (kiln_commonjs_context){{ {module_symbol}, proxy_host, import_arrays[{index}], (size_t)5, export_arrays[{index}], 0 }};",
+        "    status = {module_symbol}_commonjs_wrapper(import_arrays[{index}], (size_t)5, {}, (size_t){}, {}, (size_t){}, kiln_commonjs_require_{index}, commonjs_graph);\n    if (status != KILN_C99_OK) goto cleanup;\n    export_arrays[{index}][0] = import_arrays[{index}][0];\n    commonjs_modules[{index}] = (kiln_commonjs_context){{ {module_symbol}, proxy_host, import_arrays[{index}], (size_t)5, export_arrays[{index}], 0 }};",
         native_c_string(filename.as_str()),
         filename.as_str().len(),
         native_c_string(dirname.as_str()),
@@ -6962,7 +6962,7 @@ fn render_shared_wrapper_roots(
 ) {
     writeln!(
         output,
-        "\ntypedef struct {wrapper_symbol}_gc_context {{\n    kiln_value **imports;\n    kiln_value **exports;\n    kiln_value *namespaces;\n    kiln_value *result;\n}} {wrapper_symbol}_gc_context;"
+        "\ntypedef struct {wrapper_symbol}_gc_context {{\n    kiln_value **imports;\n    kiln_value **exports;\n    kiln_value *module_namespaces;\n    kiln_value *result;\n}} {wrapper_symbol}_gc_context;"
     )
     .unwrap();
     writeln!(
@@ -6997,7 +6997,7 @@ fn render_shared_wrapper_roots(
     };
     writeln!(
         output,
-        "static void {wrapper_symbol}_gc_roots(void *heap, void *context, int phase) {{\n    {wrapper_symbol}_gc_context *roots = ({wrapper_symbol}_gc_context *)context;\n    size_t module;\n    size_t index;\n    if (phase == KILN_GC_PHASE_RESET || roots == NULL) return;\n    for (module = 0; module < (size_t){count}; ++module) {{\n        if (roots->imports != NULL && roots->imports[module] != NULL)\n            for (index = 0; index < {wrapper_symbol}_gc_import_counts[module]; ++index)\n                (void)kiln_realm_gc_mark_value(heap, &roots->imports[module][index]);\n        if (roots->exports != NULL && roots->exports[module] != NULL)\n            for (index = 0; index < {wrapper_symbol}_gc_export_counts[module]; ++index)\n                (void)kiln_realm_gc_mark_value(heap, &roots->exports[module][index]);\n        if (roots->namespaces != NULL) (void)kiln_realm_gc_mark_value(heap, &roots->namespaces[module]);\n    }}\n    if (roots->result != NULL) (void)kiln_realm_gc_mark_value(heap, roots->result);{opentui_mark}\n}}",
+        "static void {wrapper_symbol}_gc_roots(void *heap, void *context, int phase) {{\n    {wrapper_symbol}_gc_context *roots = ({wrapper_symbol}_gc_context *)context;\n    size_t module;\n    size_t index;\n    if (phase == KILN_GC_PHASE_RESET || roots == NULL) return;\n    for (module = 0; module < (size_t){count}; ++module) {{\n        if (roots->imports != NULL && roots->imports[module] != NULL)\n            for (index = 0; index < {wrapper_symbol}_gc_import_counts[module]; ++index)\n                (void)kiln_realm_gc_mark_value(heap, &roots->imports[module][index]);\n        if (roots->exports != NULL && roots->exports[module] != NULL)\n            for (index = 0; index < {wrapper_symbol}_gc_export_counts[module]; ++index)\n                (void)kiln_realm_gc_mark_value(heap, &roots->exports[module][index]);\n        if (roots->module_namespaces != NULL) (void)kiln_realm_gc_mark_value(heap, &roots->module_namespaces[module]);\n    }}\n    if (roots->result != NULL) (void)kiln_realm_gc_mark_value(heap, roots->result);{opentui_mark}\n}}",
         count = modules.len()
     )
     .unwrap();
@@ -7304,7 +7304,28 @@ static kiln_commonjs_graph_context *kiln_graph_context_from_host(kiln_host *host
     };
     writeln!(
         output,
-        "\nstatic int {wrapper_symbol}_body(kiln_host *proxy_host, kiln_value *result) {{\n    kiln_value **import_arrays = NULL;\n    kiln_value **export_arrays = NULL;\n    kiln_value *namespaces = NULL;\n    kiln_commonjs_context *commonjs_modules = NULL;\n    kiln_commonjs_graph_context commonjs_graph;\n    {wrapper_symbol}_gc_context gc_context;\n    kiln_value module_result;\n    int status = KILN_C99_OK;\n    size_t index;\n    if (result == NULL || proxy_host == NULL) return KILN_C99_INVALID_ARGUMENT;\n    commonjs_graph = (kiln_commonjs_graph_context){{ NULL, NULL, (size_t){count} }};\n    *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};\n    if ((size_t){count} > (size_t)-1 / sizeof(*import_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*export_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*namespaces) ||\n        (size_t){count} > (size_t)-1 / sizeof(*commonjs_modules)) {{\n        status = KILN_C99_HOST_ERROR;\n        goto cleanup;\n    }}\n    import_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*import_arrays));\n    export_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*export_arrays));\n    namespaces = (kiln_value *)calloc((size_t){count}, sizeof(*namespaces));\n    commonjs_modules = (kiln_commonjs_context *)calloc((size_t){count}, sizeof(*commonjs_modules));\n    if (import_arrays == NULL || export_arrays == NULL || namespaces == NULL || commonjs_modules == NULL) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}\n    commonjs_graph.modules = commonjs_modules;\n    commonjs_graph.exports = export_arrays;\n    /* The wrapper host carries the graph context for callbacks, but preserves the embedding\n     * host's function and context verbatim for every host operation. */\n    if (proxy_host->context != NULL && proxy_host->call == kiln_proxy_call)\n        ((kiln_proxy_host *)proxy_host->context)->graph = &commonjs_graph;\n    if (kiln_graph_context_from_host(proxy_host) != &commonjs_graph) {{ status = KILN_C99_INVALID_ARGUMENT; goto cleanup; }}\n    gc_context.imports = import_arrays;\n    gc_context.exports = export_arrays;\n    gc_context.namespaces = namespaces;\n    gc_context.result = &module_result;\n    module_result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};\n    status = kiln_realm_gc_register_roots({wrapper_symbol}_gc_roots, &gc_context, 0);\n    if (status != KILN_C99_OK) goto cleanup;\n    kiln_shared_namespaces = namespaces;\n    kiln_shared_commonjs = commonjs_modules;{opentui_init}",
+        r#"
+typedef struct {wrapper_symbol}_realm_context {{
+    kiln_value *result;
+    kiln_proxy_arena arena;
+    kiln_proxy_host proxy;
+    kiln_host proxy_host;
+    kiln_value **shared_import_arrays;
+    kiln_value **shared_export_arrays;
+    kiln_value *shared_namespaces;
+    kiln_commonjs_context *shared_commonjs_modules;
+    kiln_commonjs_graph_context shared_commonjs_graph;
+    {wrapper_symbol}_gc_context shared_gc_context;
+    kiln_value shared_module_result;
+    int roots_registered;
+}} {wrapper_symbol}_realm_context;
+"#,
+        wrapper_symbol = wrapper_symbol,
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "\nstatic int {wrapper_symbol}_body({wrapper_symbol}_realm_context *context) {{\n    kiln_host *proxy_host;\n    kiln_value *result;\n    kiln_value **import_arrays = NULL;\n    kiln_value **export_arrays = NULL;\n    kiln_value *namespaces = NULL;\n    kiln_commonjs_context *commonjs_modules = NULL;\n    kiln_commonjs_graph_context *commonjs_graph;\n    {wrapper_symbol}_gc_context *gc_context;\n    /* All graph storage belongs to the realm context and survives this body until drive and\n     * realm teardown have completed. */\n    #define module_result (context->shared_module_result)\n    int status = KILN_C99_OK;\n    size_t index;\n    if (context == NULL) return KILN_C99_INVALID_ARGUMENT;\n    proxy_host = &context->proxy_host;\n    result = context->result;\n    import_arrays = context->shared_import_arrays;\n    export_arrays = context->shared_export_arrays;\n    namespaces = context->shared_namespaces;\n    commonjs_modules = context->shared_commonjs_modules;\n    commonjs_graph = &context->shared_commonjs_graph;\n    gc_context = &context->shared_gc_context;\n    if (result == NULL || proxy_host == NULL) return KILN_C99_INVALID_ARGUMENT;\n    *commonjs_graph = (kiln_commonjs_graph_context){{ NULL, NULL, (size_t){count} }};\n    *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};\n    if ((size_t){count} > (size_t)-1 / sizeof(*import_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*export_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*namespaces) ||\n        (size_t){count} > (size_t)-1 / sizeof(*commonjs_modules)) {{\n        status = KILN_C99_HOST_ERROR;\n        goto cleanup;\n    }}\n    import_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*import_arrays));\n    export_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*export_arrays));\n    namespaces = (kiln_value *)calloc((size_t){count}, sizeof(*namespaces));\n    commonjs_modules = (kiln_commonjs_context *)calloc((size_t){count}, sizeof(*commonjs_modules));\n    if (import_arrays == NULL || export_arrays == NULL || namespaces == NULL || commonjs_modules == NULL) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}\n    commonjs_graph->modules = commonjs_modules;\n    commonjs_graph->exports = export_arrays;\n    /* The wrapper host carries the graph context for callbacks, but preserves the embedding\n     * host's function and context verbatim for every host operation. */\n    if (proxy_host->context != NULL && proxy_host->call == kiln_proxy_call)\n        ((kiln_proxy_host *)proxy_host->context)->graph = commonjs_graph;\n    if (kiln_graph_context_from_host(proxy_host) != commonjs_graph) {{ status = KILN_C99_INVALID_ARGUMENT; goto cleanup; }}\n    gc_context->imports = import_arrays;\n    gc_context->exports = export_arrays;\n    gc_context->module_namespaces = namespaces;\n    gc_context->result = &module_result;\n    module_result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};\n    status = kiln_realm_gc_register_roots({wrapper_symbol}_gc_roots, gc_context, KILN_GC_ROOT_SURVIVES_TEARDOWN);\n    if (status != KILN_C99_OK) goto cleanup;\n    context->roots_registered = 1;\n    kiln_shared_namespaces = namespaces;\n    kiln_shared_commonjs = commonjs_modules;{opentui_init}",
         wrapper_symbol = wrapper_symbol,
         count = modules.len(),
     )
@@ -7435,24 +7456,10 @@ static kiln_commonjs_graph_context *kiln_graph_context_from_host(kiln_host *host
     } else {
         ""
     };
-    output.push_str(&format!("cleanup:\n    kiln_shared_namespaces = NULL;\n    kiln_shared_commonjs = NULL;{opentui_cleanup}\n"));
-    writeln!(
-        output,
-        "    (void)kiln_realm_gc_unregister_roots({wrapper_symbol}_gc_roots, &gc_context);"
-    )
-    .unwrap();
-    output.push_str("    for (index = 0; index < (size_t)");
-    write!(output, "{}; ++index) {{\n        free(import_arrays == NULL ? NULL : import_arrays[index]);\n        free(export_arrays == NULL ? NULL : export_arrays[index]);\n    }}\n    free(import_arrays);\n    free(export_arrays);\n    free(namespaces);\n    free(commonjs_modules);\n    return status;\n}}\n", modules.len()).unwrap();
+    output.push_str("cleanup:\n    #undef module_result\n    return status;\n}\n");
     writeln!(
         output,
         r#"
-typedef struct {wrapper_symbol}_realm_context {{
-    kiln_value *result;
-    kiln_proxy_arena arena;
-    kiln_proxy_host proxy;
-    kiln_host proxy_host;
-}} {wrapper_symbol}_realm_context;
-
 static void {wrapper_symbol}_gc_result_roots(void *heap, void *context, int phase) {{
     if (phase == KILN_GC_PHASE_RESET || context == NULL) return;
     (void)kiln_realm_gc_mark_value(heap, context);
@@ -7465,7 +7472,7 @@ static int {wrapper_symbol}_realm_entry(void *opaque) {{
     status = kiln_realm_gc_register_roots({wrapper_symbol}_gc_result_roots, context->result,
                                           KILN_GC_ROOT_SURVIVES_TEARDOWN);
     if (status != KILN_C99_OK) return status;
-    return {wrapper_symbol}_body(&context->proxy_host, context->result);
+    return {wrapper_symbol}_body(context);
 }}
 
 static int {impl_symbol}(kiln_host *host, kiln_value *result, int preserve_result) {{
@@ -7475,6 +7482,7 @@ static int {impl_symbol}(kiln_host *host, kiln_value *result, int preserve_resul
     int status;
     int destroy_status;
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
+    memset(&context, 0, sizeof(context));
     context.result = result;
     context.arena = (kiln_proxy_arena){{ NULL, 0, 0 }};
     context.proxy = (kiln_proxy_host){{ host, NULL, &context.arena, KILN_C99_OK }};
@@ -7504,6 +7512,16 @@ static int {impl_symbol}(kiln_host *host, kiln_value *result, int preserve_resul
         destroy_status = kiln_realm_destroy(realm);
         if (status == KILN_C99_OK) status = destroy_status;
     }}
+    kiln_shared_namespaces = NULL;
+    kiln_shared_commonjs = NULL;{opentui_cleanup}
+    for (size_t cleanup_index = 0; cleanup_index < (size_t){count}; ++cleanup_index) {{
+        free(context.shared_import_arrays == NULL ? NULL : context.shared_import_arrays[cleanup_index]);
+        free(context.shared_export_arrays == NULL ? NULL : context.shared_export_arrays[cleanup_index]);
+    }}
+    free(context.shared_import_arrays);
+    free(context.shared_export_arrays);
+    free(context.shared_namespaces);
+    free(context.shared_commonjs_modules);
     kiln_proxy_arena_clear(&context.arena);
     if (preserved != NULL) result->ptr = preserved;
     return status;
@@ -7512,7 +7530,8 @@ static int {impl_symbol}(kiln_host *host, kiln_value *result, int preserve_resul
 int {wrapper_symbol}(kiln_host *host, kiln_value *result) {{
     return {impl_symbol}(host, result, 0);
 }}
-"#
+"#,
+        count = modules.len(),
     )
     .unwrap();
     let invocation = format!("{impl_symbol}(&proxy_host, &value, 1)");
