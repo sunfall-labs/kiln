@@ -2943,6 +2943,97 @@ fn node_builtin_http2_commonjs_require_evaluates_cleanly() {
 }
 
 #[test]
+fn node_builtin_zlib_evaluates_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import zlib, { constants, deflateSync, inflateSync, gzipSync, gunzipSync, unzipSync } from 'node:zlib';\n",
+            "const def = deflateSync('hello zlib');\n",
+            "const inf = inflateSync(def);\n",
+            "const gz = gzipSync('hello gzip');\n",
+            "const ungz = gunzipSync(gz);\n",
+            "const unz = unzipSync(def);\n",
+            "console.log(\n",
+            "  constants.Z_OK === 0,\n",
+            "  inf.toString() === 'hello zlib',\n",
+            "  ungz.toString() === 'hello gzip',\n",
+            "  unz.toString() === 'hello zlib',\n",
+            ");\n",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with zlib builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute zlib builtin");
+    assert_eq!(host.output, ["true true true true"]);
+}
+
+#[test]
+fn node_builtin_zlib_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const zlib = require('node:zlib');\n",
+            "const def = zlib.deflateSync('hello zlib cjs');\n",
+            "const inf = zlib.inflateSync(def);\n",
+            "const gz = zlib.gzipSync('hello gzip cjs');\n",
+            "const ungz = zlib.gunzipSync(gz);\n",
+            "module.exports = {\n",
+            "  hasConst: zlib.constants.Z_OK === 0,\n",
+            "  infMatch: inf.toString() === 'hello zlib cjs',\n",
+            "  ungzMatch: ungz.toString() === 'hello gzip cjs',\n",
+            "  isObj: typeof zlib === 'object',\n",
+            "};\n",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import bridge from './bridge.cjs';\n",
+            "console.log(bridge.hasConst, bridge.infMatch, bridge.ungzMatch, bridge.isObj);\n",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with zlib builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute zlib builtin cjs");
+    assert_eq!(host.output, ["true true true true"]);
+}
+
+#[test]
 fn node_net_connect_is_a_typed_virtual_module_export() {
     let project = TempProject::new();
     let entry = project.write(

@@ -5633,3 +5633,17 @@ Implemented the long-term architectural solution per ADR 0005 and the Phase 5.1/
 - Resolved both `conformance/native/typed-array-codecs-refuse.ts` and `conformance/native/json-roundtrip-edge-refuses.js`.
 - Native conformance backlog in `scripts/native.sh` dropped from 5 to 3 refusals (182 matched, 3 refused, 0 diverged).
 - Rebased cleanly on `main`.
+
+---
+
+## Phase 5.2 TypeScript built-ins: `node:zlib` (2026-09-13)
+
+Migrated `node:zlib` completely to TypeScript via `crates/kiln-builtins/src/node/zlib.ts`
+with zero additions to the C runtime prelude (Phase 5.1 freeze strictly honored). Implemented canonical
+exports (`constants`, `createBrotliDecompress`, `createDeflate`, `createGunzip`, `createGzip`, `createInflate`,
+`createUnzip`, `default`, `deflateSync`, `gunzipSync`, `gzipSync`, `inflateSync`, `unzipSync`), including RFC 1951
+Deflate and Inflate with dynamic/fixed Huffman decoding, RFC 1950 zlib framing with Adler-32, RFC 1952 gzip framing with CRC-32,
+and streaming transform pipelines.
+Verified with native probe `conformance/native/node-zlib-members.cjs` (byte-for-byte identical output
+between interpreter and native CLI), integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`,
+and full `scripts/native.sh` parity (184 matched, 3 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
