@@ -19,6 +19,11 @@ fn main() {
             "{}",
             serde_json::to_string(&kiln_native_provider_contract::contract()).unwrap()
         ),
+        Some("abi") => println!("{}", kiln_native_provider_contract::contract().provider_abi),
+        Some("exports") => println!(
+            "{}",
+            kiln_native_provider_contract::contract().exports.join(" ")
+        ),
         _ => {
             eprintln!("usage: kiln-native-provider-contract <contract|source-digest [root]>");
             std::process::exit(2);

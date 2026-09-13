@@ -56,12 +56,8 @@ kiln_number_sha256_stream() {
 # the two identities independently of the packager so a checkout build and installed archive share
 # native cache entries.
 KILN_NUMBER_EXPECTED_SOURCE_DIGEST=$(
-	while IFS= read -r KILN_NUMBER_SOURCE || [[ -n $KILN_NUMBER_SOURCE ]]; do
-		[[ -z $KILN_NUMBER_SOURCE ]] && continue
-		KILN_NUMBER_SOURCE_SIZE=$(wc -c <"$KILN_NUMBER_SOURCE" | tr -d '[:space:]')
-		printf '%s\0%s\0' "$KILN_NUMBER_SOURCE" "$KILN_NUMBER_SOURCE_SIZE"
-		dd if="$KILN_NUMBER_SOURCE" bs=65536 2>/dev/null
-	done < crates/kiln-native/provider-sources.txt | kiln_number_sha256_stream
+	"${CARGO:-cargo}" run --quiet -p kiln-native-provider-contract --bin kiln-native-provider-contract -- \
+		source-digest "$(kiln_repo_root)"
 )
 KILN_NUMBER_MANIFEST_SOURCE_DIGEST=$(
 	sed -n 's/^  "source_sha256": "\([0-9a-f]*\)",$/\1/p' "$KILN_NUMBER_MANIFEST"

@@ -141,8 +141,7 @@ trap kiln_provider_cleanup EXIT
 # Keep the shipped manifest tied to the ABI the resolver validates. This is intentionally read from
 # the Rust source rather than duplicated as a second version constant in the shell packager.
 KILN_PROVIDER_ABI_VERSION=$(
-	sed -n 's/^pub const PROVIDER_ABI_VERSION: u32 = \([0-9][0-9]*\);$/\1/p' \
-		crates/kiln-native-number-abi/src/lib.rs
+	"$KILN_PROVIDER_CARGO" run --quiet -p kiln-native-provider-contract --bin kiln-native-provider-contract -- abi
 )
 if [[ ! $KILN_PROVIDER_ABI_VERSION =~ ^[0-9]+$ ]]; then
 	printf 'could not determine number-provider ABI version\n' >&2
@@ -153,9 +152,8 @@ fi
 # manifest does not name *exactly* the symbols it requires. This intentionally bounded extraction
 # reads the registry entries, rather than maintaining another list in the packager.
 KILN_PROVIDER_EXPORTS=$(
-	sed -n '/^macro_rules! provider_abi_registry/,/^}/p' crates/kiln-native-number-abi/src/lib.rs |
-		sed -n 's/.*\(kiln_[A-Za-z0-9_]*\).*/"\1"/p' |
-		paste -sd, -
+	"$KILN_PROVIDER_CARGO" run --quiet -p kiln-native-provider-contract --bin kiln-native-provider-contract -- exports |
+		awk '{for (i=1; i<=NF; i++) printf "%s\"%s\"", (i==1 ? "" : ","), $i}'
 )
 if [[ -z $KILN_PROVIDER_EXPORTS ]]; then
 	printf 'could not determine the number-provider export list\n' >&2
@@ -225,14 +223,12 @@ KILN_PROVIDER_ARCHIVE_DIGEST=$(kiln_provider_sha256_file "$KILN_PROVIDER_ARCHIVE
 KILN_PROVIDER_RUSTC_DIGEST=$("$KILN_PROVIDER_RUSTC" -vV | kiln_provider_sha256_stream)
 KILN_PROVIDER_LISTED="$(mktemp)"
 KILN_PROVIDER_SOURCE_DIGEST=$(
-	while IFS= read -r KILN_PROVIDER_SOURCE || [[ -n $KILN_PROVIDER_SOURCE ]]; do
-		[[ -z $KILN_PROVIDER_SOURCE ]] && continue
-		KILN_PROVIDER_SIZE=$(wc -c <"$KILN_PROVIDER_SOURCE" | tr -d '[:space:]')
-		printf '%s\n' "$KILN_PROVIDER_SOURCE" >>"$KILN_PROVIDER_LISTED"
-		printf '%s\0%s\0' "$KILN_PROVIDER_SOURCE" "$KILN_PROVIDER_SIZE"
-		dd if="$KILN_PROVIDER_SOURCE" bs=65536 2>/dev/null
-	done < crates/kiln-native/provider-sources.txt | kiln_provider_sha256_stream
+	"$KILN_PROVIDER_CARGO" run --quiet -p kiln-native-provider-contract --bin kiln-native-provider-contract -- \
+		source-digest "$(kiln_repo_root)"
 )
+while IFS= read -r KILN_PROVIDER_SOURCE || [[ -n $KILN_PROVIDER_SOURCE ]]; do
+	[[ -z $KILN_PROVIDER_SOURCE ]] || printf '%s\n' "$KILN_PROVIDER_SOURCE" >>"$KILN_PROVIDER_LISTED"
+done < crates/kiln-native/provider-sources.txt
 
 # The manifest is intentionally explicit, and an explicit list of inputs has one failure mode: a
 # file that belongs in it and is not. That file's contents then cannot change the digest,
