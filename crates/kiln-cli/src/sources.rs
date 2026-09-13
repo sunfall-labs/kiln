@@ -391,7 +391,7 @@ pub(crate) fn include_reachable_dependencies(
         } else {
             (frontend_oxc::parse(importer_path, importer_text), None)
         };
-        let requests = if commonjs {
+        let mut requests = if commonjs {
             static_requires.expect("CommonJS facts exist")
         } else {
             module
@@ -400,6 +400,18 @@ pub(crate) fn include_reachable_dependencies(
                 .map(|request| request.specifier.clone())
                 .collect()
         };
+        // Dynamic imports with a literal target are graph edges too.  The compiler records
+        // these separately from static import declarations because their evaluation is deferred,
+        // but source synchronization still has to capture the complete reachable closure.  If we
+        // omit them, native graph construction can discover a downstream relative import whose
+        // source and pinned Node format were never sent by the client.
+        for target in kiln_ir::collect_dynamic_imports(&module.body) {
+            if let kiln_ir::DynamicImportTarget::Static(specifier) = target
+                && !requests.contains(&specifier)
+            {
+                requests.push(specifier);
+            }
+        }
 
         for specifier in requests {
             if node && kiln_module_resolver::NodeBuiltin::parse(&specifier).is_some() {
@@ -858,6 +870,57 @@ mod tests {
             )
         );
         assert!(node_formats.is_empty());
+    }
+
+    #[test]
+    fn captures_literal_dynamic_import_closure_and_formats() {
+        let tree = Tree::new("reachable-dynamic-package");
+        tree.file("src/main.mjs");
+        tree.file("node_modules/pkg/index.mjs");
+        tree.file("node_modules/pkg/nested.mjs");
+        tree.file("node_modules/pkg/leaf.mjs");
+        std::fs::write(
+            tree.0.join("src/main.mjs"),
+            "import('pkg').then(console.log);\n",
+        )
+        .expect("write entry");
+        std::fs::write(
+            tree.0.join("node_modules/pkg/package.json"),
+            r#"{"exports":"./index.mjs","type":"module"}"#,
+        )
+        .expect("write manifest");
+        std::fs::write(
+            tree.0.join("node_modules/pkg/index.mjs"),
+            "export { value } from './nested.mjs';\n",
+        )
+        .expect("write package entry");
+        std::fs::write(
+            tree.0.join("node_modules/pkg/nested.mjs"),
+            "export { value } from './leaf.mjs';\n",
+        )
+        .expect("write nested module");
+        std::fs::write(
+            tree.0.join("node_modules/pkg/leaf.mjs"),
+            "export const value = 42;\n",
+        )
+        .expect("write leaf module");
+
+        let entry = tree.0.join("src/main.mjs").canonicalize().expect("entry");
+        let mut texts = vec![(
+            entry.to_string_lossy().into_owned(),
+            std::fs::read_to_string(&entry).expect("read entry"),
+        )];
+        let (resolutions, formats) = include_reachable_dependencies(
+            &tree.0,
+            entry.to_str().expect("UTF-8 entry"),
+            &mut texts,
+            true,
+        )
+        .expect("capture dynamic closure");
+
+        assert_eq!(resolutions.len(), 3);
+        assert_eq!(texts.len(), 4);
+        assert_eq!(formats.len(), 4);
     }
 
     /// The project walk skips every dot-directory, so nothing under `.scratch/` is in the
