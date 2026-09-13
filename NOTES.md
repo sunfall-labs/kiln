@@ -5612,6 +5612,18 @@ and full `scripts/native.sh` parity (180 matched, 5 refused, 0 diverged). Mainta
 
 ---
 
+## Phase 5.2 TypeScript built-ins: `node:http2` (2026-09-13)
+
+Migrated `node:http2` completely to TypeScript via `crates/kiln-builtins/src/node/http2.ts`
+with zero additions to the C runtime prelude (Phase 5.1 freeze strictly honored). Implemented canonical
+exports (`createSecureServer`, `createServer`, `default`), deterministically reporting that HTTP/2 host
+capabilities are unavailable in this realm across both interpreter and native CLI.
+Verified with native probe `conformance/native/node-http2-members.cjs` (byte-for-byte identical output
+between interpreter and native CLI), integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`,
+and full `scripts/native.sh` parity (181 matched, 5 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
+
+---
+
 ## Ambient TypeScript prelude & intrinsics: `Uint8Array` codecs and JSON reviver/replacer (2026-09-13)
 
 Implemented the long-term architectural solution per ADR 0005 and the Phase 5.1/5.2 freeze:

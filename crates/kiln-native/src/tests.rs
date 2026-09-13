@@ -9786,3 +9786,99 @@ fn native_node_crypto_commonjs_require_builds_and_runs() {
     let stdout = String::from_utf8_lossy(&result.stdout);
     assert!(stdout.contains("cjs-crypto: object function true"));
 }
+
+#[test]
+fn native_node_http2_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-http2-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import http2, { createServer, createSecureServer } from 'node:http2';\n",
+            "let threw = false;\n",
+            "try {\n",
+            "  createServer();\n",
+            "} catch (e) {\n",
+            "  threw = true;\n",
+            "}\n",
+            "console.log('http2-ts:', typeof http2, typeof createServer, typeof createSecureServer, threw);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("http2_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run http2 binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("http2-ts: object function function true"));
+}
+
+#[test]
+fn native_node_http2_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-http2-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const http2 = require('node:http2');\n",
+            "let threw = false;\n",
+            "try {\n",
+            "  http2.createSecureServer();\n",
+            "} catch (e) {\n",
+            "  threw = true;\n",
+            "}\n",
+            "console.log('cjs-http2:', typeof http2, typeof http2.createServer, threw);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("http2_cjs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run http2 cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("cjs-http2: object function true"));
+}
