@@ -1440,11 +1440,22 @@ mod realm {
             kiln_runtime::yield_to_tasks().await;
             let delay =
                 introspect_park(realm, deadline.map(|deadline| deadline.saturating_sub(now)));
-            // A timer wake can be the introspection poll rather than the realm deadline. The
-            // poll only brings us back around to observe signals; it must not consume the next
-            // language timer early. The loop's due check above is the single authority that
-            // decides when a timer may run.
-            let _ = kiln_runtime::wait_for_turn(signal, delay).await;
+            // A wall-clock timer wake can be the introspection poll rather than the realm
+            // deadline. The poll only brings us back around to observe signals; it must not
+            // consume the next language timer early. Virtual realms use Tokio's timer wake to
+            // advance their deterministic `RealmWork::now`, so they still consume it here.
+            if kiln_runtime::wait_for_turn(signal, delay).await == kiln_runtime::DriveWake::Timer
+                && matches!(realm.clock.get(), NativeClock::Virtual)
+            {
+                let timer = realm.work.borrow_mut().run_next_timer();
+                if let Some(WorkItem::Timer { work, .. }) = timer {
+                    let (host, thrown) = realm.drive_context.get();
+                    let status = work.run(host, thrown);
+                    if status != 0 {
+                        return status;
+                    }
+                }
+            }
         }
     }
 
