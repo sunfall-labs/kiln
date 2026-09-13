@@ -735,6 +735,7 @@ impl ModuleGraph {
             provider,
             typed_sources,
             modules: BTreeMap::new(),
+            source_kinds: HashMap::new(),
             states: HashMap::new(),
             stack: Vec::new(),
             order: Vec::new(),
@@ -1983,6 +1984,7 @@ struct Builder<P, R> {
     provider: P,
     typed_sources: bool,
     modules: BTreeMap<PathBuf, ModuleNode>,
+    source_kinds: HashMap<PathBuf, ModuleSource>,
     states: HashMap<PathBuf, VisitState>,
     stack: Vec<PathBuf>,
     order: Vec<PathBuf>,
@@ -2084,6 +2086,7 @@ where
                                 source => source,
                             }
                         };
+                        self.source_kinds.insert(path.clone(), source);
                         self.states.insert(path.clone(), VisitState::Visiting);
                         self.stack.push(path.clone());
                         let (program, data) = match source {
@@ -2194,6 +2197,17 @@ where
                             })? == Some(NodeModuleFormat::CommonJs)
                             {
                                 ModuleSource::CommonJs
+                            } else if !self.typed_sources {
+                                ModuleSource::Source
+                            } else if self.resolver.node_format(&resolved).map_err(|error| {
+                                ModuleGraphError::Resolve {
+                                    importer: path.clone(),
+                                    specifier: specifier.clone(),
+                                    error,
+                                }
+                            })? == Some(NodeModuleFormat::CommonJs)
+                            {
+                                ModuleSource::CommonJs
                             } else {
                                 ModuleSource::Source
                             };
@@ -2224,7 +2238,9 @@ where
                                 continue;
                             };
                             let target_path = resolved.path.clone();
-                            let source = if let Some(builtin) = resolved.builtin() {
+                            let source = if let Some(source) = self.source_kinds.get(&target_path) {
+                                *source
+                            } else if let Some(builtin) = resolved.builtin() {
                                 ModuleSource::NodeBuiltin(builtin)
                             } else if target_path
                                 .extension()
