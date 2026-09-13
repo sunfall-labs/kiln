@@ -1353,7 +1353,6 @@ fn typed_node_querystring_has_a_native_materializer() {
     .expect("typed node graph");
 
     native_graph_plan(&graph).expect("querystring materializes");
-    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::QueryString));
     for export in kiln_builtins::QUERYSTRING_EXPORTS {
         assert!(native_builtin_supports_export(
             NodeBuiltin::QueryString,
@@ -1532,42 +1531,32 @@ module.exports = { loads: globalThis.__loads };"#,
 #[test]
 fn node_events_is_a_ts_builtin_and_https_has_a_native_runtime_materializer() {
     use kiln_module_resolver::NodeBuiltin;
-
-    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Events));
     assert!(native_builtin_supports_export(
         NodeBuiltin::Events,
         "EventEmitter"
     ));
-    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Buffer));
     assert!(native_builtin_supports_export(
         NodeBuiltin::Buffer,
         "Buffer"
     ));
     assert!(native_builtin_supports_export(NodeBuiltin::Buffer, "alloc"));
-    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::StringDecoder));
     assert!(native_builtin_supports_export(
         NodeBuiltin::StringDecoder,
         "StringDecoder"
     ));
-    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::QueryString));
     assert!(native_builtin_supports_export(
         NodeBuiltin::QueryString,
         "parse"
     ));
-    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Util));
     assert!(native_builtin_supports_export(NodeBuiltin::Util, "format"));
     assert!(native_builtin_supports_export(
         NodeBuiltin::Util,
         "promisify"
     ));
-    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Url));
     assert!(native_builtin_supports_export(NodeBuiltin::Url, "parse"));
     assert!(native_builtin_supports_export(
         NodeBuiltin::Url,
         "fileURLToPath"
-    ));
-    assert!(kiln_builtins::is_ts_builtin(
-        NodeBuiltin::DiagnosticsChannel
     ));
     assert!(native_builtin_supports_export(
         NodeBuiltin::DiagnosticsChannel,
@@ -1577,7 +1566,6 @@ fn node_events_is_a_ts_builtin_and_https_has_a_native_runtime_materializer() {
         NodeBuiltin::DiagnosticsChannel,
         "tracingChannel"
     ));
-    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::PerfHooks));
     assert!(native_builtin_supports_export(
         NodeBuiltin::PerfHooks,
         "performance"
@@ -1586,13 +1574,11 @@ fn node_events_is_a_ts_builtin_and_https_has_a_native_runtime_materializer() {
         NodeBuiltin::PerfHooks,
         "PerformanceEntry"
     ));
-    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Console));
     assert!(native_builtin_supports_export(
         NodeBuiltin::Console,
         "Console"
     ));
     assert!(native_builtin_supports_export(NodeBuiltin::Console, "log"));
-    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Tty));
     assert!(native_builtin_supports_export(NodeBuiltin::Tty, "isatty"));
     assert!(native_builtin_supports_export(
         NodeBuiltin::Tty,
@@ -1602,7 +1588,6 @@ fn node_events_is_a_ts_builtin_and_https_has_a_native_runtime_materializer() {
         NodeBuiltin::Tty,
         "WriteStream"
     ));
-    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::WorkerThreads));
     assert!(native_builtin_supports_export(
         NodeBuiltin::WorkerThreads,
         "Worker"
@@ -1611,7 +1596,6 @@ fn node_events_is_a_ts_builtin_and_https_has_a_native_runtime_materializer() {
         NodeBuiltin::WorkerThreads,
         "isMainThread"
     ));
-    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Module));
     assert!(native_builtin_supports_export(
         NodeBuiltin::Module,
         "Module"
@@ -1624,16 +1608,12 @@ fn node_events_is_a_ts_builtin_and_https_has_a_native_runtime_materializer() {
         NodeBuiltin::Module,
         "builtinModules"
     ));
-    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Https));
     assert!(native_builtin_supports_export(
         NodeBuiltin::Https,
         "createServer"
     ));
-    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Path));
     assert!(native_builtin_supports_export(NodeBuiltin::Path, "join"));
-    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Assert));
     assert!(native_builtin_supports_export(NodeBuiltin::Assert, "ok"));
-    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Zlib));
     assert!(native_builtin_supports_export(
         NodeBuiltin::Zlib,
         "deflateSync"
@@ -1643,8 +1623,6 @@ fn node_events_is_a_ts_builtin_and_https_has_a_native_runtime_materializer() {
 #[test]
 fn node_net_is_typescript_builtin_and_supports_exports() {
     use kiln_module_resolver::NodeBuiltin;
-
-    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Net));
     assert!(native_builtin_supports_export(NodeBuiltin::Net, "connect"));
     assert!(native_builtin_supports_export(
         NodeBuiltin::Net,
@@ -1655,16 +1633,12 @@ fn node_net_is_typescript_builtin_and_supports_exports() {
         "createServer"
     ));
     assert!(native_builtin_supports_export(NodeBuiltin::Net, "default"));
-    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Https));
-    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Path));
     assert!(native_builtin_supports_export(NodeBuiltin::Path, "resolve"));
 }
 
 #[test]
 fn node_stream_is_typescript_builtin_and_supports_exports() {
     use kiln_module_resolver::NodeBuiltin;
-
-    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Stream));
     assert!(native_builtin_supports_export(
         NodeBuiltin::Stream,
         "Readable"
@@ -1824,8 +1798,6 @@ writeFile({path:?}, 'héllo').then(() => readFile({path:?}, 'utf8')).then((text)
 #[test]
 fn node_ffi_is_typescript_builtin_and_supports_exports() {
     use kiln_module_resolver::NodeBuiltin;
-
-    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Ffi));
     for export in kiln_builtins::FFI_EXPORTS {
         assert!(native_builtin_supports_export(NodeBuiltin::Ffi, export));
     }
@@ -1834,9 +1806,6 @@ fn node_ffi_is_typescript_builtin_and_supports_exports() {
 #[test]
 fn node_fs_is_typescript_builtin_and_supports_exports() {
     use kiln_module_resolver::NodeBuiltin;
-
-    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Fs));
-    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::FsPromises));
     for export in kiln_builtins::FS_EXPORTS {
         assert!(native_builtin_supports_export(NodeBuiltin::Fs, export));
     }
@@ -1851,8 +1820,6 @@ fn node_fs_is_typescript_builtin_and_supports_exports() {
 #[test]
 fn node_http_is_typescript_builtin_and_supports_exports() {
     use kiln_module_resolver::NodeBuiltin;
-
-    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Http));
     assert!(native_builtin_supports_export(
         NodeBuiltin::Http,
         "IncomingMessage"

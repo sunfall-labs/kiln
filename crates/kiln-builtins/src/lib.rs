@@ -34,17 +34,6 @@ macro_rules! declare_ts_builtins {
             }
         }
 
-        /// Every resolver builtin is implemented as a TypeScript module.
-        pub fn is_ts_builtin(builtin: NodeBuiltin) -> bool {
-            let _ = builtin;
-            true
-        }
-
-        /// Whether a specifier names a resolver builtin with an authoritative TS implementation.
-        pub fn is_ts_builtin_specifier(specifier: &str) -> bool {
-            NodeBuiltin::parse(specifier).is_some()
-        }
-
         /// The canonical specifiers whose values come from graph evaluation.
         pub fn ts_builtin_specifiers() -> Vec<&'static str> {
             NodeBuiltin::ALL
