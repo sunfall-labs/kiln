@@ -109,23 +109,35 @@ validate_checkout "$CHECKOUT"
 # pay one compiler/daemon startup, then stream all selected variants through the existing batch.
 set +e
 python3 - "$KILN_BIN" "$CHECKOUT/test" "$RAW_RESULTS" "$RESULTS" "$TEST262_REPOSITORY" "$TEST262_COMMIT" <<-'PY'
-	import json
-	import os
-	import subprocess
-	import sys
-	import time
+import json
+import os
+import pathlib
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, str(pathlib.Path.cwd() / "scripts"))
+from test262_memory import run_limited, verify_effective_cap
 
 	kiln, test_root, raw_path, result_path, repository, commit = sys.argv[1:]
+	try:
+	    verify_effective_cap()
+	except Exception as error:
+	    sys.stderr.write(f"test262.sh: memory cap verification failed: {error}\n")
+	    raise SystemExit(1)
 	started = time.monotonic()
-	completed = subprocess.run(
+	completed, exceeded = run_limited(
 	    [kiln, "test", test_root, "--out", raw_path],
 	    cwd=os.getcwd(),
 	    stdout=subprocess.PIPE,
 	    stderr=subprocess.STDOUT,
 	    text=True,
 	)
+	output, _ = completed.communicate()
 	elapsed = time.monotonic() - started
-	print(completed.stdout, end="")
+	print(output, end="")
+	if exceeded:
+	    sys.stderr.write(f"test262.sh: child exceeded memory cap; no result document (raw log: {raw_path})\n")
 	if not os.path.isfile(raw_path):
 	    sys.stderr.write("test262.sh: kiln wrote no result document\n")
 	    raise SystemExit(completed.returncode or 1)
