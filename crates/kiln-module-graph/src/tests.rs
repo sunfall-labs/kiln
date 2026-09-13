@@ -1,7 +1,9 @@
 use super::*;
 use kiln_host_abi::{HostError, HostOp, HostValue};
 use kiln_ir::{BYTECODE_VERSION, Instruction, Program};
-use kiln_module_resolver::{NodePackageResolver, NodeRuntimeResolver};
+use kiln_module_resolver::{
+    NodeModuleFormat, NodePackageResolver, NodeRuntimeResolver, PinnedPackageResolver,
+};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
@@ -540,6 +542,66 @@ fn node_executes_commonjs_named_export_and_reexport_interop() {
         .expect("execute mixed graph");
     assert_eq!(host.into_stdout(), "fragment-value <div/>\n");
     assert_eq!(execution.value, Value::Undefined);
+}
+
+#[test]
+fn pinned_js_format_survives_graph_entry_without_reclassification() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        "import value from './dep.js'; console.log(value);",
+    );
+    let dep = project.write("dep.js", "module.exports = 42;");
+    let dep_canonical = fs::canonicalize(&dep).unwrap();
+    let resolver = PinnedPackageResolver::new_with_node_builtins_and_formats(
+        &project.root,
+        [(entry.clone(), "./dep.js".to_owned(), dep.clone())],
+        [(dep_canonical, NodeModuleFormat::CommonJs)],
+    )
+    .expect("pinned resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("pinned CommonJS graph");
+    assert!(
+        graph
+            .modules()
+            .find(|node| node.path.ends_with("dep.js"))
+            .is_some_and(|node| node.source == ModuleSource::CommonJs)
+    );
+}
+
+#[test]
+fn dynamic_only_pinned_js_format_selects_commonjs_source() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        "const value = await import('./dep.js'); console.log(value.default);",
+    );
+    let dep = project.write("dep.js", "module.exports = 42;");
+    let dep_canonical = fs::canonicalize(&dep).unwrap();
+    let resolver = PinnedPackageResolver::new_with_node_builtins_and_formats(
+        &project.root,
+        [(entry.clone(), "./dep.js".to_owned(), dep.clone())],
+        [(dep_canonical, NodeModuleFormat::CommonJs)],
+    )
+    .expect("pinned resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("dynamic-only pinned CommonJS graph");
+    assert!(
+        graph
+            .modules()
+            .find(|node| node.path.ends_with("dep.js"))
+            .is_some_and(|node| node.source == ModuleSource::CommonJs)
+    );
 }
 
 #[test]
