@@ -5513,4 +5513,19 @@ Verified with native probe `conformance/native/node-diagnostics-channel-members.
 interpreter and native CLI), integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`, and full
 `scripts/native.sh` parity (173 matched, 5 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
 
+---
+
+## Phase 5.2 TypeScript built-ins: `node:perf_hooks` (2026-09-13)
+
+Migrated `node:perf_hooks` completely to TypeScript via `crates/kiln-builtins/src/node/perf_hooks.ts`
+with zero additions to the C runtime prelude (Phase 5.1 freeze strictly honored). Implemented canonical
+exports (`Performance`, `PerformanceEntry`, `PerformanceMark`, `PerformanceMeasure`, `PerformanceObserver`,
+`PerformanceObserverEntryList`, `constants`, `createHistogram`, `default`, `eventLoopUtilization`,
+`monitorEventLoopDelay`, `performance`, `timerify`). Exported `performance` bound to `globalThis.performance`,
+preserving strict identity equality (`perfHooks.performance === globalThis.performance`) across both execution
+engines (as checked by `conformance/native/node-module-shapes.cjs`). Verified with native probe
+`conformance/native/node-perf-hooks-members.cjs` (byte-for-byte identical output between interpreter and native CLI),
+integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`, and full `scripts/native.sh` parity
+(174 matched, 5 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
+
 

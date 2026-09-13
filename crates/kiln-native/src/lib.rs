@@ -2820,7 +2820,7 @@ fn native_builtin_supported_exports(
             "default",
             "finished",
         ],
-        NodeBuiltin::PerfHooks => &["default", "performance"],
+        NodeBuiltin::PerfHooks => kiln_builtins::PERF_HOOKS_EXPORTS,
         NodeBuiltin::FsPromises => &["appendFile", "mkdir", "readFile", "stat", "writeFile"],
         NodeBuiltin::Fs => &[
             "appendFileSync",
