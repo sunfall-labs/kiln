@@ -3016,3 +3016,235 @@ fn step_limit_diagnostic_reports_total_graph_steps() {
         })
     ));
 }
+
+fn reduce_all_live_demand(graph: &ModuleGraph) -> LiveDemand {
+    let mut live_imports = BTreeSet::new();
+    for node in graph.modules() {
+        for (index, _) in node.program.imports.iter().enumerate() {
+            live_imports.insert((node.path.clone(), index));
+        }
+    }
+    LiveDemand {
+        live: graph.modules().map(|node| node.path.clone()).collect(),
+        slots: BTreeMap::new(),
+        live_imports,
+    }
+}
+
+#[test]
+fn reduce_to_live_with_everything_live_is_identity() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        "import { a } from './dep1.mjs';\nimport './dep2.mjs';\nconsole.log(a());\n",
+    );
+    project.write(
+        "dep1.mjs",
+        "export function a() { return 1; }\nexport function b() { return 2; }\n",
+    );
+    project.write("dep2.mjs", "globalThis.__probe = 1;\n");
+    let graph = project.graph(&entry).expect("fixture graph");
+    assert_eq!(graph.module_count(), 3);
+    let demand = reduce_all_live_demand(&graph);
+    let (reduced, remapped) = graph.reduce_to_live(&demand).expect("identity reduction");
+    assert_eq!(reduced, graph);
+    assert_eq!(remapped.live_imports, demand.live_imports);
+}
+
+#[test]
+fn reduce_to_live_drops_dead_modules_and_edges() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        "import { a } from './dep1.mjs';\nimport './dep2.mjs';\nconsole.log(a());\n",
+    );
+    project.write(
+        "dep1.mjs",
+        "export function a() { return 1; }\nexport function b() { return 2; }\n",
+    );
+    let dep2 = project.write("dep2.mjs", "globalThis.__probe = 1;\n");
+    let graph = project.graph(&entry).expect("fixture graph");
+    let dep1 = graph
+        .modules()
+        .find(|node| node.path.ends_with("dep1.mjs"))
+        .expect("dep1")
+        .path
+        .clone();
+    let slot_a = graph
+        .module(&dep1)
+        .expect("dep1 node")
+        .program
+        .exports
+        .iter()
+        .find(|export| export.exported == "a")
+        .expect("export a")
+        .local_slot;
+    let entry_imports: Vec<usize> = graph
+        .module(&entry)
+        .expect("entry node")
+        .program
+        .imports
+        .iter()
+        .enumerate()
+        .filter(|(_, import)| import.source.ends_with("dep1.mjs"))
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(entry_imports.len(), 1);
+    let mut slots = BTreeMap::new();
+    slots.insert(dep1.clone(), BTreeSet::from([slot_a]));
+    let demand = LiveDemand {
+        live: BTreeSet::from([entry.clone(), dep1.clone()]),
+        slots,
+        live_imports: BTreeSet::from([(entry.clone(), entry_imports[0])]),
+    };
+    let (reduced, remapped) = graph.reduce_to_live(&demand).expect("reduction");
+    assert_eq!(reduced.module_count(), 2);
+    assert!(reduced.module(&dep2).is_none());
+    let reduced_entry = reduced.module(&entry).expect("entry kept");
+    assert_eq!(reduced_entry.program.imports.len(), 1);
+    assert!(
+        reduced_entry.program.imports[0]
+            .source
+            .ends_with("dep1.mjs")
+    );
+    assert!(
+        reduced_entry
+            .dependencies
+            .iter()
+            .all(|dependency| dependency.target != dep2),
+        "no edge names the dropped module"
+    );
+    // The surviving edge remaps to index zero; the demand slots ride along.
+    assert_eq!(remapped.live_imports, BTreeSet::from([(entry.clone(), 0)]));
+    assert_eq!(remapped.slots.get(&dep1).expect("slots kept").len(), 1);
+    // Star-free re-export resolution still answers on the reduced graph.
+    assert!(reduced.resolved_export(&dep1, "a").is_some());
+    assert!(reduced.resolved_export(&dep1, "b").is_some());
+}
+
+#[test]
+fn reduce_to_live_without_the_entry_is_an_error() {
+    let project = TempProject::new();
+    let entry = project.write("main.mjs", "console.log(1);\n");
+    let graph = project.graph(&entry).expect("fixture graph");
+    let demand = LiveDemand::default();
+    assert!(matches!(
+        graph.reduce_to_live(&demand),
+        Err(ModuleGraphError::InternalMissingModule { .. })
+    ));
+}
+
+#[test]
+fn reduce_to_live_keeps_commonjs_wrapper_imports() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        "import value from './dep.cjs';\nconsole.log(value);\n",
+    );
+    project.write("dep.cjs", "module.exports = 41;\n");
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("cjs fixture graph");
+    let demand = reduce_all_live_demand(&graph);
+    let (reduced, _) = graph.reduce_to_live(&demand).expect("identity reduction");
+    assert_eq!(reduced, graph);
+    let dep = graph
+        .modules()
+        .find(|node| node.path.ends_with("dep.cjs"))
+        .expect("cjs dep");
+    assert!(
+        dep.program
+            .imports
+            .iter()
+            .any(|import| import.source == "*commonjs-wrapper*"),
+        "fixture has wrapper imports"
+    );
+}
+
+#[test]
+fn reduce_to_live_keeps_link_only_reexport_imports_inert() {
+    let project = TempProject::new();
+    let origin = project.write("origin.mjs", "export const answer = 42;\n");
+    let barrel = project.write(
+        "barrel.mjs",
+        "export { answer as renamed } from './origin.mjs';\n",
+    );
+    let entry = project.write(
+        "main.mjs",
+        "import { renamed } from './barrel.mjs'; console.log(renamed);\n",
+    );
+    let graph = project.graph(&entry).expect("re-export graph");
+    let barrel_node = graph.module(&barrel).expect("barrel node");
+    assert_eq!(barrel_node.program.imports.len(), 1);
+    let original_resolution = graph
+        .resolved_export(&barrel, "renamed")
+        .expect("original resolution")
+        .clone();
+    let demand = LiveDemand {
+        live: BTreeSet::from([entry.clone(), barrel.clone(), origin.clone()]),
+        slots: BTreeMap::new(),
+        live_imports: BTreeSet::from([(entry.clone(), 0)]),
+    };
+
+    let (reduced, remapped) = graph.reduce_to_live(&demand).expect("reduction");
+
+    assert_eq!(
+        reduced
+            .module(&barrel)
+            .expect("barrel retained")
+            .program
+            .imports
+            .len(),
+        1,
+        "the synthetic import is link metadata even though no module body reads it"
+    );
+    assert_eq!(remapped.live_imports, BTreeSet::from([(entry, 0)]));
+    assert_eq!(
+        reduced.resolved_export(&barrel, "renamed"),
+        Some(&original_resolution)
+    );
+}
+
+#[test]
+fn reduce_to_live_retargets_an_import_around_a_dropped_barrel() {
+    let project = TempProject::new();
+    let origin = project.write("origin.mjs", "export const answer = 42;\n");
+    let barrel = project.write(
+        "barrel.mjs",
+        "export { answer as renamed } from './origin.mjs';\n",
+    );
+    let entry = project.write(
+        "main.mjs",
+        "import { renamed } from './barrel.mjs'; console.log(renamed);\n",
+    );
+    let graph = project.graph(&entry).expect("re-export graph");
+    let origin_slot = match graph
+        .resolved_export(&barrel, "renamed")
+        .expect("barrel resolution")
+    {
+        ResolvedExport::Local { local_slot, .. } => *local_slot,
+        resolution => panic!("expected local origin, got {resolution:?}"),
+    };
+    let demand = LiveDemand {
+        live: BTreeSet::from([entry.clone(), origin.clone()]),
+        slots: BTreeMap::from([(origin.clone(), BTreeSet::from([origin_slot]))]),
+        live_imports: BTreeSet::from([(entry.clone(), 0)]),
+    };
+
+    let (reduced, remapped) = graph.reduce_to_live(&demand).expect("reduction");
+
+    assert!(reduced.module(&barrel).is_none());
+    let entry_node = reduced.module(&entry).expect("entry retained");
+    assert_eq!(entry_node.program.imports.len(), 1);
+    assert_eq!(entry_node.program.imports[0].imported, "answer");
+    assert_eq!(entry_node.dependencies.len(), 1);
+    assert_eq!(entry_node.dependencies[0].target, origin);
+    assert_eq!(remapped.live_imports, BTreeSet::from([(entry, 0)]));
+}

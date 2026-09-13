@@ -119,6 +119,24 @@ pub struct Dependency {
     pub target: PathBuf,
 }
 
+/// Closed-world demand for one executable: which modules are live, which
+/// export slots each one must keep, and which import edges are live.
+///
+/// Produced by whole-graph selection in `kiln-liveness` and consumed by
+/// [`ModuleGraph::reduce_to_live`] plus the backends that need slot-level
+/// detail.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LiveDemand {
+    /// Canonical paths of modules the executable evaluates.
+    pub live: BTreeSet<PathBuf>,
+    /// Demanded export slots per live module; drives slot-level pruning.
+    pub slots: BTreeMap<PathBuf, BTreeSet<u32>>,
+    /// Live import edges as `(importer, index into its `program.imports`)`.
+    /// The CommonJS wrapper import is inert rather than live and is always
+    /// retained; every other retained edge is live by construction.
+    pub live_imports: BTreeSet<(PathBuf, usize)>,
+}
+
 /// A compiled canonical module and its resolved runtime dependencies.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleNode {
@@ -731,6 +749,174 @@ impl ModuleGraph {
         patched_modules.insert(canonical, patched_node);
         patched.patched_modules = Arc::new(patched_modules);
         Some(patched)
+    }
+
+    /// Return the subgraph of live modules as a self-consistent graph.
+    ///
+    /// Filters `modules` and `order` to `demand.live` (dependency-first
+    /// relative order preserved), prunes each live module's `program.imports`
+    /// to its live edges (plus the inert CommonJS wrapper import) and its
+    /// `program`/`node` dependencies to live targets, then rebuilds the
+    /// export tables with [`resolve_exports`] and re-runs [`validate_links`].
+    /// Every remaining import edge is live by construction, so consumers wire
+    /// all of them: the interpreter loop skips dead modules with no
+    /// per-engine liveness code, and the native launcher needs no dead-slot
+    /// skipping. Returns the reduced graph with its remapped demand
+    /// (import indices shift when dead edges are pruned).
+    ///
+    /// Errors loudly rather than silently changing linkage: a missing entry,
+    /// a live edge naming a dropped target, or a re-link failure surfaces as
+    /// [`ModuleGraphError`]. Dropping a module whose evaluation has effects
+    /// the program can observe is a selection bug, not a reduction bug: only
+    /// pass demands whose `live` set was computed closed-world, and note that
+    /// packages declaring `sideEffects: false` opt their unimported modules
+    /// out of evaluation, matching bundler semantics.
+    pub fn reduce_to_live(
+        &self,
+        demand: &LiveDemand,
+    ) -> Result<(Self, LiveDemand), ModuleGraphError> {
+        if !demand.live.contains(&self.entry) {
+            return Err(ModuleGraphError::InternalMissingModule {
+                path: self.entry.clone(),
+            });
+        }
+        let order: Vec<PathBuf> = self
+            .order
+            .iter()
+            .filter(|path| demand.live.contains(*path))
+            .cloned()
+            .collect();
+        let mut modules = BTreeMap::new();
+        let mut remapped_imports = BTreeSet::new();
+        let reduce_node = |node: &ModuleNode,
+                           remapped_imports: &mut BTreeSet<(PathBuf, usize)>|
+         -> Result<ModuleNode, ModuleGraphError> {
+            let mut node = node.clone();
+            let original_imports = std::mem::take(&mut node.program.imports);
+            let original_dependencies = std::mem::take(&mut node.dependencies);
+            node.dependencies = original_dependencies
+                .iter()
+                .filter(|dependency| demand.live.contains(&dependency.target))
+                .cloned()
+                .collect();
+            let mut imports = Vec::with_capacity(original_imports.len());
+            for (index, original_import) in original_imports.iter().enumerate() {
+                let live = demand.live_imports.contains(&(node.path.clone(), index));
+                // An indirect re-export is an import into a synthetic slot
+                // plus an export of that slot. The module body does not read
+                // it, but resolve_exports still needs the binding metadata.
+                let links_export = node
+                    .program
+                    .exports
+                    .iter()
+                    .any(|export| export.local_slot == original_import.local_slot);
+                if !live && !links_export && original_import.source != COMMONJS_WRAPPER_SOURCE {
+                    continue;
+                }
+
+                let mut import = original_import.clone();
+                if live && import.source != COMMONJS_WRAPPER_SOURCE {
+                    let dependency = original_dependencies
+                        .iter()
+                        .find(|dependency| dependency.specifier == import.source)
+                        .ok_or_else(|| ModuleGraphError::UnresolvedImport {
+                            importer: node.path.clone(),
+                            source: import.source.clone(),
+                        })?;
+                    if !demand.live.contains(&dependency.target) {
+                        let (target, imported) =
+                            match self.resolved_export(&dependency.target, &import.imported) {
+                                Some(ResolvedExport::Local { module, local_slot }) => {
+                                    let imported = self
+                                        .module(module)
+                                        .and_then(|origin| {
+                                            origin.program.exports.iter().find(|export| {
+                                                export.local_slot == *local_slot
+                                                    && !export
+                                                        .exported
+                                                        .starts_with(kiln_ir::STAR_REEXPORT_PREFIX)
+                                            })
+                                        })
+                                        .map(|export| export.exported.clone())
+                                        .ok_or_else(|| ModuleGraphError::MissingExport {
+                                            importer: node.path.clone(),
+                                            provider: module.clone(),
+                                            name: import.imported.clone(),
+                                        })?;
+                                    (module.clone(), imported)
+                                }
+                                Some(ResolvedExport::CommonJsNamed { module, property }) => {
+                                    (module.clone(), property.clone())
+                                }
+                                Some(ResolvedExport::Namespace { module }) => {
+                                    (module.clone(), kiln_ir::NAMESPACE_IMPORT.to_owned())
+                                }
+                                Some(ResolvedExport::Ambiguous) | None => {
+                                    return Err(ModuleGraphError::MissingExport {
+                                        importer: node.path.clone(),
+                                        provider: dependency.target.clone(),
+                                        name: import.imported.clone(),
+                                    });
+                                }
+                            };
+                        if !demand.live.contains(&target) {
+                            return Err(ModuleGraphError::InternalMissingModule { path: target });
+                        }
+                        let specifier = format!("{}#kiln-live-{index}", import.source);
+                        import.source = specifier.clone();
+                        import.imported = imported;
+                        node.dependencies.push(Dependency { specifier, target });
+                    }
+                }
+
+                let next_index = imports.len();
+                if live {
+                    remapped_imports.insert((node.path.clone(), next_index));
+                }
+                imports.push(import);
+            }
+            node.program.imports = imports;
+            Ok(node)
+        };
+        for path in &order {
+            let node = self
+                .modules
+                .get(path)
+                .ok_or_else(|| ModuleGraphError::InternalMissingModule { path: path.clone() })?;
+            let node = reduce_node(node, &mut remapped_imports)?;
+            modules.insert(path.clone(), node);
+        }
+        let mut patched_modules = BTreeMap::new();
+        for (path, node) in self.patched_modules.iter() {
+            if !demand.live.contains(path) {
+                continue;
+            }
+            let node = reduce_node(node, &mut remapped_imports)?;
+            patched_modules.insert(path.clone(), node);
+        }
+        let export_resolutions = resolve_exports(&modules, &order)?;
+        validate_links(&modules, &order, &export_resolutions)?;
+        let mut slots = BTreeMap::new();
+        for (path, set) in demand.slots.iter() {
+            if demand.live.contains(path) {
+                slots.insert(path.clone(), set.clone());
+            }
+        }
+        Ok((
+            Self {
+                entry: self.entry.clone(),
+                project_root: self.project_root.clone(),
+                modules: Arc::new(modules),
+                order: Arc::new(order),
+                export_resolutions: Arc::new(export_resolutions),
+                patched_modules: Arc::new(patched_modules),
+            },
+            LiveDemand {
+                live: demand.live.clone(),
+                slots,
+                live_imports: remapped_imports,
+            },
+        ))
     }
 
     /// Return the canonical link-time origin of `name` as exported by `module`.
