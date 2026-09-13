@@ -12,6 +12,10 @@ cd "$(kiln_repo_root)"
 kiln_provider_contract_init "$(kiln_repo_root)"
 KILN_NUMBER_CONTRACT_FILE="$(mktemp "${TMPDIR:-/tmp}/kiln-provider-contract.XXXXXX.json")"
 printf '%s\n' "$KILN_PROVIDER_CONTRACT_JSON" >"$KILN_NUMBER_CONTRACT_FILE"
+KILN_NUMBER_FULL_ARCHIVE=$(kiln_provider_contract_field full_archive)
+KILN_NUMBER_SLIM_ARCHIVE=$(kiln_provider_contract_field slim_archive)
+KILN_NUMBER_FULL_MANIFEST=$(kiln_provider_contract_field full_manifest)
+KILN_NUMBER_SLIM_MANIFEST=$(kiln_provider_contract_field slim_manifest)
 
 KILN_NUMBER_CC="${CC:-cc}"
 if ! command -v "$KILN_NUMBER_CC" >/dev/null 2>&1; then
@@ -39,8 +43,8 @@ env RUSTFLAGS='--kiln-provider-must-not-inherit' \
 	CARGO_BUILD_RUSTC_WRAPPER='/kiln/provider/must/not/inherit' \
 	CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER='/kiln/provider/must/not/inherit' \
 	bash scripts/package-native-number-provider.sh "$KILN_NUMBER_TEMP/package" >/dev/null
-KILN_NUMBER_ARCHIVE="$KILN_NUMBER_TEMP/package/libkiln_native_number_ffi.a"
-KILN_NUMBER_MANIFEST="$KILN_NUMBER_TEMP/package/kiln-native-number-provider.json"
+KILN_NUMBER_ARCHIVE="$KILN_NUMBER_TEMP/package/$KILN_NUMBER_FULL_ARCHIVE"
+KILN_NUMBER_MANIFEST="$KILN_NUMBER_TEMP/package/$KILN_NUMBER_FULL_MANIFEST"
 if [[ ! -f $KILN_NUMBER_ARCHIVE || ! -f $KILN_NUMBER_MANIFEST ]]; then
 	printf 'packaged number provider is incomplete under %s\n' "$KILN_NUMBER_TEMP/package" >&2
 	exit 1
@@ -79,6 +83,7 @@ import json, pathlib, sys
 manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
 contract = json.loads(pathlib.Path(sys.argv[2]).read_text())
 http = sys.argv[3] == "true"
+archive = contract["full_archive"] if http else contract["slim_archive"]
 expected = {
     "schema": contract["schema"],
     "provider": contract["provider"],
@@ -88,6 +93,7 @@ expected = {
     "profile": contract["profile"],
     "exports": contract["exports"],
     "http": http,
+    "archive": archive,
 }
 for key, value in expected.items():
     if manifest.get(key) != value:
@@ -121,8 +127,8 @@ env RUSTFLAGS='--kiln-provider-must-not-inherit' \
 	CARGO_BUILD_RUSTC_WRAPPER='/kiln/provider/must/not/inherit' \
 	CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER='/kiln/provider/must/not/inherit' \
 	bash scripts/package-native-number-provider.sh --slim "$KILN_NUMBER_TEMP/slim-package" >/dev/null
-KILN_NUMBER_SLIM_ARCHIVE="$KILN_NUMBER_TEMP/slim-package/libkiln_native_number_ffi.slim.a"
-KILN_NUMBER_SLIM_MANIFEST="$KILN_NUMBER_TEMP/slim-package/kiln-native-number-provider.slim.json"
+KILN_NUMBER_SLIM_ARCHIVE="$KILN_NUMBER_TEMP/slim-package/$KILN_NUMBER_SLIM_ARCHIVE"
+KILN_NUMBER_SLIM_MANIFEST="$KILN_NUMBER_TEMP/slim-package/$KILN_NUMBER_SLIM_MANIFEST"
 if [[ ! -f $KILN_NUMBER_SLIM_ARCHIVE || ! -f $KILN_NUMBER_SLIM_MANIFEST ]]; then
 	printf 'slim number provider is incomplete under %s\n' "$KILN_NUMBER_TEMP/slim-package" >&2
 	exit 1
