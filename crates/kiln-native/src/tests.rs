@@ -5523,10 +5523,7 @@ fn native_failed_dynamic_dependency_is_cached_with_original_error() {
             },
         )
         .expect("dynamic failure graph builds and runs");
-        assert_eq!(
-            report.stdout, b"1 0 true boom\n",
-            "profile {name}"
-        );
+        assert_eq!(report.stdout, b"1 0 true boom\n", "profile {name}");
     }
 }
 
