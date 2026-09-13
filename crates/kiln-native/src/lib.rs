@@ -5275,6 +5275,7 @@ int kiln_graph_dynamic_import(kiln_host *host, kiln_value specifier, kiln_value 
         if (thrown != NULL) return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), thrown, 1, depth, thrown);
         return attr_status;
     }
+    if (type.tag == KILN_VALUE_UNDEFINED || type.tag == KILN_VALUE_NULL) goto import_attributes_valid;
     if (type.tag != KILN_VALUE_STRING || type.len != 4 || memcmp(type.ptr, "file", 4) != 0) {
         kiln_value err = kiln_c99_undefined();
         (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, "unsupported import attribute type");
