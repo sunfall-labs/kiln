@@ -1104,7 +1104,7 @@ impl ModuleGraph {
             // Only a source module has a body to run. A JSON module, a CommonJS wrapper and a
             // Node builtin each need their own materialisation, and answering with an empty
             // namespace for one would be a wrong answer rather than a missing feature.
-            if node.source != ModuleSource::Source {
+            if node.source != ModuleSource::Source && node.source != ModuleSource::Asset {
                 return Err(ModuleGraphError::Source {
                     path: path.clone(),
                     message: format!(
@@ -1192,9 +1192,16 @@ impl ModuleGraph {
                 .get(path)
                 .map(|slots| slots.iter().copied().collect())
                 .unwrap_or_default();
+            let plan_program = if node.source == ModuleSource::Asset {
+                asset_module_program(node.data.as_deref().ok_or_else(|| ModuleGraphError::Source {
+                    path: path.clone(), message: "asset module has no path metadata".to_owned(),
+                })?)
+            } else {
+                export_epilogue(&node.program.program, slots)
+            };
             modules.push(PlannedModule {
                 key: path.to_string_lossy().into_owned(),
-                program: std::rc::Rc::new(export_epilogue(&node.program.program, slots)),
+                program: std::rc::Rc::new(plan_program),
                 bindings,
             });
         }
@@ -2175,6 +2182,18 @@ fn json_module_program() -> ModuleProgram {
             dynamic_imports: vec![],
             removable_declarations: vec![],
         },
+    }
+}
+
+fn asset_module_program(path: &str) -> Program {
+    Program {
+        version: BYTECODE_VERSION,
+        constants: vec![kiln_ir::Constant::String(path.to_owned())],
+        code: vec![Instruction::Const(0), Instruction::NewArray { count: 1 }, Instruction::Return],
+        local_count: 0,
+        functions: vec![],
+        template_sites: vec![],
+        source: "".into(),
     }
 }
 
