@@ -2308,6 +2308,10 @@ macro_rules! header_prefix {
  * other status because those mean "this cannot be done" and this one means "the program said
  * so": a `catch` takes this and must not take the others. */
 #define KILN_C99_THROWN (-7)
+/* Internal host dispatch used by the graph launcher for importer-bound CommonJS requires.
+ * This is an operation number, not a field in kiln_host, so the two-word host ABI remains
+ * stable across the standalone and generated runtimes. */
+#define KILN_C99_HOST_MODULE_CREATE_REQUIRE UINT16_C(0x7FF0)
 
 #if defined(__GNUC__) || defined(__clang__)
 #define KILN_LIKELY(x) __builtin_expect(!!(x), 1)

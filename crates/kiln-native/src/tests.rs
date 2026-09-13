@@ -1395,6 +1395,126 @@ console.log(edges.missing === "", edges[""], edges["empty-value"] === "", edges.
 }
 
 #[test]
+fn native_create_require_uses_captured_virtual_filename_for_builtin_path() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-create-require-virtual");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
+        .expect("write package metadata");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        r#"import { createRequire } from "node:module";
+import * as staticallyLoadedPath from "node:path";
+const require = createRequire("/virtual/main.cjs");
+const path = require("node:path");
+console.log(path.dirname === staticallyLoadedPath.dirname, path.basename("/tmp/file.js"));"#,
+    )
+    .expect("write createRequire consumer");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build createRequire graph");
+    assert!(
+        graph.modules().any(|node| node.source
+            == ModuleSource::NodeBuiltin(kiln_module_resolver::NodeBuiltin::Path)),
+        "graph modules: {:?}",
+        graph
+            .modules()
+            .map(|node| node.path.clone())
+            .collect::<Vec<_>>()
+    );
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native createRequire integration: no C compiler found");
+        return;
+    };
+    let run = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .expect("native createRequire graph builds and runs");
+    assert_eq!(run.stdout, b"true file.js\n", "stderr={:?}", run.stderr);
+}
+
+#[test]
+fn native_create_require_escaped_relative_cjs_and_demand_only_path() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-create-require-escaped");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
+        .expect("write package metadata");
+    let entry = root.path.join("entry with space.mjs");
+    fs::write(
+        &entry,
+        r#"import { createRequire } from "node:module";
+function factory() {
+  const require = createRequire(import.meta.url);
+  return { load: () => require('./dep.cjs'), require };
+}
+const { load, require } = factory();
+console.log(`before:${globalThis.__loads || 0}`);
+const first = load();
+const second = load();
+console.log(`${first === second}:${first.loads}:${globalThis.__loads}`);
+const unknownBase = '/virtual/' + (globalThis.__createRequireBase || 'main.cjs');
+const fallbackPath = createRequire(unknownBase)('node:path');
+console.log(typeof fallbackPath.basename);
+const path = createRequire(import.meta.url)('node:path');
+console.log(typeof path.basename);"#,
+    )
+    .expect("write escaped createRequire entry");
+    fs::write(
+        root.path.join("dep.cjs"),
+        r#"globalThis.__loads = (globalThis.__loads || 0) + 1;
+module.exports = { loads: globalThis.__loads };"#,
+    )
+    .expect("write escaped createRequire dependency");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build escaped createRequire graph");
+    assert!(
+        graph
+            .modules()
+            .flat_map(|node| &node.runtime_dependencies)
+            .any(|dependency| dependency.specifier == "node:path")
+    );
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping escaped createRequire integration: no C compiler found");
+        return;
+    };
+    let run = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .expect("native escaped createRequire graph builds and runs");
+    assert_eq!(
+        run.stdout, b"before:0\ntrue:1:1\nfunction\nfunction\n",
+        "stderr={:?}",
+        run.stderr
+    );
+}
+
+#[test]
 fn node_events_is_a_ts_builtin_and_https_has_a_native_runtime_materializer() {
     use kiln_module_resolver::NodeBuiltin;
 
@@ -3850,6 +3970,130 @@ int main(void) {{
     assert_eq!(output.stdout, b"99:true\n");
 }
 
+#[test]
+fn embedded_shared_graph_create_require_uses_runtime_relative_cjs_edge() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        eprintln!("skipping shared createRequire integration on unsupported platform");
+        return;
+    }
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping shared createRequire integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-shared-create-require");
+    let project = root.path.join("project");
+    fs::create_dir_all(&project).expect("create shared createRequire project");
+    let entry = project.join("entry with space.mjs");
+    fs::write(
+        &entry,
+        r#"import { createRequire } from "node:module";
+let loads = 0;
+function factory() {
+  const require = createRequire(import.meta.url);
+  return { load: () => require('./dep.cjs'), require };
+}
+const factoryResult = factory();
+const load = factoryResult.load;
+console.log(`before:${loads}`);
+const first = load();
+const second = load();
+console.log(`${first === second}:${first.loads}:${loads}`);
+try { createRequire(import.meta.url)('node:zlib'); } catch (error) { console.log(`${error instanceof TypeError}`); }"#,
+    )
+    .expect("write shared createRequire entry");
+    fs::write(project.join("dep.cjs"), r#"globalThis.__shared_create_require_loads = (globalThis.__shared_create_require_loads || 0) + 1;
+module.exports = { loads: globalThis.__shared_create_require_loads };"#)
+        .expect("write shared createRequire dependency");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build shared createRequire graph");
+    assert!(
+        graph
+            .modules()
+            .flat_map(|node| &node.runtime_dependencies)
+            .any(|dependency| dependency.specifier == "node:zlib")
+    );
+    let library = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain.clone())
+        .build_shared_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join(shared_library_name()),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .expect("build shared createRequire library");
+    let header_name = library
+        .header
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("shared createRequire header");
+    let host_source = root.path.join("host.c");
+    fs::write(
+        &host_source,
+        format!(
+            r#"#include "{header_name}"
+#include <stdio.h>
+static int host_call(void *context, uint16_t operation, uint16_t argc,
+                     const kiln_value *arguments, kiln_value *result) {{
+    (void)context;
+    if (operation != KILN_HOST_OP_WRITE_STDOUT || argc != 1 || arguments == NULL ||
+        result == NULL || arguments[0].tag != KILN_VALUE_STRING ||
+        (arguments[0].len != 0 && arguments[0].ptr == NULL)) return KILN_C99_HOST_ERROR;
+    if (fwrite(arguments[0].ptr, 1, arguments[0].len, stdout) != arguments[0].len ||
+        fputc('\n', stdout) == EOF) return KILN_C99_HOST_ERROR;
+    *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};
+    return KILN_C99_OK;
+}}
+int main(void) {{
+    kiln_host host = {{ host_call, NULL }};
+    kiln_value result;
+    int status = {symbol}(&host, &result);
+    fprintf(stderr, "status=%d tag=%u len=%u\\n", status, result.tag, result.len);
+    return status == KILN_C99_OK ? 0 : 1;
+}}
+"#,
+            symbol = library.module_symbol,
+        ),
+    )
+    .expect("write shared createRequire host");
+    let host_object = root.path.join("host.o");
+    let mut compile = CompileOptions::default();
+    compile.include_dirs.push(root.path.clone());
+    toolchain
+        .compile_c(&host_source, &host_object, &compile)
+        .expect("compile shared createRequire host");
+    let host_executable = root.path.join("host");
+    let loader_directory = library.loader.parent().expect("loader directory");
+    let mut link = LinkOptions::default();
+    link.runtime_libraries.push(library.output.clone());
+    link.extra_args
+        .push(format!("-Wl,-rpath,{}", loader_directory.display()).into());
+    toolchain
+        .link_executable(&[host_object], &host_executable, &link)
+        .expect("link shared createRequire host");
+    let mut command = Command::new(&host_executable);
+    #[cfg(target_os = "linux")]
+    command.env("LD_LIBRARY_PATH", loader_directory);
+    #[cfg(target_os = "macos")]
+    command.env("DYLD_LIBRARY_PATH", loader_directory);
+    let output = command.output().expect("run shared createRequire host");
+    assert!(
+        output.status.success(),
+        "shared createRequire host failed with {:?}: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"before:0\ntrue:1:0\ntrue\n");
+}
+
 fn star_reexport_graph(project: &Path) -> ModuleGraph {
     fs::create_dir_all(project).expect("create star graph project");
     for name in ["origin.js", "barrel.js", "main.js"] {
@@ -4049,6 +4293,7 @@ fn native_graph_wiring_uses_resolved_star_export_origins() {
         &graph,
         &modules,
         &NativeRealmPolicy::default(),
+        None,
         None,
         None,
         None,
@@ -6985,7 +7230,7 @@ fn commonjs_shared_identity_includes_observable_absolute_path() {
                 )
             })
             .collect::<Vec<_>>();
-        let topology = graph_shared_topology_digest(&graph, &modules, None);
+        let topology = graph_shared_topology_digest(&graph, &modules, None, None);
         let public = graph_shared_public_digest(topology, &modules)
             .expect("CommonJS graph has absolute module paths");
         let module_sources = modules
@@ -7017,6 +7262,51 @@ fn commonjs_shared_identity_includes_observable_absolute_path() {
                 .to_string_lossy()
         ))
     );
+}
+
+#[test]
+fn graph_topology_identity_includes_runtime_edge_base() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-runtime-topology-identity");
+    let first = root.path.join("first");
+    let second = root.path.join("second");
+    for project in [&first, &second] {
+        fs::create_dir_all(project).expect("create runtime project");
+        fs::write(project.join("dep.cjs"), "module.exports = 1;").expect("write dependency");
+        let base_name = if project == &second { "b.cjs" } else { "a.cjs" };
+        fs::write(
+            project.join("main.mjs"),
+            &format!(
+                "import {{ createRequire }} from 'node:module'; createRequire('/virtual/{base_name}')('./dep.cjs');"
+            ),
+        )
+        .expect("write runtime entry");
+    }
+    let identity = |project: &Path| {
+        let entry = project.join("main.mjs");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(project).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build runtime graph");
+        let modules = graph
+            .modules()
+            .map(|node| {
+                let logical = logical_module_path(graph.project_root(), &node.path)
+                    .expect("logical module path");
+                (
+                    node,
+                    emit_native_graph_module(node, &logical, &NativeRealmPolicy::default())
+                        .expect("emit runtime module"),
+                )
+            })
+            .collect::<Vec<_>>();
+        graph_shared_topology_digest(&graph, &modules, None, None)
+    };
+    assert_ne!(identity(&first), identity(&second));
 }
 
 #[test]
@@ -7108,7 +7398,7 @@ fn shared_graph_wrapper_emits_and_links_without_static_value_arrays() {
         .collect::<Vec<_>>();
     let wrapper_symbol = format!(
         "kiln_shared_graph_{}",
-        graph_shared_topology_digest(&graph, &modules, None).to_hex()
+        graph_shared_topology_digest(&graph, &modules, None, None).to_hex()
     );
     let wrapper =
         graph_shared_wrapper_source(&graph, &modules, &wrapper_symbol).expect("wrapper emits");

@@ -101,6 +101,8 @@ extern uint64_t kiln_c99_builtin_store_epoch __attribute__((visibility("hidden")
 extern int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len, kiln_property **out);
 extern kiln_value kiln_c99_method(uint64_t code);
 extern int kiln_c99_commonjs_require_value(kiln_value *out, kiln_commonjs_require_fn call, void *context);
+extern int kiln_c99_default_require(void *context, kiln_host *host, kiln_value specifier,
+                                    kiln_value *result, kiln_value *thrown);
 extern const char *kiln_c99_method_name(uint64_t code);
 extern const char *kiln_c99_builtin_name(uint64_t builtin);
 extern int kiln_c99_builtin_length(uint64_t builtin, double *out);

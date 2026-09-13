@@ -410,6 +410,7 @@ static int kiln_c99_global_object(kiln_value *out) {
                      {"decodeURIComponent", KILN_C99_METHOD_DECODE_URI_COMPONENT},
                      {"__kilnHostProcessStart", KILN_C99_METHOD_PROCESS_START_RAW},
                      {"__kilnHostProcessCancel", KILN_C99_METHOD_PROCESS_CANCEL_RAW},
+                     {"__kilnHostModuleCreateRequire", KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE},
                      {"queueMicrotask", KILN_C99_METHOD_QUEUE_MICROTASK},
                      {"setTimeout", KILN_C99_METHOD_SET_TIMEOUT},
                      {"setInterval", KILN_C99_METHOD_SET_INTERVAL},

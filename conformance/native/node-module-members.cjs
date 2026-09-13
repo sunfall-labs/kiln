@@ -23,6 +23,14 @@ console.log("isBuiltin('unknown_xyz'):", m.isBuiltin("unknown_xyz"));
 // An executable capability check: a callable-shaped fallback that cannot resolve
 // host builtins must diverge here. The absolute filename is valid for Node's
 // createRequire contract without depending on this fixture's checkout path.
+for (const filename of ["node:path", "relative.cjs", new (require("node:url").URL)("https://example.com/main.cjs")]) {
+  try {
+    m.createRequire(filename);
+    console.log("invalid filename throws:", false);
+  } catch (error) {
+    console.log("invalid filename throws:", error instanceof TypeError);
+  }
+}
 const req = m.createRequire("/virtual/main.cjs");
 console.log("req is fn:", typeof req === "function");
 const requiredPath = req("node:path");
