@@ -17,10 +17,11 @@ readonly TEST262_COMMIT="771005236e88a909635104e03ba12559688c0172"
 
 usage() {
 	cat >&2 <<-'USAGE'
-		usage: scripts/test262.sh --out <path>
+		usage: scripts/test262.sh --out <path> [--path <relative subtree>]
 
 		Fetch the pinned upstream Test262 commit into a temporary checkout, then run the existing
-		Kiln CLI test batch against <checkout>/test. The JSON report is written at <path>.
+		Kiln CLI test batch against <checkout>/test (or a relative subtree selected by --path).
+		The JSON report is written at <path>.
 
 		environment:
 		  KILN_TEST262_CHECKOUT  use an existing checkout, still requiring the exact commit and a
@@ -29,13 +30,20 @@ usage() {
 	USAGE
 }
 
-if [[ $# -ne 2 || $1 != --out || -z $2 ]]; then
+if [[ $# -ne 2 && $# -ne 4 ]]; then
 	usage
 	exit 2
 fi
+[[ $1 == --out && -n $2 ]] || { usage; exit 2; }
+RESULTS_ARG="$2"
+TEST_PATH=""
+if [[ $# == 4 ]]; then
+	[[ $3 == --path && -n $4 ]] || { usage; exit 2; }
+	TEST_PATH="$4"
+fi
 
 REPO_ROOT="$(kiln_repo_root)"
-RESULTS="$2"
+RESULTS="$RESULTS_ARG"
 if [[ $RESULTS != /* ]]; then
 	RESULTS="$REPO_ROOT/$RESULTS"
 fi
@@ -78,10 +86,31 @@ validate_checkout() {
 	[[ -d $checkout/test ]] || die "Test262 test directory is missing"
 }
 
+resolve_test_root() {
+	local test_root candidate
+	test_root="$CHECKOUT/test"
+	if [[ -z $TEST_PATH ]]; then
+		printf '%s\n' "$test_root"
+		return
+	fi
+	[[ $TEST_PATH != /* && $TEST_PATH != .. && $TEST_PATH != ../* && $TEST_PATH != */../* && $TEST_PATH != */.. ]] \
+		|| die "--path must be a relative subtree inside test/"
+	candidate="$(cd -- "$test_root" && cd -- "$TEST_PATH" 2>/dev/null && pwd)" \
+		|| die "--path does not name a directory under test/: $TEST_PATH"
+	case "$candidate/" in
+		"$test_root"/*) ;;
+		*) die "--path escapes test/: $TEST_PATH" ;;
+	esac
+	find "$candidate" -type f -print -quit | grep -q . \
+		|| die "--path names an empty subtree: $TEST_PATH"
+	printf '%s\n' "$candidate"
+}
+
 if [[ -n ${KILN_TEST262_CHECKOUT:-} ]]; then
 	CHECKOUT="$(cd -- "$KILN_TEST262_CHECKOUT" && pwd)" ||
 		die "cannot resolve KILN_TEST262_CHECKOUT"
 	validate_checkout "$CHECKOUT"
+	TEST_ROOT="$(resolve_test_root)"
 else
 	TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/kiln-test262.XXXXXXXX")"
 	CHECKOUT="$TEMP_ROOT/test262"
@@ -92,6 +121,7 @@ else
 	git -C "$CHECKOUT" checkout --quiet --detach "$TEST262_COMMIT" ||
 		die "could not check out pinned Test262 commit $TEST262_COMMIT"
 	validate_checkout "$CHECKOUT"
+	TEST_ROOT="$(resolve_test_root)"
 fi
 
 mkdir -p "$(dirname -- "$RESULTS")"
@@ -108,13 +138,14 @@ cd "$REPO_ROOT"
 # Re-check after the build and immediately before the external tree is handed to the CLI. This
 # closes the race where another process edits a caller-supplied checkout after the first check.
 validate_checkout "$CHECKOUT"
+TEST_ROOT="$(resolve_test_root)"
 
-# Run the whole suite in one owned child.  `--one-shot` still batches all selected variants in one
+# Run the selected subtree in one owned child.  `--one-shot` still batches all selected variants in one
 # process, amortizing compiler startup, while ensuring the memory-capped child owns the workload
 # rather than merely supervising an uncapped resident daemon.
 set +e
 STDOUT_LOG="$LOG_DIR/test262.log"
-python3 - "$KILN_BIN" "$CHECKOUT/test" "$RAW_RESULTS" "$RESULTS" "$TEST262_REPOSITORY" "$TEST262_COMMIT" "$STDOUT_LOG" <<-'PY'
+python3 - "$KILN_BIN" "$TEST_ROOT" "$RAW_RESULTS" "$RESULTS" "$TEST262_REPOSITORY" "$TEST262_COMMIT" "$STDOUT_LOG" <<-'PY'
 import json
 import os
 import pathlib
