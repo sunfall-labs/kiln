@@ -5029,6 +5029,61 @@ fn native_static_unsupported_builtin_remains_fatal() {
 }
 
 #[test]
+fn native_failed_dynamic_closure_preserves_shared_successful_dependencies() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping dynamic closure sharing integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-dynamic-closure-sharing");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).expect("write root package");
+    fs::write(
+        root.path.join("shared.mjs"),
+        "globalThis.sharedCount = (globalThis.sharedCount || 0) + 1; export const count = globalThis.sharedCount;\n",
+    )
+    .expect("write shared dependency");
+    fs::write(
+        root.path.join("bad.mjs"),
+        "import './shared.mjs'; import 'node:zlib'; export const value = 1;\n",
+    )
+    .expect("write failed dynamic target");
+    fs::write(
+        root.path.join("good.mjs"),
+        "import './shared.mjs'; export const value = 42;\n",
+    )
+    .expect("write successful dynamic target");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "import { count } from './shared.mjs';\n\
+         try { await import('./bad.mjs'); } catch (error) { console.log(error instanceof TypeError); }\n\
+         const good = await import('./good.mjs');\n\
+         console.log(good.value, count, globalThis.sharedCount);\n",
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build sharing graph");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .expect("run sharing graph");
+    assert_eq!(report.stdout, b"true\n42 1 1\n");
+}
+
+#[test]
 fn native_dynamic_top_level_await_import_waits_for_completion() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
