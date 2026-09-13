@@ -11774,6 +11774,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         };
                     let specifier = self.pop(current)?;
                     let promise = PromiseState::pending();
+                    let text = match self.import_specifier(&specifier, current)? {
+                        Ok(text) => text,
+                        Err(thrown) => {
+                            self.settle(&promise, &Settled::Rejected(thrown));
+                            self.stack.push(Value::Promise(promise));
+                            continue;
+                        }
+                    };
                     let _options = match raw_options {
                         Some(options) => {
                             match self.normalize_import_attributes(&options, current)? {
@@ -11791,14 +11799,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // specification hands the promise back first and only then looks at what it
                     // was given, so `import({ toString() { throw x } })` is a rejection and not
                     // an exception at the call site.
-                    match self.import_specifier(&specifier, current)? {
-                        Ok(text) => {
-                            let scheduled =
-                                self.scheduled(Job::Import(Rc::clone(&promise), text, _options));
-                            self.with_realm_mut(|realm| realm.queue_microtask(scheduled));
-                        }
-                        Err(thrown) => self.settle(&promise, &Settled::Rejected(thrown)),
-                    }
+                    let scheduled =
+                        self.scheduled(Job::Import(Rc::clone(&promise), text, _options));
+                    self.with_realm_mut(|realm| realm.queue_microtask(scheduled));
                     self.stack.push(Value::Promise(promise));
                 }
                 Instruction::Throw => {
