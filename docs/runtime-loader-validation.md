@@ -122,8 +122,8 @@ Final corpus evidence recorded 96,662 Test262 passes across 122 chunks with 0 re
 5 server tests, and 15 regression tests passing. The final CLI SHA-256 is
 `5ce37f2266e2cdaa37c01c54f3d0538d744130b3efc4ed09f2616d96b9f9d081`. The consolidated GHUI
 artifact SHA-256 is `6e93a4b854e6d1a8d3917686f06004ff3e24f35a333aac73446cf995288ed964`; its live
-transcript is `app/.scratch/ghui-live/consolidated-live.log` and covered HOME, repository navigation,
-PR/issue views, PR 3 markdown scrolling, Escape, `q`, and exit 0.
+transcript is `app/.scratch/ghui-live/consolidated-live.log` and covered HOME, repository/PR/issue
+counts, PR 3 details and markdown scrolling, Escape, `q`, and exit 0.
 
 The RXJS timing baseline was refreshed from a fresh `origin/main` worktree at `a17651c3`, using
 its release CLI SHA-256 `ab50bac8fd87af175a3cb41f480605d27ae44745ccc1cdd1535b41d3fe9593c3`,
