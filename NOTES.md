@@ -5780,4 +5780,19 @@ Verified with native probe `conformance/native/node-fs-members.cjs` (byte-for-by
 interpreter and native CLI), native integration tests in `kiln-native`, module-graph evaluation tests,
 and full `scripts/native.sh` parity (192 matched, 1 refused, 0 diverged).
 
+---
+
+## Phase 5.2 TypeScript built-ins: `node:ffi` (Phase 5.2 Complete: 27/27 Builtins in TypeScript) (2026-09-13)
+
+Migrated `node:ffi` completely to TypeScript via `crates/kiln-builtins/src/node/ffi.ts` with zero additions
+to the C runtime prelude (`crates/kiln-backend-c/src/runtime/` strictly frozen per Phase 5.1).
+Implemented all canonical exports (`default`, `dlopen`, `getRawPointer`, `suffix`, `toArrayBuffer`),
+bridging to host FFI capabilities under interpreter and `process.__kilnNativeModules.ffi` under native launcher,
+wiring `KILN_C99_METHOD_NODE_FFI_DLOPEN`, `KILN_C99_METHOD_NODE_FFI_GET_RAW_POINTER`, and
+`KILN_C99_METHOD_NODE_FFI_TO_ARRAY_BUFFER` through the graph launcher.
+All 27 `NodeBuiltin` variants are now fully migrated to pure TypeScript in `crates/kiln-builtins`.
+Verified with native probe `conformance/native/node-ffi-members.cjs` (byte-for-byte identical output between
+interpreter and native CLI), native integration tests in `kiln-native`, module-graph evaluation tests,
+and full `scripts/native.sh` parity (193 matched, 1 refused, 0 diverged).
+
 

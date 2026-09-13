@@ -28,6 +28,7 @@ macro_rules! declare_ts_builtins {
         )*
 
         /// Return the TypeScript source code for a builtin if it has been migrated to TypeScript.
+        #[allow(unreachable_patterns)]
         pub fn builtin_source(builtin: NodeBuiltin) -> Option<&'static str> {
             match builtin {
                 $(NodeBuiltin::$variant => Some($source_const),)*
@@ -41,6 +42,7 @@ macro_rules! declare_ts_builtins {
         }
 
         /// Return the supported exports for a builtin if it is a TypeScript builtin.
+        #[allow(unreachable_patterns)]
         pub fn builtin_supported_exports(builtin: NodeBuiltin) -> Option<&'static [&'static str]> {
             match builtin {
                 $(NodeBuiltin::$variant => Some($exports_const),)*
@@ -49,6 +51,7 @@ macro_rules! declare_ts_builtins {
         }
 
         /// Logical path with `.ts` extension for frontend parsing.
+        #[allow(unreachable_patterns)]
         pub fn builtin_logical_path(builtin: NodeBuiltin) -> &'static str {
             match builtin {
                 $(NodeBuiltin::$variant => $logical_path,)*
@@ -716,6 +719,23 @@ declare_ts_builtins! {
             "statSync",
             "unlinkSync",
             "writeFileSync",
+        ],
+    },
+    Ffi {
+        variant: Ffi,
+        file: "node/ffi.ts",
+        logical_path: "node:ffi.ts",
+        source_const: FFI_SOURCE,
+        exports_const: FFI_EXPORTS,
+        sample_source_check: "export function dlopen",
+        presence_test: ffi_builtin_source_is_present,
+        compilation_test: ffi_builtin_compiles_cleanly,
+        exports: [
+            "default",
+            "dlopen",
+            "getRawPointer",
+            "suffix",
+            "toArrayBuffer",
         ],
     },
 }
