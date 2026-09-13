@@ -193,6 +193,7 @@ extern int kiln_c99_delete_or_throw(kiln_host *host, kiln_value target, const ch
 extern int kiln_c99_delete_computed_or_throw(kiln_host *host, kiln_value target, kiln_value key, int strict, int *answer, int depth, kiln_value *thrown);
 extern int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out, int depth, kiln_value *thrown);
 extern int kiln_c99_enumerate_keys(kiln_host *host, kiln_value target, kiln_value *out, int depth, kiln_value *thrown);
+extern int kiln_c99_validate_dynamic_import_options(kiln_host *host, kiln_value options, int depth, kiln_value *thrown);
 extern int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value source, int depth, kiln_value *thrown);
 extern int kiln_c99_define_accessor(kiln_value target, const char *key, size_t key_len, kiln_value getter, kiln_value setter, int enumerable);
 extern int kiln_c99_describe_property(kiln_host *host, kiln_value target, const char *key, size_t key_len, kiln_value *out, int *found, int depth, kiln_value *thrown);
