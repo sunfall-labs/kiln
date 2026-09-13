@@ -5407,11 +5407,7 @@ import_attributes_valid:
             }
         }
         for (other_index, (other_node, _)) in modules.iter().enumerate() {
-            for dep in other_node
-                .dependencies
-                .iter()
-                .chain(graph.dynamic_dependencies(&other_node.path).iter())
-            {
+            for dep in graph.dynamic_dependencies(&other_node.path) {
                 if dep.target == node.path {
                     resolutions.insert((dep.specifier.clone(), other_index));
                 }
@@ -5593,11 +5589,7 @@ import_attributes_valid:
             }
         }
         for (other_index, (other_node, _)) in modules.iter().enumerate() {
-            for dep in other_node
-                .dependencies
-                .iter()
-                .chain(graph.dynamic_dependencies(&other_node.path).iter())
-            {
+            for dep in graph.dynamic_dependencies(&other_node.path) {
                 if dep.target == node.path {
                     resolutions.insert((dep.specifier.clone(), other_index));
                 }
