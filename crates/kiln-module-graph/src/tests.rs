@@ -4647,6 +4647,43 @@ fn body_patch_preserves_linkage_and_rejects_interface_changes() {
 }
 
 #[test]
+fn replacement_relinks_a_smaller_export_interface() {
+    let project = TempProject::new();
+    let dependency = project.write(
+        "dependency.js",
+        "export const answer = 42; export function unused() { return 0; }",
+    );
+    let entry = project.write(
+        "entry.js",
+        "import { answer } from './dependency.js'; console.log(answer);",
+    );
+    let graph = project.graph(&entry).expect("build graph");
+    let dependency = fs::canonicalize(dependency).expect("canonical dependency");
+    let demanded = BTreeSet::from(["answer".to_owned()]);
+    let replacement = compile_module(&frontend_oxc::parse_dce(
+        dependency.to_str().expect("utf8 dependency"),
+        &graph.module(&dependency).unwrap().program.program.source,
+        &demanded,
+    ))
+    .expect("compile specialized dependency");
+
+    let specialized = graph
+        .replace_programs_and_relink(BTreeMap::from([(dependency.clone(), replacement)]))
+        .expect("relink smaller interface");
+    assert!(specialized.resolved_export(&dependency, "answer").is_some());
+    assert!(specialized.resolved_export(&dependency, "unused").is_none());
+    let mut host = TestHost::default();
+    specialized
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute relinked graph");
+    assert_eq!(host.output, ["42"]);
+}
+
+#[test]
 fn sequential_body_patches_retain_each_previous_overlay() {
     let project = TempProject::new();
     let first = project.write(
