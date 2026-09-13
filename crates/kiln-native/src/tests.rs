@@ -652,6 +652,49 @@ fn run_native_http_fixture(name: &str, source: &str) -> Option<String> {
     Some(String::from_utf8(output.stdout).expect("fixture output is UTF-8"))
 }
 
+fn run_native_release_fixture(name: &str, source: &str) -> Option<String> {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    use std::process::Command;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native release fixture: no C compiler found");
+        return None;
+    };
+    let project = TestDirectory::new(name);
+    let entry = project.path.join("main.mjs");
+    fs::write(&entry, source).expect("write native release fixture");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("release source graph compiles");
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: project.path.join("program"),
+                profile: NativeProfile::Release,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .expect("native release graph builds");
+    let output = Command::new(&report.output)
+        .output()
+        .expect("run native release fixture");
+    assert!(
+        output.status.success(),
+        "status={} stdout={:?} stderr={:?}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Some(String::from_utf8(output.stdout).expect("fixture output is UTF-8"))
+}
+
 fn run_native_failure_fixture(name: &str, source: &str) -> Option<String> {
     use kiln_module_resolver::NodeRuntimeResolver;
     use std::process::Command;
@@ -736,29 +779,32 @@ fn run_native_failure_fixture_with_dependency(
 #[test]
 fn native_timer_callbacks_retain_closures_through_gc_and_interval_cancel() {
     let source = r#"
-const captured = { value: 41 };
-const delay = {
-  valueOf() {
-    const garbage = [];
-    for (let i = 0; i < 5000; i++) garbage.push({ i, text: 'allocation' });
-    return 0;
-  }
-};
-const observed = [];
-setTimeout(() => {
-  observed.push(captured.value);
-  setTimeout(() => observed.push(captured.value + 1), 0);
-}, delay);
-let ticks = 0;
-const interval = setInterval(() => {
-  ticks++;
-  if (ticks === 2) {
-    clearInterval(interval);
-    setTimeout(() => console.log(observed.join(',') + ':' + ticks + ':' + captured.value), 0);
-  }
-}, 0);
+function scheduleFactory(value) {
+  const captured = { value };
+  const delay = {
+    valueOf() {
+      const garbage = [];
+      for (let i = 0; i < 5000; i++) garbage.push({ i, text: 'allocation' });
+      return 0;
+    }
+  };
+  const observed = [];
+  setTimeout(() => {
+    observed.push(captured.value);
+    setTimeout(() => observed.push(captured.value + 1), 0);
+  }, delay);
+  let ticks = 0;
+  const interval = setInterval(() => {
+    ticks++;
+    if (ticks === 2) {
+      clearInterval(interval);
+      setTimeout(() => console.log(observed.join(',') + ':' + ticks + ':' + captured.value), 0);
+    }
+  }, 0);
+}
+scheduleFactory(41);
 "#;
-    let Some(output) = run_native_http_fixture("native-timer-gc-liveness", source) else {
+    let Some(output) = run_native_release_fixture("native-timer-gc-liveness", source) else {
         return;
     };
     assert_eq!(output, "41,42:2:41\n");
