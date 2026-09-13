@@ -2044,6 +2044,28 @@ where
                             });
                             dependency_sources.push(source);
                         }
+                        // Closed-world native dynamic imports need their statically literal
+                        // targets materialized too. This is especially important for file
+                        // assets: their bytes must never pass through the source loader.
+                        for target in &program.link_facts.dynamic_imports {
+                            let kiln_ir::DynamicImportTarget::Static(specifier) = target else { continue };
+                            if dependencies.iter().any(|dependency| dependency.specifier == *specifier) {
+                                continue;
+                            }
+                            let Ok(resolved) = self.resolver.resolve_for_request(
+                                specifier, &path, NodeRequestKind::Import,
+                            ) else { continue };
+                            let target_path = resolved.path.clone();
+                            let source = if let Some(builtin) = resolved.builtin() {
+                                ModuleSource::NodeBuiltin(builtin)
+                            } else if target_path.extension().and_then(|ext| ext.to_str()).is_some_and(is_asset_extension) {
+                                ModuleSource::Asset
+                            } else if target_path.extension().and_then(|ext| ext.to_str()).is_some_and(kiln_data_formats::is_data_extension) {
+                                ModuleSource::Json
+                            } else { ModuleSource::Source };
+                            dependencies.push(Dependency { specifier: specifier.clone(), target: target_path });
+                            dependency_sources.push(source);
+                        }
 
                         // LIFO work preserves the original source order: the first dependency is
                         // entered first, while Exit remains below all child work.
