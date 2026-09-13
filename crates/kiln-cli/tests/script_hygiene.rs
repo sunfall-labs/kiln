@@ -37,10 +37,11 @@ fn shell_scripts() -> Vec<PathBuf> {
 }
 
 /// The library is sourced, never executed, so it is exempt from the per-script rules below.
-const LIBRARY: &str = "lib.sh";
+const LIBRARIES: [&str; 2] = ["lib.sh", "provider-contract.sh"];
 
 fn is_library(path: &Path) -> bool {
-    path.file_name().is_some_and(|name| name == LIBRARY)
+    path.file_name()
+        .is_some_and(|name| LIBRARIES.iter().any(|library| name == *library))
 }
 
 /// Names defined as shell functions in `scripts/lib.sh`, e.g. `kiln_cargo`.
@@ -48,7 +49,7 @@ fn is_library(path: &Path) -> bool {
 /// Parsed rather than hard-coded: a hard-coded list silently stops covering functions added after
 /// it was written, which is the exact failure mode this file exists to prevent.
 fn library_function_names() -> BTreeSet<String> {
-    let library = std::fs::read_to_string(scripts_directory().join(LIBRARY))
+    let library = std::fs::read_to_string(scripts_directory().join("lib.sh"))
         .expect("scripts/lib.sh is readable");
     let names: BTreeSet<String> = library
         .lines()
