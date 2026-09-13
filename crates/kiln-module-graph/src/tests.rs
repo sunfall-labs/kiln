@@ -2122,6 +2122,291 @@ fn node_builtin_url_commonjs_require_evaluates_cleanly() {
 }
 
 #[test]
+fn node_builtin_diagnostics_channel_evaluates_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import dc, { Channel, TracingChannel, channel, hasSubscribers, subscribe, unsubscribe, tracingChannel } from 'node:diagnostics_channel';",
+            "const ch = channel('app.events');",
+            "let received = null;",
+            "const onMsg = (msg) => { received = msg.text; };",
+            "subscribe('app.events', onMsg);",
+            "const hasBefore = hasSubscribers('app.events');",
+            "ch.publish({ text: 'event-fired' });",
+            "unsubscribe('app.events', onMsg);",
+            "const hasAfter = hasSubscribers('app.events');",
+            "const tc = tracingChannel('app.trace');",
+            "let ran = false;",
+            "tc.start.runStores({}, function(v) { ran = this.flag && v === 7; }, { flag: true }, 7);",
+            "console.log(",
+            "  typeof dc === 'object',",
+            "  dc.default === dc,",
+            "  received,",
+            "  hasBefore,",
+            "  hasAfter,",
+            "  ran,",
+            ");",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with diagnostics_channel builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute diagnostics_channel builtin");
+    assert_eq!(host.output, ["true true event-fired true false true"]);
+}
+
+#[test]
+fn node_builtin_diagnostics_channel_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const dc = require('node:diagnostics_channel');",
+            "const ch = dc.channel('bridge.test');",
+            "module.exports = {",
+            "  isObj: typeof dc === 'object',",
+            "  hasChan: typeof dc.channel === 'function',",
+            "  hasTracing: typeof dc.tracingChannel === 'function',",
+            "  selfEq: dc.default === dc,",
+            "  hasPublish: typeof ch.publish === 'function',",
+            "};",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import bridge from './bridge.cjs';",
+            "console.log(bridge.isObj, bridge.hasChan, bridge.hasTracing, bridge.selfEq, bridge.hasPublish);",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with diagnostics_channel builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute diagnostics_channel builtin cjs");
+    assert_eq!(host.output, ["true true true true true"]);
+}
+
+#[test]
+fn node_builtin_perf_hooks_evaluates_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import perfHooks, { Performance, PerformanceEntry, PerformanceMark, PerformanceMeasure, PerformanceObserver, PerformanceObserverEntryList, performance, constants, createHistogram, monitorEventLoopDelay } from 'node:perf_hooks';",
+            "console.log(",
+            "  typeof perfHooks === 'object',",
+            "  perfHooks.default === perfHooks,",
+            "  typeof performance === 'object',",
+            "  typeof performance.now === 'function',",
+            "  typeof performance.now() === 'number',",
+            "  performance === globalThis.performance,",
+            "  constants.NODE_PERFORMANCE_GC_MAJOR === 4,",
+            "  typeof Performance === 'function',",
+            "  typeof PerformanceEntry === 'function',",
+            "  typeof PerformanceMark === 'function',",
+            "  typeof createHistogram === 'function',",
+            "  typeof monitorEventLoopDelay === 'function',",
+            ");",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with perf_hooks builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute perf_hooks builtin");
+    assert_eq!(
+        host.output,
+        ["true true true true true true true true true true true true"]
+    );
+}
+
+#[test]
+fn node_builtin_perf_hooks_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const perfHooks = require('node:perf_hooks');",
+            "const { performance } = perfHooks;",
+            "module.exports = {",
+            "  isObj: typeof perfHooks === 'object',",
+            "  hasNow: typeof performance.now === 'function',",
+            "  nowNum: typeof performance.now() === 'number',",
+            "  selfEq: perfHooks.default === perfHooks,",
+            "  globEq: performance === globalThis.performance,",
+            "  hasEntry: typeof perfHooks.PerformanceEntry === 'function',",
+            "};",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import bridge from './bridge.cjs';",
+            "console.log(bridge.isObj, bridge.hasNow, bridge.nowNum, bridge.selfEq, bridge.globEq, bridge.hasEntry);",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with perf_hooks builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute perf_hooks builtin cjs");
+    assert_eq!(host.output, ["true true true true true true"]);
+}
+
+#[test]
+fn node_builtin_console_evaluates_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import nodeConsole, { Console, log, error, warn, info, debug, assert } from 'node:console';",
+            "log('direct-log');",
+            "console.log(",
+            "  typeof nodeConsole === 'object',",
+            "  nodeConsole.default === nodeConsole,",
+            "  typeof Console === 'function',",
+            "  typeof log === 'function',",
+            "  typeof error === 'function',",
+            "  typeof warn === 'function',",
+            "  typeof info === 'function',",
+            "  typeof debug === 'function',",
+            "  typeof assert === 'function',",
+            ");",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with console builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute console builtin");
+    assert_eq!(
+        host.output,
+        ["direct-log", "true true true true true true true true true"]
+    );
+}
+
+#[test]
+fn node_builtin_console_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const c = require('node:console');",
+            "c.log('bridge-log');",
+            "module.exports = {",
+            "  isObj: typeof c === 'object',",
+            "  hasConsole: typeof c.Console === 'function',",
+            "  hasLog: typeof c.log === 'function',",
+            "  selfEq: c.default === c,",
+            "};",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import bridge from './bridge.cjs';",
+            "console.log(bridge.isObj, bridge.hasConsole, bridge.hasLog, bridge.selfEq);",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with console builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute console builtin cjs");
+    assert_eq!(host.output, ["bridge-log", "true true true true"]);
+}
+
+#[test]
 fn node_net_connect_is_a_typed_virtual_module_export() {
     let project = TempProject::new();
     let entry = project.write(

@@ -1086,6 +1086,32 @@ fn node_events_is_a_ts_builtin_and_https_has_a_native_runtime_materializer() {
         NodeBuiltin::Url,
         "fileURLToPath"
     ));
+    assert!(kiln_builtins::is_ts_builtin(
+        NodeBuiltin::DiagnosticsChannel
+    ));
+    assert!(native_builtin_supports_export(
+        NodeBuiltin::DiagnosticsChannel,
+        "channel"
+    ));
+    assert!(native_builtin_supports_export(
+        NodeBuiltin::DiagnosticsChannel,
+        "tracingChannel"
+    ));
+    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::PerfHooks));
+    assert!(native_builtin_supports_export(
+        NodeBuiltin::PerfHooks,
+        "performance"
+    ));
+    assert!(native_builtin_supports_export(
+        NodeBuiltin::PerfHooks,
+        "PerformanceEntry"
+    ));
+    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Console));
+    assert!(native_builtin_supports_export(
+        NodeBuiltin::Console,
+        "Console"
+    ));
+    assert!(native_builtin_supports_export(NodeBuiltin::Console, "log"));
     assert!(native_builtin_body(NodeBuiltin::Https).is_some());
     assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Path));
     assert!(native_builtin_supports_export(NodeBuiltin::Path, "join"));
@@ -1108,7 +1134,7 @@ fn node_net_has_one_native_runtime_module_materializer() {
 }
 
 #[test]
-fn node_stream_and_perf_hooks_have_native_runtime_module_materializers() {
+fn node_stream_has_native_runtime_module_materializer() {
     use kiln_module_resolver::NodeBuiltin;
 
     let stream = native_builtin_body(NodeBuiltin::Stream).expect("stream materializes");
@@ -1118,17 +1144,6 @@ fn node_stream_and_perf_hooks_have_native_runtime_module_materializers() {
     assert!(native_builtin_supports_export(
         NodeBuiltin::Stream,
         "addAbortSignal"
-    ));
-
-    // The realm's own `performance` builtin rather than a second object built here: node makes
-    // `require("node:perf_hooks").performance` and `globalThis.performance` one value, and two
-    // objects made a library's "have I already installed my shim" check answer wrong. `now`
-    // comes off that builtin's table, so the method code is no longer named in this body.
-    let performance = native_builtin_body(NodeBuiltin::PerfHooks).expect("perf_hooks materializes");
-    assert!(performance.contains("kiln_c99_builtin(KILN_C99_BUILTIN_PERFORMANCE)"));
-    assert!(native_builtin_supports_export(
-        NodeBuiltin::PerfHooks,
-        "performance"
     ));
 }
 
@@ -9025,4 +9040,285 @@ fn native_node_url_commonjs_require_builds_and_runs() {
         stdout.trim(),
         "cjs-url: object function function true /var/log"
     );
+}
+
+#[test]
+fn native_node_diagnostics_channel_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-dc-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import dc, { Channel, TracingChannel, channel, hasSubscribers, subscribe, unsubscribe, tracingChannel } from 'node:diagnostics_channel';\n",
+            "const ch = channel('test.chan');\n",
+            "let msgReceived = '';\n",
+            "const sub = (data) => { msgReceived = data.value; };\n",
+            "subscribe('test.chan', sub);\n",
+            "const hasSubBefore = hasSubscribers('test.chan');\n",
+            "ch.publish({ value: 'hello-dc' });\n",
+            "unsubscribe('test.chan', sub);\n",
+            "const hasSubAfter = hasSubscribers('test.chan');\n",
+            "const tc = tracingChannel('test.trace');\n",
+            "let ran = false;\n",
+            "tc.start.runStores({}, function(x) { ran = this.ok && x === 99; }, { ok: true }, 99);\n",
+            "console.log('dc-ts:', typeof channel, dc.default === dc, msgReceived, hasSubBefore, hasSubAfter, typeof tc.start, ran);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("dc_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run dc binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "dc-ts: function true hello-dc true false object true"
+    );
+}
+
+#[test]
+fn native_node_diagnostics_channel_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-dc-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const dc = require('node:diagnostics_channel');\n",
+            "const ch = dc.channel('test.cjs');\n",
+            "console.log('cjs-dc:', typeof dc, typeof dc.channel, typeof dc.tracingChannel, dc.default === dc, typeof ch.publish);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("dc_cjs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run dc cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "cjs-dc: object function function true function"
+    );
+}
+
+#[test]
+fn native_node_perf_hooks_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-perf-hooks-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import perfHooks, { Performance, PerformanceEntry, PerformanceMark, PerformanceMeasure, PerformanceObserver, performance, constants, createHistogram, monitorEventLoopDelay } from 'node:perf_hooks';\n",
+            "const globEq = performance === globalThis.performance;\n",
+            "console.log('perf-ts:', typeof performance.now, typeof Performance, typeof PerformanceEntry, typeof PerformanceMark, typeof createHistogram, typeof monitorEventLoopDelay, perfHooks.default === perfHooks, globEq, constants.NODE_PERFORMANCE_GC_MAJOR);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("perf_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run perf binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "perf-ts: function function function function function function true true 4"
+    );
+}
+
+#[test]
+fn native_node_perf_hooks_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-perf-hooks-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const perfHooks = require('node:perf_hooks');\n",
+            "const { performance } = perfHooks;\n",
+            "console.log('cjs-perf:', typeof perfHooks, typeof performance.now, typeof performance.now(), perfHooks.default === perfHooks, performance === globalThis.performance);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("perf_cjs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run perf cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert_eq!(stdout.trim(), "cjs-perf: object function number true true");
+}
+
+#[test]
+fn native_node_console_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-console-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import nodeConsole, { Console, log, error, warn, info, debug, assert } from 'node:console';\n",
+            "log('console-log-works');\n",
+            "console.log('console-ts:', typeof nodeConsole, typeof Console, typeof log, typeof error, typeof warn, typeof info, typeof debug, typeof assert, nodeConsole.default === nodeConsole);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("console_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run console binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("console-log-works"));
+    assert!(stdout.contains(
+        "console-ts: object function function function function function function function true"
+    ));
+}
+
+#[test]
+fn native_node_console_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-console-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const c = require('node:console');\n",
+            "c.log('cjs-console-works');\n",
+            "console.log('cjs-console:', typeof c, typeof c.Console, typeof c.log, typeof c.warn, c.default === c);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("console_cjs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run console cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("cjs-console-works"));
+    assert!(stdout.contains("cjs-console: object function function function true"));
 }
