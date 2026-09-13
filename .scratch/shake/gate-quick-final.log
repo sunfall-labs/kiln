@@ -1,0 +1,41 @@
+[gate-quick] $ ./scripts/gate.sh --quick
+=== build
+      ┌─────────┐  mr boxington
+     ╱ ═══════ ╱│
+    ╱─────────╱ │
+    │ •    (◉)│≡│
+    │  ◟▄▄▄◞  │ ╱
+    │   ◀◆▶   │╱
+    └─────────┘
+   Compiling kiln-builtins v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-builtins)
+   Compiling kiln-module-graph v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-module-graph)
+   Compiling kiln-backend-c v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-backend-c)
+   Compiling kiln-conformance v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-conformance)
+   Compiling kiln-liveness v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-liveness)
+   Compiling kiln-db v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-db)
+   Compiling kiln-native v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-native)
+   Compiling kiln-daemon v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-daemon)
+   Compiling kiln-cli v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-cli)
+    Finished `release` profile [optimized + debuginfo] target(s) in 9.69s
+mbx[savings]: 154.5 GiB logical of build debris binned so far. cargo clean remains unemployed.
+
+=== crate tests
+crate tests: 79 suites, 1600 passed, 0 failed
+
+=== native parity
+native: 175 matched, 5 refused, 0 diverged
+
+Refused by the native backend (the backlog, not a failure):
+  json-roundtrip-edge-refuses  native backend refusal: instruction=11 operation=CallMethod(stringify) detail=JSON.stringify with a replacer receiver_tag=8
+  typed-array-codecs-refuse    native backend refusal: instruction=19 operation=GetComputed detail=a typed-array member this backend has not implemented function=Uint8Array.toBase64 receiver_tag=8 (after 2 line(s) of output)
+  builtin-length-refuses       native backend refusal: instruction=7 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Array receiver_tag=8 (after 1 line(s) of output)
+  builtin-prototype-refuses    native backend refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=ArrayBuffer receiver_tag=8 (after 1 line(s) of output)
+  shadow-realm                 native emission failed: unsupported native emission: host realm facility ShadowRealm at instruction 3
+
+=== thirdparty
+thirdparty: 17 matched, 0 diverged, 5 not built
+  (5 bundle(s) absent; run conformance/thirdparty/build.sh to produce them)
+thirdparty (native): 17 matched, 0 refused, 0 diverged
+
+=== gate
+all clear

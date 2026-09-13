@@ -1266,6 +1266,15 @@ impl Native {
                 Self::NodeModuleCreateRequire,
                 RealmId::PRIMARY,
             )),
+            (Self::NodeModule, "Module" | "default") => {
+                Some(Value::Native(Self::NodeModule, RealmId::PRIMARY))
+            }
+            (Self::NodeModule, "builtinModules") => {
+                Some(Value::Array(crate::ArrayData::new(Vec::new())))
+            }
+            (Self::NodeModule, "isBuiltin") => {
+                Some(Value::Native(Self::NodeModule, RealmId::PRIMARY))
+            }
             (Self::NodePath, prop) => crate::path::property(prop),
             (Self::NodeWorkerThreads, "Worker") => {
                 Some(Value::Native(Self::NodeWorkerConstructor, RealmId::PRIMARY))

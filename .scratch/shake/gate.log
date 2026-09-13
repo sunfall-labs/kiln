@@ -1,0 +1,553 @@
+[gate] $ ./scripts/gate.sh
+=== build
+      ┌─────────┐  mr boxington
+     ╱ ═══════ ╱│
+    ╱─────────╱ │
+    │ •    (◉)│≡│
+    │  ◟▄▄▄◞  │ ╱
+    │   ◀◆▶   │╱
+    └─────────┘
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling serde_core v1.0.229
+   Compiling serde v1.0.229
+   Compiling either v1.18.0
+   Compiling allocator-api2 v0.2.21
+   Compiling cfg-if v1.0.4
+   Compiling stable_deref_trait v1.2.1
+   Compiling itoa v1.0.18
+   Compiling rustversion v1.0.23
+   Compiling libc v0.2.189
+   Compiling autocfg v1.5.1
+   Compiling bitflags v2.13.1
+   Compiling litemap v0.8.3
+   Compiling memchr v2.8.3
+   Compiling zmij v1.0.23
+   Compiling siphasher v1.0.3
+   Compiling version_check v0.9.5
+   Compiling rustc-hash v2.1.3
+   Compiling phf_shared v0.14.0
+   Compiling dragonbox_ecma v0.1.12
+   Compiling writeable v0.6.4
+   Compiling static_assertions v1.1.0
+   Compiling once_cell v1.21.4
+   Compiling icu_locale_fallback_data v2.3.0
+   Compiling bytes v1.12.1
+   Compiling equivalent v1.0.2
+   Compiling num-traits v0.2.19
+   Compiling str_indices v0.4.4
+   Compiling percent-encoding v2.3.2
+   Compiling hashbrown v0.17.1
+   Compiling pin-project-lite v0.2.17
+   Compiling phf v0.14.0
+   Compiling oxc_estree v0.147.0
+   Compiling fastrand v2.5.0
+   Compiling utf8_iter v1.0.4
+   Compiling cow-utils v0.1.3
+   Compiling unicode-width v0.2.2
+   Compiling libm v0.2.16
+   Compiling log v0.4.34
+   Compiling phf_generator v0.14.0
+   Compiling futures-core v0.3.34
+   Compiling castaway v0.2.4
+   Compiling unicode-id-start v1.4.0
+   Compiling thiserror v2.0.20
+   Compiling compact_str v0.10.0
+   Compiling icu_properties_data v2.3.0
+   Compiling unicode-linebreak v0.1.5
+   Compiling smawk v0.3.3
+   Compiling nonmax v0.5.5
+   Compiling owo-colors v4.4.0
+   Compiling rustix v1.1.4
+   Compiling bytecount v0.6.9
+   Compiling textwrap v0.16.2
+   Compiling icu_normalizer_data v2.3.0
+   Compiling unicode-segmentation v1.13.3
+   Compiling crossbeam-utils v0.8.22
+   Compiling tracing-core v0.1.36
+   Compiling syn v3.0.4
+   Compiling syn v2.0.119
+   Compiling generic-array v0.14.7
+   Compiling ahash v0.8.11
+   Compiling icu_calendar_data v2.3.0
+   Compiling linux-raw-sys v0.12.1
+   Compiling write16 v1.0.0
+   Compiling num-integer v0.1.47
+   Compiling icu_plurals_data v2.3.0
+   Compiling serde_json v1.0.151
+   Compiling mio v1.2.2
+   Compiling socket2 v0.6.5
+   Compiling futures-task v0.3.34
+   Compiling slab v0.4.12
+   Compiling utf16_iter v1.0.5
+   Compiling scopeguard v1.2.0
+   Compiling typenum v1.20.1
+   Compiling zerocopy v0.7.35
+   Compiling http v1.5.0
+   Compiling parking_lot_core v0.9.12
+   Compiling simd-adler32 v0.3.10
+   Compiling foldhash v0.2.0
+   Compiling icu_decimal_data v2.3.0
+   Compiling self_cell v1.3.0
+   Compiling adler2 v2.0.1
+   Compiling hashbrown v0.16.1
+   Compiling num-bigint v0.5.1
+   Compiling simdutf8 v0.1.5
+   Compiling icu_casemap_data v2.3.0
+   Compiling icu_locale_data v2.3.0
+   Compiling hashbrown v0.14.5
+   Compiling ref-cast v1.0.27
+   Compiling icu_list_data v2.3.0
+   Compiling httparse v1.10.1
+   Compiling futures-sink v0.3.34
+   Compiling icu_time_data v2.3.0
+   Compiling hashbrown v0.15.5
+   Compiling io-lifetimes v2.0.4
+   Compiling io-lifetimes v3.0.1
+   Compiling miniz_oxide v0.9.1
+   Compiling num-bigint v0.4.8
+   Compiling lock_api v0.4.14
+   Compiling float-cmp v0.10.0
+   Compiling combine v4.6.8
+   Compiling kiln-number-core v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-number-core)
+   Compiling core_maths v0.1.1
+   Compiling halfbrown v0.4.0
+   Compiling atomic-waker v1.1.2
+   Compiling icu_collator_data v2.3.0
+   Compiling ryu v1.0.23
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling try-lock v0.2.5
+   Compiling io-extras v0.19.0
+   Compiling icu_segmenter_data v2.3.0
+   Compiling icu_experimental_data v0.6.0
+   Compiling icu_datetime_data v2.3.0
+   Compiling fnv v1.0.7
+   Compiling want v0.3.1
+   Compiling value-trait v0.12.2
+   Compiling digest v0.10.7
+   Compiling kiln-host-abi v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-host-abi)
+   Compiling futures-channel v0.3.34
+   Compiling itertools v0.15.0
+   Compiling httpdate v1.0.3
+   Compiling regex-automata v0.4.18
+   Compiling indexmap v2.14.1
+   Compiling cap-primitives v4.0.3
+   Compiling jiff-tzdb v0.1.8
+   Compiling kiln-digest v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-digest)
+   Compiling crc32fast v1.5.1
+   Compiling arrayvec v0.7.8
+   Compiling fast-glob v1.1.0
+   Compiling json-strip-comments v3.1.2
+   Compiling http-body v1.1.0
+   Compiling encoding_rs v0.8.41
+   Compiling maybe-owned v0.3.4
+   Compiling ambient-authority v0.0.2
+   Compiling cap-std v4.0.3
+   Compiling cpufeatures v0.2.17
+   Compiling ixdtf v0.6.6
+   Compiling ipnet v2.12.2
+   Compiling kiln-hir v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-hir)
+   Compiling nodejs-built-in-modules v1.0.0
+   Compiling http-body-util v0.1.5
+   Compiling kiln-artifact-cache v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-artifact-cache)
+   Compiling form_urlencoded v1.2.2
+   Compiling core_detect v1.0.0
+   Compiling seq-macro v0.3.6
+   Compiling multiversion_no_op v1.0.0
+   Compiling hmac-sha1-compact v1.1.7
+   Compiling base64 v0.23.1
+   Compiling flate2 v1.1.10
+   Compiling sha2 v0.10.9
+   Compiling sha1 v0.10.7
+   Compiling kiln-ir v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-ir)
+   Compiling md-5 v0.10.6
+   Compiling lasso v0.7.3
+   Compiling regress v0.12.0
+   Compiling kiln-builtin-surface v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-builtin-surface)
+   Compiling kiln-node-path v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-node-path)
+   Compiling kiln-node-abi v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-node-abi)
+   Compiling kiln-json v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-json)
+   Compiling crossbeam-epoch v0.9.20
+   Compiling kiln-backend-c v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-backend-c)
+   Compiling crossbeam-deque v0.8.7
+   Compiling inotify-sys v0.1.8
+   Compiling kiln-native-number v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-native-number)
+   Compiling rayon-core v1.13.0
+   Compiling kiln-native-number-abi v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-native-number-abi)
+   Compiling same-file v1.0.6
+   Compiling kiln-native-runtime v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-native-runtime)
+   Compiling inotify v0.11.5
+   Compiling notify-types v2.1.0
+   Compiling walkdir v2.5.0
+   Compiling kiln-native-toolchain v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-native-toolchain)
+   Compiling kiln-test262 v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-test262)
+   Compiling file-id v0.2.3
+   Compiling kiln-test-selector v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-test-selector)
+   Compiling anstyle v1.0.14
+   Compiling annotate-snippets v0.12.16
+   Compiling notify v8.2.0
+   Compiling serde_derive v1.0.229
+   Compiling displaydoc v0.2.7
+   Compiling zerovec-derive v0.11.6
+   Compiling synstructure v0.13.2
+   Compiling oxc_ast_macros v0.147.0
+   Compiling phf_macros v0.14.0
+   Compiling thiserror-impl v2.0.20
+   Compiling tracing-attributes v0.1.31
+   Compiling tokio-macros v2.7.2
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling futures-macro v0.3.34
+   Compiling calendrical_calculations v0.2.4
+   Compiling ref-cast-impl v1.0.27
+   Compiling tokio v1.53.1
+mbx[progress]: 15s elapsed; 0 hits, 239 misses, 0 bypassed, 40 not looked up; ~0.0s compiler work saved
+   Compiling rustix-linux-procfs v0.1.1
+   Compiling tracing v0.1.44
+   Compiling fs-set-times v0.20.3
+   Compiling simd-json v0.18.1
+   Compiling cobs v0.3.0
+   Compiling futures-util v0.3.34
+   Compiling num-rational v0.4.2
+   Compiling multiversion-macros v0.9.0
+   Compiling zerofrom v0.1.8
+   Compiling tzif v0.4.1
+   Compiling yoke v0.8.3
+   Compiling rayon v1.12.0
+   Compiling zerovec v0.11.8
+   Compiling zerotrie v0.2.5
+   Compiling multiversion v0.9.0
+   Compiling tinystr v0.8.4
+   Compiling potential_utf v0.1.6
+   Compiling icu_pattern v0.5.0
+   Compiling icu_locale_core v2.3.0
+   Compiling icu_collections v2.3.0
+   Compiling notify-debouncer-full v0.7.0
+   Compiling smallvec v1.15.2
+   Compiling oxc_index v5.0.0
+   Compiling postcard v1.1.3
+   Compiling ropey v1.6.1
+   Compiling fixed_decimal v0.7.2
+   Compiling oxc-browserslist v5.0.1
+   Compiling dashmap v6.2.1
+   Compiling kiln-data-formats v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-data-formats)
+   Compiling parking_lot v0.12.1
+   Compiling kiln-proto v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-proto)
+   Compiling oxc_resolver v11.24.3
+   Compiling oxc_data_structures v0.147.0
+   Compiling icu_provider v2.3.1
+   Compiling oxc_allocator v0.147.0
+   Compiling icu_locale_fallback v2.3.0
+   Compiling icu_properties v2.3.0
+   Compiling icu_normalizer v2.3.0
+   Compiling icu_calendar v2.3.0
+   Compiling icu_plurals v2.3.0
+   Compiling icu_list v2.3.0
+   Compiling oxc_str v0.147.0
+   Compiling icu_locale v2.3.1
+   Compiling icu_segmenter v2.3.0
+   Compiling oxc_span v0.147.0
+   Compiling tokio-util v0.7.19
+   Compiling tokio-stream v0.1.19
+   Compiling kiln-module-resolver v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-module-resolver)
+   Compiling oxc_diagnostics v0.147.0
+   Compiling oxc_syntax v0.147.0
+   Compiling icu_decimal v2.3.0
+   Compiling tokio-metrics v0.5.2
+mbx[progress]: 30s elapsed; 0 hits, 246 misses, 0 bypassed, 92 not looked up; ~0.0s compiler work saved
+   Compiling kiln-builtins v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-builtins)
+   Compiling oxc_compat v0.147.0
+   Compiling h2 v0.4.19
+   Compiling oxc_regular_expression v0.147.0
+   Compiling idna_adapter v1.2.2
+   Compiling icu_casemap v2.3.0
+   Compiling icu_collator v2.3.1
+   Compiling idna v1.1.0
+   Compiling icu_time v2.3.0
+   Compiling icu_experimental v0.6.0
+   Compiling icu_datetime v2.3.0
+   Compiling url v2.5.8
+   Compiling oxc_ast v0.147.0
+   Compiling hyper v1.11.1
+   Compiling timezone_provider v0.2.6
+   Compiling hyper-util v0.1.20
+   Compiling kiln-runtime v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-runtime)
+   Compiling oxc_ecmascript v0.147.0
+   Compiling oxc_ast_visit v0.147.0
+   Compiling oxc_parser v0.147.0
+   Compiling oxc_semantic v0.147.0
+mbx[progress]: 45s elapsed; 0 hits, 246 misses, 0 bypassed, 113 not looked up; ~0.0s compiler work saved
+   Compiling temporal_rs v0.2.6
+   Compiling oxc_traverse v0.147.0
+   Compiling kiln-intl v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-intl)
+   Compiling kiln-temporal v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-temporal)
+   Compiling oxc_transformer v0.147.0
+   Compiling kiln-interpreter v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-interpreter)
+mbx[progress]: 60s elapsed; 0 hits, 246 misses, 0 bypassed, 119 not looked up; ~0.0s compiler work saved
+   Compiling frontend-oxc v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/frontend-oxc)
+mbx[progress]: 75s elapsed; 0 hits, 247 misses, 0 bypassed, 119 not looked up; ~0.0s compiler work saved
+   Compiling kiln-module-graph v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-module-graph)
+mbx[progress]: 90s elapsed; 0 hits, 247 misses, 0 bypassed, 120 not looked up; ~0.0s compiler work saved
+   Compiling kiln-conformance v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-conformance)
+mbx[progress]: 105s elapsed; 0 hits, 247 misses, 0 bypassed, 122 not looked up; ~0.0s compiler work saved
+   Compiling kiln-liveness v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-liveness)
+   Compiling kiln-db v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-db)
+   Compiling kiln-native v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-native)
+mbx[progress]: 120s elapsed; 0 hits, 247 misses, 0 bypassed, 125 not looked up; ~0.0s compiler work saved
+   Compiling kiln-daemon v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-daemon)
+mbx[progress]: 135s elapsed; 0 hits, 247 misses, 0 bypassed, 126 not looked up; ~0.0s compiler work saved
+   Compiling kiln-cli v0.0.0 (/home/candrewlee/Work/kiln-shake/crates/kiln-cli)
+mbx[progress]: 150s elapsed; 0 hits, 247 misses, 0 bypassed, 128 not looked up; ~0.0s compiler work saved
+    Finished `release` profile [optimized + debuginfo] target(s) in 2m 35s
+mbx[cache]: 0 hits, 247 misses, 128 not looked up; 0 B downloaded, 0 B uploaded, 574.6 MiB stored locally
+mbx[savings]: reflinked 52.4 GiB into place. copying is for people with disk to spare.
+
+=== crate tests
+---- runtime_prelude_abi_surface stdout ----
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Snapshot Summary ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Snapshot file: crates/kiln-backend-c/tests/snapshots/emitted_c__runtime_prelude_abi_surface.snap
+Snapshot: runtime_prelude_abi_surface
+Source: crates/kiln-backend-c/tests/emitted_c.rs:803
+──────────────────────────────────────────────────────────────────────────
+Expression: abi_surface(prelude)
+test result: FAILED. 35 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
+error: test failed, to rerun pass `-p kiln-backend-c --test emitted_c`
+crate tests: 4 suites, 238 passed, 1 failed
+crate tests: only 238 tests passed, below the floor of 500: the suite did not run
+
+=== native parity
+  typed-array-codecs-refuse    native backend refusal: instruction=19 operation=GetComputed detail=a typed-array member this backend has not implemented function=Uint8Array.toBase64 receiver_tag=8 (after 2 line(s) of output)
+  array-buffer-members-refuse  native backend refusal: instruction=26 operation=GetProperty(slice) detail=an ArrayBuffer.prototype member this backend has not implemented receiver_tag=22 (after 3 line(s) of output)
+  builtin-length-refuses       native backend refusal: instruction=7 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Array receiver_tag=8 (after 1 line(s) of output)
+  builtin-prototype-refuses    native backend refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=ArrayBuffer receiver_tag=8 (after 1 line(s) of output)
+  shadow-realm                 native emission failed: unsupported native emission: host realm facility ShadowRealm at instruction 3
+
+DIVERGED - the two engines ran the same bytecode and did not agree:
+exceptions
+  interpreter: 6
+caught negative
+{ code: 42, why: 'because' }
+[ 1, 2 ]
+7 number [exit 0]
+  native:      6
+caught negative
+{ code: 42, why: 'because' }
+[ 1, 2 ]
+7 number [exit 0]
+
+One of the two is wrong. The bytecode is the same, so nothing else can explain it.
+
+=== thirdparty
+thirdparty: 17 matched, 0 diverged, 5 not built
+  (5 bundle(s) absent; run conformance/thirdparty/build.sh to produce them)
+thirdparty (native): 17 matched, 0 refused, 0 diverged
+
+=== thirdparty baseline
+thirdparty baseline (profile=native-release, threshold=25.0%, min_delta=3.0ms, passes=5, warmup=1):
+building 15 bundles with 15 worker(s)...
+[1/15] acorn            20.97ms (baseline 19.41ms)  (+8.0%)
+[2/15] chalk            4.69ms (baseline 3.31ms)  (+41.7%)
+[3/15] datefns          3.60ms (baseline 2.62ms)  (+37.4%)
+[4/15] dayjs            6.34ms (baseline 2.39ms)  REGRESSED (+165.3%)
+[5/15] immer            3.61ms (baseline 2.16ms)  (+67.1%)
+[6/15] marked           10.01ms (baseline 9.68ms)  (+3.4%)
+[7/15] ms               3.46ms (baseline 2.00ms)  (+73.0%)
+[8/15] mustache         2.88ms (baseline 1.83ms)  (+57.4%)
+[9/15] postcss          11.71ms (baseline 7.58ms)  REGRESSED (+54.5%)
+[10/15] rxjs             21.27ms (baseline 16.48ms)  REGRESSED (+29.1%)
+[11/15] semver           9.67ms (baseline 6.36ms)  REGRESSED (+52.0%)
+[12/15] uuid             2.94ms (baseline 2.00ms)  (+47.0%)
+[13/15] vue-reactivity   4.42ms (baseline 3.26ms)  (+35.6%)
+[14/15] yaml             (bundle absent on disk; skipped)
+[15/15] zod              (bundle absent on disk; skipped)
+REGRESS  dayjs: was 2.39ms, now 6.34ms (+165.3% > 25.0% threshold)
+REGRESS  postcss: was 7.58ms, now 11.71ms (+54.5% > 25.0% threshold)
+REGRESS  rxjs: was 16.48ms, now 21.27ms (+29.1% > 25.0% threshold)
+REGRESS  semver: was 6.36ms, now 9.67ms (+52.0% > 25.0% threshold)
+
+4 bundle(s) regressed: dayjs, postcss, rxjs, semver; accept them with --update if intended
+
+=== facts baseline
+analyzing whole-program facts across 31 targets (14 benchmarks, 17 bundles)...
+[ 1/31] benchmark:collatz              closed   2 mod(s),  18 func(s),   84 site(s)
+[ 2/31] benchmark:fib                  closed   2 mod(s),  19 func(s),   88 site(s)
+[ 3/31] benchmark:frame                closed   2 mod(s),  26 func(s),  110 site(s)
+[ 4/31] benchmark:loop                 closed   2 mod(s),  18 func(s),   84 site(s)
+[ 5/31] benchmark:mandelbrot           closed   2 mod(s),  18 func(s),   84 site(s)
+[ 6/31] benchmark:nbody                closed   2 mod(s),  19 func(s),   87 site(s)
+[ 7/31] benchmark:array-functional     closed   2 mod(s),  21 func(s),   92 site(s)
+[ 8/31] benchmark:array-sort           closed   2 mod(s),  19 func(s),   91 site(s)
+[ 9/31] benchmark:class-poly           closed   2 mod(s),  22 func(s),  121 site(s)
+[10/31] benchmark:collections          closed   2 mod(s),  18 func(s),   88 site(s)
+[11/31] benchmark:json                 closed   2 mod(s),  18 func(s),   90 site(s)
+[12/31] benchmark:object-spread        closed   2 mod(s),  18 func(s),   87 site(s)
+[13/31] benchmark:regex                closed   2 mod(s),  18 func(s),   86 site(s)
+[14/31] benchmark:string-ops           closed   2 mod(s),  18 func(s),   90 site(s)
+[15/31] bundle:acorn                   closed   1 mod(s), 357 func(s), 5397 site(s)
+[16/31] bundle:ajv                     open     1 mod(s), 819 func(s), 7661 site(s)
+[17/31] bundle:async-concurrency       closed   1 mod(s), 360 func(s), 2279 site(s)
+[18/31] bundle:chalk                   closed   1 mod(s),  45 func(s),  444 site(s)
+[19/31] bundle:datefns                 closed   1 mod(s), 116 func(s),  838 site(s)
+[20/31] bundle:dayjs                   closed   1 mod(s),  64 func(s),  467 site(s)
+[21/31] bundle:immer                   closed   1 mod(s), 137 func(s),  960 site(s)
+[22/31] bundle:lodash                  open     1 mod(s), 699 func(s), 4117 site(s)
+[23/31] bundle:marked                  closed   1 mod(s), 147 func(s), 2551 site(s)
+[24/31] bundle:mobx                    closed   1 mod(s), 479 func(s), 3448 site(s)
+[25/31] bundle:ms                      closed   1 mod(s),  12 func(s),   89 site(s)
+[26/31] bundle:mustache                closed   1 mod(s),  46 func(s),  338 site(s)
+[27/31] bundle:postcss                 open     4 mod(s), 531 func(s), 6077 site(s)
+[28/31] bundle:rxjs                    closed   1 mod(s), 390 func(s), 2013 site(s)
+[29/31] bundle:semver                  closed   1 mod(s), 172 func(s), 1947 site(s)
+[30/31] bundle:uuid                    closed   1 mod(s),  12 func(s),  180 site(s)
+[31/31] bundle:vue-reactivity          closed   1 mod(s), 184 func(s), 1338 site(s)
+
+no regressions across 31 target(s) (14 benchmarks, 17 bundles)
+
+=== conformance/node
+  pass            36
+  fail            0
+
+=== conformance/server
+  pass            5
+  fail            0
+
+=== conformance/regress
+  pass            12
+  fail            0
+
+=== test262 baseline
+[1/122] annexB/built-ins  352/130
+[2/122] annexB/language  844/51
+[3/122] built-ins/AbstractModuleSource  0/8
+[4/122] built-ins/AggregateError  40/10
+[5/122] built-ins/Array  5900/217  +2
+[6/122] built-ins/ArrayBuffer  412/30
+[7/122] built-ins/ArrayIteratorPrototype  38/8
+[8/122] built-ins/AsyncDisposableStack  208/0
+[9/122] built-ins/AsyncFromSyncIteratorPrototype  24/52  REGRESSED
+[10/122] built-ins/AsyncFunction  22/14
+[11/122] built-ins/AsyncGeneratorFunction  18/28
+[12/122] built-ins/AsyncGeneratorPrototype  44/52
+[13/122] built-ins/AsyncIteratorPrototype  0/26
+[14/122] built-ins/Atomics  762/12
+[15/122] built-ins/BigInt  110/44
+[16/122] built-ins/Boolean  99/2
+[17/122] built-ins/DataView  1110/12
+[18/122] built-ins/Date  1166/22
+[19/122] built-ins/DisposableStack  186/0
+[20/122] built-ins/Error  102/84
+[21/122] built-ins/FinalizationRegistry  92/2
+[22/122] built-ins/Function  789/104
+[23/122] built-ins/GeneratorFunction  20/26
+[24/122] built-ins/GeneratorPrototype  98/24
+[25/122] built-ins/Infinity  10/0
+[26/122] built-ins/Iterator  1226/82
+[27/122] built-ins/JSON  276/54
+[28/122] built-ins/Map  389/16
+[29/122] built-ins/MapIteratorPrototype  18/4
+[30/122] built-ins/Math  618/36
+[31/122] built-ins/NaN  10/0
+[32/122] built-ins/NativeErrors  184/4
+[33/122] built-ins/Number  671/9
+[34/122] built-ins/Object  6631/171
+[35/122] built-ins/Promise  1328/130
+[36/122] built-ins/Proxy  556/51
+[37/122] built-ins/Reflect  302/4
+[38/122] built-ins/RegExp  3580/176
+[39/122] built-ins/RegExpStringIteratorPrototype  20/14
+[40/122] built-ins/Set  746/18
+[41/122] built-ins/SetIteratorPrototype  18/4
+[42/122] built-ins/ShadowRealm  116/8
+[43/122] built-ins/SharedArrayBuffer  198/10
+[44/122] built-ins/String  2263/180
+[45/122] built-ins/StringIteratorPrototype  10/4
+[46/122] built-ins/SuppressedError  34/10
+[47/122] built-ins/Symbol  172/20
+[48/122] built-ins/Temporal  8680/526
+[49/122] built-ins/ThrowTypeError  18/10
+[50/122] built-ins/TypedArray  2603/273
+[51/122] built-ins/TypedArrayConstructors  1324/122
+[52/122] built-ins/Uint8Array  136/4
+[53/122] built-ins/WeakMap  269/12
+[54/122] built-ins/WeakRef  58/0
+[55/122] built-ins/WeakSet  160/10
+[56/122] built-ins/decodeURI  102/8
+[57/122] built-ins/decodeURIComponent  104/8
+[58/122] built-ins/encodeURI  48/14
+[59/122] built-ins/encodeURIComponent  48/14
+[60/122] built-ins/eval  18/2
+[61/122] built-ins/global  54/2
+[62/122] built-ins/isFinite  30/0
+[63/122] built-ins/isNaN  30/0
+[64/122] built-ins/parseFloat  108/0
+[65/122] built-ins/parseInt  106/4
+[66/122] built-ins/undefined  12/0
+[67/122] intl402/Array  2/2
+[68/122] intl402/BigInt  10/12
+[69/122] intl402/Collator  96/34
+[70/122] intl402/Date  22/2
+[71/122] intl402/DateTimeFormat  396/92
+[72/122] intl402/DisplayNames  103/11
+[73/122] intl402/DurationFormat  150/70
+[74/122] intl402/FallbackSymbol  0/4
+[75/122] intl402/Intl  100/32
+[76/122] intl402/ListFormat  150/12
+[77/122] intl402/Locale  100/236
+[78/122] intl402/Number  12/2
+[79/122] intl402/NumberFormat  292/206
+[80/122] intl402/PluralRules  80/26
+[81/122] intl402/RelativeTimeFormat  154/6
+[82/122] intl402/Segmenter  144/14
+[83/122] intl402/String  24/14
+[84/122] intl402/Temporal  3794/264
+[85/122] intl402/TypedArray  2/0
+[86/122] language/arguments-object  433/27
+[87/122] language/asi  204/0
+[88/122] language/block-scope  287/0
+[89/122] language/comments  79/2
+[90/122] language/computed-property-names  86/10
+[91/122] language/destructuring  36/1
+[92/122] language/directive-prologue  62/0
+[93/122] language/eval-code  419/35
+[94/122] language/export  3/0
+[95/122] language/expressions  20359/611  REGRESSED
+[96/122] language/function-code  277/4
+[97/122] language/future-reserved-words  85/0
+[98/122] language/global-code  50/25
+[99/122] language/identifier-resolution  22/0
+[100/122] language/identifiers  535/0
+[101/122] language/import  24/104
+[102/122] language/keywords  50/0
+[103/122] language/line-terminators  82/0
+[104/122] language/literals  1025/16
+[105/122] language/module-code  538/61
+[106/122] language/punctuators  22/0
+[107/122] language/reserved-words  53/0
+[108/122] language/rest-parameters  22/0
+[109/122] language/source-text  2/0
+[110/122] language/statementList  160/0
+[111/122] language/statements  16863/1139  REGRESSED
+[112/122] language/types  205/6
+[113/122] language/white-space  124/10
+[114/122] staging/Temporal  4/0
+[115/122] staging/Uint8Array  2/0
+[116/122] staging/built-ins  6/10
+[117/122] staging/decorators  2/0
+[118/122] staging/explicit-resource-management  86/19
+[119/122] staging/set-methods  6/0
+[120/122] staging/sm  1943/653  +15
+[121/122] staging/source-phase-imports  0/0
+[122/122] staging/top-level-await  0/1
+REGRESS  built-ins/AsyncFromSyncIteratorPrototype: 28 -> 24 passing
+REGRESS  language/expressions: 20507 -> 20359 passing
+REGRESS  language/statements: 17633 -> 16863 passing
+gain     built-ins/Array: +2
+gain     staging/sm: +15
+
+3 chunk(s) regressed; accept them with --update if intended
+
+=== gate
+FAILED: crate tests native parity thirdparty baseline test262 baseline
+[gate] ERROR task failed

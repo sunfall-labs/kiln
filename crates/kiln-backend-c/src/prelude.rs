@@ -1068,6 +1068,10 @@ method_ids! {
     (KILN_C99_METHOD_NODE_OS_HOMEDIR, 505, Direct),
     (KILN_C99_METHOD_NODE_OS_TMPDIR, 506, Direct),
     (KILN_C99_METHOD_NODE_FS_MKDIR, 507, Direct),
+    // Private bootstrap bridges for Uint8Array codecs (ADR 0005).
+    // Captured and deleted by the compiled builtin bootstrap before user code runs.
+    (KILN_C99_METHOD_UINT8_TO_HEX_RAW, 510, Direct),
+    (KILN_C99_METHOD_UINT8_TO_BASE64_RAW, 511, Direct),
 }
 
 /// The hook a host installs when it lets a program make a second realm.
@@ -1846,7 +1850,7 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
     },
     AbsentAnswer {
         function: "kiln_c99_get_own_kind",
-        sites: 27,
+        sites: 28,
         proved_by: "one membership predicate per receiver kind -- kiln_c99_is_array_member, \
                     kiln_c99_is_string_member, kiln_c99_is_date_member, \
                     kiln_c99_is_collection_member and the kiln_c99_collection_kind_member \
@@ -2746,6 +2750,7 @@ enum kiln_value_tag {
 #define KILN_C99_BUILTIN_URL 63
 #define KILN_C99_BUILTIN_BUFFER 64
 #define KILN_C99_BUILTIN_SYMBOL_PROTOTYPE 96
+#define KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE 97
 
 /* Array methods, part two.
  *
@@ -3232,6 +3237,8 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_NODE_OS_HOMEDIR),
     emit_method_define!(KILN_C99_METHOD_NODE_OS_TMPDIR),
     emit_method_define!(KILN_C99_METHOD_NODE_FS_MKDIR),
+    emit_method_define!(KILN_C99_METHOD_UINT8_TO_HEX_RAW),
+    emit_method_define!(KILN_C99_METHOD_UINT8_TO_BASE64_RAW),
     emit_method_define!(KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE),
     emit_method_define!(KILN_C99_METHOD_NODE_QUERYSTRING_PARSE),
     r#"
@@ -3961,7 +3968,7 @@ static int kiln_c99_is_typed_array_member(int byte_view, const char *key, size_t
      * .toBase64` is absent in the language and `undefined` is its right answer; on a `Uint8Array`
      * the interpreter has a function, and `undefined` there is the silent wrong answer a
      * `typeof view.toBase64 === "function"` feature test walks past. */
-    static const char *const byte_members[] = {"setFromBase64", "setFromHex", "toBase64", "toHex"};
+    static const char *const byte_members[] = {"setFromBase64", "setFromHex"};
     size_t index;
     for (index = 0; index < sizeof members / sizeof *members; ++index) {
         if (kiln_c99_same_name(key, key_len, members[index])) {

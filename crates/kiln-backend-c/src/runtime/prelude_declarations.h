@@ -103,6 +103,7 @@ extern kiln_value kiln_c99_method(uint64_t code);
 extern int kiln_c99_commonjs_require_value(kiln_value *out, kiln_commonjs_require_fn call, void *context);
 extern const char *kiln_c99_method_name(uint64_t code);
 extern const char *kiln_c99_builtin_name(uint64_t builtin);
+extern int kiln_c99_builtin_length(uint64_t builtin, double *out);
 extern int kiln_c99_visible_arguments(kiln_value *out);
 extern int kiln_c99_atomics_object(kiln_value *out);
 extern int kiln_c99_process_object(kiln_value *out);

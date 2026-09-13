@@ -1,0 +1,12 @@
+      ┌─────────┐  mr boxington
+     ╱ ═══════ ╱│
+    ╱─────────╱ │
+    │ •    (◉)│≡│
+    │  ◟▄▄▄◞  │ ╱
+    │   ◀◆▶   │╱
+    └─────────┘
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.31s
+native: 188 matched, 1 refused, 0 diverged
+
+Refused by the native backend (the backlog, not a failure):
+  shadow-realm                 native emission failed: unsupported native emission: host realm facility ShadowRealm at instruction 3

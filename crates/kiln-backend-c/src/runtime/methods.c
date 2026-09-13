@@ -121,6 +121,8 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_PROCESS_START_RAW: return "__kilnHostProcessStart";
     case KILN_C99_METHOD_PROCESS_CANCEL_RAW: return "__kilnHostProcessCancel";
     case KILN_C99_METHOD_INTL_SEGMENT_RAW: return "__kilnIntlSegment";
+    case KILN_C99_METHOD_UINT8_TO_HEX_RAW: return "__kilnUint8ToHex";
+    case KILN_C99_METHOD_UINT8_TO_BASE64_RAW: return "__kilnUint8ToBase64";
     case KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_MILLISECONDS:
         return "fromEpochMilliseconds";
     case KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_NANOSECONDS:

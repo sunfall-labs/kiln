@@ -4058,6 +4058,12 @@ fn node_builtin_namespace(specifier: &str) -> Option<Value> {
     if kiln_builtins::is_ts_builtin_specifier(specifier) {
         return None;
     }
+    node_builtin_native_namespace(specifier)
+}
+
+/// Legacy native namespace used by TypeScript builtin implementations when they
+/// probe for an optional host capability during their own lazy evaluation.
+pub fn node_builtin_native_namespace(specifier: &str) -> Option<Value> {
     Some(Value::Native(
         match specifier.strip_prefix("node:").unwrap_or(specifier) {
             "assert" | "assert/strict" => Native::NodeAssert,
@@ -4154,7 +4160,7 @@ pub fn node_builtin_exports(specifier: &str) -> Option<Vec<(String, Value)>> {
     if kiln_builtins::is_ts_builtin_specifier(specifier) {
         return None;
     }
-    let namespace = node_builtin_namespace(specifier)?;
+    let namespace = node_builtin_native_namespace(specifier)?;
     let Value::Native(namespace, _) = namespace else {
         unreachable!("builtin namespaces are native values")
     };
@@ -4166,7 +4172,9 @@ pub fn node_builtin_exports(specifier: &str) -> Option<Vec<(String, Value)>> {
                 (
                     (*name).to_owned(),
                     node_builtin_export_value(namespace, name).unwrap_or_else(|| {
-                        panic!("missing builtin export {specifier}:{name} on {namespace:?}")
+                        panic!(
+                            "every advertised builtin export has a native value: specifier={specifier} export={name} namespace={namespace:?}"
+                        )
                     }),
                 )
             })
@@ -4181,12 +4189,10 @@ pub fn node_builtin_exports(specifier: &str) -> Option<Vec<(String, Value)>> {
 /// callable for modules such as `events` and `assert`. Keeping this beside the export table means
 /// the two projections cannot drift onto different implementations.
 pub fn node_builtin_commonjs_value(specifier: &str) -> Option<Value> {
-    if kiln_builtins::is_ts_builtin_specifier(specifier) {
-        // Graph-owned CommonJS loading evaluates the TS module and projects its default export.
-        // A standalone interpreter has no graph/module cache in which to perform that work.
+    if specifier == "node:module" || specifier == "module" {
         return None;
     }
-    let namespace = node_builtin_namespace(specifier)?;
+    let namespace = node_builtin_native_namespace(specifier)?;
     let Value::Native(native, _) = namespace else {
         unreachable!("builtin namespaces are native values")
     };
@@ -4210,6 +4216,15 @@ pub fn node_builtin_commonjs_value(specifier: &str) -> Option<Value> {
         };
     }
     None
+}
+
+/// Graph-owned CommonJS loading evaluates TypeScript builtins through its
+/// canonical module cells instead of falling back to the legacy native record.
+pub fn node_builtin_commonjs_value_for_graph(specifier: &str) -> Option<Value> {
+    if kiln_builtins::is_ts_builtin_specifier(specifier) {
+        return None;
+    }
+    node_builtin_commonjs_value(specifier)
 }
 
 impl Value {
@@ -15510,12 +15525,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::ProcessGetBuiltinModule => match arguments.first() {
                 Some(Value::String(name)) if kiln_builtins::is_ts_builtin_specifier(name) => {
                     if let Some(loader) = self.commonjs_loader {
-                        return unsafe { (&mut *loader).get_builtin(name, instruction) }.and_then(
+                        return unsafe { (&mut *loader).get_builtin(name, instruction) }.map(
                             |value| {
-                                value.ok_or_else(|| ExecutionError::TypeErrorMessage {
-                                    message: format!(
-                                        "builtin module `{name}` has not been evaluated"
-                                    ),
+                                value.unwrap_or_else(|| {
+                                    node_builtin_native_namespace(name).unwrap_or(Value::Undefined)
                                 })
                             },
                         );

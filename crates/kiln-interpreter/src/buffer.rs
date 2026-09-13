@@ -149,6 +149,8 @@ pub(crate) fn dispatch(
                     }
                     Ok(Value::String(hex_str))
                 }
+                "base64" => Ok(Value::String(crate::to_base64_text(&bytes, false, false))),
+                "base64url" => Ok(Value::String(crate::to_base64_text(&bytes, true, true))),
                 "latin1" | "binary" | "ascii" => {
                     let (decoded, _) =
                         encoding_rs::WINDOWS_1252.decode_without_bom_handling(&bytes);

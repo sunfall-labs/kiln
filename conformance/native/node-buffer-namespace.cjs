@@ -27,3 +27,6 @@ console.log("from", buffer.from([104, 105]).toString());
 console.log("isBuffer", buffer.isBuffer(buffer.alloc(1)), buffer.isBuffer(1));
 console.log("byteLength", buffer.byteLength("hey"));
 console.log("concat", buffer.concat([buffer.from([1]), buffer.from([2])]).length);
+console.log("hex", buffer.from([104, 101, 108, 108, 111]).toString("hex"));
+console.log("base64", buffer.from([104, 101, 108, 108, 111, 32, 119, 111, 114, 108, 100]).toString("base64"));
+console.log("base64url", buffer.from([104, 101, 108, 108, 111, 32, 119, 111, 114, 108, 100, 63]).toString("base64url"));

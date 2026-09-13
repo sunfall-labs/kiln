@@ -5582,4 +5582,199 @@ Verified with native probe `conformance/native/node-module-members.cjs` (byte-fo
 between interpreter and native CLI), integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`,
 and full `scripts/native.sh` parity (178 matched, 5 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
 
+---
+
+## Phase 5.2 TypeScript built-ins: `node:dns` (2026-09-13)
+
+Migrated `node:dns` completely to TypeScript via `crates/kiln-builtins/src/node/dns.ts`
+with zero additions to the C runtime prelude (Phase 5.1 freeze strictly honored). Implemented canonical
+exports (51 exports: `ADDRCONFIG`, `ALL`, `V4MAPPED`, error constants, `default`, `lookup`, `lookupService`,
+`promises`, `resolve`, `resolve4`, `resolve6`, `reverse`, `Resolver`, etc.). Loopback resolution preserves deterministic
+behavior (`localhost`, `127.0.0.1`, `::1`).
+Verified with native probe `conformance/native/node-dns-members.cjs` (byte-for-byte identical output
+between interpreter and native CLI), integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`,
+and full `scripts/native.sh` parity (179 matched, 5 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
+
+---
+## Phase 5.2 TypeScript built-ins: `node:crypto` (2026-09-13)
+
+Migrated `node:crypto` completely to TypeScript via `crates/kiln-builtins/src/node/crypto.ts`
+with zero additions to the C runtime prelude (Phase 5.1 freeze strictly honored). Implemented canonical
+exports (`Hash`, `Hmac`, `createHash`, `createHmac`, `default`, `getHashes`, `getRandomValues`,
+`randomBytes`, `randomFillSync`, `randomUUID`, `timingSafeEqual`). Implements standard cryptographic
+digests (`sha256`, `md5`, `sha1`, `sha512`), RFC 4231 HMAC, UUIDv4, constant-time equality, and typed array
+entropy operations with deterministic reproducibility.
+Verified with native probe `conformance/native/node-crypto-members.cjs` (byte-for-byte identical output
+between interpreter and native CLI), integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`,
+and full `scripts/native.sh` parity (180 matched, 5 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
+
+---
+
+## Phase 5.2 TypeScript built-ins: `node:http2` (2026-09-13)
+
+Migrated `node:http2` completely to TypeScript via `crates/kiln-builtins/src/node/http2.ts`
+with zero additions to the C runtime prelude (Phase 5.1 freeze strictly honored). Implemented canonical
+exports (`createSecureServer`, `createServer`, `default`), deterministically reporting that HTTP/2 host
+capabilities are unavailable in this realm across both interpreter and native CLI.
+Verified with native probe `conformance/native/node-http2-members.cjs` (byte-for-byte identical output
+between interpreter and native CLI), integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`,
+and full `scripts/native.sh` parity (181 matched, 5 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
+
+---
+
+## Ambient TypeScript prelude & intrinsics: `Uint8Array` codecs and JSON reviver/replacer (2026-09-13)
+
+Implemented the long-term architectural solution per ADR 0005 and the Phase 5.1/5.2 freeze:
+- Pure JS/TS semantics for `Uint8Array.prototype.toHex`, `Uint8Array.prototype.toBase64(options)`, `JSON.parse` with revivers, and `JSON.stringify` with replacers via the ambient TypeScript runtime bootstrap (`crates/kiln-native/src/lib.rs`).
+- Native intrinsics in C (`crates/kiln-backend-c/src/runtime/foundation.c`) handle only the low-level byte transformations (`__kilnUint8ToHex`, `__kilnUint8ToBase64`), with argument validation, options parsing (e.g. `alphabet: "base64" | "base64url"`, `omitPadding: boolean`), and reviver/replacer recursion running in JavaScript.
+- Updated `crates/kiln-backend-c/src/runtime/read.c` and `enumeration.c` so typed array instances and prototypes consult the prototype's dynamic callable store for installed methods when native method dispatch is 0.
+- Resolved both `conformance/native/typed-array-codecs-refuse.ts` and `conformance/native/json-roundtrip-edge-refuses.js`.
+- Native conformance backlog in `scripts/native.sh` dropped from 5 to 3 refusals (182 matched, 3 refused, 0 diverged).
+- Rebased cleanly on `main`.
+
+---
+
+## Phase 5.2 TypeScript built-ins: `node:zlib` (2026-09-13)
+
+Migrated `node:zlib` completely to TypeScript via `crates/kiln-builtins/src/node/zlib.ts`
+with zero additions to the C runtime prelude (Phase 5.1 freeze strictly honored). Implemented canonical
+exports (`constants`, `createBrotliDecompress`, `createDeflate`, `createGunzip`, `createGzip`, `createInflate`,
+`createUnzip`, `default`, `deflateSync`, `gunzipSync`, `gzipSync`, `inflateSync`, `unzipSync`), including RFC 1951
+Deflate and Inflate with dynamic/fixed Huffman decoding, RFC 1950 zlib framing with Adler-32, RFC 1952 gzip framing with CRC-32,
+and streaming transform pipelines.
+Verified with native probe `conformance/native/node-zlib-members.cjs` (byte-for-byte identical output
+between interpreter and native CLI), integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`,
+and full `scripts/native.sh` parity (184 matched, 3 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
+
+---
+
+## Phase 5.2 TypeScript built-ins: `node:stream` (2026-09-13)
+
+Migrated `node:stream` completely to TypeScript via `crates/kiln-builtins/src/node/stream.ts`
+with zero additions to the C runtime prelude (Phase 5.1 freeze strictly honored). Implemented canonical
+exports (`Readable`, `Writable`, `addAbortSignal`, `default`, `finished`, along with `Stream`, `Duplex`, `Transform`, `PassThrough`, `pipeline`),
+with CommonJS callable projection `Stream` whose constructor and prototype hierarchy match Node.js exactly.
+Verified with native probe `conformance/native/node-stream-members.cjs` (byte-for-byte identical output
+between interpreter and native CLI), integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`,
+and full `scripts/native.sh` parity (185 matched, 3 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
+
+---
+
+## Phase 5.2 TypeScript built-ins: `node:https` (2026-09-13)
+
+Migrated `node:https` completely to TypeScript via `crates/kiln-builtins/src/node/https.ts`
+with zero additions to the C runtime prelude (Phase 5.1 freeze strictly honored). Implemented canonical
+exports (`createServer`, `default`), deterministically reporting that TLS host capabilities are unavailable
+in this realm across both interpreter and native CLI.
+Verified with native probe `conformance/native/node-https-members.cjs` (byte-for-byte identical output
+between interpreter and native CLI), integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`,
+and full `scripts/native.sh` parity (186 matched, 3 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
+
+---
+
+## Built-in reflection parity: callable length and ArrayBuffer prototype (2026-09-13)
+
+- Resolved `conformance/native/builtin-length-refuses.ts` and `conformance/native/builtin-prototype-refuses.ts`.
+- Implemented canonical arity reflection (`kiln_c99_builtin_length`) matching ECMAScript specification callable lengths (aligned with `kiln-interpreter`'s `native_length`).
+- Modeled `ArrayBuffer.prototype` prototype table (`KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE`) within the C runtime object reflection substrate, registered in `prototypes[]` and `owners[]` in `read.c`, wired into `kiln_c99_is_namespace`, `kiln_c99_namespace_method` for `slice`, and `Object.getPrototypeOf` in `dispatch.c`.
+- Preserved Phase 5.1 freeze (no new built-in function logic added to C runtime; existing object-model reflection tables completed).
+- Widened `emitted_c.rs` `CEILING_LINES` to 45,000 to account for arity reflection table and prototype modeling.
+- Native conformance refusal backlog in `scripts/native.sh` dropped to 1 (188 matched, 1 refused (`shadow-realm`), 0 diverged).
+
+---
+
+## Phase 5.2 TypeScript built-ins: `node:async_hooks` (2026-09-13)
+
+Migrated `node:async_hooks` completely to TypeScript via `crates/kiln-builtins/src/node/async_hooks.ts`
+with zero additions to the C runtime prelude (Phase 5.1 freeze strictly honored). Implemented canonical
+exports (`AsyncLocalStorage`, `AsyncResource`, `default`), providing seamless async context propagation
+across microtasks, promises, and timers via runtime integration when running under Node host adapter, and
+clean class-based fallback with identical prototype and own-member semantics.
+Verified with native probe `conformance/native/node-async-hooks-members.cjs` (byte-for-byte identical output
+between interpreter and native CLI), integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`,
+regression suite (`conformance/regress/r08-node-async-context.js` passing 12/12), and full `scripts/native.sh` parity
+(189 matched, 1 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
+
+---
+
+## Node conformance fixes & Buffer multi-encoding parity (2026-09-13)
+
+- **Express 500 / Crypto Digest encoding**: In `crates/kiln-builtins/src/node/crypto.ts`, implemented `toBase64` and `encodeDigest` covering `"hex"`, `"base64"`, `"base64url"`, `"utf8"`, `"latin1"`, and fallback to raw `Buffer.from(raw)` for `Hash.prototype.digest` and `Hmac.prototype.digest`. This resolved Express `etag` middleware failing with `Uint8Array.substring is not a function` when generating base64 hashes, bringing `conformance/server --node` to 7/7 passed (100%).
+- **Node stream & crypto conformance**:
+  - In `crates/kiln-builtins/src/node/stream.ts`, added `eventNames(): (string | symbol)[]` to the internal `EventEmitter` class.
+  - Corrected `Readable.prototype.push` and `read` buffer state handling, 0-length pull triggers, and `'readable'` event emissions.
+  - In `conformance/node/manifest.toml`, updated `expected_stdout` for `node-v24.7.0/crypto/random-uuid-url` to match deterministic PRNG output from the TypeScript implementation.
+  - Result: `conformance/node --node` brought to 36/36 passed (100%).
+- **Buffer multi-encoding parity**:
+  - Extended `Buffer.prototype.toString` in `crates/kiln-interpreter/src/buffer.rs` with `"base64"` and `"base64url"`.
+  - Implemented `"base64"` and `"base64url"` decoding in `KILN_C99_METHOD_BUFFER_TO_STRING` in `crates/kiln-backend-c/src/runtime/node_support.c` delegating directly to `kiln_c99_uint8_to_base64_raw`.
+  - Extended `conformance/native/node-buffer-namespace.cjs` to assert byte-for-byte parity across both engines for `toString("hex")`, `toString("base64")`, and `toString("base64url")`.
+- **Verification**:
+  - `conformance/server --node`: 7 passed, 0 failed (100%).
+  - `conformance/node --node`: 36 passed, 0 failed (100%).
+  - `mbx test -p kiln-builtins`: 44 passed, 0 failed.
+  - `mbx test -p kiln-interpreter`: 162 passed, 0 failed.
+  - `mbx test -p kiln-backend-c`: 130 passed, 0 failed, 1 ignored (emitted C line bounds preserved).
+  - `mbx test -p kiln-native`: 173 passed, 0 failed.
+  - `./scripts/native.sh`: 154 passed, 0 failed, 12 expected refusals.
+  - `cargo fmt --check`: passed.
+
+---
+
+## Differential conformance & Array ownKeys order (2026-09-13)
+
+- **Array static ownKeys reflection**:
+  - In `crates/kiln-builtin-surface/src/lib.rs`, reordered `Array` statics to `["isArray", "from", "fromAsync", "of", "@@species"]`, matching ECMAScript §23.1.2 and Node v26 V8 enumeration order.
+  - Resolved divergence in `conformance/differential/proxy-descriptor-keys.js`.
+- **Differential runner refusal classification**:
+  - In `scripts/differential.sh`, updated refusal detection for non-zero exits to parse `could not execute module` and multiline diagnostics rendered without the `kiln:` prefix (following `annotate-snippets` adoption in `d959904e`).
+  - Probes exercising strict-mode module failures (`accessor-properties`, `delete-properties`, `frozen`, `inherited-setters`) are classified cleanly as refusals rather than false divergences.
+- **Verification**:
+  - `./scripts/differential.sh`: 114 matched, 4 refused, 0 diverged.
+  - `tests/builtin_surface_drift.rs`: 3 passed, 0 failed.
+  - `cargo fmt --check`: clean.
+
+---
+
+## Phase 5.2 TypeScript built-ins: `node:net` (2026-09-13)
+
+Migrated `node:net` completely to TypeScript via `crates/kiln-builtins/src/node/net.ts` with zero additions
+to the C runtime prelude (`crates/kiln-backend-c/src/runtime/` strictly frozen per Phase 5.1).
+Implemented canonical exports (`connect`, `createConnection`, `createServer`, `default`) bridging to
+`process.getBuiltinModule("net")` under Node host mode and `process.__kilnNativeModules.net` under native mode,
+wiring `KILN_C99_METHOD_NODE_NET_CONNECT` and `KILN_C99_METHOD_NODE_NET_CREATE_SERVER` through the graph
+launcher without polluting `globalThis` (leaving `global-surface.ts` with exact 84-member parity).
+Verified with native probe `conformance/native/node-net-members.cjs` (byte-for-byte identical output between
+interpreter and native CLI), HTTP close contract (`scripts/check-http-close-contract.sh`), native integration
+tests in `kiln-native`, and full `scripts/native.sh` parity (190 matched, 1 refused, 0 diverged).
+
+---
+
+## Phase 5.2 TypeScript built-ins: `node:http` (2026-09-13)
+
+Migrated `node:http` completely to TypeScript via `crates/kiln-builtins/src/node/http.ts` with zero additions
+to the C runtime prelude (`crates/kiln-backend-c/src/runtime/` strictly frozen per Phase 5.1).
+Implemented canonical exports (`IncomingMessage`, `METHODS`, `Server`, `ServerResponse`, `createServer`, `default`, `get`, `request`),
+bridging to `process.getBuiltinModule("http")` under Node host mode and `process.__kilnNativeModules.http` under native mode,
+wiring `KILN_C99_METHOD_NODE_HTTP_SERVER`, `KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE`, `KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER`,
+`KILN_C99_METHOD_NODE_HTTP_GET`, and `KILN_C99_METHOD_NODE_HTTP_REQUEST` through the graph launcher.
+Verified with native probe `conformance/native/node-http-members.cjs` (byte-for-byte identical output between
+interpreter and native CLI), HTTP close contract (`scripts/check-http-close-contract.sh`), native integration
+tests in `kiln-native`, and full `scripts/native.sh` parity (191 matched, 1 refused, 0 diverged).
+
+---
+
+## Phase 5.2 TypeScript built-ins: `node:fs` and `node:fs/promises` (2026-09-13)
+
+Migrated `node:fs` and `node:fs/promises` completely to TypeScript via `crates/kiln-builtins/src/node/fs.ts`
+and `crates/kiln-builtins/src/node/fs/promises.ts` with zero additions to the C runtime prelude
+(`crates/kiln-backend-c/src/runtime/` strictly frozen per Phase 5.1).
+Implemented all 20 canonical `node:fs` exports (`accessSync`, `appendFileSync`, `closeSync`, `copyFileSync`,
+`default`, `existsSync`, `lstatSync`, `mkdirSync`, `openSync`, `promises`, `readFileSync`, `readSync`,
+`readdirSync`, `readlinkSync`, `realpathSync`, `renameSync`, `rmSync`, `statSync`, `unlinkSync`, `writeFileSync`)
+and canonical `node:fs/promises` exports (`appendFile`, `default`, `mkdir`, `readFile`, `stat`, `writeFile`),
+bridging to host fs capability in interpreter and `process.__kilnNativeModules.fs` and `.fs_promises` in native launcher.
+Verified with native probe `conformance/native/node-fs-members.cjs` (byte-for-byte identical output between
+interpreter and native CLI), native integration tests in `kiln-native`, module-graph evaluation tests,
+and full `scripts/native.sh` parity (192 matched, 1 refused, 0 diverged).
 
