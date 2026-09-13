@@ -2137,6 +2137,7 @@ where
             let journal = self.dynamic_journal.take().expect("dynamic journal exists");
             if let Err(error) = result {
                 self.rollback_dynamic(journal);
+                self.remove_dynamic_dependency(&dynamic.importer, &dynamic.specifier);
                 self.dynamic_failures.insert(
                     (dynamic.importer, dynamic.specifier),
                     format!("dynamic import failed: {error}"),
@@ -2202,6 +2203,20 @@ where
             .entry(path.to_path_buf())
             .or_default()
             .push(dependency);
+    }
+
+    fn remove_dynamic_dependency(&mut self, importer: &Path, specifier: &str) {
+        if let Some(dependencies) = self.dynamic_dependencies.get_mut(importer) {
+            if let Some(index) = dependencies
+                .iter()
+                .position(|dependency| dependency.specifier == specifier)
+            {
+                dependencies.remove(index);
+            }
+            if dependencies.is_empty() {
+                self.dynamic_dependencies.remove(importer);
+            }
+        }
     }
 
     fn record_dynamic_failure(&mut self, key: (PathBuf, String), message: String) {
