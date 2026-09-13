@@ -289,27 +289,11 @@ for KILN_PROVIDER_FIELD in \
 	fi
 done
 
-printf '%s\n' \
-	'{' \
-	"  \"schema\": $KILN_PROVIDER_SCHEMA," \
-	"  \"provider\": \"$KILN_PROVIDER_NAME\"," \
-	"  \"provider_abi\": $KILN_PROVIDER_ABI_VERSION," \
-	"  \"format_version\": $KILN_PROVIDER_FORMAT," \
-	"  \"parse_version\": $KILN_PROVIDER_PARSE," \
-	"  \"rust_target\": \"$KILN_PROVIDER_TARGET\"," \
-	"  \"rustc_identity\": \"sha256:$KILN_PROVIDER_RUSTC_DIGEST\"," \
-	"  \"source_sha256\": \"$KILN_PROVIDER_SOURCE_DIGEST\"," \
-	"  \"archive_sha256\": \"$KILN_PROVIDER_ARCHIVE_DIGEST\"," \
-	"  \"archive\": \"$KILN_PROVIDER_ARCHIVE_NAME\"," \
-	'  "linkage": "static",' \
-	'  "pic": true,' \
-	"  \"profile\": \"$KILN_PROVIDER_PROFILE\"," \
-	'  "cpu_features": "generic",' \
-	"  \"deployment\": \"$KILN_PROVIDER_DEPLOYMENT\"," \
-	"  \"libc_baseline\": \"$KILN_PROVIDER_LIBC\"," \
-	"  \"exports\": [$KILN_PROVIDER_EXPORTS]," \
-	"  \"http\": $KILN_PROVIDER_HTTP_JSON" \
-	'}' >"$KILN_PROVIDER_MANIFEST_TEMP"
+"$KILN_PROVIDER_CONTRACT_BIN" manifest \
+	"$KILN_PROVIDER_TARGET" "sha256:$KILN_PROVIDER_RUSTC_DIGEST" \
+	"$KILN_PROVIDER_SOURCE_DIGEST" "$KILN_PROVIDER_ARCHIVE_DIGEST" \
+	"$KILN_PROVIDER_DEPLOYMENT" "$KILN_PROVIDER_LIBC" "$KILN_PROVIDER_HTTP_JSON" \
+	>"$KILN_PROVIDER_MANIFEST_TEMP"
 
 mv -f "$KILN_PROVIDER_ARCHIVE_TEMP" "$KILN_PROVIDER_ARCHIVE"
 mv -f "$KILN_PROVIDER_MANIFEST_TEMP" "$KILN_PROVIDER_MANIFEST"
