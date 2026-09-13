@@ -4237,6 +4237,7 @@ pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     // roots -- realm state, and invisible to the ownership guard until that guard learned to read
     // a declaration that spans lines.
     ("kiln_c99_native_constructors", C99StateOwner::Realm),
+    ("kiln_c99_array_unscopables", C99StateOwner::Realm),
     ("kiln_c99_method_index", C99StateOwner::Constant),
     ("kiln_c99_method_index_len", C99StateOwner::Constant),
     ("kiln_c99_method_index_ready", C99StateOwner::Constant),

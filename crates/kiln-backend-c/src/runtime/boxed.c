@@ -1534,6 +1534,7 @@ static void kiln_c99_gc_unit_roots(void *opaque, void *context, int phase) {
         kiln_c99_symbol_capacity = 0;
         for (index = 0; index < constructors; ++index)
             kiln_c99_native_constructors[index].prototype = kiln_c99_undefined();
+        kiln_c99_array_unscopables = kiln_c99_undefined();
         kiln_c99_new_target = kiln_c99_undefined();
         kiln_c99_adopted_this = kiln_c99_undefined();
         kiln_c99_captured_arguments = kiln_c99_undefined();
@@ -1545,6 +1546,7 @@ static void kiln_c99_gc_unit_roots(void *opaque, void *context, int phase) {
     kiln_c99_gc_mark_values(heap, kiln_c99_symbols, kiln_c99_symbol_count);
     for (index = 0; index < constructors; ++index)
         kiln_c99_gc_mark_value(heap, &kiln_c99_native_constructors[index].prototype);
+    kiln_c99_gc_mark_value(heap, &kiln_c99_array_unscopables);
     kiln_c99_gc_mark_value(heap, &kiln_c99_new_target);
     kiln_c99_gc_mark_value(heap, &kiln_c99_adopted_this);
     kiln_c99_gc_mark_value(heap, &kiln_c99_captured_arguments);

@@ -186,6 +186,11 @@ static int kiln_c99_builtin_has_member(uint64_t builtin, const char *key, size_t
     if (kiln_c99_namespace_method(builtin, key, key_len) != 0) {
         return 1;
     }
+    if (builtin == KILN_C99_BUILTIN_ARRAY_PROTOTYPE &&
+        (kiln_c99_same_name(key, key_len, "@@iterator") ||
+         kiln_c99_same_name(key, key_len, "@@unscopables"))) {
+        return 1;
+    }
     /* A symbol key is settled by the lookup above and nowhere else. The per-kind predicates
      * below answer *every* `@@` name, which is right for the reads they were written for and
      * wrong here for the same reason as on a date instance: `Symbol.for("x") in Array.prototype`
@@ -456,6 +461,7 @@ static int kiln_c99_has_property(kiln_host *host, kiln_value target, const char 
          * `for...of` and spread reach it by different paths -- so `in` has to spell it out too
          * or `Symbol.iterator in []` answers false about a method the array demonstrably has. */
         *answer = kiln_c99_same_name(key, key_len, "@@iterator") ||
+                  kiln_c99_same_name(key, key_len, "@@unscopables") ||
                   kiln_c99_array_method(key, key_len) != 0;
         return KILN_C99_OK;
     }
