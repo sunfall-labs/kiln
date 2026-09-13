@@ -65,3 +65,25 @@ acceptance result above is historical evidence from `fea2802b`.
 The post-merge ordinary native corpus then completed with 180 matched, 5 refused, and 0 diverged
 using the current release CLI. The five refusals are the existing JSON replacer, typed-array codec,
 callable length/prototype, and ShadowRealm backlog entries; no parity divergence was observed.
+
+## Provisional ROOT live evidence
+
+The latest ROOT live run used provisional compiler revision `d02cd136`. The policy-helper change
+was dirty during that build, so this is evidence of the emitted binary rather than an exact source
+commit. The binary is at `app/.scratch/ghui-live/ghui-d02cd136-provisional`, with SHA-256
+`419ff5cd68dcf40af903c6261ee4a300cb77b123f9bf08bc2259215faec49d78` and size 116,256,408 bytes.
+The build log is `.scratch/ghui-d02cd136-provisional-build.log`; it recorded emit 9,238 ms,
+compile 421,271 ms, link 836 ms, and exit 0.
+
+The corresponding transcript is `app/.scratch/ghui-live/d02cd136-provisional-live.log`. It passed
+the ROOT acceptance path: real HOME, repository navigation, PR 16, PR 50, issues 15, Enter into
+PR 3, rich result presentation, markdown scrolling, Escape back, `q` terminal restoration, and
+exit 0. Terminal restoration succeeded and no timeout notice appeared.
+
+The latest full native run at `532d2d1a` completed with 205 passed, 0 failed, and 2 ignored in
+402.73 seconds; its log is `.scratch/kiln-native-full-final.log`. Main is now based on
+`fc771151` with 1,572 merged changes, and the native bridge is `d02cd136` with policy commits
+`835` and `532`.
+
+These results remain provisional. The capability patch is not integrated, and exact clean-source
+rebuild, fresh paired performance comparison, and push validation remain pending.

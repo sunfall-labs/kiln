@@ -45,3 +45,21 @@ Compiler revision `e2bee922` failed its latest `e2ghui` startup because the Type
 `createRequire` relied on `globalThis.require`. Compiler revision `fea2802b` passed the older live
 run. These observations do not establish final GHUI application success, and no push is claimed
 by this record.
+
+## Provisional ROOT evidence
+
+The latest ROOT live acceptance used provisional compiler revision `d02cd136`. A policy-helper
+change was dirty during the build, so the result is not an exact clean-commit validation. The
+binary SHA-256 is
+`419ff5cd68dcf40af903c6261ee4a300cb77b123f9bf08bc2259215faec49d78` and its size is 116,256,408
+bytes. The build log is `.scratch/ghui-d02cd136-provisional-build.log` and records emit 9,238 ms,
+compile 421,271 ms, link 836 ms, and exit 0.
+
+The live transcript at `app/.scratch/ghui-live/d02cd136-provisional-live.log` passed real HOME,
+repository navigation, PR 16, PR 50, issues 15, Enter into PR 3, rich result presentation,
+markdown scrolling, Escape back, `q` terminal restoration, and exit 0, with no timeout notice.
+The full native validation at `532d2d1a` recorded 205 passed, 0 failed, and 2 ignored in 402.73
+seconds (`.scratch/kiln-native-full-final.log`).
+
+Capability integration, exact clean-source validation, fresh paired performance comparison, and
+push validation remain pending; this record does not claim completion of those checks.
