@@ -1,5 +1,7 @@
 // kiln-builtins: node:module implementation (Phase 5.2, ADR 0005)
 
+import { URL as NodeURL } from "node:url";
+
 export const builtinModules: string[] = [
   "assert",
   "assert/strict",
@@ -57,14 +59,19 @@ export function isBuiltin(moduleName: string): boolean {
   return builtinModules.indexOf(name) !== -1;
 }
 
-export function createRequire(_filename: string | any): (specifier: string) => any {
-  const globalRequire = (globalThis as any).require;
-  if (typeof globalRequire === "function") {
-    return globalRequire;
+export function createRequire(filename: string | any): (specifier: string) => any {
+  const isUrlObject =
+    filename instanceof NodeURL ||
+    (filename !== null && typeof filename === "object" && typeof filename.href === "string");
+  if (typeof filename !== "string" && !isUrlObject) {
+    throw new TypeError("The argument must be a string or a file URL object");
   }
-  return (specifier: string) => {
-    throw new Error(`Cannot find module '${specifier}'`);
-  };
+  // The host captures this immutable filename and binds the returned callable to the
+  // graph loader for that importer. Keeping the hook private prevents a process-global
+  // require from bypassing graph identity and cache ownership.
+  return __kilnHostModuleCreateRequire(
+    typeof filename === "string" ? filename : filename.href,
+  );
 }
 
 export class Module {

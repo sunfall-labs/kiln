@@ -136,7 +136,6 @@ pub struct RuntimeFailure {
     pub specifier: String,
     pub message: String,
 }
-
 fn runtime_importer_path(raw: &str) -> Result<PathBuf, String> {
     if raw.starts_with("file:") {
         let url =
@@ -1816,6 +1815,8 @@ impl ModuleGraph {
             limits,
             capabilities: capabilities.clone(),
             node,
+            pending_thrown: None,
+            ensuring_targets: HashSet::new(),
         };
 
         let static_reachable = self.statically_reachable();
@@ -1957,30 +1958,13 @@ impl ModuleGraph {
                     imports.push(Value::Cell(cell));
                     continue;
                 };
-                // `import * as ns` wants every export at once rather than one by name. The
-                // specification orders a namespace object's keys, so this sorts them: a hash map
-                // would otherwise make `Object.keys(ns)` differ run to run.
-                if import.imported == kiln_ir::NAMESPACE_IMPORT {
-                    let mut entries: Vec<(String, Value)> = provider
-                        .iter()
-                        .map(|(name, value)| (name.clone(), value.clone()))
-                        .collect();
-                    entries.sort_by(|left, right| left.0.cmp(&right.0));
-                    imports.push(kiln_interpreter::namespace_object(entries));
-                    continue;
-                }
-                let value = provider
-                    .get(&import.imported)
-                    .cloned()
-                    .or_else(|| {
-                        provider.get("default").and_then(|default_val| {
-                            own_data_property(default_val, &import.imported)
-                        })
-                    })
-                    .ok_or_else(|| ModuleGraphError::MissingExport {
-                        importer: path.clone(),
-                        provider: dependency.target.clone(),
-                        name: import.imported.clone(),
+                let value =
+                    linked_import_value(provider, &import.imported, false).ok_or_else(|| {
+                        ModuleGraphError::MissingExport {
+                            importer: path.clone(),
+                            provider: dependency.target.clone(),
+                            name: import.imported.clone(),
+                        }
                     })?;
                 imports.push(value);
             }
@@ -2128,9 +2112,208 @@ struct CommonJsLoader<'graph, H: HostOps + ?Sized> {
     limits: ExecutionLimits,
     capabilities: ExecutionCapabilities,
     node: bool,
+    pending_thrown: Option<Value>,
+    ensuring_targets: HashSet<PathBuf>,
+}
+
+fn linked_import_value(
+    provider: &HashMap<String, Value>,
+    imported: &str,
+    read_cells: bool,
+) -> Option<Value> {
+    if imported == kiln_ir::NAMESPACE_IMPORT {
+        let mut entries: Vec<_> = provider
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.clone(),
+                    if read_cells {
+                        read_through_cell(value)
+                    } else {
+                        value.clone()
+                    },
+                )
+            })
+            .collect();
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        return Some(kiln_interpreter::namespace_object(entries));
+    }
+    provider
+        .get(imported)
+        .map(|value| {
+            if read_cells {
+                read_through_cell(value)
+            } else {
+                value.clone()
+            }
+        })
+        .or_else(|| {
+            provider
+                .get("default")
+                .and_then(|default_val| own_data_property(default_val, imported))
+        })
 }
 
 impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
+    fn ensure_target_value(
+        &mut self,
+        target: &Path,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        self.ensure_target_value_inner(target, instruction)
+    }
+
+    fn ensure_target_value_inner(
+        &mut self,
+        target: &Path,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        if let Some(cell) = self.commonjs_cache.get(target) {
+            self.execute_target(target, false)?;
+            return Ok(cell.borrow().clone());
+        }
+        if let Some(value) = self.builtin_commonjs.get(target) {
+            return Ok(value.clone());
+        }
+        if let Some(provider) = unsafe { (&*self.values).get(target) }
+            && let Some(value) = provider.get("default")
+        {
+            return Ok(read_through_cell(value));
+        }
+        let Some(module_node) = self.graph.module_node(target) else {
+            return Err(ExecutionError::Host {
+                instruction,
+                message: format!(
+                    "CommonJS runtime target `{}` is not in the graph",
+                    target.display()
+                ),
+            });
+        };
+        if !matches!(module_node.source, ModuleSource::NodeBuiltin(builtin) if kiln_builtins::is_ts_builtin(builtin))
+        {
+            return Err(ExecutionError::Host {
+                instruction,
+                message: format!(
+                    "CommonJS runtime target `{}` has no value",
+                    target.display()
+                ),
+            });
+        }
+        if !self.ensuring_targets.insert(target.to_path_buf()) {
+            return Err(ExecutionError::Host {
+                instruction,
+                message: format!("cyclic lazy builtin dependency at `{}`", target.display()),
+            });
+        }
+        let result = self.evaluate_ts_builtin_target(target, instruction, module_node);
+        self.ensuring_targets.remove(target);
+        return result;
+    }
+
+    fn evaluate_ts_builtin_target(
+        &mut self,
+        target: &Path,
+        instruction: usize,
+        module_node: &ModuleNode,
+    ) -> Result<Value, ExecutionError> {
+        let program = module_node.program.clone();
+        let mut imports = Vec::with_capacity(program.imports.len());
+        for import in &program.imports {
+            let dependency = module_node
+                .dependencies
+                .iter()
+                .find(|dependency| dependency.specifier == import.source)
+                .ok_or_else(|| ExecutionError::Host {
+                    instruction,
+                    message: format!(
+                        "lazy builtin `{}` has unresolved import `{}`",
+                        target.display(),
+                        import.source
+                    ),
+                })?;
+            if !unsafe { (&*self.values).contains_key(&dependency.target) }
+                && let Some(node) = self.graph.module_node(&dependency.target)
+            {
+                if node.source == ModuleSource::CommonJs {
+                    self.execute_target(&dependency.target, false)?;
+                } else if matches!(node.source, ModuleSource::NodeBuiltin(builtin) if kiln_builtins::is_ts_builtin(builtin))
+                {
+                    self.ensure_target_value(&dependency.target, instruction)?;
+                }
+            }
+            let provider = unsafe { (&*self.values).get(&dependency.target) }.ok_or_else(|| {
+                ExecutionError::Host {
+                    instruction,
+                    message: format!(
+                        "lazy builtin dependency `{}` has not been evaluated",
+                        dependency.target.display()
+                    ),
+                }
+            })?;
+            imports.push(
+                linked_import_value(provider, &import.imported, true).ok_or_else(|| {
+                    ExecutionError::Host {
+                        instruction,
+                        message: format!(
+                            "lazy builtin dependency `{}` has no export `{}`",
+                            dependency.target.display(),
+                            import.imported
+                        ),
+                    }
+                })?,
+            );
+        }
+        let result = unsafe {
+            if self.node {
+                execute_node_module_in_session_with_loader(
+                    &program,
+                    &imports,
+                    &[],
+                    &mut *self.host,
+                    self.limits,
+                    &mut *self.runtime,
+                    (&mut *self.node_session)
+                        .as_mut()
+                        .expect("Node mode owns a session"),
+                    self.capabilities.clone(),
+                    false,
+                    self,
+                    false,
+                    Some(target.to_string_lossy().as_ref()),
+                )
+            } else {
+                execute_module_in_runtime_with_loader(
+                    &program,
+                    &imports,
+                    &[],
+                    &mut *self.host,
+                    self.limits,
+                    &mut *self.runtime,
+                    self.capabilities.clone(),
+                    self,
+                    false,
+                    Some(target.to_string_lossy().as_ref()),
+                )
+            }
+        }?;
+        let exports = result
+            .exports
+            .into_iter()
+            .map(|export| (export.name, export.value))
+            .collect::<HashMap<_, _>>();
+        let value = exports
+            .get("default")
+            .cloned()
+            .ok_or_else(|| ExecutionError::Host {
+                instruction,
+                message: format!("lazy builtin `{}` has no default export", target.display()),
+            })?;
+        unsafe {
+            (&mut *self.values).insert(target.to_path_buf(), exports);
+        }
+        Ok(read_through_cell(&value))
+    }
+
     fn execute_target(&mut self, path: &Path, enter_runtime: bool) -> Result<(), ExecutionError> {
         match unsafe { (&*self.states).get(path).copied() } {
             Some(CommonJsExecutionState::Executing | CommonJsExecutionState::Done) => return Ok(()),
@@ -2312,6 +2495,76 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
 }
 
 impl<H: HostOps + ?Sized> CommonJsModuleLoader for CommonJsLoader<'_, H> {
+    fn record_thrown_value(&mut self, value: Value) {
+        self.pending_thrown = Some(value);
+    }
+
+    fn take_thrown_value(&mut self) -> Option<Value> {
+        self.pending_thrown.take()
+    }
+
+    fn get_builtin(
+        &mut self,
+        specifier: &str,
+        instruction: usize,
+    ) -> Result<Option<Value>, ExecutionError> {
+        if let Some(value) = node_builtin_commonjs_value(specifier) {
+            return Ok(Some(value));
+        }
+        let builtin = NodeBuiltin::parse(specifier).ok_or_else(|| ExecutionError::Host {
+            instruction,
+            message: format!("unknown builtin module `{specifier}`"),
+        })?;
+        let path = self.graph.modules.iter().find_map(|(path, node)| {
+            (node.source == ModuleSource::NodeBuiltin(builtin)).then_some(path)
+        });
+        let Some(path) = path else {
+            return Ok(None);
+        };
+        if unsafe { (&*self.values).get(path).is_none() } {
+            self.ensure_target_value(path, instruction)?;
+        }
+        let provider = unsafe { (&*self.values).get(path) }.ok_or_else(|| {
+            ExecutionError::Host {
+                instruction,
+                message: format!("builtin module `{specifier}` has not been evaluated"),
+            }
+        })?;
+        let value = provider
+            .get("default")
+            .cloned()
+            .ok_or_else(|| ExecutionError::Host {
+                instruction,
+                message: format!("builtin module `{specifier}` has no default export"),
+            })?;
+        Ok(Some(read_through_cell(&value)))
+    }
+
+    fn create_require(
+        &mut self,
+        importer: &str,
+        _instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let path = if importer.starts_with("file:") {
+            url::Url::parse(importer)
+                .ok()
+                .and_then(|url| url.to_file_path().ok())
+                .ok_or_else(|| ExecutionError::TypeErrorMessage {
+                    message: format!("invalid module filename `{importer}`"),
+                })?
+        } else {
+            PathBuf::from(importer)
+        };
+        if !path.is_absolute() {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "The argument must be an absolute path or file URL".to_owned(),
+            });
+        }
+        Ok(Value::CommonJsRequire(std::rc::Rc::new(
+            CommonJsRequire::for_importer(path.to_string_lossy()),
+        )))
+    }
+
     fn load(
         &mut self,
         require: &CommonJsRequire,
@@ -2319,7 +2572,94 @@ impl<H: HostOps + ?Sized> CommonJsModuleLoader for CommonJsLoader<'_, H> {
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
         let Some(cell) = require.target_cell(specifier) else {
-            return Err(ExecutionError::Host {
+            if let Some(importer) = require.importer() {
+                if let Some(message) = self
+                    .graph
+                    .modules
+                    .values()
+                    .filter_map(|node| {
+                        self.graph
+                            .runtime_failures(&node.path)
+                            .find(|((base, requested), _)| {
+                                base == Path::new(importer) && requested == specifier
+                            })
+                            .map(|(_, message)| message.clone())
+                    })
+                    .next()
+                {
+                    return Err(ExecutionError::ModuleNotFound {
+                        instruction,
+                        message,
+                    });
+                }
+                let runtime_dependency = self
+                    .graph
+                    .modules
+                    .values()
+                    .flat_map(|node| node.runtime_dependencies.iter())
+                    .find(|dependency| {
+                        dependency.importer == Path::new(importer)
+                            && dependency.specifier == specifier
+                    })
+                    .cloned();
+                if let Some(dependency) = runtime_dependency {
+                    return self.ensure_target_value(&dependency.target, instruction);
+                }
+                if let Some(value) = node_builtin_commonjs_value(specifier) {
+                    return Ok(value);
+                }
+                if NodeBuiltin::parse(specifier).is_some_and(kiln_builtins::is_ts_builtin) {
+                    return self.get_builtin(specifier, instruction)?.ok_or_else(|| {
+                        ExecutionError::Host {
+                            instruction,
+                            message: format!("builtin module `{specifier}` is unavailable"),
+                        }
+                    });
+                }
+                let importer = PathBuf::from(importer);
+                let dependency = self
+                    .graph
+                    .module_node(&importer)
+                    .and_then(|node| {
+                        node.dependencies
+                            .iter()
+                            .find(|dependency| dependency.specifier == specifier)
+                            .cloned()
+                    })
+                    .ok_or_else(|| ExecutionError::ModuleNotFound {
+                        instruction,
+                        message: format!("Cannot find module '{specifier}'"),
+                    })?;
+                let target = dependency.target;
+                if let Some(cell) = self.commonjs_cache.get(&target) {
+                    self.execute_target(&target, false)?;
+                    return Ok(cell.borrow().clone());
+                }
+                if let Some(value) = self.builtin_commonjs.get(&target) {
+                    return Ok(value.clone());
+                }
+                if let Some(provider) = unsafe { (&*self.values).get(&target) } {
+                    if self.graph.module_node(&target).is_some_and(|node| {
+                        node.source == ModuleSource::Json
+                            || matches!(node.source, ModuleSource::NodeBuiltin(builtin) if kiln_builtins::is_ts_builtin(builtin))
+                    }) {
+                        return provider.get("default").cloned().ok_or_else(|| {
+                            ExecutionError::Host {
+                                instruction,
+                                message: format!("Target `{}` has no default", target.display()),
+                            }
+                        });
+                    }
+                }
+                return Err(ExecutionError::Host {
+                    instruction,
+                    message: format!(
+                        "CommonJS target `{}` has not been evaluated",
+                        target.display()
+                    ),
+                });
+            }
+            return Err(ExecutionError::ModuleNotFound {
                 instruction,
                 message: format!("CommonJS require target `{specifier}` is not in the graph"),
             });
@@ -2332,7 +2672,9 @@ impl<H: HostOps + ?Sized> CommonJsModuleLoader for CommonJsLoader<'_, H> {
             .cached_value(specifier)
             .ok_or_else(|| ExecutionError::Host {
                 instruction,
-                message: format!("CommonJS require target `{specifier}` is not in the graph"),
+                message: format!(
+                    "CommonJS require target `{specifier}` has a cell without a cached value"
+                ),
             })
     }
 }
@@ -2480,6 +2822,35 @@ where
                 }
             }
         }
+        while let Some(runtime) = self.runtime_work.pop() {
+            self.dynamic_journal = Some(DynamicJournal {
+                order_before: self.order.len(),
+                stack_before: self.stack.len(),
+                runtime_pending_before: self.runtime_work.len(),
+                ..DynamicJournal::default()
+            });
+            let result = self
+                .visit_static(runtime.path.clone(), Some(runtime.source))
+                .and_then(|_| {
+                    let export_resolutions = resolve_exports(&self.modules, &self.order)?;
+                    validate_links(&self.modules, &self.order, &export_resolutions)
+                });
+            let journal = self.dynamic_journal.take().expect("runtime journal exists");
+            if let Err(error) = result {
+                self.rollback_runtime(journal);
+                self.remove_runtime_dependency(
+                    &runtime.owner,
+                    &runtime.importer,
+                    &runtime.specifier,
+                );
+                self.record_runtime_failure(
+                    runtime.owner,
+                    runtime.importer,
+                    runtime.specifier,
+                    format!("runtime request failed: {error}"),
+                );
+            }
+        }
         Ok(())
     }
 
@@ -2517,6 +2888,18 @@ where
                     self.runtime_failures.remove(&owner);
                 }
             }
+        }
+    }
+
+    fn rollback_runtime(&mut self, journal: DynamicJournal) {
+        self.runtime_work.truncate(journal.runtime_pending_before);
+        self.stack.truncate(journal.stack_before);
+        self.order.truncate(journal.order_before);
+        for path in journal.new_modules {
+            self.modules.remove(&path);
+        }
+        for path in journal.new_states {
+            self.states.remove(&path);
         }
     }
 

@@ -1415,6 +1415,7 @@ dependencies = [
  "encoding_rs",
  "flate2",
  "kiln-builtin-surface",
+ "kiln-builtins",
  "kiln-host-abi",
  "kiln-intl",
  "kiln-ir",

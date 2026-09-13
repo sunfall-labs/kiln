@@ -54,7 +54,7 @@ fn binary_asset_is_retained_as_an_explicit_path_module() {
         &entry,
         kiln_module_resolver::ModuleResolver::new(&project.root).expect("resolver"),
         |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
-        frontend_oxc::parse,
+        OxcFrontend,
     )
     .expect("build asset graph");
     let node = graph.module(&asset).expect("asset node");
@@ -102,7 +102,7 @@ fn create_require_literal_is_retained_as_lazy_runtime_dependency() {
 }
 
 #[test]
-fn create_require_uses_its_captured_file_as_the_resolution_base() {
+fn create_require_uses_its_captured_file_as_the_resolution_base_dynamic_compat() {
     let project = TempProject::new();
     fs::create_dir_all(project.root.join("nested")).unwrap();
     let base = project.write("nested/base.cjs", "module.exports = 1;");
@@ -128,7 +128,7 @@ fn create_require_uses_its_captured_file_as_the_resolution_base() {
 }
 
 #[test]
-fn unresolved_create_require_is_a_deferred_runtime_failure() {
+fn unresolved_create_require_is_a_deferred_runtime_failure_dynamic_compat() {
     let project = TempProject::new();
     let entry = project.write(
         "main.mjs",
@@ -192,6 +192,198 @@ fn invalid_runtime_target_becomes_catchable_failure() {
     .expect("invalid lazy target is deferred");
     assert_eq!(graph.runtime_failures(&entry).count(), 1);
     assert!(graph.module(&runtime).is_none());
+}
+
+#[test]
+fn create_require_executes_a_lazy_commonjs_runtime_target() {
+    let project = TempProject::new();
+    project.write("dep.cjs", "module.exports = 42;");
+    let entry = project.write(
+        "main.mjs",
+        "import { createRequire } from 'node:module'; const req = createRequire(import.meta.url); const path = req('node:path'); const pathAgain = req('node:path'); console.log(req('./dep.cjs'), path.basename('x/y'), path === pathAgain);",
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        frontend_oxc::parse,
+    )
+    .expect("build lazy runtime execution graph");
+    let mut host = TestHost::default();
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute lazy runtime target");
+    assert_eq!(host.output, ["42 y true"]);
+}
+
+#[test]
+fn runtime_commonjs_cycle_preserves_partially_initialized_exports() {
+    let project = TempProject::new();
+    project.write(
+        "a.cjs",
+        "exports.name = 'a'; const b = require('./b.cjs'); exports.peer = b.name;",
+    );
+    project.write(
+        "b.cjs",
+        "exports.name = 'b'; const a = require('./a.cjs'); exports.peer = a.name;",
+    );
+    let entry = project.write(
+        "main.mjs",
+        "import { createRequire } from 'node:module'; const a = createRequire(import.meta.url)('./a.cjs'); console.log(a.name, a.peer);",
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        OxcFrontend,
+    )
+    .expect("build runtime CommonJS cycle");
+    assert!(graph.module(project.root.join("b.cjs")).is_some());
+    let mut host = TestHost::default();
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute runtime CommonJS cycle");
+    assert_eq!(host.output, ["a b"]);
+}
+
+#[test]
+fn create_require_url_object_passes_its_href_to_the_host() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        "import { createRequire } from 'node:module'; const req = createRequire(new URL(import.meta.url)); console.log(typeof req);",
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        frontend_oxc::parse,
+    )
+    .expect("build URL createRequire graph");
+    let mut host = TestHost::default();
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute URL createRequire");
+    assert_eq!(host.output, ["function"]);
+}
+
+#[test]
+fn demand_only_ts_builtin_evaluates_its_ts_dependency() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        "import { createRequire } from 'node:module'; const req = createRequire(import.meta.url); console.log(typeof req('node:module').createRequire);",
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        frontend_oxc::parse,
+    )
+    .expect("build demand-only builtin graph");
+    let mut host = TestHost::default();
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute demand-only builtin dependency");
+    assert_eq!(host.output, ["function"]);
+}
+
+#[test]
+fn demand_only_get_builtin_module_evaluates_the_requested_ts_builtin() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        "console.log(typeof process.getBuiltinModule('node:path').join);",
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        frontend_oxc::parse,
+    )
+    .expect("build demand-only getBuiltinModule graph");
+    let mut host = TestHost::default();
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute demand-only getBuiltinModule");
+    assert_eq!(host.output, ["function"]);
+}
+
+#[test]
+fn create_require_uses_its_captured_file_as_the_resolution_base() {
+    let project = TempProject::new();
+    fs::create_dir_all(project.root.join("nested")).unwrap();
+    let base = project.write("nested/base.cjs", "module.exports = 1;");
+    let dependency = project.write("nested/dep.cjs", "module.exports = 42;");
+    let entry = project.write(
+        "main.mjs",
+        &format!(
+            "import {{ createRequire }} from 'node:module'; const req = createRequire('{}'); req('./dep.cjs');",
+            base.display()
+        ),
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        frontend_oxc::parse,
+    )
+    .expect("build captured-base graph");
+    let node = graph.module(&entry).expect("entry node");
+    assert_eq!(node.runtime_dependencies.len(), 1);
+    assert_eq!(node.runtime_dependencies[0].importer, base);
+    assert_eq!(node.runtime_dependencies[0].target, dependency);
+}
+
+#[test]
+fn unresolved_create_require_is_a_deferred_runtime_failure() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        "import { createRequire } from 'node:module'; const req = createRequire(import.meta.url); let caught = false; try { req('./missing.cjs'); } catch (_) { caught = true; } console.log(caught);",
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        frontend_oxc::parse,
+    )
+    .expect("unresolved lazy target is deferred");
+    assert!(graph.module(&entry).is_some());
+    assert_eq!(graph.runtime_failures(&entry).count(), 1);
+    let ((importer, specifier), message) = graph.runtime_failures(&entry).next().unwrap();
+    assert_eq!(importer, &entry);
+    assert_eq!(specifier, "./missing.cjs");
+    assert!(message.contains("runtime request failed"));
+    let mut host = TestHost::default();
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute deferred runtime failure");
+    assert_eq!(host.output, ["true"]);
 }
 
 #[test]
@@ -3062,19 +3254,14 @@ fn node_builtin_worker_threads_commonjs_require_evaluates_cleanly() {
 #[test]
 fn node_builtin_module_evaluates_cleanly() {
     let project = TempProject::new();
+    let main_path = project.root.join("main file.mjs");
+    let main_url = url::Url::from_file_path(&main_path)
+        .expect("main path URL")
+        .to_string();
     let entry = project.write(
-        "main.mjs",
-        concat!(
-            "import defaultModule, { Module, createRequire, builtinModules, isBuiltin } from 'node:module';\n",
-            "console.log(\n",
-            "  typeof defaultModule === 'function',\n",
-            "  defaultModule === Module,\n",
-            "  typeof createRequire === 'function',\n",
-            "  Array.isArray(builtinModules),\n",
-            "  isBuiltin('fs'),\n",
-            "  isBuiltin('node:path'),\n",
-            "  isBuiltin('unknown_xyz'),\n",
-            ");\n",
+        "main file.mjs",
+        &format!(
+            "import defaultModule, {{ Module, createRequire, builtinModules, isBuiltin }} from 'node:module';\nconst viaProcess = process.getBuiltinModule('node:module');\nconst viaRequireModule = createRequire('/virtual/main.cjs')('node:module');\nconst viaFileUrl = createRequire({main_url:?})('node:module');\nlet relativeCaught = false; try {{ createRequire('relative.cjs'); }} catch (_) {{ relativeCaught = true; }}\nlet missingCaught = false; try {{ createRequire('/virtual/main.cjs')('./missing.cjs'); }} catch (error) {{ missingCaught = error instanceof Error; }}\nconsole.log(typeof defaultModule === 'function', defaultModule === Module, typeof createRequire === 'function', Array.isArray(builtinModules), isBuiltin('fs'), isBuiltin('node:path'), isBuiltin('unknown_xyz'), viaProcess === Module, viaProcess === viaRequireModule, viaFileUrl === Module, relativeCaught, missingCaught);\n",
         ),
     );
     let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
@@ -3099,7 +3286,10 @@ fn node_builtin_module_evaluates_cleanly() {
             ExecutionCapabilities::default(),
         )
         .expect("execute module builtin");
-    assert_eq!(host.output, ["true true true true true true false"]);
+    assert_eq!(
+        host.output,
+        ["true true true true true true false true true true true true"]
+    );
 }
 
 #[test]
@@ -3143,6 +3333,77 @@ fn node_builtin_module_commonjs_require_evaluates_cleanly() {
         )
         .expect("execute module builtin cjs");
     assert_eq!(host.output, ["true true true true true"]);
+}
+
+#[test]
+fn commonjs_loader_preserves_thrown_object_identity() {
+    let project = TempProject::new();
+    project.write("marker.cjs", "module.exports = { tag: 'marker' };\n");
+    project.write(
+        "thrower.cjs",
+        "const marker = require('./marker.cjs'); throw marker;\n",
+    );
+    project.write(
+        "bridge.cjs",
+        "const marker = require('./marker.cjs'); try { require('./thrower.cjs'); } catch (error) { module.exports = error === marker; }\n",
+    );
+    let entry = project.write(
+        "main.mjs",
+        "import ok from './bridge.cjs'; console.log(ok);\n",
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("Node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build thrown identity graph");
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute thrown identity graph");
+    assert_eq!(host.output, ["true"]);
+}
+
+#[test]
+fn commonjs_loader_clears_nested_thrown_values_before_next_require() {
+    let project = TempProject::new();
+    project.write("a.cjs", "module.exports = { tag: 'a' };\n");
+    project.write("b.cjs", "module.exports = { tag: 'b' };\n");
+    project.write("success.cjs", "module.exports = 7;\n");
+    project.write("inner.cjs", "const a = require('./a.cjs'); throw a;\n");
+    project.write(
+        "bridge.cjs",
+        "const b = require('./b.cjs'); try { require('./inner.cjs'); } catch (error) { if (error.tag !== 'a') throw { tag: 'wrong-inner' }; } if (require('./success.cjs') !== 7) throw { tag: 'wrong-success' }; throw b;\n",
+    );
+    project.write(
+        "result.cjs",
+        "const b = require('./b.cjs'); try { require('./bridge.cjs'); } catch (error) { module.exports = error === b; }\n",
+    );
+    let entry = project.write(
+        "main.mjs",
+        "import ok from './result.cjs'; console.log(ok);\n",
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("Node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build nested thrown identity graph");
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute nested thrown identity graph");
+    assert_eq!(host.output, ["true"]);
 }
 
 #[test]

@@ -40,6 +40,22 @@ macro_rules! declare_ts_builtins {
             builtin_source(builtin).is_some()
         }
 
+        /// Whether a module specifier names a builtin whose authoritative implementation is
+        /// embedded TypeScript rather than the interpreter's legacy Native namespace.
+        pub fn is_ts_builtin_specifier(specifier: &str) -> bool {
+            NodeBuiltin::parse(specifier).is_some_and(is_ts_builtin)
+        }
+
+        /// The canonical specifiers whose values must come from graph evaluation.
+        pub fn ts_builtin_specifiers() -> Vec<&'static str> {
+            NodeBuiltin::ALL
+                .iter()
+                .copied()
+                .filter(|builtin| is_ts_builtin(*builtin))
+                .map(NodeBuiltin::specifier)
+                .collect()
+        }
+
         /// Return the supported exports for a builtin if it is a TypeScript builtin.
         pub fn builtin_supported_exports(builtin: NodeBuiltin) -> Option<&'static [&'static str]> {
             match builtin {

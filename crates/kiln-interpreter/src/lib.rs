@@ -3372,6 +3372,25 @@ pub type Cell = Rc<RefCell<Value>>;
 /// point the JavaScript call actually occurs. Keeping the hook outside [`CommonJsRequire`] means
 /// a statically discovered edge does not become an eager execution obligation.
 pub trait CommonJsModuleLoader {
+    /// Receives a thrown value from a lazily evaluated target without putting the realm-local
+    /// value into the cross-thread `ExecutionError` report type.
+    fn record_thrown_value(&mut self, value: Value);
+
+    /// Takes the value recorded while evaluating the most recent lazy target.
+    fn take_thrown_value(&mut self) -> Option<Value>;
+
+    fn get_builtin(
+        &mut self,
+        specifier: &str,
+        instruction: usize,
+    ) -> Result<Option<Value>, ExecutionError>;
+
+    fn create_require(
+        &mut self,
+        importer: &str,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError>;
+
     fn load(
         &mut self,
         require: &CommonJsRequire,
@@ -3387,13 +3406,26 @@ pub trait CommonJsModuleLoader {
 #[derive(Debug, PartialEq)]
 pub struct CommonJsRequire {
     targets: Vec<(String, String, Cell)>,
+    importer: Option<String>,
 }
 
 impl CommonJsRequire {
     pub fn new(targets: impl IntoIterator<Item = (String, String, Cell)>) -> Self {
         Self {
             targets: targets.into_iter().collect(),
+            importer: None,
         }
+    }
+
+    pub fn for_importer(importer: impl Into<String>) -> Self {
+        Self {
+            targets: Vec::new(),
+            importer: Some(importer.into()),
+        }
+    }
+
+    pub fn importer(&self) -> Option<&str> {
+        self.importer.as_deref()
     }
 
     fn get(&self, specifier: &str) -> Option<Value> {
@@ -4020,6 +4052,12 @@ pub fn node_builtin_export_names(specifier: &str) -> Option<&'static [&'static s
 }
 
 fn node_builtin_namespace(specifier: &str) -> Option<Value> {
+    // TypeScript builtins are evaluated by ModuleGraph. Returning the legacy native namespace
+    // here would let process.getBuiltinModule bypass that authoritative materialization and
+    // expose a partial object.
+    if kiln_builtins::is_ts_builtin_specifier(specifier) {
+        return None;
+    }
     Some(Value::Native(
         match specifier.strip_prefix("node:").unwrap_or(specifier) {
             "assert" | "assert/strict" => Native::NodeAssert,
@@ -4109,19 +4147,27 @@ fn node_builtin_export_value(namespace: Native, name: &str) -> Option<Value> {
 }
 
 pub fn node_builtin_exports(specifier: &str) -> Option<Vec<(String, Value)>> {
+    // TypeScript builtins are materialized by ModuleGraph from their authoritative source
+    // program.  Do not project their ABI names through the legacy Native namespace: that would
+    // silently publish a partial/stale object (for example node:module's `Module` export).
+    let builtin = kiln_node_abi::builtin_abi(specifier)?;
+    if kiln_builtins::is_ts_builtin_specifier(specifier) {
+        return None;
+    }
     let namespace = node_builtin_namespace(specifier)?;
     let Value::Native(namespace, _) = namespace else {
         unreachable!("builtin namespaces are native values")
     };
-    let names = node_builtin_export_names(specifier)?;
+    let names = builtin.exports;
     Some(
         names
             .iter()
             .map(|name| {
                 (
                     (*name).to_owned(),
-                    node_builtin_export_value(namespace, name)
-                        .expect("every advertised builtin export has a native value"),
+                    node_builtin_export_value(namespace, name).unwrap_or_else(|| {
+                        panic!("missing builtin export {specifier}:{name} on {namespace:?}")
+                    }),
                 )
             })
             .collect(),
@@ -4135,6 +4181,11 @@ pub fn node_builtin_exports(specifier: &str) -> Option<Vec<(String, Value)>> {
 /// callable for modules such as `events` and `assert`. Keeping this beside the export table means
 /// the two projections cannot drift onto different implementations.
 pub fn node_builtin_commonjs_value(specifier: &str) -> Option<Value> {
+    if kiln_builtins::is_ts_builtin_specifier(specifier) {
+        // Graph-owned CommonJS loading evaluates the TS module and projects its default export.
+        // A standalone interpreter has no graph/module cache in which to perform that work.
+        return None;
+    }
     let namespace = node_builtin_namespace(specifier)?;
     let Value::Native(native, _) = namespace else {
         unreachable!("builtin namespaces are native values")
@@ -5081,6 +5132,10 @@ pub enum ExecutionError {
         instruction: usize,
         message: String,
     },
+    ModuleNotFound {
+        instruction: usize,
+        message: String,
+    },
     /// A `MakeFunction` or `Call` naming a proto the program does not contain.
     UnknownFunction {
         function: u32,
@@ -5635,6 +5690,7 @@ impl fmt::Display for ExecutionError {
                     "host operation failed at instruction {instruction}: {message}"
                 )
             }
+            Self::ModuleNotFound { message, .. } => write!(formatter, "{message}"),
         }
     }
 }
@@ -6498,7 +6554,7 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
     runtime: &mut RealmRuntime,
     capabilities: ExecutionCapabilities,
     session: Option<(&mut ModuleRealmSession, bool)>,
-    commonjs_loader: Option<&'host mut dyn CommonJsModuleLoader>,
+    mut commonjs_loader: Option<&'host mut dyn CommonJsModuleLoader>,
     enter_runtime: bool,
     module_path: Option<&str>,
 ) -> Result<ModuleExecutionResult, ExecutionError> {
@@ -6635,7 +6691,7 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
         vm.async_host = Some(runtime as *mut RealmRuntime as *mut dyn ActiveAsyncHostOps);
         vm.http_runtime = Some(runtime as *mut RealmRuntime as *mut dyn ActiveHttpRuntime);
     }
-    if let Some(loader) = commonjs_loader {
+    if let Some(loader) = commonjs_loader.as_deref_mut() {
         vm.commonjs_loader = Some(loader as *mut dyn CommonJsModuleLoader);
     }
     let drain = session.as_ref().is_some_and(|(_, drain)| *drain);
@@ -6643,11 +6699,21 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
         vm.module_realm = Some(Rc::clone(&session.shared));
         vm.intrinsics = Rc::clone(&session.shared.borrow().intrinsics);
     }
-    let execution = if enter_runtime {
+    let execution = match if enter_runtime {
         runtime.enter(|| vm.run_module_body())
     } else {
         vm.run_module_body()
-    }?;
+    } {
+        Ok(execution) => execution,
+        Err(error) => {
+            if let Some(value) = vm.uncaught_value.take()
+                && let Some(loader) = commonjs_loader.as_deref_mut()
+            {
+                loader.record_thrown_value(value);
+            }
+            return Err(error);
+        }
+    };
     // A dependency's top-level await must finish before its importer reads the exported cells.
     // Node graph execution normally leaves a dependency's shared-realm jobs queued so they run
     // after the entry body, but that is only valid for ordinary module jobs. A suspended module
@@ -6673,6 +6739,9 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
         let trace = captured_trace(&reason);
         let instruction = vm.instruction;
         let message = vm.describe_uncaught(&reason, instruction);
+        if let Some(loader) = commonjs_loader.as_deref_mut() {
+            loader.record_thrown_value(reason.clone());
+        }
         return Err(ExecutionError::Uncaught {
             instruction,
             message,
@@ -7262,6 +7331,9 @@ struct Vm<'host, H: HostOps + ?Sized> {
     async_context: AsyncContext,
     /// The value delivered to a host handler, waiting to be collected by `call_catching`.
     caught: Option<Value>,
+    /// A top-level throw captured for the graph loader before it is converted to an execution
+    /// report. This remains inside the realm and never crosses the worker error boundary.
+    uncaught_value: Option<Value>,
     /// Whether the call being dispatched arrived through `%TypedArray%.prototype`.
     ///
     /// The two families share one implementation -- `Native::TypedArrayGeneric(name)` re-enters
@@ -7483,6 +7555,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             http_runtime: None,
             commonjs_loader: None,
             caught: None,
+            uncaught_value: None,
             typed_array_method: false,
             unhandled: None,
             module_suspension: None,
@@ -13148,6 +13221,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 return Err(ExecutionError::GeneratorReturned);
             }
             let trace = captured_trace(&thrown);
+            self.uncaught_value = Some(thrown.clone());
             return Err(ExecutionError::Uncaught {
                 instruction,
                 message: self.describe_uncaught(&thrown, instruction),
@@ -14843,6 +14917,29 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 });
             }
             Native::NodeModuleCreateRequire => {
+                if let Some(loader) = self.commonjs_loader {
+                    let importer = if let Some(value) = arguments.first() {
+                        match value {
+                            Value::String(value) => value.clone(),
+                            _ => match self.read_property(value, "href", instruction)? {
+                                Value::String(value) => value,
+                                _ => {
+                                    return Err(ExecutionError::TypeErrorMessage {
+                                        message:
+                                            "The argument must be a string or a file URL object"
+                                                .to_owned(),
+                                    });
+                                }
+                            },
+                        }
+                    } else {
+                        self.module_path
+                            .as_deref()
+                            .map(str::to_owned)
+                            .unwrap_or_default()
+                    };
+                    return unsafe { (&mut *loader).create_require(&importer, instruction) };
+                }
                 let require = CommonJsRequire::new([]);
                 return Ok(Value::CommonJsRequire(Rc::new(require)));
             }
@@ -15411,6 +15508,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         match native {
             Native::ProcessGetBuiltinModule => match arguments.first() {
+                Some(Value::String(name)) if kiln_builtins::is_ts_builtin_specifier(name) => {
+                    if let Some(loader) = self.commonjs_loader {
+                        return unsafe { (&mut *loader).get_builtin(name, instruction) }.and_then(
+                            |value| {
+                                value.ok_or_else(|| ExecutionError::TypeErrorMessage {
+                                    message: format!(
+                                        "builtin module `{name}` has not been evaluated"
+                                    ),
+                                })
+                            },
+                        );
+                    }
+                    Err(ExecutionError::TypeErrorMessage {
+                        message: format!(
+                            "node:{name} is graph-materialized; process.getBuiltinModule requires a graph loader"
+                        ),
+                    })
+                }
                 Some(Value::String(name)) => {
                     Ok(node_builtin_namespace(name).unwrap_or(Value::Undefined))
                 }
@@ -21422,9 +21537,52 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .first()
                     .map(Value::to_display_string)
                     .unwrap_or_default();
+                if let Some(loader) = self.commonjs_loader
+                    && require.importer().is_some()
+                {
+                    return match unsafe { (&mut *loader).load(require, &specifier, instruction) } {
+                        Ok(value) => Ok(value),
+                        Err(ExecutionError::ModuleNotFound { message, .. }) => {
+                            self.throw_error(ErrorKind::Error, message, instruction)?;
+                            Ok(Value::Undefined)
+                        }
+                        Err(ExecutionError::Uncaught { .. }) => {
+                            let value = unsafe { (&mut *loader).take_thrown_value() };
+                            if let Some(value) = value {
+                                self.caught = Some(value);
+                                Err(ExecutionError::ThrownAcrossNative)
+                            } else {
+                                Err(ExecutionError::Host {
+                                    instruction,
+                                    message: "CommonJS target failed without a thrown value"
+                                        .to_owned(),
+                                })
+                            }
+                        }
+                        Err(error) => Err(error),
+                    };
+                }
                 if require.target_cell(&specifier).is_some() {
                     if let Some(loader) = self.commonjs_loader {
-                        return unsafe { (&mut *loader).load(require, &specifier, instruction) };
+                        return match unsafe {
+                            (&mut *loader).load(require, &specifier, instruction)
+                        } {
+                            Ok(value) => Ok(value),
+                            Err(ExecutionError::Uncaught { .. }) => {
+                                let value = unsafe { (&mut *loader).take_thrown_value() };
+                                if let Some(value) = value {
+                                    self.caught = Some(value);
+                                    Err(ExecutionError::ThrownAcrossNative)
+                                } else {
+                                    Err(ExecutionError::Host {
+                                        instruction,
+                                        message: "CommonJS target failed without a thrown value"
+                                            .to_owned(),
+                                    })
+                                }
+                            }
+                            Err(error) => Err(error),
+                        };
                     }
                     if let Some(target) = require.get(&specifier) {
                         return Ok(target);
@@ -25494,6 +25652,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         globals.set_non_enumerable(
             "__kilnHostProcessCancel",
             Value::Native(Native::ProcessCancelRaw, realm),
+        );
+        globals.set_non_enumerable(
+            "__kilnHostModuleCreateRequire",
+            Value::Native(Native::NodeModuleCreateRequire, realm),
         );
         globals.set_non_enumerable(
             "Intl",
