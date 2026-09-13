@@ -171,6 +171,8 @@ const BUILTINS: &[BuiltinAbi] = &[
     BuiltinAbi {
         specifier: "node:crypto",
         exports: &[
+            "Hash",
+            "Hmac",
             "createHash",
             "createHmac",
             "default",

@@ -2899,7 +2899,7 @@ fn native_builtin_supported_exports(
         NodeBuiltin::Buffer => kiln_builtins::BUFFER_EXPORTS,
         NodeBuiltin::StringDecoder => kiln_builtins::STRING_DECODER_EXPORTS,
         NodeBuiltin::AsyncHooks => &["AsyncLocalStorage", "AsyncResource", "default"],
-        NodeBuiltin::Crypto => &["createHash", "default", "randomUUID"],
+        NodeBuiltin::Crypto => kiln_builtins::CRYPTO_EXPORTS,
         _ => &[],
     }
 }

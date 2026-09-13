@@ -2758,6 +2758,97 @@ fn node_builtin_dns_commonjs_require_evaluates_cleanly() {
 }
 
 #[test]
+fn node_builtin_crypto_evaluates_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import crypto, { createHash, createHmac, randomUUID, randomBytes, timingSafeEqual, getHashes } from 'node:crypto';\n",
+            "const hash = createHash('sha256').update('hello world').digest('hex');\n",
+            "const hmac = createHmac('sha256', 'key').update('The quick brown fox jumps over the lazy dog').digest('hex');\n",
+            "const uuid = randomUUID();\n",
+            "const bytes = randomBytes(8);\n",
+            "const eq = timingSafeEqual(bytes, bytes);\n",
+            "console.log(\n",
+            "  typeof crypto === 'object',\n",
+            "  hash === 'b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9',\n",
+            "  hmac === 'f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8',\n",
+            "  typeof uuid === 'string' && uuid.length === 36,\n",
+            "  bytes.length === 8,\n",
+            "  eq,\n",
+            "  getHashes().includes('sha256'),\n",
+            ");\n",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with crypto builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute crypto builtin");
+    assert_eq!(host.output, ["true true true true true true true"]);
+}
+
+#[test]
+fn node_builtin_crypto_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const crypto = require('node:crypto');\n",
+            "const hash = crypto.createHash('sha256').update('hello world').digest('hex');\n",
+            "module.exports = {\n",
+            "  isObj: typeof crypto === 'object',\n",
+            "  hashMatches: hash === 'b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9',\n",
+            "  hasRandomUUID: typeof crypto.randomUUID === 'function',\n",
+            "  hasGetHashes: Array.isArray(crypto.getHashes()),\n",
+            "};\n",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import bridge from './bridge.cjs';\n",
+            "console.log(bridge.isObj, bridge.hashMatches, bridge.hasRandomUUID, bridge.hasGetHashes);\n",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with crypto builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute crypto builtin cjs");
+    assert_eq!(host.output, ["true true true true"]);
+}
+
+#[test]
 fn node_net_connect_is_a_typed_virtual_module_export() {
     let project = TempProject::new();
     let entry = project.write(

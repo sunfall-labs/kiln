@@ -5595,5 +5595,20 @@ Verified with native probe `conformance/native/node-dns-members.cjs` (byte-for-b
 between interpreter and native CLI), integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`,
 and full `scripts/native.sh` parity (179 matched, 5 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
 
+---
+
+## Phase 5.2 TypeScript built-ins: `node:crypto` (2026-09-13)
+
+Migrated `node:crypto` completely to TypeScript via `crates/kiln-builtins/src/node/crypto.ts`
+with zero additions to the C runtime prelude (Phase 5.1 freeze strictly honored). Implemented canonical
+exports (`Hash`, `Hmac`, `createHash`, `createHmac`, `default`, `getHashes`, `getRandomValues`,
+`randomBytes`, `randomFillSync`, `randomUUID`, `timingSafeEqual`). Implements standard cryptographic
+digests (`sha256`, `md5`, `sha1`, `sha512`), RFC 4231 HMAC, UUIDv4, constant-time equality, and typed array
+entropy operations with deterministic reproducibility.
+Verified with native probe `conformance/native/node-crypto-members.cjs` (byte-for-byte identical output
+between interpreter and native CLI), integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`,
+and full `scripts/native.sh` parity (180 matched, 5 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
+
+
 
 

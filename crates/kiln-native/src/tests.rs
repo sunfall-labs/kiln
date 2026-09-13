@@ -9699,3 +9699,90 @@ fn native_node_dns_commonjs_require_builds_and_runs() {
     let stdout = String::from_utf8_lossy(&result.stdout);
     assert!(stdout.contains("cjs-dns: object function true true"));
 }
+
+#[test]
+fn native_node_crypto_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-crypto-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import crypto, { createHash, randomUUID } from 'node:crypto';\n",
+            "const hash = createHash('sha256').update('hello world').digest('hex');\n",
+            "const uuid = randomUUID();\n",
+            "console.log('crypto-ts:', typeof crypto, hash === 'b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9', typeof uuid === 'string' && uuid.length === 36);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("crypto_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run crypto binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("crypto-ts: object true true"));
+}
+
+#[test]
+fn native_node_crypto_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-crypto-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const crypto = require('node:crypto');\n",
+            "const hash = crypto.createHash('sha256').update('hello world').digest('hex');\n",
+            "console.log('cjs-crypto:', typeof crypto, typeof crypto.createHash, hash === 'b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9');\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("crypto_cjs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run crypto cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("cjs-crypto: object function true"));
+}
