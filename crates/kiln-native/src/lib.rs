@@ -5966,7 +5966,7 @@ fn render_graph_roots(
     }
     writeln!(
         output,
-        "    if (graph != NULL) {{\n        (void)kiln_realm_gc_mark_value(heap, &graph->result);\n        (void)kiln_realm_gc_mark_value(heap, &graph->entry_result);\n        for (index = 0; index < (size_t){}; ++index) {{\n            (void)kiln_realm_gc_mark_value(heap, &graph->module_states[index].result);\n            (void)kiln_realm_gc_mark_value(heap, &graph->module_states[index].active_promise);\n            (void)kiln_realm_gc_mark_value(heap, &graph->module_states[index].completion_promise);\n        }}\n    }}\n}}\n",
+        "    if (graph != NULL) {{\n        (void)kiln_realm_gc_mark_value(heap, &graph->result);\n        (void)kiln_realm_gc_mark_value(heap, &graph->entry_result);\n        for (index = 0; index < (size_t){}; ++index) {{\n            (void)kiln_realm_gc_mark_value(heap, &graph->module_states[index].result);\n            (void)kiln_realm_gc_mark_value(heap, &graph->module_states[index].active_promise);\n            (void)kiln_realm_gc_mark_value(heap, &graph->module_states[index].completion_promise);\n            (void)kiln_realm_gc_mark_value(heap, &graph->module_states[index].completion_resolve);\n            (void)kiln_realm_gc_mark_value(heap, &graph->module_states[index].completion_reject);\n        }}\n    }}\n}}\n",
         modules.len()
     )
     .unwrap();
@@ -6137,6 +6137,7 @@ extern int kiln_c99_module_completion(kiln_host *, kiln_value, uint32_t, kiln_va
 #define KILN_C99_OK 0
 #define KILN_C99_METHOD_PROMISE_RESOLVE 110
 #define KILN_C99_METHOD_PROMISE_REJECT 111
+#define KILN_C99_METHOD_PROMISE_WITH_RESOLVERS 411
 "#,
     );
     for (node, module) in modules {
@@ -6263,7 +6264,11 @@ typedef struct kiln_graph_module_state {
     kiln_value result;
     kiln_value active_promise;
     kiln_value completion_promise;
+    kiln_value completion_resolve;
+    kiln_value completion_reject;
+    size_t dependency_cursor;
     int module_settling;
+    int body_started;
     int phase;
     int failure_status;
 } kiln_graph_module_state;
@@ -6372,6 +6377,29 @@ static kiln_value *kiln_graph_module_promise(kiln_graph_context *graph, size_t i
     return graph->module_states[index].completion_promise.tag == 16 /* KILN_VALUE_PROMISE */
         ? &graph->module_states[index].completion_promise
         : &undefined;
+}
+
+static int kiln_graph_prepare_completion(kiln_graph_context *graph, size_t index) {
+    kiln_graph_module_state *state;
+    kiln_value deferred;
+    int status;
+    if (graph == NULL || index >= (size_t)MODULE_COUNT) return KILN_C99_CONTROL_ERROR;
+    state = &graph->module_states[index];
+    if (state->completion_promise.tag == 16 /* KILN_VALUE_PROMISE */) return KILN_C99_OK;
+    status = kiln_c99_invoke_method(&graph->host,
+                                    &deferred,
+                                    KILN_C99_METHOD_PROMISE_WITH_RESOLVERS,
+                                    kiln_c99_undefined(), NULL, 0, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_get(&graph->host, deferred, "promise", 7,
+                          &state->completion_promise, 0, NULL);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_get(&graph->host, deferred, "resolve", 7,
+                              &state->completion_resolve, 0, NULL);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_get(&graph->host, deferred, "reject", 6,
+                              &state->completion_reject, 0, NULL);
+    return status;
 }
 "#
         .replace("MODULE_COUNT", &modules.len().to_string()),
@@ -7297,6 +7325,7 @@ extern int kiln_c99_module_completion(kiln_host *, kiln_value, uint32_t, kiln_va
 #define KILN_C99_OK 0
 #define KILN_C99_METHOD_PROMISE_RESOLVE 110
 #define KILN_C99_METHOD_PROMISE_REJECT 111
+#define KILN_C99_METHOD_PROMISE_WITH_RESOLVERS 411
 static __thread kiln_value *kiln_shared_namespaces = NULL;
 static __thread kiln_commonjs_context *kiln_shared_commonjs = NULL;
 "#,
