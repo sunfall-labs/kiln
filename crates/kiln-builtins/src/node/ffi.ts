@@ -1,10 +1,11 @@
 // kiln-builtins: node:ffi implementation (Phase 5.2, ADR 0005)
 
-const nativeModule =
-  typeof process !== "undefined"
-    ? typeof (process as any).getBuiltinModule === "function"
-      ? (process as any).getBuiltinModule("node:ffi") || (process as any).getBuiltinModule("ffi")
-      : (process as any).__kilnNativeModules?.ffi
+const nativeModules =
+  typeof process !== "undefined" ? (process as any).__kilnNativeModules : undefined;
+const nativeModule = nativeModules
+  ? nativeModules.ffi || null
+  : typeof process !== "undefined" && typeof (process as any).getBuiltinModule === "function"
+    ? (process as any).getBuiltinModule("node:ffi") || (process as any).getBuiltinModule("ffi")
     : null;
 
 export const suffix: string =
