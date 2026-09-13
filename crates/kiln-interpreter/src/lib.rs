@@ -22158,6 +22158,71 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let result = iteration_result(value, true);
                 self.resolve_promise(step, result);
             }
+            Ok((step_value, false))
+                if generator.borrow().delegate.is_some() && !generator.borrow().awaiting =>
+            {
+                // `yield*` suspends on the delegate's iterator-result object. An async
+                // generator exposes that result's `value`, never the result object itself;
+                // handing the object to `for await` makes destructuring ask it for @@iterator.
+                let iterator_result = step_value;
+                if !is_object_type(&iterator_result) {
+                    let error = self.construct_error(
+                        ErrorKind::Type,
+                        &[Value::String("Iterator result is not an object".to_owned())],
+                    );
+                    self.settle(step, &Settled::Rejected(error));
+                    return Ok(());
+                }
+                let done = match self.eval_catching(|this| {
+                    this.read_property(&iterator_result, "done", instruction)
+                })? {
+                    Ok(value) => value.is_truthy(),
+                    Err(thrown) => {
+                        self.settle(&step, &Settled::Rejected(thrown));
+                        return Ok(());
+                    }
+                };
+                if done {
+                    // The compiler normally branches around YieldStar for a done step, but
+                    // retain the protocol guard here so a custom delegate cannot expose an
+                    // iterator-result object as a yielded value.
+                    let value = match self.eval_catching(|this| {
+                        this.read_property(&iterator_result, "value", instruction)
+                    })? {
+                        Ok(value) => value,
+                        Err(thrown) => {
+                            self.settle(&step, &Settled::Rejected(thrown));
+                            return Ok(());
+                        }
+                    };
+                    self.resolve_promise(step, iteration_result(value, true));
+                    return Ok(());
+                }
+                let value = match self.eval_catching(|this| {
+                    this.read_property(&iterator_result, "value", instruction)
+                })? {
+                    Ok(value) => value,
+                    Err(thrown) => {
+                        self.settle(&step, &Settled::Rejected(thrown));
+                        return Ok(());
+                    }
+                };
+                let target = match value {
+                    Value::Promise(inner) => inner,
+                    other => {
+                        let pending = PromiseState::pending();
+                        self.resolve_promise(&pending, other);
+                        pending
+                    }
+                };
+                self.react(
+                    &target,
+                    Value::Undefined,
+                    Value::Undefined,
+                    Sink::AsyncGeneratorYield(Rc::clone(generator), Rc::clone(step)),
+                    false,
+                );
+            }
             Ok((value, false)) if !generator.borrow().awaiting => {
                 // Awaited before it is yielded, which is the specification's order and is
                 // observable twice over: a yielded promise arrives as its value, and one that
