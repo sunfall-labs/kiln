@@ -71,6 +71,7 @@ fn lowers(op: &GraphOp) -> bool {
             | GraphOp::GetComputed { .. }
             | GraphOp::SetComputed { .. }
             | GraphOp::SetComputedStrict { .. }
+            | GraphOp::IsReturnSignal(_)
             | GraphOp::Phi { .. }
     )
 }

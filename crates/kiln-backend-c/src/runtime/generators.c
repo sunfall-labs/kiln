@@ -59,6 +59,8 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
     frame->queue_count = 0;
     frame->queue_capacity = 0;
     frame->queue_executing = 0;
+    frame->delegate = kiln_c99_undefined();
+    frame->delegate_exit = 0;
     *out = kiln_c99_value(KILN_VALUE_GENERATOR, (uint64_t)(uintptr_t)frame, NULL, 0);
     return KILN_C99_OK;
 }

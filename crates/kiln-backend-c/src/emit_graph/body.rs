@@ -350,8 +350,15 @@ pub fn emit_function_from_graph_with_profile(
         } else {
             output.push_str("    if (frame->started) {\n        switch (frame->resume) {\n");
             for block in &graph.blocks {
-                if let Terminator::Suspend { pc, .. } = block.terminator {
+                if let Terminator::Suspend { pc, delegate, .. } = &block.terminator {
                     writeln!(output, "        case {pc}: goto kiln_resume_{pc};").unwrap();
+                    if let Some((_, _, exit_pc)) = delegate {
+                        writeln!(
+                            output,
+                            "        case {exit_pc}: goto kiln_resume_{exit_pc};"
+                        )
+                        .unwrap();
+                    }
                 }
             }
             if let Some(seam) = graph.seam_block {
@@ -547,8 +554,15 @@ pub fn emit_async_entry_body(
     writeln!(output, "    kiln_val *locals = {symbol}_globals;").unwrap();
     output.push_str("    if (frame->started) {\n        switch (frame->resume) {\n");
     for block in &graph.blocks {
-        if let Terminator::Suspend { pc, .. } = block.terminator {
+        if let Terminator::Suspend { pc, delegate, .. } = &block.terminator {
             writeln!(output, "        case {pc}: goto kiln_resume_{pc};").unwrap();
+            if let Some((_, _, exit_pc)) = delegate {
+                writeln!(
+                    output,
+                    "        case {exit_pc}: goto kiln_resume_{exit_pc};"
+                )
+                .unwrap();
+            }
         }
     }
     if let Some(seam) = graph.seam_block {
@@ -801,8 +815,16 @@ fn emit_block_sequence(
             | Terminator::BranchNotNullish { condition, .. } => {
                 used.insert(*condition);
             }
-            Terminator::Suspend { value, spilled, .. } => {
+            Terminator::Suspend {
+                value,
+                spilled,
+                delegate,
+                ..
+            } => {
                 used.insert(*value);
+                if let Some((iter, _, _)) = delegate {
+                    used.insert(*iter);
+                }
                 used.extend(spilled.iter().copied());
             }
             _ => {}
@@ -843,6 +865,48 @@ fn emit_block_sequence(
                     .map(|(v, _)| v.0)
                     .collect();
                 writeln!(output, "kiln_resume_{pc}:;").unwrap();
+                writeln!(
+                    output,
+                    "    frame->delegate = kiln_c99_undefined(); frame->delegate_exit = 0;"
+                )
+                .unwrap();
+                writeln!(
+                    output,
+                    "    if (frame->raising) {{ *thrown = frame->sent; {landing_unwind} }}"
+                )
+                .unwrap();
+                for (i, phi) in phis.iter().enumerate() {
+                    if i < spilled.len() {
+                        writeln!(output, "    v{phi} = frame->stack[{i}];").unwrap();
+                    } else {
+                        writeln!(output, "    v{phi} = kiln_val_from_boundary(frame->sent);")
+                            .unwrap();
+                    }
+                }
+            }
+            if let Terminator::Suspend {
+                delegate: Some((_, exit_block, exit_pc)),
+                spilled,
+                ..
+            } = &from.terminator
+                && *exit_block == block.id
+            {
+                let landing_unwind = match block.exception_handler {
+                    Some(handler) => format!("goto {block_prefix}{};", handler.0),
+                    None => "goto kiln_unwind;".to_owned(),
+                };
+                let phis: Vec<u32> = block
+                    .operations
+                    .iter()
+                    .filter(|(_, op)| matches!(op, GraphOp::Phi { .. }))
+                    .map(|(v, _)| v.0)
+                    .collect();
+                writeln!(output, "kiln_resume_{exit_pc}:;").unwrap();
+                writeln!(
+                    output,
+                    "    frame->delegate = kiln_c99_undefined(); frame->delegate_exit = 0;"
+                )
+                .unwrap();
                 writeln!(
                     output,
                     "    if (frame->raising) {{ *thrown = frame->sent; {landing_unwind} }}"
@@ -1071,8 +1135,16 @@ fn boxed_uses(
             Terminator::Throw(v) => {
                 used.insert(*v);
             }
-            Terminator::Suspend { value, spilled, .. } => {
+            Terminator::Suspend {
+                value,
+                spilled,
+                delegate,
+                ..
+            } => {
                 used.insert(*value);
+                if let Some((iter, _, _)) = delegate {
+                    used.insert(*iter);
+                }
                 used.extend(spilled.iter().copied());
             }
             _ => {}
@@ -1919,6 +1991,7 @@ fn emit_terminator(
             spilled,
             pc,
             awaiting,
+            delegate,
             ..
         } => {
             let mut spill = String::new();
@@ -1929,9 +2002,20 @@ fn emit_terminator(
             // here, but the runtime's `return()` and `throw()` read this to decide whether the
             // body has a `finally` or `catch` to run, and so whether to re-enter it at all.
             let covered = i32::from(current_block.exception_handler.is_some());
+            let delegate_set = match delegate {
+                Some((iter, _, exit_pc)) => {
+                    format!(
+                        " frame->delegate = kiln_val_to_boundary(v{}); frame->delegate_exit = {};",
+                        iter.0, exit_pc
+                    )
+                }
+                None => {
+                    " frame->delegate = kiln_c99_undefined(); frame->delegate_exit = 0;".to_string()
+                }
+            };
             writeln!(
                 output,
-                "   {spill} frame->sp = {}; frame->resume = {pc}; frame->awaiting = {}; frame->handler_top = {covered}; *result = v{}; return KILN_C99_YIELDED;",
+                "   {spill} frame->sp = {}; frame->resume = {pc}; frame->awaiting = {}; frame->handler_top = {covered};{delegate_set} *result = v{}; return KILN_C99_YIELDED;",
                 spilled.len(),
                 i32::from(*awaiting),
                 value.0

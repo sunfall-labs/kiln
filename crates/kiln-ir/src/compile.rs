@@ -2938,6 +2938,8 @@ impl Compiler {
         }
         match handler {
             Some(clause) => {
+                let skip_catch_jump = self.emit_jump(Instruction::JumpIfReturnSignal(0));
+
                 self.scopes.push(HashMap::new());
                 match &clause.binding {
                     Some(name) => self.declare_bound(VariableKind::Let, name, span),
@@ -2972,11 +2974,17 @@ impl Compiler {
                     // Catch block threw: landing pad for `catch_handler_jump`.
                     // The thrown value from catch is on the value stack.
                     self.patch_jump(j);
+                    self.patch_jump(skip_catch_jump);
                     self.emit_finalizer(&Cleanup::Finally(finalizer.to_vec()));
                     if !Self::statements_always_terminate(finalizer) {
                         self.code.push(Instruction::Throw);
                     }
 
+                    self.patch_jump(catch_done_jump);
+                } else {
+                    let catch_done_jump = self.emit_jump(Instruction::Jump(0));
+                    self.patch_jump(skip_catch_jump);
+                    self.code.push(Instruction::Throw);
                     self.patch_jump(catch_done_jump);
                 }
             }
@@ -3580,24 +3588,26 @@ impl Compiler {
         self.load_hidden(&step_binding);
         let done = self.constant_index(Constant::String("done".to_owned()));
         self.code.push(Instruction::GetProperty(done));
-        let finished = self.emit_jump(Instruction::JumpIfTruthy(0));
+        let not_done = self.emit_jump(Instruction::JumpIfFalse(0));
 
-        // Not done: yield this value out, and keep what the caller sends back.
-        //
-        // No await here even for a wrapped sync iterator: `Yield` inside an async generator
-        // already awaits what it is handed, and `AsyncFromSyncIteratorContinuation` resolves
-        // each value exactly once. Awaiting again would unwrap a promise a second time and
-        // spend a tick the specification does not.
+        // Done: load step.value and jump to finished
         self.load_hidden(&step_binding);
         self.code.push(Instruction::GetProperty(value_key));
-        self.code.push(Instruction::Yield);
+        let finished_jump = self.emit_jump(Instruction::Jump(0));
+
+        // Not done: yield the inner step object out directly, delegating return and throw completions.
+        self.patch_jump(not_done);
+        self.load_hidden(&iterator_binding);
+        self.load_hidden(&step_binding);
+        let yield_star_idx = self.emit_jump(Instruction::YieldStar(0));
         self.store_hidden(&sent_binding);
         self.code.push(Instruction::Jump(start as u32));
 
-        // Done: the delegate's own return value is what `yield*` evaluates to.
-        self.patch_jump(finished);
-        self.load_hidden(&step_binding);
-        self.code.push(Instruction::GetProperty(value_key));
+        // Finished: either normal completion from done step, or inner throw() returning done: true.
+        // The final value of yield* is left on top of the stack.
+        let finished_target = self.code.len() as u32;
+        self.patch_jump(finished_jump);
+        self.patch_jump_to(yield_star_idx, finished_target);
         if asynchronous {
             self.await_wrapped_value(&wrapped_binding);
         }
@@ -3979,7 +3989,9 @@ impl Compiler {
             | Instruction::JumpIfNotNullish(slot)
             // A handler's target is patched the same way a jump's is: it is not known until the
             // handler body has been emitted.
-            | Instruction::PushHandler(slot) => *slot = target,
+            | Instruction::PushHandler(slot)
+            | Instruction::YieldStar(slot)
+            | Instruction::JumpIfReturnSignal(slot) => *slot = target,
             other => unreachable!("patched a {other:?}, which is not a jump"),
         }
     }
@@ -7568,7 +7580,9 @@ impl Compiler {
             | Instruction::JumpIfNotNullish(offset)
             // A handler's target is patched exactly like a jump's: neither is known until the
             // code it points past has been emitted.
-            | Instruction::PushHandler(offset) => *offset = target,
+            | Instruction::PushHandler(offset)
+            | Instruction::YieldStar(offset)
+            | Instruction::JumpIfReturnSignal(offset) => *offset = target,
             other => unreachable!("patch_jump called for {other:?}, which carries no target"),
         }
     }

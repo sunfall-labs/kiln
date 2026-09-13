@@ -563,10 +563,12 @@ pub use verifier::{VerifierError, verify_function_graph};
 /// `MakeFunction` and `LoadBuiltin`, so `console.log([1])` -- a program with neither -- handed
 /// the host a raw array and failed with no diagnostic.
 fn has_top_level_await(program: &Program) -> bool {
-    program
-        .code
-        .iter()
-        .any(|instruction| matches!(instruction, Instruction::Await | Instruction::Yield))
+    program.code.iter().any(|instruction| {
+        matches!(
+            instruction,
+            Instruction::Await | Instruction::Yield | Instruction::YieldStar(_)
+        )
+    })
 }
 
 fn produces_references(program: &Program) -> bool {
@@ -593,6 +595,7 @@ fn produces_references(program: &Program) -> bool {
                     | Instruction::JumpIfFalse(_)
                     | Instruction::JumpIfTruthy(_)
                     | Instruction::JumpIfNotNullish(_)
+                    | Instruction::JumpIfReturnSignal(_)
                     | Instruction::HostCall { .. }
                     | Instruction::Return
             )
@@ -639,6 +642,7 @@ fn proto_produces_references(proto: &FunctionProto, program: &Program) -> bool {
             | Instruction::JumpIfFalse(_)
             | Instruction::JumpIfTruthy(_)
             | Instruction::JumpIfNotNullish(_)
+            | Instruction::JumpIfReturnSignal(_)
             | Instruction::Return
             | Instruction::MarkUninitialized(_) => true,
             Instruction::Binary(op) => !matches!(op, BinaryOp::In | BinaryOp::InstanceOf),
@@ -3702,6 +3706,10 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             }
             Instruction::PopHandler => byte(&mut hash, 39),
             Instruction::Yield => byte(&mut hash, 42),
+            Instruction::YieldStar(target) => {
+                byte(&mut hash, 197);
+                word(&mut hash, u64::from(*target));
+            }
             Instruction::Await => byte(&mut hash, 60),
             Instruction::Throw => byte(&mut hash, 40),
             Instruction::LoadArguments => byte(&mut hash, 37),
@@ -3920,6 +3928,10 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             }
             Instruction::JumpIfNotNullish(value) => {
                 byte(&mut hash, 10);
+                word(&mut hash, u64::from(*value));
+            }
+            Instruction::JumpIfReturnSignal(value) => {
+                byte(&mut hash, 65);
                 word(&mut hash, u64::from(*value));
             }
             Instruction::HostCall { op, argc } => {

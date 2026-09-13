@@ -181,6 +181,8 @@ pub(crate) fn validate_code(
             | Instruction::JumpIfTruthy(target)
             | Instruction::JumpIfNotNullish(target)
             | Instruction::PushHandler(target)
+            | Instruction::YieldStar(target)
+            | Instruction::JumpIfReturnSignal(target)
                 if (*target as usize) >= code.len() =>
             {
                 return Err(invalid(
@@ -261,7 +263,9 @@ pub(crate) fn validate_code(
             Instruction::Jump(target) => work.push((*target as usize, next_height)),
             Instruction::JumpIfFalse(target)
             | Instruction::JumpIfTruthy(target)
-            | Instruction::JumpIfNotNullish(target) => {
+            | Instruction::JumpIfNotNullish(target)
+            | Instruction::YieldStar(target)
+            | Instruction::JumpIfReturnSignal(target) => {
                 work.push((*target as usize, next_height));
                 if index + 1 < code.len() {
                     work.push((index + 1, next_height));
@@ -440,6 +444,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::RestArguments(_)
         | Instruction::PushHole
         | Instruction::Yield
+        | Instruction::YieldStar(_)
         | Instruction::SuperCall { .. }
         | Instruction::SuperApply
         | Instruction::SuperForward
@@ -454,6 +459,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::JumpIfFalse(_)
         | Instruction::JumpIfTruthy(_)
         | Instruction::JumpIfNotNullish(_)
+        | Instruction::JumpIfReturnSignal(_)
         | Instruction::HostCall { .. }
         | Instruction::Nop
         | Instruction::Return => Ok(()),
@@ -792,6 +798,13 @@ pub(crate) fn stack_effect(
                 Ok((height, false))
             }
         }
+        Instruction::YieldStar(_) => {
+            if height < 2 {
+                Err(underflow(2))
+            } else {
+                Ok((height - 1, false))
+            }
+        }
         // The name is a constant rather than a stack value. Control does *not* necessarily leave:
         // the instruction stands in for a value load, and the emitted runtime resolves the name
         // against the realm's global object before throwing -- so on the found path it pushes
@@ -908,6 +921,13 @@ pub(crate) fn stack_effect(
                 Err(underflow(1))
             } else {
                 Ok((height - 1, false))
+            }
+        }
+        Instruction::JumpIfReturnSignal(_) => {
+            if height < 1 {
+                Err(underflow(1))
+            } else {
+                Ok((height, false))
             }
         }
         Instruction::HostCall { argc, .. } => {

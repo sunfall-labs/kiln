@@ -22,6 +22,7 @@ typedef uint64_t kiln_val;
 #define KILN_VAL_TRUE           UINT64_C(0xFFF8000000000005)
 #define KILN_VAL_HOLE           UINT64_C(0xFFF8000000000006)
 #define KILN_VAL_UNINITIALIZED  UINT64_C(0xFFF8000000000007)
+#define KILN_VAL_RETURN_SIGNAL  UINT64_C(0xFFF8000000000009)
 
 #define KILN_VAL_BUILTIN_PREFIX UINT64_C(0xFFF8000100000000)
 #define KILN_VAL_BUILTIN(id)    (KILN_VAL_BUILTIN_PREFIX | ((uint64_t)(id) & UINT64_C(0xFFFFFFFF)))
@@ -276,8 +277,14 @@ static inline kiln_val kiln_val_from_boundary(kiln_value v) {
         case KILN_VALUE_CELL:          return KILN_VAL_TAG_PTR(KILN_TAG_CELL_PREFIX, (const void *)(uintptr_t)v.bits);
         case KILN_VALUE_HOLE:          return KILN_VAL_HOLE;
         case KILN_VALUE_UNINITIALIZED: return KILN_VAL_UNINITIALIZED;
+        case KILN_VALUE_RETURN_SIGNAL: return KILN_VAL_RETURN_SIGNAL;
         default:                       return KILN_VAL_TAG_PTR(KILN_TAG_OBJECT_PREFIX, (const void *)(uintptr_t)v.bits);
     }
+}
+
+static inline kiln_value kiln_c99_return_signal(void) {
+    kiln_value v = { .tag = KILN_VALUE_RETURN_SIGNAL, .len = 0, .bits = 0 };
+    return v;
 }
 
 static inline kiln_val kiln_c99_val_from_double(double d) {
@@ -1187,6 +1194,8 @@ typedef struct kiln_generator {
     size_t queue_count;
     size_t queue_capacity;
     int queue_executing;
+    kiln_value delegate;
+    size_t delegate_exit;
 } kiln_generator;
 
 /* The parts a civil date is made of. The realm has one zone and it is UTC (ADR 0015), so there

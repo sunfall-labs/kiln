@@ -24,7 +24,8 @@ fn restartable(
         | GraphOp::CheckTdz { .. }
         | GraphOp::GetProperty { .. }
         | GraphOp::GetComputed { .. }
-        | GraphOp::Unary { .. } => true,
+        | GraphOp::Unary { .. }
+        | GraphOp::IsReturnSignal(_) => true,
         GraphOp::LoadUpvalue(_) | GraphOp::LoadCell(_) => plan.unchecked.contains(&vid),
         GraphOp::Binary { op, .. } => !matches!(op, BinaryOp::In | BinaryOp::InstanceOf),
         // A method call is restartable only as an intrinsic on the `Math` built-in: the call

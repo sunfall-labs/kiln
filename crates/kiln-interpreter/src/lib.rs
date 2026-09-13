@@ -3263,6 +3263,9 @@ pub struct GeneratorState {
     /// rejected with `[Function: returnSignal]`: not a JavaScript value at all, from a program
     /// that had merely written `break` inside `for await`.
     returning: Option<Value>,
+    /// When suspended at `YieldStar`, the active delegate iterator and the target instruction to resume
+    /// at if `inner.throw()` completes with `done: true`.
+    delegate: Option<(Value, usize)>,
 }
 
 impl PartialEq for GeneratorState {
@@ -7150,6 +7153,7 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// Written where the body stops and read by whoever resumed it, because the instruction that
     /// stopped is not otherwise visible from there.
     suspended_awaiting: bool,
+    suspended_delegate: Option<(Value, usize)>,
     /// `new.target` in the running frame: the constructor a `new` call named, or `undefined`.
     ///
     /// Held beside `this` and saved with it, because it follows exactly the same rule -- an
@@ -7400,6 +7404,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             this_value: Value::Undefined,
             new_target: Value::Undefined,
             suspended_awaiting: false,
+            suspended_delegate: None,
             global_objects: vec![None],
             process_object: None,
             intrinsics: Intrinsics::default(),
@@ -11285,6 +11290,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         self.jump(current, *target)?;
                     }
                 }
+                Instruction::JumpIfReturnSignal(target) => {
+                    if matches!(
+                        self.stack.last(),
+                        Some(Value::Native(Native::ReturnSignal, _))
+                    ) {
+                        self.jump(current, *target)?;
+                    }
+                }
                 Instruction::Jump(target) => self.jump(current, *target)?,
                 Instruction::HostCall { op, argc } => {
                     let argc = usize::from(*argc);
@@ -11607,6 +11620,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let value = self.pop(current)?;
                     self.suspended = true;
                     self.suspended_awaiting = matches!(opcode, Instruction::Await);
+                    return Ok(ExecutionResult {
+                        value,
+                        steps: self.steps,
+                    });
+                }
+                Instruction::YieldStar(exit_target) => {
+                    let value = self.pop(current)?;
+                    let iterator = self.pop(current)?;
+                    self.suspended = true;
+                    self.suspended_awaiting = false;
+                    self.suspended_delegate = Some((iterator, *exit_target as usize));
                     return Ok(ExecutionResult {
                         value,
                         steps: self.steps,
@@ -13101,6 +13125,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             done: false,
             awaiting: false,
             returning: None,
+            delegate: None,
         }))))
     }
 
@@ -13169,6 +13194,284 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.stack.truncate(stack_base);
         self.restore_caller_frame();
         Ok(())
+    }
+
+    fn eval_catching<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<T, ExecutionError>,
+    ) -> Result<Result<T, Value>, ExecutionError> {
+        let installed = self.handlers.len();
+        self.handlers.push(Handler {
+            target: HOST_HANDLER,
+            frame_depth: self.frames.len(),
+            stack_height: self.stack.len(),
+            native_depth: self.native_depth,
+        });
+        match f(self) {
+            Ok(value) => {
+                self.handlers.truncate(installed);
+                Ok(Ok(value))
+            }
+            Err(ExecutionError::CaughtByHost) => {
+                self.handlers.truncate(installed);
+                Ok(Err(self.caught.take().unwrap_or(Value::Undefined)))
+            }
+            Err(ExecutionError::ThrownAcrossNative) => {
+                self.handlers.truncate(installed);
+                Ok(Err(self.caught.take().unwrap_or(Value::Undefined)))
+            }
+            Err(error) => {
+                self.handlers.truncate(installed);
+                match error.as_javascript_error() {
+                    Some((kind, msg)) => {
+                        let err = self.construct_error(kind, &[Value::String(msg)]);
+                        Ok(Err(err))
+                    }
+                    None => Err(error),
+                }
+            }
+        }
+    }
+
+    fn get_method(
+        &mut self,
+        target: &Value,
+        name: &str,
+        instruction: usize,
+    ) -> Result<Option<Value>, ExecutionError> {
+        let method = self.read_property(target, name, instruction)?;
+        if method.is_nullish() {
+            Ok(None)
+        } else if is_callable(&method) {
+            Ok(Some(method))
+        } else {
+            self.throw_error(
+                ErrorKind::Type,
+                format!("Property '{name}' is not a function"),
+                instruction,
+            )?;
+            Ok(None)
+        }
+    }
+
+    fn delegate_generator_return(
+        &mut self,
+        generator: &Rc<RefCell<GeneratorState>>,
+        delegate: Value,
+        exit_target: usize,
+        sent: Value,
+        instruction: usize,
+    ) -> Result<(Value, bool), ExecutionError> {
+        let _ = exit_target;
+        let method_res =
+            self.eval_catching(|this| this.get_method(&delegate, "return", instruction))?;
+        let return_method = match method_res {
+            Ok(method) => method,
+            Err(thrown) => {
+                generator.borrow_mut().delegate = None;
+                return self.resume_generator_with(generator, Resume::Throw(thrown), instruction);
+            }
+        };
+        match return_method {
+            None => {
+                generator.borrow_mut().delegate = None;
+                self.resume_generator_with(generator, Resume::Return(sent), instruction)
+            }
+            Some(return_fn) => {
+                let call_res = self.call_catching(&return_fn, delegate, vec![sent], instruction)?;
+                let inner_result = match call_res {
+                    Ok(val) => val,
+                    Err(thrown) => {
+                        generator.borrow_mut().delegate = None;
+                        return self.resume_generator_with(
+                            generator,
+                            Resume::Throw(thrown),
+                            instruction,
+                        );
+                    }
+                };
+                if !is_object_type(&inner_result) {
+                    generator.borrow_mut().delegate = None;
+                    let err = self.construct_error(
+                        ErrorKind::Type,
+                        &[Value::String(format!(
+                            "Iterator result {} is not an object",
+                            inner_result.to_display_string()
+                        ))],
+                    );
+                    return self.resume_generator_with(generator, Resume::Throw(err), instruction);
+                }
+                let done_res = self
+                    .eval_catching(|this| this.read_property(&inner_result, "done", instruction))?;
+                let done_val = match done_res {
+                    Ok(val) => val,
+                    Err(thrown) => {
+                        generator.borrow_mut().delegate = None;
+                        return self.resume_generator_with(
+                            generator,
+                            Resume::Throw(thrown),
+                            instruction,
+                        );
+                    }
+                };
+                let done = done_val.is_truthy();
+                if done {
+                    generator.borrow_mut().delegate = None;
+                    let val_res = self.eval_catching(|this| {
+                        this.read_property(&inner_result, "value", instruction)
+                    })?;
+                    let val = match val_res {
+                        Ok(v) => v,
+                        Err(thrown) => {
+                            return self.resume_generator_with(
+                                generator,
+                                Resume::Throw(thrown),
+                                instruction,
+                            );
+                        }
+                    };
+                    self.resume_generator_with(generator, Resume::Return(val), instruction)
+                } else {
+                    Ok((inner_result, false))
+                }
+            }
+        }
+    }
+
+    fn delegate_generator_throw(
+        &mut self,
+        generator: &Rc<RefCell<GeneratorState>>,
+        delegate: Value,
+        exit_target: usize,
+        thrown: Value,
+        instruction: usize,
+    ) -> Result<(Value, bool), ExecutionError> {
+        let method_res =
+            self.eval_catching(|this| this.get_method(&delegate, "throw", instruction))?;
+        let throw_method = match method_res {
+            Ok(method) => method,
+            Err(thrown_val) => {
+                generator.borrow_mut().delegate = None;
+                return self.resume_generator_with(
+                    generator,
+                    Resume::Throw(thrown_val),
+                    instruction,
+                );
+            }
+        };
+        match throw_method {
+            None => {
+                generator.borrow_mut().delegate = None;
+                let return_method_res =
+                    self.eval_catching(|this| this.get_method(&delegate, "return", instruction))?;
+                match return_method_res {
+                    Ok(Some(return_fn)) => {
+                        let close_res =
+                            self.call_catching(&return_fn, delegate, vec![], instruction)?;
+                        match close_res {
+                            Ok(inner_res) => {
+                                if !is_object_type(&inner_res) {
+                                    let err = self.construct_error(
+                                        ErrorKind::Type,
+                                        &[Value::String(format!(
+                                            "Iterator result {} is not an object",
+                                            inner_res.to_display_string()
+                                        ))],
+                                    );
+                                    return self.resume_generator_with(
+                                        generator,
+                                        Resume::Throw(err),
+                                        instruction,
+                                    );
+                                }
+                            }
+                            Err(thrown_val) => {
+                                return self.resume_generator_with(
+                                    generator,
+                                    Resume::Throw(thrown_val),
+                                    instruction,
+                                );
+                            }
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(thrown_val) => {
+                        return self.resume_generator_with(
+                            generator,
+                            Resume::Throw(thrown_val),
+                            instruction,
+                        );
+                    }
+                }
+                let err = self.construct_error(
+                    ErrorKind::Type,
+                    &[Value::String(
+                        "Iterator does not have a throw method".to_owned(),
+                    )],
+                );
+                self.resume_generator_with(generator, Resume::Throw(err), instruction)
+            }
+            Some(throw_fn) => {
+                let call_res =
+                    self.call_catching(&throw_fn, delegate, vec![thrown], instruction)?;
+                let inner_result = match call_res {
+                    Ok(val) => val,
+                    Err(thrown_val) => {
+                        generator.borrow_mut().delegate = None;
+                        return self.resume_generator_with(
+                            generator,
+                            Resume::Throw(thrown_val),
+                            instruction,
+                        );
+                    }
+                };
+                if !is_object_type(&inner_result) {
+                    generator.borrow_mut().delegate = None;
+                    let err = self.construct_error(
+                        ErrorKind::Type,
+                        &[Value::String(format!(
+                            "Iterator result {} is not an object",
+                            inner_result.to_display_string()
+                        ))],
+                    );
+                    return self.resume_generator_with(generator, Resume::Throw(err), instruction);
+                }
+                let done_res = self
+                    .eval_catching(|this| this.read_property(&inner_result, "done", instruction))?;
+                let done_val = match done_res {
+                    Ok(val) => val,
+                    Err(thrown_val) => {
+                        generator.borrow_mut().delegate = None;
+                        return self.resume_generator_with(
+                            generator,
+                            Resume::Throw(thrown_val),
+                            instruction,
+                        );
+                    }
+                };
+                let done = done_val.is_truthy();
+                if done {
+                    generator.borrow_mut().delegate = None;
+                    let val_res = self.eval_catching(|this| {
+                        this.read_property(&inner_result, "value", instruction)
+                    })?;
+                    let val = match val_res {
+                        Ok(v) => v,
+                        Err(thrown_val) => {
+                            return self.resume_generator_with(
+                                generator,
+                                Resume::Throw(thrown_val),
+                                instruction,
+                            );
+                        }
+                    };
+                    generator.borrow_mut().instruction = exit_target;
+                    self.resume_generator_with(generator, Resume::Send(val), instruction)
+                } else {
+                    Ok((inner_result, false))
+                }
+            }
+        }
     }
 
     /// Start or resume a generator, returning its next value and whether it finished.
@@ -13296,6 +13599,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
 
         self.suspended = false;
+        self.suspended_delegate = None;
         let outcome = if raising {
             // Throwing at the suspension point runs every `finally` between there and the top of
             // the generator, then arrives as `GeneratorReturned`.
@@ -13383,6 +13687,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             state.handlers = retained;
             state.started = true;
             state.awaiting = self.suspended_awaiting;
+            state.delegate = self.suspended_delegate.take();
             drop(state);
 
             self.restore_caller_frame();
@@ -30238,9 +30543,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.caught = Some(thrown);
                     return Err(ExecutionError::ThrownAcrossNative);
                 }
-                let (value, done) =
-                    self.resume_generator_with(&generator, Resume::Throw(thrown), instruction)?;
-                Ok(Some(iteration_result(value, done)))
+                let delegate = generator.borrow().delegate.clone();
+                let (value, done) = if let Some((delegate_iter, exit_target)) = delegate {
+                    self.delegate_generator_throw(
+                        &generator,
+                        delegate_iter,
+                        exit_target,
+                        thrown,
+                        instruction,
+                    )?
+                } else {
+                    self.resume_generator_with(&generator, Resume::Throw(thrown), instruction)?
+                };
+                if generator.borrow().delegate.is_some() && !done {
+                    Ok(Some(value))
+                } else {
+                    Ok(Some(iteration_result(value, done)))
+                }
             }
             Value::Callback(
                 method @ (CallbackMethod::GeneratorNext | CallbackMethod::GeneratorReturn),
@@ -30257,18 +30576,38 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let (value, done) = if matches!(method, CallbackMethod::GeneratorReturn) {
                     let started = generator.borrow().started;
                     if started {
-                        // A started generator has to unwind: every `finally` between the
-                        // suspension point and the top runs before it is done.
-                        self.resume_generator_with(&generator, Resume::Return(sent), instruction)?
+                        let delegate = generator.borrow().delegate.clone();
+                        if let Some((delegate_iter, exit_target)) = delegate {
+                            self.delegate_generator_return(
+                                &generator,
+                                delegate_iter,
+                                exit_target,
+                                sent,
+                                instruction,
+                            )?
+                        } else {
+                            // A started generator has to unwind: every `finally` between the
+                            // suspension point and the top runs before it is done.
+                            self.resume_generator_with(
+                                &generator,
+                                Resume::Return(sent),
+                                instruction,
+                            )?
+                        }
                     } else {
                         // Never entered, so there is nothing to unwind.
                         generator.borrow_mut().done = true;
                         (sent, true)
                     }
                 } else {
+                    generator.borrow_mut().delegate = None;
                     self.resume_generator(&generator, sent, instruction)?
                 };
-                Ok(Some(iteration_result(value, done)))
+                if generator.borrow().delegate.is_some() && !done {
+                    Ok(Some(value))
+                } else {
+                    Ok(Some(iteration_result(value, done)))
+                }
             }
             // `reduce` threads an accumulator and `sort` compares pairs, so neither is the walk
             // the other callback methods share. All three coerce their receiver first, for the

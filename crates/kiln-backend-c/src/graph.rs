@@ -57,6 +57,7 @@ pub enum GraphOp {
     /// The value a handler block starts with: what was thrown into it. Only ever the first
     /// operation of a handler block.
     CaughtValue,
+    IsReturnSignal(ValueId),
     /// An instruction lowered by its own body in `tail.rs`, on a small local stack holding
     /// `operands`. The tail of the instruction set: each of these has one correct lowering on
     /// `stack[sp]`, and this op runs it there rather than carrying a second copy. `pushes` is how many results it leaves; the op's value is the top one, and
@@ -192,6 +193,7 @@ impl GraphOp {
             | Self::StoreUpvalue { value, .. }
             | Self::StoreGlobal { value, .. }
             | Self::CheckTdz { value, .. }
+            | Self::IsReturnSignal(value)
             | Self::Unary { value, .. } => vec![*value],
             Self::Bridge { operands, .. } => operands.clone(),
             Self::Binary { left, right, .. } => vec![*left, *right],
@@ -240,6 +242,7 @@ impl GraphOp {
             | Self::StoreUpvalue { value, .. }
             | Self::StoreGlobal { value, .. }
             | Self::CheckTdz { value, .. }
+            | Self::IsReturnSignal(value)
             | Self::Unary { value, .. } => apply(value),
             Self::Bridge { operands, .. } => operands.iter_mut().for_each(&mut apply),
             Self::Binary { left, right, .. } => {
@@ -355,6 +358,7 @@ pub enum Terminator {
         spilled: Vec<ValueId>,
         pc: u32,
         awaiting: bool,
+        delegate: Option<(ValueId, BlockId, u32)>,
     },
     Unreachable,
 }
@@ -920,9 +924,17 @@ pub fn proven_types_with(
     let resume_targets: std::collections::HashSet<BlockId> = graph
         .blocks
         .iter()
-        .filter_map(|b| match b.terminator {
-            Terminator::Suspend { resume, .. } => Some(resume),
-            _ => None,
+        .flat_map(|b| match &b.terminator {
+            Terminator::Suspend {
+                resume, delegate, ..
+            } => {
+                if let Some((_, exit, _)) = delegate {
+                    vec![*resume, *exit]
+                } else {
+                    vec![*resume]
+                }
+            }
+            _ => vec![],
         })
         .collect();
     // `None` in `state` is "unconstrained so far"; an absent key is "proven nothing".
@@ -1050,6 +1062,7 @@ pub fn proven_types_with(
                     },
                     GraphOp::NewArray { .. } => Some(Proven::Object),
                     GraphOp::MakeFunction { .. } => Some(Proven::Callable),
+                    GraphOp::IsReturnSignal(_) => Some(Proven::Boolean),
                     GraphOp::StoreLocal { value, .. }
                     | GraphOp::StoreCell { value, .. }
                     | GraphOp::StoreGlobal { value, .. }
@@ -1438,7 +1451,8 @@ pub fn build_function_graph(
             }
             Instruction::JumpIfFalse(target)
             | Instruction::JumpIfTruthy(target)
-            | Instruction::JumpIfNotNullish(target) => {
+            | Instruction::JumpIfNotNullish(target)
+            | Instruction::JumpIfReturnSignal(target) => {
                 block_starts.insert(*target as usize);
                 if pc + 1 < code.len() {
                     block_starts.insert(pc + 1);
@@ -1468,6 +1482,12 @@ pub fn build_function_graph(
             Instruction::Yield | Instruction::Await if pc + 1 < code.len() => {
                 block_starts.insert(pc + 1);
             }
+            Instruction::YieldStar(target) => {
+                block_starts.insert(*target as usize);
+                if pc + 1 < code.len() {
+                    block_starts.insert(pc + 1);
+                }
+            }
             _ => {}
         }
     }
@@ -1478,13 +1498,17 @@ pub fn build_function_graph(
     if binds_at_call {
         block_starts.insert(proto.prologue_end as usize);
     }
-    let jumps_to_zero = code.iter().any(|inst| match inst {
-        Instruction::Jump(0)
-        | Instruction::JumpIfFalse(0)
-        | Instruction::JumpIfTruthy(0)
-        | Instruction::JumpIfNotNullish(0)
-        | Instruction::PushHandler(0) => true,
-        _ => false,
+    let jumps_to_zero = code.iter().any(|inst| {
+        matches!(
+            inst,
+            Instruction::Jump(0)
+                | Instruction::JumpIfFalse(0)
+                | Instruction::JumpIfTruthy(0)
+                | Instruction::JumpIfNotNullish(0)
+                | Instruction::JumpIfReturnSignal(0)
+                | Instruction::PushHandler(0)
+                | Instruction::YieldStar(0)
+        )
     });
     let block_offset = if jumps_to_zero { 1 } else { 0 };
     let block_starts_vec: Vec<usize> = block_starts.into_iter().collect();
@@ -1584,7 +1608,8 @@ pub fn build_function_graph(
             Some(
                 Instruction::JumpIfFalse(target)
                 | Instruction::JumpIfTruthy(target)
-                | Instruction::JumpIfNotNullish(target),
+                | Instruction::JumpIfNotNullish(target)
+                | Instruction::JumpIfReturnSignal(target),
             ) => {
                 succs.push(pc_to_containing_block(*target as usize));
                 succs.extend(next);
@@ -1592,7 +1617,11 @@ pub fn build_function_graph(
             // A suspend is not an edge: the body returns, and a later call re-enters at the
             // resume target through the dispatch switch.
             Some(
-                Instruction::Return | Instruction::Throw | Instruction::Yield | Instruction::Await,
+                Instruction::Return
+                | Instruction::Throw
+                | Instruction::Yield
+                | Instruction::Await
+                | Instruction::YieldStar(_),
             ) => {}
             _ => succs.extend(next),
         }
@@ -1629,7 +1658,8 @@ pub fn build_function_graph(
                 Instruction::Jump(target)
                 | Instruction::JumpIfFalse(target)
                 | Instruction::JumpIfTruthy(target)
-                | Instruction::JumpIfNotNullish(target) => {
+                | Instruction::JumpIfNotNullish(target)
+                | Instruction::JumpIfReturnSignal(target) => {
                     height = after(inst, height, pc);
                     height_at.entry(*target as usize).or_insert(height);
                 }
@@ -1639,6 +1669,12 @@ pub fn build_function_graph(
                 Instruction::Yield | Instruction::Await => {
                     // The yielded value leaves and the sent value arrives: the same height.
                     resume_depths.insert(pc_to_containing_block(pc + 1), height);
+                }
+                Instruction::YieldStar(target) => {
+                    resume_depths.insert(pc_to_containing_block(pc + 1), height - 1);
+                    resume_depths.insert(pc_to_containing_block(*target as usize), height - 1);
+                    height = after(inst, height, pc);
+                    height_at.entry(*target as usize).or_insert(height);
                 }
                 other => height = after(other, height, pc),
             }
@@ -1954,6 +1990,42 @@ pub fn build_function_graph(
                         &mut operations,
                     );
                 }
+                Instruction::JumpIfReturnSignal(target) => {
+                    let cond = frame
+                        .stack
+                        .last()
+                        .copied()
+                        .unwrap_or_else(|| graph.alloc_value());
+                    let is_signal = graph.alloc_value();
+                    operations.push((is_signal, GraphOp::IsReturnSignal(cond)));
+                    let target_block = *pc_to_block.get(&(*target as usize)).unwrap();
+                    let fallthrough_block = pc_to_containing_block(pc + 1);
+                    terminator = Terminator::Branch {
+                        condition: is_signal,
+                        true_block: target_block,
+                        false_block: fallthrough_block,
+                    };
+                    successors.push(target_block);
+                    successors.push(fallthrough_block);
+                    propagate_frame(
+                        &mut block_entry_frames,
+                        &mut merges,
+                        block_id,
+                        target_block,
+                        &frame,
+                        &mut graph,
+                        &mut operations,
+                    );
+                    propagate_frame(
+                        &mut block_entry_frames,
+                        &mut merges,
+                        block_id,
+                        fallthrough_block,
+                        &frame,
+                        &mut graph,
+                        &mut operations,
+                    );
+                }
                 Instruction::Nop => {}
                 Instruction::Return => {
                     let ret_val = frame.stack.pop();
@@ -2219,6 +2291,22 @@ pub fn build_function_graph(
                         spilled,
                         pc: pc as u32,
                         awaiting: matches!(inst, Instruction::Await),
+                        delegate: None,
+                    };
+                }
+                Instruction::YieldStar(target) => {
+                    let value = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
+                    let iterator = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
+                    let spilled = frame.stack.clone();
+                    let resume_block = pc_to_containing_block(pc + 1);
+                    let exit_block = pc_to_containing_block(*target as usize);
+                    terminator = Terminator::Suspend {
+                        value,
+                        resume: resume_block,
+                        spilled,
+                        pc: pc as u32,
+                        awaiting: false,
+                        delegate: Some((iterator, exit_block, *target)),
                     };
                 }
                 Instruction::PushHandler(target) => {
@@ -2369,9 +2457,14 @@ fn remove_dead_phis(graph: &mut FunctionGraph) {
                 value,
                 spilled,
                 resume,
+                delegate,
                 ..
             } => {
                 live.insert(*value);
+                if let Some((iter, exit, _)) = delegate {
+                    live.insert(*iter);
+                    resumes.insert(*exit);
+                }
                 live.extend(spilled.iter().copied());
                 resumes.insert(*resume);
             }
@@ -2425,8 +2518,16 @@ fn map_graph_values(graph: &mut FunctionGraph, map: impl Fn(ValueId) -> ValueId)
             | Terminator::BranchNotNullish {
                 condition: value, ..
             } => *value = map(*value),
-            Terminator::Suspend { value, spilled, .. } => {
+            Terminator::Suspend {
+                value,
+                spilled,
+                delegate,
+                ..
+            } => {
                 *value = map(*value);
+                if let Some((iter, _, _)) = delegate {
+                    *iter = map(*iter);
+                }
                 for value in spilled {
                     *value = map(*value);
                 }
@@ -2450,9 +2551,17 @@ fn simplify_trivial_phis(graph: &mut FunctionGraph) {
     let resumes: HashSet<_> = graph
         .blocks
         .iter()
-        .filter_map(|block| match block.terminator {
-            Terminator::Suspend { resume, .. } => Some(resume),
-            _ => None,
+        .flat_map(|block| match &block.terminator {
+            Terminator::Suspend {
+                resume, delegate, ..
+            } => {
+                if let Some((_, exit, _)) = delegate {
+                    vec![*resume, *exit]
+                } else {
+                    vec![*resume]
+                }
+            }
+            _ => vec![],
         })
         .collect();
     let mut aliases: Vec<_> = (0..graph.next_value_id).map(ValueId).collect();
@@ -2542,8 +2651,16 @@ fn compact_value_ids(graph: &mut FunctionGraph) {
             | Terminator::BranchNotNullish {
                 condition: value, ..
             } => present[value.0 as usize] = true,
-            Terminator::Suspend { value, spilled, .. } => {
+            Terminator::Suspend {
+                value,
+                spilled,
+                delegate,
+                ..
+            } => {
                 present[value.0 as usize] = true;
+                if let Some((iter, _, _)) = delegate {
+                    present[iter.0 as usize] = true;
+                }
                 for value in spilled {
                     present[value.0 as usize] = true;
                 }
@@ -2828,8 +2945,16 @@ fn escape_analysis_with(
             | Terminator::BranchNotNullish { condition: v, .. } => {
                 live_values.insert(*v);
             }
-            Terminator::Suspend { value, spilled, .. } => {
+            Terminator::Suspend {
+                value,
+                spilled,
+                delegate,
+                ..
+            } => {
                 live_values.insert(*value);
+                if let Some((iter, _, _)) = delegate {
+                    live_values.insert(*iter);
+                }
                 live_values.extend(spilled);
             }
             _ => {}
@@ -2842,7 +2967,8 @@ fn escape_analysis_with(
                     | GraphOp::StoreGlobal { value, .. }
                     | GraphOp::StoreUpvalue { value, .. }
                     | GraphOp::CheckTdz { value, .. }
-                    | GraphOp::Unary { value, .. } => {
+                    | GraphOp::Unary { value, .. }
+                    | GraphOp::IsReturnSignal(value) => {
                         live_values.insert(*value);
                     }
                     GraphOp::Binary { left, right, .. } => {
@@ -2937,8 +3063,18 @@ fn escape_analysis_with(
                     escaped.insert(root);
                 }
             }
-            Terminator::Suspend { value, spilled, .. } => {
+            Terminator::Suspend {
+                value,
+                spilled,
+                delegate,
+                ..
+            } => {
                 if let Some(&root) = alias_to_root.get(value) {
+                    escaped.insert(root);
+                }
+                if let Some((iter, _, _)) = delegate
+                    && let Some(&root) = alias_to_root.get(iter)
+                {
                     escaped.insert(root);
                 }
                 for s in spilled {
@@ -3047,7 +3183,7 @@ fn escape_analysis_with(
                         }
                     }
                 }
-                GraphOp::Unary { value, .. } => {
+                GraphOp::Unary { value, .. } | GraphOp::IsReturnSignal(value) => {
                     if let Some(&root) = alias_to_root.get(value) {
                         escaped.insert(root);
                     }
@@ -3660,6 +3796,7 @@ mod dead_phi_tests {
                     resume: BlockId(1),
                     pc: 1,
                     awaiting: false,
+                    delegate: None,
                 },
                 predecessors: vec![],
                 successors: vec![BlockId(1)],
