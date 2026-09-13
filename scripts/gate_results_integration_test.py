@@ -125,8 +125,7 @@ class GateResultsCliIntegrationTests(unittest.TestCase):
                 hashlib.sha256(self.binary.read_bytes()).hexdigest(),
             )
         workspace_record = next(record for record in self.aggregate_document["steps"] if record["source"]["name"] == "crate tests")
-        self.assertEqual(workspace_record["outcomes"], {"total": 3, "passed": 2, "failed": 0})
-        self.assertEqual(workspace_record["outcome_breakdown"]["ignored"], 1)
+        self.assertEqual(workspace_record["outcomes"], {"total": 3, "passed": 2, "failed": 0, "ignored": 1})
         self.assertEqual(workspace_record["evidence"]["log"], str((self.root / "crate-tests.log").resolve()))
 
     def test_missing_duplicate_and_malformed_steps_fail(self) -> None:

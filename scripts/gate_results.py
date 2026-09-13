@@ -77,8 +77,8 @@ def validate(doc: dict[str, Any]) -> dict[str, Any]:
         raise ResultError("result envelope has no source kind")
     if not isinstance(source.get("code_snapshot_sha256"), str) or not source["code_snapshot_sha256"]:
         raise ResultError("result envelope has no code snapshot identity")
-    if source.get("kind") == "process" and doc.get("verdict") == "passed" and not isinstance(source.get("binary_sha256"), str):
-        raise ResultError("process step has no binary identity")
+    if source.get("kind") in {"process", "workspace", "conformance", "test262"} and doc.get("verdict") == "passed" and not isinstance(source.get("binary_sha256"), str):
+        raise ResultError("passed executable step has no binary identity")
     evidence = doc.get("evidence")
     if not isinstance(evidence, dict) or not isinstance(evidence.get("log"), str) or not evidence["log"]:
         raise ResultError("result envelope has no log evidence")
@@ -92,6 +92,9 @@ def validate(doc: dict[str, Any]) -> dict[str, Any]:
     failed = _nonnegative(counts.get("failed"), "counts.failed")
     if passed + failed > total:
         raise ResultError("counts passed + failed exceeds total")
+    categories = [value for key, value in counts.items() if key != "total"]
+    if sum(categories) != total:
+        raise ResultError("outcome counts do not sum to total")
     if total == 0 and verdict != "infrastructure":
         raise ResultError("result envelope has no measured cases")
     return doc
@@ -100,7 +103,9 @@ def validate(doc: dict[str, Any]) -> dict[str, Any]:
 def _envelope(source: str, kind: str, log: str, status: int, total: int, passed: int, failed: int, *, verdict: str | None = None, **extra: Any) -> dict[str, Any]:
     snapshot = __import__("os").environ.get("KILN_CODE_SNAPSHOT_SHA256") or code_snapshot()
     verdict = verdict or ("passed" if status == 0 and failed == 0 else "failed")
-    result = {"schema": 1, "verdict": verdict, "source": {"kind": kind, "name": source, "code_snapshot_sha256": snapshot, "binary_sha256": binary_snapshot(), "corpus_pin": extra.pop("corpus_pin", None)}, "outcomes": {"total": total, "passed": passed, "failed": failed}, "evidence": {"log": str(Path(log).resolve())}, **extra}
+    breakdown = extra.pop("outcome_extra", {})
+    outcomes = {"total": total, "passed": passed, "failed": failed, **breakdown}
+    result = {"schema": 1, "verdict": verdict, "source": {"kind": kind, "name": source, "code_snapshot_sha256": snapshot, "binary_sha256": binary_snapshot(), "corpus_pin": extra.pop("corpus_pin", None)}, "outcomes": outcomes, "evidence": {"log": str(Path(log).resolve())}, **extra}
     return validate(result)
 
 
@@ -123,7 +128,7 @@ def workspace(log: str, status: int) -> dict[str, Any]:
     minimum = int(__import__("os").environ.get("KILN_GATE_MIN_PASSED", "500"))
     if passed < minimum:
         raise ResultError(f"workspace tests passed {passed}, below the floor of {minimum}")
-    return _envelope("workspace tests", "workspace", log, status, passed + failed + ignored, passed, failed, suites=len(rows), outcome_breakdown={"passed": passed, "failed": failed, "ignored": ignored})
+    return _envelope("workspace tests", "workspace", log, status, passed + failed + ignored, passed, failed, suites=len(rows), outcome_extra={"ignored": ignored})
 
 
 def conformance(log: str, status: int, document: str | None = None) -> dict[str, Any]:
@@ -146,7 +151,7 @@ def conformance(log: str, status: int, document: str | None = None) -> dict[str,
         expected = {"total": len(tests), "passed": counts["pass"], "failed": counts["fail"], "unsupported": counts["unsupported"], "skipped": counts["skipped"]}
         if not isinstance(totals, dict) or any(totals.get(key) != value for key, value in expected.items() if key in totals):
             raise ResultError("conformance totals disagree with test outcomes")
-    return _envelope("conformance", "conformance", log, status, len(tests), counts["pass"], counts["fail"], outcome_breakdown=counts, result_document=str(Path(document).resolve()))
+    return _envelope("conformance", "conformance", log, status, len(tests), counts["pass"], counts["fail"], outcome_extra={"unsupported": counts["unsupported"], "skipped": counts["skipped"]}, result_document=str(Path(document).resolve()))
 
 
 def test262(log: str, status: int) -> dict[str, Any]:
@@ -209,7 +214,7 @@ def test262_document(log: str, status: int, document: str) -> dict[str, Any]:
         raise ResultError("Test262 aggregate counts disagree with chunks")
     if report["status"] == "passed" and report.get("regressions"):
         raise ResultError("Test262 passing report lists regressions")
-    doc = _envelope("Test262 baseline", "test262", log, status, counts.get("total"), counts.get("passed"), counts.get("failed"), verdict=report["status"] if status == 0 else "failed", chunks=len(report["chunks"]), result_document=str(Path(document).resolve()), regressions=report.get("regressions", []), corpus_pin=report.get("source", {}).get("commit"))
+    doc = _envelope("Test262 baseline", "test262", log, status, counts.get("total"), counts.get("passed"), counts.get("failed"), verdict=report["status"] if status == 0 else "failed", outcome_extra={"unsupported": counts.get("unsupported", 0), "skipped": counts.get("skipped", 0)}, chunks=len(report["chunks"]), result_document=str(Path(document).resolve()), regressions=report.get("regressions", []), corpus_pin=report.get("source", {}).get("commit"))
     return doc
 
 
