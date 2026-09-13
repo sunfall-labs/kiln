@@ -5764,3 +5764,20 @@ Verified with native probe `conformance/native/node-http-members.cjs` (byte-for-
 interpreter and native CLI), HTTP close contract (`scripts/check-http-close-contract.sh`), native integration
 tests in `kiln-native`, and full `scripts/native.sh` parity (191 matched, 1 refused, 0 diverged).
 
+---
+
+## Phase 5.2 TypeScript built-ins: `node:fs` and `node:fs/promises` (2026-09-13)
+
+Migrated `node:fs` and `node:fs/promises` completely to TypeScript via `crates/kiln-builtins/src/node/fs.ts`
+and `crates/kiln-builtins/src/node/fs/promises.ts` with zero additions to the C runtime prelude
+(`crates/kiln-backend-c/src/runtime/` strictly frozen per Phase 5.1).
+Implemented all 20 canonical `node:fs` exports (`accessSync`, `appendFileSync`, `closeSync`, `copyFileSync`,
+`default`, `existsSync`, `lstatSync`, `mkdirSync`, `openSync`, `promises`, `readFileSync`, `readSync`,
+`readdirSync`, `readlinkSync`, `realpathSync`, `renameSync`, `rmSync`, `statSync`, `unlinkSync`, `writeFileSync`)
+and canonical `node:fs/promises` exports (`appendFile`, `default`, `mkdir`, `readFile`, `stat`, `writeFile`),
+bridging to host fs capability in interpreter and `process.__kilnNativeModules.fs` and `.fs_promises` in native launcher.
+Verified with native probe `conformance/native/node-fs-members.cjs` (byte-for-byte identical output between
+interpreter and native CLI), native integration tests in `kiln-native`, module-graph evaluation tests,
+and full `scripts/native.sh` parity (192 matched, 1 refused, 0 diverged).
+
+
