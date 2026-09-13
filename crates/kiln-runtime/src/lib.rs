@@ -10,6 +10,12 @@
     clippy::wrong_self_convention
 )]
 
+mod process_wire;
+pub use process_wire::{
+    ProcessWireError, ProcessWireRequest, decode as decode_process_wire,
+    encode as encode_process_wire,
+};
+
 #[cfg(feature = "http")]
 mod http_body;
 #[cfg(feature = "http")]
