@@ -3034,6 +3034,95 @@ fn node_builtin_zlib_commonjs_require_evaluates_cleanly() {
 }
 
 #[test]
+fn node_builtin_stream_evaluates_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import Stream, { Readable, Writable, addAbortSignal, finished } from 'node:stream';\n",
+            "const r = new Readable();\n",
+            "r.push('hello stream');\n",
+            "const data = r.read();\n",
+            "const w = new Writable({ write(c, e, cb) { cb(); } });\n",
+            "w.write('chunk');\n",
+            "w.end();\n",
+            "console.log(\n",
+            "  typeof Stream === 'function',\n",
+            "  typeof Readable === 'function',\n",
+            "  typeof Writable === 'function',\n",
+            "  data.toString() === 'hello stream',\n",
+            "  w.writableEnded,\n",
+            ");\n",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with stream builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute stream builtin");
+    assert_eq!(host.output, ["true true true true true"]);
+}
+
+#[test]
+fn node_builtin_stream_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const Stream = require('node:stream');\n",
+            "module.exports = {\n",
+            "  isFn: typeof Stream === 'function',\n",
+            "  hasReadable: typeof Stream.Readable === 'function',\n",
+            "  hasWritable: typeof Stream.Writable === 'function',\n",
+            "  hasFinished: typeof Stream.finished === 'function',\n",
+            "};\n",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import bridge from './bridge.cjs';\n",
+            "console.log(bridge.isFn, bridge.hasReadable, bridge.hasWritable, bridge.hasFinished);\n",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with stream builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute stream builtin cjs");
+    assert_eq!(host.output, ["true true true true"]);
+}
+
+#[test]
 fn node_net_connect_is_a_typed_virtual_module_export() {
     let project = TempProject::new();
     let entry = project.write(

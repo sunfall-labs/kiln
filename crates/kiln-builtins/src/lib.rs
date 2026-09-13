@@ -586,4 +586,21 @@ declare_ts_builtins! {
             "unzipSync",
         ],
     },
+    Stream {
+        variant: Stream,
+        file: "node/stream.ts",
+        logical_path: "node:stream.ts",
+        source_const: STREAM_SOURCE,
+        exports_const: STREAM_EXPORTS,
+        sample_source_check: "export class Readable",
+        presence_test: stream_builtin_source_is_present,
+        compilation_test: stream_builtin_compiles_cleanly,
+        exports: [
+            "Readable",
+            "Writable",
+            "addAbortSignal",
+            "default",
+            "finished",
+        ],
+    },
 }

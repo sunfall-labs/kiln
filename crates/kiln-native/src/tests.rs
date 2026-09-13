@@ -1171,16 +1171,25 @@ fn node_net_has_one_native_runtime_module_materializer() {
 }
 
 #[test]
-fn node_stream_has_native_runtime_module_materializer() {
+fn node_stream_is_typescript_builtin_and_supports_exports() {
     use kiln_module_resolver::NodeBuiltin;
 
-    let stream = native_builtin_body(NodeBuiltin::Stream).expect("stream materializes");
-    assert!(stream.contains("KILN_C99_METHOD_NODE_READABLE"));
-    assert!(stream.contains("KILN_C99_METHOD_NODE_WRITABLE"));
-    assert!(stream.contains("KILN_C99_METHOD_NODE_STREAM_FINISHED"));
+    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Stream));
+    assert!(native_builtin_supports_export(
+        NodeBuiltin::Stream,
+        "Readable"
+    ));
+    assert!(native_builtin_supports_export(
+        NodeBuiltin::Stream,
+        "Writable"
+    ));
     assert!(native_builtin_supports_export(
         NodeBuiltin::Stream,
         "addAbortSignal"
+    ));
+    assert!(native_builtin_supports_export(
+        NodeBuiltin::Stream,
+        "finished"
     ));
 }
 
@@ -9976,4 +9985,91 @@ fn native_node_zlib_commonjs_require_builds_and_runs() {
     );
     let stdout = String::from_utf8_lossy(&result.stdout);
     assert!(stdout.contains("cjs-zlib: object true true"));
+}
+
+#[test]
+fn native_node_stream_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-stream-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import Stream, { Readable, Writable, addAbortSignal, finished } from 'node:stream';\n",
+            "const r = new Readable();\n",
+            "r.push('native stream data');\n",
+            "const data = r.read();\n",
+            "console.log('stream-ts:', typeof Stream, typeof Readable, typeof Writable, data.toString() === 'native stream data');\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("stream_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run stream binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("stream-ts: function function function true"));
+}
+
+#[test]
+fn native_node_stream_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-stream-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const Stream = require('node:stream');\n",
+            "console.log('cjs-stream:', typeof Stream, typeof Stream.Readable, typeof Stream.Writable);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("stream_cjs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run stream cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("cjs-stream: function function function"));
 }

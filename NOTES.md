@@ -5647,3 +5647,15 @@ and streaming transform pipelines.
 Verified with native probe `conformance/native/node-zlib-members.cjs` (byte-for-byte identical output
 between interpreter and native CLI), integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`,
 and full `scripts/native.sh` parity (184 matched, 3 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
+
+---
+
+## Phase 5.2 TypeScript built-ins: `node:stream` (2026-09-13)
+
+Migrated `node:stream` completely to TypeScript via `crates/kiln-builtins/src/node/stream.ts`
+with zero additions to the C runtime prelude (Phase 5.1 freeze strictly honored). Implemented canonical
+exports (`Readable`, `Writable`, `addAbortSignal`, `default`, `finished`, along with `Stream`, `Duplex`, `Transform`, `PassThrough`, `pipeline`),
+with CommonJS callable projection `Stream` whose constructor and prototype hierarchy match Node.js exactly.
+Verified with native probe `conformance/native/node-stream-members.cjs` (byte-for-byte identical output
+between interpreter and native CLI), integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`,
+and full `scripts/native.sh` parity (185 matched, 3 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
