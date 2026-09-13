@@ -10,6 +10,7 @@ use crate::{
     ExecutionError, Native, NodeObject, ObjectData, Property, RealmId, Value, is_callable,
 };
 
+#[derive(Debug)]
 pub(crate) struct HttpClientRequestState {
     pub(crate) host: String,
     pub(crate) port: u16,
