@@ -2667,6 +2667,97 @@ fn node_builtin_module_commonjs_require_evaluates_cleanly() {
 }
 
 #[test]
+fn node_builtin_dns_evaluates_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import dns, { lookup, ADDRCONFIG, promises } from 'node:dns';\n",
+            "let lookedUp = false;\n",
+            "lookup('localhost', (err, address, family) => {\n",
+            "  lookedUp = address === '127.0.0.1' && family === 4;\n",
+            "});\n",
+            "console.log(\n",
+            "  typeof dns === 'object',\n",
+            "  typeof lookup === 'function',\n",
+            "  ADDRCONFIG === 32,\n",
+            "  typeof promises.lookup === 'function',\n",
+            "  lookedUp,\n",
+            ");\n",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with dns builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute dns builtin");
+    assert_eq!(host.output, ["true true true true true"]);
+}
+
+#[test]
+fn node_builtin_dns_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const dns = require('node:dns');\n",
+            "let lookedUp = false;\n",
+            "dns.lookup('localhost', (err, address, family) => {\n",
+            "  lookedUp = address === '127.0.0.1' && family === 4;\n",
+            "});\n",
+            "module.exports = {\n",
+            "  isObj: typeof dns === 'object',\n",
+            "  hasLookup: typeof dns.lookup === 'function',\n",
+            "  addrconfig: dns.ADDRCONFIG,\n",
+            "  lookedUp,\n",
+            "};\n",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import bridge from './bridge.cjs';\n",
+            "console.log(bridge.isObj, bridge.hasLookup, bridge.addrconfig === 32, bridge.lookedUp);\n",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with dns builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute dns builtin cjs");
+    assert_eq!(host.output, ["true true true true"]);
+}
+
+#[test]
 fn node_net_connect_is_a_typed_virtual_module_export() {
     let project = TempProject::new();
     let entry = project.write(

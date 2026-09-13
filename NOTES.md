@@ -5582,4 +5582,18 @@ Verified with native probe `conformance/native/node-module-members.cjs` (byte-fo
 between interpreter and native CLI), integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`,
 and full `scripts/native.sh` parity (178 matched, 5 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
 
+---
+
+## Phase 5.2 TypeScript built-ins: `node:dns` (2026-09-13)
+
+Migrated `node:dns` completely to TypeScript via `crates/kiln-builtins/src/node/dns.ts`
+with zero additions to the C runtime prelude (Phase 5.1 freeze strictly honored). Implemented canonical
+exports (51 exports: `ADDRCONFIG`, `ALL`, `V4MAPPED`, error constants, `default`, `lookup`, `lookupService`,
+`promises`, `resolve`, `resolve4`, `resolve6`, `reverse`, `Resolver`, etc.). Loopback resolution preserves deterministic
+behavior (`localhost`, `127.0.0.1`, `::1`).
+Verified with native probe `conformance/native/node-dns-members.cjs` (byte-for-byte identical output
+between interpreter and native CLI), integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`,
+and full `scripts/native.sh` parity (179 matched, 5 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
+
+
 
