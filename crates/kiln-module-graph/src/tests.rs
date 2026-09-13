@@ -2026,6 +2026,102 @@ fn node_builtin_util_commonjs_require_evaluates_cleanly() {
 }
 
 #[test]
+fn node_builtin_url_evaluates_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import url, { URL, URLSearchParams, fileURLToPath, pathToFileURL, parse, format, urlToHttpOptions } from 'node:url';",
+            "const p = fileURLToPath('file:///foo/bar.txt');",
+            "const u = pathToFileURL('/foo/bar.txt');",
+            "const parsed = parse('http://user:pass@host.com:8080/path?a=1&b=2#sec');",
+            "const opts = urlToHttpOptions(new URL('https://example.com:8443/test'));",
+            "console.log(",
+            "  typeof url === 'object',",
+            "  url.default === url,",
+            "  typeof URL === 'function',",
+            "  typeof URLSearchParams === 'function',",
+            "  p,",
+            "  u.protocol,",
+            "  parsed.hostname,",
+            "  parsed.port,",
+            "  opts.port,",
+            ");",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with url builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute url builtin");
+    assert_eq!(
+        host.output,
+        ["true true true true /foo/bar.txt file: host.com 8080 8443"]
+    );
+}
+
+#[test]
+fn node_builtin_url_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const url = require('node:url');",
+            "const p = url.fileURLToPath('file:///hello/world');",
+            "module.exports = {",
+            "  isObj: typeof url === 'object',",
+            "  isFn: typeof url.parse === 'function',",
+            "  hasUrl: typeof url.URL === 'function',",
+            "  selfEq: url.default === url,",
+            "  p,",
+            "};",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import bridge from './bridge.cjs';",
+            "console.log(bridge.isObj, bridge.isFn, bridge.hasUrl, bridge.selfEq, bridge.p);",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with url builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute url builtin cjs");
+    assert_eq!(host.output, ["true true true true /hello/world"]);
+}
+
+#[test]
 fn node_net_connect_is_a_typed_virtual_module_export() {
     let project = TempProject::new();
     let entry = project.write(
