@@ -4288,6 +4288,33 @@ fn native_executable_graph(
     })
 }
 
+/// Closed-world demand for an executable graph: which modules are live and
+/// which export slots each one must keep. Computed once by
+/// [`executable_demand`] and shared by size attribution and member analysis
+/// so both read the same selection the build emits.
+#[derive(Debug, Clone, Default)]
+pub struct ExecutableDemand {
+    pub live: BTreeSet<PathBuf>,
+    pub slots: BTreeMap<PathBuf, BTreeSet<u32>>,
+}
+
+/// Run the same closed-world selection as [`NativeBuilder::build_graph`]
+/// without emitting or compiling anything.
+pub fn executable_demand(
+    graph: &ModuleGraph,
+    profile: NativeProfile,
+) -> Result<ExecutableDemand, NativeError> {
+    let selected = native_executable_graph(graph, profile)?;
+    Ok(ExecutableDemand {
+        live: selected
+            .modules
+            .iter()
+            .map(|node| node.path.clone())
+            .collect(),
+        slots: selected.live_export_slots,
+    })
+}
+
 /// Per-module retained-size attribution for an executable graph.
 ///
 /// Runs the same closed-world selection as [`NativeBuilder::build_graph`]
@@ -4300,25 +4327,29 @@ pub fn executable_module_sizes(
     graph: &ModuleGraph,
     profile: NativeProfile,
 ) -> Result<Vec<kiln_backend_c::facts::ModuleSizeFacts>, NativeError> {
+    executable_module_sizes_from_demand(graph, &executable_demand(graph, profile)?)
+}
+
+/// [`executable_module_sizes`] over an already-computed [`executable_demand`],
+/// so callers needing both sizes and demand run the selection once.
+pub fn executable_module_sizes_from_demand(
+    graph: &ModuleGraph,
+    demand: &ExecutableDemand,
+) -> Result<Vec<kiln_backend_c::facts::ModuleSizeFacts>, NativeError> {
     use kiln_backend_c::facts::ModuleSizeFacts;
 
-    let selected = native_executable_graph(graph, profile)?;
-    let live: BTreeSet<&PathBuf> = selected.modules.iter().map(|node| &node.path).collect();
     let mut sizes = Vec::with_capacity(graph.module_count());
     for node in graph.modules() {
         let (total_instructions, total_functions) =
             kiln_backend_c::retained_module_size(&node.program, None);
-        let is_live = live.contains(&node.path);
+        let is_live = demand.live.contains(&node.path);
         let (retained_instructions, retained_functions) = if !is_live {
             (0, 0)
         } else if matches!(
             node.source,
             kiln_module_graph::ModuleSource::Source | kiln_module_graph::ModuleSource::CommonJs
         ) {
-            kiln_backend_c::retained_module_size(
-                &node.program,
-                selected.live_export_slots.get(&node.path),
-            )
+            kiln_backend_c::retained_module_size(&node.program, demand.slots.get(&node.path))
         } else {
             (total_instructions, total_functions)
         };

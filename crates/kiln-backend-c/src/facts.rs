@@ -8,10 +8,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use kiln_ir::{Constant, FunctionProto, Instruction, Program};
-use kiln_module_graph::{ClosedWorldVerdict, ModuleGraph};
+use kiln_module_graph::{ClosedWorldVerdict, ModuleGraph, ModuleSource};
 use serde::{Deserialize, Serialize};
 
 use crate::graph::{FunctionGraph, GraphOp, build_function_graph};
@@ -141,6 +141,123 @@ pub fn format_module_sizes(sizes: &[ModuleSizeFacts]) -> String {
                 size.total_functions,
                 size.path
             );
+        }
+    }
+    out
+}
+
+/// Static member-name and builtin demand read off retained IR.
+///
+/// `names` holds every member name in a retained static position (`CallMethod`,
+/// `GetProperty`, setters): the exact set a demand-driven method router would
+/// serve. `builtins` holds retained `LoadBuiltin` variants by debug name.
+/// Computed access (`x[k]`) and open-world needs (direct eval, dynamic import)
+/// name nothing and are reported as flags: either forces the router to keep
+/// its full table.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DemandedMembers {
+    pub names: BTreeSet<String>,
+    pub builtins: BTreeSet<String>,
+    pub has_computed_access: bool,
+    pub has_open_world: bool,
+}
+
+/// Read the demand in retained code: for every live module, scan its top-level
+/// body and every function the closed-world analysis retains, mirroring the
+/// demand emission applies (`Source`/`CommonJs` modules keep demanded slots,
+/// every other module is retained whole; dropped modules are skipped).
+pub fn analyze_demanded_members(
+    graph: &ModuleGraph,
+    live: &BTreeSet<PathBuf>,
+    demands: &BTreeMap<PathBuf, BTreeSet<u32>>,
+) -> DemandedMembers {
+    let mut demanded = DemandedMembers::default();
+    for node in graph.modules() {
+        if !live.contains(&node.path) {
+            continue;
+        }
+        let module = &node.program;
+        let program = &module.program;
+        demanded.has_open_world |= program.has_direct_eval() || program.has_dynamic_import();
+        let is_closed_world = matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs);
+        // Retained function bodies, by index into `program.functions`. Top-level
+        // code is always retained: it runs when the module evaluates.
+        let reachable: Option<HashSet<usize>> = is_closed_world.then(|| {
+            crate::closed_world_function_liveness(
+                program,
+                &demands.get(&node.path).cloned().unwrap_or_default(),
+                module.link_facts.direct_eval,
+                &module.link_facts.removable_declarations,
+            )
+            .0
+        });
+        let name_at = |index: u32| match program.constants.get(index as usize) {
+            Some(Constant::String(name)) => Some(name.clone()),
+            _ => None,
+        };
+        let mut scan = |code: &[Instruction]| {
+            for instruction in code {
+                match instruction {
+                    Instruction::LoadBuiltin(builtin) => {
+                        demanded.builtins.insert(format!("{builtin:?}"));
+                    }
+                    Instruction::CallMethod { name, .. } => {
+                        if let Some(name) = name_at(*name) {
+                            demanded.names.insert(name);
+                        }
+                    }
+                    Instruction::GetProperty(index) | Instruction::SetProperty(index) => {
+                        if let Some(name) = name_at(*index) {
+                            demanded.names.insert(name);
+                        }
+                    }
+                    Instruction::SetPropertyStrict { name, .. } => {
+                        if let Some(name) = name_at(*name) {
+                            demanded.names.insert(name);
+                        }
+                    }
+                    Instruction::GetComputed
+                    | Instruction::CallComputed { .. }
+                    | Instruction::SetComputed
+                    | Instruction::SetComputedStrict { .. } => {
+                        demanded.has_computed_access = true;
+                    }
+                    _ => {}
+                }
+            }
+        };
+        scan(&program.code);
+        for (index, function) in program.functions.iter().enumerate() {
+            if reachable.as_ref().is_none_or(|set| set.contains(&index)) {
+                scan(&function.code);
+            }
+        }
+    }
+    demanded
+}
+
+/// Format member-name demand as a `kiln build --explain` section.
+pub fn format_demanded_members(demanded: &DemandedMembers) -> String {
+    let mut out = String::new();
+    out.push_str("\n=== Demanded Members (retained IR) ===\n");
+    let _ = writeln!(
+        out,
+        "Summary: {} distinct names, {} builtins, computed access: {}, open world: {}",
+        demanded.names.len(),
+        demanded.builtins.len(),
+        demanded.has_computed_access,
+        demanded.has_open_world
+    );
+    if !demanded.builtins.is_empty() {
+        out.push_str("Builtins:\n");
+        for builtin in &demanded.builtins {
+            let _ = writeln!(out, "  {builtin}");
+        }
+    }
+    if !demanded.names.is_empty() {
+        out.push_str("Names:\n");
+        for name in &demanded.names {
+            let _ = writeln!(out, "  {name}");
         }
     }
     out
@@ -1149,6 +1266,26 @@ mod tests {
             text.contains("dropped (0/40 instr, 0/2 fns)  dropped.mjs"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn demanded_members_format_reports_flags() {
+        let demanded = DemandedMembers {
+            names: BTreeSet::from(["log".to_string(), "push".to_string()]),
+            builtins: BTreeSet::from(["SetTimeout".to_string()]),
+            has_computed_access: true,
+            has_open_world: false,
+        };
+        let text = format_demanded_members(&demanded);
+        assert!(text.contains("Demanded Members"), "{text}");
+        assert!(
+            text.contains("2 distinct names, 1 builtins"),
+            "{text}"
+        );
+        assert!(text.contains("computed access: true"), "{text}");
+        assert!(text.contains("open world: false"), "{text}");
+        assert!(text.contains("  log"), "{text}");
+        assert!(text.contains("  SetTimeout"), "{text}");
     }
 
     #[test]

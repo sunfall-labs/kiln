@@ -1640,12 +1640,20 @@ pub(crate) fn native_build_graph(
         Ok(report) => {
             let explanation = if explain {
                 let mut text = kiln_backend_c::facts::analyze_graph(graph).format_explain();
-                // Out-of-band attribution: a failure here must never fail the
-                // build, so the sizes section is skipped rather than propagated.
-                if let Ok(sizes) =
-                    kiln_native::executable_module_sizes(graph, native_profile(profile))
-                {
-                    text.push_str(&kiln_backend_c::facts::format_module_sizes(&sizes));
+                // Out-of-band attribution: failures here must never fail the
+                // build, so each section is skipped rather than propagated.
+                if let Ok(demand) = kiln_native::executable_demand(graph, native_profile(profile)) {
+                    if let Ok(sizes) =
+                        kiln_native::executable_module_sizes_from_demand(graph, &demand)
+                    {
+                        text.push_str(&kiln_backend_c::facts::format_module_sizes(&sizes));
+                    }
+                    let members = kiln_backend_c::facts::analyze_demanded_members(
+                        graph,
+                        &demand.live,
+                        &demand.slots,
+                    );
+                    text.push_str(&kiln_backend_c::facts::format_demanded_members(&members));
                 }
                 Some(text)
             } else {
