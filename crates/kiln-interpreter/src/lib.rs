@@ -4878,7 +4878,8 @@ pub enum ModuleLoadError {
 /// referrer-aware service object that replaces this is part of the remaining module-realm kernel
 /// migration.
 pub type ModuleLoader = fn(&str) -> Result<ModulePlan, ModuleLoadError>;
-pub type ModuleLoaderWithOptions = fn(&str, &Value) -> Result<ModulePlan, ModuleLoadError>;
+pub type ModuleLoaderWithOptions =
+    fn(&str, &ImportAttributes) -> Result<ModulePlan, ModuleLoadError>;
 
 /// The complete context of one dynamic import request. The service is scoped to an execution
 /// realm, so a loader can retain graph ownership without ambient process state.
@@ -4886,7 +4887,12 @@ pub type ModuleLoaderWithOptions = fn(&str, &Value) -> Result<ModulePlan, Module
 pub struct ModuleLoadRequest {
     pub importer: Option<String>,
     pub specifier: String,
-    pub attributes: Option<Value>,
+    pub attributes: Option<ImportAttributes>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ImportAttributes {
+    pub type_: Option<String>,
 }
 
 pub trait ModuleLoaderService: Send + Sync {
@@ -7033,7 +7039,7 @@ enum Job {
     /// settle the promise before `import(x).then(f)` had attached `f`, which is not observable
     /// on its own -- but the module's *side effects* would then happen before the statement
     /// after the `import()`, and that is.
-    Import(Rc<PromiseData>, String, Option<Value>),
+    Import(Rc<PromiseData>, String, Option<ImportAttributes>),
     /// `ShadowRealm.prototype.importValue(specifier, exportName)`.
     ///
     /// A job for the same reason `Import` is one, and carries the two realms because both
@@ -11760,13 +11766,27 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 instruction @ (Instruction::DynamicImport
                 | Instruction::DynamicImportWithOptions) => {
-                    let _options = if matches!(instruction, Instruction::DynamicImportWithOptions) {
-                        Some(self.pop(current)?)
-                    } else {
-                        None
-                    };
+                    let raw_options =
+                        if matches!(instruction, Instruction::DynamicImportWithOptions) {
+                            Some(self.pop(current)?)
+                        } else {
+                            None
+                        };
                     let specifier = self.pop(current)?;
                     let promise = PromiseState::pending();
+                    let _options = match raw_options {
+                        Some(options) => {
+                            match self.normalize_import_attributes(&options, current)? {
+                                Ok(attributes) => attributes,
+                                Err(thrown) => {
+                                    self.settle(&promise, &Settled::Rejected(thrown));
+                                    self.stack.push(Value::Promise(promise));
+                                    continue;
+                                }
+                            }
+                        }
+                        None => None,
+                    };
                     // Everything from the coercion onwards rejects rather than throws: the
                     // specification hands the promise back first and only then looks at what it
                     // was given, so `import({ toString() { throw x } })` is a rejection and not
@@ -33030,6 +33050,46 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
     }
 
+    /// Read dynamic import attributes through the VM's ordinary property machinery. This keeps
+    /// getters, proxies and inherited properties observable exactly once before the typed loader
+    /// service is called.
+    fn normalize_import_attributes(
+        &mut self,
+        options: &Value,
+        instruction: usize,
+    ) -> Result<Result<Option<ImportAttributes>, Value>, ExecutionError> {
+        let installed = self.handlers.len();
+        self.handlers.push(Handler {
+            target: HOST_HANDLER,
+            frame_depth: self.frames.len(),
+            stack_height: self.stack.len(),
+            native_depth: self.native_depth,
+        });
+        let outcome = self
+            .read_property(options, "with", instruction)
+            .and_then(|with| {
+                if matches!(with, Value::Undefined | Value::Null) {
+                    return Ok(None);
+                }
+                self.read_property(&with, "type", instruction).map(|kind| {
+                    Some(ImportAttributes {
+                        type_: match kind {
+                            Value::String(value) => Some(value),
+                            _ => None,
+                        },
+                    })
+                })
+            });
+        self.handlers.truncate(installed);
+        match outcome {
+            Ok(attributes) => Ok(Ok(attributes)),
+            Err(ExecutionError::CaughtByHost) => {
+                Ok(Err(self.caught.take().unwrap_or(Value::Undefined)))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Resolve, evaluate and answer one `import(specifier)`.
     ///
     /// `Ok(Err(value))` is the rejection the promise gets: a specifier that names nothing, a
@@ -33037,7 +33097,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     fn import_module(
         &mut self,
         specifier: &str,
-        options: Option<&Value>,
+        options: Option<&ImportAttributes>,
     ) -> Result<Result<Value, Value>, ExecutionError> {
         let Some(loader) = self.module_loader.as_ref() else {
             let message = if options.is_some() {
