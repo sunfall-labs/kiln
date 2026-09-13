@@ -14,7 +14,7 @@ use std::sync::OnceLock;
 use crate::error::{Error, Result};
 use kiln_module_resolver::{
     NodeModuleFormat as ResolverNodeModuleFormat, NodePackageResolver, NodeRequestKind,
-    ResolutionKind, ResolutionPolicy,
+    ResolutionKind, ResolutionPolicy, is_asset_extension,
 };
 use kiln_proto::{
     NodeModuleFormat, NodeSourceFormat, PackageResolution, SourceDigest, source_digest,
@@ -379,11 +379,6 @@ pub(crate) fn include_reachable_dependencies(
             continue;
         }
         let commonjs = importer_format == Some(ResolverNodeModuleFormat::CommonJs);
-        let request = if commonjs {
-            NodeRequestKind::Require
-        } else {
-            NodeRequestKind::Import
-        };
         let (module, static_requires) = if commonjs {
             let (module, requires) =
                 frontend_oxc::parse_commonjs_with_requires(importer_path, importer_text);
@@ -391,13 +386,16 @@ pub(crate) fn include_reachable_dependencies(
         } else {
             (frontend_oxc::parse(importer_path, importer_text), None)
         };
-        let mut requests = if commonjs {
+        let mut requests: Vec<(String, NodeRequestKind, bool)> = if commonjs {
             static_requires.expect("CommonJS facts exist")
+                .into_iter()
+                .map(|specifier| (specifier, NodeRequestKind::Require, true))
+                .collect()
         } else {
             module
                 .runtime_requested_modules()
                 .into_iter()
-                .map(|request| request.specifier.clone())
+                .map(|request| (request.specifier.clone(), NodeRequestKind::Import, true))
                 .collect()
         };
         // Dynamic imports with a literal target are graph edges too.  The compiler records
@@ -407,13 +405,15 @@ pub(crate) fn include_reachable_dependencies(
         // source and pinned Node format were never sent by the client.
         for target in kiln_ir::collect_dynamic_imports(&module.body) {
             if let kiln_ir::DynamicImportTarget::Static(specifier) = target
-                && !requests.contains(&specifier)
+                && !requests.iter().any(|(existing, _, _)| existing == &specifier)
             {
-                requests.push(specifier);
+                // Dynamic import always uses the import condition, even in a CommonJS module;
+                // a missing target remains a deferred runtime rejection rather than a build error.
+                requests.push((specifier, NodeRequestKind::Import, false));
             }
         }
 
-        for specifier in requests {
+        for (specifier, request, required) in requests {
             if node && kiln_module_resolver::NodeBuiltin::parse(&specifier).is_some() {
                 // Builtins are typed virtual graph nodes. They have no source bytes or package
                 // metadata to synchronize, and the daemon's Node resolver materializes them.
@@ -425,11 +425,15 @@ pub(crate) fn include_reachable_dependencies(
                     // A CommonJS `require()` resolves when execution reaches it. Leaving an
                     // unresolved literal out of the pinned map lets the runtime throw inside the
                     // program's own `try/catch`; ESM imports remain strict graph dependencies.
-                    Err(_) if commonjs => continue,
+                    Err(_) if commonjs || !required => continue,
                     Err(error) => return Err(Error::BadInput(error.to_string())),
-                };
+            };
             let target = resolved.module.path.clone();
-            if node {
+            let asset = target
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(is_asset_extension);
+            if node && !asset {
                 let format = resolver
                     .node_format(&resolved.module)
                     .map_err(|error| Error::BadInput(error.to_string()))?
@@ -482,6 +486,12 @@ pub(crate) fn include_reachable_dependencies(
                         package_json_hash,
                     },
                 );
+            }
+            // Binary assets are explicit path modules.  They belong in the resolution map so the
+            // graph can materialize their path, but are not UTF-8 sources and must not enter the
+            // source snapshot or dependency work list.
+            if asset {
+                continue;
             }
             if !indexes.contains_key(&target) {
                 let target_text = std::fs::read_to_string(&target).map_err(|source| {
@@ -921,6 +931,35 @@ mod tests {
         assert_eq!(resolutions.len(), 3);
         assert_eq!(texts.len(), 4);
         assert_eq!(formats.len(), 4);
+    }
+
+    #[test]
+    fn leaves_binary_asset_imports_out_of_utf8_source_snapshot() {
+        let tree = Tree::new("reachable-binary-asset");
+        tree.file("src/main.mjs");
+        let entry = tree.0.join("src/main.mjs");
+        let asset = tree.0.join("src/tree-sitter.wasm");
+        std::fs::write(&entry, "import wasm from './tree-sitter.wasm'; console.log(wasm);\n")
+            .expect("write entry");
+        std::fs::write(&asset, [0_u8, 159, 146, 150]).expect("write binary asset");
+
+        let entry = entry.canonicalize().expect("entry");
+        let mut texts = vec![(
+            entry.to_string_lossy().into_owned(),
+            std::fs::read_to_string(&entry).expect("read entry"),
+        )];
+        let (resolutions, formats) = include_reachable_dependencies(
+            &tree.0,
+            entry.to_str().expect("UTF-8 entry"),
+            &mut texts,
+            true,
+        )
+        .expect("capture asset edge");
+
+        assert_eq!(resolutions.len(), 1);
+        assert_eq!(resolutions[0].target, asset.canonicalize().unwrap().to_string_lossy());
+        assert_eq!(texts.len(), 1);
+        assert_eq!(formats.len(), 1);
     }
 
     /// The project walk skips every dot-directory, so nothing under `.scratch/` is in the
