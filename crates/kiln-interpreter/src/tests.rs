@@ -4128,6 +4128,14 @@ fn every_surface_member_is_named_for_its_key() {
          another member's function, say so in `NAME_IS_SHARED` instead.",
         wrong.join("\n")
     );
+
+    let host_create_require = vm
+        .read_property(&globals, "__kilnHostModuleCreateRequire", 0)
+        .expect("the private createRequire host hook is published");
+    assert_eq!(
+        vm.read_property(&host_create_require, "name", 0),
+        Ok(Value::String("__kilnHostModuleCreateRequire".to_owned()))
+    );
 }
 
 /// Every `"@@..."` literal in this crate is a key `is_reserved` recognises.

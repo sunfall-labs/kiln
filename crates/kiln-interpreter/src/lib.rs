@@ -45862,6 +45862,7 @@ fn native_js_name(native: &Native) -> String {
     match native {
         Native::ProcessStartRaw => "__kilnHostProcessStart".to_owned(),
         Native::ProcessCancelRaw => "__kilnHostProcessCancel".to_owned(),
+        Native::NodeModuleCreateRequire => "__kilnHostModuleCreateRequire".to_owned(),
         // A symbol-keyed method is named for the symbol in brackets, which is what the
         // specification's `SetFunctionName` does with a symbol key. Derivation would spell it
         // `functionHasInstance`, the name of a Rust variant rather than of anything a program
