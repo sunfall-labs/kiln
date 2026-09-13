@@ -2649,6 +2649,7 @@ fn native_graph_plan(graph: &ModuleGraph) -> Result<NativeGraphPlan, NativeError
             edge.owner.clone(),
             edge.captured_importer.clone(),
             edge.specifier.clone(),
+            edge.runtime,
         )) {
             continue;
         }
