@@ -398,4 +398,20 @@ declare_ts_builtins! {
             "warn",
         ],
     },
+    Tty {
+        variant: Tty,
+        file: "node/tty.ts",
+        logical_path: "node:tty.ts",
+        source_const: TTY_SOURCE,
+        exports_const: TTY_EXPORTS,
+        sample_source_check: "export function isatty",
+        presence_test: tty_builtin_source_is_present,
+        compilation_test: tty_builtin_compiles_cleanly,
+        exports: [
+            "ReadStream",
+            "WriteStream",
+            "default",
+            "isatty",
+        ],
+    },
 }
