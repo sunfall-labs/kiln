@@ -3736,6 +3736,7 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             // one's object file for the other.
             Instruction::DirectEval(_) => byte(&mut hash, 62),
             Instruction::DynamicImport => byte(&mut hash, 63),
+            Instruction::DynamicImportWithOptions => byte(&mut hash, 67),
             Instruction::ToObject => byte(&mut hash, 64),
             Instruction::WithHas(name) => {
                 byte(&mut hash, 65);

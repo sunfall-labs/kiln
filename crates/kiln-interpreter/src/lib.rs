@@ -11691,9 +11691,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     };
                     self.stack.push(Value::Boolean(!blocked));
                 }
-                Instruction::DynamicImport => {
+                instruction @ (Instruction::DynamicImport | Instruction::DynamicImportWithOptions) => {
+                    let _options = if matches!(instruction, Instruction::DynamicImportWithOptions) {
+                        Some(self.pop(current)?)
+                    } else {
+                        None
+                    };
                     let specifier = self.pop(current)?;
                     let promise = PromiseState::pending();
+                    if _options.is_some() {
+                        let error = self.construct_error(
+                            ErrorKind::Type,
+                            &[Value::String("import attributes are unsupported by this loader".to_owned())],
+                        );
+                        self.settle(&promise, &Settled::Rejected(error));
+                        self.stack.push(Value::Promise(promise));
+                        continue;
+                    }
                     // Everything from the coercion onwards rejects rather than throws: the
                     // specification hands the promise back first and only then looks at what it
                     // was given, so `import({ toString() { throw x } })` is a rejection and not

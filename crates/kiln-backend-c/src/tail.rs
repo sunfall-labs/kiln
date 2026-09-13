@@ -548,6 +548,13 @@ pub(crate) fn emit_tail_instruction(
             )
             .unwrap();
         }
+        Instruction::DynamicImportWithOptions => {
+            writeln!(
+                output,
+                "    {{ kiln_value promise; int status = kiln_graph_dynamic_import(host, kiln_val_to_boundary(stack[sp - 2]), &promise, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= 2; stack[sp++] = kiln_val_from_boundary(promise); }}"
+            )
+            .unwrap();
+        }
         other => unreachable!("the graph lowers {other:?} itself; only the tail comes here"),
     }
     // A refusal from a helper is noted against this instruction and routed through the body's
