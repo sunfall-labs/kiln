@@ -267,6 +267,8 @@ pub enum Native {
     ProcessHrtimeBigInt,
     ProcessCwd,
     ProcessKill,
+    ProcessStartRaw,
+    ProcessCancelRaw,
     ProcessStdinSetRawMode,
     UrlConstructor,
     UrlSearchParamsGet,

@@ -10,6 +10,12 @@
     clippy::wrong_self_convention
 )]
 
+mod process_wire;
+pub use process_wire::{
+    ProcessWireError, ProcessWireRequest, decode as decode_process_wire,
+    encode as encode_process_wire,
+};
+
 #[cfg(feature = "http")]
 mod http_body;
 #[cfg(feature = "http")]
@@ -44,7 +50,7 @@ pub mod scripted_transport;
 pub use scripted_transport::{ScriptedTransport, ScriptedTransportLog};
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BinaryHeap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashSet, VecDeque};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
@@ -54,14 +60,15 @@ use std::time::Duration;
 pub use kiln_artifact_cache::{CapabilityIdentity, RealmCapabilityIdentity};
 use kiln_host_abi::{
     AcceptedTcpStream, ActiveAsyncHostOps, AsyncHostError, AsyncHostOp, AsyncHostOps,
-    AsyncHostValue, Completion, FileStat, HostError, HostOp, HostOps, HostValue, RequestId,
-    ResourceId, ResourceInfo, ResourceKind, ResourceState,
+    AsyncHostValue, Completion, FileStat, HostError, HostOp, HostOps, HostValue, ProcessOutput,
+    RequestId, ResourceId, ResourceInfo, ResourceKind, ResourceState,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{
     TcpListener, TcpStream,
     tcp::{OwnedReadHalf, OwnedWriteHalf},
 };
+use tokio::sync::oneshot;
 use tokio_util::task::JoinMap;
 
 use crate::node_http_agent::{AgentDecision, AgentFailure, AgentRelease, HttpAgent, HttpOrigin};
@@ -429,6 +436,9 @@ pub struct ScriptedHost {
 /// return an already-scripted completion immediately, or await its own infrastructure (as the
 /// Tokio provider does); the realm's timer-versus-completion arbitration remains shared.
 pub trait RealmHostProvider: AsyncHostOps {
+    /// Let provider-owned tasks finish cooperative teardown while the realm executor is alive.
+    fn drain_on_shutdown(&mut self, _executor: &DriveExecutor) {}
+
     /// Start an operation while the realm's LocalSet is active.
     ///
     /// Providers with resource tables may override this to keep resource creation on the realm
@@ -835,6 +845,22 @@ impl RealmRuntime<TokioHost> {
 }
 
 impl<H: RealmHostProvider> RealmRuntime<H> {
+    /// Tear down the realm after giving provider tasks a chance to complete cooperative cleanup.
+    pub fn shutdown(&mut self) -> bool {
+        if self.state.is_shutdown() {
+            return false;
+        }
+        let executor = self.drive_executor();
+        self.state.host.drain_on_shutdown(&executor);
+        self.state.shutdown()
+    }
+
+    /// Select the host clock before the realm is entered. This keeps Tokio time real for
+    /// host-backed executions; deterministic realms retain paused virtual time.
+    pub fn use_host_clock(&mut self) {
+        self.state.capabilities.clock = ClockCapability::Host;
+    }
+
     /// Builds a runtime around an explicit asynchronous host provider.
     ///
     /// The current-thread Tokio runtime and LocalSet remain the realm scheduler for every
@@ -2021,6 +2047,8 @@ pub struct TokioHost {
     resources: BTreeMap<ResourceId, HostResource>,
     ready: BTreeMap<u64, Completion>,
     tasks: JoinMap<RequestId, HostCompletion>,
+    process_tasks: BTreeSet<RequestId>,
+    process_cancellers: BTreeMap<RequestId, oneshot::Sender<()>>,
     completed: Rc<tokio::sync::Notify>,
     failure: Option<RuntimeFailure>,
     shutdown: bool,
@@ -2118,6 +2146,8 @@ impl TokioHost {
             resources: BTreeMap::new(),
             ready: BTreeMap::new(),
             tasks: JoinMap::new(),
+            process_tasks: BTreeSet::new(),
+            process_cancellers: BTreeMap::new(),
             completed: Rc::new(tokio::sync::Notify::new()),
             failure: None,
             shutdown: false,
@@ -2152,6 +2182,25 @@ impl TokioHost {
         let sequence = self.next_sequence;
         self.next_sequence = self.next_sequence.wrapping_add(1);
         let operation = match operation {
+            AsyncHostOp::ProcessRun {
+                command,
+                args,
+                stdin,
+            } => {
+                let (cancel, cancelled) = oneshot::channel();
+                self.process_cancellers.insert(request, cancel);
+                self.process_tasks.insert(request);
+                self.spawn_task(request, sequence, referenced, async move {
+                    let result = execute_process(command, args, stdin, cancelled).await;
+                    HostCompletion {
+                        request,
+                        sequence,
+                        lifecycle: None,
+                        result: result.map(HostCompletionValue::Public),
+                    }
+                });
+                return request;
+            }
             AsyncHostOp::CloseResource { resource } => {
                 let result = self.close_resource(resource);
                 self.insert_immediate(request, sequence, referenced, result);
@@ -2588,6 +2637,7 @@ impl TokioHost {
 
     fn collect_ready_nonblocking(&mut self) {
         while let Some((request, result)) = self.tasks.try_join_next() {
+            self.process_tasks.remove(&request);
             match result {
                 Ok(completion) => {
                     debug_assert_eq!(completion.request, request);
@@ -2617,6 +2667,7 @@ impl TokioHost {
     }
 
     fn promote_completion(&mut self, completion: HostCompletion) {
+        self.process_cancellers.remove(&completion.request);
         // Cancellation removes the request before aborting its task. A task can already have
         // completed at that boundary; its stale result must not mutate resource lifecycle state
         // or become visible to the realm.
@@ -2741,7 +2792,11 @@ impl AsyncHostOps for TokioHost {
         let Some(pending) = self.pending.remove(&request) else {
             return false;
         };
-        self.tasks.abort(&request);
+        if let Some(cancel) = self.process_cancellers.remove(&request) {
+            let _ = cancel.send(());
+        } else {
+            self.tasks.abort(&request);
+        }
         self.ready.remove(&pending.sequence);
         true
     }
@@ -2762,6 +2817,26 @@ impl AsyncHostOps for TokioHost {
 }
 
 impl RealmHostProvider for TokioHost {
+    fn drain_on_shutdown(&mut self, executor: &DriveExecutor) {
+        for (_, cancel) in std::mem::take(&mut self.process_cancellers) {
+            let _ = cancel.send(());
+        }
+        // Abort unrelated resource work first; process tasks own explicit kill-and-wait cleanup
+        // and are joined deterministically below.
+        for request in self.pending.keys().copied().collect::<Vec<_>>() {
+            if !self.process_tasks.contains(&request) {
+                self.tasks.abort(&request);
+            }
+        }
+        while !self.process_tasks.is_empty() {
+            let Some((request, _result)) = executor.block_on(self.tasks.join_next()) else {
+                break;
+            };
+            self.process_tasks.remove(&request);
+        }
+        self.tasks.abort_all();
+    }
+
     fn shutdown_on_realm(&mut self) {
         if self.shutdown {
             return;
@@ -2903,6 +2978,7 @@ impl RealmHostProvider for TokioHost {
                     .join_next()
                     .await
                     .expect("a non-empty task map must yield a task exit");
+                self.process_tasks.remove(&request);
                 match result {
                     Ok(completion) => {
                         debug_assert_eq!(completion.request, request);
@@ -2965,6 +3041,9 @@ async fn execute_async_host_op(operation: AsyncHostOp) -> Result<AsyncHostValue,
             bytes.truncate(length);
             Ok(AsyncHostValue::Bytes(bytes))
         }
+        AsyncHostOp::ProcessRun { .. } => {
+            unreachable!("process operations are handled by start_on")
+        }
         AsyncHostOp::CloseResource { .. }
         | AsyncHostOp::SetResourceReferenced { .. }
         | AsyncHostOp::ResourceState { .. }
@@ -2977,6 +3056,108 @@ async fn execute_async_host_op(operation: AsyncHostOp) -> Result<AsyncHostValue,
             unreachable!("resource control operations are handled by the owning table")
         }
     }
+}
+
+async fn execute_process(
+    command: String,
+    args: Vec<String>,
+    stdin: Option<Vec<u8>>,
+    mut cancelled: oneshot::Receiver<()>,
+) -> Result<AsyncHostValue, AsyncHostError> {
+    use std::process::Stdio;
+    let mut process = tokio::process::Command::new(&command);
+    process
+        .args(&args)
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = process
+        .spawn()
+        .map_err(|error| io_error("spawn", command.clone(), error))?;
+    let mut child_stdout = child.stdout.take().ok_or_else(|| {
+        AsyncHostError::new(
+            "EIO",
+            "spawn",
+            Some(command.clone()),
+            "child stdout was not piped",
+        )
+    })?;
+    let mut child_stderr = child.stderr.take().ok_or_else(|| {
+        AsyncHostError::new(
+            "EIO",
+            "spawn",
+            Some(command.clone()),
+            "child stderr was not piped",
+        )
+    })?;
+    let child_stdin = child.stdin.take();
+    let stdout_task = tokio::task::spawn_local(async move {
+        let mut bytes = Vec::new();
+        child_stdout.read_to_end(&mut bytes).await.map(|_| bytes)
+    });
+    let stderr_task = tokio::task::spawn_local(async move {
+        let mut bytes = Vec::new();
+        child_stderr.read_to_end(&mut bytes).await.map(|_| bytes)
+    });
+    let stdin_task = tokio::task::spawn_local(async move {
+        if let (Some(data), Some(mut pipe)) = (stdin, child_stdin) {
+            pipe.write_all(&data).await?;
+        }
+        Ok::<(), std::io::Error>(())
+    });
+    let status = tokio::select! {
+        status = child.wait() => status,
+        _ = &mut cancelled => {
+            // Cancellation owns the child until wait completes. This explicit kill-and-wait
+            // path reaps the process instead of relying on JoinMap task abort/drop semantics.
+            let _ = child.start_kill();
+            child.wait().await
+        }
+    };
+    let (stdout, stderr, stdin_result) = tokio::join!(stdout_task, stderr_task, stdin_task);
+    let stdout = stdout
+        .map_err(|error| {
+            io_error(
+                "read",
+                format!("{command}:stdout"),
+                std::io::Error::other(error.to_string()),
+            )
+        })?
+        .map_err(|error| io_error("read", format!("{command}:stdout"), error))?;
+    let stderr = stderr
+        .map_err(|error| {
+            io_error(
+                "read",
+                format!("{command}:stderr"),
+                std::io::Error::other(error.to_string()),
+            )
+        })?
+        .map_err(|error| io_error("read", format!("{command}:stderr"), error))?;
+    let _stdin_result = stdin_result
+        .map_err(|error| {
+            io_error(
+                "write",
+                format!("{command}:stdin"),
+                std::io::Error::other(error.to_string()),
+            )
+        })?
+        .map_err(|error| io_error("write", format!("{command}:stdin"), error))?;
+    let status = status.map_err(|error| io_error("wait", command.clone(), error))?;
+    #[cfg(unix)]
+    let signal = std::os::unix::process::ExitStatusExt::signal(&status);
+    #[cfg(not(unix))]
+    let signal = None;
+    Ok(AsyncHostValue::ProcessOutput(ProcessOutput {
+        stdout,
+        stderr,
+        exit_code: status.code(),
+        signal,
+    }))
 }
 
 fn invalid_resource(syscall: &str, resource: ResourceId) -> AsyncHostError {
@@ -3529,6 +3710,238 @@ pub fn duration_from_milliseconds(milliseconds: f64) -> Duration {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn tokio_host_runs_process_with_bidirectional_pipes_and_preserves_status() {
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        let request = runtime.start_host_op(
+            AsyncHostOp::ProcessRun {
+                command: "sh".into(),
+                args: vec![
+                    "-c".into(),
+                    "head -c 131072 /dev/zero & cat >/dev/null; wait; printf stderr >&2".into(),
+                ],
+                stdin: Some(vec![b'x'; 131072]),
+            },
+            false,
+        );
+        let completion = next_host_completion(&mut runtime).expect("process completes");
+        assert_eq!(completion.request, request);
+        let AsyncHostValue::ProcessOutput(output) = completion.result.expect("process succeeds")
+        else {
+            panic!("expected process output")
+        };
+        assert_eq!(output.stdout.len(), 131072);
+        assert_eq!(output.stderr, b"stderr");
+        assert_eq!(output.exit_code, Some(0));
+        assert_eq!(output.signal, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tokio_host_process_result_preserves_signal_termination() {
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        runtime.start_host_op(
+            AsyncHostOp::ProcessRun {
+                command: "sh".into(),
+                args: vec!["-c".into(), "kill -TERM $$".into()],
+                stdin: None,
+            },
+            false,
+        );
+        let completion = next_host_completion(&mut runtime).expect("process completes");
+        let AsyncHostValue::ProcessOutput(output) = completion.result.expect("process result")
+        else {
+            panic!("expected process output")
+        };
+        assert_eq!(output.exit_code, None);
+        assert_eq!(output.signal, Some(libc::SIGTERM));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tokio_host_process_reports_nonzero_exit_and_missing_command() {
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        runtime.start_host_op(
+            AsyncHostOp::ProcessRun {
+                command: "sh".into(),
+                args: vec!["-c".into(), "printf failed >&2; exit 7".into()],
+                stdin: None,
+            },
+            false,
+        );
+        let completion = next_host_completion(&mut runtime).expect("process completes");
+        let AsyncHostValue::ProcessOutput(output) = completion.result.expect("process result")
+        else {
+            panic!("expected process output")
+        };
+        assert_eq!(output.exit_code, Some(7));
+        assert_eq!(output.stderr, b"failed");
+
+        runtime.start_host_op(
+            AsyncHostOp::ProcessRun {
+                command: "kiln-process-command-that-does-not-exist".into(),
+                args: Vec::new(),
+                stdin: None,
+            },
+            false,
+        );
+        let completion = next_host_completion(&mut runtime).expect("spawn failure completes");
+        let error = completion.result.expect_err("missing command fails");
+        assert_eq!(error.syscall, "spawn");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tokio_host_process_cancellation_kills_and_reaps_the_child() {
+        use std::process::Command;
+        use std::thread;
+
+        let directory = TestDirectory::new("process-cancel");
+        let marker = directory.join("pid");
+        let marker_string = marker.to_string_lossy().into_owned();
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        let request = runtime.start_host_op(
+            AsyncHostOp::ProcessRun {
+                command: "sh".into(),
+                args: vec![
+                    "-c".into(),
+                    "echo \"$$\" > \"$1\"; exec sleep 30".into(),
+                    "kiln-process-test".into(),
+                    marker_string.clone(),
+                ],
+                stdin: None,
+            },
+            true,
+        );
+        let executor = runtime.drive_executor();
+        let mut pid = None;
+        for _ in 0..100 {
+            executor.block_on(yield_to_tasks());
+            if let Ok(contents) = fs::read_to_string(&marker) {
+                pid = Some(contents.trim().parse::<i32>().expect("child PID"));
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        let pid = pid.expect("child published its PID");
+        assert!(AsyncHostOps::cancel(runtime.host(), request));
+
+        for _ in 0..100 {
+            executor.block_on(yield_to_tasks());
+            let status = Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .expect("ps is available");
+            if status.stdout.iter().all(u8::is_ascii_whitespace) {
+                return;
+            }
+            assert!(
+                status.status.success(),
+                "ps failed while inspecting live child: {:?}: {}",
+                status.status,
+                String::from_utf8_lossy(&status.stderr)
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        panic!("cancelled child PID {pid} was not reaped");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tokio_host_shutdown_kills_and_reaps_a_pending_process() {
+        use std::process::Command;
+        use std::thread;
+
+        let directory = TestDirectory::new("process-shutdown");
+        let marker = directory.join("pid");
+        let marker_string = marker.to_string_lossy().into_owned();
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        runtime.start_host_op(
+            AsyncHostOp::ProcessRun {
+                command: "sh".into(),
+                args: vec![
+                    "-c".into(),
+                    "echo \"$$\" > \"$1\"; exec sleep 30".into(),
+                    "kiln-process-test".into(),
+                    marker_string,
+                ],
+                stdin: None,
+            },
+            true,
+        );
+        let mut pid = None;
+        for _ in 0..100 {
+            runtime.drive_executor().block_on(yield_to_tasks());
+            if let Ok(contents) = fs::read_to_string(&marker) {
+                pid = Some(contents.trim().parse::<i32>().expect("child PID"));
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        let pid = pid.expect("child published its PID");
+        assert!(runtime.shutdown());
+        for _ in 0..100 {
+            let status = Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .expect("ps is available");
+            if status.stdout.iter().all(u8::is_ascii_whitespace) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        panic!("shutdown child PID {pid} was not reaped");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tokio_host_shutdown_drains_a_process_after_last_op_cancellation() {
+        use std::process::Command;
+        use std::thread;
+
+        let directory = TestDirectory::new("process-cancel-shutdown");
+        let marker = directory.join("pid");
+        let marker_string = marker.to_string_lossy().into_owned();
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        let request = runtime.start_host_op(
+            AsyncHostOp::ProcessRun {
+                command: "sh".into(),
+                args: vec![
+                    "-c".into(),
+                    "echo \"$$\" > \"$1\"; exec sleep 30".into(),
+                    "kiln-process-test".into(),
+                    marker_string,
+                ],
+                stdin: None,
+            },
+            true,
+        );
+        let mut pid = None;
+        for _ in 0..100 {
+            runtime.drive_executor().block_on(yield_to_tasks());
+            if let Ok(contents) = fs::read_to_string(&marker) {
+                pid = Some(contents.trim().parse::<i32>().expect("child PID"));
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        let pid = pid.expect("child published its PID");
+        assert!(AsyncHostOps::cancel(runtime.host(), request));
+        assert!(runtime.shutdown());
+        for _ in 0..100 {
+            let status = Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .expect("ps is available");
+            if status.stdout.iter().all(u8::is_ascii_whitespace) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        panic!("cancelled shutdown child PID {pid} was not reaped");
+    }
+
     /// A clock reading keeps the part of it that is shorter than a millisecond.
     ///
     /// The native FFI once spelled this conversion `as_millis() as f64`, which truncates, while

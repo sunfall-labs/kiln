@@ -997,6 +997,7 @@ typedef enum kiln_gc_kind {
     KILN_GC_NODE_RESPONSE,
     KILN_GC_NODE_COMPLETION,
     KILN_GC_NODE_FS_COMPLETION,
+    KILN_GC_NODE_PROCESS_COMPLETION,
     KILN_GC_NEXT_TICK,
     KILN_GC_TIMER,
     KILN_GC_KIND_COUNT
@@ -1575,6 +1576,13 @@ typedef struct kiln_node_fs_completion {
     int utf8;
 } kiln_node_fs_completion;
 
+typedef struct kiln_node_process_completion {
+    kiln_value promise;
+    kiln_value result;
+    kiln_value stdout_value;
+    kiln_value stderr_value;
+} kiln_node_process_completion;
+
 /* A cursor over JSON source, moved forward as text is consumed. */
 /* One entry of the tape `kiln_json_parse` answers with -- the same struct as `kiln_json::Node` in
  * the provider archive. `len` is a string's byte length or a container's child count; `value` is
@@ -1644,7 +1652,7 @@ typedef void (*kiln_realm_drop_fn)(void *work);
 typedef int (*kiln_realm_lane_run_fn)(void *context, void *host, void *thrown);
 typedef int (*kiln_realm_lane_pending_fn)(void *context);
 typedef int (*kiln_realm_entry_fn)(void *context);
-#define KILN_REALM_ASYNC_ABI_VERSION 5
+#define KILN_REALM_ASYNC_ABI_VERSION 6
 #define KILN_REALM_ASYNC_OK 0
 #define KILN_REALM_ASYNC_ERROR 1
 #define KILN_REALM_ASYNC_NOT_FOUND 1
@@ -1654,6 +1662,7 @@ typedef int (*kiln_realm_entry_fn)(void *context);
 #define KILN_REALM_ASYNC_RESOURCE 3
 #define KILN_REALM_ASYNC_RESOURCE_STATE 4
 #define KILN_REALM_ASYNC_ACCEPTED_STREAM 5
+#define KILN_REALM_ASYNC_PROCESS_OUTPUT 6
 #define KILN_REALM_OP_READ_FILE 1
 #define KILN_REALM_OP_WRITE_FILE 2
 #define KILN_REALM_OP_STAT 3
@@ -1666,6 +1675,7 @@ typedef int (*kiln_realm_entry_fn)(void *context);
 #define KILN_REALM_OP_TCP_SHUTDOWN 12
 #define KILN_REALM_OP_STDIN_READ 13
 #define KILN_REALM_OP_MKDIR 14
+#define KILN_REALM_OP_PROCESS_RUN 15
 #define KILN_REALM_HTTP_CLOSE_GRACEFUL 0
 #define KILN_REALM_HTTP_CLOSE_ABORT 1
 typedef struct kiln_async_host_op {
@@ -1685,6 +1695,10 @@ typedef struct kiln_async_completion {
     uint32_t value_kind;
     const uint8_t *bytes;
     uint64_t bytes_len;
+    const uint8_t *stderr_bytes;
+    uint64_t stderr_len;
+    int32_t exit_code;
+    int32_t signal;
     uint64_t value_u64;
     uint64_t resource;
     uint32_t resource_kind;

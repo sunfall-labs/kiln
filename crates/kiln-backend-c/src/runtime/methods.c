@@ -118,6 +118,9 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_NODE_QUERYSTRING_PARSE: return "parse";
     case KILN_C99_METHOD_PROCESS_NEXT_TICK: return "nextTick";
     case KILN_C99_METHOD_PROCESS_KILL: return "kill";
+    case KILN_C99_METHOD_PROCESS_START_RAW: return "__kilnHostProcessStart";
+    case KILN_C99_METHOD_PROCESS_CANCEL_RAW: return "__kilnHostProcessCancel";
+    case KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE: return "__kilnHostModuleCreateRequire";
     case KILN_C99_METHOD_INTL_SEGMENT_RAW: return "__kilnIntlSegment";
     case KILN_C99_METHOD_UINT8_TO_HEX_RAW: return "__kilnUint8ToHex";
     case KILN_C99_METHOD_UINT8_TO_BASE64_RAW: return "__kilnUint8ToBase64";

@@ -42,6 +42,10 @@ fi
 
 TEMP_ROOT=""
 OUTPUT_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/kiln-test262-output.XXXXXXXX")"
+LOG_ROOT="${KILN_TEST262_LOG_DIR:-$REPO_ROOT/target/test262-logs}"
+mkdir -p "$LOG_ROOT"
+LOG_DIR="$(mktemp -d "$LOG_ROOT/run.XXXXXXXX")"
+export KILN_TEST262_LOG_DIR="$LOG_DIR"
 # shellcheck disable=SC2329
 cleanup() {
 	if [[ -n $TEMP_ROOT ]]; then
@@ -105,41 +109,54 @@ cd "$REPO_ROOT"
 # closes the race where another process edits a caller-supplied checkout after the first check.
 validate_checkout "$CHECKOUT"
 
-# The default CLI mode uses the resident daemon.  Do not add --one-shot here: a full suite must
-# pay one compiler/daemon startup, then stream all selected variants through the existing batch.
+# Run the whole suite in one owned child.  `--one-shot` still batches all selected variants in one
+# process, amortizing compiler startup, while ensuring the memory-capped child owns the workload
+# rather than merely supervising an uncapped resident daemon.
 set +e
-python3 - "$KILN_BIN" "$CHECKOUT/test" "$RAW_RESULTS" "$RESULTS" "$TEST262_REPOSITORY" "$TEST262_COMMIT" <<-'PY'
-	import json
-	import os
-	import subprocess
-	import sys
-	import time
+STDOUT_LOG="$LOG_DIR/test262.log"
+python3 - "$KILN_BIN" "$CHECKOUT/test" "$RAW_RESULTS" "$RESULTS" "$TEST262_REPOSITORY" "$TEST262_COMMIT" "$STDOUT_LOG" <<-'PY'
+import json
+import os
+import pathlib
+import subprocess
+import sys
+import time
 
-	kiln, test_root, raw_path, result_path, repository, commit = sys.argv[1:]
+sys.path.insert(0, str(pathlib.Path.cwd() / "scripts"))
+from test262_memory import run_limited, verify_effective_cap
+
+	kiln, test_root, raw_path, result_path, repository, commit, stdout_path = sys.argv[1:]
+	try:
+	    verify_effective_cap()
+	except Exception as error:
+	    sys.stderr.write(f"test262.sh: memory cap verification failed: {error}\n")
+	    raise SystemExit(1)
 	started = time.monotonic()
-	completed = subprocess.run(
-	    [kiln, "test", test_root, "--out", raw_path],
-	    cwd=os.getcwd(),
-	    stdout=subprocess.PIPE,
-	    stderr=subprocess.STDOUT,
-	    text=True,
-	)
+	with open(stdout_path, "w", encoding="utf-8") as stream:
+	    completed, exceeded = run_limited(
+	        [kiln, "--one-shot", "test", test_root, "--out", raw_path],
+	        cwd=os.getcwd(), stdout=stream, stderr=subprocess.STDOUT,
+	    )
 	elapsed = time.monotonic() - started
-	print(completed.stdout, end="")
+	with open(stdout_path, encoding="utf-8") as stream:
+	    print(stream.read(), end="")
+	if exceeded:
+	    sys.stderr.write(f"test262.sh: child exceeded memory cap; full log: {stdout_path}\n")
+	    raise SystemExit(1)
 	if not os.path.isfile(raw_path):
-	    sys.stderr.write("test262.sh: kiln wrote no result document\n")
+	    sys.stderr.write(f"test262.sh: kiln wrote no result document; full log: {stdout_path}\n")
 	    raise SystemExit(completed.returncode or 1)
 
 	try:
 	    with open(raw_path, encoding="utf-8") as handle:
 	        report = json.load(handle)
 	except (OSError, ValueError) as error:
-	    sys.stderr.write(f"test262.sh: invalid Kiln result document: {error}\n")
+	    sys.stderr.write(f"test262.sh: invalid Kiln result document: {error}; full log: {stdout_path}\n")
 	    raise SystemExit(completed.returncode or 1)
 
 	tests = report.get("tests")
 	if not isinstance(tests, list) or not tests:
-	    sys.stderr.write("test262.sh: Kiln result document has no test entries\n")
+	    sys.stderr.write(f"test262.sh: Kiln result document has no test entries; full log: {stdout_path}\n")
 	    raise SystemExit(completed.returncode or 1)
 
 outcomes = {"pass": 0, "fail": 0, "unsupported": 0, "skipped": 0}

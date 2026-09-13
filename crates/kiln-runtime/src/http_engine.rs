@@ -32,14 +32,7 @@ use crate::HttpCloseMode;
 use crate::http_body::{BodyEvent, BodySink, ResponseBody, ResponseBodyDriver};
 use crate::node_stream::WriteDisposition;
 
-static HTTP3_OVERRIDE: std::sync::atomic::AtomicI8 = std::sync::atomic::AtomicI8::new(-1);
-
-/// Whether HTTP/3 support is enabled via `KILN_HTTP3=1` or `--http3`.
-pub fn http3_enabled() -> bool {
-    let ovr = HTTP3_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed);
-    if ovr >= 0 {
-        return ovr == 1;
-    }
+fn configured_http3() -> bool {
     static FROM_ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *FROM_ENV.get_or_init(|| {
         let env_set =
@@ -47,16 +40,6 @@ pub fn http3_enabled() -> bool {
         let arg_set = std::env::args_os().any(|arg| arg == "--http3");
         env_set || arg_set
     })
-}
-
-/// Override HTTP/3 enablement programmatically (for testing or runtime configuration).
-pub fn set_http3_enabled(enabled: bool) {
-    HTTP3_OVERRIDE.store(i8::from(enabled), std::sync::atomic::Ordering::Relaxed);
-}
-
-/// Reset HTTP/3 enablement override to environment/command-line defaults.
-pub fn reset_http3_enabled() {
-    HTTP3_OVERRIDE.store(-1, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -298,9 +281,24 @@ pub(crate) type HashMap<K, V> = std::collections::HashMap<K, V, BuildHasherDefau
 
 /// The table of live server connections. Lives in the realm state; tasks reach it through
 /// `Rc` so a finished connection can retire itself.
-#[derive(Default)]
 pub struct HttpServerEngine {
     connections: Rc<RefCell<HashMap<ResourceId, ServerConnection>>>,
+    http3: bool,
+}
+
+impl Default for HttpServerEngine {
+    fn default() -> Self {
+        Self::with_http3(configured_http3())
+    }
+}
+
+impl HttpServerEngine {
+    pub fn with_http3(http3: bool) -> Self {
+        Self {
+            connections: Rc::new(RefCell::new(HashMap::default())),
+            http3,
+        }
+    }
 }
 
 struct ServerConnection {
@@ -319,6 +317,7 @@ pub(crate) struct ConnectionShared {
     /// An abort has been requested and its `Closed` has not been published yet. Counted as
     /// work in flight so a drive does not return before the language hears it.
     abort_pending: Cell<bool>,
+    http3: bool,
 }
 
 impl ConnectionShared {
@@ -779,6 +778,7 @@ impl HttpServerEngine {
             shutdown: Notify::new(),
             closing: Cell::new(false),
             abort_pending: Cell::new(false),
+            http3: self.http3,
         });
         trace!("{resource:?} attach half_close={allow_half_close}");
         let table = Rc::clone(&self.connections);
@@ -1263,7 +1263,7 @@ async fn handle(
     {
         headers.insert(hyper::header::CONNECTION, HeaderValue::from_static("close"));
     }
-    if http3_enabled()
+    if shared.http3
         && !headers.contains_key("alt-svc")
         && let Ok(val) = HeaderValue::from_str("h3=\":443\"; ma=86400")
     {
@@ -1699,16 +1699,10 @@ mod tests {
 
     #[test]
     fn http3_flag_and_alt_svc_advertising() {
-        reset_http3_enabled();
-        assert!(!http3_enabled());
-
-        set_http3_enabled(true);
-        assert!(http3_enabled());
-
         let (runtime, local) = local();
         local.block_on(&runtime, async {
             let (mut client, server) = tokio::io::duplex(4096);
-            let engine = Rc::new(RefCell::new(HttpServerEngine::default()));
+            let engine = Rc::new(RefCell::new(HttpServerEngine::with_http3(true)));
             let recording = Rc::new(Recording {
                 events: RefCell::new(Vec::new()),
                 checkpoints: Cell::new(0),
@@ -1748,9 +1742,13 @@ mod tests {
                 "alt-svc header missing: {text}"
             );
         });
+    }
 
-        set_http3_enabled(false);
-        assert!(!http3_enabled());
-        reset_http3_enabled();
+    #[test]
+    fn http3_configuration_is_owned_by_each_engine() {
+        let http3 = HttpServerEngine::with_http3(true);
+        let http1 = HttpServerEngine::with_http3(false);
+        assert!(http3.http3);
+        assert!(!http1.http3);
     }
 }

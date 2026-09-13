@@ -10,7 +10,7 @@ pub use kiln_hir::{Span, TypeAnnotation, VariableKind};
 pub use kiln_host_abi::HostOp;
 
 /// Version of the bytecode contract produced by this crate.
-pub const BYTECODE_VERSION: u16 = 4;
+pub const BYTECODE_VERSION: u16 = 5;
 
 /// A constant embedded in a [`Program`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -279,6 +279,9 @@ pub enum Instruction {
     /// program that observed it settling synchronously would be seeing this engine rather than
     /// the language.
     DynamicImport,
+    /// `import(specifier, options)`. The options value remains on the stack so its evaluation is
+    /// observable to the host; loaders may reject attributes they do not support explicitly.
+    DynamicImportWithOptions,
     /// Run a parent constructor against the current `this`, forwarding the arguments this frame
     /// received.
     ///
@@ -603,14 +606,19 @@ impl Program {
 
     /// Whether this program or any nested function prototype contains [`Instruction::DynamicImport`].
     pub fn has_dynamic_import(&self) -> bool {
-        self.code
-            .iter()
-            .any(|inst| matches!(inst, Instruction::DynamicImport))
-            || self.functions.iter().any(|f| {
-                f.code
-                    .iter()
-                    .any(|inst| matches!(inst, Instruction::DynamicImport))
+        self.code.iter().any(|inst| {
+            matches!(
+                inst,
+                Instruction::DynamicImport | Instruction::DynamicImportWithOptions
+            )
+        }) || self.functions.iter().any(|f| {
+            f.code.iter().any(|inst| {
+                matches!(
+                    inst,
+                    Instruction::DynamicImport | Instruction::DynamicImportWithOptions
+                )
             })
+        })
     }
 }
 
@@ -1160,6 +1168,9 @@ pub enum DynamicImportTarget {
 /// Whole-program linking and closed-world facts extracted for one compiled module.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ModuleLinkFacts {
+    /// Literal Node loader requests discovered by the source frontend. These remain lazy at
+    /// execution time but must participate in graph closure and liveness selection.
+    pub node_runtime_requests: Vec<kiln_hir::NodeRuntimeRequest>,
     /// Module-level bindings that are never mutated across the program.
     pub immutable_bindings: Vec<String>,
     /// Whether the module syntax contains direct `eval(...)`.

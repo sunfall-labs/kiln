@@ -186,6 +186,7 @@ fn oracle_frontend(_path: &str, text: &str) -> Module {
             .collect(),
         diagnostics: Vec::new(),
         panicked: false,
+        node_runtime_requests: Vec::new(),
     }
 }
 

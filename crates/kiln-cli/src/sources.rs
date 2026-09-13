@@ -14,11 +14,22 @@ use std::sync::OnceLock;
 use crate::error::{Error, Result};
 use kiln_module_resolver::{
     NodeModuleFormat as ResolverNodeModuleFormat, NodePackageResolver, NodeRequestKind,
-    ResolutionKind, ResolutionPolicy,
+    ResolutionKind, ResolutionPolicy, is_asset_extension,
 };
 use kiln_proto::{
     NodeModuleFormat, NodeSourceFormat, PackageResolution, SourceDigest, source_digest,
 };
+
+fn captured_importer_path(raw: &str) -> Result<PathBuf> {
+    if raw.starts_with("file:") {
+        let url = url::Url::parse(raw)
+            .map_err(|error| Error::BadInput(format!("invalid file URL `{raw}`: {error}")))?;
+        return url.to_file_path().map_err(|()| {
+            Error::BadInput(format!("file URL does not identify a local path: {raw}"))
+        });
+    }
+    Ok(PathBuf::from(raw))
+}
 use rayon::prelude::*;
 
 const SOURCE_EXTENSIONS: [&str; 8] = ["js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts"];
@@ -326,14 +337,22 @@ pub(crate) fn include_reachable_dependencies(
         texts.push((entry_path.to_owned(), entry_text));
     }
 
-    let mut pending = vec![entry];
-    let mut visited = HashSet::new();
+    // Static imports from the entry are strict graph roots. Literal dynamic imports and
+    // CommonJS requires are runtime-reachable subtrees: capture anything that exists, but do not
+    // reject the whole snapshot when a descendant is unavailable.
+    let mut pending = vec![(entry, true)];
+    // Keep the strongest reachability mode seen for each module. A dynamic edge may be popped
+    // before a later static edge to the same path; the latter must still validate its subtree.
+    let mut visited = HashMap::<PathBuf, bool>::new();
     let mut resolutions = BTreeMap::new();
     let mut node_formats = BTreeMap::new();
 
-    while let Some(importer) = pending.pop() {
-        if !visited.insert(importer.clone()) {
-            continue;
+    while let Some((importer, strict)) = pending.pop() {
+        match visited.get(&importer).copied() {
+            Some(previous_strict) if previous_strict || !strict => continue,
+            Some(_) | None => {
+                visited.insert(importer.clone(), strict);
+            }
         }
         // Every module reaches `pending` only after being inserted into `indexes` -- the entry
         // just above, each import target below -- so a miss here is a broken invariant in this
@@ -379,11 +398,6 @@ pub(crate) fn include_reachable_dependencies(
             continue;
         }
         let commonjs = importer_format == Some(ResolverNodeModuleFormat::CommonJs);
-        let request = if commonjs {
-            NodeRequestKind::Require
-        } else {
-            NodeRequestKind::Import
-        };
         let (module, static_requires) = if commonjs {
             let (module, requires) =
                 frontend_oxc::parse_commonjs_with_requires(importer_path, importer_text);
@@ -391,33 +405,87 @@ pub(crate) fn include_reachable_dependencies(
         } else {
             (frontend_oxc::parse(importer_path, importer_text), None)
         };
-        let requests = if commonjs {
-            static_requires.expect("CommonJS facts exist")
+        let mut requests: Vec<(String, NodeRequestKind, bool, PathBuf)> = if commonjs {
+            static_requires
+                .expect("CommonJS facts exist")
+                .into_iter()
+                .map(|specifier| (specifier, NodeRequestKind::Require, true, importer.clone()))
+                .collect()
         } else {
             module
                 .runtime_requested_modules()
                 .into_iter()
-                .map(|request| request.specifier.clone())
+                .map(|request| {
+                    (
+                        request.specifier.clone(),
+                        NodeRequestKind::Import,
+                        true,
+                        importer.clone(),
+                    )
+                })
                 .collect()
         };
+        // Literal createRequire/getBuiltinModule calls are lazy at runtime, but a relative
+        // createRequire target still needs its source text in the synchronized snapshot.
+        for runtime in frontend_oxc::discover_node_runtime_requests(importer_path, importer_text) {
+            let runtime_importer = captured_importer_path(&runtime.importer)?;
+            if !requests
+                .iter()
+                .any(|(existing, kind, _, existing_importer)| {
+                    existing == &runtime.specifier
+                        && *kind == NodeRequestKind::Require
+                        && existing_importer == &runtime_importer
+                })
+            {
+                requests.push((
+                    runtime.specifier,
+                    NodeRequestKind::Require,
+                    false,
+                    runtime_importer,
+                ));
+            }
+        }
+        // Dynamic imports with a literal target are graph edges too.  The compiler records
+        // these separately from static import declarations because their evaluation is deferred,
+        // but source synchronization still has to capture the complete reachable closure.  If we
+        // omit them, native graph construction can discover a downstream relative import whose
+        // source and pinned Node format were never sent by the client.
+        for target in kiln_ir::collect_dynamic_imports(&module.body) {
+            if let kiln_ir::DynamicImportTarget::Static(specifier) = target
+                && !requests.iter().any(|(existing, kind, _, _)| {
+                    existing == &specifier && *kind == NodeRequestKind::Import
+                })
+            {
+                // Dynamic import always uses the import condition, even in a CommonJS module;
+                // a missing target remains a deferred runtime rejection rather than a build error.
+                requests.push((specifier, NodeRequestKind::Import, false, importer.clone()));
+            }
+        }
 
-        for specifier in requests {
+        for (specifier, request, required, request_importer) in requests {
             if node && kiln_module_resolver::NodeBuiltin::parse(&specifier).is_some() {
                 // Builtins are typed virtual graph nodes. They have no source bytes or package
                 // metadata to synchronize, and the daemon's Node resolver materializes them.
                 continue;
             }
-            let resolved =
-                match resolver.resolve_with_metadata_for_request(&specifier, &importer, request) {
-                    Ok(resolved) => resolved,
-                    // A CommonJS `require()` resolves when execution reaches it. Leaving an
-                    // unresolved literal out of the pinned map lets the runtime throw inside the
-                    // program's own `try/catch`; ESM imports remain strict graph dependencies.
-                    Err(_) if commonjs => continue,
-                    Err(error) => return Err(Error::BadInput(error.to_string())),
-                };
+            let resolved = match resolver.resolve_with_metadata_for_request(
+                &specifier,
+                &request_importer,
+                request,
+            ) {
+                Ok(resolved) => resolved,
+                // A CommonJS `require()` resolves when execution reaches it. Leaving an
+                // unresolved literal out of the pinned map lets the runtime throw inside the
+                // program's own `try/catch`; ESM imports remain strict graph dependencies.
+                Err(_) if commonjs || !required || !strict => continue,
+                Err(error) => return Err(Error::BadInput(error.to_string())),
+            };
             let target = resolved.module.path.clone();
-            if node {
+            let asset = target
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(is_asset_extension);
+            if node && !asset {
                 let format = resolver
                     .node_format(&resolved.module)
                     .map_err(|error| Error::BadInput(error.to_string()))?
@@ -430,7 +498,7 @@ pub(crate) fn include_reachable_dependencies(
                 node_formats.insert(target.clone(), to_wire_node_format(format));
             }
             let exact_explicit = match resolved.module.kind {
-                ResolutionKind::Relative => importer
+                ResolutionKind::Relative => request_importer
                     .parent()
                     .is_some_and(|directory| directory.join(&specifier).is_file()),
                 ResolutionKind::Absolute => Path::new(&specifier).is_file(),
@@ -471,6 +539,12 @@ pub(crate) fn include_reachable_dependencies(
                     },
                 );
             }
+            // Binary assets are explicit path modules.  They belong in the resolution map so the
+            // graph can materialize their path, but are not UTF-8 sources and must not enter the
+            // source snapshot or dependency work list.
+            if asset {
+                continue;
+            }
             if !indexes.contains_key(&target) {
                 let target_text = std::fs::read_to_string(&target).map_err(|source| {
                     Error::io(format!("cannot read {}", target.display()), source)
@@ -481,7 +555,7 @@ pub(crate) fn include_reachable_dependencies(
                 indexes.insert(target.clone(), texts.len());
                 texts.push((target_path.to_owned(), target_text));
             }
-            pending.push(target);
+            pending.push((target, strict && required && !commonjs));
         }
     }
 
@@ -860,6 +934,176 @@ mod tests {
         assert!(node_formats.is_empty());
     }
 
+    #[test]
+    fn captures_literal_dynamic_import_closure_and_formats() {
+        let tree = Tree::new("reachable-dynamic-package");
+        tree.file("src/main.mjs");
+        tree.file("node_modules/pkg/index.mjs");
+        tree.file("node_modules/pkg/nested.mjs");
+        tree.file("node_modules/pkg/leaf.mjs");
+        std::fs::write(
+            tree.0.join("src/main.mjs"),
+            "import('pkg').then(console.log);\n",
+        )
+        .expect("write entry");
+        std::fs::write(
+            tree.0.join("node_modules/pkg/package.json"),
+            r#"{"exports":"./index.mjs","type":"module"}"#,
+        )
+        .expect("write manifest");
+        std::fs::write(
+            tree.0.join("node_modules/pkg/index.mjs"),
+            "export { value } from './nested.mjs';\n",
+        )
+        .expect("write package entry");
+        std::fs::write(
+            tree.0.join("node_modules/pkg/nested.mjs"),
+            "export { value } from './leaf.mjs';\n",
+        )
+        .expect("write nested module");
+        std::fs::write(
+            tree.0.join("node_modules/pkg/leaf.mjs"),
+            "export const value = 42;\n",
+        )
+        .expect("write leaf module");
+
+        let entry = tree.0.join("src/main.mjs").canonicalize().expect("entry");
+        let mut texts = vec![(
+            entry.to_string_lossy().into_owned(),
+            std::fs::read_to_string(&entry).expect("read entry"),
+        )];
+        let (resolutions, formats) = include_reachable_dependencies(
+            &tree.0,
+            entry.to_str().expect("UTF-8 entry"),
+            &mut texts,
+            true,
+        )
+        .expect("capture dynamic closure");
+
+        assert_eq!(resolutions.len(), 3);
+        assert_eq!(texts.len(), 4);
+        assert_eq!(formats.len(), 4);
+    }
+
+    #[test]
+    fn leaves_binary_asset_imports_out_of_utf8_source_snapshot() {
+        let tree = Tree::new("reachable-binary-asset");
+        tree.file("src/main.mjs");
+        let entry = tree.0.join("src/main.mjs");
+        let asset = tree.0.join("src/tree-sitter.wasm");
+        std::fs::write(
+            &entry,
+            "import wasm from './tree-sitter.wasm'; console.log(wasm);\n",
+        )
+        .expect("write entry");
+        std::fs::write(&asset, [0_u8, 159, 146, 150]).expect("write binary asset");
+
+        let entry = entry.canonicalize().expect("entry");
+        let mut texts = vec![(
+            entry.to_string_lossy().into_owned(),
+            std::fs::read_to_string(&entry).expect("read entry"),
+        )];
+        let (resolutions, formats) = include_reachable_dependencies(
+            &tree.0,
+            entry.to_str().expect("UTF-8 entry"),
+            &mut texts,
+            true,
+        )
+        .expect("capture asset edge");
+
+        assert_eq!(resolutions.len(), 1);
+        assert_eq!(
+            resolutions[0].target,
+            asset.canonicalize().unwrap().to_string_lossy()
+        );
+        assert_eq!(texts.len(), 1);
+        assert_eq!(formats.len(), 1);
+    }
+
+    #[test]
+    fn leaves_missing_literal_dynamic_import_deferred() {
+        let tree = Tree::new("missing-dynamic-import");
+        tree.file("src/main.mjs");
+        tree.file("src/optional.mjs");
+        let entry = tree.0.join("src/main.mjs");
+        std::fs::write(&entry, "import('./optional.mjs').catch(() => {});\n").expect("write entry");
+        std::fs::write(
+            tree.0.join("src/optional.mjs"),
+            "import './missing.mjs'; export const optional = true;\n",
+        )
+        .expect("write optional module");
+        let entry = entry.canonicalize().expect("entry");
+        let mut texts = vec![(
+            entry.to_string_lossy().into_owned(),
+            std::fs::read_to_string(&entry).expect("read entry"),
+        )];
+        let (resolutions, formats) = include_reachable_dependencies(
+            &tree.0,
+            entry.to_str().expect("UTF-8 entry"),
+            &mut texts,
+            true,
+        )
+        .expect("missing dynamic subtree dependency stays deferred");
+        assert_eq!(resolutions.len(), 1);
+        assert_eq!(resolutions[0].specifier, "./optional.mjs");
+        assert_eq!(texts.len(), 2);
+        assert_eq!(formats.len(), 2);
+    }
+
+    #[test]
+    fn missing_static_import_remains_strict() {
+        let tree = Tree::new("missing-static-import");
+        tree.file("src/main.mjs");
+        let entry = tree.0.join("src/main.mjs");
+        std::fs::write(&entry, "import './missing.mjs';\n").expect("write entry");
+        let entry = entry.canonicalize().expect("entry");
+        let mut texts = vec![(
+            entry.to_string_lossy().into_owned(),
+            std::fs::read_to_string(&entry).expect("read entry"),
+        )];
+
+        let error = include_reachable_dependencies(
+            &tree.0,
+            entry.to_str().expect("UTF-8 entry"),
+            &mut texts,
+            true,
+        )
+        .expect_err("missing static target must fail the snapshot");
+        assert!(error.to_string().contains("missing.mjs"));
+    }
+
+    #[test]
+    fn a_shared_module_reached_dynamically_then_statically_remains_strict() {
+        let tree = Tree::new("shared-static-and-dynamic");
+        tree.file("src/main.mjs");
+        tree.file("src/strict.mjs");
+        tree.file("src/shared.mjs");
+        let entry = tree.0.join("src/main.mjs");
+        std::fs::write(
+            &entry,
+            "import './strict.mjs';\nimport('./shared.mjs').catch(() => {});\n",
+        )
+        .expect("write entry");
+        std::fs::write(tree.0.join("src/strict.mjs"), "import './shared.mjs';\n")
+            .expect("write strict importer");
+        std::fs::write(tree.0.join("src/shared.mjs"), "import './missing.mjs';\n")
+            .expect("write shared importer");
+
+        let entry = entry.canonicalize().expect("entry");
+        let mut texts = vec![(
+            entry.to_string_lossy().into_owned(),
+            std::fs::read_to_string(&entry).expect("read entry"),
+        )];
+        let error = include_reachable_dependencies(
+            &tree.0,
+            entry.to_str().expect("UTF-8 entry"),
+            &mut texts,
+            true,
+        )
+        .expect_err("the later static edge must make the shared subtree strict");
+        assert!(error.to_string().contains("missing.mjs"));
+    }
+
     /// The project walk skips every dot-directory, so nothing under `.scratch/` is in the
     /// snapshot. Naming such a file as the entry used to fail with "reachable module was not
     /// captured in the source snapshot", which reads like a compiler bug and cost several people
@@ -1009,6 +1253,58 @@ mod tests {
         assert!(resolutions.is_empty());
         assert_eq!(node_formats.len(), 1);
         assert_eq!(texts.len(), 1);
+    }
+
+    #[test]
+    fn node_commonjs_conditional_require_and_import_use_export_conditions() {
+        let tree = Tree::new("commonjs-export-conditions");
+        tree.file("main.cjs");
+        tree.file("node_modules/pkg/package.json");
+        tree.file("node_modules/pkg/cjs.cjs");
+        tree.file("node_modules/pkg/esm.mjs");
+        std::fs::write(
+            tree.0.join("main.cjs"),
+            "const cjs = require('pkg');\nif (false) import('pkg');\n",
+        )
+        .expect("write entry");
+        std::fs::write(
+            tree.0.join("node_modules/pkg/package.json"),
+            r#"{"exports":{"import":"./esm.mjs","require":"./cjs.cjs"}}"#,
+        )
+        .expect("write package manifest");
+        std::fs::write(
+            tree.0.join("node_modules/pkg/cjs.cjs"),
+            "module.exports = 1;\n",
+        )
+        .expect("write CommonJS target");
+        std::fs::write(
+            tree.0.join("node_modules/pkg/esm.mjs"),
+            "export default 2;\n",
+        )
+        .expect("write ESM target");
+
+        let entry = tree.0.join("main.cjs").canonicalize().expect("entry");
+        let mut texts = vec![(
+            entry.to_string_lossy().into_owned(),
+            std::fs::read_to_string(&entry).expect("read entry"),
+        )];
+        let (resolutions, formats) = include_reachable_dependencies(
+            &tree.0,
+            entry.to_str().expect("UTF-8 entry"),
+            &mut texts,
+            true,
+        )
+        .expect("both package conditions resolve");
+
+        assert_eq!(resolutions.len(), 2);
+        assert!(resolutions.iter().any(|resolution| resolution.condition
+            == kiln_proto::NodeRequestKind::Require
+            && resolution.target.ends_with("/node_modules/pkg/cjs.cjs")));
+        assert!(resolutions.iter().any(|resolution| resolution.condition
+            == kiln_proto::NodeRequestKind::Import
+            && resolution.target.ends_with("/node_modules/pkg/esm.mjs")));
+        assert_eq!(texts.len(), 3);
+        assert_eq!(formats.len(), 3);
     }
 
     #[test]

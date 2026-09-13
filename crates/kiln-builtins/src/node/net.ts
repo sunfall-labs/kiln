@@ -2,9 +2,10 @@
 
 const nativeModule =
   typeof process !== "undefined"
-    ? typeof (process as any).getBuiltinModule === "function"
-      ? (process as any).getBuiltinModule("net")
-      : (process as any).__kilnNativeModules?.net
+    ? (process as any).__kilnNativeModules?.net ||
+      (typeof (process as any).getBuiltinModule === "function"
+        ? (process as any).getBuiltinModule("net")
+        : null)
     : null;
 
 export function createServer(...args: any[]): any {

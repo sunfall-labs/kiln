@@ -805,6 +805,47 @@ fn array_species_definition_writes_typed_array_elements() {
 }
 
 #[test]
+fn process_private_native_modules_are_separate_from_public_ts_projection() {
+    let program = Program {
+        source: "".into(),
+        template_sites: Vec::new(),
+        version: kiln_ir::BYTECODE_VERSION,
+        constants: Vec::new(),
+        code: Vec::new(),
+        local_count: 0,
+        functions: Vec::new(),
+    };
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: std::collections::VecDeque::new(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+    let process = vm.process_object();
+    let modules = vm
+        .read_property(&process, "__kilnNativeModules", 0)
+        .expect("private capability table");
+    for name in ["fs", "fs_promises", "http", "net"] {
+        assert!(
+            !matches!(vm.read_property(&modules, name, 0), Ok(Value::Undefined)),
+            "missing private native capability: {name}"
+        );
+    }
+    assert!(matches!(
+        vm.dispatch_native(
+            Native::ProcessGetBuiltinModule,
+            &Value::Undefined,
+            &[Value::String("node:fs".to_owned())],
+            0,
+        ),
+        Err(ExecutionError::TypeErrorMessage { message })
+            if message.contains("graph-materialized")
+    ));
+}
+
+#[test]
 fn node_events_builtin_exposes_event_emitter() {
     let program = Program {
         source: "".into(),
@@ -823,15 +864,18 @@ fn node_events_builtin_exposes_event_emitter() {
         locale: None,
     };
     let mut vm = test_vm(&program, &mut host);
-    assert_eq!(
-        vm.dispatch_native(
-            Native::ProcessGetBuiltinModule,
-            &Value::Undefined,
-            &[Value::String("node:events".to_owned())],
-            0,
-        ),
-        Ok(Value::Native(Native::NodeEvents, RealmId::PRIMARY))
-    );
+    for specifier in ["node:events", "node:module"] {
+        assert!(matches!(
+            vm.dispatch_native(
+                Native::ProcessGetBuiltinModule,
+                &Value::Undefined,
+                &[Value::String(specifier.to_owned())],
+                0,
+            ),
+            Err(ExecutionError::TypeErrorMessage { message })
+                if message.contains("graph-materialized")
+        ));
+    }
     assert_eq!(
         Native::NodeEvents.property("EventEmitter"),
         Some(Value::Native(Native::NodeEventEmitter, RealmId::PRIMARY))
@@ -840,50 +884,39 @@ fn node_events_builtin_exposes_event_emitter() {
         node_builtin_export_names("events"),
         Some(&["EventEmitter", "default"][..])
     );
-    assert_eq!(
-        node_builtin_exports("node:events"),
-        Some(vec![
-            (
-                "EventEmitter".to_owned(),
-                Value::Native(Native::NodeEventEmitter, RealmId::PRIMARY),
-            ),
-            (
-                "default".to_owned(),
-                Value::Native(Native::NodeEventEmitter, RealmId::PRIMARY),
-            ),
-        ])
-    );
+    assert!(node_builtin_exports("node:events").is_none());
+    assert!(node_builtin_commonjs_value("node:events").is_none());
 }
 
 #[test]
 fn node_builtin_defaults_preserve_namespace_or_callable_shape() {
-    for specifier in [
-        "async_hooks",
-        "buffer",
-        "console",
-        "crypto",
-        "fs",
-        "http",
-        "net",
-        "perf_hooks",
-        "string_decoder",
-        "util",
-    ] {
-        let default = node_builtin_exports(specifier)
-            .expect("builtin exists")
-            .into_iter()
-            .find_map(|(name, value)| (name == "default").then_some(value))
-            .expect("builtin advertises a default export");
+    for specifier in ["async_hooks", "crypto", "fs", "http", "net"] {
+        let default = match node_builtin_native_namespace(specifier) {
+            Some(Value::Native(namespace, _)) => namespace
+                .property("default")
+                .unwrap_or(Value::Native(namespace, RealmId::PRIMARY)),
+            _ => panic!("builtin missing: {specifier}"),
+        };
         assert_eq!(default.type_name(), "object", "node:{specifier}");
     }
 
-    for specifier in ["assert", "events", "module", "stream"] {
-        let default = node_builtin_exports(specifier)
-            .expect("builtin exists")
-            .into_iter()
-            .find_map(|(name, value)| (name == "default").then_some(value))
-            .expect("builtin advertises a default export");
-        assert_eq!(default.type_name(), "function", "node:{specifier}");
+    // node:module is implemented by its TypeScript source program.  The legacy direct
+    // projection intentionally declines to manufacture a partial Native::NodeModule object;
+    // graph execution is the authoritative materialization path for this builtin.
+    assert!(node_builtin_exports("node:module").is_none());
+    assert!(node_builtin_commonjs_value("node:module").is_none());
+    let stream_default = match node_builtin_native_namespace("stream") {
+        Some(Value::Native(namespace, _)) => namespace
+            .property("default")
+            .unwrap_or(Value::Native(namespace, RealmId::PRIMARY)),
+        _ => panic!("legacy stream builtin"),
+    };
+    assert_eq!(stream_default.type_name(), "function");
+    for specifier in kiln_builtins::ts_builtin_specifiers() {
+        assert!(
+            node_builtin_exports(specifier).is_none(),
+            "TS builtin must use graph materialization: node:{specifier}"
+        );
     }
 }
 
@@ -1635,6 +1668,7 @@ fn instanceof_walks_the_chain_by_identity() {
         name: None,
         program: no_program(),
         strictness: Rc::new(Strictness::default()),
+        module_path: None,
         captured_new_target: None,
         function: 0,
         upvalues: Vec::new(),
@@ -1652,6 +1686,7 @@ fn instanceof_walks_the_chain_by_identity() {
         name: None,
         program: no_program(),
         strictness: Rc::new(Strictness::default()),
+        module_path: None,
         captured_new_target: None,
         function: 1,
         upvalues: Vec::new(),
@@ -1681,6 +1716,7 @@ fn instanceof_walks_the_chain_by_identity() {
         name: None,
         program: no_program(),
         strictness: Rc::new(Strictness::default()),
+        module_path: None,
         captured_new_target: None,
         function: 2,
         upvalues: Vec::new(),
@@ -4092,6 +4128,14 @@ fn every_surface_member_is_named_for_its_key() {
          another member's function, say so in `NAME_IS_SHARED` instead.",
         wrong.join("\n")
     );
+
+    let host_create_require = vm
+        .read_property(&globals, "__kilnHostModuleCreateRequire", 0)
+        .expect("the private createRequire host hook is published");
+    assert_eq!(
+        vm.read_property(&host_create_require, "name", 0),
+        Ok(Value::String("__kilnHostModuleCreateRequire".to_owned()))
+    );
 }
 
 /// Every `"@@..."` literal in this crate is a key `is_reserved` recognises.
@@ -4464,10 +4508,13 @@ fn dynamic_import_without_module_loader_rejects_with_type_error() {
 
 #[test]
 fn dynamic_import_with_unsupported_loader_rejects_with_type_error() {
-    fn mock_loader(_specifier: &str) -> Result<ModulePlan, ModuleLoadError> {
-        Err(ModuleLoadError::Unsupported(
-            "custom resolver refused specifier".into(),
-        ))
+    struct MockLoader;
+    impl ModuleLoaderService for MockLoader {
+        fn load(&self, _request: ModuleLoadRequest) -> Result<ModulePlan, ModuleLoadError> {
+            Err(ModuleLoadError::Unsupported(
+                "custom resolver refused specifier".into(),
+            ))
+        }
     }
 
     let program = Program {
@@ -4490,7 +4537,8 @@ fn dynamic_import_with_unsupported_loader_rejects_with_type_error() {
         timezone: None,
         locale: None,
     };
-    let capabilities = ExecutionCapabilities::default().with_module_loader(mock_loader);
+    let capabilities =
+        ExecutionCapabilities::default().with_module_loader_service(Arc::new(MockLoader));
     let result = execute(
         Rc::new(program),
         &mut host,
@@ -4506,69 +4554,6 @@ fn dynamic_import_with_unsupported_loader_rejects_with_type_error() {
         }
         other => panic!("expected unhandled rejection from dynamic import, got {other:?}"),
     }
-}
-
-#[test]
-fn node_module_create_require_returns_callable_require() {
-    let mut host = TestHost {
-        calls: Vec::new(),
-        clock_now: None,
-        entropy: std::collections::VecDeque::new(),
-        timezone: None,
-        locale: None,
-    };
-    let module_val = node_builtin_commonjs_value("node:module").expect("node:module value");
-    let create_require = match &module_val {
-        Value::Native(n, _) => n.property("createRequire"),
-        Value::Function(f) => f.properties.borrow().get("createRequire"),
-        Value::Object(o) => o.borrow().get_own("createRequire").cloned(),
-        _ => None,
-    }
-    .expect("createRequire property");
-
-    let program = Program {
-        source: "".into(),
-        template_sites: Vec::new(),
-        version: kiln_ir::BYTECODE_VERSION,
-        constants: vec![
-            Constant::String("import.meta.url".to_owned()),
-            Constant::String("node:path".to_owned()),
-        ],
-        code: vec![
-            Instruction::LoadCell(0),
-            Instruction::Const(0),
-            Instruction::Call { argc: 1 },
-            Instruction::Const(1),
-            Instruction::Call { argc: 1 },
-            Instruction::Return,
-        ],
-        local_count: 1,
-        functions: Vec::new(),
-    };
-    let module_prog = ModuleProgram {
-        program,
-        dependencies: Vec::new(),
-        imports: vec![kiln_ir::ImportBinding {
-            source: "".into(),
-            imported: "".into(),
-            local: "createRequire".into(),
-            local_slot: 0,
-        }],
-        exports: Vec::new(),
-        ..Default::default()
-    };
-    let result = execute_module(
-        &module_prog,
-        &[create_require],
-        &mut host,
-        ExecutionLimits::default(),
-        ExecutionCapabilities::default(),
-    )
-    .expect("execute module calling createRequire");
-    assert!(matches!(
-        result.execution.value,
-        Value::Native(Native::NodePath, _)
-    ));
 }
 
 #[test]

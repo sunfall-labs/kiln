@@ -3316,6 +3316,8 @@ pub struct Closure {
     /// a module boundary is indexed against its own table, and answering from the caller's would
     /// report someone else's body. Whether *this* body is strict is `strictness.function`.
     pub strictness: Rc<Strictness>,
+    /// The module whose lexical code created this closure, used to resolve later import().
+    pub module_path: Option<Rc<str>>,
     /// The declared name, for a console to show. Shared with every other closure over the same
     /// proto rather than copied, because a function expression in a loop makes one closure per
     /// pass and the name is the same every time.
@@ -3370,6 +3372,25 @@ pub type Cell = Rc<RefCell<Value>>;
 /// point the JavaScript call actually occurs. Keeping the hook outside [`CommonJsRequire`] means
 /// a statically discovered edge does not become an eager execution obligation.
 pub trait CommonJsModuleLoader {
+    /// Receives a thrown value from a lazily evaluated target without putting the realm-local
+    /// value into the cross-thread `ExecutionError` report type.
+    fn record_thrown_value(&mut self, value: Value);
+
+    /// Takes the value recorded while evaluating the most recent lazy target.
+    fn take_thrown_value(&mut self) -> Option<Value>;
+
+    fn get_builtin(
+        &mut self,
+        specifier: &str,
+        instruction: usize,
+    ) -> Result<Option<Value>, ExecutionError>;
+
+    fn create_require(
+        &mut self,
+        importer: &str,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError>;
+
     fn load(
         &mut self,
         require: &CommonJsRequire,
@@ -3385,13 +3406,26 @@ pub trait CommonJsModuleLoader {
 #[derive(Debug, PartialEq)]
 pub struct CommonJsRequire {
     targets: Vec<(String, String, Cell)>,
+    importer: Option<String>,
 }
 
 impl CommonJsRequire {
     pub fn new(targets: impl IntoIterator<Item = (String, String, Cell)>) -> Self {
         Self {
             targets: targets.into_iter().collect(),
+            importer: None,
         }
+    }
+
+    pub fn for_importer(importer: impl Into<String>) -> Self {
+        Self {
+            targets: Vec::new(),
+            importer: Some(importer.into()),
+        }
+    }
+
+    pub fn importer(&self) -> Option<&str> {
+        self.importer.as_deref()
     }
 
     fn get(&self, specifier: &str) -> Option<Value> {
@@ -4018,6 +4052,18 @@ pub fn node_builtin_export_names(specifier: &str) -> Option<&'static [&'static s
 }
 
 fn node_builtin_namespace(specifier: &str) -> Option<Value> {
+    // TypeScript builtins are evaluated by ModuleGraph. Returning the legacy native namespace
+    // here would let process.getBuiltinModule bypass that authoritative materialization and
+    // expose a partial object.
+    if kiln_builtins::is_ts_builtin_specifier(specifier) {
+        return None;
+    }
+    node_builtin_native_namespace(specifier)
+}
+
+/// Legacy native namespace used by TypeScript builtin implementations when they
+/// probe for an optional host capability during their own lazy evaluation.
+pub fn node_builtin_native_namespace(specifier: &str) -> Option<Value> {
     Some(Value::Native(
         match specifier.strip_prefix("node:").unwrap_or(specifier) {
             "assert" | "assert/strict" => Native::NodeAssert,
@@ -4107,11 +4153,18 @@ fn node_builtin_export_value(namespace: Native, name: &str) -> Option<Value> {
 }
 
 pub fn node_builtin_exports(specifier: &str) -> Option<Vec<(String, Value)>> {
-    let namespace = node_builtin_namespace(specifier)?;
+    // TypeScript builtins are materialized by ModuleGraph from their authoritative source
+    // program.  Do not project their ABI names through the legacy Native namespace: that would
+    // silently publish a partial/stale object (for example node:module's `Module` export).
+    let builtin = kiln_node_abi::builtin_abi(specifier)?;
+    if kiln_builtins::is_ts_builtin_specifier(specifier) {
+        return None;
+    }
+    let namespace = node_builtin_native_namespace(specifier)?;
     let Value::Native(namespace, _) = namespace else {
         unreachable!("builtin namespaces are native values")
     };
-    let names = node_builtin_export_names(specifier)?;
+    let names = builtin.exports;
     Some(
         names
             .iter()
@@ -4136,7 +4189,10 @@ pub fn node_builtin_exports(specifier: &str) -> Option<Vec<(String, Value)>> {
 /// callable for modules such as `events` and `assert`. Keeping this beside the export table means
 /// the two projections cannot drift onto different implementations.
 pub fn node_builtin_commonjs_value(specifier: &str) -> Option<Value> {
-    let namespace = node_builtin_namespace(specifier)?;
+    if kiln_builtins::is_ts_builtin_specifier(specifier) {
+        return None;
+    }
+    let namespace = node_builtin_native_namespace(specifier)?;
     let Value::Native(native, _) = namespace else {
         unreachable!("builtin namespaces are native values")
     };
@@ -4710,7 +4766,7 @@ pub type SourceCompiler = fn(&EvalSource<'_>) -> Result<(Program, Strictness), E
 #[derive(Clone, Default)]
 pub struct ExecutionCapabilities {
     source_compiler: Option<SourceCompiler>,
-    module_loader: Option<ModuleLoader>,
+    module_loader: Option<Arc<dyn ModuleLoaderService + Send + Sync>>,
     host_realms: bool,
     host_agents: Option<&'static str>,
     /// The command line this execution's `process.argv` reports, exactly as the host spelled it.
@@ -4732,13 +4788,16 @@ impl ExecutionCapabilities {
         self.source_compiler
     }
 
-    pub const fn with_module_loader(mut self, loader: ModuleLoader) -> Self {
+    pub fn with_module_loader_service(
+        mut self,
+        loader: Arc<dyn ModuleLoaderService + Send + Sync>,
+    ) -> Self {
         self.module_loader = Some(loader);
         self
     }
 
-    pub const fn module_loader(&self) -> Option<ModuleLoader> {
-        self.module_loader
+    pub fn module_loader(&self) -> Option<Arc<dyn ModuleLoaderService + Send + Sync>> {
+        self.module_loader.clone()
     }
 
     /// Let this execution make further realms, and publish the hook that does it.
@@ -4853,11 +4912,23 @@ pub enum ModuleLoadError {
 /// interpreter is downstream of the bytecode and has no filesystem, no parser and no linker.
 /// A host that installs none simply has no `import()`, and says so rather than answering.
 ///
-/// The specifier arrives already coerced to a string. This temporary function-pointer contract
-/// carries no referrer; a filesystem-backed loader must not emulate one with ambient state. The
-/// referrer-aware service object that replaces this is part of the remaining module-realm kernel
-/// migration.
-pub type ModuleLoader = fn(&str) -> Result<ModulePlan, ModuleLoadError>;
+/// The complete context of one dynamic import request. The service is scoped to an execution
+/// realm, so a loader can retain graph ownership without ambient process state.
+#[derive(Clone)]
+pub struct ModuleLoadRequest {
+    pub importer: Option<String>,
+    pub specifier: String,
+    pub attributes: Option<ImportAttributes>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ImportAttributes {
+    pub type_: Option<String>,
+}
+
+pub trait ModuleLoaderService: Send + Sync {
+    fn load(&self, request: ModuleLoadRequest) -> Result<ModulePlan, ModuleLoadError>;
+}
 
 /// Whether a program reads or writes module scope through the frame stack.
 ///
@@ -5064,6 +5135,10 @@ pub enum ExecutionError {
         target: usize,
     },
     Host {
+        instruction: usize,
+        message: String,
+    },
+    ModuleNotFound {
         instruction: usize,
         message: String,
     },
@@ -5621,6 +5696,7 @@ impl fmt::Display for ExecutionError {
                     "host operation failed at instruction {instruction}: {message}"
                 )
             }
+            Self::ModuleNotFound { message, .. } => write!(formatter, "{message}"),
         }
     }
 }
@@ -6332,6 +6408,7 @@ pub fn execute_module_in_runtime_with_loader<H: HostOps + ?Sized>(
     capabilities: ExecutionCapabilities,
     loader: &mut dyn CommonJsModuleLoader,
     enter_runtime: bool,
+    module_path: Option<&str>,
 ) -> Result<ModuleExecutionResult, ExecutionError> {
     execute_module_in_runtime_mode_with_session(
         module,
@@ -6344,6 +6421,7 @@ pub fn execute_module_in_runtime_with_loader<H: HostOps + ?Sized>(
         None,
         Some(loader),
         enter_runtime,
+        module_path,
     )
 }
 
@@ -6396,6 +6474,7 @@ pub fn execute_node_module_in_session<H: HostOps + ?Sized>(
         Some((session, drain)),
         None,
         true,
+        None,
     )
 }
 
@@ -6413,6 +6492,7 @@ pub fn execute_node_module_in_session_with_loader<H: HostOps + ?Sized>(
     drain: bool,
     loader: &mut dyn CommonJsModuleLoader,
     enter_runtime: bool,
+    module_path: Option<&str>,
 ) -> Result<ModuleExecutionResult, ExecutionError> {
     execute_module_in_runtime_mode_with_session(
         module,
@@ -6425,6 +6505,7 @@ pub fn execute_node_module_in_session_with_loader<H: HostOps + ?Sized>(
         Some((session, drain)),
         Some(loader),
         enter_runtime,
+        module_path,
     )
 }
 
@@ -6450,6 +6531,7 @@ fn execute_module_in_runtime_mode<H: HostOps + ?Sized>(
             Some((&mut session, true)),
             None,
             true,
+            None,
         )
     } else {
         execute_module_in_runtime_mode_with_session(
@@ -6463,6 +6545,7 @@ fn execute_module_in_runtime_mode<H: HostOps + ?Sized>(
             None,
             None,
             true,
+            None,
         )
     }
 }
@@ -6477,8 +6560,9 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
     runtime: &mut RealmRuntime,
     capabilities: ExecutionCapabilities,
     session: Option<(&mut ModuleRealmSession, bool)>,
-    commonjs_loader: Option<&'host mut dyn CommonJsModuleLoader>,
+    mut commonjs_loader: Option<&'host mut dyn CommonJsModuleLoader>,
     enter_runtime: bool,
+    module_path: Option<&str>,
 ) -> Result<ModuleExecutionResult, ExecutionError> {
     if import_values.len() != module.imports.len() {
         return Err(ExecutionError::ImportCountMismatch {
@@ -6607,12 +6691,13 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
         capabilities,
     )?;
     vm.self_bindings = self_bindings;
+    vm.module_path = module_path.map(Rc::from);
     vm.self_namespaces = self_namespaces;
     if session.is_some() {
         vm.async_host = Some(runtime as *mut RealmRuntime as *mut dyn ActiveAsyncHostOps);
         vm.http_runtime = Some(runtime as *mut RealmRuntime as *mut dyn ActiveHttpRuntime);
     }
-    if let Some(loader) = commonjs_loader {
+    if let Some(loader) = commonjs_loader.as_deref_mut() {
         vm.commonjs_loader = Some(loader as *mut dyn CommonJsModuleLoader);
     }
     let drain = session.as_ref().is_some_and(|(_, drain)| *drain);
@@ -6620,11 +6705,21 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
         vm.module_realm = Some(Rc::clone(&session.shared));
         vm.intrinsics = Rc::clone(&session.shared.borrow().intrinsics);
     }
-    let execution = if enter_runtime {
+    let execution = match if enter_runtime {
         runtime.enter(|| vm.run_module_body())
     } else {
         vm.run_module_body()
-    }?;
+    } {
+        Ok(execution) => execution,
+        Err(error) => {
+            if let Some(value) = vm.uncaught_value.take()
+                && let Some(loader) = commonjs_loader.as_deref_mut()
+            {
+                loader.record_thrown_value(value);
+            }
+            return Err(error);
+        }
+    };
     // A dependency's top-level await must finish before its importer reads the exported cells.
     // Node graph execution normally leaves a dependency's shared-realm jobs queued so they run
     // after the entry body, but that is only valid for ordinary module jobs. A suspended module
@@ -6650,6 +6745,9 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
         let trace = captured_trace(&reason);
         let instruction = vm.instruction;
         let message = vm.describe_uncaught(&reason, instruction);
+        if let Some(loader) = commonjs_loader.as_deref_mut() {
+            loader.record_thrown_value(reason.clone());
+        }
         return Err(ExecutionError::Uncaught {
             instruction,
             message,
@@ -6971,7 +7069,12 @@ enum Job {
     /// settle the promise before `import(x).then(f)` had attached `f`, which is not observable
     /// on its own -- but the module's *side effects* would then happen before the statement
     /// after the `import()`, and that is.
-    Import(Rc<PromiseData>, String),
+    Import(
+        Rc<PromiseData>,
+        String,
+        Option<ImportAttributes>,
+        Option<Rc<str>>,
+    ),
     /// `ShadowRealm.prototype.importValue(specifier, exportName)`.
     ///
     /// A job for the same reason `Import` is one, and carries the two realms because both
@@ -7047,6 +7150,8 @@ struct Frame {
     strictness: Rc<Strictness>,
     /// Whether the caller was strict code, restored with the frame.
     strict: bool,
+    /// The module whose lexical code is running, restored with the caller frame.
+    module_path: Option<Rc<str>>,
     /// `new.target` in the caller, restored with the frame.
     new_target: Value,
     /// The closure that was running, or `None` for the module body.
@@ -7081,6 +7186,11 @@ struct Frame {
     /// Stack height when the call began, so a callee that leaves debris cannot corrupt the
     /// caller's operand stack.
     stack_base: usize,
+}
+
+enum DynamicModuleState {
+    Evaluated(Rc<Vec<Value>>),
+    Failed(Value),
 }
 
 struct Vm<'host, H: HostOps + ?Sized> {
@@ -7196,7 +7306,8 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// The text a new agent's realm is given before the program's own source, when this
     /// execution's host granted agents at all. `None` disables `$262AgentStart` and its siblings.
     host_agents: Option<&'static str>,
-    module_loader: Option<ModuleLoader>,
+    module_loader: Option<Arc<dyn ModuleLoaderService + Send + Sync>>,
+    module_path: Option<Rc<str>>,
     /// The command line `process.argv` reports, as the host stated it. Empty when no host did.
     argv: Vec<String>,
     /// Promise state waiting for a Tokio-owned host request, keyed by opaque request identity.
@@ -7226,6 +7337,9 @@ struct Vm<'host, H: HostOps + ?Sized> {
     async_context: AsyncContext,
     /// The value delivered to a host handler, waiting to be collected by `call_catching`.
     caught: Option<Value>,
+    /// A top-level throw captured for the graph loader before it is converted to an execution
+    /// report. This remains inside the realm and never crosses the worker error boundary.
+    uncaught_value: Option<Value>,
     /// Whether the call being dispatched arrived through `%TypedArray%.prototype`.
     ///
     /// The two families share one implementation -- `Native::TypedArrayGeneric(name)` re-enters
@@ -7304,10 +7418,11 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// registry itself keeps nothing alive -- it exists only so [`Vm::release_cycles`] can find
     /// the closures again and cut the links.
     closures: Vec<Weak<Closure>>,
-    /// What each module a dynamic import has already evaluated exported, by the host's key for
-    /// it.
+    /// What each module a dynamic import has already evaluated, or how it failed, by the host's
+    /// key for it.
     ///
-    /// The module cache, and the whole of what makes `import("./m.js")` twice run `m.js` once.
+    /// The module cache, and the whole of what makes `import("./m.js")` twice run `m.js` once
+    /// (including the once-only evaluation rule for a rejected module).
     /// It is realm state rather than the loader's, because it holds *values* -- a second
     /// evaluation would produce a second set of objects, and a program that compared the two
     /// namespaces would see them differ.
@@ -7317,7 +7432,7 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// `ShadowRealm` from sharing module state with the realm that made it: a shared map would
     /// let a write to an export in one realm be read in the other, and no amount of wrapping
     /// values at the boundary would close that.
-    dynamic_modules: std::collections::HashMap<(RealmId, String), Rc<Vec<Value>>>,
+    dynamic_modules: std::collections::HashMap<(RealmId, String), DynamicModuleState>,
     /// The namespace object handed back for each module, so two imports of one module hand back
     /// the same object rather than two equal ones. A namespace has identity in the
     /// specification, and `import(s).then(a => import(s).then(b => a === b))` is how a program
@@ -7432,6 +7547,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             default_locale,
             source_compiler: execution.source_compiler(),
             module_loader: execution.module_loader(),
+            module_path: None,
             host_realms: execution.host_realms(),
             host_agents: execution.host_agents(),
             argv: execution.argv().to_vec(),
@@ -7445,6 +7561,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             http_runtime: None,
             commonjs_loader: None,
             caught: None,
+            uncaught_value: None,
             typed_array_method: false,
             unhandled: None,
             module_suspension: None,
@@ -10395,6 +10512,74 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         arguments: &[Value],
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
+        if native == Native::ProcessStartRaw {
+            let bytes = match arguments.first() {
+                Some(Value::TypedArray(bytes)) => bytes.bytes(),
+                value => {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: format!(
+                            "process host request must be Uint8Array, received {}",
+                            value.map_or("undefined", Value::type_name)
+                        ),
+                    });
+                }
+            };
+            let request = kiln_runtime::decode_process_wire(&bytes).map_err(|error| {
+                ExecutionError::Host {
+                    instruction,
+                    message: format!("invalid process host request: {error:?}"),
+                }
+            })?;
+            let promise = PromiseState::pending();
+            let node = self.async_host.ok_or_else(|| ExecutionError::Host {
+                instruction,
+                message: "process.run requires the Node execution Adapter".into(),
+            })?;
+            let command = String::from_utf8(request.command).map_err(|_| {
+                ExecutionError::TypeErrorMessage {
+                    message: "process command must be UTF-8".into(),
+                }
+            })?;
+            let args = request
+                .args
+                .into_iter()
+                .map(|arg| {
+                    String::from_utf8(arg).map_err(|_| ExecutionError::TypeErrorMessage {
+                        message: "process argument must be UTF-8".into(),
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let id = unsafe {
+                ActiveAsyncHostOps::start(
+                    &mut *node,
+                    AsyncHostOp::ProcessRun {
+                        command,
+                        args,
+                        stdin: request.stdin,
+                    },
+                    true,
+                )
+            };
+            self.push_pending_host(PendingHostRequest {
+                request: id,
+                promise: Rc::clone(&promise),
+                conversion: HostResultConversion::Direct,
+            });
+            let mut result = ObjectData::default();
+            result.set("requestId", Value::Number(id.get() as f64));
+            result.set("promise", Value::Promise(promise));
+            return Ok(Value::Object(Rc::new(RefCell::new(result))));
+        }
+        if native == Native::ProcessCancelRaw {
+            let id = arguments.first().map(Value::as_number).unwrap_or(0.0) as u64;
+            let node = self.async_host.ok_or_else(|| ExecutionError::Host {
+                instruction,
+                message: "process.run requires the Node execution Adapter".into(),
+            })?;
+            return Ok(Value::Boolean(unsafe {
+                ActiveAsyncHostOps::cancel(&mut *node, RequestId::new(id))
+            }));
+        }
         let path = match arguments.first() {
             Some(Value::String(path)) => path.clone(),
             value => {
@@ -11694,20 +11879,48 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     };
                     self.stack.push(Value::Boolean(!blocked));
                 }
-                Instruction::DynamicImport => {
+                instruction @ (Instruction::DynamicImport
+                | Instruction::DynamicImportWithOptions) => {
+                    let raw_options =
+                        if matches!(instruction, Instruction::DynamicImportWithOptions) {
+                            Some(self.pop(current)?)
+                        } else {
+                            None
+                        };
                     let specifier = self.pop(current)?;
                     let promise = PromiseState::pending();
+                    let text = match self.import_specifier(&specifier, current)? {
+                        Ok(text) => text,
+                        Err(thrown) => {
+                            self.settle(&promise, &Settled::Rejected(thrown));
+                            self.stack.push(Value::Promise(promise));
+                            continue;
+                        }
+                    };
+                    let _options = match raw_options {
+                        Some(options) => {
+                            match self.normalize_import_attributes(&options, current)? {
+                                Ok(attributes) => attributes,
+                                Err(thrown) => {
+                                    self.settle(&promise, &Settled::Rejected(thrown));
+                                    self.stack.push(Value::Promise(promise));
+                                    continue;
+                                }
+                            }
+                        }
+                        None => None,
+                    };
                     // Everything from the coercion onwards rejects rather than throws: the
                     // specification hands the promise back first and only then looks at what it
                     // was given, so `import({ toString() { throw x } })` is a rejection and not
                     // an exception at the call site.
-                    match self.import_specifier(&specifier, current)? {
-                        Ok(text) => {
-                            let scheduled = self.scheduled(Job::Import(Rc::clone(&promise), text));
-                            self.with_realm_mut(|realm| realm.queue_microtask(scheduled));
-                        }
-                        Err(thrown) => self.settle(&promise, &Settled::Rejected(thrown)),
-                    }
+                    let scheduled = self.scheduled(Job::Import(
+                        Rc::clone(&promise),
+                        text,
+                        _options,
+                        self.module_path.clone(),
+                    ));
+                    self.with_realm_mut(|realm| realm.queue_microtask(scheduled));
                     self.stack.push(Value::Promise(promise));
                 }
                 Instruction::Throw => {
@@ -12907,6 +13120,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.strictness = frame.strictness;
                     self.current_realm = frame.realm;
                     self.strict = frame.strict;
+                    self.module_path = frame.module_path;
                     self.function = frame.function;
                     self.this_value = frame.this_value;
                     self.new_target = frame.new_target;
@@ -13013,6 +13227,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 return Err(ExecutionError::GeneratorReturned);
             }
             let trace = captured_trace(&thrown);
+            self.uncaught_value = Some(thrown.clone());
             return Err(ExecutionError::Uncaught {
                 instruction,
                 message: self.describe_uncaught(&thrown, instruction),
@@ -13030,6 +13245,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.strictness = frame.strictness;
                 self.current_realm = frame.realm;
                 self.strict = frame.strict;
+                self.module_path = frame.module_path;
                 self.function = frame.function;
                 self.this_value = frame.this_value;
                 self.new_target = frame.new_target;
@@ -13050,6 +13266,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             self.strictness = frame.strictness;
             self.current_realm = frame.realm;
             self.strict = frame.strict;
+            self.module_path = frame.module_path;
             self.function = frame.function;
             self.this_value = frame.this_value;
             self.new_target = frame.new_target;
@@ -13165,6 +13382,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             program: std::mem::replace(&mut self.program, Rc::clone(&closure.program)),
             strictness: std::mem::replace(&mut self.strictness, Rc::clone(&closure.strictness)),
             strict: std::mem::replace(&mut self.strict, closure.is_strict()),
+            module_path: std::mem::replace(&mut self.module_path, closure.module_path.clone()),
             function: self.function.take(),
             this_value: std::mem::replace(&mut self.this_value, this_value.clone()),
             new_target: std::mem::replace(&mut self.new_target, new_target.clone()),
@@ -13282,7 +13500,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         match return_method {
             None => {
                 generator.borrow_mut().delegate = None;
-                self.resume_generator_with(generator, Resume::Return(sent), instruction)
+                self.resume_generator_return(generator, sent, instruction)
             }
             Some(return_fn) => {
                 let call_res = self.call_catching(&return_fn, delegate, vec![sent], instruction)?;
@@ -13491,6 +13709,26 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.resume_generator_with(generator, Resume::Send(sent), instruction)
     }
 
+    /// Resume a generator for a public `.return()` call. Return completion is represented by an
+    /// internal signal while `finally` blocks unwind, so it must pass through the host boundary
+    /// catcher just like the callback that drives it. Calling `resume_generator_with` directly
+    /// lets that marker escape as the observable iteration value when a delegated iterator has a
+    /// `finally`.
+    fn resume_generator_return(
+        &mut self,
+        generator: &Rc<RefCell<GeneratorState>>,
+        sent: Value,
+        instruction: usize,
+    ) -> Result<(Value, bool), ExecutionError> {
+        match self.resume_catching(generator, Resume::Return(sent), instruction)? {
+            Ok(result) => Ok(result),
+            Err(thrown) => {
+                self.caught = Some(thrown);
+                Err(ExecutionError::ThrownAcrossNative)
+            }
+        }
+    }
+
     /// Resume a generator, optionally by throwing the `.return()` signal into it.
     fn resume_generator_with(
         &mut self,
@@ -13569,6 +13807,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             program: std::mem::replace(&mut self.program, Rc::clone(&closure.program)),
             strictness: std::mem::replace(&mut self.strictness, Rc::clone(&closure.strictness)),
             strict: std::mem::replace(&mut self.strict, closure.is_strict()),
+            module_path: std::mem::replace(&mut self.module_path, closure.module_path.clone()),
             function: self.function.take(),
             this_value: std::mem::replace(&mut self.this_value, this_value),
             new_target: std::mem::replace(&mut self.new_target, new_target),
@@ -13909,6 +14148,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.strictness = frame.strictness;
         self.current_realm = frame.realm;
         self.strict = frame.strict;
+        self.module_path = frame.module_path;
         self.function = frame.function;
         self.this_value = frame.this_value;
         self.new_target = frame.new_target;
@@ -14405,7 +14645,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         if matches!(
             native,
-            Native::NodeFsReadFile
+            Native::ProcessStartRaw
+                | Native::ProcessCancelRaw
+                | Native::NodeFsReadFile
                 | Native::NodeFsWriteFile
                 | Native::NodeFsAppendFile
                 | Native::NodeFsStat
@@ -14681,6 +14923,29 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 });
             }
             Native::NodeModuleCreateRequire => {
+                if let Some(loader) = self.commonjs_loader {
+                    let importer = if let Some(value) = arguments.first() {
+                        match value {
+                            Value::String(value) => value.clone(),
+                            _ => match self.read_property(value, "href", instruction)? {
+                                Value::String(value) => value,
+                                _ => {
+                                    return Err(ExecutionError::TypeErrorMessage {
+                                        message:
+                                            "The argument must be a string or a file URL object"
+                                                .to_owned(),
+                                    });
+                                }
+                            },
+                        }
+                    } else {
+                        self.module_path
+                            .as_deref()
+                            .map(str::to_owned)
+                            .unwrap_or_default()
+                    };
+                    return unsafe { (&mut *loader).create_require(&importer, instruction) };
+                }
                 let require = CommonJsRequire::new([]);
                 return Ok(Value::CommonJsRequire(Rc::new(require)));
             }
@@ -15249,6 +15514,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         match native {
             Native::ProcessGetBuiltinModule => match arguments.first() {
+                Some(Value::String(name)) if kiln_builtins::is_ts_builtin_specifier(name) => {
+                    if let Some(loader) = self.commonjs_loader {
+                        return unsafe { (&mut *loader).get_builtin(name, instruction) }
+                            .map(|value| value.unwrap_or(Value::Undefined));
+                    }
+                    Err(ExecutionError::TypeErrorMessage {
+                        message: format!(
+                            "node:{name} is graph-materialized; process.getBuiltinModule requires a graph loader"
+                        ),
+                    })
+                }
                 Some(Value::String(name)) => {
                     Ok(node_builtin_namespace(name).unwrap_or(Value::Undefined))
                 }
@@ -21260,9 +21536,52 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .first()
                     .map(Value::to_display_string)
                     .unwrap_or_default();
+                if let Some(loader) = self.commonjs_loader
+                    && require.importer().is_some()
+                {
+                    return match unsafe { (&mut *loader).load(require, &specifier, instruction) } {
+                        Ok(value) => Ok(value),
+                        Err(ExecutionError::ModuleNotFound { message, .. }) => {
+                            self.throw_error(ErrorKind::Error, message, instruction)?;
+                            Ok(Value::Undefined)
+                        }
+                        Err(ExecutionError::Uncaught { .. }) => {
+                            let value = unsafe { (&mut *loader).take_thrown_value() };
+                            if let Some(value) = value {
+                                self.caught = Some(value);
+                                Err(ExecutionError::ThrownAcrossNative)
+                            } else {
+                                Err(ExecutionError::Host {
+                                    instruction,
+                                    message: "CommonJS target failed without a thrown value"
+                                        .to_owned(),
+                                })
+                            }
+                        }
+                        Err(error) => Err(error),
+                    };
+                }
                 if require.target_cell(&specifier).is_some() {
                     if let Some(loader) = self.commonjs_loader {
-                        return unsafe { (&mut *loader).load(require, &specifier, instruction) };
+                        return match unsafe {
+                            (&mut *loader).load(require, &specifier, instruction)
+                        } {
+                            Ok(value) => Ok(value),
+                            Err(ExecutionError::Uncaught { .. }) => {
+                                let value = unsafe { (&mut *loader).take_thrown_value() };
+                                if let Some(value) = value {
+                                    self.caught = Some(value);
+                                    Err(ExecutionError::ThrownAcrossNative)
+                                } else {
+                                    Err(ExecutionError::Host {
+                                        instruction,
+                                        message: "CommonJS target failed without a thrown value"
+                                            .to_owned(),
+                                    })
+                                }
+                            }
+                            Err(error) => Err(error),
+                        };
                     }
                     if let Some(target) = require.get(&specifier) {
                         return Ok(target);
@@ -21995,6 +22314,39 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Ok((value, true)) => {
                 let result = iteration_result(value, true);
                 self.resolve_promise(step, result);
+            }
+            Ok((iterator_result, false))
+                if generator.borrow().delegate.is_some() && !generator.borrow().awaiting =>
+            {
+                // `yield*` suspends on the delegate's iterator-result object. The compiler
+                // already consumed and validated `done` before YieldStar; an async generator
+                // must expose only that result's `value`, never the result object itself.
+                let value = match self.eval_catching(|this| {
+                    this.read_property(&iterator_result, "value", instruction)
+                })? {
+                    Ok(value) => value,
+                    Err(thrown) => {
+                        // A value getter failure is an abrupt completion of yield*. Resume the
+                        // suspended body so its catch/finally paths observe the throw exactly as
+                        // they do for a delegate's next() failure.
+                        return self.drive_async_generator(generator, step, Resume::Throw(thrown));
+                    }
+                };
+                let target = match value {
+                    Value::Promise(inner) => inner,
+                    other => {
+                        let pending = PromiseState::pending();
+                        self.resolve_promise(&pending, other);
+                        pending
+                    }
+                };
+                self.react(
+                    &target,
+                    Value::Undefined,
+                    Value::Undefined,
+                    Sink::AsyncGeneratorYield(Rc::clone(generator), Rc::clone(step)),
+                    false,
+                );
             }
             Ok((value, false)) if !generator.borrow().awaiting => {
                 // Awaited before it is yielded, which is the specification's order and is
@@ -22942,8 +23294,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 );
                 Ok(())
             }
-            Job::Import(promise, specifier) => {
-                match self.import_module(&specifier)? {
+            Job::Import(promise, specifier, options, module_path) => {
+                let previous = std::mem::replace(&mut self.module_path, module_path);
+                let imported = self.import_module(&specifier, options.as_ref());
+                self.module_path = previous;
+                match imported? {
                     Ok(namespace) => self.settle(&promise, &Settled::Fulfilled(namespace)),
                     Err(thrown) => self.settle(&promise, &Settled::Rejected(thrown)),
                 }
@@ -25078,7 +25433,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         evaluated: RealmId,
         caller: RealmId,
     ) -> Result<Settled, ExecutionError> {
-        let imported = self.entering(evaluated, |vm| vm.import_module(specifier));
+        let imported = self.entering(evaluated, |vm| vm.import_module(specifier, None));
         let namespace = match imported {
             Ok(Ok(namespace)) => namespace,
             // Both the module's own failure and any error `entering` turned into a thrown value.
@@ -25289,6 +25644,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         globals.set_non_enumerable("Map", Value::Native(Native::MapConstructor, realm));
         globals.set_non_enumerable("performance", Value::Native(Native::Performance, realm));
         globals.set_non_enumerable("Reflect", Value::Native(Native::Reflect, realm));
+        globals.set_non_enumerable(
+            "__kilnHostProcessStart",
+            Value::Native(Native::ProcessStartRaw, realm),
+        );
+        globals.set_non_enumerable(
+            "__kilnHostProcessCancel",
+            Value::Native(Native::ProcessCancelRaw, realm),
+        );
+        globals.set_non_enumerable(
+            "__kilnHostModuleCreateRequire",
+            Value::Native(Native::NodeModuleCreateRequire, realm),
+        );
         globals.set_non_enumerable(
             "Intl",
             Value::Native(Native::Intl(intl::Op::Namespace), realm),
@@ -25603,6 +25970,33 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             "getBuiltinModule",
             Value::Native(Native::ProcessGetBuiltinModule, RealmId::PRIMARY),
         );
+        // TypeScript Node builtins use this private capability table while they are
+        // materializing themselves.  It is deliberately separate from the public
+        // getBuiltinModule projection: asking for the builtin currently being evaluated
+        // must not fall back to a second legacy namespace with different identity.
+        let native_modules = ordinary_object([
+            (
+                "async_hooks".to_owned(),
+                Value::Native(Native::NodeAsyncHooks, RealmId::PRIMARY),
+            ),
+            (
+                "fs".to_owned(),
+                Value::Native(Native::NodeFs, RealmId::PRIMARY),
+            ),
+            (
+                "fs_promises".to_owned(),
+                Value::Native(Native::NodeFsPromises, RealmId::PRIMARY),
+            ),
+            (
+                "http".to_owned(),
+                Value::Native(Native::NodeHttp, RealmId::PRIMARY),
+            ),
+            (
+                "net".to_owned(),
+                Value::Native(Native::NodeNet, RealmId::PRIMARY),
+            ),
+        ]);
+        process.set_non_enumerable("__kilnNativeModules", native_modules);
         let value = Value::Object(Rc::new(RefCell::new(process)));
         self.process_object = Some(value.clone());
         value
@@ -27385,6 +27779,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             },
             program: Rc::clone(&self.program),
             strictness: Rc::clone(&self.strictness),
+            module_path: self.module_path.clone(),
             captured_new_target: proto.arrow.then(|| self.new_target.clone()),
             captured_arguments,
             prototype: RefCell::new(None),
@@ -30595,11 +30990,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         } else {
                             // A started generator has to unwind: every `finally` between the
                             // suspension point and the top runs before it is done.
-                            self.resume_generator_with(
-                                &generator,
-                                Resume::Return(sent),
-                                instruction,
-                            )?
+                            self.resume_generator_return(&generator, sent, instruction)?
                         }
                     } else {
                         // Never entered, so there is nothing to unwind.
@@ -32728,6 +33119,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             program: std::mem::replace(&mut self.program, Rc::clone(&closure.program)),
             strictness: std::mem::replace(&mut self.strictness, Rc::clone(&closure.strictness)),
             strict: std::mem::replace(&mut self.strict, closure.is_strict()),
+            module_path: std::mem::replace(&mut self.module_path, closure.module_path.clone()),
             function: self.function.take(),
             this_value: std::mem::replace(&mut self.this_value, entering),
             new_target: std::mem::replace(&mut self.new_target, target),
@@ -32860,6 +33252,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             program: std::mem::replace(&mut self.program, Rc::new(program)),
             strictness: std::mem::replace(&mut self.strictness, Rc::new(program_strictness)),
             strict: std::mem::replace(&mut self.strict, program_is_strict),
+            module_path: self.module_path.clone(),
             function: self.function.take(),
             this_value: std::mem::replace(&mut self.this_value, this_value),
             new_target: std::mem::replace(&mut self.new_target, frame_new_target),
@@ -32959,19 +33352,119 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
     }
 
+    /// Read dynamic import attributes through the VM's ordinary property machinery. This keeps
+    /// getters, proxies and inherited properties observable exactly once before the typed loader
+    /// service is called.
+    fn normalize_import_attributes(
+        &mut self,
+        options: &Value,
+        instruction: usize,
+    ) -> Result<Result<Option<ImportAttributes>, Value>, ExecutionError> {
+        let installed = self.handlers.len();
+        self.handlers.push(Handler {
+            target: HOST_HANDLER,
+            frame_depth: self.frames.len(),
+            stack_height: self.stack.len(),
+            native_depth: self.native_depth,
+        });
+        let outcome = if !is_an_object(options) {
+            Ok(Err(self.construct_error(
+                ErrorKind::Type,
+                &[Value::String("import options must be an object".into())],
+            )))
+        } else {
+            self.read_property(options, "with", instruction)
+                .and_then(|with| {
+                    if matches!(with, Value::Undefined) {
+                        return Ok(Ok(None));
+                    }
+                    if !is_an_object(&with) {
+                        return Ok(Err(self.construct_error(
+                            ErrorKind::Type,
+                            &[Value::String("import attributes must be an object".into())],
+                        )));
+                    }
+                    let mut type_value = None;
+                    let mut entries = Vec::new();
+                    for key in self.own_keys(&with, instruction)? {
+                        let Some((_, attributes)) =
+                            self.own_state(&with, &Value::String(key.clone()), instruction)?
+                        else {
+                            continue;
+                        };
+                        if !attributes.enumerable {
+                            continue;
+                        }
+                        let value = self.read_property(&with, &key, instruction)?;
+                        entries.push((key, value));
+                    }
+                    for (key, value) in entries {
+                        if key == "type" {
+                            type_value = Some(value);
+                        } else {
+                            return Ok(Err(self.construct_error(
+                                ErrorKind::Type,
+                                &[Value::String("unsupported import attribute".into())],
+                            )));
+                        }
+                    }
+                    let Some(value) = type_value else {
+                        return Ok(Ok(Some(ImportAttributes { type_: None })));
+                    };
+                    match value {
+                        Value::String(value) if value == "file" => {
+                            Ok(Ok(Some(ImportAttributes { type_: Some(value) })))
+                        }
+                        Value::String(_) => Ok(Err(self.construct_error(
+                            ErrorKind::Type,
+                            &[Value::String("unsupported import attribute `type`".into())],
+                        ))),
+                        _ => Ok(Err(self.construct_error(
+                            ErrorKind::Type,
+                            &[Value::String(
+                                "import attribute values must be strings".into(),
+                            )],
+                        ))),
+                    }
+                })
+        };
+        self.handlers.truncate(installed);
+        match outcome {
+            Ok(Ok(attributes)) => Ok(Ok(attributes)),
+            Ok(Err(error)) => Ok(Err(error)),
+            Err(ExecutionError::CaughtByHost) => {
+                Ok(Err(self.caught.take().unwrap_or(Value::Undefined)))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Resolve, evaluate and answer one `import(specifier)`.
     ///
     /// `Ok(Err(value))` is the rejection the promise gets: a specifier that names nothing, a
     /// module that is not a module, a host that cannot load the module, or a module whose body threw.
-    fn import_module(&mut self, specifier: &str) -> Result<Result<Value, Value>, ExecutionError> {
-        let Some(load) = self.module_loader else {
-            let error = self.construct_error(
+    fn import_module(
+        &mut self,
+        specifier: &str,
+        options: Option<&ImportAttributes>,
+    ) -> Result<Result<Value, Value>, ExecutionError> {
+        let Some(loader) = self.module_loader.as_ref() else {
+            let message = if options.is_some() {
+                "no option-aware module loader is installed"
+            } else {
+                "no module loader is installed"
+            };
+            return Ok(Err(self.construct_error(
                 ErrorKind::Type,
-                &[Value::String("no module loader is installed".to_owned())],
-            );
-            return Ok(Err(error));
+                &[Value::String(message.to_owned())],
+            )));
         };
-        let plan = match load(specifier) {
+        let plan_result = loader.load(ModuleLoadRequest {
+            importer: self.module_path.as_deref().map(str::to_owned),
+            specifier: specifier.to_owned(),
+            attributes: options.cloned(),
+        });
+        let plan = match plan_result {
             Ok(plan) => plan,
             Err(ModuleLoadError::Unsupported(message)) => {
                 let error = self.construct_error(ErrorKind::Type, &[Value::String(message)]);
@@ -32988,15 +33481,25 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
 
         let realm = self.current_realm;
+        if let Some(DynamicModuleState::Failed(failure)) =
+            self.dynamic_modules.get(&(realm, plan.key.clone()))
+        {
+            return Ok(Err(failure.clone()));
+        }
         if let Some(namespace) = self.dynamic_namespaces.get(&(realm, plan.key.clone())) {
             return Ok(Ok(namespace.clone()));
         }
 
         let mut evaluated: Vec<Rc<Vec<Value>>> = Vec::with_capacity(plan.modules.len());
         for planned in &plan.modules {
-            if let Some(cached) = self.dynamic_modules.get(&(realm, planned.key.clone())) {
-                evaluated.push(Rc::clone(cached));
-                continue;
+            if let Some(state) = self.dynamic_modules.get(&(realm, planned.key.clone())) {
+                match state {
+                    DynamicModuleState::Evaluated(cached) => {
+                        evaluated.push(Rc::clone(cached));
+                        continue;
+                    }
+                    DynamicModuleState::Failed(failure) => return Ok(Err(failure.clone())),
+                }
             }
             let mut locals = vec![Value::Undefined; planned.program.local_count as usize];
             for (slot, binding) in &planned.bindings {
@@ -33014,7 +33517,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     other => Value::Cell(Rc::new(RefCell::new(other))),
                 };
             }
-            match self.drive_module(Rc::clone(&planned.program), locals)? {
+            let module_path = Rc::from(planned.key.as_str());
+            match self.drive_module(Rc::clone(&planned.program), locals, Some(module_path))? {
                 Ok(returned) => {
                     let Value::Array(exported) = returned else {
                         let error = self.construct_error(
@@ -33024,18 +33528,26 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                                 planned.key
                             ))],
                         );
+                        self.dynamic_modules.insert(
+                            (realm, planned.key.clone()),
+                            DynamicModuleState::Failed(error.clone()),
+                        );
                         return Ok(Err(error));
                     };
                     let exported = Rc::new(exported.items.borrow().clone());
-                    self.dynamic_modules
-                        .insert((realm, planned.key.clone()), Rc::clone(&exported));
+                    self.dynamic_modules.insert(
+                        (realm, planned.key.clone()),
+                        DynamicModuleState::Evaluated(Rc::clone(&exported)),
+                    );
                     evaluated.push(exported);
                 }
-                // A module that throws while evaluating rejects the import. It is deliberately
-                // not cached: the specification remembers the failure and hands the same error
-                // to a later import of the same module, and re-running the body instead is a
-                // gap rather than a wrong answer.
-                Err(thrown) => return Ok(Err(thrown)),
+                Err(thrown) => {
+                    self.dynamic_modules.insert(
+                        (realm, planned.key.clone()),
+                        DynamicModuleState::Failed(thrown.clone()),
+                    );
+                    return Ok(Err(thrown));
+                }
             }
         }
 
@@ -33090,6 +33602,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         &mut self,
         program: Rc<Program>,
         locals: Vec<Value>,
+        module_path: Option<Rc<str>>,
     ) -> Result<Result<Value, Value>, ExecutionError> {
         if self.native_depth >= self.limits.max_native_depth {
             return Err(ExecutionError::CallDepthExceeded {
@@ -33116,6 +33629,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             program: std::mem::replace(&mut self.program, program),
             strictness: std::mem::replace(&mut self.strictness, strictness),
             strict: std::mem::replace(&mut self.strict, true),
+            module_path: self.module_path.clone(),
             function: self.function.take(),
             // A module body is always strict, so its `this` is `undefined` rather than the
             // global object.
@@ -33130,6 +33644,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             instruction: self.instruction,
             stack_base: self.stack.len(),
         });
+        self.module_path = module_path;
         self.global_base = self.frames.len();
         self.instruction = 0;
         let outcome = self.run_frames(depth).map(|result| result.value);
@@ -37044,6 +37559,8 @@ fn call_native(
         | Native::ProcessHrtimeBigInt
         | Native::ProcessCwd
         | Native::ProcessKill
+        | Native::ProcessStartRaw
+        | Native::ProcessCancelRaw
         | Native::ProcessStdinSetRawMode
         | Native::UrlConstructor
         | Native::UrlSearchParamsGet
@@ -37164,6 +37681,30 @@ fn node_host_value(value: AsyncHostValue) -> Result<Value, ExecutionError> {
                     accepted.resource.id.get()
                 ),
             });
+        }
+        AsyncHostValue::ProcessOutput(output) => {
+            let mut object = ObjectData::default();
+            object.set(
+                "stdout",
+                node_host_value(AsyncHostValue::Bytes(output.stdout))?,
+            );
+            object.set(
+                "stderr",
+                node_host_value(AsyncHostValue::Bytes(output.stderr))?,
+            );
+            object.set(
+                "exitCode",
+                output
+                    .exit_code
+                    .map_or(Value::Null, |code| Value::Number(code as f64)),
+            );
+            object.set(
+                "signal",
+                output
+                    .signal
+                    .map_or(Value::Null, |signal| Value::Number(signal as f64)),
+            );
+            Value::Object(Rc::new(RefCell::new(object)))
         }
         AsyncHostValue::ResourceState(state) => {
             return Err(ExecutionError::Host {
@@ -45319,6 +45860,9 @@ fn native_js_name(native: &Native) -> String {
         return name.to_owned();
     }
     match native {
+        Native::ProcessStartRaw => "__kilnHostProcessStart".to_owned(),
+        Native::ProcessCancelRaw => "__kilnHostProcessCancel".to_owned(),
+        Native::NodeModuleCreateRequire => "__kilnHostModuleCreateRequire".to_owned(),
         // A symbol-keyed method is named for the symbol in brackets, which is what the
         // specification's `SetFunctionName` does with a symbol key. Derivation would spell it
         // `functionHasInstance`, the name of a Rust variant rather than of anything a program

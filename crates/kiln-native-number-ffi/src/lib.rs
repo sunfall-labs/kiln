@@ -164,6 +164,10 @@ mod realm {
         pub value_kind: u32,
         pub bytes: *const u8,
         pub bytes_len: u64,
+        pub stderr: *const u8,
+        pub stderr_len: u64,
+        pub exit_code: i32,
+        pub signal: i32,
         pub value_u64: u64,
         pub resource: u64,
         pub resource_kind: u32,
@@ -215,6 +219,7 @@ mod realm {
     const OP_TCP_SHUTDOWN: u32 = 12;
     const OP_STDIN_READ: u32 = 13;
     const OP_MKDIR: u32 = 14;
+    const OP_PROCESS_RUN: u32 = 15;
 
     const VALUE_UNDEFINED: u32 = 0;
     const VALUE_BYTES: u32 = 1;
@@ -222,6 +227,7 @@ mod realm {
     const VALUE_RESOURCE: u32 = 3;
     const VALUE_RESOURCE_STATE: u32 = 4;
     const VALUE_ACCEPTED_STREAM: u32 = 5;
+    const VALUE_PROCESS_OUTPUT: u32 = 6;
 
     const RESOURCE_LISTENER: u32 = 1;
     const RESOURCE_STREAM: u32 = 2;
@@ -434,6 +440,9 @@ mod realm {
         status: i32,
         value_kind: u32,
         bytes: Vec<u8>,
+        stderr: Vec<u8>,
+        exit_code: i32,
+        signal: i32,
         value_u64: u64,
         resource: u64,
         resource_kind: u32,
@@ -456,6 +465,9 @@ mod realm {
                 status: 0,
                 value_kind,
                 bytes: Vec::new(),
+                stderr: Vec::new(),
+                exit_code: i32::MIN,
+                signal: i32::MIN,
                 value_u64: 0,
                 resource: 0,
                 resource_kind: 0,
@@ -495,6 +507,14 @@ mod realm {
                 Ok(AsyncHostValue::Bytes(bytes)) => {
                     let mut payload = Self::empty(request, sequence, VALUE_BYTES);
                     payload.bytes = bytes;
+                    payload
+                }
+                Ok(AsyncHostValue::ProcessOutput(output)) => {
+                    let mut payload = Self::empty(request, sequence, VALUE_PROCESS_OUTPUT);
+                    payload.bytes = output.stdout;
+                    payload.stderr = output.stderr;
+                    payload.exit_code = output.exit_code.unwrap_or(i32::MIN);
+                    payload.signal = output.signal.unwrap_or(i32::MIN);
                     payload
                 }
                 Ok(AsyncHostValue::FileStat(stat)) => {
@@ -557,6 +577,9 @@ mod realm {
                 status: 1,
                 value_kind: 0,
                 bytes: Vec::new(),
+                stderr: Vec::new(),
+                exit_code: i32::MIN,
+                signal: i32::MIN,
                 value_u64: 0,
                 resource: 0,
                 resource_kind: 0,
@@ -579,6 +602,7 @@ mod realm {
 
         fn view(&self) -> CompletionView {
             let (bytes, bytes_len) = Self::bytes_ptr_len(&self.bytes);
+            let (stderr, stderr_len) = Self::bytes_ptr_len(&self.stderr);
             let (address, address_len) = Self::bytes_ptr_len(&self.address);
             let (peer_address, peer_address_len) = Self::bytes_ptr_len(&self.peer_address);
             let (error_code, error_code_len) = Self::bytes_ptr_len(&self.error_code);
@@ -592,6 +616,10 @@ mod realm {
                 value_kind: self.value_kind,
                 bytes,
                 bytes_len,
+                stderr,
+                stderr_len,
+                exit_code: self.exit_code,
+                signal: self.signal,
                 value_u64: self.value_u64,
                 resource: self.resource,
                 resource_kind: self.resource_kind,
@@ -1171,6 +1199,19 @@ mod realm {
         let text = unsafe { borrowed_bytes(view.text, view.text_len) }?;
         // SAFETY: the caller keeps both framed spans live for this call.
         let bytes = unsafe { borrowed_bytes(view.bytes, view.bytes_len) }?;
+        if view.operation == OP_PROCESS_RUN {
+            let framed = kiln_runtime::decode_process_wire(bytes).ok()?;
+            return Some(AsyncHostOp::ProcessRun {
+                command: String::from_utf8(framed.command).ok()?,
+                args: framed
+                    .args
+                    .into_iter()
+                    .map(String::from_utf8)
+                    .collect::<Result<_, _>>()
+                    .ok()?,
+                stdin: framed.stdin,
+            });
+        }
         let text = std::str::from_utf8(text).ok()?.to_owned();
         Some(match view.operation {
             OP_READ_FILE => AsyncHostOp::ReadFile { path: text },
@@ -1399,7 +1440,13 @@ mod realm {
             kiln_runtime::yield_to_tasks().await;
             let delay =
                 introspect_park(realm, deadline.map(|deadline| deadline.saturating_sub(now)));
-            if kiln_runtime::wait_for_turn(signal, delay).await == kiln_runtime::DriveWake::Timer {
+            // A wall-clock timer wake can be the introspection poll rather than the realm
+            // deadline. The poll only brings us back around to observe signals; it must not
+            // consume the next language timer early. Virtual realms use Tokio's timer wake to
+            // advance their deterministic `RealmWork::now`, so they still consume it here.
+            if kiln_runtime::wait_for_turn(signal, delay).await == kiln_runtime::DriveWake::Timer
+                && matches!(realm.clock.get(), NativeClock::Virtual)
+            {
                 let timer = realm.work.borrow_mut().run_next_timer();
                 if let Some(WorkItem::Timer { work, .. }) = timer {
                     let (host, thrown) = realm.drive_context.get();
@@ -2289,6 +2336,7 @@ mod realm {
             if realm.entered.get() {
                 return INVALID_ARGUMENT;
             }
+            realm.runtime.borrow_mut().use_host_clock();
             realm.clock.set(NativeClock::wall());
             // The realm's clock jumps from the epoch to the present here, before any timer
             // measures from it.

@@ -47,6 +47,11 @@ QUICK=0
 [[ ${1:-} == --quick ]] && QUICK=1
 
 FAILURES=()
+GATE_LOG_ROOT="${GATE_LOG_DIR:-$PWD/target/gate-logs}"
+mkdir -p "$GATE_LOG_ROOT"
+GATE_LOG_DIR="$(mktemp -d "$GATE_LOG_ROOT/run.XXXXXXXX")"
+export GATE_LOG_DIR
+GATE_STEP_NUMBER=0
 # Every step runs even when an earlier one failed, and the failures are reported together at the
 # end: which *combination* broke is the useful signal, and stopping at the first hides it. `set -e`
 # is still on -- an `if` condition is exempt from it, which is what makes this safe rather than a
@@ -54,10 +59,28 @@ FAILURES=()
 step() {
 	local name="$1"
 	shift
+	local safe_name="${name//[^A-Za-z0-9_.-]/_}"
+	GATE_STEP_NUMBER=$((GATE_STEP_NUMBER + 1))
+	local logfile="$GATE_LOG_DIR/$(printf '%02d-%s.log' "$GATE_STEP_NUMBER" "$safe_name")"
+	local temporary="$logfile.tmp"
+	export GATE_STEP_LOG="$logfile"
 	printf '\n=== %s\n' "$name"
-	if "$@"; then
-		return 0
+	local status=0
+	"$@" >"$temporary" 2>&1 || status=$?
+	if [[ -s $logfile ]]; then
+		# The command wrote the raw stream directly to the final log.  Preserve the filtered
+		# aggregate too; the gate's crate total and failure names are part of the evidence.
+		{
+			printf '\n--- gate summary ---\n'
+			cat "$temporary"
+		} >>"$logfile"
+		rm -f "$temporary"
+	else
+		mv -f "$temporary" "$logfile"
 	fi
+	echo "full log: $logfile"
+	tail -20 "$logfile" || true
+	if [[ $status -eq 0 ]]; then return 0; fi
 	FAILURES+=("$name")
 	return 0
 }
@@ -65,19 +88,20 @@ step() {
 expect_clean() {
 	local name="$1" pattern="$2"
 	shift 2
-	local output=""
-	# `|| true` because a non-zero exit is one of the things being reported, not a reason to
-	# abandon the gate: the summary line below says what actually happened.
-	output="$("$@" 2>&1)" || true
-	printf '%s\n' "$output" | tail -20
-	grep -qE "$pattern" <<<"$output"
+	local status=0
+	"$@" >"$GATE_STEP_LOG" 2>&1 || status=$?
+	grep -qE "$pattern" "$GATE_STEP_LOG" && [[ $status -eq 0 ]]
 }
 
 printf '=== build\n'
-kiln_cargo build --release --locked -p kiln-cli >/dev/null || {
+BUILD_LOG="$GATE_LOG_DIR/00-build.log"
+kiln_cargo build --release --locked -p kiln-cli >"$BUILD_LOG" 2>&1 || {
+	echo "full log: $BUILD_LOG" >&2
+	tail -20 "$BUILD_LOG" >&2 || true
 	echo "gate: release build failed" >&2
 	exit 1
 }
+echo "full log: $BUILD_LOG"
 KILN_BIN="$(kiln_repo_root)/target/release/kiln"
 export KILN_BIN
 KILN_TEST262_KILN="$KILN_BIN"
@@ -94,7 +118,9 @@ export KILN_BENCH_KILN
 # suite never ran. Asserting on the summary line rather than the exit code is what catches it.
 # shellcheck disable=SC2016
 step "crate tests" "$BASH" -c '
-	output="$(mbx test --workspace -- --test-threads=4 2>&1)"
+	test_status=0
+	mbx test --workspace -- --test-threads=4 >"$GATE_STEP_LOG" 2>&1 || test_status=$?
+	output="$(cat "$GATE_STEP_LOG")"
 	# The failing *names* as well as the summary: a count says the suite is red and nothing
 	# about which part, and this step is the one that reports breakage in any other crate.
 	# The failure *bodies*, not just their names: a name says which test and nothing about
@@ -114,7 +140,7 @@ step "crate tests" "$BASH" -c '
 		echo "crate tests: only $total_passed tests passed, below the floor of ${KILN_GATE_MIN_PASSED:-500}: the suite did not run" >&2
 		exit 1
 	fi
-	! grep -qE "^error|FAILED" <<<"$output"
+	[[ $test_status -eq 0 ]] && ! grep -qE "^error|FAILED" <<<"$output"
 '
 
 step "native parity" expect_clean "native" "0 diverged" "$BASH" ./scripts/native.sh
@@ -125,9 +151,11 @@ if [[ $QUICK -eq 0 ]]; then
 	step "facts baseline" ./scripts/facts-baseline.sh --check
 	for corpus in node server regress; do
 		step "conformance/$corpus" "$BASH" -c "
-			out=\"\$(\"\$KILN_BIN\" --one-shot test conformance/$corpus --node 2>&1)\"
+			status=0
+			\"\$KILN_BIN\" --one-shot test conformance/$corpus --node >\"\$GATE_STEP_LOG\" 2>&1 || status=\$?
+			out=\"\$(cat \"\$GATE_STEP_LOG\")\"
 			printf '%s\n' \"\$out\" | grep -E '^  (pass|fail) '
-			[[ \$(grep -cE '^  fail +[1-9]' <<<\"\$out\") -eq 0 ]]
+			[[ \$status -eq 0 && \$(grep -cE '^  fail +[1-9]' <<<\"\$out\") -eq 0 ]]
 		"
 	done
 	step "test262 baseline" ./scripts/test262-baseline.sh

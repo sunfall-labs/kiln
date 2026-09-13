@@ -306,6 +306,12 @@ static int kiln_c99_process_object(kiln_value *out) {
     if (status == KILN_C99_OK)
         status = kiln_c99_define_method(*process, "kill", 4,
                                         kiln_c99_method(KILN_C99_METHOD_PROCESS_KILL));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, *process, "__kilnHostProcessStart", 22,
+                              kiln_c99_method(KILN_C99_METHOD_PROCESS_START_RAW), 0, NULL);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, *process, "__kilnHostProcessCancel", 23,
+                              kiln_c99_method(KILN_C99_METHOD_PROCESS_CANCEL_RAW), 0, NULL);
     if (status != KILN_C99_OK) return status;
     *out = *process;
     return KILN_C99_OK;
@@ -402,6 +408,9 @@ static int kiln_c99_global_object(kiln_value *out) {
                      {"encodeURIComponent", KILN_C99_METHOD_ENCODE_URI_COMPONENT},
                      {"decodeURI", KILN_C99_METHOD_DECODE_URI},
                      {"decodeURIComponent", KILN_C99_METHOD_DECODE_URI_COMPONENT},
+                     {"__kilnHostProcessStart", KILN_C99_METHOD_PROCESS_START_RAW},
+                     {"__kilnHostProcessCancel", KILN_C99_METHOD_PROCESS_CANCEL_RAW},
+                     {"__kilnHostModuleCreateRequire", KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE},
                      {"queueMicrotask", KILN_C99_METHOD_QUEUE_MICROTASK},
                      {"setTimeout", KILN_C99_METHOD_SET_TIMEOUT},
                      {"setInterval", KILN_C99_METHOD_SET_INTERVAL},

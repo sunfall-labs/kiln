@@ -54,6 +54,9 @@ pub enum GraphOp {
     },
     /// A name the compiler resolved to something the runtime supplies.
     LoadBuiltin(kiln_ir::Builtin),
+    /// The value supplied by a generator caller when a suspension resumes. It has no compile-time
+    /// value or type; the C emitter restores it from `frame->sent` at the synthetic resume edge.
+    ResumeValue,
     /// The value a handler block starts with: what was thrown into it. Only ever the first
     /// operation of a handler block.
     CaughtValue,
@@ -181,6 +184,7 @@ impl GraphOp {
             | Self::LoadCell(_)
             | Self::LoadUpvalue(_)
             | Self::LoadBuiltin(_)
+            | Self::ResumeValue
             | Self::CaughtValue
             | Self::MakeCell(_)
             | Self::LoadGlobal(_)
@@ -230,6 +234,7 @@ impl GraphOp {
             | Self::LoadCell(_)
             | Self::LoadUpvalue(_)
             | Self::LoadBuiltin(_)
+            | Self::ResumeValue
             | Self::CaughtValue
             | Self::MakeCell(_)
             | Self::LoadGlobal(_)
@@ -298,6 +303,7 @@ impl GraphOp {
             Self::Const { .. }
             | Self::LoadLocal(_)
             | Self::LoadBuiltin(_)
+            | Self::ResumeValue
             | Self::LoadThis
             | Self::LoadNewTarget
             | Self::Phi { .. } => Effect::Pure,
@@ -1383,6 +1389,7 @@ pub fn bridge_effect(instruction: &Instruction) -> Option<(usize, u8)> {
         | Instruction::DeleteProperty(_)
         | Instruction::DeletePropertyStrict { .. }
         | Instruction::DynamicImport => (1, 1),
+        Instruction::DynamicImportWithOptions => (2, 1),
         Instruction::SuperCall { argc } => (usize::from(*argc) + 1, 1),
         Instruction::CallComputed { argc } => (usize::from(*argc) + 2, 1),
         Instruction::ToPropertyKey => (2, 2),
@@ -1614,15 +1621,19 @@ pub fn build_function_graph(
                 succs.push(pc_to_containing_block(*target as usize));
                 succs.extend(next);
             }
-            // A suspend is not an edge: the body returns, and a later call re-enters at the
-            // resume target through the dispatch switch.
-            Some(
-                Instruction::Return
-                | Instruction::Throw
-                | Instruction::Yield
-                | Instruction::Await
-                | Instruction::YieldStar(_),
-            ) => {}
+            // Suspension edges are synthetic CFG edges. The body returns to its caller, but a
+            // later generator call re-enters at the resume target through the dispatch switch.
+            // Keeping those edges in the graph is essential: resume/delegate targets still have
+            // real SSA joins (and therefore need one phi input for this activation) even though
+            // the edge is implemented by the frame rather than a C goto.
+            Some(Instruction::Return | Instruction::Throw) => {}
+            Some(Instruction::Yield | Instruction::Await) => {
+                succs.push(pc_to_containing_block(end));
+            }
+            Some(Instruction::YieldStar(target)) => {
+                succs.push(pc_to_containing_block(end));
+                succs.push(pc_to_containing_block(*target as usize));
+            }
             _ => succs.extend(next),
         }
         // A protected block can leave through its handler from any throwing operation.
@@ -1671,9 +1682,13 @@ pub fn build_function_graph(
                     resume_depths.insert(pc_to_containing_block(pc + 1), height);
                 }
                 Instruction::YieldStar(target) => {
-                    resume_depths.insert(pc_to_containing_block(pc + 1), height - 1);
-                    resume_depths.insert(pc_to_containing_block(*target as usize), height - 1);
                     height = after(inst, height, pc);
+                    // YieldStar consumes iterator + yielded value and resumes with one sent
+                    // value, so the post-instruction height is exactly the spilled depth plus
+                    // the synthetic resume slot. Do not subtract again: that dropped the final
+                    // phi input for delegates with a value already below the pair.
+                    resume_depths.insert(pc_to_containing_block(pc + 1), height);
+                    resume_depths.insert(pc_to_containing_block(*target as usize), height);
                     height_at.entry(*target as usize).or_insert(height);
                 }
                 other => height = after(other, height, pc),
@@ -1705,21 +1720,24 @@ pub fn build_function_graph(
             .enumerate()
             .map(|(slot, &v)| (slot as u32, v))
             .collect();
-        let stack: Option<Vec<ValueId>> = resume_depth.map(|depth| {
-            let phis: Vec<ValueId> = (0..depth).map(|_| graph.alloc_value()).collect();
-            for &phi in &phis {
-                merges.inputs.insert(phi, Vec::new());
-            }
-            phis
-        });
         block_entry_frames.insert(
             block_id,
             AbstractFrame {
-                stack: stack.clone().unwrap_or_default(),
+                stack: Vec::new(),
                 locals: frame_locals,
             },
         );
-        merges.phis.insert(block_id, PhiSet { locals, stack });
+        merges.phis.insert(
+            block_id,
+            PhiSet {
+                locals,
+                // Stack phis are allocated from the first actual incoming frame. The bytecode
+                // height walk identifies suspension targets, but cannot know the concrete stack
+                // retained by a path after nested control flow. Deferring allocation prevents a
+                // speculative extra phi from becoming an invalid zero-input join.
+                stack: None,
+            },
+        );
     }
 
     let mut handler_caught: HashMap<BlockId, ValueId> = HashMap::new();
@@ -1784,7 +1802,7 @@ pub fn build_function_graph(
             }
         }
         if let Some(set) = merges.phis.get(&block_id) {
-            for &phi in set.locals.iter().chain(set.stack.iter().flatten()) {
+            for &phi in &set.locals {
                 operations.push((phi, GraphOp::Phi { inputs: Vec::new() }));
             }
         }
@@ -2285,6 +2303,13 @@ pub fn build_function_graph(
                     let value = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
                     let spilled = frame.stack.clone();
                     let resume_block = pc_to_containing_block(pc + 1);
+                    // The value sent by the next generator call is not available in this
+                    // activation. Model it as a first-class unknown SSA value; the emitter
+                    // restores the actual frame->sent value at the resume label.
+                    let mut resumed = frame.clone();
+                    let resume_value = graph.alloc_value();
+                    operations.push((resume_value, GraphOp::ResumeValue));
+                    resumed.stack.push(resume_value);
                     terminator = Terminator::Suspend {
                         value,
                         resume: resume_block,
@@ -2293,6 +2318,16 @@ pub fn build_function_graph(
                         awaiting: matches!(inst, Instruction::Await),
                         delegate: None,
                     };
+                    successors.push(resume_block);
+                    propagate_frame(
+                        &mut block_entry_frames,
+                        &mut merges,
+                        block_id,
+                        resume_block,
+                        &resumed,
+                        &mut graph,
+                        &mut operations,
+                    );
                 }
                 Instruction::YieldStar(target) => {
                     let value = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
@@ -2300,6 +2335,12 @@ pub fn build_function_graph(
                     let spilled = frame.stack.clone();
                     let resume_block = pc_to_containing_block(pc + 1);
                     let exit_block = pc_to_containing_block(*target as usize);
+                    // Both delegate suspension and delegate completion re-enter through the
+                    // frame's sent slot. The value is unknown until that synthetic edge runs.
+                    let mut resumed = frame.clone();
+                    let resume_value = graph.alloc_value();
+                    operations.push((resume_value, GraphOp::ResumeValue));
+                    resumed.stack.push(resume_value);
                     terminator = Terminator::Suspend {
                         value,
                         resume: resume_block,
@@ -2308,6 +2349,28 @@ pub fn build_function_graph(
                         awaiting: false,
                         delegate: Some((iterator, exit_block, *target)),
                     };
+                    successors.push(resume_block);
+                    if exit_block != resume_block {
+                        successors.push(exit_block);
+                    }
+                    propagate_frame(
+                        &mut block_entry_frames,
+                        &mut merges,
+                        block_id,
+                        resume_block,
+                        &resumed,
+                        &mut graph,
+                        &mut operations,
+                    );
+                    propagate_frame(
+                        &mut block_entry_frames,
+                        &mut merges,
+                        block_id,
+                        exit_block,
+                        &resumed,
+                        &mut graph,
+                        &mut operations,
+                    );
                 }
                 Instruction::PushHandler(target) => {
                     // The handler starts with the operand stack as it is here, plus the thrown
@@ -2397,6 +2460,31 @@ pub fn build_function_graph(
             successors,
             exception_handler: block_handlers[b_idx],
         });
+    }
+
+    // Stack phis are allocated lazily from an actual incoming frame. Insert them now so this
+    // remains true even for a back edge whose target block was emitted before that edge was
+    // walked.
+    for block in &mut basic_blocks {
+        let Some(set) = merges.phis.get(&block.id) else {
+            continue;
+        };
+        let existing: HashSet<ValueId> = block
+            .operations
+            .iter()
+            .filter_map(|(value, op)| matches!(op, GraphOp::Phi { .. }).then_some(*value))
+            .collect();
+        let stack_phis: Vec<_> = set
+            .stack
+            .iter()
+            .flatten()
+            .copied()
+            .filter(|value| !existing.contains(value))
+            .map(|value| (value, GraphOp::Phi { inputs: Vec::new() }))
+            .collect();
+        if !stack_phis.is_empty() {
+            block.operations.splice(0..0, stack_phis);
+        }
     }
 
     // Phase 3b: fill the phi inputs collected while the predecessors were walked.
@@ -3593,6 +3681,69 @@ fn propagate_frame(
 #[cfg(test)]
 mod dead_phi_tests {
     use super::*;
+    use crate::verify_function_graph;
+    use kiln_ir::Span;
+
+    #[test]
+    fn delegate_resume_and_completion_edges_supply_phi_inputs() {
+        // The post-YieldStar loop is intentionally tiny: block 3 is the ordinary resume path,
+        // while block 8 is both the ordinary done path and the delegate-completion path. Both
+        // targets must have complete phis before C emission is allowed to run.
+        let proto = FunctionProto {
+            span: Span::default(),
+            prologue_end: 0,
+            asynchronous: false,
+            name: Some("delegate_edges".into()),
+            arrow: false,
+            generator: true,
+            async_generator: false,
+            is_method: false,
+            parameter_count: 0,
+            declared_length: 0,
+            mapped_arguments: false,
+            local_count: 1,
+            code: vec![
+                Instruction::Const(0),      // iterator placeholder
+                Instruction::Const(0),      // yielded value
+                Instruction::YieldStar(7),  // synthetic edges to pc 3 and pc 7
+                Instruction::StoreLocal(0), // resume sent value
+                Instruction::Jump(0),       // loop back to the delegate
+                Instruction::Const(0),      // ordinary done value
+                Instruction::Jump(7),       // ordinary predecessor of the exit
+                Instruction::Return,
+            ],
+            upvalues: Vec::new(),
+            type_annotations: None,
+        };
+        let mut program = Program::default();
+        program.constants.push(Constant::Undefined);
+        let graph = build_function_graph(&proto, &program).expect("delegate graph builds");
+        verify_function_graph(&graph).expect("synthetic resume edges make phis complete");
+        let resume_values: Vec<_> = graph
+            .blocks
+            .iter()
+            .flat_map(|block| block.operations.iter())
+            .filter_map(|(value, op)| matches!(op, GraphOp::ResumeValue).then_some(*value))
+            .collect();
+        assert!(!resume_values.is_empty());
+        let proven_numbers = proven_numbers(&graph);
+        assert!(
+            resume_values
+                .iter()
+                .all(|value| !proven_numbers.contains(value))
+        );
+
+        let exit = graph
+            .blocks
+            .iter()
+            .find(|block| matches!(block.terminator, Terminator::Return(_)))
+            .expect("exit block");
+        assert!(
+            exit.predecessors.len() >= 2,
+            "ordinary and delegate completion edges"
+        );
+        assert!(exit.operations.iter().any(|(_, op)| matches!(op, GraphOp::Phi { inputs } if inputs.len() == exit.predecessors.len())));
+    }
 
     #[test]
     fn removes_dead_cycles_but_keeps_live_parallel_copies() {

@@ -370,6 +370,16 @@ static int kiln_c99_throw_not_a(kiln_value *thrown, kiln_value value, const char
     static const char terminator[1] = {0};
     kiln_text built = {NULL, 0, 0};
     int status;
+    /* Keep the language-visible TypeError unchanged, but make the native boundary refusal
+     * identify the value that was used as a callee and the closure that issued the call. The
+     * closure name points at generated module storage and therefore remains valid through the
+     * diagnostic renderer; no heap pointer is retained here. */
+    if (strcmp(role, "function") == 0) {
+        if (kiln_c99_diagnostic_detail == NULL) {
+            kiln_c99_diagnostic_detail = "non-callable callee kind";
+        }
+        kiln_c99_diagnostic_receiver_tag = value.tag;
+    }
     if (kiln_c99_text_append_c(&built, "a ") != KILN_C99_OK ||
         kiln_c99_text_append_c(&built, kiln_c99_kind_name(value)) != KILN_C99_OK ||
         kiln_c99_text_append_c(&built, " is not a ") != KILN_C99_OK ||
@@ -541,4 +551,7 @@ static int kiln_c99_throw_node_invalid_arg_type(kiln_value *thrown, const char *
         object->properties[object->count - 1].enumerable = 0;
     }
     return KILN_C99_THROWN;
+}
+int kiln_c99_new_type_error(kiln_value *out, const char *message) {
+    return kiln_c99_throw_error(out, KILN_C99_BUILTIN_TYPE_ERROR, message);
 }

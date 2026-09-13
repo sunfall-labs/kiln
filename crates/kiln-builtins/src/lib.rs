@@ -41,6 +41,22 @@ macro_rules! declare_ts_builtins {
             builtin_source(builtin).is_some()
         }
 
+        /// Whether a module specifier names a builtin whose authoritative implementation is
+        /// embedded TypeScript rather than the interpreter's legacy Native namespace.
+        pub fn is_ts_builtin_specifier(specifier: &str) -> bool {
+            NodeBuiltin::parse(specifier).is_some_and(is_ts_builtin)
+        }
+
+        /// The canonical specifiers whose values must come from graph evaluation.
+        pub fn ts_builtin_specifiers() -> Vec<&'static str> {
+            NodeBuiltin::ALL
+                .iter()
+                .copied()
+                .filter(|builtin| is_ts_builtin(*builtin))
+                .map(NodeBuiltin::specifier)
+                .collect()
+        }
+
         /// Return the supported exports for a builtin if it is a TypeScript builtin.
         #[allow(unreachable_patterns)]
         pub fn builtin_supported_exports(builtin: NodeBuiltin) -> Option<&'static [&'static str]> {
@@ -99,6 +115,17 @@ macro_rules! declare_ts_builtins {
 }
 
 declare_ts_builtins! {
+    Process {
+        variant: Process,
+        file: "node/process.ts",
+        logical_path: "kiln:process.ts",
+        source_const: PROCESS_SOURCE,
+        exports_const: PROCESS_EXPORTS,
+        sample_source_check: "export async function run",
+        presence_test: process_builtin_source_is_present,
+        compilation_test: process_builtin_compiles_cleanly,
+        exports: ["default", "run"],
+    },
     Assert {
         variant: Assert,
         file: "node/assert.ts",

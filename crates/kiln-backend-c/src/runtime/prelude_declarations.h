@@ -26,6 +26,7 @@ extern kiln_value kiln_c99_number_bits(uint64_t bits);
 extern kiln_value kiln_c99_concat(kiln_value left, kiln_value right);
 extern int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_value value);
 extern void kiln_c99_note_refusal(const char *site, size_t instruction, const char *operation, size_t depth);
+extern void kiln_c99_publish_diagnostic(void);
 extern void kiln_c99_gc_unit_roots(void *opaque, void *context, int phase);
 extern int kiln_c99_refuse(const char *lacked);
 extern int kiln_c99_refuse_named(const char *lacked, const char *subject, size_t subject_len);
@@ -100,12 +101,17 @@ extern uint64_t kiln_c99_builtin_store_epoch __attribute__((visibility("hidden")
 extern int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len, kiln_property **out);
 extern kiln_value kiln_c99_method(uint64_t code);
 extern int kiln_c99_commonjs_require_value(kiln_value *out, kiln_commonjs_require_fn call, void *context);
+extern int kiln_c99_default_require(void *context, kiln_host *host, kiln_value specifier,
+                                    kiln_value *result, kiln_value *thrown);
 extern const char *kiln_c99_method_name(uint64_t code);
 extern const char *kiln_c99_builtin_name(uint64_t builtin);
 extern int kiln_c99_builtin_length(uint64_t builtin, double *out);
 extern int kiln_c99_visible_arguments(kiln_value *out);
 extern int kiln_c99_atomics_object(kiln_value *out);
 extern int kiln_c99_process_object(kiln_value *out);
+extern int kiln_c99_node_process_raw(kiln_host *host, kiln_value *result, uint64_t code,
+                                     const kiln_value *args, size_t argc, int depth,
+                                     kiln_value *thrown);
 extern int kiln_c99_global_object(kiln_value *out);
 extern int kiln_c99_global_binding(kiln_value *out, const char *name, size_t name_len, int *found);
 extern int kiln_c99_declare_global(const char *name, size_t name_len, int configurable);
@@ -148,6 +154,7 @@ extern int kiln_c99_global_object_val(kiln_val *out);
 extern int kiln_c99_make_cell(kiln_value *slot);
 extern void kiln_c99_mark_uninitialized(kiln_value *slot);
 extern int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char *name, size_t name_len, const char *source, size_t source_len, const char *diagnostic_source, uint32_t proto, uint32_t arity, int generator, int asynchronous, int async_generator, int is_method, int arrow, int strict, kiln_val receiver, kiln_val new_target, uint32_t local_count, uint32_t stack_size, uint32_t handler_depth, uint32_t prologue_resume, const kiln_val *captured, uint32_t count);
+extern int kiln_c99_module_completion(kiln_host *host, kiln_value input_promise, uint32_t module_index, kiln_value *out_promise, int depth, kiln_value *thrown);
 extern int kiln_c99_tail_define_accessor(kiln_val *stack, size_t *sp, int setter_half, int enumerable, const char *site, size_t pc, const char *operation, size_t diagnostic_depth);
 extern int kiln_c99_tail_define_method(kiln_val *stack, size_t *sp, const char *site, size_t pc, const char *operation, size_t diagnostic_depth);
 extern int kiln_c99_tail_apply(kiln_host *host, kiln_val *stack, size_t *sp, int depth, kiln_value *thrown, const char *site, size_t pc, const char *operation, size_t diagnostic_depth);
@@ -164,6 +171,7 @@ extern kiln_value kiln_c99_copy_text(const char *text, size_t len);
 extern kiln_val kiln_c99_val_from_text(const char *bytes, size_t len);
 extern int kiln_c99_new_array_with_capacity(kiln_value *out, size_t capacity, int is_numeric);
 extern kiln_value kiln_c99_control_diagnostic(void);
+extern int kiln_c99_diagnostic_available(void);
 extern void kiln_c99_forget_handled_throw(void);
 extern void kiln_c99_note_refusal(const char *site, size_t instruction, const char *operation, size_t depth);
 extern kiln_value kiln_c99_text(kiln_value value);
@@ -194,6 +202,7 @@ extern int kiln_c99_delete_or_throw(kiln_host *host, kiln_value target, const ch
 extern int kiln_c99_delete_computed_or_throw(kiln_host *host, kiln_value target, kiln_value key, int strict, int *answer, int depth, kiln_value *thrown);
 extern int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out, int depth, kiln_value *thrown);
 extern int kiln_c99_enumerate_keys(kiln_host *host, kiln_value target, kiln_value *out, int depth, kiln_value *thrown);
+extern int kiln_c99_validate_dynamic_import_options(kiln_host *host, kiln_value options, int depth, kiln_value *thrown, int *attribute_type);
 extern int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value source, int depth, kiln_value *thrown);
 extern int kiln_c99_define_accessor(kiln_value target, const char *key, size_t key_len, kiln_value getter, kiln_value setter, int enumerable);
 extern int kiln_c99_describe_property(kiln_host *host, kiln_value target, const char *key, size_t key_len, kiln_value *out, int *found, int depth, kiln_value *thrown);
@@ -205,6 +214,7 @@ extern int kiln_c99_iterator_method(kiln_host *host, kiln_value *result, uint64_
 extern kiln_property *kiln_c99_own_private(kiln_value target, const char *key, size_t key_len);
 extern int kiln_c99_private_error(kiln_value *thrown, const char *key, size_t key_len, int mode);
 extern int kiln_c99_throw_error(kiln_value *thrown, uint64_t kind, const char *message);
+extern int kiln_c99_new_type_error(kiln_value *out, const char *message);
 extern kiln_promise *kiln_c99_promise_of(kiln_value value);
 extern int kiln_c99_bind_with(kiln_value *out, kiln_value target, kiln_value receiver, const kiln_value *arguments, size_t count);
 extern int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value callee, const kiln_value *args, size_t argc, int depth, kiln_value *thrown);

@@ -12,8 +12,10 @@ use std::path::{Path, PathBuf};
 
 use frontend_oxc::parse_with_goal;
 use kiln_hir::SourceGoal;
-use kiln_interpreter::{ModuleLoadError, ModulePlan};
-use kiln_module_graph::{ModuleGraph, ModuleGraphError, ResolveError};
+use kiln_interpreter::{
+    ImportAttributes, ModuleLoadError, ModuleLoadRequest, ModuleLoaderService, ModulePlan,
+};
+use kiln_module_graph::{ModuleGraph, ModuleGraphError, ModuleSource, ResolveError};
 
 thread_local! {
     /// The directory a bare relative specifier is resolved against.
@@ -42,22 +44,65 @@ pub(crate) fn set_base(base: &Path) {
     BASE.with(|slot| *slot.borrow_mut() = Some(base.to_path_buf()));
 }
 
-pub(crate) fn load(specifier: &str) -> Result<ModulePlan, ModuleLoadError> {
+pub(crate) fn load(
+    specifier: &str,
+    attributes: Option<&ImportAttributes>,
+) -> Result<ModulePlan, ModuleLoadError> {
     let Some(base) = BASE.with(|slot| slot.borrow().clone()) else {
         return Err(ModuleLoadError::Unsupported(
             "no directory was recorded to resolve `import()` against".to_owned(),
         ));
     };
-    // A specifier this runner cannot host is not a specifier the test got wrong: a bare name is
-    // a package, and packages are the resolver's business rather than this corpus's. Rejecting
-    // is right either way -- there is no such module here -- and the message says which it was.
-    let entry = base.join(specifier);
-    let entry = entry.canonicalize().map_err(|error| {
+    load_from(&base, specifier, attributes)
+}
+
+pub(crate) struct ConformanceModuleLoader;
+
+impl ModuleLoaderService for ConformanceModuleLoader {
+    fn load(&self, request: ModuleLoadRequest) -> Result<ModulePlan, ModuleLoadError> {
+        if request
+            .attributes
+            .as_ref()
+            .and_then(|attributes| attributes.type_.as_deref())
+            .is_some_and(|kind| kind != "file")
+        {
+            return Err(ModuleLoadError::Unsupported(
+                "unsupported import attribute `type`".to_owned(),
+            ));
+        }
+        if let Some(importer) = request.importer {
+            return load_from(
+                Path::new(&importer)
+                    .parent()
+                    .unwrap_or_else(|| Path::new(".")),
+                &request.specifier,
+                request.attributes.as_ref(),
+            );
+        }
+        load(&request.specifier, request.attributes.as_ref())
+    }
+}
+
+fn load_from(
+    base: &Path,
+    specifier: &str,
+    attributes: Option<&ImportAttributes>,
+) -> Result<ModulePlan, ModuleLoadError> {
+    let entry = base.join(specifier).canonicalize().map_err(|error| {
         ModuleLoadError::NotFound(format!("could not resolve module `{specifier}`: {error}"))
     })?;
-
-    let graph = ModuleGraph::build_with_module_provider(&entry, &base, compile_module_at)
+    let graph = ModuleGraph::build_with_module_provider(&entry, base, compile_module_at)
         .map_err(classify)?;
+    if attributes.and_then(|attributes| attributes.type_.as_deref()) == Some("file")
+        && graph
+            .module(&entry)
+            .is_none_or(|module| module.source != ModuleSource::Asset)
+    {
+        return Err(ModuleLoadError::Unsupported(format!(
+            "module `{}` is not a file asset",
+            entry.display()
+        )));
+    }
     graph.import_plan().map_err(classify)
 }
 

@@ -20,14 +20,17 @@ use kiln_module_graph::{
 
 /// What the selection may assume about its consumer.
 ///
-/// Today only one knob exists: release-style production dispatch, which drops
-/// the development arm of the exact two-arm React-style CommonJS dispatcher.
-/// Native release/profile builds set it; everything else (including the
-/// interpreter reduction path) clears it, keeping both arms live.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Release-style production dispatch drops the development arm of the exact two-arm
+/// React-style CommonJS dispatcher. Backend capability exclusions omit unsupported dynamic
+/// closures while callers retain their deferred failure records.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SelectionOptions {
     /// Drop the inactive arm of the two-arm production dispatcher.
     pub production_dispatch: bool,
+    /// Modules rejected by a backend capability plan, typically unsupported dynamic-import
+    /// closures. They remain represented by the caller's deferred failure table and are omitted
+    /// from the emitted graph.
+    pub excluded: BTreeSet<PathBuf>,
 }
 
 impl SelectionOptions {
@@ -35,6 +38,7 @@ impl SelectionOptions {
     pub const fn production() -> Self {
         Self {
             production_dispatch: true,
+            excluded: BTreeSet::new(),
         }
     }
 
@@ -42,6 +46,7 @@ impl SelectionOptions {
     pub const fn development() -> Self {
         Self {
             production_dispatch: false,
+            excluded: BTreeSet::new(),
         }
     }
 }
@@ -207,6 +212,9 @@ pub fn select_executable_modules<'a>(
     let mut side_effect_free = BTreeMap::new();
 
     let mark_live = |path: &Path, live: &mut BTreeSet<PathBuf>, queue: &mut VecDeque<PathBuf>| {
+        if options.excluded.contains(path) {
+            return;
+        }
         if live.insert(path.to_path_buf()) {
             queue.push_back(path.to_path_buf());
         }
@@ -218,6 +226,9 @@ pub fn select_executable_modules<'a>(
         .any(|m| m.program.program.has_dynamic_import());
     if has_any_dynamic_import {
         for m in graph.modules() {
+            if options.excluded.contains(&m.path) {
+                continue;
+            }
             namespace_demands.insert(m.path.clone());
             mark_live(&m.path, &mut live, &mut queue);
         }
@@ -257,6 +268,14 @@ pub fn select_executable_modules<'a>(
             if node.source == ModuleSource::CommonJs || !removable {
                 mark_live(&dependency.target, &mut live, &mut queue);
             }
+        }
+        // Literal createRequire/getBuiltinModule targets are lazy at execution time but remain
+        // part of the closed graph: the runtime loader may request any one of them.
+        for dependency in &node.runtime_dependencies {
+            mark_live(&dependency.target, &mut live, &mut queue);
+            // A lazy require returns the target's complete runtime value. Preserve its CommonJS
+            // module.exports slot or, for ESM, demand the full namespace before reduction.
+            namespace_demands.insert(dependency.target.clone());
         }
 
         for (import_index, import) in node.program.imports.iter().enumerate() {
@@ -529,8 +548,8 @@ pub fn retained_method_groups(
             DiagnosticsChannel => groups::NODE_DIAGNOSTICS,
             Fs | FsPromises => groups::NODE_STREAM | groups::NODE_EVENT | groups::BUFFER,
             // Audited `Direct`-only (see phase1-PRD): no groups implicated.
-            Assert | Console | Crypto | Dns | Module | Os | Tty | Zlib | StringDecoder
-            | QueryString | Url | WorkerThreads | PerfHooks | AsyncHooks => 0,
+            Assert | Console | Crypto | Dns | Module | Os | Process | Tty | Zlib
+            | StringDecoder | QueryString | Url | WorkerThreads | PerfHooks | AsyncHooks => 0,
             // `dlopen` hands out raw pointers: anything is reachable.
             Ffi => return None,
         })
@@ -564,6 +583,17 @@ pub fn retained_method_groups(
                 },
                 // An explicit `node:` specifier that resolved anywhere else is
                 // unexpected; failing closed keeps the program working.
+                _ if dependency.specifier.starts_with("node:") => return FULL,
+                _ => {}
+            }
+        }
+        for dependency in &node.runtime_dependencies {
+            let target = graph.module(&dependency.target);
+            match target.map(|module| &module.source) {
+                Some(ModuleSource::NodeBuiltin(builtin)) => match builtin_groups(builtin) {
+                    Some(groups) => mask |= groups,
+                    None => return FULL,
+                },
                 _ if dependency.specifier.starts_with("node:") => return FULL,
                 _ => {}
             }
