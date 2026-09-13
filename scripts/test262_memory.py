@@ -58,7 +58,7 @@ def run_limited(argv, **kwargs):
 
 def verify_effective_cap():
     """Prove the mechanism rejects a controlled oversized allocation before the real run."""
-    script = "bytearray(2048 * 1024 * 1024)"
+    script = "try:\n bytearray(2048 * 1024 * 1024)\nexcept MemoryError:\n raise SystemExit(42)"
     env = os.environ.copy()
     env["KILN_TEST262_MEMORY_MB"] = "512"
     old = os.environ.get("KILN_TEST262_MEMORY_MB")
@@ -72,5 +72,8 @@ def verify_effective_cap():
             os.environ.pop("KILN_TEST262_MEMORY_MB", None)
         else:
             os.environ["KILN_TEST262_MEMORY_MB"] = old
-    if child.returncode == 0 and not exceeded:
-        raise RuntimeError("memory cap verification child allocated beyond 512 MiB")
+    if not exceeded and child.returncode != 42:
+        raise RuntimeError(
+            "memory cap verification did not observe a capped allocation "
+            f"(exit={child.returncode})"
+        )
