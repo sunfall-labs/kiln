@@ -42003,6 +42003,9 @@ fn slice_bounds(arguments: &[Value], length: usize) -> (usize, usize) {
             None | Some(Value::Undefined) => fallback,
             Some(value) => {
                 let at = value.as_number();
+                if at.is_nan() {
+                    return 0;
+                }
                 if !at.is_finite() {
                     return if at < 0.0 { 0 } else { length };
                 }
