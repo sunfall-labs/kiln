@@ -2804,9 +2804,7 @@ fn native_builtin_supported_exports(
     use kiln_module_resolver::NodeBuiltin;
 
     match builtin {
-        NodeBuiltin::Console => &[
-            "Console", "debug", "default", "error", "info", "log", "warn",
-        ],
+        NodeBuiltin::Console => kiln_builtins::CONSOLE_EXPORTS,
         NodeBuiltin::Events => &["EventEmitter", "default"],
         NodeBuiltin::Ffi => &[
             "default",
@@ -2830,9 +2828,7 @@ fn native_builtin_supported_exports(
             "request",
         ],
         NodeBuiltin::Util => kiln_builtins::UTIL_EXPORTS,
-        NodeBuiltin::DiagnosticsChannel => {
-            &["channel", "default", "hasSubscribers", "tracingChannel"]
-        }
+        NodeBuiltin::DiagnosticsChannel => kiln_builtins::DIAGNOSTICS_CHANNEL_EXPORTS,
         NodeBuiltin::Https => &["createServer", "default"],
         NodeBuiltin::Http2 => &["createSecureServer", "createServer", "default"],
         NodeBuiltin::Dns => &["default", "lookup"],
@@ -2850,7 +2846,7 @@ fn native_builtin_supported_exports(
             "default",
             "finished",
         ],
-        NodeBuiltin::PerfHooks => &["default", "performance"],
+        NodeBuiltin::PerfHooks => kiln_builtins::PERF_HOOKS_EXPORTS,
         NodeBuiltin::FsPromises => &["appendFile", "mkdir", "readFile", "stat", "writeFile"],
         NodeBuiltin::Fs => &[
             "appendFileSync",
