@@ -20,8 +20,8 @@ use kiln_interpreter::{
     ExecutionLimits, ExecutionResult, ImportAttributes, ModuleBinding, ModuleLoadError,
     ModuleLoadRequest, ModuleLoaderService, ModulePlan, ModuleRealmSession, ModuleSelfExport,
     ModuleSelfImport, ModuleValueRef, PlannedModule, Value, execute_module_in_runtime_with_loader,
-    execute_node_module_in_session_with_loader, ordinary_object,
-    own_data_property, parse_json_module, read_through_cell,
+    execute_node_module_in_session_with_loader, ordinary_object, own_data_property,
+    parse_json_module, read_through_cell,
 };
 use kiln_ir::{
     BYTECODE_VERSION, CompileDiagnostic, ExportBinding, Instruction, ModuleProgram, Program,
