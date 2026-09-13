@@ -151,6 +151,7 @@ extern int kiln_c99_global_object_val(kiln_val *out);
 extern int kiln_c99_make_cell(kiln_value *slot);
 extern void kiln_c99_mark_uninitialized(kiln_value *slot);
 extern int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char *name, size_t name_len, const char *source, size_t source_len, const char *diagnostic_source, uint32_t proto, uint32_t arity, int generator, int asynchronous, int async_generator, int is_method, int arrow, int strict, kiln_val receiver, kiln_val new_target, uint32_t local_count, uint32_t stack_size, uint32_t handler_depth, uint32_t prologue_resume, const kiln_val *captured, uint32_t count);
+extern int kiln_c99_module_completion(kiln_host *host, kiln_value input_promise, uint32_t module_index, kiln_value *out_promise, int depth, kiln_value *thrown);
 extern int kiln_c99_tail_define_accessor(kiln_val *stack, size_t *sp, int setter_half, int enumerable, const char *site, size_t pc, const char *operation, size_t diagnostic_depth);
 extern int kiln_c99_tail_define_method(kiln_val *stack, size_t *sp, const char *site, size_t pc, const char *operation, size_t diagnostic_depth);
 extern int kiln_c99_tail_apply(kiln_host *host, kiln_val *stack, size_t *sp, int depth, kiln_value *thrown, const char *site, size_t pc, const char *operation, size_t diagnostic_depth);
