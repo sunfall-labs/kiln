@@ -4040,39 +4040,59 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         case KILN_C99_METHOD_ADOPT_STEP: {
             /* Two settlers bound to the outer promise: whichever the inner one reaches, the outer
              * one follows. */
-            kiln_promise *inner;
-            kiln_reaction adopt;
-            if (receiver.tag != KILN_VALUE_PROMISE || argc == 0 ||
-                args[0].tag != KILN_VALUE_PROMISE) {
-                /* Named, because this runs as a microtask and a microtask's refusal has no
-                 * instruction to be attributed to: without a detail the report is the phase it
-                 * happened in and nothing else. `@@adopt` is scheduled only by `kiln_c99_settle`
-                 * and only with two promises, so reaching here means something else resolved a
-                 * promise with a value this backend cannot follow. */
+            if (receiver.tag != KILN_VALUE_PROMISE || argc == 0) {
                 KILN_C99_REFUSE("promise adoption was handed something that is not a pair of "
                                 "promises");
             }
-            inner = kiln_c99_promise_of(args[0]);
-            status = kiln_c99_new_settler(&adopt.on_fulfilled, receiver, 0);
+            if (argc == 1) {
+                kiln_promise *inner;
+                kiln_reaction adopt;
+                if (args[0].tag != KILN_VALUE_PROMISE) {
+                    KILN_C99_REFUSE("promise adoption was handed something that is not a pair of "
+                                    "promises");
+                }
+                inner = kiln_c99_promise_of(args[0]);
+                status = kiln_c99_new_settler(&adopt.on_fulfilled, receiver, 0);
+                if (status == KILN_C99_OK) {
+                    status = kiln_c99_new_settler(&adopt.on_rejected, receiver, 1);
+                }
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                adopt.derived = kiln_c99_undefined();
+                adopt.continuation = 0;
+                *result = kiln_c99_undefined();
+                if (inner->state != KILN_C99_PENDING) {
+                    return kiln_c99_schedule(inner, &adopt);
+                }
+                status = kiln_c99_reserve((void **)&inner->reactions, &inner->capacity,
+                                          inner->count + 1, sizeof *inner->reactions);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                inner->reactions[inner->count] = adopt;
+                inner->count += 1;
+                return KILN_C99_OK;
+            }
+            /* argc >= 2: thenable adoption: args[0] is `then`, args[1] is `thenable`. */
+            kiln_value resolve, reject;
+            kiln_value settler_args[2];
+            kiln_value call_result = kiln_c99_undefined();
+            status = kiln_c99_new_settler(&resolve, receiver, 0);
             if (status == KILN_C99_OK) {
-                status = kiln_c99_new_settler(&adopt.on_rejected, receiver, 1);
+                status = kiln_c99_new_settler(&reject, receiver, 1);
             }
             if (status != KILN_C99_OK) {
                 return status;
             }
-            adopt.derived = kiln_c99_undefined();
-            adopt.continuation = 0;
+            settler_args[0] = resolve;
+            settler_args[1] = reject;
+            status = kiln_c99_call(host, &call_result, args[0], args[1], settler_args, 2, depth, thrown);
+            if (status == KILN_C99_THROWN) {
+                status = kiln_c99_settle(receiver, *thrown, 1);
+                if (status != KILN_C99_OK) return status;
+            }
             *result = kiln_c99_undefined();
-            if (inner->state != KILN_C99_PENDING) {
-                return kiln_c99_schedule(inner, &adopt);
-            }
-            status = kiln_c99_reserve((void **)&inner->reactions, &inner->capacity,
-                                      inner->count + 1, sizeof *inner->reactions);
-            if (status != KILN_C99_OK) {
-                return status;
-            }
-            inner->reactions[inner->count] = adopt;
-            inner->count += 1;
             return KILN_C99_OK;
         }
         case KILN_C99_METHOD_FINALLY_RESTORE:
@@ -5936,6 +5956,26 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             KILN_C99_REFUSE("a String.prototype method on a receiver that is not a string");
         }
         return kiln_c99_invoke_string_method(result, code, receiver, args, argc);
+    }
+    if (receiver.tag == KILN_VALUE_ARRAY_BUFFER) {
+        if (code == KILN_C99_METHOD_SLICE) {
+            kiln_typed_buffer *buffer = kiln_c99_typed_buffer_of(receiver);
+            size_t start = kiln_c99_relative_index(argc > 0 ? args[0] : kiln_c99_undefined(),
+                                                   buffer->byte_length, 0);
+            size_t end = kiln_c99_relative_index(argc > 1 ? args[1] : kiln_c99_undefined(),
+                                                 buffer->byte_length, buffer->byte_length);
+            size_t count = end >= start ? end - start : 0;
+            status = kiln_c99_new_typed_buffer(result, count);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            if (count != 0 && buffer->bytes != NULL) {
+                kiln_typed_buffer *copy = kiln_c99_typed_buffer_of(*result);
+                memcpy(copy->bytes, buffer->bytes + start, count);
+            }
+            return KILN_C99_OK;
+        }
+        KILN_C99_REFUSE("an ArrayBuffer method this backend has not implemented");
     }
     if (receiver.tag == KILN_VALUE_TYPED_ARRAY) {
         kiln_typed_array *view = kiln_c99_typed_array_of(receiver);

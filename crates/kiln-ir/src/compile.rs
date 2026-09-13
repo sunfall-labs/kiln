@@ -2974,11 +2974,19 @@ impl Compiler {
                     // Catch block threw: landing pad for `catch_handler_jump`.
                     // The thrown value from catch is on the value stack.
                     self.patch_jump(j);
+                    self.emit_finalizer(&Cleanup::Finally(finalizer.to_vec()));
+                    if !Self::statements_always_terminate(finalizer) {
+                        self.code.push(Instruction::Throw);
+                    }
+                    let catch_landing_done = self.emit_jump(Instruction::Jump(0));
+
+                    // Return signal skipped catch: landing pad for `skip_catch_jump`.
                     self.patch_jump(skip_catch_jump);
                     self.emit_finalizer(&Cleanup::Finally(finalizer.to_vec()));
                     if !Self::statements_always_terminate(finalizer) {
                         self.code.push(Instruction::Throw);
                     }
+                    self.patch_jump(catch_landing_done);
 
                     self.patch_jump(catch_done_jump);
                 } else {

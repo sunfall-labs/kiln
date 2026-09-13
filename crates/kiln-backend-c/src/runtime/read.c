@@ -435,6 +435,10 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_BUFFER);
             return KILN_C99_OK;
         }
+        if (kiln_c99_same_name(key, key_len, "slice")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_SLICE);
+            return KILN_C99_OK;
+        }
         if (kiln_c99_is_array_buffer_member(key, key_len)) {
             KILN_C99_REFUSE("an ArrayBuffer.prototype member this backend has not implemented");
         }

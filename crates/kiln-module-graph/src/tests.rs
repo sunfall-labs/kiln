@@ -1475,6 +1475,653 @@ fn node_builtin_path_commonjs_require_evaluates_cleanly() {
 }
 
 #[test]
+fn node_builtin_assert_evaluates_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.js",
+        concat!(
+            "import assert, { ok, strict, strictEqual, deepStrictEqual, throws, doesNotThrow, AssertionError } from 'node:assert';",
+            "assert(true);",
+            "ok(true);",
+            "strict(true);",
+            "strictEqual(1 + 1, 2);",
+            "deepStrictEqual({ a: [1, 2] }, { a: [1, 2] });",
+            "doesNotThrow(() => 42);",
+            "let caught = false;",
+            "try { strictEqual(1, 2); } catch (e) { caught = e instanceof AssertionError; }",
+            "console.log('assert ok', caught);",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with assert builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute assert builtin");
+    assert_eq!(host.output, ["assert ok true"]);
+}
+
+#[test]
+fn node_builtin_assert_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const assert = require('node:assert');",
+            "assert(true);",
+            "assert.strictEqual(2 + 2, 4);",
+            "module.exports = {",
+            "  isFn: typeof assert === 'function',",
+            "  name: assert.name,",
+            "  defaultEq: assert.default === assert,",
+            "  strictOk: typeof assert.strict.ok === 'function',",
+            "  strictEq: assert.strict === assert.strict.strict,",
+            "};",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import bridge from './bridge.cjs';",
+            "console.log(bridge.isFn, bridge.name, bridge.defaultEq, bridge.strictOk, bridge.strictEq);",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with assert builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute assert builtin cjs");
+    assert_eq!(host.output, ["true assert true true true"]);
+}
+
+#[test]
+fn node_builtin_events_evaluates_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.js",
+        concat!(
+            "import EventEmitter, { EventEmitter as EE } from 'node:events';",
+            "const ee = new EventEmitter();",
+            "let count = 0;",
+            "ee.on('ping', () => { count++; });",
+            "ee.once('ping', () => { count += 10; });",
+            "ee.emit('ping');",
+            "ee.emit('ping');",
+            "console.log('events ok', count, ee.addListener === ee.on, EventEmitter === EE);",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with events builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute events builtin");
+    assert_eq!(host.output, ["events ok 12 true true"]);
+}
+
+#[test]
+fn node_builtin_events_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const EventEmitter = require('node:events');",
+            "const ee = new EventEmitter();",
+            "let val = '';",
+            "ee.on('test', (x) => { val = x; });",
+            "ee.emit('test', 'hello');",
+            "module.exports = {",
+            "  isFn: typeof EventEmitter === 'function',",
+            "  name: EventEmitter.name,",
+            "  defaultEq: EventEmitter.default === EventEmitter,",
+            "  val,",
+            "};",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import bridge from './bridge.cjs';",
+            "console.log(bridge.isFn, bridge.name, bridge.defaultEq, bridge.val);",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with events builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute events builtin cjs");
+    assert_eq!(host.output, ["true EventEmitter true hello"]);
+}
+
+#[test]
+fn node_builtin_buffer_evaluates_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.js",
+        concat!(
+            "import buffer, { Buffer, alloc, from, isBuffer, byteLength, concat, constants } from 'node:buffer';",
+            "const b1 = alloc(3);",
+            "const b2 = from('hi');",
+            "const b3 = concat([b1, b2]);",
+            "console.log(",
+            "  buffer.Buffer === Buffer,",
+            "  isBuffer(b1),",
+            "  b2.toString(),",
+            "  b3.length,",
+            "  byteLength('hey'),",
+            "  typeof constants.MAX_STRING_LENGTH,",
+            ");",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with buffer builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute buffer builtin");
+    assert_eq!(host.output, ["true true hi 5 3 number"]);
+}
+
+#[test]
+fn node_builtin_buffer_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const buffer = require('node:buffer');",
+            "const b = buffer.from('xyz');",
+            "module.exports = {",
+            "  isObj: typeof buffer === 'object',",
+            "  sameCtor: buffer.Buffer === Buffer,",
+            "  isBuf: buffer.isBuffer(b),",
+            "  str: b.toString(),",
+            "  defaultBuf: buffer.default.Buffer === buffer.Buffer,",
+            "};",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import bridge from './bridge.cjs';",
+            "console.log(bridge.isObj, bridge.sameCtor, bridge.isBuf, bridge.str, bridge.defaultBuf);",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with buffer builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute buffer builtin cjs");
+    assert_eq!(host.output, ["true true true xyz true"]);
+}
+
+#[test]
+fn node_builtin_string_decoder_evaluates_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.js",
+        concat!(
+            "import { StringDecoder } from 'node:string_decoder';",
+            "const decoder = new StringDecoder('utf8');",
+            "const part1 = decoder.write(new Uint8Array([0xf0, 0x9f]));",
+            "const part2 = decoder.write(new Uint8Array([0x92, 0xa9, 0x21]));",
+            "const part3 = decoder.end(new Uint8Array([0xe2]));",
+            "console.log(",
+            "  typeof StringDecoder === 'function',",
+            "  part1 === '',",
+            "  part2 === '💩!',",
+            "  part3 === '\\uFFFD',",
+            "  decoder.encoding,",
+            ");",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with string_decoder builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute string_decoder builtin");
+    assert_eq!(host.output, ["true true true true utf8"]);
+}
+
+#[test]
+fn node_builtin_string_decoder_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const string_decoder = require('node:string_decoder');",
+            "const SD = string_decoder.StringDecoder;",
+            "const dec = new SD();",
+            "const s = dec.write(new Uint8Array([104, 101, 108, 108, 111]));",
+            "module.exports = {",
+            "  isObj: typeof string_decoder === 'object',",
+            "  isFn: typeof SD === 'function',",
+            "  selfEq: SD.StringDecoder === SD,",
+            "  s,",
+            "};",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import bridge from './bridge.cjs';",
+            "console.log(bridge.isObj, bridge.isFn, bridge.selfEq, bridge.s);",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with string_decoder builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute string_decoder builtin cjs");
+    assert_eq!(host.output, ["true true true hello"]);
+}
+
+#[test]
+fn node_builtin_querystring_evaluates_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import querystring, { parse, decode, stringify, encode, escape, unescape } from 'node:querystring';",
+            "const q1 = parse('name=ferret&color=purple&tags=fluffy&tags=quick');",
+            "const s1 = stringify({ a: '1', b: ['2', '3'] });",
+            "const esc = escape('a b&c=d');",
+            "const unesc = unescape('a+b%26c%3Dd');",
+            "console.log(",
+            "  parse === decode,",
+            "  stringify === encode,",
+            "  querystring.parse === parse,",
+            "  querystring.default === querystring,",
+            "  q1.name === 'ferret',",
+            "  q1.color === 'purple',",
+            "  q1.tags.join(','),",
+            "  s1,",
+            "  esc,",
+            "  unesc,",
+            ");",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with querystring builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute querystring builtin");
+    assert_eq!(
+        host.output,
+        ["true true true true true true fluffy,quick a=1&b=2&b=3 a%20b%26c%3Dd a b&c=d"]
+    );
+}
+
+#[test]
+fn node_builtin_querystring_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const qs = require('node:querystring');",
+            "const parsed = qs.decode('x=10&y=20');",
+            "const str = qs.encode({ x: 10 });",
+            "module.exports = {",
+            "  isObj: typeof qs === 'object',",
+            "  isFn: typeof qs.parse === 'function',",
+            "  selfEq: qs.default === qs,",
+            "  x: parsed.x,",
+            "  y: parsed.y,",
+            "  str,",
+            "};",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import bridge from './bridge.cjs';",
+            "console.log(bridge.isObj, bridge.isFn, bridge.selfEq, bridge.x, bridge.y, bridge.str);",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with querystring builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute querystring builtin cjs");
+    assert_eq!(host.output, ["true true true 10 20 x=10"]);
+}
+
+#[test]
+fn node_builtin_util_evaluates_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import util, { format, inherits, inspect, promisify, types, isArray } from 'node:util';",
+            "const fmt = format('hello %s: %d', 'world', 42);",
+            "function Base() {}",
+            "Base.prototype.greet = function() { return 'base'; };",
+            "function Sub() {}",
+            "inherits(Sub, Base);",
+            "const sub = new Sub();",
+            "const isArr = isArray([1, 2]);",
+            "const isPromise = types.isPromise(Promise.resolve(1));",
+            "console.log(",
+            "  typeof util === 'object',",
+            "  util.default === util,",
+            "  fmt,",
+            "  sub.greet() === 'base',",
+            "  Sub.super_ === Base,",
+            "  isArr,",
+            "  isPromise,",
+            ");",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with util builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute util builtin");
+    assert_eq!(
+        host.output,
+        ["true true hello world: 42 true true true true"]
+    );
+}
+
+#[test]
+fn node_builtin_util_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const util = require('node:util');",
+            "const fmt = util.format('count: %d', 100);",
+            "module.exports = {",
+            "  isObj: typeof util === 'object',",
+            "  isFn: typeof util.format === 'function',",
+            "  hasPromisify: typeof util.promisify === 'function',",
+            "  selfEq: util.default === util,",
+            "  fmt,",
+            "};",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import bridge from './bridge.cjs';",
+            "console.log(bridge.isObj, bridge.isFn, bridge.hasPromisify, bridge.selfEq, bridge.fmt);",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with util builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute util builtin cjs");
+    assert_eq!(host.output, ["true true true true count: 100"]);
+}
+
+#[test]
+fn node_builtin_url_evaluates_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import url, { URL, URLSearchParams, fileURLToPath, pathToFileURL, parse, format, urlToHttpOptions } from 'node:url';",
+            "const p = fileURLToPath('file:///foo/bar.txt');",
+            "const u = pathToFileURL('/foo/bar.txt');",
+            "const parsed = parse('http://user:pass@host.com:8080/path?a=1&b=2#sec');",
+            "const opts = urlToHttpOptions(new URL('https://example.com:8443/test'));",
+            "console.log(",
+            "  typeof url === 'object',",
+            "  url.default === url,",
+            "  typeof URL === 'function',",
+            "  typeof URLSearchParams === 'function',",
+            "  p,",
+            "  u.protocol,",
+            "  parsed.hostname,",
+            "  parsed.port,",
+            "  opts.port,",
+            ");",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with url builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute url builtin");
+    assert_eq!(
+        host.output,
+        ["true true true true /foo/bar.txt file: host.com 8080 8443"]
+    );
+}
+
+#[test]
+fn node_builtin_url_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const url = require('node:url');",
+            "const p = url.fileURLToPath('file:///hello/world');",
+            "module.exports = {",
+            "  isObj: typeof url === 'object',",
+            "  isFn: typeof url.parse === 'function',",
+            "  hasUrl: typeof url.URL === 'function',",
+            "  selfEq: url.default === url,",
+            "  p,",
+            "};",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import bridge from './bridge.cjs';",
+            "console.log(bridge.isObj, bridge.isFn, bridge.hasUrl, bridge.selfEq, bridge.p);",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with url builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute url builtin cjs");
+    assert_eq!(host.output, ["true true true true /hello/world"]);
+}
+
+#[test]
 fn node_net_connect_is_a_typed_virtual_module_export() {
     let project = TempProject::new();
     let entry = project.write(
