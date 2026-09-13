@@ -2398,6 +2398,7 @@ struct DynamicJournal {
     new_states: Vec<PathBuf>,
     new_dynamic_dependencies: Vec<(PathBuf, String)>,
     new_failures: Vec<(PathBuf, String)>,
+    new_runtime_failures: Vec<(PathBuf, PathBuf, String)>,
 }
 
 #[derive(Clone, Copy)]
@@ -2511,6 +2512,14 @@ where
         for key in journal.new_failures {
             self.dynamic_failures.remove(&key);
         }
+        for (owner, importer, specifier) in journal.new_runtime_failures {
+            if let Some(failures) = self.runtime_failures.get_mut(&owner) {
+                failures.remove(&(importer, specifier));
+                if failures.is_empty() {
+                    self.runtime_failures.remove(&owner);
+                }
+            }
+        }
     }
 
     fn record_state(&mut self, path: &Path) {
@@ -2573,10 +2582,18 @@ where
         specifier: String,
         message: String,
     ) {
-        self.runtime_failures
-            .entry(owner)
-            .or_default()
-            .insert((importer, specifier), message);
+        let key = (importer.clone(), specifier.clone());
+        let failures = self.runtime_failures.entry(owner.clone()).or_default();
+        if !failures.contains_key(&key) {
+            if let Some(journal) = &mut self.dynamic_journal {
+                journal.new_runtime_failures.push((
+                    owner.clone(),
+                    importer.clone(),
+                    specifier.clone(),
+                ));
+            }
+        }
+        failures.insert(key, message);
     }
 
     fn remove_runtime_dependency(&mut self, owner: &Path, importer: &Path, specifier: &str) {
