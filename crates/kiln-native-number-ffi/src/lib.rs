@@ -1203,7 +1203,12 @@ mod realm {
             let framed = kiln_runtime::decode_process_wire(bytes).ok()?;
             return Some(AsyncHostOp::ProcessRun {
                 command: String::from_utf8(framed.command).ok()?,
-                args: framed.args.into_iter().map(String::from_utf8).collect::<Result<_, _>>().ok()?,
+                args: framed
+                    .args
+                    .into_iter()
+                    .map(String::from_utf8)
+                    .collect::<Result<_, _>>()
+                    .ok()?,
                 stdin: framed.stdin,
             });
         }

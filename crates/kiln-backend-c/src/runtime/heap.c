@@ -2335,6 +2335,9 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
     case KILN_GC_NODE_FS_COMPLETION:
         kiln_c99_gc_mark_value(heap, &((kiln_node_fs_completion *)payload)->promise);
         break;
+    case KILN_GC_NODE_PROCESS_COMPLETION:
+        kiln_c99_gc_mark_value(heap, &((kiln_node_process_completion *)payload)->promise);
+        break;
     case KILN_GC_NEXT_TICK: {
         kiln_next_tick *tick = (kiln_next_tick *)payload;
         kiln_c99_gc_mark_value(heap, &tick->callback);
