@@ -6146,6 +6146,13 @@ typedef struct kiln_graph_context {
 "#,
     );
     render_graph_roots(&mut output, modules);
+    for index in 0..modules.len() {
+        writeln!(
+            output,
+            "static int kiln_graph_eval_module_{index}(kiln_graph_context *graph);"
+        )
+        .unwrap();
+    }
     output.push_str(
         r#"
 static int kiln_graph_enter(void *opaque) {
@@ -6192,11 +6199,18 @@ static int kiln_graph_enter(void *opaque) {
         modules.len()
     )
     .unwrap();
+    let mut helper_defs = String::new();
     // Single Rust-level emission point for a module case; generated C remains unchanged.
     let mut emit_module_case = |index: usize,
                                 node: &kiln_module_graph::ModuleNode,
                                 module: &kiln_backend_c::CModule|
      -> Result<(), NativeError> {
+        let mut evaluation = &mut helper_defs;
+        writeln!(
+            evaluation,
+            "static int kiln_graph_eval_module_{index}(kiln_graph_context *graph) {{\n    kiln_graph_entry_context context;\n    kiln_host *host = &graph->host;\n    kiln_value *result = &graph->result;\n    int status = 0;"
+        )
+        .unwrap();
         let is_async = node
             .program
             .program
@@ -6209,7 +6223,6 @@ static int kiln_graph_enter(void *opaque) {
         } else {
             format!("kiln_exports_{index}")
         };
-        writeln!(evaluation, "        case {index}: {{").unwrap();
         if node.source == ModuleSource::CommonJs {
             writeln!(
                 evaluation,
@@ -6417,12 +6430,18 @@ static int kiln_graph_enter(void *opaque) {
             )
             .unwrap();
         }
-        evaluation
-            .push_str("            graph->current_module++;\n            break;\n        }\n");
+        evaluation.push_str("    graph->current_module++;\n    return 0;\n}\n");
         Ok(())
     };
     for (index, (node, module)) in modules.iter().enumerate() {
         emit_module_case(index, node, module)?;
+    }
+    for index in 0..modules.len() {
+        writeln!(
+            evaluation,
+            "        case {index}: return kiln_graph_eval_module_{index}(graph);"
+        )
+        .unwrap();
     }
     evaluation.push_str(
         r#"        default:
@@ -6432,11 +6451,10 @@ static int kiln_graph_enter(void *opaque) {
 "#,
     );
     output.push_str(&evaluation);
+    output.push_str("    return 0;\n}\n");
+    output.push_str(&helper_defs);
     output.push_str(
-        r#"    return 0;
-}
-
-/* argc/argv reach the realm before it is entered, so the first `process` a module builds
+        r#"/* argc/argv reach the realm before it is entered, so the first `process` a module builds
  * already has the command line. The strings are copied on the other side of this call. */
 static int kiln_cli_run_realm(int argc, char **argv, int writes_result) {
     kiln_graph_context graph = {0};
