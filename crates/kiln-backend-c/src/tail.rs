@@ -544,14 +544,16 @@ pub(crate) fn emit_tail_instruction(
         Instruction::DynamicImport => {
             writeln!(
                 output,
-                "    {{ kiln_value promise; int status = kiln_graph_dynamic_import(host, kiln_val_to_boundary(stack[sp - 1]), kiln_c99_undefined(), &promise, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_val_from_boundary(promise); }}"
+                "    {{ kiln_value promise; int status = kiln_graph_dynamic_import(host, {importer}, kiln_val_to_boundary(stack[sp - 1]), kiln_c99_undefined(), &promise, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_val_from_boundary(promise); }}",
+                importer = if *compact { "ku_importer".to_owned() } else { c_string(symbol) },
             )
             .unwrap();
         }
         Instruction::DynamicImportWithOptions => {
             writeln!(
                 output,
-                "    {{ kiln_value promise; int status = kiln_graph_dynamic_import(host, kiln_val_to_boundary(stack[sp - 2]), kiln_val_to_boundary(stack[sp - 1]), &promise, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= 2; stack[sp++] = kiln_val_from_boundary(promise); }}"
+                "    {{ kiln_value promise; int status = kiln_graph_dynamic_import(host, {importer}, kiln_val_to_boundary(stack[sp - 2]), kiln_val_to_boundary(stack[sp - 1]), &promise, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= 2; stack[sp++] = kiln_val_from_boundary(promise); }}",
+                importer = if *compact { "ku_importer".to_owned() } else { c_string(symbol) },
             )
             .unwrap();
         }
