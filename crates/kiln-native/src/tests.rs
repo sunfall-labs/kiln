@@ -3999,7 +3999,8 @@ const load = factoryResult.load;
 console.log(`before:${loads}`);
 const first = load();
 const second = load();
-console.log(`${first === second}:${first.loads}:${loads}`);"#,
+console.log(`${first === second}:${first.loads}:${loads}`);
+try { createRequire(import.meta.url)('./missing.cjs'); } catch (error) { console.log(`${error instanceof TypeError}`); }"#,
     )
     .expect("write shared createRequire entry");
     fs::write(project.join("dep.cjs"), r#"globalThis.__shared_create_require_loads = (globalThis.__shared_create_require_loads || 0) + 1;
@@ -4084,7 +4085,7 @@ int main(void) {{
         output.status.code(),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(output.stdout, b"before:0\ntrue:1:0\n");
+    assert_eq!(output.stdout, b"before:0\ntrue:1:0\ntrue\n");
 }
 
 fn star_reexport_graph(project: &Path) -> ModuleGraph {
@@ -5443,7 +5444,7 @@ fn native_deferred_dynamic_import_failures_are_catchable() {
         &entry,
         "console.log('start');\n\
          try { await import('./missing.mjs'); } catch (error) { console.log(error instanceof TypeError); }\n\
-         try { await import('node:zlib'); } catch (error) { console.log(error instanceof TypeError); }\n\
+         try { await import('./missing-builtin.mjs'); } catch (error) { console.log(error instanceof TypeError); }\n\
          try { await import('./bad-syntax.mjs'); } catch (error) { console.log(error instanceof TypeError); }\n\
          try { await import('./bad-export.mjs'); } catch (error) { console.log(error instanceof TypeError); }\n\
          function neverCalled() { return import('./never-called.mjs'); }\n\
@@ -5632,7 +5633,7 @@ fn native_failed_dynamic_closure_preserves_shared_successful_dependencies() {
     .expect("write shared dependency");
     fs::write(
         root.path.join("bad.mjs"),
-        "import './shared.mjs'; import 'node:zlib'; export const value = 1;\n",
+        "import './shared.mjs'; import './missing-static.mjs'; export const value = 1;\n",
     )
     .expect("write failed dynamic target");
     fs::write(
@@ -10048,7 +10049,7 @@ fn embedded_shared_graph_dynamic_import_rejects_unsupported_builtin() {
     let entry = project.join("main.mjs");
     fs::write(
         &entry,
-        "console.log('start');\nPromise.resolve().then(() => import('node:zlib')).catch(error => console.log(error instanceof TypeError));\n",
+        "console.log('start');\nPromise.resolve().then(() => import('./missing-dynamic.mjs')).catch(error => console.log(error instanceof TypeError));\n",
     )
     .expect("write delayed dynamic entry");
     fs::write(project.join("target.mjs"), "export const x = 99;\n")
