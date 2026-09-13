@@ -1,6 +1,6 @@
 # Run ghui with OpenTUI
 
-Status: in-progress
+Status: in-progress; live acceptance is not verified
 
 ## Why
 
@@ -10,10 +10,10 @@ It now compiles to a native executable, but it does not yet run to its first fra
 
 ## What is established
 
-With the landing change, a clean ghui checkout builds successfully with the native-release profile. The
-build generated about 816 MB of C, compiled it in parallel, and produced a 231 MB executable.
-The size is now a tracked compiler defect, not an accepted application cost: issue 04 records that
-the supposedly decoupled runtime header is still copied into every module translation unit.
+The current full build at integration `1dbb6fd0` generated 161,313,202 bytes of C and a
+112,237,608-byte executable. It reaches the splash path and then currently exits with SIGSEGV
+during live diagnosis. Earlier mock sessions reached the first frame and accepted navigation;
+that is historical evidence, not current live acceptance.
 
 The same application exposed a module scheduler bug in the interpreter: a dynamic-import job was
 queued on the interpreter's private realm while Node module execution drained the shared module
@@ -38,12 +38,17 @@ the focused checks are `mbx test -p kiln-runtime --offline` and
 stdout/stderr, nonzero exit status, signal nullability, and AbortSignal cancellation in interpreter
 and generated native C execution.
 
+The read-only real process boundary probe is established: the native capability imports and runs a
+real command, returning 1,084 bytes of stdout and a successful schema result in 1.23 seconds
+(binary hash `41f697...`). No GitHub mutation was performed. The live ghui first-frame and input
+acceptance remain pending.
+
 The remaining renderer work is tracked separately. Earlier probes reached OpenTUI's explicit
 platform check and reported:
 
     opentui is not supported on the current platform: kiln-undefined
 
-The native executable currently loses the specific cause and reports only:
+Some earlier binaries lost the specific cause and reported only:
 
     kiln: the host refused an operation
 
