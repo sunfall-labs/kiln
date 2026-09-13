@@ -31,6 +31,8 @@ pub struct Contract {
     pub slim_archive: &'static str,
     pub full_manifest: &'static str,
     pub slim_manifest: &'static str,
+    pub full_http: bool,
+    pub slim_http: bool,
     pub exports: Vec<&'static str>,
 }
 
@@ -57,6 +59,8 @@ pub fn contract() -> Contract {
         slim_archive: SLIM_ARCHIVE,
         full_manifest: FULL_MANIFEST,
         slim_manifest: SLIM_MANIFEST,
+        full_http: true,
+        slim_http: false,
         exports: exports(),
     }
 }
@@ -110,6 +114,11 @@ mod tests {
         std::fs::write(root.join("a"), b"one").unwrap();
         std::fs::write(root.join("b"), b"two").unwrap();
         let first = digest_paths(&root, ["a", "b"]).unwrap();
+        assert_eq!(
+            first,
+            Digest::from_hex("d4fcad726c5fe31fb48171feca00869c5522b7f88db0b0fe379309ca927fab7f")
+                .unwrap()
+        );
         assert_ne!(first, digest_paths(&root, ["b", "a"]).unwrap());
         std::fs::write(root.join("a"), b"changed").unwrap();
         assert_ne!(first, digest_paths(&root, ["a", "b"]).unwrap());
@@ -122,6 +131,8 @@ mod tests {
         assert_ne!(value.full_archive, value.slim_archive);
         assert_ne!(value.full_manifest, value.slim_manifest);
         assert_ne!(value.full_features, value.slim_features);
+        assert!(value.full_http);
+        assert!(!value.slim_http);
         assert!(!value.exports.is_empty());
     }
 }
