@@ -1,4 +1,8 @@
 
+#if defined(__unix__) || defined(__APPLE__)
+#include <sys/ioctl.h>
+#endif
+
 static int kiln_c99_realm_value_slot(uint32_t key, kiln_value **out) {
     void *slot = NULL;
     int status;
@@ -191,8 +195,21 @@ static int kiln_c99_process_object(kiln_value *out) {
         status = kiln_c99_new_object(&stream);
         if (status == KILN_C99_OK) status = kiln_c99_install_event_emitter_methods(stream);
         if (status == KILN_C99_OK) status = kiln_c99_install_readable_methods(stream);
+        if (status == KILN_C99_OK) {
+            kiln_value queue;
+            status = kiln_c99_new_array(&queue);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_put(NULL, stream, "@@node:readable", 15, queue, 0, NULL);
+        }
         if (status == KILN_C99_OK)
             status = kiln_c99_put(NULL, stream, "fd", 2, kiln_c99_number(0.0), 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, stream, "isTTY", 5, kiln_c99_boolean(isatty(0) != 0), 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, stream, "isRaw", 5, kiln_c99_boolean(0), 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_define_method(stream, "setRawMode", 10,
+                                            kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_SET_RAW_MODE));
         if (status == KILN_C99_OK)
             status = kiln_c99_put(NULL, *process, "stdin", 5, stream, 0, NULL);
     }
@@ -202,6 +219,21 @@ static int kiln_c99_process_object(kiln_value *out) {
         if (status == KILN_C99_OK) status = kiln_c99_install_writable_methods(stream);
         if (status == KILN_C99_OK)
             status = kiln_c99_put(NULL, stream, "fd", 2, kiln_c99_number(1.0), 0, NULL);
+        if (status == KILN_C99_OK) {
+            int is_tty = isatty(1) != 0;
+            status = kiln_c99_put(NULL, stream, "isTTY", 5, kiln_c99_boolean(is_tty), 0, NULL);
+#if defined(__unix__) || defined(__APPLE__)
+            if (status == KILN_C99_OK && is_tty) {
+                struct winsize ws;
+                if (ioctl(1, TIOCGWINSZ, &ws) == 0) {
+                    if (ws.ws_col > 0)
+                        (void)kiln_c99_put(NULL, stream, "columns", 7, kiln_c99_number((double)ws.ws_col), 0, NULL);
+                    if (ws.ws_row > 0)
+                        (void)kiln_c99_put(NULL, stream, "rows", 4, kiln_c99_number((double)ws.ws_row), 0, NULL);
+                }
+            }
+#endif
+        }
         if (status == KILN_C99_OK)
             status = kiln_c99_put(NULL, *process, "stdout", 6, stream, 0, NULL);
     }
@@ -211,6 +243,8 @@ static int kiln_c99_process_object(kiln_value *out) {
         if (status == KILN_C99_OK) status = kiln_c99_install_writable_methods(stream);
         if (status == KILN_C99_OK)
             status = kiln_c99_put(NULL, stream, "fd", 2, kiln_c99_number(2.0), 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, stream, "isTTY", 5, kiln_c99_boolean(isatty(2) != 0), 0, NULL);
         if (status == KILN_C99_OK)
             status = kiln_c99_put(NULL, *process, "stderr", 6, stream, 0, NULL);
     }

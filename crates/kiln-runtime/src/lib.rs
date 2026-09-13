@@ -2306,6 +2306,7 @@ impl TokioHost {
                 });
                 return request;
             }
+            AsyncHostOp::StdinRead { max_bytes } => AsyncHostOp::StdinRead { max_bytes },
         };
         self.spawn_task(request, sequence, referenced, async move {
             let result = execute_async_host_op(operation).await;
@@ -2782,6 +2783,15 @@ async fn execute_async_host_op(operation: AsyncHostOp) -> Result<AsyncHostValue,
             };
             res.map(|()| AsyncHostValue::Undefined)
                 .map_err(|error| io_error("mkdir", path, error))
+        }
+        AsyncHostOp::StdinRead { max_bytes } => {
+            let mut bytes = vec![0; max_bytes];
+            let length = tokio::io::stdin()
+                .read(&mut bytes)
+                .await
+                .map_err(|error| io_error("read", "stdin".to_string(), error))?;
+            bytes.truncate(length);
+            Ok(AsyncHostValue::Bytes(bytes))
         }
         AsyncHostOp::CloseResource { .. }
         | AsyncHostOp::SetResourceReferenced { .. }

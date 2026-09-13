@@ -260,6 +260,15 @@ static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t cod
                                   NULL);
         if (status == KILN_C99_OK) status = kiln_c99_array_push(listeners, record);
         if (status != KILN_C99_OK) return status;
+        {
+            kiln_value fd_val;
+            if (kiln_c99_get(NULL, receiver, "fd", 2, &fd_val, 0, NULL) == KILN_C99_OK &&
+                fd_val.tag == KILN_VALUE_NUMBER && kiln_c99_as_number(fd_val) == 0.0) {
+                if (kiln_c99_strict_equal(name, kiln_c99_copy_text("data", 4))) {
+                    (void)kiln_c99_node_stdin_resume(host, receiver);
+                }
+            }
+        }
         *result = receiver;
         return KILN_C99_OK;
     }
@@ -632,6 +641,93 @@ static void kiln_c99_node_cancel_request(uint64_t *request) {
     if (*request != 0) {
         (void)kiln_realm_cancel_active_request(*request);
         *request = 0;
+    }
+}
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <termios.h>
+static struct termios kiln_orig_termios;
+static int kiln_raw_mode_active = 0;
+static int kiln_atexit_registered = 0;
+
+static void kiln_c99_cfmakeraw(struct termios *t) {
+    t->c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL | IXON);
+    t->c_oflag &= ~OPOST;
+    t->c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
+    t->c_cflag &= ~(CSIZE | PARENB);
+    t->c_cflag |= CS8;
+    t->c_cc[VMIN] = 1;
+    t->c_cc[VTIME] = 0;
+}
+
+static void kiln_disable_raw_mode(void) {
+    if (kiln_raw_mode_active) {
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &kiln_orig_termios);
+        kiln_raw_mode_active = 0;
+    }
+}
+
+static int kiln_c99_node_set_raw_mode(int mode) {
+    if (!isatty(STDIN_FILENO)) {
+        return KILN_C99_OK;
+    }
+    if (mode) {
+        if (!kiln_raw_mode_active) {
+            struct termios raw;
+            if (tcgetattr(STDIN_FILENO, &kiln_orig_termios) == -1) {
+                return KILN_C99_OK;
+            }
+            if (!kiln_atexit_registered) {
+                atexit(kiln_disable_raw_mode);
+                kiln_atexit_registered = 1;
+            }
+            raw = kiln_orig_termios;
+            kiln_c99_cfmakeraw(&raw);
+            if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) {
+                return KILN_C99_OK;
+            }
+            kiln_raw_mode_active = 1;
+        }
+    } else {
+        kiln_disable_raw_mode();
+    }
+    return KILN_C99_OK;
+}
+#else
+static int kiln_c99_node_set_raw_mode(int mode) {
+    (void)mode;
+    return KILN_C99_OK;
+}
+#endif
+
+static uint64_t kiln_c99_node_stdin_request = 0;
+static int kiln_c99_node_stdin_paused = 1;
+static int kiln_c99_node_stdin_read_active = 0;
+
+static int kiln_c99_node_stdin_start_read(void) {
+    if (kiln_c99_node_stdin_read_active || kiln_c99_node_stdin_paused) {
+        return KILN_C99_OK;
+    }
+    kiln_node_completion *read = (kiln_node_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_COMPLETION, sizeof *read);
+    if (read == NULL) return KILN_C99_OUT_OF_MEMORY;
+    read->kind = KILN_REALM_OP_STDIN_READ;
+    kiln_c99_node_stdin_read_active = 1;
+    return kiln_c99_node_start(KILN_REALM_OP_STDIN_READ, 0, 16384, NULL, 0, NULL, 0, read, &kiln_c99_node_stdin_request);
+}
+
+static int kiln_c99_node_stdin_resume(void *host, kiln_value receiver) {
+    (void)host;
+    (void)receiver;
+    kiln_c99_node_stdin_paused = 0;
+    return kiln_c99_node_stdin_start_read();
+}
+
+static void kiln_c99_node_stdin_pause(kiln_value receiver) {
+    (void)receiver;
+    kiln_c99_node_stdin_paused = 1;
+    if (kiln_c99_node_stdin_request != 0) {
+        kiln_c99_node_cancel_request(&kiln_c99_node_stdin_request);
+        kiln_c99_node_stdin_read_active = 0;
     }
 }
 
@@ -1077,6 +1173,44 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
     kiln_node_completion *work = (kiln_node_completion *)opaque;
     kiln_value *exception = (kiln_value *)thrown;
     if (work == NULL || completion == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (work->kind == KILN_REALM_OP_STDIN_READ) {
+        kiln_value *process_slot = NULL;
+        kiln_value stdin_stream = kiln_c99_undefined();
+        kiln_c99_node_stdin_read_active = 0;
+        kiln_c99_node_stdin_request = 0;
+        if (kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_PROCESS, &process_slot) == KILN_C99_OK &&
+            process_slot != NULL && process_slot->tag == KILN_VALUE_OBJECT) {
+            (void)kiln_c99_get(NULL, *process_slot, "stdin", 5, &stdin_stream, 0, NULL);
+        }
+        if (completion->status != KILN_REALM_ASYNC_OK) {
+            if (stdin_stream.tag == KILN_VALUE_OBJECT) {
+                kiln_value message = kiln_c99_copy_text((const char *)completion->error_message,
+                                                        (size_t)completion->error_message_len);
+                return kiln_c99_node_emit((kiln_host *)host, stdin_stream, "error", message, 1, 0, exception);
+            }
+            return KILN_C99_OK;
+        }
+        if (stdin_stream.tag != KILN_VALUE_OBJECT) {
+            return KILN_C99_OK;
+        }
+        if (completion->bytes_len == 0) {
+            return kiln_c99_node_emit((kiln_host *)host, stdin_stream, "end",
+                                      kiln_c99_undefined(), 0, 0, exception);
+        }
+        {
+            kiln_value bytes = kiln_c99_copy_text((const char *)completion->bytes,
+                                                  (size_t)completion->bytes_len);
+            kiln_value data;
+            int status = kiln_c99_buffer_from(&data, bytes, exception);
+            if (status != KILN_C99_OK) return status;
+            status = kiln_c99_node_emit((kiln_host *)host, stdin_stream, "data", data, 1, 0, exception);
+            if (status != KILN_C99_OK) return status;
+            if (!kiln_c99_node_stdin_paused) {
+                return kiln_c99_node_stdin_start_read();
+            }
+            return KILN_C99_OK;
+        }
+    }
     if (completion->status != KILN_REALM_ASYNC_OK) {
         kiln_value message = kiln_c99_copy_text((const char *)completion->error_message,
                                                 (size_t)completion->error_message_len);

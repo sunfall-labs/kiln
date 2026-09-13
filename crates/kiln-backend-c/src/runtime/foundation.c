@@ -603,6 +603,9 @@ static int kiln_c99_node_fs(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_iterator_method(kiln_host *host, kiln_value *result, uint64_t code,
                                     kiln_value receiver, const kiln_value *args, size_t argc,
                                     int depth, kiln_value *thrown);
+static int kiln_c99_node_stdin_resume(void *host, kiln_value receiver);
+static void kiln_c99_node_stdin_pause(kiln_value receiver);
+static int kiln_c99_node_set_raw_mode(int mode);
 
 static kiln_value kiln_c99_value(uint32_t tag, uint64_t bits, const char *ptr, size_t len) {
     kiln_value value;
@@ -708,8 +711,33 @@ static int kiln_c99_node_stream(kiln_host *host, kiln_value *result, uint64_t co
         queue->count -= 1;
         return KILN_C99_OK;
     }
-    if (code == KILN_C99_METHOD_NODE_READABLE_PAUSE || code == KILN_C99_METHOD_NODE_READABLE_RESUME ||
-        code == KILN_C99_METHOD_NODE_READABLE_SET_ENCODING || code == KILN_C99_METHOD_NODE_READABLE_UNPIPE) {
+    if (code == KILN_C99_METHOD_NODE_READABLE_RESUME) {
+        kiln_value fd_val;
+        if (kiln_c99_get(host, receiver, "fd", 2, &fd_val, depth, NULL) == KILN_C99_OK &&
+            fd_val.tag == KILN_VALUE_NUMBER && kiln_c99_as_number(fd_val) == 0.0) {
+            status = kiln_c99_node_stdin_resume(host, receiver);
+            if (status != KILN_C99_OK) return status;
+        }
+        *result = receiver; return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_NODE_READABLE_PAUSE) {
+        kiln_value fd_val;
+        if (kiln_c99_get(host, receiver, "fd", 2, &fd_val, depth, NULL) == KILN_C99_OK &&
+            fd_val.tag == KILN_VALUE_NUMBER && kiln_c99_as_number(fd_val) == 0.0) {
+            kiln_c99_node_stdin_pause(receiver);
+        }
+        *result = receiver; return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_NODE_READABLE_SET_RAW_MODE) {
+        int mode = (argc > 0 && kiln_c99_truthy(args[0])) ? 1 : 0;
+        status = kiln_c99_node_set_raw_mode(mode);
+        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_put(NULL, receiver, "isRaw", 5, kiln_c99_boolean(mode), 0, NULL);
+        if (status != KILN_C99_OK) return status;
+        *result = receiver;
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_NODE_READABLE_SET_ENCODING || code == KILN_C99_METHOD_NODE_READABLE_UNPIPE) {
         *result = receiver; return KILN_C99_OK;
     }
     if (code == KILN_C99_METHOD_NODE_READABLE_PIPE) { *result = argc > 0 ? args[0] : kiln_c99_undefined(); return KILN_C99_OK; }
