@@ -405,7 +405,9 @@ pub(crate) fn include_reachable_dependencies(
         // source and pinned Node format were never sent by the client.
         for target in kiln_ir::collect_dynamic_imports(&module.body) {
             if let kiln_ir::DynamicImportTarget::Static(specifier) = target
-                && !requests.iter().any(|(existing, _, _)| existing == &specifier)
+                && !requests
+                    .iter()
+                    .any(|(existing, kind, _)| existing == &specifier && *kind == NodeRequestKind::Import)
             {
                 // Dynamic import always uses the import condition, even in a CommonJS module;
                 // a missing target remains a deferred runtime rejection rather than a build error.
@@ -425,11 +427,7 @@ pub(crate) fn include_reachable_dependencies(
                     // A CommonJS `require()` resolves when execution reaches it. Leaving an
                     // unresolved literal out of the pinned map lets the runtime throw inside the
                     // program's own `try/catch`; ESM imports remain strict graph dependencies.
-                    // Host-specific URL modules such as `bun:sqlite` belong to an optional
-                    // runtime branch.  They are intentionally outside Kiln's Node capability;
-                    // leave them deferred so importing the supported sibling branch does not
-                    // decode or resolve an unavailable host module during synchronization.
-                    Err(_) if commonjs || !required || specifier.starts_with("bun:") => continue,
+                    Err(_) if commonjs || !required => continue,
                     Err(error) => return Err(Error::BadInput(error.to_string())),
             };
             let target = resolved.module.path.clone();
