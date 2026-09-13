@@ -81,6 +81,10 @@ class CorpusPolicyTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"FAKE_REPORT": json.dumps(failing), "FAKE_NO_WRITE": "0", "FAKE_EXIT": "1"}):
             report, completed = corpus.run_result(str(fake), root / "test/language/a", raw, log)
         self.assertEqual((report["_kiln_counts"]["fail"], completed.returncode), (1, 1))
+        unsupported = {"tests": [{"id": "a", "outcome": "unsupported"}], "totals": {"total": 1, "passed": 0, "failed": 0, "unsupported": 1, "skipped": 0}}
+        with mock.patch.dict(os.environ, {"FAKE_REPORT": json.dumps(unsupported), "FAKE_NO_WRITE": "0", "FAKE_EXIT": "1"}):
+            report, completed = corpus.run_result(str(fake), root / "test/language/a", raw, log)
+        self.assertEqual((report["_kiln_counts"]["unsupported"], completed.returncode), (1, 1))
         with mock.patch.dict(os.environ, {"FAKE_REPORT": json.dumps(valid), "FAKE_NO_WRITE": "0", "FAKE_EXIT": "9"}):
             with self.assertRaisesRegex(corpus.CorpusError, "exited 9"):
                 corpus.run_result(str(fake), root / "test/language/a", raw, log)

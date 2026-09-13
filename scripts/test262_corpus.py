@@ -188,7 +188,7 @@ def run_result(kiln: str, root: pathlib.Path, output: pathlib.Path, log: pathlib
     for key, value in expected.items():
         if not isinstance(totals.get(key), int) or totals[key] != value:
             raise CorpusError(f"Kiln result totals disagree with test entries for {key}: expected {value}, got {totals.get(key)!r}")
-    if completed.returncode not in (0, 1) or (completed.returncode == 1 and counts["fail"] == 0):
+    if completed.returncode not in (0, 1) or (completed.returncode == 1 and not (counts["fail"] or counts["unsupported"] or counts["skipped"])):
         raise CorpusError(f"Kiln exited {completed.returncode} without reported test failures; full log: {log}")
     report["_kiln_elapsed_millis"] = max(1, round((time.monotonic() - started) * 1000))
     report["_kiln_paths"] = len(paths)
