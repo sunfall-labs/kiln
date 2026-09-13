@@ -1161,6 +1161,13 @@ fn tabulated_property(intrinsics: &Intrinsics, target: &Value, key: &str) -> Opt
             intrinsic_identity(target).map(|(_, length)| Property::Value(Value::Number(length)))
         }
         "prototype" => intrinsic_prototype_in(intrinsics, target).map(Property::Value),
+        _ if matches!(
+            target,
+            Value::Native(Native::PrototypeOf(PrototypeTable::Array), _)
+        ) && key == WellKnown::Unscopables.property_key() =>
+        {
+            Some(Property::Value(intrinsics.array_unscopables(realm)))
+        }
         _ => match target {
             Value::Native(native, _) => match native.property(key) {
                 Some(Value::Undefined) | None => None,
@@ -7551,6 +7558,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             .into_iter()
             .flatten()
             .chain(self.intrinsics.take_error_prototypes())
+            .chain(self.intrinsics.take_unscopables())
         {
             if let Value::Object(object) = root {
                 object.replace(ObjectData::default());
@@ -29569,6 +29577,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     };
                     self.intrinsics.error_prototype(*kind, *realm)
                 }
+                Overridden::Untouched
+                    if matches!(native, Native::PrototypeOf(PrototypeTable::Array))
+                        && name == WellKnown::Unscopables.property_key() =>
+                {
+                    self.intrinsics.array_unscopables(*realm)
+                }
                 Overridden::Untouched => {
                     match native.property(name).map(|found| in_realm(found, *realm)) {
                         Some(found) if !matches!(found, Value::Undefined) => found,
@@ -38505,44 +38519,12 @@ fn number_property(name: &str) -> Value {
     }
 }
 
-/// `Array.prototype[Symbol.unscopables]`.
-///
-/// The object `with` consults to take a name *out* of the scope an array provides: it is what
-/// lets `Array.prototype.flat` be added years after `with (array) { flat }` was written without
-/// changing what that code means. The `with` machinery has always read it correctly; the property
-/// simply was not there, so every one of these sixteen names shadowed an outer binding of the
-/// same name.
-///
-/// Built once and handed out by clone, because its identity is observable:
-/// `Array.prototype[Symbol.unscopables] === Array.prototype[Symbol.unscopables]` is true, and a
-/// fresh object per read would make it false. That is why it cannot be spelled as an ordinary
-/// table entry -- the tables answer with values that have no identity to keep.
-fn array_unscopables() -> Value {
-    thread_local! {
-        static UNSCOPABLES: Value = {
-            let mut data = ObjectData::default();
-            // No prototype, so a name the list does not mention cannot be answered by
-            // `Object.prototype` and blocked by accident.
-            data.set_prototype(Value::Null);
-            for name in [
-                "at", "copyWithin", "entries", "fill", "find", "findIndex", "findLast",
-                "findLastIndex", "flat", "flatMap", "includes", "keys", "toReversed", "toSorted",
-                "toSpliced", "values",
-            ] {
-                data.set(name, Value::Boolean(true));
-            }
-            Value::Object(Rc::new(RefCell::new(data)))
-        };
-    }
-    UNSCOPABLES.with(Value::clone)
-}
-
 fn array_property(name: &str) -> Value {
     if let Some(method) = array_callback_method(name) {
         return Value::Callback(method, RealmId::PRIMARY);
     }
     if name == WellKnown::Unscopables.property_key() {
-        return array_unscopables();
+        return Value::Null;
     }
     match name {
         "join" => Value::Native(Native::ArrayJoin, RealmId::PRIMARY),
@@ -41422,6 +41404,11 @@ fn inherited_object_property(intrinsics: &Intrinsics, name: &str, realm: RealmId
 /// the tables whose members are published by earlier, more specific arms -- `EventEmitter` and the
 /// two stream tables -- owning what they publish.
 fn intrinsic_owns(native: Native, key: &str) -> Option<Value> {
+    if matches!(native, Native::PrototypeOf(PrototypeTable::Array))
+        && key == WellKnown::Unscopables.property_key()
+    {
+        return Some(Value::Null);
+    }
     let found = native.property(key)?;
     if matches!(found, Value::Undefined) {
         return None;
@@ -43220,6 +43207,7 @@ struct Intrinsics {
     /// Interior mutability for the same reason the entries have it: the prototype is built on
     /// first use, and first use is now a `&self` read.
     error_prototypes: RefCell<Vec<[Option<Value>; ErrorKind::ALL.len()]>>,
+    unscopables: RefCell<Vec<Option<Value>>>,
 }
 
 impl Default for Intrinsics {
@@ -43229,6 +43217,7 @@ impl Default for Intrinsics {
             entries: RefCell::default(),
             accessors: std::cell::Cell::new(false),
             error_prototypes: RefCell::new(vec![[const { None }; ErrorKind::ALL.len()]]),
+            unscopables: RefCell::new(vec![None]),
         }
     }
 }
@@ -43275,11 +43264,12 @@ impl Intrinsics {
         prototype
     }
 
-    /// Make room for one more realm's error prototypes.
+    /// Make room for one more realm's error prototypes and unscopables.
     fn add_realm(&self) {
         self.error_prototypes
             .borrow_mut()
             .push([const { None }; ErrorKind::ALL.len()]);
+        self.unscopables.borrow_mut().push(None);
     }
 
     /// Every error prototype this store holds, taken out so the caller can break their cycles.
@@ -43289,6 +43279,55 @@ impl Intrinsics {
             .iter_mut()
             .flat_map(|realm| realm.iter_mut().filter_map(Option::take))
             .collect()
+    }
+
+    /// Every unscopables object this store holds, taken out so the caller can break their cycles.
+    fn take_unscopables(&self) -> Vec<Value> {
+        self.unscopables
+            .borrow_mut()
+            .iter_mut()
+            .filter_map(Option::take)
+            .collect()
+    }
+
+    /// `Array.prototype[Symbol.unscopables]` (ECMA-262 §23.1.3.32) for `realm`, built on first use.
+    fn array_unscopables(&self, realm: RealmId) -> Value {
+        let index = realm.0 as usize;
+        if let Some(unscopables) = self
+            .unscopables
+            .borrow()
+            .get(index)
+            .and_then(Option::as_ref)
+        {
+            return unscopables.clone();
+        }
+        let mut data = ObjectData::default();
+        data.set_prototype(Value::Null);
+        for name in [
+            "at",
+            "copyWithin",
+            "entries",
+            "fill",
+            "find",
+            "findIndex",
+            "findLast",
+            "findLastIndex",
+            "flat",
+            "flatMap",
+            "includes",
+            "keys",
+            "toReversed",
+            "toSorted",
+            "toSpliced",
+            "values",
+        ] {
+            data.set(name, Value::Boolean(true));
+        }
+        let unscopables = Value::Object(Rc::new(RefCell::new(data)));
+        if index < self.unscopables.borrow().len() {
+            self.unscopables.borrow_mut()[index] = Some(unscopables.clone());
+        }
+        unscopables
     }
 
     /// What the store says about `key` on this built-in.
@@ -43515,7 +43554,15 @@ fn table_step(
 ) -> Value {
     intrinsics
         .read(&Value::Native(Native::PrototypeOf(table), realm), name)
-        .unwrap_or(in_realm(tabulated, realm))
+        .unwrap_or_else(|| {
+            if matches!(table, PrototypeTable::Array)
+                && name == WellKnown::Unscopables.property_key()
+            {
+                intrinsics.array_unscopables(realm)
+            } else {
+                in_realm(tabulated, realm)
+            }
+        })
 }
 
 /// The names physically owned by each virtual intrinsic prototype table.
@@ -44415,7 +44462,9 @@ fn own_property_keys_including_symbols(intrinsics: &Intrinsics, target: &Value) 
             // absent from `getOwnPropertySymbols`.
             let published = !matches!(native.property(key), None | Some(Value::Undefined))
                 || intrinsic_accessor(target, key).is_some()
-                || machine_accessor(target, key).is_some();
+                || machine_accessor(target, key).is_some()
+                || (matches!(native, Native::PrototypeOf(PrototypeTable::Array))
+                    && key == WellKnown::Unscopables.property_key());
             if published {
                 keys.push(key.to_owned());
             }

@@ -464,6 +464,29 @@ static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const 
         return status;
     }
     if (target.tag == KILN_VALUE_BUILTIN &&
+        target.bits == KILN_C99_BUILTIN_ARRAY_PROTOTYPE &&
+        kiln_c99_same_name(key, key_len, "@@unscopables")) {
+        kiln_value val;
+        status = kiln_c99_get_array_unscopables(&val);
+        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_new_object(&built);
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_put(NULL, built, "value", 5, val, 0, NULL);
+        }
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_put(NULL, built, "writable", 8, kiln_c99_boolean(0), 0, NULL);
+        }
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_put(NULL, built, "enumerable", 10, kiln_c99_boolean(0), 0, NULL);
+        }
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_put(NULL, built, "configurable", 12, kiln_c99_boolean(1), 0, NULL);
+        }
+        *found = 1;
+        *out = built;
+        return status;
+    }
+    if (target.tag == KILN_VALUE_BUILTIN &&
         target.bits == KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE &&
         kiln_c99_same_name(key, key_len, "@@toStringTag")) {
         /* `%TypedArray%.prototype[@@toStringTag]` is an accessor on the shared prototype, not a

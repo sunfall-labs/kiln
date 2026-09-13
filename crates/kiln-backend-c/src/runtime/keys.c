@@ -155,6 +155,21 @@ static int kiln_c99_builtin_own_keys(uint64_t builtin, kiln_value *out) {
             }
         }
     }
+    if (builtin == KILN_C99_BUILTIN_ARRAY_PROTOTYPE) {
+        kiln_value symbol;
+        if (kiln_c99_symbol_of_key("@@iterator", 10, &symbol)) {
+            status = kiln_c99_array_push(built, symbol);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        }
+        if (kiln_c99_symbol_of_key("@@unscopables", 13, &symbol)) {
+            status = kiln_c99_array_push(built, symbol);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        }
+    }
     *out = built;
     return KILN_C99_OK;
 }

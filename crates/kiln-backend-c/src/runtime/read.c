@@ -575,6 +575,9 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             *out = kiln_c99_method(KILN_C99_METHOD_ARRAY_VALUES);
             return KILN_C99_OK;
         }
+        if (kiln_c99_same_name(key, key_len, "@@unscopables")) {
+            return kiln_c99_get_array_unscopables(out);
+        }
         code = kiln_c99_array_method(key, key_len);
         if (code != 0) {
             *out = kiln_c99_method(code);
@@ -1368,6 +1371,10 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
              * themselves. An absent name is undefined there for the same reason it is on an array
              * or a string: it is what the language answers. A bundled `mobx` reads names off
              * `Array.prototype` one at a time, which is how a library patches methods. */
+            if (target.bits == KILN_C99_BUILTIN_ARRAY_PROTOTYPE &&
+                kiln_c99_same_name(key, key_len, "@@unscopables")) {
+                return kiln_c99_get_array_unscopables(out);
+            }
             if (target.bits == KILN_C99_BUILTIN_ARRAY_PROTOTYPE &&
                 !kiln_c99_is_array_member(key, key_len)) {
                 KILN_C99_ABSENT("not a member of Array.prototype; kiln_c99_is_array_member holds "

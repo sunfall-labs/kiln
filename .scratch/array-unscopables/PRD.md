@@ -1,6 +1,6 @@
 # PRD: Array.prototype[Symbol.unscopables] Realm-Held Intrinsic Object
 
-Status: ready-for-agent
+Status: resolved
 Branch: `feat/array-unscopables`
 
 ## Problem Statement

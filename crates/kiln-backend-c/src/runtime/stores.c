@@ -109,6 +109,58 @@ static int kiln_c99_callable_prototype(kiln_value callable, kiln_value *out) {
     KILN_C99_REFUSE("a prototype for a method id that is not a registered native constructor");
 }
 
+/* `Array.prototype[Symbol.unscopables]` (ECMA-262 §23.1.3.32).
+ *
+ * A distinct realm-held object with a null prototype and 16 properties set to `true`:
+ * `at`, `copyWithin`, `entries`, `fill`, `find`, `findIndex`, `findLast`,
+ * `findLastIndex`, `flat`, `flatMap`, `includes`, `keys`, `toReversed`, `toSorted`,
+ * `toSpliced`, `values`.
+ * Its property descriptor on Array.prototype is non-writable, non-enumerable,
+ * configurable (`w0e0c1`). Identity is observable across reads:
+ * `Array.prototype[Symbol.unscopables] === Array.prototype[Symbol.unscopables]`. */
+static kiln_value kiln_c99_array_unscopables;
+
+static int kiln_c99_get_array_unscopables(kiln_value *out) {
+    if (kiln_c99_array_unscopables.tag == KILN_VALUE_UNDEFINED) {
+        kiln_value built;
+        int status = kiln_c99_new_object(&built);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        kiln_c99_object_of(built)->prototype = kiln_c99_null();
+        static const struct {
+            const char *name;
+            size_t len;
+        } names[] = {
+            {"at", 2},
+            {"copyWithin", 10},
+            {"entries", 7},
+            {"fill", 4},
+            {"find", 4},
+            {"findIndex", 9},
+            {"findLast", 8},
+            {"findLastIndex", 13},
+            {"flat", 4},
+            {"flatMap", 7},
+            {"includes", 8},
+            {"keys", 4},
+            {"toReversed", 10},
+            {"toSorted", 8},
+            {"toSpliced", 9},
+            {"values", 6}
+        };
+        for (size_t i = 0; i < sizeof names / sizeof *names; ++i) {
+            status = kiln_c99_own_data(built, names[i].name, names[i].len, kiln_c99_boolean(1));
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        }
+        kiln_c99_array_unscopables = built;
+    }
+    *out = kiln_c99_array_unscopables;
+    return KILN_C99_OK;
+}
+
 /* The store `f.x = 1` writes into. Separate from the prototype object: a static belongs to the
  * function and an instance method belongs to what it constructs. */
 static int kiln_c99_function_store(kiln_value function, kiln_value *out) {

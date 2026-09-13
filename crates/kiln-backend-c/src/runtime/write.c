@@ -182,7 +182,8 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
                  * general read answers it. Any other that nobody set is *absent*, and absent is
                  * undefined -- not the refusal an unknown ordinary name gets, which is there to
                  * catch a method this backend has not grown and which a symbol can never be. */
-                if (!kiln_c99_same_name(name.ptr, name.len, "@@iterator")) {
+                if (!kiln_c99_same_name(name.ptr, name.len, "@@iterator") &&
+                    !kiln_c99_same_name(name.ptr, name.len, "@@unscopables")) {
                     KILN_C99_ABSENT("a reserved slot nobody set on this object", out);
                 }
                 return kiln_c99_get(host, target, name.ptr, name.len, out, depth, thrown);

@@ -1,5 +1,6 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
+assertion_line: 803
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -1819,6 +1820,8 @@ static size_t kiln_c99_string_length(kiln_value value) {
 static double kiln_c99_array_index(kiln_value key) {
 static int kiln_c99_prototype_object(kiln_value function, kiln_value *out) {
 static int kiln_c99_callable_prototype(kiln_value callable, kiln_value *out) {
+static kiln_value kiln_c99_array_unscopables;
+static int kiln_c99_get_array_unscopables(kiln_value *out) {
 static int kiln_c99_function_store(kiln_value function, kiln_value *out) {
 static kiln_method_store *kiln_c99_fixture_method_stores;
 static void kiln_c99_drop_callable_store(void *pointer) {
