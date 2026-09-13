@@ -4166,24 +4166,6 @@ struct NativeExecutableGraph<'a> {
     partial_namespace_members: BTreeMap<PathBuf, BTreeSet<String>>,
 }
 
-fn native_static_reachable(graph: &ModuleGraph) -> BTreeSet<PathBuf> {
-    let mut reachable = BTreeSet::new();
-    let mut pending = vec![graph.entry().to_path_buf()];
-    while let Some(path) = pending.pop() {
-        if !reachable.insert(path.clone()) {
-            continue;
-        }
-        if let Some(node) = graph.module(&path) {
-            pending.extend(
-                node.dependencies
-                    .iter()
-                    .map(|dependency| dependency.target.clone()),
-            );
-        }
-    }
-    reachable
-}
-
 /// The exact two-arm dispatcher used by React and similar CommonJS packages.
 ///
 /// This intentionally accepts no general JavaScript. Matching the complete whitespace-free
@@ -5885,7 +5867,7 @@ fn graph_launcher_source_with_imports(
     for (index, (node, _)) in modules.iter().enumerate() {
         indices.insert(node.path.clone(), index);
     }
-    let startup_paths = native_static_reachable(graph);
+    let startup_paths = graph.statically_reachable();
     let startup_indices = modules
         .iter()
         .enumerate()

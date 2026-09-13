@@ -831,8 +831,12 @@ impl ModuleGraph {
         self.dynamic_failures.iter()
     }
 
-    fn statically_reachable(&self) -> HashSet<PathBuf> {
-        let mut reachable = HashSet::new();
+    /// Return the entry module and all modules reachable through static dependencies.
+    ///
+    /// Dynamic imports are intentionally excluded: callers use this set to identify startup
+    /// evaluation and may materialize dynamic targets lazily.
+    pub fn statically_reachable(&self) -> BTreeSet<PathBuf> {
+        let mut reachable = BTreeSet::new();
         let mut pending = vec![self.entry.clone()];
         while let Some(path) = pending.pop() {
             if !reachable.insert(path.clone()) {
