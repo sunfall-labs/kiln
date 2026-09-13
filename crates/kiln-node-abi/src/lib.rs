@@ -327,7 +327,7 @@ const BUILTINS: &[BuiltinAbi] = &[
     },
     BuiltinAbi {
         specifier: "node:tty",
-        exports: &["default", "isatty"],
+        exports: &["ReadStream", "WriteStream", "default", "isatty"],
         commonjs: CommonJsProjection::Namespace,
     },
     BuiltinAbi {

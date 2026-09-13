@@ -5542,4 +5542,17 @@ fallback implementations when underlying host facilities differ. Verified with n
 integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`, and full `scripts/native.sh` parity
 (175 matched, 5 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
 
+---
+
+## Phase 5.2 TypeScript built-ins: `node:tty` (2026-09-13)
+
+Migrated `node:tty` completely to TypeScript via `crates/kiln-builtins/src/node/tty.ts`
+with zero additions to the C runtime prelude (Phase 5.1 freeze strictly honored). Implemented all canonical
+exports (`ReadStream`, `WriteStream`, `default`, `isatty`). `ReadStream` and `WriteStream` provide terminal
+stream methods (`setRawMode`, `getColorDepth`, `hasColors`, `getWindowSize`, `cursorTo`, `moveCursor`,
+`clearLine`, `clearScreenDown`) reflecting standard descriptors and dimensions. Verified with native probe
+`conformance/native/node-tty-members.cjs` (byte-for-byte identical output between interpreter and native CLI),
+integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`, and full `scripts/native.sh` parity
+(176 matched, 5 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
+
 

@@ -2407,6 +2407,93 @@ fn node_builtin_console_commonjs_require_evaluates_cleanly() {
 }
 
 #[test]
+fn node_builtin_tty_evaluates_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import nodeTty, { isatty, ReadStream, WriteStream } from 'node:tty';\n",
+            "console.log(\n",
+            "  typeof nodeTty === 'object',\n",
+            "  nodeTty.default === nodeTty,\n",
+            "  typeof isatty === 'function',\n",
+            "  typeof ReadStream === 'function',\n",
+            "  typeof WriteStream === 'function',\n",
+            "  isatty(0),\n",
+            "  isatty(-1),\n",
+            ");\n",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with tty builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute tty builtin");
+    assert_eq!(host.output, ["true true true true true false false"]);
+}
+
+#[test]
+fn node_builtin_tty_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const t = require('node:tty');\n",
+            "module.exports = {\n",
+            "  isObj: typeof t === 'object',\n",
+            "  hasIsatty: typeof t.isatty === 'function',\n",
+            "  hasReadStream: typeof t.ReadStream === 'function',\n",
+            "  hasWriteStream: typeof t.WriteStream === 'function',\n",
+            "  selfEq: t.default === t,\n",
+            "  isattyNeg: t.isatty(-1),\n",
+            "};\n",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import bridge from './bridge.cjs';\n",
+            "console.log(bridge.isObj, bridge.hasIsatty, bridge.hasReadStream, bridge.hasWriteStream, bridge.selfEq, bridge.isattyNeg);\n",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with tty builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute tty builtin cjs");
+    assert_eq!(host.output, ["true true true true true false"]);
+}
+
+#[test]
 fn node_net_connect_is_a_typed_virtual_module_export() {
     let project = TempProject::new();
     let entry = project.write(
