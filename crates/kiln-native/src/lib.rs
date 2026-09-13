@@ -5327,6 +5327,9 @@ fn write_launcher_dynamic_import(
 typedef struct kiln_graph_context kiln_graph_context;
 static kiln_value *kiln_graph_module_result(kiln_graph_context *graph, size_t index);
 static int kiln_graph_ensure_module(kiln_graph_context *graph, size_t index);
+static kiln_value *kiln_graph_module_promise(kiln_graph_context *graph, size_t index);
+int kiln_graph_module_completion(kiln_host *host, uint32_t index, int rejected, const kiln_value *value, kiln_value *result, int depth, kiln_value *thrown);
+extern int kiln_c99_module_completion(kiln_host *, kiln_value, uint32_t, kiln_value *, int, kiln_value *);
 extern int kiln_c99_validate_dynamic_import_options(kiln_host *, kiln_value, int, kiln_value *, int *);
 int kiln_graph_dynamic_import(kiln_host *host, const char *importer, kiln_value specifier, kiln_value options, kiln_value *promise, int depth, kiln_value *thrown) {
     if (promise == NULL) return KILN_C99_CONTROL_ERROR;
@@ -5478,7 +5481,7 @@ import_attributes_valid:
             .unwrap();
             writeln!(
                 output,
-                "        int status = kiln_graph_ensure_module((kiln_graph_context *)host->context, (size_t){index});\n        if (status != KILN_C99_OK) return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), kiln_graph_module_result((kiln_graph_context *)host->context, (size_t){index}), 1, depth, thrown);"
+                "        int status = kiln_graph_ensure_module((kiln_graph_context *)host->context, (size_t){index});\n        if (status != KILN_C99_OK) return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), kiln_graph_module_result((kiln_graph_context *)host->context, (size_t){index}), 1, depth, thrown);\n        if (kiln_graph_module_promise((kiln_graph_context *)host->context, (size_t){index})->tag == 16 /* KILN_VALUE_PROMISE */) return kiln_c99_module_completion(host, *kiln_graph_module_promise((kiln_graph_context *)host->context, (size_t){index}), (uint32_t){index}, promise, depth, thrown);"
             )
             .unwrap();
             if modules[index].0.source == ModuleSource::CommonJs {
@@ -6222,6 +6225,13 @@ struct kiln_graph_context {
 static kiln_value *kiln_graph_module_result(kiln_graph_context *graph, size_t index) {
     return &graph->module_states[index].result;
 }
+
+static kiln_value *kiln_graph_module_promise(kiln_graph_context *graph, size_t index) {
+    static kiln_value undefined = { KILN_VALUE_UNDEFINED, 0, {0} };
+    return graph->module_states[index].module_settling
+        ? &graph->module_states[index].active_promise
+        : &undefined;
+}
 "#
         .replace("MODULE_COUNT", &modules.len().to_string()),
     );
@@ -6536,6 +6546,29 @@ static int kiln_graph_enter(void *opaque) {
     for (index, (node, module)) in modules.iter().enumerate() {
         emit_module_case(index, node, module)?;
     }
+    helper_defs.push_str("int kiln_graph_module_completion(kiln_host *host, uint32_t index, int rejected, const kiln_value *value, kiln_value *result, int depth, kiln_value *thrown) {\n    kiln_graph_context *graph = (kiln_graph_context *)host->context;\n    int status = KILN_C99_OK;\n    (void)depth; (void)thrown;\n    if (graph == NULL || result == NULL || value == NULL) return KILN_C99_CONTROL_ERROR;\n    switch (index) {\n");
+    for (index, (node, module)) in modules.iter().enumerate() {
+        helper_defs.push_str(&format!("        case {index}: {{\n            kiln_graph_module_state *state = &graph->module_states[{index}];\n            if (rejected) {{ state->result = *value; state->phase = KILN_MODULE_FAILED; state->failure_status = KILN_C99_THROWN; state->module_settling = 0; *result = *value; return KILN_C99_THROWN; }}\n            if (state->phase == KILN_MODULE_EVALUATED) {{ *result = kiln_namespaces[{index}]; return KILN_C99_OK; }}\n", index = index));
+        let is_async = node
+            .program
+            .program
+            .code
+            .iter()
+            .any(|i| matches!(i, kiln_ir::Instruction::Await | kiln_ir::Instruction::Yield));
+        if is_async && native_graph_export_count(node) != 0 {
+            helper_defs.push_str(&format!(
+                "            {symbol}_publish_exports(kiln_exports_{index});\n",
+                symbol = module.symbol,
+                index = index
+            ));
+        }
+        if let Some(plan) = &namespace_plans[index] {
+            write_graph_namespace_build(&mut helper_defs, index, &module.symbol, plan, false);
+        }
+        helper_defs.push_str(&format!("            state->result = kiln_namespaces[{index}];\n            state->phase = KILN_MODULE_EVALUATED;\n            state->module_settling = 0;\n            *result = state->result;\n            return KILN_C99_OK;\n        }}\n", index = index));
+        let _ = node;
+    }
+    helper_defs.push_str("        default: return KILN_C99_CONTROL_ERROR;\n    }\n}\n");
     for (startup_order, &index) in startup_indices.iter().enumerate() {
         let is_async = modules[index]
             .0
