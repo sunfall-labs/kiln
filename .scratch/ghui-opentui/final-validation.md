@@ -61,3 +61,7 @@ diverged. The post-merge workspace also passed the live HTTP source-graph test. 
 performance pairing against the main revision was not run, so no performance baseline conclusion
 is recorded. A newer `e2` ghui startup attempt failed and remains pending investigation; the live
 acceptance result above is historical evidence from `fea2802b`.
+
+The post-merge ordinary native corpus then completed with 180 matched, 5 refused, and 0 diverged
+using the current release CLI. The five refusals are the existing JSON replacer, typed-array codec,
+callable length/prototype, and ShadowRealm backlog entries; no parity divergence was observed.
