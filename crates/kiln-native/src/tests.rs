@@ -5132,6 +5132,53 @@ fn native_dynamic_top_level_await_import_waits_for_completion() {
 }
 
 #[test]
+fn native_dynamic_import_static_tla_dependency_waits_for_completion() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping dynamic static-TLA integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-dynamic-static-tla");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).expect("write root package");
+    fs::write(
+        root.path.join("dep.mjs"),
+        "globalThis.dynamicStaticTlaCount = (globalThis.dynamicStaticTlaCount || 0) + 1;\nexport const x = await new Promise(resolve => setTimeout(() => resolve(42), 1));\n",
+    )
+    .expect("write TLA dependency");
+    fs::write(
+        root.path.join("target.mjs"),
+        "import { x } from './dep.mjs'; export const answer = x + 1;\n",
+    )
+    .expect("write dynamic target");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "const a = import('./target.mjs'); const b = import('./target.mjs'); const [na, nb] = await Promise.all([a, b]); console.log(na.answer, nb.answer, na === nb, globalThis.dynamicStaticTlaCount);\n",
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build dynamic static-TLA graph");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .expect("dynamic static-TLA graph builds and runs");
+    assert_eq!(report.stdout, b"43 43 true 1\n");
+}
+
+#[test]
 fn native_static_top_level_await_resolves_before_entry() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
