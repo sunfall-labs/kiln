@@ -248,7 +248,8 @@ def command_baseline(args: argparse.Namespace) -> int:
         if total <= 0:
             raise CorpusError(f"chunk {chunk} has zero test results; full log: {log}")
         passed, failed = int(totals["passed"]), int(totals["failed"])
-        report_chunks[chunk] = {"total": sum(report["_kiln_counts"].values()), **report["_kiln_counts"]}
+        raw_counts = report["_kiln_counts"]
+        report_chunks[chunk] = {"total": sum(raw_counts.values()), "passed": raw_counts["pass"], "failed": raw_counts["fail"], "unsupported": raw_counts["unsupported"], "skipped": raw_counts["skipped"]}
         measured[chunk] = {"passed": passed, "failed": failed}
         old = baseline.get("chunks", {}).get(chunk)
         mark = ""
@@ -263,7 +264,7 @@ def command_baseline(args: argparse.Namespace) -> int:
             "schema": 1,
             "status": "failed" if regressions else "passed",
             "source": {"name": "Test262 baseline", "repository": REPOSITORY, "commit": COMMIT},
-            "counts": {"total": sum(v["total"] for v in report_chunks.values()), "passed": sum(v["pass"] for v in report_chunks.values()), "failed": sum(v["fail"] for v in report_chunks.values()), "unsupported": sum(v["unsupported"] for v in report_chunks.values()), "skipped": sum(v["skipped"] for v in report_chunks.values())},
+            "counts": {"total": sum(v["total"] for v in report_chunks.values()), "passed": sum(v["passed"] for v in report_chunks.values()), "failed": sum(v["failed"] for v in report_chunks.values()), "unsupported": sum(v["unsupported"] for v in report_chunks.values()), "skipped": sum(v["skipped"] for v in report_chunks.values())},
             "chunks": report_chunks,
             "expected_chunks": chunks,
             "regressions": regressions,

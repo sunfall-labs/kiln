@@ -155,7 +155,7 @@ def test262(log: str, status: int) -> dict[str, Any]:
 
 def process(log: str, status: int, name: str) -> dict[str, Any]:
     snapshot = os.environ.get("KILN_CODE_SNAPSHOT_SHA256") or code_snapshot()
-    result = {"schema": 1, "verdict": "passed" if status == 0 else "failed", "measurement": "process", "source": {"kind": "process", "name": name, "code_snapshot_sha256": snapshot}, "evidence": {"log": str(Path(log).resolve())}}
+    result = {"schema": 1, "verdict": "passed" if status == 0 else "failed", "measurement": "process", "source": {"kind": "process", "name": name, "code_snapshot_sha256": snapshot, "binary_sha256": binary_snapshot() if name != "build" else None}, "evidence": {"log": str(Path(log).resolve())}}
     return validate(result)
 
 
