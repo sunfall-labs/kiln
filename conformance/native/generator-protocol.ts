@@ -101,6 +101,21 @@ function* catchingOuter(): Generator<number, string> {
 const thrown = catchingOuter();
 console.log("delegate throw", thrown.next(), thrown.throw("boom"));
 
+// return() closes the delegate, runs its finally, and returns the caller's value from the outer
+// generator. The internal return signal must not leak as an iteration value.
+function* closingInner(): Generator<number, never> {
+  try {
+    yield 30;
+  } finally {
+    console.log("delegate finally");
+  }
+}
+function* closingOuter(): Generator<number, string> {
+  return yield* closingInner();
+}
+const returned = closingOuter();
+console.log("delegate return", returned.next(), returned.return("closed"));
+
 // A generator method on an object, and one on a class, are the same thing reached two ways.
 const collection = { *[Symbol.iterator]() { yield "a"; yield "b"; } };
 class Range {

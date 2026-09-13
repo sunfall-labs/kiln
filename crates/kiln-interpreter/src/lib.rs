@@ -13279,7 +13279,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         match return_method {
             None => {
                 generator.borrow_mut().delegate = None;
-                self.resume_generator_with(generator, Resume::Return(sent), instruction)
+                self.resume_generator_return(generator, sent, instruction)
             }
             Some(return_fn) => {
                 let call_res = self.call_catching(&return_fn, delegate, vec![sent], instruction)?;
@@ -13486,6 +13486,26 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
     ) -> Result<(Value, bool), ExecutionError> {
         self.resume_generator_with(generator, Resume::Send(sent), instruction)
+    }
+
+    /// Resume a generator for a public `.return()` call. Return completion is represented by an
+    /// internal signal while `finally` blocks unwind, so it must pass through the host boundary
+    /// catcher just like the callback that drives it. Calling `resume_generator_with` directly
+    /// lets that marker escape as the observable iteration value when a delegated iterator has a
+    /// `finally`.
+    fn resume_generator_return(
+        &mut self,
+        generator: &Rc<RefCell<GeneratorState>>,
+        sent: Value,
+        instruction: usize,
+    ) -> Result<(Value, bool), ExecutionError> {
+        match self.resume_catching(generator, Resume::Return(sent), instruction)? {
+            Ok(result) => Ok(result),
+            Err(thrown) => {
+                self.caught = Some(thrown);
+                Err(ExecutionError::ThrownAcrossNative)
+            }
+        }
     }
 
     /// Resume a generator, optionally by throwing the `.return()` signal into it.
@@ -30592,11 +30612,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         } else {
                             // A started generator has to unwind: every `finally` between the
                             // suspension point and the top runs before it is done.
-                            self.resume_generator_with(
-                                &generator,
-                                Resume::Return(sent),
-                                instruction,
-                            )?
+                            self.resume_generator_return(&generator, sent, instruction)?
                         }
                     } else {
                         // Never entered, so there is nothing to unwind.
