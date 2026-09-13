@@ -5307,6 +5307,32 @@ fn find_opentui_library(project_root: &Path) -> Option<PathBuf> {
     None
 }
 
+fn write_dynamic_failure_dispatch(
+    output: &mut String,
+    graph: &ModuleGraph,
+    modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
+    indent: &str,
+) {
+    for ((importer_path, specifier), message) in graph.dynamic_failures() {
+        let Some(importer_index) = modules
+            .iter()
+            .position(|(node, _)| node.path == *importer_path)
+        else {
+            continue;
+        };
+        let importer = native_c_string(&modules[importer_index].1.symbol);
+        let c_spec = native_c_string(specifier);
+        let c_message = native_c_string(message);
+        writeln!(
+            output,
+            "{indent}if (importer != NULL && strcmp(importer, {importer}) == 0 && specifier.tag == KILN_VALUE_STRING && specifier.len == (size_t){} && memcmp(specifier.ptr, {c_spec}, (size_t){}) == 0) {{ kiln_value err = kiln_c99_undefined(); (void)kiln_c99_new_type_error(&err, {c_message}); return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown); }}",
+            specifier.len(),
+            specifier.len()
+        )
+        .unwrap();
+    }
+}
+
 fn write_launcher_dynamic_import(
     output: &mut String,
     graph: &ModuleGraph,
@@ -5432,24 +5458,7 @@ import_attributes_valid:
     }
 "#,
     );
-    for ((importer_path, specifier), message) in graph.dynamic_failures() {
-        let Some(importer_index) = modules
-            .iter()
-            .position(|(node, _)| node.path == *importer_path)
-        else {
-            continue;
-        };
-        let importer = native_c_string(&modules[importer_index].1.symbol);
-        let c_spec = native_c_string(specifier);
-        let c_message = native_c_string(message);
-        writeln!(
-            output,
-            "    if (importer != NULL && strcmp(importer, {importer}) == 0 && specifier.tag == KILN_VALUE_STRING && specifier.len == (size_t){} && memcmp(specifier.ptr, {c_spec}, (size_t){}) == 0) {{ kiln_value err = kiln_c99_undefined(); (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, {c_message}); return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown); }}",
-            specifier.len(),
-            specifier.len()
-        )
-        .unwrap();
-    }
+    write_dynamic_failure_dispatch(output, graph, modules, "    ");
     for (index, (node, _)) in modules.iter().enumerate() {
         let mut resolutions = std::collections::BTreeSet::new();
         resolutions.insert((logical_paths[index].clone(), index));
@@ -5637,6 +5646,7 @@ import_attributes_valid:
     if (kiln_shared_namespaces != NULL) {
 "#,
     );
+    write_dynamic_failure_dispatch(output, graph, modules, "        ");
     for (index, (node, _)) in modules.iter().enumerate() {
         let mut resolutions = std::collections::BTreeSet::new();
         resolutions.insert((logical_paths[index].clone(), index));
