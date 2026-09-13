@@ -5984,12 +5984,15 @@ fn graph_launcher_source_with_imports(
     for (index, (node, _)) in modules.iter().enumerate() {
         indices.insert(node.path.clone(), index);
     }
-    let startup_paths = graph.statically_reachable();
-    let startup_indices = modules
+    let entry_index = modules
         .iter()
-        .enumerate()
-        .filter_map(|(index, (node, _))| startup_paths.contains(&node.path).then_some(index))
-        .collect::<Vec<_>>();
+        .position(|(node, _)| node.path == graph.entry())
+        .expect("entry module is present in the graph");
+    // The entry is the sole startup root. Its static dependency walk recursively ensures every
+    // reachable provider, while the realm turn loop drives any pending top-level-await
+    // continuations. Starting every reachable module independently can evaluate a cycle from the
+    // dependency side before the authoritative entry has established its state.
+    let startup_indices = vec![entry_index];
     let namespace_plans = graph_namespace_plans(
         graph,
         modules,
