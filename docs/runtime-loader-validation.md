@@ -111,15 +111,25 @@ the physical `test/` tree are rejected before invoking Kiln.
 
 The consolidation branch merged `origin/main` revision `a17651c3` in `74ad` and retained the
 loader policy, per-run resolver bases, graph-owned failure identity, TS builtin demand loading,
-and shared graph/executable cache paths. The final focused slice is about 1,184 net lines after
-removing duplicate policy and ambient state. The workspace follow-up passed 79 suites (1,764
-passed, 0 failed, 7 ignored); the native parity follow-up recorded 195 matches, 1 intentional
-ShadowRealm refusal, and 0 divergences. These are targeted follow-ups to the earlier full gate,
-whose initial facts result was corrected by commits `803c416a` and `a1caa284`.
+and shared graph/executable cache paths. The final focused slice removes about 1,200 net lines
+of duplicate policy and ambient state. The workspace follow-up passed 79 suites (1,764 passed,
+0 failed, 7 ignored). The full-gate native parity recorded 195 matches, 1 intentional ShadowRealm
+refusal, and 0 divergences. The initial full-gate facts failure was corrected by `803c416a`; the
+later workspace rerun passed.
+
+Final corpus evidence recorded 96,662 Test262 passes across 122 chunks with 0 regressions,
+17 third-party interpreted/native matches with 0 divergences and 5 absent bundles, 36 Node tests,
+5 server tests, and 15 regression tests passing. The final CLI SHA-256 is
+`5ce37f2266e2cdaa37c01c54f3d0538d744130b3efc4ed09f2616d96b9f9d081`. The consolidated GHUI
+artifact SHA-256 is `6e93a4b854e6d1a8d3917686f06004ff3e24f35a333aac73446cf995288ed964`; its live
+transcript is `app/.scratch/ghui-live/consolidated-live.log` and covered HOME, repository navigation,
+PR/issue views, PR 3 markdown scrolling, Escape, `q`, and exit 0.
 
 The RXJS timing baseline was refreshed from a fresh `origin/main` worktree at `a17651c3`, using
 its release CLI SHA-256 `ab50bac8fd87af175a3cb41f480605d27ae44745ccc1cdd1535b41d3fe9593c3`,
 2 warmups, and 7 passes. The new baseline median is 21.56 ms (previous stale value: 16.48 ms).
 The consolidation CLI measured 22.02 ms against that baseline, +2.1%, with no regression under
-the existing threshold. Logs are `.scratch/rxjs-baseline-update.log` and
+the existing threshold. The full gate was not rerun after these corrections; the initial two
+failures were closed by the workspace rerun after the facts update and this fresh-main RXJS
+baseline plus narrow candidate check. Logs are `.scratch/rxjs-baseline-update.log` and
 `.scratch/rxjs-candidate-verify.log`; the paired output proof is `.scratch/rxjs-main-vs-consolidation.log`.
