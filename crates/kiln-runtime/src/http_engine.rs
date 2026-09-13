@@ -32,11 +32,16 @@ use crate::HttpCloseMode;
 use crate::http_body::{BodyEvent, BodySink, ResponseBody, ResponseBodyDriver};
 use crate::node_stream::WriteDisposition;
 
-static HTTP3_OVERRIDE: std::sync::atomic::AtomicI8 = std::sync::atomic::AtomicI8::new(-1);
+thread_local! {
+    // Configuration is realm-thread local. A process-global mutable override made unrelated
+    // HTTP tests race when one realm temporarily enabled HTTP/3 while another serialized HTTP/1
+    // responses.
+    static HTTP3_OVERRIDE: std::cell::Cell<i8> = const { std::cell::Cell::new(-1) };
+}
 
 /// Whether HTTP/3 support is enabled via `KILN_HTTP3=1` or `--http3`.
 pub fn http3_enabled() -> bool {
-    let ovr = HTTP3_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed);
+    let ovr = HTTP3_OVERRIDE.with(std::cell::Cell::get);
     if ovr >= 0 {
         return ovr == 1;
     }
@@ -51,12 +56,12 @@ pub fn http3_enabled() -> bool {
 
 /// Override HTTP/3 enablement programmatically (for testing or runtime configuration).
 pub fn set_http3_enabled(enabled: bool) {
-    HTTP3_OVERRIDE.store(i8::from(enabled), std::sync::atomic::Ordering::Relaxed);
+    HTTP3_OVERRIDE.with(|override_| override_.set(i8::from(enabled)));
 }
 
 /// Reset HTTP/3 enablement override to environment/command-line defaults.
 pub fn reset_http3_enabled() {
-    HTTP3_OVERRIDE.store(-1, std::sync::atomic::Ordering::Relaxed);
+    HTTP3_OVERRIDE.with(|override_| override_.set(-1));
 }
 
 #[derive(Clone, Copy, Debug)]
