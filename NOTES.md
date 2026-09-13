@@ -5555,4 +5555,18 @@ stream methods (`setRawMode`, `getColorDepth`, `hasColors`, `getWindowSize`, `cu
 integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`, and full `scripts/native.sh` parity
 (176 matched, 5 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
 
+---
+
+## Phase 5.2 TypeScript built-ins: `node:worker_threads` (2026-09-13)
+
+Migrated `node:worker_threads` completely to TypeScript via `crates/kiln-builtins/src/node/worker_threads.ts`
+with zero additions to the C runtime prelude (Phase 5.1 freeze strictly honored). Implemented canonical
+exports (`BroadcastChannel`, `MessageChannel`, `MessagePort`, `SHARE_ENV`, `Worker`, `default`,
+`getEnvironmentData`, `isMainThread`, `markAsUncloneable`, `markAsUntransferable`,
+`moveMessagePortToContext`, `parentPort`, `receiveMessageOnPort`, `resourceLimits`, `setEnvironmentData`,
+`threadId`, `workerData`). Preserves deterministic capability error on `new Worker()` across both engines.
+Verified with native probe `conformance/native/node-worker-threads-members.cjs` (byte-for-byte identical output
+between interpreter and native CLI), integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`,
+and full `scripts/native.sh` parity (177 matched, 5 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
+
 
