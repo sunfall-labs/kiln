@@ -138,11 +138,12 @@ class GateResultsCliIntegrationTests(unittest.TestCase):
         report.write_text(
             json.dumps(
                 {
+                    "schema": 1,
                     "status": "passed",
                     "expected_chunks": ["chunk-0"],
-                    "chunks": {"chunk-0": {"total": 1, "passed": 1, "failed": 0}},
-                    "counts": {"total": 1, "passed": 1, "failed": 0},
-                    "source": {"commit": "fixture-pin"},
+                    "chunks": {"chunk-0": {"total": 1, "passed": 1, "failed": 0, "unsupported": 0, "skipped": 0}},
+                    "counts": {"total": 1, "passed": 1, "failed": 0, "unsupported": 0, "skipped": 0},
+                    "source": {"commit": "fixture-pin", "name": "test262 fixture"},
                 }
             ),
             encoding="utf-8",
@@ -164,7 +165,9 @@ class GateResultsCliIntegrationTests(unittest.TestCase):
             str(out),
         )
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(json.loads(out.read_text(encoding="utf-8"))["verdict"], "failed")
+        envelope = json.loads(out.read_text(encoding="utf-8"))
+        self.assertEqual(envelope["verdict"], "infrastructure")
+        self.assertIn("exited 1 despite a passing report", envelope["error"])
 
         self.process("build", status=1)
         self.process("crate tests")
