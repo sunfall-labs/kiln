@@ -6997,7 +6997,6 @@ fn native_host_clock_is_explicit_while_default_date_stays_at_epoch() {
 }
 
 #[test]
-#[ignore = "requires kiln:process builtin from the integration host"]
 fn native_host_process_completion_beats_realm_timeout() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
