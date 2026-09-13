@@ -5723,6 +5723,21 @@ regression suite (`conformance/regress/r08-node-async-context.js` passing 12/12)
 
 ---
 
+## Differential conformance & Array ownKeys order (2026-09-13)
+
+- **Array static ownKeys reflection**:
+  - In `crates/kiln-builtin-surface/src/lib.rs`, reordered `Array` statics to `["isArray", "from", "fromAsync", "of", "@@species"]`, matching ECMAScript §23.1.2 and Node v26 V8 enumeration order.
+  - Resolved divergence in `conformance/differential/proxy-descriptor-keys.js`.
+- **Differential runner refusal classification**:
+  - In `scripts/differential.sh`, updated refusal detection for non-zero exits to parse `could not execute module` and multiline diagnostics rendered without the `kiln:` prefix (following `annotate-snippets` adoption in `d959904e`).
+  - Probes exercising strict-mode module failures (`accessor-properties`, `delete-properties`, `frozen`, `inherited-setters`) are classified cleanly as refusals rather than false divergences.
+- **Verification**:
+  - `./scripts/differential.sh`: 114 matched, 4 refused, 0 diverged.
+  - `tests/builtin_surface_drift.rs`: 3 passed, 0 failed.
+  - `cargo fmt --check`: clean.
+
+---
+
 ## Phase 5.2 TypeScript built-ins: `node:net` (2026-09-13)
 
 Migrated `node:net` completely to TypeScript via `crates/kiln-builtins/src/node/net.ts` with zero additions
