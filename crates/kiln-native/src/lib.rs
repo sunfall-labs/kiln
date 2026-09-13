@@ -2599,6 +2599,7 @@ impl NativeBuilder {
 struct NativeGraphPlan {
     excluded: BTreeSet<PathBuf>,
     failures: BTreeMap<(PathBuf, String), String>,
+    runtime_failures: BTreeMap<(PathBuf, PathBuf, String), String>,
 }
 
 fn native_graph_plan(graph: &ModuleGraph) -> Result<NativeGraphPlan, NativeError> {
@@ -2608,6 +2609,7 @@ fn native_graph_plan(graph: &ModuleGraph) -> Result<NativeGraphPlan, NativeError
         specifier: String,
         captured_importer: PathBuf,
         target: PathBuf,
+        runtime: bool,
     }
 
     let static_reachable = graph.statically_reachable();
@@ -2625,6 +2627,7 @@ fn native_graph_plan(graph: &ModuleGraph) -> Result<NativeGraphPlan, NativeError
                     specifier: dependency.specifier.clone(),
                     captured_importer: path.clone(),
                     target: dependency.target.clone(),
+                    runtime: false,
                 });
             let runtime = graph.module(path).into_iter().flat_map(move |node| {
                 node.runtime_dependencies
@@ -2634,6 +2637,7 @@ fn native_graph_plan(graph: &ModuleGraph) -> Result<NativeGraphPlan, NativeError
                         specifier: dependency.specifier.clone(),
                         captured_importer: dependency.importer.clone(),
                         target: dependency.target.clone(),
+                        runtime: true,
                     })
             });
             dynamic.chain(runtime)
@@ -2662,23 +2666,19 @@ fn native_graph_plan(graph: &ModuleGraph) -> Result<NativeGraphPlan, NativeError
                 unsupported.get_or_insert(error.to_string());
             }
             walk.extend(node.dependencies.iter().map(|edge| edge.target.clone()));
-            walk.extend(
-                node.runtime_dependencies
-                    .iter()
-                    .map(|dependency| dependency.target.clone()),
-            );
-            walk.extend(
-                graph
-                    .dynamic_dependencies(&node.path)
-                    .iter()
-                    .map(|dependency| dependency.target.clone()),
-            );
         }
         if let Some(message) = unsupported {
-            plan.failures.insert(
-                (edge.owner, edge.specifier),
-                format!("lazy runtime request failed: {message}"),
-            );
+            if edge.runtime {
+                plan.runtime_failures.insert(
+                    (edge.owner, edge.captured_importer, edge.specifier),
+                    format!("runtime request failed: {message}"),
+                );
+            } else {
+                plan.failures.insert(
+                    (edge.owner, edge.specifier),
+                    format!("dynamic import failed: {message}"),
+                );
+            }
             continue;
         }
         for path in &closure {
@@ -2689,6 +2689,7 @@ fn native_graph_plan(graph: &ModuleGraph) -> Result<NativeGraphPlan, NativeError
                     specifier: nested.specifier.clone(),
                     captured_importer: path.clone(),
                     target: nested.target.clone(),
+                    runtime: false,
                 });
             }
             if let Some(node) = graph.module(path) {
@@ -2698,6 +2699,7 @@ fn native_graph_plan(graph: &ModuleGraph) -> Result<NativeGraphPlan, NativeError
                         specifier: nested.specifier.clone(),
                         captured_importer: nested.importer.clone(),
                         target: nested.target.clone(),
+                        runtime: true,
                     });
                 }
             }
