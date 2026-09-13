@@ -107,6 +107,45 @@ fn dynamic_loader_resolves_against_the_requesting_module() {
 }
 
 #[test]
+fn delayed_exported_async_import_uses_defining_module_referrer() {
+    let project = TempProject::new();
+    fs::create_dir_all(project.root.join("src")).unwrap();
+    let entry = project.write(
+        "main.mjs",
+        "import { run } from './src/processCapability.mjs';\n\
+         run().then(ns => console.log(ns.source));\n\
+         import('./dep.mjs').then(ns => console.log(ns.source));",
+    );
+    project.write(
+        "src/processCapability.mjs",
+        "export const run = async () => { await Promise.resolve(); return import('./dep.mjs'); };",
+    );
+    project.write("src/dep.mjs", "export const source = 'src';");
+    project.write("dep.mjs", "export const source = 'entry';");
+
+    let graph = Arc::new(project.graph(&entry).expect("build referrer graph"));
+    let loader = GraphModuleLoader::new(Arc::clone(&graph));
+    let mut host = TestHost::default();
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default().with_module_loader_service(Arc::new(loader)),
+        )
+        .expect("execute delayed imports");
+    assert!(
+        host.output.iter().any(|line| line == "src"),
+        "{:?}",
+        host.output
+    );
+    assert!(
+        host.output.iter().any(|line| line == "entry"),
+        "{:?}",
+        host.output
+    );
+}
+
+#[test]
 fn failed_dynamic_subtree_is_deferred_until_import() {
     let project = TempProject::new();
     let entry = project.write("main.mjs", "import('./optional.mjs');");
