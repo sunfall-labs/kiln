@@ -1241,7 +1241,7 @@ fn live_cache_identity_catalogue_covers_every_stage_and_profile_family() {
     // The ordinary shared-library object and its final link share one toolchain identity by
     // design; identity digests intentionally omit artifact kind and link inputs. Every other
     // catalogued family/profile contributes a distinct identity.
-    assert_eq!(identities.len(), 56);
+    assert_eq!(identities.len(), 52);
 
     let tool = builder.toolchain().identity();
     let target = target_identity(tool);

@@ -31,7 +31,7 @@ use kiln_backend_c::{
 };
 use kiln_host_abi::HOST_ABI_VERSION;
 pub use kiln_host_abi::HostValue;
-use kiln_ir::{ExportBinding, ModuleProgram, Program};
+use kiln_ir::{ModuleProgram, Program};
 use kiln_module_graph::{ModuleGraph, ModuleGraphError, ModuleSource, ResolvedExport};
 use kiln_native_runtime::{
     EMBEDDING_C_ABI_VERSION, EMBEDDING_HOST_ABI_VERSION, EMBEDDING_MODULE_API_VERSION,
@@ -59,7 +59,7 @@ macro_rules! native_artifact_catalogue {
     ($callback:ident) => {
         $callback! {
             sources: [ModuleSource, RuntimeSource, PreludeSource, LauncherSource, GraphLauncherSource, SharedModuleSource, SharedGraphWrapperSource, NumberProvider],
-            objects: [ModuleObject, RuntimeModuleObject, RuntimeObject, PreludeObject, LauncherObject, SharedLibraryObject, SharedPreludeObject, SharedGraphModuleObject, SharedGraphWrapperObject, SharedGraphObject, GraphLauncherObject, SharedLibraryLink, SharedGraphLink, RuntimeLibrary, RuntimePreludeLibrary, ExecutableLink]
+            objects: [ModuleObject, LauncherObject, SharedLibraryObject, SharedPreludeObject, SharedGraphModuleObject, SharedGraphWrapperObject, GraphLauncherObject, SharedLibraryLink, SharedGraphLink, RuntimeLibrary, RuntimePreludeLibrary, ExecutableLink]
         }
     };
 }
@@ -87,15 +87,11 @@ impl NativeArtifactFamily {
             | Self::SharedGraphWrapperSource => ArtifactKind::GeneratedC,
             Self::NumberProvider => ArtifactKind::RuntimeLibrary,
             Self::ModuleObject
-            | Self::RuntimeModuleObject
-            | Self::RuntimeObject
-            | Self::PreludeObject
             | Self::LauncherObject
             | Self::SharedLibraryObject
             | Self::SharedPreludeObject
             | Self::SharedGraphModuleObject
             | Self::SharedGraphWrapperObject
-            | Self::SharedGraphObject
             | Self::GraphLauncherObject => ArtifactKind::NativeObject,
             Self::SharedLibraryLink | Self::SharedGraphLink => ArtifactKind::LinkedArtifact,
             Self::RuntimeLibrary | Self::RuntimePreludeLibrary => ArtifactKind::RuntimeLibrary,
@@ -111,18 +107,12 @@ impl NativeArtifactFamily {
     ) -> (Backend, String) {
         match self {
             Self::ModuleSource | Self::ModuleObject => (Backend::C, module_abi.into()),
-            Self::RuntimeModuleObject => (Backend::C, runtime_abi.into()),
             Self::RuntimeSource => (
                 Backend::Custom("native-runtime-source".into()),
                 runtime_abi.into(),
             ),
-            Self::RuntimeObject => (Backend::Custom("native-runtime".into()), runtime_abi.into()),
             Self::PreludeSource => (
                 Backend::Custom("native-prelude-source".into()),
-                runtime_abi.into(),
-            ),
-            Self::PreludeObject => (
-                Backend::Custom("native-runtime-prelude".into()),
                 runtime_abi.into(),
             ),
             Self::LauncherSource => (
@@ -169,10 +159,6 @@ impl NativeArtifactFamily {
                 Backend::Custom("native-shared-graph-module".into()),
                 module_abi.into(),
             ),
-            Self::SharedGraphObject => (
-                Backend::Custom("native-shared-graph".into()),
-                runtime_abi.into(),
-            ),
             Self::SharedLibraryLink => (
                 Backend::Custom("native-shared-library".into()),
                 embedding_abi.into(),
@@ -191,13 +177,13 @@ impl NativeArtifactFamily {
     }
     fn compiler_version(self) -> String {
         match self {
-            Self::ModuleSource | Self::ModuleObject | Self::RuntimeModuleObject => {
+            Self::ModuleSource | Self::ModuleObject => {
                 format!("kiln-c-abi-{C_ABI_VERSION}-generator-{C_GENERATOR_VERSION}")
             }
-            Self::RuntimeSource | Self::RuntimeObject => {
+            Self::RuntimeSource => {
                 format!("kiln-runtime-{NATIVE_RUNTIME_VERSION}")
             }
-            Self::PreludeSource | Self::PreludeObject => {
+            Self::PreludeSource => {
                 format!("kiln-runtime-prelude-{NATIVE_PRELUDE_VERSION}")
             }
             Self::LauncherSource | Self::LauncherObject => {
@@ -215,7 +201,6 @@ impl NativeArtifactFamily {
             Self::NumberProvider => "rust-native-number-provider".into(),
             Self::SharedPreludeObject => "shared-prelude-object".into(),
             Self::SharedGraphModuleObject => "shared-graph-module-object".into(),
-            Self::SharedGraphObject => "shared-graph-object".into(),
             Self::SharedLibraryLink => "shared-library-link".into(),
             Self::SharedGraphLink => "shared-graph-link".into(),
             Self::RuntimeLibrary => format!("kiln-runtime-{NATIVE_RUNTIME_VERSION}"),
