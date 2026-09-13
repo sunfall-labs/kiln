@@ -5,7 +5,7 @@
 //! deliberately boring so the provider and generated C can implement the same parser.
 
 const VERSION: u32 = 1;
-const HEADER: usize = 12;
+const HEADER: usize = 24;
 const MAX_FIELD: usize = 16 * 1024 * 1024;
 const MAX_ARGS: usize = 4096;
 const NONE: u64 = u64::MAX;
@@ -55,6 +55,16 @@ fn field(
     length: u64,
     name: &'static str,
 ) -> Result<Vec<u8>, ProcessWireError> {
+    field_with_nul(input, at, length, name, true)
+}
+
+fn field_with_nul(
+    input: &[u8],
+    at: &mut usize,
+    length: u64,
+    name: &'static str,
+    reject_nul: bool,
+) -> Result<Vec<u8>, ProcessWireError> {
     if length > MAX_FIELD as u64 {
         return Err(ProcessWireError::FieldTooLarge {
             field: name,
@@ -69,7 +79,7 @@ fn field(
         .get(*at..end)
         .ok_or(ProcessWireError::Truncated { field: name })?;
     *at = end;
-    if value.contains(&0) {
+    if reject_nul && value.contains(&0) {
         return Err(ProcessWireError::EmbeddedNul { field: name });
     }
     Ok(value.to_vec())
@@ -83,13 +93,7 @@ pub fn encode(request: &ProcessWireRequest) -> Result<Vec<u8>, ProcessWireError>
     out.extend_from_slice(&VERSION.to_le_bytes());
     out.extend_from_slice(&(request.args.len() as u32).to_le_bytes());
     out.extend_from_slice(&(request.stdin.as_ref().map_or(NONE, |v| v.len() as u64)).to_le_bytes());
-    for (name, value) in [
-        ("command", &request.command),
-        ("stdin", &request.stdin.clone().unwrap_or_default()),
-    ] {
-        if name == "stdin" && request.stdin.is_none() {
-            continue;
-        }
+    for (name, value) in [("command", &request.command)] {
         if value.len() > MAX_FIELD {
             return Err(ProcessWireError::FieldTooLarge {
                 field: name,
@@ -148,7 +152,7 @@ pub fn decode(input: &[u8]) -> Result<ProcessWireRequest, ProcessWireError> {
     let stdin = if stdin_len == NONE {
         None
     } else {
-        Some(field(input, &mut at, stdin_len, "stdin")?)
+        Some(field_with_nul(input, &mut at, stdin_len, "stdin", false)?)
     };
     if at != input.len() {
         return Err(ProcessWireError::TrailingBytes(input.len() - at));
@@ -172,6 +176,33 @@ mod tests {
             stdin: Some(Vec::new()),
         };
         assert_eq!(decode(&encode(&request).unwrap()).unwrap(), request);
+    }
+
+    #[test]
+    fn stdin_is_binary_even_when_it_contains_nul() {
+        let request = ProcessWireRequest {
+            command: b"cat".to_vec(),
+            args: Vec::new(),
+            stdin: Some(vec![0, 1, 255]),
+        };
+        assert_eq!(decode(&encode(&request).unwrap()).unwrap(), request);
+    }
+
+    #[test]
+    fn decodes_the_typescript_encoder_fixture() {
+        let bytes = [
+            1, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, b'p', b'r',
+            b'i', b'n', b't', b'f', 1, 0, 0, 0, 0, 0, 0, 0, b'a', 1, 0, 0, 0, 0, 0, 0, 0, b'b', 0,
+            255,
+        ];
+        assert_eq!(
+            decode(&bytes).unwrap(),
+            ProcessWireRequest {
+                command: b"printf".to_vec(),
+                args: vec![b"a".to_vec(), b"b".to_vec()],
+                stdin: Some(vec![0, 255]),
+            }
+        );
     }
 
     #[test]

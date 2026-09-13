@@ -19,7 +19,7 @@ function frame(command: string, args: string[], input: any): Uint8Array {
   const inputBytes = input === undefined ? undefined : bytes(input);
   rejectNul(commandBytes, "command");
   for (const arg of argBytes) rejectNul(arg, "argument");
-  const size = 12 + 8 + commandBytes.length + argBytes.reduce((total, arg) => total + 8 + arg.length, 0) + (inputBytes === undefined ? 0 : inputBytes.length);
+  const size = 24 + commandBytes.length + argBytes.reduce((total, arg) => total + 8 + arg.length, 0) + (inputBytes === undefined ? 0 : inputBytes.length);
   const result = new Uint8Array(size);
   const view = new DataView(result.buffer);
   let offset = 0;
@@ -41,17 +41,20 @@ export async function run(command: string, args: string[] = [], options: any = {
   if (typeof command !== "string") throw new TypeError("process.run command must be a string");
   if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string")) throw new TypeError("process.run args must be an array of strings");
   if (options === null || typeof options !== "object") throw new TypeError("process.run options must be an object");
-  const signal = options.signal;
-  if (signal !== undefined && (typeof signal !== "object" || typeof signal.addEventListener !== "function")) throw new TypeError("process.run signal must be an AbortSignal");
+  const signal = options.signal === null ? undefined : options.signal;
+  if (signal !== undefined && (typeof signal !== "object" || typeof signal.addEventListener !== "function" || typeof signal.removeEventListener !== "function")) throw new TypeError("process.run signal must be an AbortSignal");
   if (signal && signal.aborted) throw signal.reason;
   const pending = __kilnHostProcessStart(frame(command, args, options.input));
   let onAbort: any;
+  let abortPromise: Promise<any> | undefined;
   if (signal) {
-    onAbort = () => { __kilnHostProcessCancel(pending.requestId); };
+    abortPromise = new Promise((_resolve, reject) => {
+      onAbort = () => { __kilnHostProcessCancel(pending.requestId); reject(signal.reason); };
+    });
     signal.addEventListener("abort", onAbort, { once: true });
   }
   try {
-    return await pending.promise;
+    return await (abortPromise === undefined ? pending.promise : Promise.race([pending.promise, abortPromise]));
   } finally {
     if (signal && onAbort) signal.removeEventListener("abort", onAbort);
   }
