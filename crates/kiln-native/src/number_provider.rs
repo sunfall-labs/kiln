@@ -488,31 +488,15 @@ fn build_from_source(
     }
     let archive = read(&archive_path, "read source-built number-provider archive")?;
     let archive_digest = Digest::hash(&archive);
-    let identity = provider_contract::ProviderManifest {
-        schema: PROVIDER_SCHEMA_VERSION,
-        provider: PROVIDER_NAME.to_owned(),
-        provider_abi: PROVIDER_ABI_VERSION,
-        format_version: NUMBER_FORMAT_VERSION,
-        parse_version: NUMBER_PARSE_VERSION,
-        rust_target: rust_target.clone(),
-        rustc_identity: rustc_digest_identity,
-        source_sha256: source_digest.to_hex(),
-        archive_sha256: archive_digest.to_hex(),
-        archive: if want_http {
-            provider_contract::FULL_ARCHIVE
-        } else {
-            provider_contract::SLIM_ARCHIVE
-        }
-        .to_owned(),
-        linkage: "static".to_owned(),
-        pic: true,
-        profile: PROVIDER_PROFILE.to_owned(),
-        cpu_features: "generic".to_owned(),
-        deployment: env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_default(),
-        libc_baseline: env::var("KILN_LIBC_BASELINE").unwrap_or_default(),
-        exports: PROVIDER_EXPORTS.iter().map(ToString::to_string).collect(),
-        http: want_http,
-    }
+    let identity = provider_contract::manifest(
+        rust_target.clone(),
+        rustc_digest_identity,
+        source_digest.to_hex(),
+        archive_digest.to_hex(),
+        env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_default(),
+        env::var("KILN_LIBC_BASELINE").unwrap_or_default(),
+        want_http,
+    )
     .identity();
     Ok(NumberProvider {
         archive: archive.into(),
