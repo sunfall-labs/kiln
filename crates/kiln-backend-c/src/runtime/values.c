@@ -349,7 +349,8 @@ static int kiln_c99_invoke_closure_body(kiln_host *host, kiln_val *result,
     ctx.frame = frame;
     ctx.depth = depth + 1;
     status = closure->body(&ctx, result, closure->upvalues, &receiver, args, argc);
-    if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL) {
+    if ((status == KILN_C99_CONTROL_ERROR || status == KILN_C99_THROWN) &&
+        kiln_c99_diagnostic_site == NULL) {
         kiln_c99_diagnostic_site = closure->diagnostic_source;
         kiln_c99_diagnostic_operation = "FunctionBody";
         kiln_c99_diagnostic_function = closure->name;
@@ -402,8 +403,13 @@ static inline int kiln_c99_invoke_closure(kiln_host *host, kiln_val *result,
                                           int inherit_new_target) {
     if (!closure->publishes_frame && !inherit_new_target) {
         int saved_depth = kiln_c99_diagnostic_active_depth;
+        kiln_value saved_callee = kiln_c99_frame_callee;
         int quick;
         kiln_c99_diagnostic_active_depth = depth + 1;
+        /* The fast body path still crosses a closure/module boundary. Keep the callee
+         * available while it runs so a TypeError from a non-callable value can name the
+         * source function in the native refusal. */
+        kiln_c99_frame_callee = kiln_c99_function(closure);
         kiln_call_context ctx;
         ctx.host = host;
         ctx.thrown = thrown;
@@ -413,6 +419,7 @@ static inline int kiln_c99_invoke_closure(kiln_host *host, kiln_val *result,
         if (quick == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL) {
             kiln_c99_attribute_body_refusal(closure, depth);
         }
+        kiln_c99_frame_callee = saved_callee;
         kiln_c99_diagnostic_active_depth = saved_depth;
         return quick;
     }

@@ -652,6 +652,91 @@ fn run_native_http_fixture(name: &str, source: &str) -> Option<String> {
     Some(String::from_utf8(output.stdout).expect("fixture output is UTF-8"))
 }
 
+fn run_native_failure_fixture(name: &str, source: &str) -> Option<String> {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    use std::process::Command;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native diagnostic fixture: no C compiler found");
+        return None;
+    };
+    let project = TestDirectory::new(name);
+    let entry = project.path.join("main.mjs");
+    fs::write(&entry, source).expect("write native diagnostic fixture");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("diagnostic source graph compiles");
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: project.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .expect("native diagnostic graph builds");
+    let output = Command::new(&report.output)
+        .output()
+        .expect("run native diagnostic fixture");
+    assert!(!output.status.success(), "fixture unexpectedly succeeded");
+    Some(String::from_utf8(output.stderr).expect("diagnostic output is UTF-8"))
+}
+
+#[test]
+fn native_non_callable_diagnostic_keeps_call_site_and_callee_context() {
+    let Some(stderr) = run_native_failure_fixture(
+        "kiln-native-non-callable-diagnostic",
+        "function invoke() { const value = {}; value(); }\ninvoke();\n",
+    ) else {
+        return;
+    };
+    assert!(
+        stderr.contains("module=main.mjs"),
+        "missing module: {stderr}"
+    );
+    assert!(
+        stderr.contains("operation=Call"),
+        "missing operation: {stderr}"
+    );
+    assert!(
+        stderr.contains("detail=non-callable callee kind"),
+        "missing value kind: {stderr}"
+    );
+    assert!(
+        stderr.contains("function=invoke"),
+        "missing owning function: {stderr}"
+    );
+    assert!(
+        stderr.contains("receiver_tag=9"),
+        "missing offending value tag: {stderr}"
+    );
+}
+
+#[test]
+fn native_non_callable_caught_error_does_not_leak_into_later_throw() {
+    let Some(stderr) = run_native_failure_fixture(
+        "kiln-native-non-callable-diagnostic-reset",
+        "function caught() { try { const value = {}; value(); } catch (_) {} }\nfunction boom() { throw new Error('boom'); }\ncaught();\nboom();\n",
+    ) else {
+        return;
+    };
+    assert!(
+        stderr.contains("detail=Call invocation threw"),
+        "stale non-callable detail: {stderr}"
+    );
+    assert!(
+        !stderr.contains("function=caught"),
+        "caught context leaked: {stderr}"
+    );
+}
+
 #[test]
 fn owned_result_wrapper_source_is_deterministic_and_has_no_static_result_state() {
     let source = owned_result_wrapper_source(
