@@ -4734,6 +4734,68 @@ fn native_dynamic_import_resolves_opentui_and_in_graph_modules() {
 }
 
 #[test]
+fn native_dynamic_import_uses_importer_identity_for_relative_modules() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping importer identity integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-dynamic-import-importer-identity");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).expect("write root package");
+    for (dir, value) in [("a", "A"), ("b", "B")] {
+        fs::create_dir_all(root.path.join(dir)).expect("create loader directory");
+        fs::write(
+            root.path.join(format!("{dir}/loader.mjs")),
+            "export async function load() { return (await import('./same.mjs')).value; }\n",
+        )
+        .expect("write loader");
+        fs::write(
+            root.path.join(format!("{dir}/same.mjs")),
+            format!("export const value = '{value}';\n"),
+        )
+        .expect("write relative module");
+    }
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "import { load as loadA } from './a/loader.mjs';\n\
+         import { load as loadB } from './b/loader.mjs';\n\
+         import * as staticAssert from 'node:assert';\n\
+         const dynamicAssert = await import('node:assert');\n\
+         console.log(await loadA(), await loadB(), staticAssert === dynamicAssert);\n",
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("dynamic importer graph compiles");
+    for (profile, name) in [
+        (NativeProfile::Dev, "dev"),
+        (NativeProfile::Release, "release"),
+    ] {
+        let report = NativeBuilder::new(
+            test_cache(root.path.join(format!("cache-{name}"))),
+            toolchain.clone(),
+        )
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join(format!("program-{name}")),
+                profile,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .expect("dynamic importer graph builds and runs");
+        assert_eq!(report.stdout, b"A B true\n", "profile {name}");
+    }
+}
+
+#[test]
 fn a_second_build_reuses_every_material_artifact_and_runs() {
     let Some(toolchain) = Toolchain::discover().ok() else {
         eprintln!("skipping native integration: no C compiler found");
