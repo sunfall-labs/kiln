@@ -5,7 +5,7 @@ expression: report
 empty program
   invalid bytecode program: program has no instructions
 unsupported bytecode version
-  unsupported native emission: bytecode version 5 (backend supports 4)
+  unsupported native emission: bytecode version 6 (backend supports 5)
 constant index out of bounds
   invalid bytecode program: instruction 0: constant 0 is out of bounds
 local slot out of bounds
