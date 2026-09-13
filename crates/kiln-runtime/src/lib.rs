@@ -436,6 +436,9 @@ pub struct ScriptedHost {
 /// return an already-scripted completion immediately, or await its own infrastructure (as the
 /// Tokio provider does); the realm's timer-versus-completion arbitration remains shared.
 pub trait RealmHostProvider: AsyncHostOps {
+    /// Let provider-owned tasks finish cooperative teardown while the realm executor is alive.
+    fn drain_on_shutdown(&mut self, _executor: &DriveExecutor) {}
+
     /// Start an operation while the realm's LocalSet is active.
     ///
     /// Providers with resource tables may override this to keep resource creation on the realm
@@ -842,6 +845,16 @@ impl RealmRuntime<TokioHost> {
 }
 
 impl<H: RealmHostProvider> RealmRuntime<H> {
+    /// Tear down the realm after giving provider tasks a chance to complete cooperative cleanup.
+    pub fn shutdown(&mut self) -> bool {
+        if self.state.is_shutdown() {
+            return false;
+        }
+        let executor = self.drive_executor();
+        self.state.host.drain_on_shutdown(&executor);
+        self.state.shutdown()
+    }
+
     /// Builds a runtime around an explicit asynchronous host provider.
     ///
     /// The current-thread Tokio runtime and LocalSet remain the realm scheduler for every
@@ -2794,6 +2807,17 @@ impl AsyncHostOps for TokioHost {
 }
 
 impl RealmHostProvider for TokioHost {
+    fn drain_on_shutdown(&mut self, executor: &DriveExecutor) {
+        for (_, cancel) in std::mem::take(&mut self.process_cancellers) {
+            let _ = cancel.send(());
+        }
+        executor.block_on(async {
+            while !self.tasks.is_empty() {
+                let _ = self.tasks.join_next().await;
+            }
+        });
+    }
+
     fn shutdown_on_realm(&mut self) {
         if self.shutdown {
             return;
@@ -3776,7 +3800,6 @@ mod tests {
             },
             true,
         );
-
         let executor = runtime.drive_executor();
         let mut pid = None;
         for _ in 0..100 {
@@ -3833,10 +3856,9 @@ mod tests {
             },
             true,
         );
-        let executor = runtime.drive_executor();
         let mut pid = None;
         for _ in 0..100 {
-            executor.block_on(yield_to_tasks());
+            runtime.drive_executor().block_on(yield_to_tasks());
             if let Ok(contents) = fs::read_to_string(&marker) {
                 pid = Some(contents.trim().parse::<i32>().expect("child PID"));
                 break;
@@ -3846,7 +3868,6 @@ mod tests {
         let pid = pid.expect("child published its PID");
         assert!(runtime.shutdown());
         for _ in 0..100 {
-            executor.block_on(yield_to_tasks());
             let status = Command::new("ps")
                 .args(["-o", "stat=", "-p", &pid.to_string()])
                 .output()
