@@ -6302,12 +6302,17 @@ static int kiln_cli_run_realm(int argc, char **argv, int writes_result) {
      * handled throw resets the realm diagnostic bridge, so this cannot leak an earlier refusal
      * into a later ordinary error. */
     if (status == KILN_C99_THROWN) {
-        kiln_value message = kiln_c99_text(graph.result);
+        kiln_value message = kiln_cli_describe_error(graph.result);
+        if (message.tag != KILN_VALUE_STRING) {
+            message = kiln_c99_text(message);
+        }
         kiln_value site = kiln_c99_control_diagnostic();
         if (kiln_c99_diagnostic_available() && message.tag == KILN_VALUE_STRING &&
             site.tag == KILN_VALUE_STRING && site.len != 0) {
             kiln_value separator = kiln_c99_copy_text(" at ", 4);
             graph.result = kiln_c99_concat(kiln_c99_concat(message, separator), site);
+        } else {
+            graph.result = message;
         }
     }
     if (status != 0) kiln_cli_report_failure_in(status, graph.result, phase);
