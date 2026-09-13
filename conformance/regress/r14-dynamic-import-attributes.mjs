@@ -59,6 +59,12 @@ await verdict('type-number', import('./r14-dynamic-import-target.mjs', { with: {
 await verdict('type-undefined', import('./r14-dynamic-import-target.mjs', { with: { type: undefined } }));
 await verdict('type-unsupported', import('./r14-dynamic-import-target.mjs', { with: { type: 'json' } }));
 await verdict('unknown-attribute', import('./r14-dynamic-import-target.mjs', { with: { mode: 'file' } }));
+await verdict('unknown-before-throw', import('./r14-dynamic-import-target.mjs', {
+  with: { mode: 'file', get type() { throw new Error('late getter'); } },
+}));
+await verdict('bad-before-throw', import('./r14-dynamic-import-target.mjs', {
+  with: { type: 'json', get later() { throw new Error('later getter'); } },
+}));
 await verdict('throwing-attribute', import('./r14-dynamic-import-target.mjs', {
   with: { get type() { throw new Error('type boom'); } },
 }));

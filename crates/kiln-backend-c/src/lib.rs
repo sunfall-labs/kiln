@@ -2628,7 +2628,7 @@ fn render(
     )?;
     if program.has_dynamic_import() {
         output.push_str(
-            "__attribute__((weak)) int kiln_graph_dynamic_import(kiln_host *host, kiln_value specifier, kiln_value options, kiln_value *promise, int depth, kiln_value *thrown) {\n    (void)specifier; (void)options;\n    kiln_value err = kiln_c99_undefined();\n    (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, \"no module loader is installed\");\n    return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);\n}\n",
+            "__attribute__((weak)) int kiln_graph_dynamic_import(kiln_host *host, const char *importer, kiln_value specifier, kiln_value options, kiln_value *promise, int depth, kiln_value *thrown) {\n    (void)importer; (void)specifier; (void)options;\n    kiln_value err = kiln_c99_undefined();\n    (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, \"no module loader is installed\");\n    return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);\n}\n",
         );
     }
     render_functions(
@@ -3178,6 +3178,12 @@ fn render_module(
     let emission_diagnostic_site = if policy.compact {
         writeln!(
             output,
+            "static const char ku_importer[] = {};",
+            c_string(symbol)
+        )
+        .unwrap();
+        writeln!(
+            output,
             "static const char ku_site[] = {};",
             c_string(diagnostic_site)
         )
@@ -3274,7 +3280,7 @@ fn render_module(
     }
     if emitted_program.has_dynamic_import() {
         output.push_str(
-            "__attribute__((weak)) int kiln_graph_dynamic_import(kiln_host *host, kiln_value specifier, kiln_value options, kiln_value *promise, int depth, kiln_value *thrown) {\n    (void)specifier; (void)options;\n    kiln_value err = kiln_c99_undefined();\n    (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, \"no module loader is installed\");\n    return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);\n}\n",
+            "__attribute__((weak)) int kiln_graph_dynamic_import(kiln_host *host, const char *importer, kiln_value specifier, kiln_value options, kiln_value *promise, int depth, kiln_value *thrown) {\n    (void)importer; (void)specifier; (void)options;\n    kiln_value err = kiln_c99_undefined();\n    (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, \"no module loader is installed\");\n    return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);\n}\n",
         );
     }
     render_functions(
