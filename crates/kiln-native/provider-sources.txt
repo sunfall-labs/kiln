@@ -45,3 +45,7 @@ crates/kiln-runtime/src/node_http_agent.rs
 crates/kiln-runtime/src/node_net.rs
 crates/kiln-runtime/src/node_stream.rs
 crates/kiln-runtime/src/scripted_transport.rs
+crates/kiln-native-provider-contract/Cargo.toml
+crates/kiln-native-provider-contract/src/lib.rs
+crates/kiln-native-provider-contract/src/main.rs
+crates/kiln-native/Cargo.toml

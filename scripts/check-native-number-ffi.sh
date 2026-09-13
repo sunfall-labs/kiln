@@ -2,6 +2,7 @@
 #
 # Package the no-std number provider exactly as it ships, then call that archive from strict C.
 set -euo pipefail
+# Contract metadata and source identity are provided by kiln-native-provider-contract.
 
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib.sh

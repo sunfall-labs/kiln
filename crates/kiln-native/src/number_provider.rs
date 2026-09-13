@@ -10,23 +10,23 @@ use kiln_artifact_cache::Digest;
 use kiln_native_number::{NUMBER_FORMAT_VERSION, NUMBER_PARSE_VERSION};
 pub(crate) use kiln_native_number_abi::PROVIDER_ABI_VERSION;
 use kiln_native_number_abi::PROVIDER_EXPORTS;
+use kiln_native_provider_contract as provider_contract;
 use kiln_native_toolchain::ToolIdentity;
 use serde::Deserialize;
 
-pub(crate) const PROVIDER_SCHEMA_VERSION: u16 = 1;
-const PROVIDER_NAME: &str = "kiln-native-number-ffi";
+pub(crate) const PROVIDER_SCHEMA_VERSION: u16 = provider_contract::SCHEMA_VERSION;
+const PROVIDER_NAME: &str = provider_contract::PROVIDER_NAME;
 /// Release plus whole-archive LTO; see the profile's own note in `Cargo.toml`.
-const PROVIDER_PROFILE: &str = "provider";
+const PROVIDER_PROFILE: &str = provider_contract::PROFILE;
 /// `debuginfo=0` because the workspace's release profile keeps line tables and this archive is a
 /// link input to *every* artifact: with the regexp engine in it, the difference is 11.7 MiB versus
 /// 8.4 MiB, multiplied by every cached build. Nobody debugs through a private ABI adapter.
-const PROVIDER_RUSTFLAGS: &str =
-    "-C panic=unwind -C relocation-model=pic -C target-cpu=generic -C debuginfo=0";
+const PROVIDER_RUSTFLAGS: &str = provider_contract::RUSTFLAGS;
 const MANIFEST_ENV: &str = "KILN_NATIVE_NUMBER_PROVIDER_MANIFEST";
-const MANIFEST_FILE: &str = "kiln-native-number-provider.json";
+const MANIFEST_FILE: &str = provider_contract::FULL_MANIFEST;
 /// Manifest for the slim provider archive: same schema, provider ABI, and export list as
 /// the full manifest, but the archive was built without the Hyper-backed HTTP engines.
-const MANIFEST_SLIM_FILE: &str = "kiln-native-number-provider.slim.json";
+const MANIFEST_SLIM_FILE: &str = provider_contract::SLIM_MANIFEST;
 // `kiln-native-number-abi` owns the ordered export registry and ABI version. Keep the imported
 // contract private to this resolver module so manifest validation and source-build identities
 // cannot drift from the provider's compile-time signature assertions.
@@ -449,9 +449,9 @@ fn build_from_source(
         arguments.extend([
             OsString::from("--features"),
             OsString::from(if want_http {
-                "regexp,bigint,temporal,json,intl,parallel,ffi"
+                provider_contract::FULL_FEATURES
             } else {
-                "realm,regexp,bigint,temporal,json,intl,parallel,ffi"
+                provider_contract::SLIM_FEATURES
             }),
             OsString::from("--profile"),
             OsString::from(PROVIDER_PROFILE),
@@ -534,24 +534,11 @@ fn build_from_source(
 }
 
 fn source_digest(root: &Path) -> Result<Digest, NumberProviderError> {
-    // Keep this ordered list in one repository manifest. The packager and installed-layout
-    // checker consume the same file, so a new provider input cannot silently land in only one
-    // of the three identity implementations.
-    const SOURCE_LIST: &str = include_str!("../provider-sources.txt");
-    let mut identity = Vec::new();
-    for relative in SOURCE_LIST
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-    {
-        let bytes = read(&root.join(relative), "read number-provider source")?;
-        identity.extend_from_slice(relative.as_bytes());
-        identity.push(0);
-        identity.extend_from_slice(bytes.len().to_string().as_bytes());
-        identity.push(0);
-        identity.extend_from_slice(&bytes);
-    }
-    Ok(Digest::hash(&identity))
+    provider_contract::source_digest(root).map_err(|source| NumberProviderError::Read {
+        operation: "read number-provider source",
+        path: root.to_path_buf(),
+        source,
+    })
 }
 
 fn sha256_identity(bytes: &[u8]) -> String {
