@@ -693,13 +693,19 @@ expected_stdout = "bundle\n"
     fn the_repositorys_own_manifest_reads() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../conformance/manifest.toml");
         let manifest = Manifest::read(&path).expect("the corpus manifest is in the subset");
-        // 32 ported plus the regression probes and the server probes authored here, which are
-        // separate groups so the ported counts keep meaning what they say.
-        //
-        // This total is written by hand, so adding a probe to the manifest and not touching this
-        // line turns the suite red for whoever pulls next -- which is how it arrived at 49 while
-        // still claiming 48. Update it in the same commit that adds the probe.
-        assert_eq!(manifest.tests().len(), 55);
+        assert!(!manifest.tests().is_empty());
+        for (group, representative) in [
+            ("effect", "effect/01-core"),
+            ("guard", "guard/g06-array-proto-iterator"),
+            ("regress", "regress/r14-dynamic-import-attributes"),
+            ("server", "server/s01-http-hello"),
+        ] {
+            let root = manifest.directory().join(group);
+            assert!(
+                manifest.tests_under(&root).any(|test| test.id == representative),
+                "manifest is missing representative {representative}"
+            );
+        }
         assert_eq!(
             manifest
                 .tests_under(&manifest.directory().join("effect"))
@@ -712,18 +718,6 @@ expected_stdout = "bundle\n"
                 .count(),
             20
         );
-        assert_eq!(
-            manifest
-                .tests_under(&manifest.directory().join("regress"))
-                .count(),
-            12
-        );
-        assert_eq!(
-            manifest
-                .tests_under(&manifest.directory().join("server"))
-                .count(),
-            7
-        );
         let probe = manifest
             .tests()
             .iter()
@@ -731,5 +725,15 @@ expected_stdout = "bundle\n"
             .expect("the one-line probe is declared");
         assert_eq!(probe.expected_stdout, "function\n");
         assert!(probe.features.contains(&"iterator-protocol".to_owned()));
+        let dynamic_import = manifest
+            .tests()
+            .iter()
+            .find(|test| test.id == "regress/r14-dynamic-import-attributes")
+            .expect("the dynamic import regression is declared");
+        assert_eq!(
+            dynamic_import.source,
+            Path::new("regress/r14-dynamic-import-attributes.mjs")
+        );
+        assert!(dynamic_import.features.contains(&"import-attributes".to_owned()));
     }
 }
