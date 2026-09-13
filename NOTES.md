@@ -5458,4 +5458,19 @@ safe `__proto__` data preservation on `Object.create(null)` dictionaries. Verifi
 integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`, and `scripts/native.sh` (168 matched,
 0 diverged). In accordance with user instructions, avoided expensive gate re-runs mid-flight to preserve shared CPU resources.
 
+---
+
+## Phase 5.2 TypeScript built-ins: `node:util` (2026-09-13)
+
+Migrated `node:util` completely from C runtime to TypeScript via `crates/kiln-builtins/src/node/util.ts`
+with zero additions to the C runtime prelude (Phase 5.1 freeze strictly honored). Implemented 27 exports
+including canonical utility functions (`format`, `formatWithOptions`, `inherits`, `inspect`, `promisify`,
+`callbackify`, `debuglog`, `deprecate`), type checkers (`types`, `isArray`, `isBoolean`, `isBuffer`, `isDate`,
+`isError`, `isFunction`, `isNull`, `isNullOrUndefined`, `isNumber`, `isObject`, `isPrimitive`, `isRegExp`,
+`isString`, `isSymbol`, `isUndefined`), and global codec re-exports (`TextDecoder`, `TextEncoder`).
+Verified with native probe `conformance/native/node-util-members.cjs` (byte-for-byte identical output between
+interpreter and native CLI), integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`,
+and full `scripts/native.sh` parity (169 matched, 0 diverged). Maintained rule to avoid mid-flight gate runs.
+
+
 

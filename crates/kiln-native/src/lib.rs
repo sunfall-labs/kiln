@@ -2801,16 +2801,7 @@ fn native_builtin_supported_exports(
             "get",
             "request",
         ],
-        NodeBuiltin::Util => &[
-            "TextDecoder",
-            "TextEncoder",
-            "debuglog",
-            "default",
-            "deprecate",
-            "format",
-            "inherits",
-            "inspect",
-        ],
+        NodeBuiltin::Util => kiln_builtins::UTIL_EXPORTS,
         NodeBuiltin::DiagnosticsChannel => {
             &["channel", "default", "hasSubscribers", "tracingChannel"]
         }
