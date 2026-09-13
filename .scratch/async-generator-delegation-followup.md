@@ -29,6 +29,10 @@ Validation from the frozen tree used the pinned corpus at
 | `language/expressions` | 21,286 | 20,578 | 392 | 316 | `/tmp/expressions-after.log` |
 | `built-ins/AsyncFromSyncIteratorPrototype` | 76 | 28 | 48 | 0 | `/tmp/async-from-sync.log` |
 | `language/expressions/template-literal` | 114 | 114 | 0 | 0 | `/tmp/template-literal-after.log` |
+| `staging/top-level-await` | 1 | 0 | 1 | 0 | `/tmp/staging-top-level-await-after.log` |
 
 The focused `for-await-of` run was recorded in `/tmp` during the same validation session and
-reported 2,412 pass / 19 fail from 2,431 selected. No full Test262 rerun was performed.
+reported 2,412 pass / 19 fail from 2,431 selected. The final staging chunk,
+`staging/top-level-await`, was then run separately and reported 0 pass / 1 fail. The
+template-literal chunk above is an additional passing spot check, not the final staging chunk.
+No full Test262 rerun was performed.
