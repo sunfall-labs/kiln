@@ -3999,8 +3999,7 @@ const load = factoryResult.load;
 console.log(`before:${loads}`);
 const first = load();
 const second = load();
-console.log(`${first === second}:${first.loads}:${loads}`);
-try { createRequire(import.meta.url)('node:zlib'); } catch (error) { console.log(`${error instanceof TypeError}`); }"#,
+console.log(`${first === second}:${first.loads}:${loads}`);"#,
     )
     .expect("write shared createRequire entry");
     fs::write(project.join("dep.cjs"), r#"globalThis.__shared_create_require_loads = (globalThis.__shared_create_require_loads || 0) + 1;
@@ -4013,12 +4012,6 @@ module.exports = { loads: globalThis.__shared_create_require_loads };"#)
         OxcFrontend,
     )
     .expect("build shared createRequire graph");
-    assert!(
-        graph
-            .modules()
-            .flat_map(|node| &node.runtime_dependencies)
-            .any(|dependency| dependency.specifier == "node:zlib")
-    );
     let library = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain.clone())
         .build_shared_graph(
             &graph,
@@ -4091,7 +4084,7 @@ int main(void) {{
         output.status.code(),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(output.stdout, b"before:0\ntrue:1:0\ntrue\n");
+    assert_eq!(output.stdout, b"before:0\ntrue:1:0\n");
 }
 
 fn star_reexport_graph(project: &Path) -> ModuleGraph {
@@ -5492,7 +5485,16 @@ fn native_static_unsupported_builtin_remains_fatal() {
         OxcFrontend,
     )
     .expect("build static zlib graph");
-    let error = native_graph_plan(&graph).expect_err("static zlib must remain fatal");
+    let reject_zlib = |graph: &ModuleGraph, node: &kiln_module_graph::ModuleNode| {
+        if node.source == ModuleSource::NodeBuiltin(kiln_module_resolver::NodeBuiltin::Zlib) {
+            return Err(NativeError::UnsupportedNodeBuiltin {
+                specifier: "node:zlib",
+            });
+        }
+        validate_native_builtin_node(graph, node)
+    };
+    let error = native_graph_plan_with_validator(&graph, &reject_zlib)
+        .expect_err("policy-rejected zlib must remain fatal");
     assert!(matches!(
         error,
         NativeError::UnsupportedNodeBuiltin {
@@ -5519,7 +5521,16 @@ fn native_runtime_unsupported_builtin_is_deferred_and_excluded() {
         OxcFrontend,
     )
     .expect("build runtime builtin graph");
-    let plan = native_graph_plan(&graph).expect("runtime unsupported builtin is deferred");
+    let reject_zlib = |graph: &ModuleGraph, node: &kiln_module_graph::ModuleNode| {
+        if node.source == ModuleSource::NodeBuiltin(kiln_module_resolver::NodeBuiltin::Zlib) {
+            return Err(NativeError::UnsupportedNodeBuiltin {
+                specifier: "node:zlib",
+            });
+        }
+        validate_native_builtin_node(graph, node)
+    };
+    let plan = native_graph_plan_with_validator(&graph, &reject_zlib)
+        .expect("policy-rejected runtime builtin is deferred");
     let zlib = graph
         .modules()
         .find(|node| node.source == ModuleSource::NodeBuiltin(NodeBuiltin::Zlib))
@@ -5558,7 +5569,16 @@ fn native_runtime_failures_keep_distinct_captured_bases() {
         OxcFrontend,
     )
     .expect("build runtime failure graph");
-    let plan = native_graph_plan(&graph).expect("runtime failures are deferred");
+    let reject_zlib = |graph: &ModuleGraph, node: &kiln_module_graph::ModuleNode| {
+        if node.source == ModuleSource::NodeBuiltin(kiln_module_resolver::NodeBuiltin::Zlib) {
+            return Err(NativeError::UnsupportedNodeBuiltin {
+                specifier: "node:zlib",
+            });
+        }
+        validate_native_builtin_node(graph, node)
+    };
+    let plan = native_graph_plan_with_validator(&graph, &reject_zlib)
+        .expect("policy-rejected runtime failures are deferred");
     assert_eq!(plan.runtime_failures.len(), 2);
 }
 
