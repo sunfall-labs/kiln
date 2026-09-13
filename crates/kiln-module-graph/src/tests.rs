@@ -4525,9 +4525,7 @@ fn reduce_to_live_keeps_live_importer_failures_and_drops_dead_dynamic_edges() {
     let (reduced, _) = graph.reduce_to_live(&demand).expect("reduction");
 
     assert!(reduced.dynamic_dependencies(&entry).is_empty());
-    assert!(reduced
-        .dynamic_failure(&entry, "./missing.mjs")
-        .is_some());
+    assert!(reduced.dynamic_failure(&entry, "./missing.mjs").is_some());
 }
 
 #[test]
