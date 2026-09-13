@@ -297,6 +297,27 @@ fn every_executable_script_is_strict_and_sources_the_library() {
     }
 }
 
+/// The shared Test262 policy is Python because it is also consumed by the shell entrypoints.
+/// Keep its real contract suite in the normal script-hygiene gate, without creating bytecode in
+/// the checkout.
+#[test]
+fn shared_test262_corpus_policy_suite_passes() {
+    let root = repo_root();
+    let output = Command::new("python3")
+        .arg("-B")
+        .arg("scripts/test262_corpus_test.py")
+        .current_dir(&root)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .output()
+        .expect("python3 is available");
+    assert!(
+        output.status.success(),
+        "shared Test262 corpus policy tests failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn every_script_has_the_execute_bit_it_needs() {
