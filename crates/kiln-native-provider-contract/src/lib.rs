@@ -69,8 +69,15 @@ pub fn source_paths() -> impl Iterator<Item = &'static str> {
 }
 
 pub fn source_digest(root: &Path) -> std::io::Result<Digest> {
+    digest_paths(root, source_paths())
+}
+
+fn digest_paths<'a>(
+    root: &Path,
+    paths: impl IntoIterator<Item = &'a str>,
+) -> std::io::Result<Digest> {
     let mut bytes = Vec::new();
-    for relative in source_paths() {
+    for relative in paths {
         let path = root.join(relative);
         let contents = std::fs::read(&path)?;
         bytes.extend_from_slice(relative.as_bytes());
@@ -96,8 +103,25 @@ mod tests {
     use super::*;
     #[test]
     fn source_digest_changes_with_contents_and_order() {
-        // The repository inventory is fixed; this test locks the framing through a known prefix.
-        assert!(source_digest(Path::new("/definitely/missing")).is_err());
-        assert!(!contract().exports.is_empty());
+        let root =
+            std::env::temp_dir().join(format!("kiln-provider-contract-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a"), b"one").unwrap();
+        std::fs::write(root.join("b"), b"two").unwrap();
+        let first = digest_paths(&root, ["a", "b"]).unwrap();
+        assert_ne!(first, digest_paths(&root, ["b", "a"]).unwrap());
+        std::fs::write(root.join("a"), b"changed").unwrap();
+        assert_ne!(first, digest_paths(&root, ["a", "b"]).unwrap());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn contract_keeps_full_and_slim_fields_distinct() {
+        let value = contract();
+        assert_ne!(value.full_archive, value.slim_archive);
+        assert_ne!(value.full_manifest, value.slim_manifest);
+        assert_ne!(value.full_features, value.slim_features);
+        assert!(!value.exports.is_empty());
     }
 }

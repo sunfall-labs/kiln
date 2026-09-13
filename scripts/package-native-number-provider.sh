@@ -5,6 +5,7 @@
 # manifest. This host packager deliberately does not claim a release target matrix; CI/release
 # jobs choose CARGO_BUILD_TARGET and the deployment/libc baselines explicitly.
 set -euo pipefail
+# Contract metadata and source identity are provided by kiln-native-provider-contract.
 
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib.sh

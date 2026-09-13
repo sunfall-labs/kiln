@@ -17,9 +17,9 @@ kiln-module-graph = { workspace = true }
 kiln-module-resolver = { workspace = true }
 kiln-native-number = { workspace = true }
 kiln-native-number-abi = { workspace = true }
+kiln-native-provider-contract = { workspace = true }
 kiln-native-runtime = { workspace = true }
 kiln-native-toolchain = { workspace = true }
-kiln-node-abi = { workspace = true }
 frontend-oxc = { workspace = true }
 parking_lot = { workspace = true }
 rayon = { workspace = true }

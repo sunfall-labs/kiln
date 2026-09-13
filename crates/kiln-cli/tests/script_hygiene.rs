@@ -181,15 +181,13 @@ fn no_script_launches_a_shell_function_through_a_binary_launcher() {
     );
 }
 
-/// The provider's source identity is spelled out in three places that must agree exactly.
-///
-/// The Rust fallback, packager, and smoke script all consume one ordered manifest, so a provider
-/// input cannot be added to only one cache identity implementation.
+/// The provider contract and its ordered source inventory are shared by runtime and scripts.
 #[test]
 fn the_provider_source_manifest_is_shared_and_complete() {
     let root = repo_root();
-    let rust = std::fs::read_to_string(root.join("crates/kiln-native/src/number_provider.rs"))
-        .expect("number_provider.rs is readable");
+    let contract =
+        std::fs::read_to_string(root.join("crates/kiln-native-provider-contract/src/lib.rs"))
+            .expect("provider contract is readable");
     let packager =
         std::fs::read_to_string(scripts_directory().join("package-native-number-provider.sh"))
             .expect("packager is readable");
@@ -235,17 +233,9 @@ fn the_provider_source_manifest_is_shared_and_complete() {
         );
     }
     for (name, source, marker) in [
-        ("Rust source digest", rust, "provider-sources.txt"),
-        (
-            "packager",
-            packager,
-            "crates/kiln-native/provider-sources.txt",
-        ),
-        (
-            "smoke script",
-            smoke,
-            "crates/kiln-native/provider-sources.txt",
-        ),
+        ("provider contract", contract, "provider-sources.txt"),
+        ("packager", packager, "kiln-native-provider-contract"),
+        ("smoke script", smoke, "kiln-native-provider-contract"),
     ] {
         assert!(
             source.contains(marker),

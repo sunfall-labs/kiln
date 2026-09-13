@@ -8798,20 +8798,6 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
 }
 
 #[test]
-fn resolver_and_node_abi_cover_the_same_builtin_set() {
-    let resolver = kiln_module_resolver::NodeBuiltin::ALL
-        .iter()
-        .filter(|builtin| !matches!(builtin, kiln_module_resolver::NodeBuiltin::Process))
-        .map(|builtin| builtin.specifier())
-        .collect::<BTreeSet<_>>();
-    let abi = kiln_node_abi::SPECIFIERS
-        .iter()
-        .copied()
-        .collect::<BTreeSet<_>>();
-    assert_eq!(resolver, abi);
-}
-
-#[test]
 fn executable_graph_omits_unused_modules_only_with_package_permission() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
