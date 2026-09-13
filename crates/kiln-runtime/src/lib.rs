@@ -2791,7 +2791,6 @@ impl AsyncHostOps for TokioHost {
         } else {
             self.tasks.abort(&request);
         }
-        self.process_tasks.remove(&request);
         self.ready.remove(&pending.sequence);
         true
     }
@@ -3887,6 +3886,54 @@ mod tests {
             thread::sleep(Duration::from_millis(5));
         }
         panic!("shutdown child PID {pid} was not reaped");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tokio_host_shutdown_drains_a_process_after_last_op_cancellation() {
+        use std::process::Command;
+        use std::thread;
+
+        let directory = TestDirectory::new("process-cancel-shutdown");
+        let marker = directory.join("pid");
+        let marker_string = marker.to_string_lossy().into_owned();
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        let request = runtime.start_host_op(
+            AsyncHostOp::ProcessRun {
+                command: "sh".into(),
+                args: vec![
+                    "-c".into(),
+                    "echo \"$$\" > \"$1\"; exec sleep 30".into(),
+                    "kiln-process-test".into(),
+                    marker_string,
+                ],
+                stdin: None,
+            },
+            true,
+        );
+        let mut pid = None;
+        for _ in 0..100 {
+            runtime.drive_executor().block_on(yield_to_tasks());
+            if let Ok(contents) = fs::read_to_string(&marker) {
+                pid = Some(contents.trim().parse::<i32>().expect("child PID"));
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        let pid = pid.expect("child published its PID");
+        assert!(AsyncHostOps::cancel(runtime.host(), request));
+        assert!(runtime.shutdown());
+        for _ in 0..100 {
+            let status = Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .expect("ps is available");
+            if status.stdout.iter().all(u8::is_ascii_whitespace) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        panic!("cancelled shutdown child PID {pid} was not reaped");
     }
 
     /// A clock reading keeps the part of it that is shorter than a millisecond.
