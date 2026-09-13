@@ -20,9 +20,8 @@ use kiln_interpreter::{
     ExecutionLimits, ExecutionResult, ImportAttributes, ModuleBinding, ModuleLoadError,
     ModuleLoadRequest, ModuleLoaderService, ModulePlan, ModuleRealmSession, ModuleSelfExport,
     ModuleSelfImport, ModuleValueRef, PlannedModule, Value, execute_module_in_runtime_with_loader,
-    execute_node_module_in_session_with_loader, node_builtin_commonjs_value,
-    node_builtin_export_names, node_builtin_exports, ordinary_object, own_data_property,
-    parse_json_module, read_through_cell,
+    execute_node_module_in_session_with_loader, node_builtin_export_names, ordinary_object,
+    own_data_property, parse_json_module, read_through_cell,
 };
 use kiln_ir::{
     BYTECODE_VERSION, CompileDiagnostic, ExportBinding, Instruction, ModuleProgram, Program,
@@ -279,36 +278,8 @@ impl ModuleLoaderService for GraphModuleLoader {
                     importer.display()
                 ))
             })?;
-        if dependency
-            .target
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(is_asset_extension)
-            && request.attributes.is_none()
-        {
-            return Err(ModuleLoadError::Unsupported(
-                "file asset imports require `with: { type: 'file' }`".to_owned(),
-            ));
-        }
-        if let Some(ImportAttributes { type_: Some(kind) }) = request.attributes {
-            if kind != "file" {
-                return Err(ModuleLoadError::Unsupported(
-                    "unsupported import attribute `type`".to_owned(),
-                ));
-            }
-            if self
-                .graph
-                .module(&dependency.target)
-                .is_none_or(|target| target.source != ModuleSource::Asset)
-            {
-                return Err(ModuleLoadError::Unsupported(format!(
-                    "module `{}` is not a file asset",
-                    dependency.target.display()
-                )));
-            }
-        }
         self.graph
-            .import_plan_for(&dependency.target)
+            .import_plan_for_request(&dependency.target, request.attributes.as_ref())
             .map_err(|error| ModuleLoadError::Unsupported(error.to_string()))
     }
 }
@@ -1734,6 +1705,47 @@ impl ModuleGraph {
         rooted.import_plan()
     }
 
+    /// Build a plan for a runtime request after applying its import-attribute policy.
+    ///
+    /// Keeping validation beside rooted-plan construction prevents a loader from reusing a
+    /// source module for a request that requires a file asset. Hosts retain control over how
+    /// graph errors are classified at their boundary.
+    pub fn import_plan_for_request(
+        &self,
+        entry: impl AsRef<Path>,
+        attributes: Option<&ImportAttributes>,
+    ) -> Result<ModulePlan, ModuleGraphError> {
+        let entry = entry.as_ref();
+        let node = self
+            .module(entry)
+            .ok_or_else(|| ModuleGraphError::InternalMissingModule {
+                path: entry.to_path_buf(),
+            })?;
+        if node.source == ModuleSource::Asset
+            && attributes.and_then(|attributes| attributes.type_.as_deref()) != Some("file")
+        {
+            return Err(ModuleGraphError::Source {
+                path: node.path.clone(),
+                message: "file asset imports require `with: { type: 'file' }`".to_owned(),
+            });
+        }
+        if let Some(ImportAttributes { type_: Some(kind) }) = attributes {
+            if kind != "file" {
+                return Err(ModuleGraphError::Source {
+                    path: node.path.clone(),
+                    message: "unsupported import attribute `type`".to_owned(),
+                });
+            }
+            if node.source != ModuleSource::Asset {
+                return Err(ModuleGraphError::Source {
+                    path: node.path.clone(),
+                    message: format!("module `{}` is not a file asset", node.path.display()),
+                });
+            }
+        }
+        self.import_plan_for(entry)
+    }
+
     /// Every visible export of `module`, paired with where in the plan its value will be.
     fn plan_namespace(
         &self,
@@ -1785,24 +1797,6 @@ impl ModuleGraph {
         // the specifier it arrived through, because a re-export chain can cross a cycle several
         // times and every crossing has to land on the same cell.
         let mut pending_cycle_cells: HashMap<(PathBuf, String), Cell> = HashMap::new();
-        // A builtin has one canonical implementation and two language projections. `values`
-        // holds its ESM bindings; this table holds Node's historical CommonJS `module.exports`
-        // value so a later `require()` never has to reverse-engineer one projection from the
-        // other.
-        let builtin_commonjs: HashMap<PathBuf, Value> = self
-            .modules
-            .iter()
-            .filter_map(|(path, node)| match node.source {
-                ModuleSource::NodeBuiltin(builtin) if !kiln_builtins::is_ts_builtin(builtin) => {
-                    Some((
-                        path.clone(),
-                        node_builtin_commonjs_value(builtin.specifier())
-                            .expect("a linkable builtin has a CommonJS projection"),
-                    ))
-                }
-                _ => None,
-            })
-            .collect();
         // Allocated for every CommonJS node before any body runs. This is the module cache's
         // identity seam: every require edge names the same mutable export cell.
         let commonjs_cache: HashMap<PathBuf, Cell> = self
@@ -1843,7 +1837,6 @@ impl ModuleGraph {
         let mut commonjs_states = HashMap::new();
         let mut commonjs_loader = CommonJsLoader {
             graph: self,
-            builtin_commonjs: &builtin_commonjs,
             commonjs_cache: &commonjs_cache,
             cache_targets,
             values: &mut values as *mut _,
@@ -1868,14 +1861,6 @@ impl ModuleGraph {
             let module_node = self
                 .module_node(path)
                 .ok_or_else(|| ModuleGraphError::InternalMissingModule { path: path.clone() })?;
-            if let ModuleSource::NodeBuiltin(builtin) = module_node.source
-                && !kiln_builtins::is_ts_builtin(builtin)
-            {
-                let exports = node_builtin_exports(builtin.specifier())
-                    .expect("only materializable builtins have linkable exports");
-                values.insert(path.clone(), exports.into_iter().collect());
-                continue;
-            }
             if module_node.source == ModuleSource::Json {
                 let source =
                     module_node
@@ -2140,7 +2125,6 @@ enum CommonJsExecutionState {
 // outlive the pointed-to values.
 struct CommonJsLoader<'graph, H: HostOps + ?Sized> {
     graph: &'graph ModuleGraph,
-    builtin_commonjs: &'graph HashMap<PathBuf, Value>,
     commonjs_cache: &'graph HashMap<PathBuf, Cell>,
     cache_targets: HashMap<*const std::cell::RefCell<Value>, PathBuf>,
     values: *mut HashMap<PathBuf, HashMap<String, Value>>,
@@ -2213,9 +2197,6 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
             self.execute_target(target, false)?;
             return Ok(cell.borrow().clone());
         }
-        if let Some(value) = self.builtin_commonjs.get(target) {
-            return Ok(value.clone());
-        }
         if let Some(provider) = unsafe { (&*self.values).get(target) }
             && let Some(value) = provider.get("default")
         {
@@ -2230,8 +2211,7 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
                 ),
             });
         };
-        if !matches!(module_node.source, ModuleSource::NodeBuiltin(builtin) if kiln_builtins::is_ts_builtin(builtin))
-        {
+        if !matches!(module_node.source, ModuleSource::NodeBuiltin(_)) {
             return Err(ExecutionError::Host {
                 instruction,
                 message: format!(
@@ -2277,8 +2257,7 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
             {
                 if node.source == ModuleSource::CommonJs {
                     self.execute_target(&dependency.target, false)?;
-                } else if matches!(node.source, ModuleSource::NodeBuiltin(builtin) if kiln_builtins::is_ts_builtin(builtin))
-                {
+                } else if matches!(node.source, ModuleSource::NodeBuiltin(_)) {
                     self.ensure_target_value(&dependency.target, instruction)?;
                 }
             }
@@ -2383,49 +2362,46 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
             .clone();
         let mut targets = Vec::with_capacity(module_node.dependencies.len());
         for dependency in &module_node.dependencies {
-            let value = if let Some(cell) = self.commonjs_cache.get(&dependency.target) {
-                std::rc::Rc::clone(cell)
-            } else if let Some(provider) = unsafe { (&*self.values).get(&dependency.target) } {
-                if let Some(value) = self.builtin_commonjs.get(&dependency.target) {
-                    std::rc::Rc::new(std::cell::RefCell::new(value.clone()))
-                } else if self
-                    .graph
-                    .module_node(&dependency.target)
-                    .is_some_and(|node| match node.source {
-                        ModuleSource::Json => true,
-                        ModuleSource::NodeBuiltin(builtin) => kiln_builtins::is_ts_builtin(builtin),
-                        _ => false,
-                    })
-                {
-                    let value =
-                        provider
-                            .get("default")
-                            .cloned()
-                            .ok_or_else(|| ExecutionError::Host {
+            let value =
+                if let Some(cell) = self.commonjs_cache.get(&dependency.target) {
+                    std::rc::Rc::clone(cell)
+                } else if let Some(provider) = unsafe { (&*self.values).get(&dependency.target) } {
+                    if self
+                        .graph
+                        .module_node(&dependency.target)
+                        .is_some_and(|node| match node.source {
+                            ModuleSource::Json => true,
+                            ModuleSource::NodeBuiltin(_) => true,
+                            _ => false,
+                        })
+                    {
+                        let value = provider.get("default").cloned().ok_or_else(|| {
+                            ExecutionError::Host {
                                 instruction: 0,
                                 message: format!(
                                     "Target `{}` has no default",
                                     dependency.target.display()
                                 ),
-                            })?;
-                    std::rc::Rc::new(std::cell::RefCell::new(read_through_cell(&value)))
+                            }
+                        })?;
+                        std::rc::Rc::new(std::cell::RefCell::new(read_through_cell(&value)))
+                    } else {
+                        let mut entries: Vec<_> = provider
+                            .iter()
+                            .map(|(name, value)| (name.clone(), read_through_cell(value)))
+                            .collect();
+                        entries.sort_by(|left, right| left.0.cmp(&right.0));
+                        std::rc::Rc::new(std::cell::RefCell::new(ordinary_object(entries)))
+                    }
                 } else {
-                    let mut entries: Vec<_> = provider
-                        .iter()
-                        .map(|(name, value)| (name.clone(), read_through_cell(value)))
-                        .collect();
-                    entries.sort_by(|left, right| left.0.cmp(&right.0));
-                    std::rc::Rc::new(std::cell::RefCell::new(ordinary_object(entries)))
-                }
-            } else {
-                return Err(ExecutionError::Host {
-                    instruction: 0,
-                    message: format!(
-                        "CommonJS target `{}` has not been evaluated",
-                        dependency.target.display()
-                    ),
-                });
-            };
+                    return Err(ExecutionError::Host {
+                        instruction: 0,
+                        message: format!(
+                            "CommonJS target `{}` has not been evaluated",
+                            dependency.target.display()
+                        ),
+                    });
+                };
             targets.push((
                 dependency.specifier.clone(),
                 dependency.target.to_string_lossy().into_owned(),
@@ -2549,9 +2525,6 @@ impl<H: HostOps + ?Sized> CommonJsModuleLoader for CommonJsLoader<'_, H> {
         specifier: &str,
         instruction: usize,
     ) -> Result<Option<Value>, ExecutionError> {
-        if let Some(value) = node_builtin_commonjs_value(specifier) {
-            return Ok(Some(value));
-        }
         let builtin = NodeBuiltin::parse(specifier).ok_or_else(|| ExecutionError::Host {
             instruction,
             message: format!("unknown builtin module `{specifier}`"),
@@ -2645,10 +2618,7 @@ impl<H: HostOps + ?Sized> CommonJsModuleLoader for CommonJsLoader<'_, H> {
                 if let Some(dependency) = runtime_dependency {
                     return self.ensure_target_value(&dependency.target, instruction);
                 }
-                if let Some(value) = node_builtin_commonjs_value(specifier) {
-                    return Ok(value);
-                }
-                if NodeBuiltin::parse(specifier).is_some_and(kiln_builtins::is_ts_builtin) {
+                if NodeBuiltin::parse(specifier).is_some() {
                     return self.get_builtin(specifier, instruction)?.ok_or_else(|| {
                         ExecutionError::Host {
                             instruction,
@@ -2675,13 +2645,10 @@ impl<H: HostOps + ?Sized> CommonJsModuleLoader for CommonJsLoader<'_, H> {
                     self.execute_target(&target, false)?;
                     return Ok(cell.borrow().clone());
                 }
-                if let Some(value) = self.builtin_commonjs.get(&target) {
-                    return Ok(value.clone());
-                }
                 if let Some(provider) = unsafe { (&*self.values).get(&target) } {
                     if self.graph.module_node(&target).is_some_and(|node| {
                         node.source == ModuleSource::Json
-                            || matches!(node.source, ModuleSource::NodeBuiltin(builtin) if kiln_builtins::is_ts_builtin(builtin))
+                            || matches!(node.source, ModuleSource::NodeBuiltin(_))
                     }) {
                         return provider.get("default").cloned().ok_or_else(|| {
                             ExecutionError::Host {
@@ -3133,19 +3100,16 @@ where
                                 )
                             }
                             ModuleSource::NodeBuiltin(builtin) => {
-                                if let Some(source) = kiln_builtins::builtin_source(builtin) {
-                                    let path_str = kiln_builtins::builtin_logical_path(builtin);
-                                    let hir = frontend_oxc::parse(path_str, source);
-                                    let program = compile_module(&hir).map_err(|diagnostics| {
-                                        ModuleGraphError::Compile {
-                                            path: path.clone(),
-                                            diagnostics,
-                                        }
-                                    })?;
-                                    (program, None)
-                                } else {
-                                    (builtin_module_program(builtin), None)
-                                }
+                                let source = kiln_builtins::builtin_source(builtin);
+                                let path_str = kiln_builtins::builtin_logical_path(builtin);
+                                let hir = frontend_oxc::parse(path_str, source);
+                                let program = compile_module(&hir).map_err(|diagnostics| {
+                                    ModuleGraphError::Compile {
+                                        path: path.clone(),
+                                        diagnostics,
+                                    }
+                                })?;
+                                (program, None)
                             }
                         };
                         validate_exports(&path, &program)?;
