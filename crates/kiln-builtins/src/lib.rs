@@ -99,7 +99,7 @@ declare_ts_builtins! {
     Process {
         variant: Process,
         file: "node/process.ts",
-        logical_path: "node:process.ts",
+        logical_path: "kiln:process.ts",
         source_const: PROCESS_SOURCE,
         exports_const: PROCESS_EXPORTS,
         sample_source_check: "export async function run",

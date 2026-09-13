@@ -119,7 +119,7 @@ impl NodeBuiltin {
 
     pub fn parse(specifier: &str) -> Option<Self> {
         Some(match specifier.strip_prefix("node:").unwrap_or(specifier) {
-            "process" => Self::Process,
+            "kiln:process" => Self::Process,
             "assert" | "assert/strict" => Self::Assert,
             "buffer" => Self::Buffer,
             "async_hooks" => Self::AsyncHooks,
@@ -153,7 +153,7 @@ impl NodeBuiltin {
 
     pub const fn specifier(self) -> &'static str {
         match self {
-            Self::Process => "node:process",
+            Self::Process => "kiln:process",
             Self::Assert => "node:assert",
             Self::Buffer => "node:buffer",
             Self::AsyncHooks => "node:async_hooks",
@@ -188,7 +188,11 @@ impl NodeBuiltin {
         project_root
             .join(".kiln")
             .join("builtins")
-            .join(self.specifier().trim_start_matches("node:"))
+            .join(
+                self.specifier()
+                    .trim_start_matches("node:")
+                    .trim_start_matches("kiln:"),
+            )
             .with_extension("builtin")
     }
 }
@@ -2136,10 +2140,14 @@ mod tests {
             NodeBuiltin::WorkerThreads,
         ] {
             assert_eq!(NodeBuiltin::parse(builtin.specifier()), Some(builtin));
-            assert_eq!(
-                NodeBuiltin::parse(builtin.specifier().trim_start_matches("node:")),
-                Some(builtin)
-            );
+            if builtin == NodeBuiltin::Process {
+                assert_eq!(NodeBuiltin::parse("kiln:process"), Some(builtin));
+            } else {
+                assert_eq!(
+                    NodeBuiltin::parse(builtin.specifier().trim_start_matches("node:")),
+                    Some(builtin)
+                );
+            }
         }
     }
 
