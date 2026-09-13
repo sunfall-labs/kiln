@@ -128,6 +128,20 @@ declare_ts_builtins! {
             "throws",
         ],
     },
+    Events {
+        variant: Events,
+        file: "node/events.ts",
+        logical_path: "node:events.ts",
+        source_const: EVENTS_SOURCE,
+        exports_const: EVENTS_EXPORTS,
+        sample_source_check: "export class EventEmitter",
+        presence_test: events_builtin_source_is_present,
+        compilation_test: events_builtin_compiles_cleanly,
+        exports: [
+            "EventEmitter",
+            "default",
+        ],
+    },
     Os {
         variant: Os,
         file: "node/os.ts",

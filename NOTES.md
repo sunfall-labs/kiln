@@ -5408,3 +5408,16 @@ cycles a call where we spend five, and it gets there by checking the shape once 
 rather than once per element. Folding the prototype into the shape identity would remove two or
 three of those loads; winning the row outright needs the loop-level guard, which is a larger
 piece of work than anything here.
+
+---
+
+## Phase 5.2 TypeScript built-ins: `node:events` (2026-09-13)
+
+Implemented `node:events` (`EventEmitter`) completely in TypeScript via
+`crates/kiln-builtins/src/node/events.ts` with zero additions to C runtime prelude (honoring
+the Phase 5.1 freeze). Verified byte-for-byte output parity between interpreter and native CLI on
+`conformance/native/node-events-members.cjs`, and full clean pass on `scripts/native.sh` (164 matched,
+0 diverged). Whole-program fact extraction updated in `bench/results/facts-baseline.json`.
+
+Reminder: Do not rerun the full gate or gate-quick repeatedly mid-flight when individual targeted suites
+and parity scripts already passed; test runs share CPU budgets across active worktrees and are costly.
