@@ -9607,3 +9607,95 @@ fn native_node_module_commonjs_require_builds_and_runs() {
     let stdout = String::from_utf8_lossy(&result.stdout);
     assert!(stdout.contains("cjs-module: function function true true"));
 }
+
+#[test]
+fn native_node_dns_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-dns-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import dns, { lookup, ADDRCONFIG } from 'node:dns';\n",
+            "let lookedUp = false;\n",
+            "lookup('localhost', (err, address, family) => {\n",
+            "  lookedUp = address === '127.0.0.1' && family === 4;\n",
+            "});\n",
+            "console.log('dns-ts:', typeof dns, typeof lookup, ADDRCONFIG === 32, lookedUp);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("dns_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run dns binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("dns-ts: object function true true"));
+}
+
+#[test]
+fn native_node_dns_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-dns-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const dns = require('node:dns');\n",
+            "let lookedUp = false;\n",
+            "dns.lookup('localhost', (err, address, family) => {\n",
+            "  lookedUp = address === '127.0.0.1' && family === 4;\n",
+            "});\n",
+            "console.log('cjs-dns:', typeof dns, typeof dns.lookup, dns.ADDRCONFIG === 32, lookedUp);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("dns_cjs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run dns cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("cjs-dns: object function true true"));
+}
