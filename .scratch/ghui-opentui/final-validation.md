@@ -10,11 +10,12 @@ and 10 failed. The failures mapped as follows:
 
 - four `native_non_callable_*` diagnostics failures, fixed by formatting native provenance at the
   final uncaught graph boundary; the focused four tests pass, including `KILN_GC_STRESS=1`;
-- two daemon cycle failures;
-- four shared graph failures;
-- one provider identity failure;
-- namespace and ABI failures (344 combined in the workspace report);
-- HTTP checks remain pending.
+- one daemon cycle failure;
+- one shared wrapper failure;
+- one provider fixture failure;
+- one namespace assertion failure;
+- one Node ABI set failure;
+- one HTTP failure.
 
 The original Test262 comparison had three reported regressions. The restored baseline counts are:
 
@@ -22,8 +23,8 @@ The original Test262 comparison had three reported regressions. The restored bas
 - statements: `17635/367` versus `17633/369` in the earlier report;
 - expressions: `20578/392` versus `20507/463` in the earlier report.
 
-The source phase unsupported set accounts for four cases; three are attributed to `f3cd`. The last
-staging top-level-await result is `0/1`, matching the expected baseline.
+The source phase unsupported set accounts for four cases and is covered by commit `f3cd2fa2`. The
+last staging top-level-await result is `0/1`, matching the expected baseline.
 
 ## Focused native boundary validation
 
@@ -33,7 +34,8 @@ Dynamic rejection identity coverage also passes:
 - `native_dynamic_tla_rejection_preserves_original_error`;
 - `native_dynamic_import_static_tla_target_rejection_is_cached`.
 
-The implementation commit is `58a961e4`; the emitted C ABI snapshot follow-up is `bfcf3030`.
+The integrated implementation commit is `156f525a`; the emitted C ABI snapshot follow-up is
+`d870e2c5`. Commit `34453b92` is the namespace and ABI fix referenced by the gate mapping.
 
 ## ghui live acceptance
 
@@ -47,4 +49,3 @@ no timeout notice. No GitHub mutation was performed.
 
 The fresh same-host performance pairing against the main revision was not run, so no performance
 baseline conclusion is recorded. Native stress remains active, and HTTP validation is pending.
-
