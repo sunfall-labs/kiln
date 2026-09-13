@@ -67,6 +67,63 @@ fn binary_asset_is_retained_as_an_explicit_path_module() {
 }
 
 #[test]
+fn dynamic_loader_requires_file_attribute_for_assets_and_rejects_it_for_source() {
+    let project = TempProject::new();
+    let asset = project.root.join("tree-sitter.wasm");
+    fs::write(&asset, [0_u8, 159, 146, 150]).expect("write binary asset");
+    let entry = project.write(
+        "main.mjs",
+        "import('./tree-sitter.wasm'); import('./source.mjs');",
+    );
+    project.write("source.mjs", "export default 1;");
+    let graph = Arc::new(
+        ModuleGraph::build_node(
+            &entry,
+            kiln_module_resolver::ModuleResolver::new(&project.root).expect("resolver"),
+            |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+            OxcFrontend,
+        )
+        .expect("build dynamic asset graph"),
+    );
+    let loader = GraphModuleLoader::new(Arc::clone(&graph));
+    let importer = entry.to_string_lossy().into_owned();
+    let error = match loader.load(ModuleLoadRequest {
+        importer: Some(importer.clone()),
+        specifier: "./tree-sitter.wasm".into(),
+        attributes: Some(ImportAttributes { type_: None }),
+    }) {
+        Err(error) => error,
+        Ok(_) => panic!("empty attributes must not satisfy an asset request"),
+    };
+    assert!(
+        matches!(error, ModuleLoadError::Unsupported(message) if message.contains("file asset"))
+    );
+    match loader.load(ModuleLoadRequest {
+        importer: Some(importer.clone()),
+        specifier: "./tree-sitter.wasm".into(),
+        attributes: Some(ImportAttributes {
+            type_: Some("file".into()),
+        }),
+    }) {
+        Ok(_) => {}
+        Err(_) => panic!("file asset attribute should load the asset"),
+    }
+    let error = match loader.load(ModuleLoadRequest {
+        importer: Some(importer),
+        specifier: "./source.mjs".into(),
+        attributes: Some(ImportAttributes {
+            type_: Some("file".into()),
+        }),
+    }) {
+        Err(error) => error,
+        Ok(_) => panic!("source modules must reject file attributes"),
+    };
+    assert!(
+        matches!(error, ModuleLoadError::Unsupported(message) if message.contains("not a file asset"))
+    );
+}
+
+#[test]
 fn create_require_literal_is_retained_as_lazy_runtime_dependency() {
     let project = TempProject::new();
     let dependency = project.write("dep.cjs", "module.exports = 42;");

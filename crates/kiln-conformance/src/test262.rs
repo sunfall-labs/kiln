@@ -126,12 +126,6 @@ fn run_variant_with_harness_and_worker(
     worker: Option<&mut InterpreterWorker>,
 ) -> CaseResult {
     let started = Instant::now();
-    // `import()` names its module at run time, so the loader has to be reachable from a running
-    // program too. It is rooted at the test's own directory, which is where every fixture the
-    // corpus imports lives.
-    if let Some(directory) = case.path.parent() {
-        crate::module_loader::set_base(directory);
-    }
     // A compiler or interpreter bug reached by one test must not take the run with it. Before
     // this, a single `unreachable!` in lowering aborted the process, and a sweep of
     // `language/expressions` reported nothing at all for the other eleven thousand tests in the
@@ -317,6 +311,7 @@ fn run_variant_uncaught(
             prefix_len,
             worker,
             started,
+            case.path.parent(),
         );
     };
 
@@ -372,14 +367,14 @@ fn run_variant_uncaught(
             std::rc::Rc::new(strictness),
             &mut host,
             conformance_limits(case),
-            crate::source_compiler::capabilities(),
+            crate::source_compiler::capabilities(case.path.parent()),
         ),
         None => execute_reclaiming_with_strictness(
             std::rc::Rc::new(program),
             std::rc::Rc::new(strictness),
             &mut host,
             conformance_limits(case),
-            crate::source_compiler::capabilities(),
+            crate::source_compiler::capabilities(case.path.parent()),
         ),
     };
     match outcome {
@@ -434,6 +429,7 @@ fn execute_positive(
     prefix_len: usize,
     worker: Option<&mut InterpreterWorker>,
     started: Instant,
+    base: Option<&std::path::Path>,
 ) -> CaseResult {
     let (program, strictness) =
         match kiln_ir::compile_with_strictness(module, script_compile_options()) {
@@ -450,14 +446,14 @@ fn execute_positive(
             std::rc::Rc::new(strictness),
             &mut host,
             limits,
-            crate::source_compiler::capabilities(),
+            crate::source_compiler::capabilities(base),
         ),
         None => execute_reclaiming_with_strictness(
             std::rc::Rc::new(program),
             std::rc::Rc::new(strictness),
             &mut host,
             limits,
-            crate::source_compiler::capabilities(),
+            crate::source_compiler::capabilities(base),
         ),
     }
     .map(|_| ());
@@ -492,7 +488,7 @@ fn execute_module_case(
             &[],
             &mut host,
             conformance_limits(case),
-            crate::source_compiler::capabilities(),
+            crate::source_compiler::capabilities(case.path.parent()),
         )
         .map(|_| ());
         Ok((outcome, host))
@@ -635,7 +631,7 @@ fn link_and_execute(
     match graph.execute(
         &mut host,
         conformance_limits(case),
-        crate::source_compiler::capabilities(),
+        crate::source_compiler::capabilities(case.path.parent()),
     ) {
         Ok(_) => Ok((Ok(()), host)),
         Err(ModuleGraphError::Execution { error, .. }) => Ok((Err(error), host)),

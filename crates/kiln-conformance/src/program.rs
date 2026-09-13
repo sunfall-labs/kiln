@@ -147,7 +147,7 @@ fn run_node_module(path: &Path, expected: &str, mode: RunMode) -> CaseResult {
     if let Err(error) = graph.execute_node(
         &mut host,
         ExecutionLimits::default(),
-        crate::source_compiler::capabilities(),
+        crate::source_compiler::capabilities(path.parent()),
     ) {
         let mut result = failed(DiagnosticPhase::Runtime, error.to_string(), started);
         result.stdout = host.into_stdout();
@@ -252,7 +252,7 @@ fn run_with_executor(
             strictness,
             &mut host,
             ExecutionLimits::default(),
-            crate::source_compiler::capabilities(),
+            crate::source_compiler::capabilities(path.parent()),
         )
         .map(|_| ())
     } else if let Some(worker) = worker {
@@ -262,7 +262,7 @@ fn run_with_executor(
                 strictness,
                 &mut host,
                 ExecutionLimits::default(),
-                crate::source_compiler::capabilities(),
+                crate::source_compiler::capabilities(path.parent()),
             )
             .map(|_| ())
     } else {
@@ -271,7 +271,7 @@ fn run_with_executor(
             strictness,
             &mut host,
             ExecutionLimits::default(),
-            crate::source_compiler::capabilities(),
+            crate::source_compiler::capabilities(path.parent()),
         )
         .map(|_| ())
     };

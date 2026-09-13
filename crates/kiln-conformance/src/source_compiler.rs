@@ -9,16 +9,17 @@
 use frontend_oxc::{EvalSyntax, parse_eval};
 use kiln_interpreter::{EvalCompileError, EvalSource, ExecutionCapabilities};
 use kiln_ir::{EvalNewTarget, EvalOptions, Program, Strictness};
+use std::path::{Path, PathBuf};
 
-/// Give this thread's VMs a compiler, so `eval` and `Function` can build a program at run time.
+/// Give a VM a compiler and an optional fixture base for importer-less dynamic requests.
 ///
-/// Idempotent, and called at the top of every run rather than once at startup: a conformance run
-/// creates a VM per case and this crate has no other moment that happens exactly once.
-pub(crate) fn capabilities() -> ExecutionCapabilities {
+/// Called for each execution so the loader base belongs to that run rather than ambient thread
+/// state.
+pub(crate) fn capabilities(base: Option<&Path>) -> ExecutionCapabilities {
     ExecutionCapabilities::default()
         .with_source_compiler(compile_source)
         .with_module_loader_service(std::sync::Arc::new(
-            crate::module_loader::ConformanceModuleLoader,
+            crate::module_loader::ConformanceModuleLoader::new(base.map(PathBuf::from)),
         ))
         // Test262's `$262.createRealm`. A host capability rather than a language feature, so it
         // is named here beside the compiler rather than assumed by the engine.
