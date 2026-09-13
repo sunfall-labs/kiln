@@ -1048,6 +1048,15 @@ fn node_events_is_a_ts_builtin_and_https_has_a_native_runtime_materializer() {
         NodeBuiltin::Events,
         "EventEmitter"
     ));
+    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Buffer));
+    assert!(native_builtin_supports_export(
+        NodeBuiltin::Buffer,
+        "Buffer"
+    ));
+    assert!(native_builtin_supports_export(
+        NodeBuiltin::Buffer,
+        "alloc"
+    ));
     assert!(native_builtin_body(NodeBuiltin::Https).is_some());
     assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Path));
     assert!(native_builtin_supports_export(NodeBuiltin::Path, "join"));
@@ -8489,3 +8498,95 @@ fn native_node_events_commonjs_require_builds_and_runs() {
         "cjs-events: function EventEmitter true payload"
     );
 }
+
+#[test]
+fn native_node_buffer_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-buffer-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import buffer, { Buffer, alloc, from, isBuffer, byteLength, concat, constants } from 'node:buffer';\n",
+            "const b1 = alloc(3);\n",
+            "const b2 = from('world');\n",
+            "const b3 = concat([b1, b2]);\n",
+            "console.log('buffer-test:', buffer.Buffer === Buffer, isBuffer(b1), b2.toString(), b3.length, byteLength('hello'), typeof constants.MAX_STRING_LENGTH);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("buffer_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run buffer binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert_eq!(stdout.trim(), "buffer-test: true true world 8 5 number");
+}
+
+#[test]
+fn native_node_buffer_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-buffer-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const buffer = require('node:buffer');\n",
+            "const b = buffer.from('abc');\n",
+            "console.log('cjs-buffer:', typeof buffer, buffer.Buffer === Buffer, buffer.isBuffer(b), b.toString(), buffer.default.Buffer === buffer.Buffer);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("buffer_cjs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run buffer cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "cjs-buffer: object true true abc true"
+    );
+}
+

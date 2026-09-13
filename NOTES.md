@@ -5421,3 +5421,14 @@ the Phase 5.1 freeze). Verified byte-for-byte output parity between interpreter 
 
 Reminder: Do not rerun the full gate or gate-quick repeatedly mid-flight when individual targeted suites
 and parity scripts already passed; test runs share CPU budgets across active worktrees and are costly.
+
+---
+
+## Phase 5.2 TypeScript built-ins: `node:buffer` (2026-09-13)
+
+Migrated `node:buffer` to a pure TypeScript built-in in `crates/kiln-builtins/src/node/buffer.ts`
+covering all 10 canonical exports (`Buffer`, `alloc`, `allocUnsafe`, `allocUnsafeSlow`,
+`byteLength`, `concat`, `constants`, `default`, `from`, `isBuffer`). Zero additions to the C runtime
+prelude (Phase 5.1 freeze honored). Verified with native probe `conformance/native/node-buffer-namespace.cjs`
+(byte-for-byte identical output between interpreter and native), `native_commonjs_builtin_namespace_is_not_its_default_export`,
+and full `scripts/native.sh` parity (165 matched, 0 diverged).

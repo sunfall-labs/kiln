@@ -1650,6 +1650,96 @@ fn node_builtin_events_commonjs_require_evaluates_cleanly() {
 }
 
 #[test]
+fn node_builtin_buffer_evaluates_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.js",
+        concat!(
+            "import buffer, { Buffer, alloc, from, isBuffer, byteLength, concat, constants } from 'node:buffer';",
+            "const b1 = alloc(3);",
+            "const b2 = from('hi');",
+            "const b3 = concat([b1, b2]);",
+            "console.log(",
+            "  buffer.Buffer === Buffer,",
+            "  isBuffer(b1),",
+            "  b2.toString(),",
+            "  b3.length,",
+            "  byteLength('hey'),",
+            "  typeof constants.MAX_STRING_LENGTH,",
+            ");",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with buffer builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute buffer builtin");
+    assert_eq!(host.output, ["true true hi 5 3 number"]);
+}
+
+#[test]
+fn node_builtin_buffer_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const buffer = require('node:buffer');",
+            "const b = buffer.from('xyz');",
+            "module.exports = {",
+            "  isObj: typeof buffer === 'object',",
+            "  sameCtor: buffer.Buffer === Buffer,",
+            "  isBuf: buffer.isBuffer(b),",
+            "  str: b.toString(),",
+            "  defaultBuf: buffer.default.Buffer === buffer.Buffer,",
+            "};",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import bridge from './bridge.cjs';",
+            "console.log(bridge.isObj, bridge.sameCtor, bridge.isBuf, bridge.str, bridge.defaultBuf);",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with buffer builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute buffer builtin cjs");
+    assert_eq!(host.output, ["true true true xyz true"]);
+}
+
+
+#[test]
 fn node_net_connect_is_a_typed_virtual_module_export() {
     let project = TempProject::new();
     let entry = project.write(
