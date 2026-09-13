@@ -5812,6 +5812,7 @@ enum kiln_value_tag {
     KILN_VALUE_NUMBER = 3,
     KILN_VALUE_STRING = 4
 };
+#define KILN_C99_BUILTIN_TYPE_ERROR 11
 
 typedef struct kiln_value {
     uint32_t tag;
@@ -5890,7 +5891,6 @@ extern int kiln_realm_gc_mark_value(void *heap, const void *value);
 #define KILN_C99_CONTROL_ERROR (-2)
 #define KILN_C99_HOST_ERROR (-3)
 #define KILN_C99_HINT_STRING 1
-#define KILN_C99_BUILTIN_TYPE_ERROR 11 /* prelude.rs ErrorKind::Type ABI */
 extern int kiln_c99_new_object(kiln_value *result);
 extern int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value value, int depth, kiln_value *thrown);
@@ -6894,7 +6894,6 @@ extern int kiln_realm_gc_mark_value(void *heap, const void *value);
 #define KILN_GC_ROOT_SURVIVES_TEARDOWN 1u
 #define KILN_GC_PHASE_RESET 2
 #define KILN_C99_HINT_STRING 1
-#define KILN_C99_BUILTIN_TYPE_ERROR 11 /* prelude.rs ErrorKind::Type ABI */
 extern int kiln_realm_is_active(void);
 
 typedef int (*kiln_graph_module_fn)(kiln_host *host, kiln_value *result,
