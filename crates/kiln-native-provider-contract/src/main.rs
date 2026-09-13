@@ -31,6 +31,23 @@ fn main() {
             "{}",
             kiln_native_provider_contract::contract().exports.join(" ")
         ),
+        Some("manifest") => {
+            let values: Vec<_> = args.collect();
+            if values.len() != 7 {
+                eprintln!("manifest requires 7 arguments");
+                std::process::exit(2);
+            }
+            let m = kiln_native_provider_contract::manifest(
+                values[0].clone(),
+                values[1].clone(),
+                values[2].clone(),
+                values[3].clone(),
+                values[4].clone(),
+                values[5].clone(),
+                values[6] == "true",
+            );
+            println!("{}", serde_json::to_string_pretty(&m).unwrap());
+        }
         _ => {
             eprintln!(
                 "usage: kiln-native-provider-contract <contract|abi|exports|source-digest ROOT>"
