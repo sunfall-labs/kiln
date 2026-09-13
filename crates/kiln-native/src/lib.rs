@@ -2838,7 +2838,7 @@ fn native_builtin_supported_exports(
         // read far more often than it is called, `text.split(os.EOL)` being the whole of why, and
         // it had been answering `undefined` here against the interpreter's "\n".
         NodeBuiltin::Os => kiln_builtins::OS_EXPORTS,
-        NodeBuiltin::Tty => &["default", "isatty"],
+        NodeBuiltin::Tty => kiln_builtins::TTY_EXPORTS,
         NodeBuiltin::Stream => &[
             "Readable",
             "Writable",
