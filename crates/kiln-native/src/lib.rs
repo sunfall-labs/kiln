@@ -59,7 +59,7 @@ macro_rules! native_artifact_catalogue {
     ($callback:ident) => {
         $callback! {
             sources: [ModuleSource, RuntimeSource, PreludeSource, LauncherSource, GraphLauncherSource, SharedModuleSource, SharedGraphWrapperSource, NumberProvider],
-            objects: [ModuleObject, RuntimeModuleObject, RuntimeObject, PreludeObject, LauncherObject, SharedLibraryObject, SharedPreludeObject, SharedGraphModuleObject, SharedGraphWrapperObject, SharedGraphObject, GraphLauncherObject, SharedLibraryLink, SharedGraphLink]
+            objects: [ModuleObject, RuntimeModuleObject, RuntimeObject, PreludeObject, LauncherObject, SharedLibraryObject, SharedPreludeObject, SharedGraphModuleObject, SharedGraphWrapperObject, SharedGraphObject, GraphLauncherObject, SharedLibraryLink, SharedGraphLink, RuntimeLibrary, RuntimePreludeLibrary, ExecutableLink]
         }
     };
 }
@@ -98,6 +98,8 @@ impl NativeArtifactFamily {
             | Self::SharedGraphObject
             | Self::GraphLauncherObject => ArtifactKind::NativeObject,
             Self::SharedLibraryLink | Self::SharedGraphLink => ArtifactKind::LinkedArtifact,
+            Self::RuntimeLibrary | Self::RuntimePreludeLibrary => ArtifactKind::RuntimeLibrary,
+            Self::ExecutableLink => ArtifactKind::LinkedArtifact,
         }
     }
 
@@ -179,6 +181,12 @@ impl NativeArtifactFamily {
                 Backend::Custom("native-shared-graph".into()),
                 embedding_abi.into(),
             ),
+            Self::RuntimeLibrary => (Backend::Custom("native-runtime".into()), runtime_abi.into()),
+            Self::RuntimePreludeLibrary => (
+                Backend::Custom("native-runtime-prelude".into()),
+                runtime_abi.into(),
+            ),
+            Self::ExecutableLink => (Backend::C, runtime_abi.into()),
         }
     }
     fn compiler_version(self) -> String {
@@ -210,6 +218,11 @@ impl NativeArtifactFamily {
             Self::SharedGraphObject => "shared-graph-object".into(),
             Self::SharedLibraryLink => "shared-library-link".into(),
             Self::SharedGraphLink => "shared-graph-link".into(),
+            Self::RuntimeLibrary => format!("kiln-runtime-{NATIVE_RUNTIME_VERSION}"),
+            Self::RuntimePreludeLibrary => format!("kiln-runtime-prelude-{NATIVE_PRELUDE_VERSION}"),
+            Self::ExecutableLink => {
+                format!("kiln-c-abi-{C_ABI_VERSION}-generator-{C_GENERATOR_VERSION}")
+            }
         }
     }
 
@@ -741,11 +754,8 @@ impl NativeBuilder {
                 },
             )?
         };
-        let provider_key = key(
-            ArtifactKind::RuntimeLibrary,
+        let provider_key = NativeArtifactFamily::NumberProvider.key(
             &provider.identity,
-            Backend::Custom("rust-native-number-provider".to_owned()),
-            &native_number_abi_identity(),
             target,
             CacheProfile::Release,
             Digest::hash(
@@ -847,8 +857,6 @@ impl NativeBuilder {
         let paths = BuildPaths::new(workspace.path());
         let identity = self.toolchain.identity().clone();
         let profile = options.profile;
-        let module_abi = module_abi_identity();
-        let runtime_abi = runtime_abi_identity();
         let target = target_identity(&identity);
         let compiler = compiler_identity(&identity);
         // The single-module API sees only bytecode, not the import table, so a static
@@ -856,11 +864,8 @@ impl NativeBuilder {
         let (number_provider, number_provider_digest, _, number_provider_http) =
             self.cached_number_provider_with_http(&target, true)?;
 
-        let module_source_key = key(
-            ArtifactKind::GeneratedC,
+        let module_source_key = NativeArtifactFamily::ModuleSource.key(
             format!("kiln-c-abi-{C_ABI_VERSION}-generator-{C_GENERATOR_VERSION}"),
-            Backend::C,
-            &module_abi,
             &target,
             CacheProfile::Debug,
             Digest::hash(b"deterministic-c11"),
@@ -869,11 +874,8 @@ impl NativeBuilder {
         let (module_source, module_source_digest, generated_c_hit) =
             self.cached_payload(&module_source_key, module.source.as_bytes())?;
 
-        let runtime_source_key = key(
-            ArtifactKind::GeneratedC,
+        let runtime_source_key = NativeArtifactFamily::RuntimeSource.key(
             format!("kiln-runtime-{NATIVE_RUNTIME_VERSION}"),
-            Backend::Custom("native-runtime-source".to_owned()),
-            &runtime_abi,
             &target,
             CacheProfile::Debug,
             Digest::hash(b"portable-runtime-c11"),
@@ -883,11 +885,8 @@ impl NativeBuilder {
             self.cached_payload(&runtime_source_key, runtime.as_bytes())?;
 
         let prelude_source = kiln_backend_c::runtime_prelude_source_with_policy(&emission);
-        let prelude_source_key = key(
-            ArtifactKind::GeneratedC,
+        let prelude_source_key = NativeArtifactFamily::PreludeSource.key(
             format!("kiln-runtime-prelude-{NATIVE_PRELUDE_VERSION}"),
-            Backend::Custom("native-prelude-source".to_owned()),
-            &runtime_abi,
             &target,
             CacheProfile::Debug,
             Digest::hash(b"portable-prelude-c11"),
@@ -896,11 +895,8 @@ impl NativeBuilder {
         let (prelude_bytes, prelude_source_digest, _) =
             self.cached_payload(&prelude_source_key, prelude_source.as_bytes())?;
 
-        let launcher_source_key = key(
-            ArtifactKind::GeneratedC,
+        let launcher_source_key = NativeArtifactFamily::LauncherSource.key(
             format!("kiln-launcher-{NATIVE_RUNTIME_VERSION}"),
-            Backend::Custom("native-launcher-source".to_owned()),
-            &runtime_abi,
             &target,
             CacheProfile::Debug,
             Digest::hash(b"portable-launcher-c11"),
@@ -922,41 +918,29 @@ impl NativeBuilder {
             )
             .as_bytes(),
         );
-        let application_key = key(
-            ArtifactKind::NativeObject,
+        let application_key = NativeArtifactFamily::ModuleObject.key(
             &compiler,
-            Backend::C,
-            &module_abi,
             &target,
             profile.cache(),
             object_options,
             [module_source_digest, prelude_header_digest()],
         );
-        let prelude_key = key(
-            ArtifactKind::RuntimeLibrary,
+        let prelude_key = NativeArtifactFamily::RuntimePreludeLibrary.key(
             &compiler,
-            Backend::Custom("native-runtime-prelude".to_owned()),
-            &runtime_abi,
             &target,
             profile.cache(),
             prelude_object_options(object_options, profile),
             [prelude_source_digest],
         );
-        let runtime_key = key(
-            ArtifactKind::RuntimeLibrary,
+        let runtime_key = NativeArtifactFamily::RuntimeLibrary.key(
             &compiler,
-            Backend::Custom("native-runtime".to_owned()),
-            &runtime_abi,
             &target,
             profile.cache(),
             object_options,
             [runtime_source_digest],
         );
-        let launcher_key = key(
-            ArtifactKind::NativeObject,
+        let launcher_key = NativeArtifactFamily::LauncherObject.key(
             &compiler,
-            Backend::Custom("native-launcher".to_owned()),
-            &runtime_abi,
             &target,
             profile.cache(),
             object_options,
@@ -971,11 +955,8 @@ impl NativeBuilder {
             && let Some(runtime_info) = self.lookup_digest(&runtime_key)?
             && let Some(launcher_info) = self.lookup_digest(&launcher_key)?
         {
-            let candidate_executable_key = key(
-                ArtifactKind::LinkedArtifact,
+            let candidate_executable_key = NativeArtifactFamily::ExecutableLink.key(
                 &compiler,
-                Backend::C,
-                &runtime_abi,
                 &target,
                 profile.cache(),
                 link_options_digest,
@@ -1109,11 +1090,8 @@ impl NativeBuilder {
         let link_options_digest = Digest::hash(
             format!("{}\0system-math\0system-entropy-v1", profile.as_str()).as_bytes(),
         );
-        let executable_key = key(
-            ArtifactKind::LinkedArtifact,
+        let executable_key = NativeArtifactFamily::ExecutableLink.key(
             &compiler,
-            Backend::C,
-            &runtime_abi,
             &target,
             profile.cache(),
             link_options_digest,
