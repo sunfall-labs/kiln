@@ -12231,3 +12231,68 @@ fn native_node_ffi_commonjs_require_builds_and_runs() {
     let stdout = String::from_utf8_lossy(&result.stdout);
     assert!(stdout.contains("cjs-ffi: object function function string function true"));
 }
+
+#[test]
+fn native_node_ffi_dlopen_calls_compiled_function() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-ffi-operation");
+    let source = project.path.join("add.c");
+    fs::write(
+        &source,
+        "int kiln_test_add(int left, int right) { return left + right; }\n",
+    )
+    .expect("write ffi fixture");
+    let object = project.path.join("add.o");
+    toolchain
+        .compile_c(&source, &object, &CompileOptions::default())
+        .expect("compile ffi fixture");
+    let library = project.path.join(if cfg!(target_os = "macos") {
+        "libadd.dylib"
+    } else if cfg!(target_os = "windows") {
+        "add.dll"
+    } else {
+        "libadd.so"
+    });
+    toolchain
+        .link_shared_library(&[object], &library, &LinkOptions::default())
+        .expect("link ffi fixture");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        format!(
+            "import {{ createRequire }} from 'node:module';\nconst require = createRequire(import.meta.url);\nconst ffi = require('node:ffi');\nconst opened = ffi.dlopen({:?}, {{ kiln_test_add: {{ arguments: ['i32', 'i32'], return: 'i32' }} }});\nconsole.log(opened.functions.kiln_test_add(2, 40));\nopened.lib.close();\n",
+            library.to_string_lossy()
+        ),
+    )
+    .expect("write ffi operation entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build ffi operation graph");
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(
+                project.path.join("ffi_operation_bin"),
+                NativeProfile::Release,
+            ),
+        )
+        .expect("build ffi operation binary");
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run ffi operation binary");
+    assert!(
+        result.status.success(),
+        "ffi operation failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(result.stdout, b"42\n");
+}
