@@ -7354,6 +7354,10 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// specification, and `import(s).then(a => import(s).then(b => a === b))` is how a program
     /// sees it.
     dynamic_namespaces: std::collections::HashMap<(RealmId, String), Value>,
+    /// The original rejection for a module whose body threw, by realm and module key. A failed
+    /// module is evaluated once too: later imports receive the same thrown value without replaying
+    /// its side effects.
+    dynamic_failures: std::collections::HashMap<(RealmId, String), Value>,
     limits: ExecutionLimits,
 }
 
@@ -7494,6 +7498,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             closures: Vec::new(),
             dynamic_modules: std::collections::HashMap::new(),
             dynamic_namespaces: std::collections::HashMap::new(),
+            dynamic_failures: std::collections::HashMap::new(),
             limits,
         })
     }
@@ -33254,12 +33259,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
 
         let realm = self.current_realm;
+        if let Some(failure) = self.dynamic_failures.get(&(realm, plan.key.clone())) {
+            return Ok(Err(failure.clone()));
+        }
         if let Some(namespace) = self.dynamic_namespaces.get(&(realm, plan.key.clone())) {
             return Ok(Ok(namespace.clone()));
         }
 
         let mut evaluated: Vec<Rc<Vec<Value>>> = Vec::with_capacity(plan.modules.len());
         for planned in &plan.modules {
+            if let Some(failure) = self.dynamic_failures.get(&(realm, planned.key.clone())) {
+                return Ok(Err(failure.clone()));
+            }
             if let Some(cached) = self.dynamic_modules.get(&(realm, planned.key.clone())) {
                 evaluated.push(Rc::clone(cached));
                 continue;
@@ -33291,6 +33302,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                                 planned.key
                             ))],
                         );
+                        self.dynamic_failures
+                            .insert((realm, planned.key.clone()), error.clone());
                         return Ok(Err(error));
                     };
                     let exported = Rc::new(exported.items.borrow().clone());
@@ -33302,7 +33315,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // not cached: the specification remembers the failure and hands the same error
                 // to a later import of the same module, and re-running the body instead is a
                 // gap rather than a wrong answer.
-                Err(thrown) => return Ok(Err(thrown)),
+                Err(thrown) => {
+                    self.dynamic_failures
+                        .insert((realm, planned.key.clone()), thrown.clone());
+                    return Ok(Err(thrown));
+                }
             }
         }
 
