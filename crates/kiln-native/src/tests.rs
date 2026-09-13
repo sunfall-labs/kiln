@@ -12058,10 +12058,9 @@ fn native_node_fs_typescript_builtin_builds_and_runs() {
     let entry = project.path.join("main.mjs");
     fs::write(
         &entry,
-        concat!(
-            "import fs, { existsSync, promises, readFileSync } from 'node:fs';\n",
-            "import { readFile } from 'node:fs/promises';\n",
-            "console.log('fs-ts:', typeof fs, typeof existsSync, typeof promises, typeof readFileSync, typeof readFile, fs.default === fs);\n",
+        format!(
+            "import fs, {{ existsSync, promises, readFileSync }} from 'node:fs';\nimport {{ readFile }} from 'node:fs/promises';\nconsole.log('fs-ts:', typeof fs, typeof existsSync, typeof promises, typeof readFileSync, typeof readFile, fs.default === fs, existsSync({:?}));\n",
+            entry.to_string_lossy(),
         ),
     )
     .unwrap();
@@ -12088,7 +12087,7 @@ fn native_node_fs_typescript_builtin_builds_and_runs() {
         String::from_utf8_lossy(&result.stderr)
     );
     let stdout = String::from_utf8_lossy(&result.stdout);
-    assert!(stdout.contains("fs-ts: object function object function function true"));
+    assert!(stdout.contains("fs-ts: object function object function function true true"));
 }
 
 #[test]

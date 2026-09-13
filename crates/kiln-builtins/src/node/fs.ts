@@ -2,16 +2,19 @@
 
 const nativeModule =
   typeof process !== "undefined"
-    ? typeof (process as any).getBuiltinModule === "function"
-      ? (process as any).getBuiltinModule("node:fs") || (process as any).getBuiltinModule("fs")
-      : (process as any).__kilnNativeModules?.fs
+    ? (process as any).__kilnNativeModules?.fs ||
+      (typeof (process as any).getBuiltinModule === "function"
+        ? (process as any).getBuiltinModule("node:fs") || (process as any).getBuiltinModule("fs")
+        : null)
     : null;
 
 const nativePromises =
   typeof process !== "undefined"
-    ? typeof (process as any).getBuiltinModule === "function"
-      ? (process as any).getBuiltinModule("node:fs/promises") || (process as any).getBuiltinModule("fs/promises")
-      : (process as any).__kilnNativeModules?.fs_promises || (process as any).__kilnNativeModules?.fs?.promises
+    ? (process as any).__kilnNativeModules?.fs_promises ||
+      (process as any).__kilnNativeModules?.fs?.promises ||
+      (typeof (process as any).getBuiltinModule === "function"
+        ? (process as any).getBuiltinModule("node:fs/promises") || (process as any).getBuiltinModule("fs/promises")
+        : null)
     : null;
 
 function unmaterialized(name: string): any {
