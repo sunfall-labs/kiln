@@ -1264,6 +1264,18 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         *result = kiln_c99_copy_text("kiln", 4);
         return KILN_C99_OK;
     }
+    if (code == KILN_C99_METHOD_NODE_OS_HOMEDIR) {
+        const char *home = getenv("HOME");
+        if (home == NULL || *home == '\0') home = "/";
+        *result = kiln_c99_copy_text(home, strlen(home));
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_NODE_OS_TMPDIR) {
+        const char *tmp = getenv("TMPDIR");
+        if (tmp == NULL || *tmp == '\0') tmp = "/tmp";
+        *result = kiln_c99_copy_text(tmp, strlen(tmp));
+        return KILN_C99_OK;
+    }
     if (code == KILN_C99_METHOD_NODE_OS_NETWORK_INTERFACES) {
         kiln_value interfaces;
         kiln_value loopback;

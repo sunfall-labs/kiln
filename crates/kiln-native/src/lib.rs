@@ -2645,6 +2645,7 @@ fn native_builtin_supported_exports(
             "homedir",
             "hostname",
             "networkInterfaces",
+            "tmpdir",
         ],
         NodeBuiltin::Tty => &["default", "isatty"],
         NodeBuiltin::Stream => &[
@@ -3127,6 +3128,8 @@ exports[1] = lookup;"#,
             r#"kiln_value unmaterialized = kiln_c99_method(KILN_C99_METHOD_NODE_BUILTIN_UNMATERIALIZED);
 kiln_value hostname = kiln_c99_method(KILN_C99_METHOD_NODE_OS_HOSTNAME);
 kiln_value network_interfaces = kiln_c99_method(KILN_C99_METHOD_NODE_OS_NETWORK_INTERFACES);
+kiln_value homedir = kiln_c99_method(KILN_C99_METHOD_NODE_OS_HOMEDIR);
+kiln_value tmpdir = kiln_c99_method(KILN_C99_METHOD_NODE_OS_TMPDIR);
 kiln_value namespace;
 int status = kiln_c99_new_object(&namespace);
 if (status != KILN_C99_OK) return status;
@@ -3138,7 +3141,9 @@ status = kiln_c99_put(host, namespace, "EOL", 3, kiln_c99_copy_text("\n", 1), 0,
 if (status != KILN_C99_OK) return status;
 status = kiln_c99_put(host, namespace, "devNull", 7, kiln_c99_copy_text("/dev/null", 9), 0, NULL);
 if (status != KILN_C99_OK) return status;
-status = kiln_c99_put(host, namespace, "homedir", 7, unmaterialized, 0, NULL);
+status = kiln_c99_put(host, namespace, "homedir", 7, homedir, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "tmpdir", 6, tmpdir, 0, NULL);
 if (status != KILN_C99_OK) return status;
 exports[0] = kiln_c99_copy_text("\n", 1);
 exports[1] = kiln_c99_undefined();
@@ -3148,14 +3153,14 @@ exports[4] = namespace;
 exports[5] = kiln_c99_copy_text("/dev/null", 9);
 exports[6] = kiln_c99_undefined();
 exports[7] = kiln_c99_undefined();
-exports[8] = unmaterialized;
+exports[8] = homedir;
 exports[9] = hostname;
 exports[10] = kiln_c99_undefined();
 exports[11] = kiln_c99_undefined();
 exports[12] = network_interfaces;
 exports[13] = kiln_c99_undefined();
 exports[14] = kiln_c99_undefined();
-exports[15] = kiln_c99_undefined();
+exports[15] = tmpdir;
 exports[16] = kiln_c99_undefined();
 exports[17] = kiln_c99_undefined();
 exports[18] = kiln_c99_undefined();
