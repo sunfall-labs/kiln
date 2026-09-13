@@ -17,9 +17,9 @@ use kiln_hir::Module;
 use kiln_host_abi::HostOps;
 use kiln_interpreter::{
     Cell, CommonJsModuleLoader, CommonJsRequire, ExecutionCapabilities, ExecutionError,
-    ExecutionLimits, ExecutionResult, ModuleBinding, ModuleLoadError, ModuleLoadRequest,
-    ModuleLoaderService, ModulePlan, ModuleRealmSession, ModuleSelfExport, ModuleSelfImport,
-    ModuleValueRef, PlannedModule, Value, execute_module_in_runtime_with_loader,
+    ExecutionLimits, ExecutionResult, ImportAttributes, ModuleBinding, ModuleLoadError,
+    ModuleLoadRequest, ModuleLoaderService, ModulePlan, ModuleRealmSession, ModuleSelfExport,
+    ModuleSelfImport, ModuleValueRef, PlannedModule, Value, execute_module_in_runtime_with_loader,
     execute_node_module_in_session_with_loader, node_builtin_commonjs_value,
     node_builtin_export_names, node_builtin_exports, ordinary_object, own_data_property,
     parse_json_module, read_through_cell,
@@ -223,14 +223,8 @@ impl ModuleLoaderService for GraphModuleLoader {
                 "file asset imports require `with: { type: 'file' }`".to_owned(),
             ));
         }
-        if let Some(attributes) = request.attributes {
-            let attributes = own_data_property(&attributes, "with").unwrap_or(attributes);
-            let Some(kind) = own_data_property(&attributes, "type") else {
-                return Err(ModuleLoadError::Unsupported(
-                    "import attributes must include a string `type`".to_owned(),
-                ));
-            };
-            if !matches!(kind, Value::String(ref value) if value == "file") {
+        if let Some(ImportAttributes { type_: Some(kind) }) = request.attributes {
+            if kind != "file" {
                 return Err(ModuleLoadError::Unsupported(
                     "unsupported import attribute `type`".to_owned(),
                 ));
