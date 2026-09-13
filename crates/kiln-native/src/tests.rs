@@ -3823,6 +3823,7 @@ fn native_graph_wiring_uses_resolved_star_export_origins() {
         None,
         None,
         None,
+        None,
         Some(&bootstrap),
     )
     .expect("bootstrapped launcher emits");
@@ -4976,6 +4977,7 @@ fn native_deferred_dynamic_import_failures_are_catchable() {
         &entry,
         "console.log('start');\n\
          try { await import('./missing.mjs'); } catch (error) { console.log(error instanceof TypeError); }\n\
+         try { await import('node:zlib'); } catch (error) { console.log(error instanceof TypeError); }\n\
          try { await import('./bad-syntax.mjs'); } catch (error) { console.log(error instanceof TypeError); }\n\
          try { await import('./bad-export.mjs'); } catch (error) { console.log(error instanceof TypeError); }\n\
          function neverCalled() { return import('./never-called.mjs'); }\n\
@@ -5000,7 +5002,30 @@ fn native_deferred_dynamic_import_failures_are_catchable() {
             },
         )
         .expect("deferred failure graph builds and runs");
-    assert_eq!(report.stdout, b"start\ntrue\ntrue\ntrue\n42\n");
+    assert_eq!(report.stdout, b"start\ntrue\ntrue\ntrue\ntrue\n42\n");
+}
+
+#[test]
+fn native_static_unsupported_builtin_remains_fatal() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-static-unsupported-builtin");
+    let entry = root.path.join("main.mjs");
+    fs::write(&entry, "import 'node:zlib';\n").expect("write static zlib entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build static zlib graph");
+    let error = native_graph_plan(&graph).expect_err("static zlib must remain fatal");
+    assert!(matches!(
+        error,
+        NativeError::UnsupportedNodeBuiltin {
+            specifier: "node:zlib"
+        }
+    ));
 }
 
 #[test]
@@ -8048,8 +8073,8 @@ fn executable_graph_omits_unused_modules_only_with_package_permission() {
     )
     .expect("source graph compiles");
 
-    let selected =
-        native_executable_graph(&graph, NativeProfile::Release).expect("select executable modules");
+    let selected = native_executable_graph(&graph, NativeProfile::Release, &BTreeSet::new())
+        .expect("select executable modules");
     let names = selected
         .modules
         .iter()
@@ -8092,8 +8117,8 @@ fn executable_graph_keeps_unused_import_without_package_permission() {
     )
     .expect("source graph compiles");
 
-    let selected =
-        native_executable_graph(&graph, NativeProfile::Release).expect("select executable modules");
+    let selected = native_executable_graph(&graph, NativeProfile::Release, &BTreeSet::new())
+        .expect("select executable modules");
     assert_eq!(selected.modules.len(), 2);
     assert!(
         selected
@@ -8139,8 +8164,8 @@ fn executable_graph_demands_only_statically_read_namespace_members() {
     )
     .expect("source graph compiles");
 
-    let selected =
-        native_executable_graph(&graph, NativeProfile::Release).expect("select executable graph");
+    let selected = native_executable_graph(&graph, NativeProfile::Release, &BTreeSet::new())
+        .expect("select executable graph");
     let helpers = fs::canonicalize(package.join("helpers.js")).expect("canonical helpers");
     let helper_node = graph.module(&helpers).expect("helpers node");
     let used = helper_node
@@ -8190,8 +8215,8 @@ fn executable_graph_keeps_a_namespace_import_captured_by_a_live_closure() {
     )
     .expect("source graph compiles");
 
-    let selected =
-        native_executable_graph(&graph, NativeProfile::Release).expect("select executable graph");
+    let selected = native_executable_graph(&graph, NativeProfile::Release, &BTreeSet::new())
+        .expect("select executable graph");
     let entry = fs::canonicalize(entry).expect("canonical entry");
     assert!(selected.live_imports.contains(&(entry, 0)));
     let helpers = fs::canonicalize(helpers).expect("canonical helpers");
@@ -8234,8 +8259,8 @@ fn executable_graph_full_namespace_demand_overrides_a_partial_demand() {
     )
     .expect("source graph compiles");
 
-    let selected =
-        native_executable_graph(&graph, NativeProfile::Release).expect("select executable graph");
+    let selected = native_executable_graph(&graph, NativeProfile::Release, &BTreeSet::new())
+        .expect("select executable graph");
     let helpers = fs::canonicalize(helpers).expect("canonical helpers");
     let helper_node = graph.module(&helpers).expect("helpers node");
     let demanded = selected
@@ -8284,8 +8309,8 @@ if (process.env.NODE_ENV === 'production') {
     )
     .expect("source graph compiles");
 
-    let release =
-        native_executable_graph(&graph, NativeProfile::Release).expect("select release graph");
+    let release = native_executable_graph(&graph, NativeProfile::Release, &BTreeSet::new())
+        .expect("select release graph");
     let release_names = release
         .modules
         .iter()
@@ -8295,7 +8320,8 @@ if (process.env.NODE_ENV === 'production') {
     assert!(!release_names.contains(std::ffi::OsStr::new("development.cjs")));
     assert_eq!(release.inactive_commonjs_dependencies.len(), 1);
 
-    let dev = native_executable_graph(&graph, NativeProfile::Dev).expect("select dev graph");
+    let dev = native_executable_graph(&graph, NativeProfile::Dev, &BTreeSet::new())
+        .expect("select dev graph");
     let dev_names = dev
         .modules
         .iter()

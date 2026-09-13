@@ -1281,7 +1281,7 @@ impl NativeBuilder {
         graph: &ModuleGraph,
         options: &NativeBuildOptions,
     ) -> Result<NativeSharedLibraryReport, NativeError> {
-        validate_native_node_builtins(graph)?;
+        let native_plan = native_graph_plan(graph)?;
         let mut emission = options.realm.emission();
         emission.compact = options.profile != NativeProfile::Profile;
         emission.generic_only =
@@ -1291,7 +1291,10 @@ impl NativeBuilder {
         let identity = self.toolchain.identity().clone();
         let module_abi = module_abi_identity();
         let target = target_identity(&identity);
-        let nodes = graph.modules().collect::<Vec<_>>();
+        let nodes = graph
+            .modules()
+            .filter(|node| !native_plan.excluded.contains(&node.path))
+            .collect::<Vec<_>>();
         let emitted_modules = emit_indexed(nodes.len(), "shared graph module emission", |index| {
             let node = nodes[index];
             let logical_path = logical_module_path(graph.project_root(), &node.path)?;
@@ -1336,7 +1339,12 @@ impl NativeBuilder {
             "kiln_shared_graph_{}",
             graph_shared_public_digest(topology, &modules)?.to_hex()
         );
-        let wrapper = graph_shared_wrapper_source(graph, &modules, &wrapper_symbol)?;
+        let wrapper = graph_shared_wrapper_source_with_failures(
+            graph,
+            &modules,
+            &wrapper_symbol,
+            &native_plan.failures,
+        )?;
         let module_api_symbol = embedding_module_api_symbol(&wrapper_symbol)?;
         let mut header_source = graph_shared_header(&wrapper_symbol)?;
         let emit_elapsed = emit_started.elapsed();
@@ -1803,7 +1811,7 @@ impl NativeBuilder {
         graph: &ModuleGraph,
         options: &NativeBuildOptions,
     ) -> Result<NativeBuildReport, NativeError> {
-        validate_native_node_builtins(graph)?;
+        let native_plan = native_graph_plan(graph)?;
         let total_started = Instant::now();
         let emit_started = Instant::now();
         let mut emission = options.realm.emission_executable();
@@ -1820,7 +1828,7 @@ impl NativeBuilder {
         let identity = self.toolchain.identity().clone();
         let module_abi = module_abi_identity();
         let target = target_identity(&identity);
-        let selected = native_executable_graph(graph, options.profile)?;
+        let selected = native_executable_graph(graph, options.profile, &native_plan.excluded)?;
         // Dispatch-group mask for the prelude: same closed-world selection,
         // so the `-D` flags below only ever remove what nothing retained can
         // reach. Computed once; the explain path recomputes it out-of-band.
@@ -1897,6 +1905,7 @@ impl NativeBuilder {
             Some(&selected.live_imports),
             Some(&selected.inactive_commonjs_dependencies),
             Some(&selected.partial_namespace_members),
+            Some(&native_plan.failures),
             Some(&bootstrap),
         )?;
         let emit_elapsed = emit_started.elapsed();
@@ -2590,6 +2599,104 @@ fn validate_native_node_builtins(graph: &ModuleGraph) -> Result<(), NativeError>
                     export_name: import.imported.clone(),
                 });
             }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Default)]
+struct NativeGraphPlan {
+    excluded: BTreeSet<PathBuf>,
+    failures: BTreeMap<(PathBuf, String), String>,
+}
+
+fn native_graph_plan(graph: &ModuleGraph) -> Result<NativeGraphPlan, NativeError> {
+    let static_reachable = graph.statically_reachable();
+    validate_native_builtins_in_paths(graph, &static_reachable)?;
+    let mut plan = NativeGraphPlan::default();
+    let mut retained = static_reachable.clone();
+    for importer in graph.modules() {
+        for dependency in graph.dynamic_dependencies(&importer.path) {
+            let mut closure = BTreeSet::new();
+            let mut pending = vec![dependency.target.clone()];
+            let mut unsupported = None;
+            while let Some(path) = pending.pop() {
+                if !closure.insert(path.clone()) {
+                    continue;
+                }
+                let Some(node) = graph.module(&path) else {
+                    continue;
+                };
+                if let Err(error) = validate_native_builtin_node(graph, node) {
+                    unsupported = Some(error.to_string());
+                    break;
+                }
+                pending.extend(node.dependencies.iter().map(|edge| edge.target.clone()));
+            }
+            let Some(message) = unsupported else {
+                retained.extend(closure);
+                continue;
+            };
+            if closure.iter().any(|path| static_reachable.contains(path)) {
+                return Err(NativeError::UnsupportedNodeBuiltin {
+                    specifier: "dynamic static dependency",
+                });
+            }
+            plan.excluded.extend(closure);
+            plan.failures.insert(
+                (importer.path.clone(), dependency.specifier.clone()),
+                format!("dynamic import failed: {message}"),
+            );
+        }
+    }
+    plan.excluded.retain(|path| !retained.contains(path));
+    Ok(plan)
+}
+
+fn validate_native_builtins_in_paths(
+    graph: &ModuleGraph,
+    paths: &BTreeSet<PathBuf>,
+) -> Result<(), NativeError> {
+    for path in paths {
+        if let Some(node) = graph.module(path) {
+            validate_native_builtin_node(graph, node)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_native_builtin_node(
+    graph: &ModuleGraph,
+    node: &kiln_module_graph::ModuleNode,
+) -> Result<(), NativeError> {
+    if let ModuleSource::NodeBuiltin(builtin) = node.source {
+        if !kiln_builtins::is_ts_builtin(builtin) && native_builtin_body(builtin).is_none() {
+            return Err(NativeError::UnsupportedNodeBuiltin {
+                specifier: builtin.specifier(),
+            });
+        }
+    }
+    for import in &node.program.imports {
+        let Some(dependency) = node
+            .dependencies
+            .iter()
+            .find(|dependency| dependency.specifier == import.source)
+        else {
+            continue;
+        };
+        let Some(provider) = graph.module(&dependency.target) else {
+            continue;
+        };
+        let ModuleSource::NodeBuiltin(builtin) = provider.source else {
+            continue;
+        };
+        if import.imported != kiln_ir::NAMESPACE_IMPORT
+            && !native_builtin_supports_export(builtin, &import.imported)
+        {
+            return Err(NativeError::UnsupportedNodeBuiltinExport {
+                specifier: builtin.specifier(),
+                export_name: import.imported.clone(),
+            });
         }
     }
     Ok(())
@@ -4298,10 +4405,11 @@ fn demand_namespace_members(
 ///
 /// The complete graph is still linked first, so missing and ambiguous exports remain errors. This
 /// pass only removes evaluation work that package metadata explicitly declares unobservable.
-fn native_executable_graph(
-    graph: &ModuleGraph,
+fn native_executable_graph<'a>(
+    graph: &'a ModuleGraph,
     profile: NativeProfile,
-) -> Result<NativeExecutableGraph<'_>, NativeError> {
+    excluded: &BTreeSet<PathBuf>,
+) -> Result<NativeExecutableGraph<'a>, NativeError> {
     let mut live = BTreeSet::new();
     let mut live_imports = BTreeSet::new();
     let mut live_export_slots: BTreeMap<PathBuf, BTreeSet<u32>> = BTreeMap::new();
@@ -4324,12 +4432,18 @@ fn native_executable_graph(
         .any(|m| m.program.program.has_dynamic_import());
     if has_any_dynamic_import {
         for m in graph.modules() {
+            if excluded.contains(&m.path) {
+                continue;
+            }
             namespace_demands.insert(m.path.clone());
             mark_live(&m.path, &mut live, &mut queue);
         }
     }
 
     while let Some(path) = queue.pop_front() {
+        if excluded.contains(&path) {
+            continue;
+        }
         let node = graph.module(&path).ok_or_else(|| {
             NativeError::Graph(ModuleGraphError::InternalMissingModule { path: path.clone() })
         })?;
@@ -4367,6 +4481,9 @@ fn native_executable_graph(
             }
         }
         for dependency in graph.dynamic_dependencies(&node.path) {
+            if excluded.contains(&dependency.target) {
+                continue;
+            }
             mark_live(&dependency.target, &mut live, &mut queue);
         }
 
@@ -4558,7 +4675,7 @@ pub fn executable_demand(
     graph: &ModuleGraph,
     profile: NativeProfile,
 ) -> Result<ExecutableDemand, NativeError> {
-    let selected = native_executable_graph(graph, profile)?;
+    let selected = native_executable_graph(graph, profile, &BTreeSet::new())?;
     Ok(ExecutableDemand {
         live: selected
             .modules
@@ -5294,6 +5411,7 @@ fn write_dynamic_failure_dispatch(
     graph: &ModuleGraph,
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
     indent: &str,
+    native_failures: Option<&BTreeMap<(PathBuf, String), String>>,
 ) {
     for ((importer_path, specifier), message) in graph.dynamic_failures() {
         let Some(importer_index) = modules
@@ -5313,6 +5431,20 @@ fn write_dynamic_failure_dispatch(
         )
         .unwrap();
     }
+    if let Some(failures) = native_failures {
+        for ((importer_path, specifier), message) in failures {
+            let Some(importer_index) = modules
+                .iter()
+                .position(|(node, _)| node.path == *importer_path)
+            else {
+                continue;
+            };
+            let importer = native_c_string(&modules[importer_index].1.symbol);
+            let c_spec = native_c_string(specifier);
+            let c_message = native_c_string(message);
+            writeln!(output, "{indent}if (importer != NULL && strcmp(importer, {importer}) == 0 && specifier.tag == KILN_VALUE_STRING && specifier.len == (size_t){} && memcmp(specifier.ptr, {c_spec}, (size_t){}) == 0) {{ kiln_value err = kiln_c99_undefined(); (void)kiln_c99_new_type_error(&err, {c_message}); return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown); }}", specifier.len(), specifier.len()).unwrap();
+        }
+    }
 }
 
 fn write_launcher_dynamic_import(
@@ -5320,6 +5452,7 @@ fn write_launcher_dynamic_import(
     graph: &ModuleGraph,
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
     logical_paths: &[String],
+    native_failures: Option<&BTreeMap<(PathBuf, String), String>>,
 ) {
     let opentui_path = find_opentui_library(graph.project_root());
     output.push_str(
@@ -5444,7 +5577,7 @@ import_attributes_valid:
     }
 "#,
     );
-    write_dynamic_failure_dispatch(output, graph, modules, "    ");
+    write_dynamic_failure_dispatch(output, graph, modules, "    ", native_failures);
     for (index, (node, _)) in modules.iter().enumerate() {
         let mut resolutions = std::collections::BTreeSet::new();
         resolutions.insert((logical_paths[index].clone(), index));
@@ -5515,6 +5648,7 @@ fn write_shared_wrapper_dynamic_import(
     graph: &ModuleGraph,
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
     logical_paths: &[String],
+    native_failures: &BTreeMap<(PathBuf, String), String>,
 ) {
     let opentui_path = find_opentui_library(graph.project_root());
     output.push_str(
@@ -5632,7 +5766,7 @@ import_attributes_valid:
     if (kiln_shared_namespaces != NULL) {
 "#,
     );
-    write_dynamic_failure_dispatch(output, graph, modules, "        ");
+    write_dynamic_failure_dispatch(output, graph, modules, "        ", Some(native_failures));
     for (index, (node, _)) in modules.iter().enumerate() {
         let mut resolutions = std::collections::BTreeSet::new();
         resolutions.insert((logical_paths[index].clone(), index));
@@ -5841,7 +5975,7 @@ fn graph_launcher_source(
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
     policy: &NativeRealmPolicy,
 ) -> Result<String, NativeError> {
-    graph_launcher_source_with_imports(graph, modules, policy, None, None, None, None)
+    graph_launcher_source_with_imports(graph, modules, policy, None, None, None, None, None)
 }
 
 fn graph_launcher_source_with_imports(
@@ -5851,6 +5985,7 @@ fn graph_launcher_source_with_imports(
     live_imports: Option<&BTreeSet<(PathBuf, usize)>>,
     inactive_commonjs_dependencies: Option<&BTreeSet<(PathBuf, String)>>,
     partial_namespace_members: Option<&BTreeMap<PathBuf, BTreeSet<String>>>,
+    native_failures: Option<&BTreeMap<(PathBuf, String), String>>,
     bootstrap: Option<&kiln_backend_c::CModule>,
 ) -> Result<String, NativeError> {
     if modules.is_empty() {
@@ -6206,7 +6341,7 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
         .iter()
         .any(|(node, _)| node.program.program.has_dynamic_import())
     {
-        write_launcher_dynamic_import(&mut output, graph, modules, &logical_paths);
+        write_launcher_dynamic_import(&mut output, graph, modules, &logical_paths, native_failures);
     }
     output.push_str(
         &r#"
@@ -7079,6 +7214,15 @@ fn graph_shared_wrapper_source(
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
     wrapper_symbol: &str,
 ) -> Result<String, NativeError> {
+    graph_shared_wrapper_source_with_failures(graph, modules, wrapper_symbol, &BTreeMap::new())
+}
+
+fn graph_shared_wrapper_source_with_failures(
+    graph: &ModuleGraph,
+    modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
+    wrapper_symbol: &str,
+    native_failures: &BTreeMap<(PathBuf, String), String>,
+) -> Result<String, NativeError> {
     if modules.is_empty() {
         return Err(NativeError::Graph(
             ModuleGraphError::InternalMissingModule {
@@ -7366,7 +7510,13 @@ static kiln_commonjs_graph_context *kiln_graph_context_from_host(kiln_host *host
         .iter()
         .any(|(node, _)| node.program.program.has_dynamic_import());
     if has_any_dynamic_import {
-        write_shared_wrapper_dynamic_import(&mut output, graph, modules, &logical_paths);
+        write_shared_wrapper_dynamic_import(
+            &mut output,
+            graph,
+            modules,
+            &logical_paths,
+            native_failures,
+        );
     }
     render_shared_wrapper_roots(&mut output, modules, wrapper_symbol);
     let opentui_init = if has_any_dynamic_import {
