@@ -177,6 +177,10 @@ class GateResultsCliIntegrationTests(unittest.TestCase):
         self.assertEqual(self.aggregate_document["verdict"], "failed")
         self.assertIn("build", self.aggregate_document["failed_steps"])
 
+        result = self.aggregate(["build", "crate tests", "native parity"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.aggregate_document["verdict"], "infrastructure")
+
 
 if __name__ == "__main__":
     unittest.main()
