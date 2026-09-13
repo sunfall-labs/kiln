@@ -5,15 +5,22 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Hyper is large and HTTP-only. The default build keeps it, so default behavior is
+# byte-for-byte identical to before; `--no-default-features` drops every Hyper symbol
+# for the slim archive (phase 1: no packaging, manifest, launcher, or default changes).
+default = ["http"]
+http = ["dep:hyper", "dep:hyper-util", "dep:http-body-util"]
+
 [dependencies]
 kiln-artifact-cache = { workspace = true }
 kiln-host-abi = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tokio-metrics = { workspace = true }
-hyper = { workspace = true }
-hyper-util = { workspace = true }
-http-body-util = { workspace = true }
+hyper = { workspace = true, optional = true }
+hyper-util = { workspace = true, optional = true }
+http-body-util = { workspace = true, optional = true }
 bytes = { workspace = true }
 libc = { workspace = true }
 

@@ -15,8 +15,12 @@ crate-type = ["rlib"]
 # Realm entry is always present: this archive is the private Rust implementation package shipped
 # with native artifacts. The larger semantic engines remain opt-in so ordinary workspace tests do
 # not compile code used only by generated native programs.
-default = ["realm"]
+default = ["realm", "realm-http"]
 realm = ["dep:kiln-runtime"]
+# Hyper-backed HTTP server/client engines inside `kiln-runtime`. On by default so the
+# default build is behavior-identical to before; the slim archive disables default
+# features and lists the engines it needs explicitly (phase 1: no packaging changes).
+realm-http = ["kiln-runtime/http"]
 regexp = ["dep:regress"]
 bigint = ["dep:num-bigint", "dep:num-traits"]
 # `Temporal` over the same adapter the interpreter links, so the two engines cannot disagree about
