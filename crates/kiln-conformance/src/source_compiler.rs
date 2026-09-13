@@ -17,7 +17,9 @@ use kiln_ir::{EvalNewTarget, EvalOptions, Program, Strictness};
 pub(crate) fn capabilities() -> ExecutionCapabilities {
     ExecutionCapabilities::default()
         .with_source_compiler(compile_source)
-        .with_module_loader(crate::module_loader::load)
+        .with_module_loader_service(std::sync::Arc::new(
+            crate::module_loader::ConformanceModuleLoader,
+        ))
         // Test262's `$262.createRealm`. A host capability rather than a language feature, so it
         // is named here beside the compiler rather than assumed by the engine.
         .with_host_realms()
