@@ -12,6 +12,7 @@ kiln-builtins = { workspace = true }
 kiln-builtin-surface = { workspace = true }
 kiln-host-abi = { workspace = true }
 kiln-ir = { workspace = true }
+kiln-liveness = { workspace = true }
 kiln-module-graph = { workspace = true }
 kiln-module-resolver = { workspace = true }
 kiln-native-number = { workspace = true }

@@ -2272,6 +2272,63 @@ fn production_daemon_executes_a_node_builtin_module_with_explicit_capability() {
 }
 
 #[test]
+fn production_daemon_does_not_evaluate_an_unused_side_effect_free_module() {
+    let fixture = Fixture::empty();
+    std::fs::write(
+        fixture.dir.join("package.json"),
+        r#"{"type":"module","sideEffects":false}"#,
+    )
+    .expect("write package policy");
+    let dependency = fixture.dir.join("unused.mjs");
+    std::fs::write(
+        &dependency,
+        "console.log('dead module ran'); export const unused = 1;\n",
+    )
+    .expect("write unused module");
+    let entry = fixture.dir.join("main.mjs");
+    let source = "import { unused } from './unused.mjs'; console.log('entry');\n";
+    std::fs::write(&entry, source).expect("write entry");
+
+    let daemon = Daemon::bind(&fixture.socket).expect("bind");
+    let stop = daemon.shutdown_handle();
+    let serving = std::thread::spawn(move || daemon.serve());
+    let mut client = Client::connect(&fixture.socket).expect("connect");
+    client.handshake().expect("handshake");
+    client
+        .request(&Request::SetSource {
+            source_view: SourceView(0),
+            path: entry.to_string_lossy().into_owned(),
+            text: source.into(),
+        })
+        .expect("set entry source");
+    client
+        .request(&Request::SetSource {
+            source_view: SourceView(0),
+            path: dependency.to_string_lossy().into_owned(),
+            text: "console.log('dead module ran'); export const unused = 1;\n".into(),
+        })
+        .expect("set dependency source");
+
+    let Response::Ran(summary) = client
+        .request(&Request::Run {
+            node: false,
+            steps: StepBudget::Unmetered,
+            source_view: client.source_view(),
+            path: entry.to_string_lossy().into_owned(),
+            project_root: fixture.dir.to_string_lossy().into_owned(),
+        })
+        .expect("run shaken graph")
+    else {
+        panic!("expected run response");
+    };
+    assert!(summary.succeeded, "{:?}", summary.diagnostics);
+    assert_eq!(summary.stdout, "entry\n");
+
+    stop.shutdown();
+    within(Duration::from_secs(5), move || serving.join()).expect("the accept loop must not panic");
+}
+
+#[test]
 fn production_daemon_compiles_direct_eval_at_runtime() {
     let fixture = Fixture::empty();
     let daemon = Daemon::bind(&fixture.socket).expect("bind");

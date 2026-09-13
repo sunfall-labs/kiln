@@ -896,6 +896,19 @@ fn execute_graph(
     let capabilities =
         kiln_conformance::source_compiler_capability().with_argv(interpreted_argv(&path));
     let mut host = kiln_runtime::CaptureHost::new();
+    // One shaken graph feeds execution: reduce to the closed-world live
+    // subset first, so dead modules never evaluate. Development selection
+    // keeps the interpreter conservative; a reduction failure runs the full
+    // graph rather than refusing a program liveness could not classify.
+    let graph = graph.map(|graph| {
+        kiln_liveness::executable_demand(&graph, &kiln_liveness::SelectionOptions::development())
+            .and_then(|demand| {
+                graph
+                    .reduce_to_live(&demand)
+                    .map(|reduced| Arc::new(reduced.0))
+            })
+            .unwrap_or(graph)
+    });
     let result = match graph {
         Ok(graph) if node => {
             let capabilities = capabilities.with_module_loader_service(std::sync::Arc::new(
@@ -1662,9 +1675,12 @@ pub(crate) fn native_build_graph(
                 let mut text = kiln_backend_c::facts::analyze_graph(graph).format_explain();
                 // Out-of-band attribution: failures here must never fail the
                 // build, so each section is skipped rather than propagated.
-                if let Ok(demand) = kiln_native::executable_demand(graph, native_profile(profile)) {
+                if let Ok(demand) = kiln_liveness::executable_demand(
+                    graph,
+                    &kiln_native::selection_options(&native_profile(profile)),
+                ) {
                     if let Ok(sizes) =
-                        kiln_native::executable_module_sizes_from_demand(graph, &demand)
+                        kiln_liveness::executable_module_sizes_from_demand(graph, &demand)
                     {
                         text.push_str(&kiln_backend_c::facts::format_module_sizes(&sizes));
                     }
@@ -1674,7 +1690,7 @@ pub(crate) fn native_build_graph(
                         &demand.slots,
                     );
                     text.push_str(&kiln_backend_c::facts::format_demanded_members(&members));
-                    let mask = kiln_native::retained_method_groups(graph, &demand, &members);
+                    let mask = kiln_liveness::retained_method_groups(graph, &demand, &members);
                     text.push_str(&kiln_backend_c::facts::format_retained_groups(mask));
                 }
                 Some(text)

@@ -290,7 +290,25 @@ const BUILTINS: &[BuiltinAbi] = &[
     },
     BuiltinAbi {
         specifier: "node:worker_threads",
-        exports: &["Worker", "default"],
+        exports: &[
+            "BroadcastChannel",
+            "MessageChannel",
+            "MessagePort",
+            "SHARE_ENV",
+            "Worker",
+            "default",
+            "getEnvironmentData",
+            "isMainThread",
+            "markAsUncloneable",
+            "markAsUntransferable",
+            "moveMessagePortToContext",
+            "parentPort",
+            "receiveMessageOnPort",
+            "resourceLimits",
+            "setEnvironmentData",
+            "threadId",
+            "workerData",
+        ],
         commonjs: CommonJsProjection::Namespace,
     },
     BuiltinAbi {
@@ -327,7 +345,7 @@ const BUILTINS: &[BuiltinAbi] = &[
     },
     BuiltinAbi {
         specifier: "node:tty",
-        exports: &["default", "isatty"],
+        exports: &["ReadStream", "WriteStream", "default", "isatty"],
         commonjs: CommonJsProjection::Namespace,
     },
     BuiltinAbi {

@@ -5458,4 +5458,115 @@ safe `__proto__` data preservation on `Object.create(null)` dictionaries. Verifi
 integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`, and `scripts/native.sh` (168 matched,
 0 diverged). In accordance with user instructions, avoided expensive gate re-runs mid-flight to preserve shared CPU resources.
 
+---
+
+## Phase 5.2 TypeScript built-ins: `node:util` (2026-09-13)
+
+Migrated `node:util` completely from C runtime to TypeScript via `crates/kiln-builtins/src/node/util.ts`
+with zero additions to the C runtime prelude (Phase 5.1 freeze strictly honored). Implemented 27 exports
+including canonical utility functions (`format`, `formatWithOptions`, `inherits`, `inspect`, `promisify`,
+`callbackify`, `debuglog`, `deprecate`), type checkers (`types`, `isArray`, `isBoolean`, `isBuffer`, `isDate`,
+`isError`, `isFunction`, `isNull`, `isNullOrUndefined`, `isNumber`, `isObject`, `isPrimitive`, `isRegExp`,
+`isString`, `isSymbol`, `isUndefined`), and global codec re-exports (`TextDecoder`, `TextEncoder`).
+Verified with native probe `conformance/native/node-util-members.cjs` (byte-for-byte identical output between
+interpreter and native CLI), integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`,
+and full `scripts/native.sh` parity (169 matched, 0 diverged). Maintained rule to avoid mid-flight gate runs.
+
+---
+
+## Native Backlog Reduction: `ArrayBuffer.prototype.slice` (2026-09-13)
+
+Implemented native C backend method dispatch for `ArrayBuffer.prototype.slice` via existing method ID
+`KILN_C99_METHOD_SLICE` and `kiln_c99_relative_index`, and removed `"slice"` from `kiln_c99_is_array_buffer_member`.
+Also fixed a latent bug in `kiln-interpreter`'s `slice_bounds` where `NaN` argument coercion erroneously returned
+`length` rather than `0` (per ECMAScript `ToIntegerOrInfinity`). Conformance probe `array-buffer-members-refuse.ts`
+now starts matching (as documented in its header), and added dedicated test `conformance/native/array-buffer-slice.js`
+exercising argument bounds, relative indexing, negative ranges, empty buffers, and memory isolation.
+`scripts/native.sh` improved from 6 refusals down to 5 (170 matched, 5 refused, 0 diverged).
+
+---
+
+## Phase 5.2 TypeScript built-ins: `node:url` (2026-09-13)
+
+Migrated `node:url` completely to TypeScript via `crates/kiln-builtins/src/node/url.ts`
+with zero additions to the C runtime prelude (Phase 5.1 freeze strictly honored). Implemented all 10 canonical
+exports (`URL`, `URLSearchParams`, `default`, `domainToASCII`, `domainToUnicode`, `fileURLToPath`,
+`format`, `parse`, `pathToFileURL`, `urlToHttpOptions`). Provided pure TypeScript implementations of WHATWG `URL`
+and `URLSearchParams` ensuring full property reflection (`protocol`, `hostname`, `port`, `pathname`, `search`,
+`searchParams`, `hash`, `href`, `auth`) across both execution engines, resolving legacy native backend omissions
+where `new URL()` in C only set `pathname` and `searchParams`. Verified with native probe
+`conformance/native/node-url-members.cjs` (byte-for-byte identical output between interpreter and native CLI),
+integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`, and full `scripts/native.sh` parity
+(171 matched, 5 refused, 0 diverged). Updated facts baseline for `bundle:postcss` reflecting `node:url`'s transition to a typed module.
+Per explicit user instructions and AGENTS.md rules, avoided costly whole-workspace gate runs mid-flight to preserve shared CPU resources.
+
+---
+
+## Phase 5.2 TypeScript built-ins: `node:diagnostics_channel` (2026-09-13)
+
+Migrated `node:diagnostics_channel` completely to TypeScript via `crates/kiln-builtins/src/node/diagnostics_channel.ts`
+with zero additions to the C runtime prelude (Phase 5.1 freeze strictly honored). Implemented all 8 canonical
+exports (`Channel`, `TracingChannel`, `channel`, `default`, `hasSubscribers`, `subscribe`, `tracingChannel`, `unsubscribe`).
+Provided pure TypeScript implementations of `Channel` (with registry caching, subscription management, and `runStores` context execution)
+and `TracingChannel` (`start`, `end`, `asyncStart`, `asyncEnd`, `error` subchannels with `traceSync` and `tracePromise`).
+Verified with native probe `conformance/native/node-diagnostics-channel-members.cjs` (byte-for-byte identical output between
+interpreter and native CLI), integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`, and full
+`scripts/native.sh` parity (173 matched, 5 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
+
+---
+
+## Phase 5.2 TypeScript built-ins: `node:perf_hooks` (2026-09-13)
+
+Migrated `node:perf_hooks` completely to TypeScript via `crates/kiln-builtins/src/node/perf_hooks.ts`
+with zero additions to the C runtime prelude (Phase 5.1 freeze strictly honored). Implemented canonical
+exports (`Performance`, `PerformanceEntry`, `PerformanceMark`, `PerformanceMeasure`, `PerformanceObserver`,
+`PerformanceObserverEntryList`, `constants`, `createHistogram`, `default`, `eventLoopUtilization`,
+`monitorEventLoopDelay`, `performance`, `timerify`). Exported `performance` bound to `globalThis.performance`,
+preserving strict identity equality (`perfHooks.performance === globalThis.performance`) across both execution
+engines (as checked by `conformance/native/node-module-shapes.cjs`). Verified with native probe
+`conformance/native/node-perf-hooks-members.cjs` (byte-for-byte identical output between interpreter and native CLI),
+integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`, and full `scripts/native.sh` parity
+(174 matched, 5 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
+
+---
+
+## Phase 5.2 TypeScript built-ins: `node:console` (2026-09-13)
+
+Migrated `node:console` completely to TypeScript via `crates/kiln-builtins/src/node/console.ts`
+with zero additions to the C runtime prelude (Phase 5.1 freeze strictly honored). Implemented canonical
+exports (`Console`, `assert`, `clear`, `count`, `countReset`, `debug`, `default`, `dir`, `dirxml`,
+`error`, `group`, `groupCollapsed`, `groupEnd`, `info`, `log`, `profile`, `profileEnd`, `table`,
+`time`, `timeEnd`, `timeLog`, `timeStamp`, `trace`, `warn`). Delegates to `globalThis.console` with
+fallback implementations when underlying host facilities differ. Verified with native probe
+`conformance/native/node-console-members.cjs` (byte-for-byte identical output between interpreter and native CLI),
+integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`, and full `scripts/native.sh` parity
+(175 matched, 5 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
+
+---
+
+## Phase 5.2 TypeScript built-ins: `node:tty` (2026-09-13)
+
+Migrated `node:tty` completely to TypeScript via `crates/kiln-builtins/src/node/tty.ts`
+with zero additions to the C runtime prelude (Phase 5.1 freeze strictly honored). Implemented all canonical
+exports (`ReadStream`, `WriteStream`, `default`, `isatty`). `ReadStream` and `WriteStream` provide terminal
+stream methods (`setRawMode`, `getColorDepth`, `hasColors`, `getWindowSize`, `cursorTo`, `moveCursor`,
+`clearLine`, `clearScreenDown`) reflecting standard descriptors and dimensions. Verified with native probe
+`conformance/native/node-tty-members.cjs` (byte-for-byte identical output between interpreter and native CLI),
+integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`, and full `scripts/native.sh` parity
+(176 matched, 5 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
+
+---
+
+## Phase 5.2 TypeScript built-ins: `node:worker_threads` (2026-09-13)
+
+Migrated `node:worker_threads` completely to TypeScript via `crates/kiln-builtins/src/node/worker_threads.ts`
+with zero additions to the C runtime prelude (Phase 5.1 freeze strictly honored). Implemented canonical
+exports (`BroadcastChannel`, `MessageChannel`, `MessagePort`, `SHARE_ENV`, `Worker`, `default`,
+`getEnvironmentData`, `isMainThread`, `markAsUncloneable`, `markAsUntransferable`,
+`moveMessagePortToContext`, `parentPort`, `receiveMessageOnPort`, `resourceLimits`, `setEnvironmentData`,
+`threadId`, `workerData`). Preserves deterministic capability error on `new Worker()` across both engines.
+Verified with native probe `conformance/native/node-worker-threads-members.cjs` (byte-for-byte identical output
+between interpreter and native CLI), integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`,
+and full `scripts/native.sh` parity (177 matched, 5 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
+
 

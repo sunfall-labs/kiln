@@ -7,7 +7,7 @@
 mod number_provider;
 pub mod shared_publication;
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Write};
@@ -31,7 +31,7 @@ use kiln_backend_c::{
 use kiln_host_abi::HOST_ABI_VERSION;
 pub use kiln_host_abi::HostValue;
 use kiln_ir::{ExportBinding, ModuleProgram, Program};
-use kiln_module_graph::{Dependency, ModuleGraph, ModuleGraphError, ModuleSource, ResolvedExport};
+use kiln_module_graph::{ModuleGraph, ModuleGraphError, ModuleSource, ResolvedExport};
 use kiln_native_runtime::{
     EMBEDDING_C_ABI_VERSION, EMBEDDING_HOST_ABI_VERSION, EMBEDDING_MODULE_API_VERSION,
     NATIVE_RESULT_PATH_ENV, NATIVE_RUNTIME_VERSION, decode_native_result,
@@ -56,6 +56,36 @@ fn release_module_uses_generic_bodies(module: &ModuleProgram, policy: &EmissionP
         kiln_backend_c::retained_module_size(module, policy.live_module_slots.as_deref());
     functions > MAX_RELEASE_SPECIALIZED_MODULE_FUNCTIONS
         || instructions > MAX_RELEASE_SPECIALIZED_MODULE_INSTRUCTIONS
+}
+
+/// Map a native build profile to liveness selection: only release-style
+/// builds drop the development arm of the exact two-arm production
+/// dispatcher; development, measurement, and interpreter reduction keep
+/// both arms live.
+pub fn selection_options(profile: &NativeProfile) -> kiln_liveness::SelectionOptions {
+    selection_options_with_exclusions(profile, &BTreeSet::new())
+}
+
+fn selection_options_with_exclusions(
+    profile: &NativeProfile,
+    excluded: &BTreeSet<PathBuf>,
+) -> kiln_liveness::SelectionOptions {
+    kiln_liveness::SelectionOptions {
+        production_dispatch: matches!(profile, NativeProfile::Release | NativeProfile::Profile),
+        excluded: excluded.clone(),
+    }
+}
+
+/// Reduce a linked graph to its closed-world live subset.
+///
+/// Every remaining import edge is live by construction, so emission and the
+/// launcher wire all of them with no dead-slot skipping. See
+/// [`ModuleGraph::reduce_to_live`].
+fn reduced_graph(
+    graph: &ModuleGraph,
+    demand: &kiln_module_graph::LiveDemand,
+) -> Result<(ModuleGraph, kiln_module_graph::LiveDemand), NativeError> {
+    graph.reduce_to_live(demand).map_err(NativeError::Graph)
 }
 
 // Select the budget only on a generated-C cache miss. Warm builds must not rerun liveness,
@@ -1282,6 +1312,16 @@ impl NativeBuilder {
         options: &NativeBuildOptions,
     ) -> Result<NativeSharedLibraryReport, NativeError> {
         let native_plan = native_graph_plan(graph)?;
+        // Shared libraries embed for unknown hosts: development selection
+        // keeps both arms of the production dispatcher and every live edge,
+        // while dead modules are pruned like any other executable.
+        let demand = kiln_liveness::executable_demand(
+            graph,
+            &selection_options_with_exclusions(&NativeProfile::Dev, &native_plan.excluded),
+        )
+        .map_err(NativeError::Graph)?;
+        let (reduced, _) = reduced_graph(graph, &demand)?;
+        let graph = &reduced;
         let mut emission = options.realm.emission();
         emission.compact = options.profile != NativeProfile::Profile;
         emission.generic_only =
@@ -1831,35 +1871,33 @@ impl NativeBuilder {
         let identity = self.toolchain.identity().clone();
         let module_abi = module_abi_identity();
         let target = target_identity(&identity);
-        let selected = native_executable_graph(graph, options.profile, &native_plan.excluded)?;
+        let selected = kiln_liveness::select_executable_modules(
+            graph,
+            &selection_options_with_exclusions(&options.profile, &native_plan.excluded),
+        )
+        .map_err(NativeError::Graph)?;
+        // One shaken graph feeds emission: reduce to the live subset first,
+        // so the emitter and launcher below only ever see live modules and
+        // live edges. With everything live this is the identity transform.
+        let demand = selected.demand();
+        let (reduced, demand) = reduced_graph(graph, &demand)?;
+        let graph = &reduced;
         // Dispatch-group mask for the prelude: same closed-world selection,
         // so the `-D` flags below only ever remove what nothing retained can
         // reach. Computed once; the explain path recomputes it out-of-band.
         let group_mask = {
-            let demand = ExecutableDemand {
-                live: selected
-                    .modules
-                    .iter()
-                    .map(|node| node.path.clone())
-                    .collect(),
-                slots: selected.live_export_slots.clone(),
-            };
             let members =
                 kiln_backend_c::facts::analyze_demanded_members(graph, &demand.live, &demand.slots);
-            retained_method_groups(graph, &demand, &members)
+            kiln_liveness::retained_method_groups(graph, &demand, &members)
         };
-        let nodes = selected.modules;
+        let nodes: Vec<&kiln_module_graph::ModuleNode> = graph.modules().collect();
         let emitted_modules = emit_indexed(nodes.len(), "graph module emission", |index| {
             let node = nodes[index];
             let logical_path = logical_module_path(graph.project_root(), &node.path)?;
             let mut module_emission = emission.clone();
             if matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs) {
                 module_emission.live_module_slots = Some(Arc::new(
-                    selected
-                        .live_export_slots
-                        .get(&node.path)
-                        .cloned()
-                        .unwrap_or_default(),
+                    demand.slots.get(&node.path).cloned().unwrap_or_default(),
                 ));
             }
             let (emitted, generated_c_hit) = cached_graph_module(
@@ -1905,7 +1943,7 @@ impl NativeBuilder {
             graph,
             &modules,
             &options.realm,
-            Some(&selected.live_imports),
+            Some(&demand.live_imports),
             Some(&selected.inactive_commonjs_dependencies),
             Some(&selected.partial_namespace_members),
             Some(&native_plan.failures),
@@ -2557,21 +2595,6 @@ impl NativeBuilder {
     }
 }
 
-/// Fail before emission if a typed builtin has no native materializer.
-///
-/// A builtin node's bytecode is intentionally empty: its exports are supplied by the execution
-/// adapter. Treating it as an ordinary generated module therefore succeeds while leaving every
-/// export `undefined`, which is worse than refusing the surface. A typed builtin can expose a
-/// broader interface than its native materializer, so named imports are checked against the
-/// materialized subset here as well. Keep this gate beside native graph construction until each
-/// accepted builtin has an explicit native materializer.
-fn validate_native_node_builtins(graph: &ModuleGraph) -> Result<(), NativeError> {
-    for node in graph.modules() {
-        validate_native_builtin_node(graph, node)?;
-    }
-    Ok(())
-}
-
 #[derive(Debug, Default)]
 struct NativeGraphPlan {
     excluded: BTreeSet<PathBuf>,
@@ -2864,9 +2887,7 @@ fn native_builtin_supported_exports(
     use kiln_module_resolver::NodeBuiltin;
 
     match builtin {
-        NodeBuiltin::Console => &[
-            "Console", "debug", "default", "error", "info", "log", "warn",
-        ],
+        NodeBuiltin::Console => kiln_builtins::CONSOLE_EXPORTS,
         NodeBuiltin::Events => &["EventEmitter", "default"],
         NodeBuiltin::Ffi => &[
             "default",
@@ -2889,19 +2910,8 @@ fn native_builtin_supported_exports(
             "get",
             "request",
         ],
-        NodeBuiltin::Util => &[
-            "TextDecoder",
-            "TextEncoder",
-            "debuglog",
-            "default",
-            "deprecate",
-            "format",
-            "inherits",
-            "inspect",
-        ],
-        NodeBuiltin::DiagnosticsChannel => {
-            &["channel", "default", "hasSubscribers", "tracingChannel"]
-        }
+        NodeBuiltin::Util => kiln_builtins::UTIL_EXPORTS,
+        NodeBuiltin::DiagnosticsChannel => kiln_builtins::DIAGNOSTICS_CHANNEL_EXPORTS,
         NodeBuiltin::Https => &["createServer", "default"],
         NodeBuiltin::Http2 => &["createSecureServer", "createServer", "default"],
         NodeBuiltin::Dns => &["default", "lookup"],
@@ -2911,7 +2921,7 @@ fn native_builtin_supported_exports(
         // read far more often than it is called, `text.split(os.EOL)` being the whole of why, and
         // it had been answering `undefined` here against the interpreter's "\n".
         NodeBuiltin::Os => kiln_builtins::OS_EXPORTS,
-        NodeBuiltin::Tty => &["default", "isatty"],
+        NodeBuiltin::Tty => kiln_builtins::TTY_EXPORTS,
         NodeBuiltin::Stream => &[
             "Readable",
             "Writable",
@@ -2919,7 +2929,7 @@ fn native_builtin_supported_exports(
             "default",
             "finished",
         ],
-        NodeBuiltin::PerfHooks => &["default", "performance"],
+        NodeBuiltin::PerfHooks => kiln_builtins::PERF_HOOKS_EXPORTS,
         NodeBuiltin::FsPromises => &["appendFile", "mkdir", "readFile", "stat", "writeFile"],
         NodeBuiltin::Fs => &[
             "appendFileSync",
@@ -2965,10 +2975,10 @@ fn native_builtin_supported_exports(
             "strictEqual",
             "throws",
         ],
-        NodeBuiltin::WorkerThreads => &["Worker", "default"],
+        NodeBuiltin::WorkerThreads => kiln_builtins::WORKER_THREADS_EXPORTS,
         NodeBuiltin::Module => &["createRequire", "default"],
         NodeBuiltin::QueryString => kiln_builtins::QUERYSTRING_EXPORTS,
-        NodeBuiltin::Url => &["URL", "default", "fileURLToPath", "parse", "pathToFileURL"],
+        NodeBuiltin::Url => kiln_builtins::URL_EXPORTS,
         NodeBuiltin::Buffer => kiln_builtins::BUFFER_EXPORTS,
         NodeBuiltin::StringDecoder => kiln_builtins::STRING_DECODER_EXPORTS,
         NodeBuiltin::AsyncHooks => &["AsyncLocalStorage", "AsyncResource", "default"],
@@ -4257,594 +4267,6 @@ enum NativeGraphImport {
     },
 }
 
-#[derive(Debug)]
-struct NativeExecutableGraph<'a> {
-    modules: Vec<&'a kiln_module_graph::ModuleNode>,
-    live_imports: BTreeSet<(PathBuf, usize)>,
-    live_export_slots: BTreeMap<PathBuf, BTreeSet<u32>>,
-    inactive_commonjs_dependencies: BTreeSet<(PathBuf, String)>,
-    partial_namespace_members: BTreeMap<PathBuf, BTreeSet<String>>,
-}
-
-/// The exact two-arm dispatcher used by React and similar CommonJS packages.
-///
-/// This intentionally accepts no general JavaScript. Matching the complete whitespace-free
-/// source makes the specialization semantic rather than filename-based: in a release realm the
-/// production arm is the only arm that can run, while any extra statement, condition, or third
-/// dependency falls back to the complete graph.
-fn commonjs_production_dispatch(
-    source: &str,
-    dependencies: &[Dependency],
-) -> Option<(String, String)> {
-    if dependencies.len() != 2 {
-        return None;
-    }
-    let compact = source
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .map(|character| if character == '"' { '\'' } else { character })
-        .collect::<String>();
-    for (production, development) in [
-        (&dependencies[0], &dependencies[1]),
-        (&dependencies[1], &dependencies[0]),
-    ] {
-        let expected = format!(
-            "'usestrict';if(process.env.NODE_ENV==='production'){{module.exports=require('{}');}}else{{module.exports=require('{}');}}",
-            production.specifier, development.specifier
-        );
-        if compact == expected {
-            return Some((production.specifier.clone(), development.specifier.clone()));
-        }
-    }
-    None
-}
-
-/// Whether the nearest package boundary explicitly licenses removing unused modules.
-///
-/// Absence, malformed metadata, and non-empty pattern lists all remain conservative. Supporting
-/// package-relative `sideEffects` globs needs the resolver to preserve package identity, so this
-/// first closed-world optimization only accepts the two unambiguous all-files spellings.
-fn package_declares_no_side_effects(path: &Path, project_root: &Path) -> bool {
-    let mut directory = path.parent();
-    while let Some(current) = directory {
-        if !current.starts_with(project_root) {
-            break;
-        }
-        let manifest = current.join("package.json");
-        if manifest.is_file() {
-            let Ok(bytes) = fs::read(&manifest) else {
-                return false;
-            };
-            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-                return false;
-            };
-            return matches!(
-                value.get("sideEffects"),
-                Some(serde_json::Value::Bool(false))
-            ) || matches!(value.get("sideEffects"), Some(serde_json::Value::Array(items)) if items.is_empty());
-        }
-        if current == project_root {
-            break;
-        }
-        directory = current.parent();
-    }
-    false
-}
-
-fn demand_namespace_members(
-    graph: &ModuleGraph,
-    namespace: &Path,
-    members: &BTreeSet<String>,
-    live: &mut BTreeSet<PathBuf>,
-    live_export_slots: &mut BTreeMap<PathBuf, BTreeSet<u32>>,
-    namespace_demands: &mut BTreeSet<PathBuf>,
-    queue: &mut VecDeque<PathBuf>,
-) -> Result<(), NativeError> {
-    for name in members {
-        match graph.resolved_export(namespace, name) {
-            Some(ResolvedExport::Local { module, local_slot }) => {
-                let newly_live = live.insert(module.clone());
-                let newly_demanded = live_export_slots
-                    .entry(module.clone())
-                    .or_default()
-                    .insert(*local_slot);
-                if newly_live || newly_demanded {
-                    queue.push_back(module.clone());
-                }
-            }
-            Some(ResolvedExport::CommonJsNamed { module, .. }) => {
-                let newly_live = live.insert(module.clone());
-                let newly_demanded = live_export_slots
-                    .entry(module.clone())
-                    .or_default()
-                    .insert(0);
-                if newly_live || newly_demanded {
-                    queue.push_back(module.clone());
-                }
-            }
-            Some(ResolvedExport::Namespace { module }) => {
-                namespace_demands.insert(module.clone());
-                if live.insert(module.clone()) {
-                    queue.push_back(module.clone());
-                }
-            }
-            Some(ResolvedExport::Ambiguous) | None => {
-                if graph
-                    .module(namespace)
-                    .is_some_and(|node| node.source == ModuleSource::CommonJs)
-                {
-                    let newly_live = live.insert(namespace.to_path_buf());
-                    let newly_demanded = live_export_slots
-                        .entry(namespace.to_path_buf())
-                        .or_default()
-                        .insert(0);
-                    if newly_live || newly_demanded {
-                        queue.push_back(namespace.to_path_buf());
-                    }
-                } else {
-                    return Err(NativeError::Graph(ModuleGraphError::MissingExport {
-                        importer: namespace.to_path_buf(),
-                        provider: namespace.to_path_buf(),
-                        name: name.clone(),
-                    }));
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Select the source bodies an executable can observe after applying package side-effect facts.
-///
-/// The complete graph is still linked first, so missing and ambiguous exports remain errors. This
-/// pass only removes evaluation work that package metadata explicitly declares unobservable.
-fn native_executable_graph<'a>(
-    graph: &'a ModuleGraph,
-    profile: NativeProfile,
-    excluded: &BTreeSet<PathBuf>,
-) -> Result<NativeExecutableGraph<'a>, NativeError> {
-    let mut live = BTreeSet::new();
-    let mut live_imports = BTreeSet::new();
-    let mut live_export_slots: BTreeMap<PathBuf, BTreeSet<u32>> = BTreeMap::new();
-    let mut namespace_demands = BTreeSet::new();
-    let mut namespace_member_cache = BTreeMap::new();
-    let mut partial_namespace_members: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
-    let mut inactive_commonjs_dependencies = BTreeSet::new();
-    let mut queue = VecDeque::new();
-    let mut side_effect_free = BTreeMap::new();
-
-    let mark_live = |path: &Path, live: &mut BTreeSet<PathBuf>, queue: &mut VecDeque<PathBuf>| {
-        if live.insert(path.to_path_buf()) {
-            queue.push_back(path.to_path_buf());
-        }
-    };
-    mark_live(graph.entry(), &mut live, &mut queue);
-
-    let has_any_dynamic_import = graph
-        .modules()
-        .any(|m| m.program.program.has_dynamic_import());
-    if has_any_dynamic_import {
-        for m in graph.modules() {
-            if excluded.contains(&m.path) {
-                continue;
-            }
-            namespace_demands.insert(m.path.clone());
-            mark_live(&m.path, &mut live, &mut queue);
-        }
-    }
-
-    while let Some(path) = queue.pop_front() {
-        if excluded.contains(&path) {
-            continue;
-        }
-        let node = graph.module(&path).ok_or_else(|| {
-            NativeError::Graph(ModuleGraphError::InternalMissingModule { path: path.clone() })
-        })?;
-        let direct_eval = node.program.link_facts.direct_eval;
-        let demanded = live_export_slots.get(&path).cloned().unwrap_or_default();
-        let live_slots = kiln_backend_c::closed_world_module_live_slots_with_declarations(
-            &node.program.program,
-            &demanded,
-            direct_eval,
-            &node.program.link_facts.removable_declarations,
-        );
-
-        let production_dispatch =
-            matches!(profile, NativeProfile::Release | NativeProfile::Profile)
-                .then(|| {
-                    commonjs_production_dispatch(&node.program.program.source, &node.dependencies)
-                })
-                .flatten();
-        for dependency in &node.dependencies {
-            if production_dispatch
-                .as_ref()
-                .is_some_and(|(_, inactive)| inactive == &dependency.specifier)
-            {
-                inactive_commonjs_dependencies
-                    .insert((node.path.clone(), dependency.specifier.clone()));
-                continue;
-            }
-            let removable = *side_effect_free
-                .entry(dependency.target.clone())
-                .or_insert_with(|| {
-                    package_declares_no_side_effects(&dependency.target, graph.project_root())
-                });
-            if node.source == ModuleSource::CommonJs || !removable {
-                mark_live(&dependency.target, &mut live, &mut queue);
-            }
-        }
-        for dependency in graph.dynamic_dependencies(&node.path) {
-            if excluded.contains(&dependency.target) {
-                continue;
-            }
-            mark_live(&dependency.target, &mut live, &mut queue);
-        }
-
-        for (import_index, import) in node.program.imports.iter().enumerate() {
-            if node.source == ModuleSource::CommonJs && import.source == "*commonjs-wrapper*" {
-                continue;
-            }
-            let dependency = node
-                .dependencies
-                .iter()
-                .find(|dependency| dependency.specifier == import.source)
-                .ok_or_else(|| {
-                    NativeError::Graph(ModuleGraphError::UnresolvedImport {
-                        importer: node.path.clone(),
-                        source: import.source.clone(),
-                    })
-                })?;
-            if !live_slots.contains(&import.local_slot) {
-                continue;
-            }
-            live_imports.insert((node.path.clone(), import_index));
-            if import.imported == kiln_ir::NAMESPACE_IMPORT {
-                let static_members = namespace_member_cache
-                    .entry((node.path.clone(), import.local_slot))
-                    .or_insert_with(|| {
-                        kiln_backend_c::closed_world_namespace_members(
-                            &node.program.program,
-                            import.local_slot,
-                            direct_eval,
-                        )
-                    })
-                    .clone();
-                if let Some(members) = static_members {
-                    mark_live(&dependency.target, &mut live, &mut queue);
-                    partial_namespace_members
-                        .entry(dependency.target.clone())
-                        .or_default()
-                        .extend(members.iter().cloned());
-                    demand_namespace_members(
-                        graph,
-                        &dependency.target,
-                        &members,
-                        &mut live,
-                        &mut live_export_slots,
-                        &mut namespace_demands,
-                        &mut queue,
-                    )?;
-                } else {
-                    namespace_demands.insert(dependency.target.clone());
-                    mark_live(&dependency.target, &mut live, &mut queue);
-                }
-                continue;
-            }
-            match graph.resolved_export(&dependency.target, &import.imported) {
-                Some(ResolvedExport::Local { module, local_slot }) => {
-                    let newly_demanded = live_export_slots
-                        .entry(module.clone())
-                        .or_default()
-                        .insert(*local_slot);
-                    mark_live(module, &mut live, &mut queue);
-                    if newly_demanded {
-                        queue.push_back(module.clone());
-                    }
-                }
-                Some(ResolvedExport::CommonJsNamed { module, .. }) => {
-                    let newly_demanded = live_export_slots
-                        .entry(module.clone())
-                        .or_default()
-                        .insert(0);
-                    mark_live(module, &mut live, &mut queue);
-                    if newly_demanded {
-                        queue.push_back(module.clone());
-                    }
-                }
-                Some(ResolvedExport::Namespace { module }) => {
-                    let static_members = namespace_member_cache
-                        .entry((node.path.clone(), import.local_slot))
-                        .or_insert_with(|| {
-                            kiln_backend_c::closed_world_namespace_members(
-                                &node.program.program,
-                                import.local_slot,
-                                direct_eval,
-                            )
-                        })
-                        .clone();
-                    if let Some(members) = static_members {
-                        mark_live(module, &mut live, &mut queue);
-                        partial_namespace_members
-                            .entry(module.clone())
-                            .or_default()
-                            .extend(members.iter().cloned());
-                        demand_namespace_members(
-                            graph,
-                            module,
-                            &members,
-                            &mut live,
-                            &mut live_export_slots,
-                            &mut namespace_demands,
-                            &mut queue,
-                        )?;
-                    } else {
-                        namespace_demands.insert(module.clone());
-                        mark_live(module, &mut live, &mut queue);
-                    }
-                }
-                Some(ResolvedExport::Ambiguous) | None => {
-                    return Err(NativeError::Graph(ModuleGraphError::MissingExport {
-                        importer: node.path.clone(),
-                        provider: dependency.target.clone(),
-                        name: import.imported.clone(),
-                    }));
-                }
-            }
-        }
-
-        if namespace_demands.contains(&path) {
-            if node.source == ModuleSource::CommonJs {
-                let newly_demanded = live_export_slots.entry(path.clone()).or_default().insert(0);
-                mark_live(&path, &mut live, &mut queue);
-                if newly_demanded {
-                    queue.push_back(path.clone());
-                }
-                continue;
-            }
-            let names = graph.resolved_export_names(&path).ok_or_else(|| {
-                NativeError::Graph(ModuleGraphError::InternalMissingModule { path: path.clone() })
-            })?;
-            for name in names {
-                match graph.resolved_export(&path, &name) {
-                    Some(ResolvedExport::Local { module, local_slot }) => {
-                        let newly_demanded = live_export_slots
-                            .entry(module.clone())
-                            .or_default()
-                            .insert(*local_slot);
-                        mark_live(module, &mut live, &mut queue);
-                        if newly_demanded {
-                            queue.push_back(module.clone());
-                        }
-                    }
-                    Some(ResolvedExport::CommonJsNamed { module, .. }) => {
-                        let newly_demanded = live_export_slots
-                            .entry(module.clone())
-                            .or_default()
-                            .insert(0);
-                        mark_live(module, &mut live, &mut queue);
-                        if newly_demanded {
-                            queue.push_back(module.clone());
-                        }
-                    }
-                    Some(ResolvedExport::Namespace { module }) => {
-                        mark_live(module, &mut live, &mut queue);
-                    }
-                    Some(ResolvedExport::Ambiguous) | None => {}
-                }
-            }
-        }
-    }
-
-    // Namespace requirements are joined across every importer. One dynamic/escaping use requires
-    // the complete namespace even when another importer has a statically known subset.
-    partial_namespace_members.retain(|path, _| !namespace_demands.contains(path));
-
-    let modules = graph
-        .modules()
-        .filter(|node| live.contains(&node.path) && !excluded.contains(&node.path))
-        .collect::<Vec<_>>();
-    Ok(NativeExecutableGraph {
-        modules,
-        live_imports,
-        live_export_slots,
-        inactive_commonjs_dependencies,
-        partial_namespace_members,
-    })
-}
-
-/// Closed-world demand for an executable graph: which modules are live and
-/// which export slots each one must keep. Computed once by
-/// [`executable_demand`] and shared by size attribution and member analysis
-/// so both read the same selection the build emits.
-#[derive(Debug, Clone, Default)]
-pub struct ExecutableDemand {
-    pub live: BTreeSet<PathBuf>,
-    pub slots: BTreeMap<PathBuf, BTreeSet<u32>>,
-}
-
-/// Run the same closed-world selection as [`NativeBuilder::build_graph`]
-/// without emitting or compiling anything.
-pub fn executable_demand(
-    graph: &ModuleGraph,
-    profile: NativeProfile,
-) -> Result<ExecutableDemand, NativeError> {
-    let plan = native_graph_plan(graph)?;
-    let selected = native_executable_graph(graph, profile, &plan.excluded)?;
-    Ok(ExecutableDemand {
-        live: selected
-            .modules
-            .iter()
-            .map(|node| node.path.clone())
-            .collect(),
-        slots: selected.live_export_slots,
-    })
-}
-
-/// Method dispatch groups retained by one executable, as a bitmask over
-/// `kiln_backend_c::facts::method_groups`.
-///
-/// Core groups always; node-ish groups only on demand. A group is implicated
-/// by an imported node builtin (conservative supersets: an HTTP server also
-/// needs net/stream/event implementations), by the `Buffer`/`Process` globals
-/// behind retained `LoadBuiltin`s, or by computed access (which can resolve
-/// through `process` and `globalThis`). Direct eval, `new Function`,
-/// indirect `eval`, and dynamic imports keep the full table: their targets
-/// are unknowable. Successful builds resolve every static require, so CJS
-/// literal requires are already covered by the graph edges below.
-pub fn retained_method_groups(
-    graph: &ModuleGraph,
-    demand: &ExecutableDemand,
-    members: &kiln_backend_c::facts::DemandedMembers,
-) -> u32 {
-    use kiln_backend_c::facts::{
-        CORE_METHOD_GROUPS, PRUNABLE_METHOD_GROUPS, method_groups as groups,
-    };
-    use kiln_module_resolver::NodeBuiltin;
-
-    const FULL: u32 = CORE_METHOD_GROUPS | PRUNABLE_METHOD_GROUPS;
-
-    // Builtin globals with group-backed methods behind them.
-    let uses_buffer = members
-        .builtins
-        .iter()
-        .any(|name| name.as_str() == "Buffer");
-    // `process.stdout` is a stream and `process.on` an emitter: touching the
-    // `process` global can reach both implementations without any import.
-    let uses_process = members
-        .builtins
-        .iter()
-        .any(|name| name.as_str() == "Process");
-    // `process[k]()` and `globalThis[k]()` dynamics resolve through process
-    // members (events/streams) and globals (`Buffer`); user objects implicate
-    // nothing the router serves.
-    let dynamic = members.has_computed_access;
-    // Indirect `eval` runs arbitrary code.
-    let indirect_eval = members.builtins.iter().any(|name| name.as_str() == "Eval");
-
-    // Imported node builtins, from resolved graph edges: ESM imports and CJS
-    // literal requires alike. Unknown `node:*` specifiers bail: failing closed
-    // keeps a program working.
-    fn builtin_groups(builtin: &NodeBuiltin) -> Option<u32> {
-        use NodeBuiltin::*;
-        Some(match builtin {
-            Http | Https | Http2 => {
-                groups::NODE_HTTP
-                    | groups::NODE_RESPONSE
-                    | groups::NODE_SERVER
-                    | groups::NODE_NET
-                    | groups::NODE_STREAM
-                    | groups::NODE_EVENT
-            }
-            Net => {
-                groups::NODE_NET | groups::NODE_SERVER | groups::NODE_STREAM | groups::NODE_EVENT
-            }
-            Events => groups::NODE_EVENT,
-            Stream => groups::NODE_STREAM | groups::NODE_EVENT,
-            Buffer => groups::BUFFER,
-            Path => groups::NODE_PATH,
-            Util => groups::NODE_UTIL,
-            DiagnosticsChannel => groups::NODE_DIAGNOSTICS,
-            Fs | FsPromises => groups::NODE_STREAM | groups::NODE_EVENT,
-            // Audited `Direct`-only (see phase1-PRD): no groups implicated.
-            Assert | Console | Crypto | Dns | Module | Os | Tty | Zlib | StringDecoder
-            | Process | QueryString | Url | WorkerThreads | PerfHooks | AsyncHooks => 0,
-            // `dlopen` hands out raw pointers: anything is reachable.
-            Ffi => return None,
-        })
-    }
-
-    let mut mask = CORE_METHOD_GROUPS;
-    if uses_buffer || dynamic {
-        mask |= groups::BUFFER;
-    }
-    if uses_process || dynamic {
-        mask |= groups::NODE_EVENT | groups::NODE_STREAM;
-    }
-    for node in graph.modules() {
-        if !demand.live.contains(&node.path) {
-            continue;
-        }
-        // Dynamic import targets and `new Function` bodies are unknowable.
-        if !node.program.link_facts.dynamic_imports.is_empty()
-            || node.program.program.has_dynamic_import()
-            || node.program.link_facts.new_function
-            || indirect_eval
-        {
-            return FULL;
-        }
-        for dependency in &node.dependencies {
-            let target = graph.module(&dependency.target);
-            match target.map(|module| &module.source) {
-                Some(ModuleSource::NodeBuiltin(builtin)) => match builtin_groups(builtin) {
-                    Some(groups) => mask |= groups,
-                    None => return FULL,
-                },
-                // An explicit `node:` specifier that resolved anywhere else is
-                // unexpected; failing closed keeps the program working.
-                _ if dependency.specifier.starts_with("node:") => return FULL,
-                _ => {}
-            }
-        }
-    }
-    // The members walk already bails the open world (direct eval, dynamic
-    // import) into `has_open_world`; `new Function` and indirect eval are
-    // checked above, so reaching here is closed.
-    if members.has_open_world {
-        return FULL;
-    }
-    mask
-}
-
-/// Per-module retained-size attribution for an executable graph.
-///
-/// Runs the same closed-world selection as [`NativeBuilder::build_graph`]
-/// without emitting or compiling anything, so `build --explain` can show
-/// where bytes go. The demand applied per module mirrors emission exactly:
-/// `Source`/`CommonJs` modules keep their demanded export slots, every other
-/// module is retained whole. Out-of-band: failures here must never fail a
-/// build, so callers skip the section on error rather than propagating it.
-pub fn executable_module_sizes(
-    graph: &ModuleGraph,
-    profile: NativeProfile,
-) -> Result<Vec<kiln_backend_c::facts::ModuleSizeFacts>, NativeError> {
-    executable_module_sizes_from_demand(graph, &executable_demand(graph, profile)?)
-}
-
-/// [`executable_module_sizes`] over an already-computed [`executable_demand`],
-/// so callers needing both sizes and demand run the selection once.
-pub fn executable_module_sizes_from_demand(
-    graph: &ModuleGraph,
-    demand: &ExecutableDemand,
-) -> Result<Vec<kiln_backend_c::facts::ModuleSizeFacts>, NativeError> {
-    use kiln_backend_c::facts::ModuleSizeFacts;
-
-    let mut sizes = Vec::with_capacity(graph.module_count());
-    for node in graph.modules() {
-        let (total_instructions, total_functions) =
-            kiln_backend_c::retained_module_size(&node.program, None);
-        let is_live = demand.live.contains(&node.path);
-        let (retained_instructions, retained_functions) = if !is_live {
-            (0, 0)
-        } else if matches!(
-            node.source,
-            kiln_module_graph::ModuleSource::Source | kiln_module_graph::ModuleSource::CommonJs
-        ) {
-            kiln_backend_c::retained_module_size(&node.program, demand.slots.get(&node.path))
-        } else {
-            (total_instructions, total_functions)
-        };
-        sizes.push(ModuleSizeFacts {
-            path: node.path.display().to_string(),
-            live: is_live,
-            total_instructions,
-            total_functions,
-            retained_instructions,
-            retained_functions,
-        });
-    }
-    Ok(sizes)
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum NativeNamespaceValue {
     Binding {
@@ -5258,7 +4680,7 @@ fn native_builtin_runtime_module(
             // This loop used to publish every ABI name unconditionally, and the slots the
             // materializer had left as `kiln_c99_undefined()` went out with it. That is where the
             // two halves of the loader stopped agreeing: a static `import { dirname }` was
-            // refused ahead of time by `validate_native_node_builtins`, while
+            // refused ahead of time by `native_graph_plan`, while
             // `require("path").dirname` -- which is what an esbuild bundle emits -- handed back
             // `undefined` and let the program run on. `postcss` walked past its own
             // `resolve && isAbsolute` guard on the strength of it and died three frames later on
