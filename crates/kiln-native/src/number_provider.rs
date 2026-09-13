@@ -829,6 +829,7 @@ mod tests {
             "deployment": "",
             "libc_baseline": "",
             "exports": PROVIDER_EXPORTS,
+            "http": true,
         });
         let manifest_path = root.0.join(MANIFEST_FILE);
         fs::write(
@@ -843,7 +844,7 @@ mod tests {
         assert_eq!(provider.archive_digest, Digest::hash(archive));
         // A manifest predating the slim variant names no variant: it is the full archive.
         assert!(provider.http);
-        assert!(provider.identity.contains(";http=true;"));
+        assert!(provider.identity.contains("\"http\":true"));
 
         fs::write(root.0.join("provider.a"), b"corrupt").expect("corrupt archive fixture");
         let error = load_manifest(&manifest_path, &identity("arm64-apple-darwin25.6.0"), true)
@@ -982,7 +983,7 @@ mod tests {
         let provider = load_manifest(&manifest_path, &identity("aarch64-apple-darwin"), false)
             .expect("slim manifest loads for an HTTP-free build");
         assert!(!provider.http);
-        assert!(provider.identity.contains(";http=false;"));
+        assert!(provider.identity.contains("\"http\":false"));
 
         let error = load_manifest(&manifest_path, &identity("aarch64-apple-darwin"), true)
             .expect_err("slim manifest is rejected when HTTP is needed");
