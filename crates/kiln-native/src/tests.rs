@@ -4952,6 +4952,49 @@ fn native_dynamic_import_resolves_opentui_and_in_graph_modules() {
 }
 
 #[test]
+fn native_deferred_dynamic_import_failures_are_catchable() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping deferred dynamic failure integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-deferred-dynamic-failures");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).expect("write root package");
+    fs::write(root.path.join("bad-syntax.mjs"), "export const = ;\n")
+        .expect("write syntax failure");
+    fs::write(root.path.join("dep.mjs"), "export const answer = 42;\n").expect("write dependency");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "console.log('start');\n\
+         try { await import('./missing.mjs'); } catch (error) { console.log(error instanceof TypeError); }\n\
+         try { await import('./bad-syntax.mjs'); } catch (error) { console.log(error instanceof TypeError); }\n\
+         const ns = await import('./dep.mjs'); console.log(ns.answer);\n",
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build deferred failure graph");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .expect("deferred failure graph builds and runs");
+    assert_eq!(report.stdout, b"start\ntrue\ntrue\n42\n");
+}
+
+#[test]
 fn native_static_top_level_await_resolves_before_entry() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
