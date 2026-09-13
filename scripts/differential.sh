@@ -102,9 +102,15 @@ run_probe() {
 		return 0
 	fi
 
-	if ((kiln_status != 0)) && [[ $actual == kiln:* || $actual == *$'\n'kiln:* ]]; then
+	if ((kiln_status != 0)); then
 		local reason
-		reason="$(printf '%s\n' "$actual" | sed -n '/^kiln:/ { s/^kiln: [^:]*: //; p; q; }')"
+		if [[ $actual == *could\ not\ execute\ module* ]]; then
+			reason="$(printf '%s\n' "$actual" | sed -n '/could not execute module/ { s/.*could not execute module [^:]*: //; p; q; }')"
+		elif [[ $actual == kiln:* || $actual == *$'\n'kiln:* ]]; then
+			reason="$(printf '%s\n' "$actual" | sed -n '/^kiln:/ { s/^kiln: [^:]*: //; p; q; }')"
+		else
+			reason="$(printf '%s\n' "$actual" | head -1)"
+		fi
 		printf '%s\n' "$reason" > "$WORK_DIR/$name.refused"
 		return 0
 	fi

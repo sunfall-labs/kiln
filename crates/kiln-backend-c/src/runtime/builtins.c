@@ -104,12 +104,96 @@ static const char *kiln_c99_builtin_name(uint64_t builtin) {
     case KILN_C99_BUILTIN_UINT32_ARRAY_PROTOTYPE: return "Uint32Array";
     case KILN_C99_BUILTIN_FLOAT32_ARRAY_PROTOTYPE: return "Float32Array";
     case KILN_C99_BUILTIN_FLOAT64_ARRAY_PROTOTYPE: return "Float64Array";
+    case KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE: return "ArrayBuffer";
     default: {
         /* Every other tag is an error constructor; a tag with no name at all is a tag added
          * without one, which shows as anonymous rather than dereferencing a null. */
         const char *name = kiln_c99_error_name(builtin);
         return name == NULL ? "anonymous" : name;
     }
+    }
+}
+
+/* The canonical arity (fn.length) of a built-in callable per ECMAScript specification.
+ * Returns 1 and sets *out if known; returns 0 if unknown/unmodeled. */
+static int kiln_c99_builtin_length(uint64_t builtin, double *out) {
+    switch (builtin) {
+    case KILN_C99_BUILTIN_SYMBOL:
+    case KILN_C99_BUILTIN_MAP:
+    case KILN_C99_BUILTIN_SET:
+    case KILN_C99_BUILTIN_WEAK_MAP:
+    case KILN_C99_BUILTIN_WEAK_SET:
+    case KILN_C99_BUILTIN_ABORT_CONTROLLER:
+    case KILN_C99_BUILTIN_ABORT_SIGNAL:
+    case KILN_C99_BUILTIN_TEXT_ENCODER:
+    case KILN_C99_BUILTIN_TEXT_DECODER:
+    case KILN_C99_BUILTIN_DISPOSABLE_STACK:
+    case KILN_C99_BUILTIN_ASYNC_DISPOSABLE_STACK:
+    case KILN_C99_BUILTIN_TEMPORAL_PLAIN_TIME:
+    case KILN_C99_BUILTIN_TEMPORAL_DURATION:
+        *out = 0.0;
+        return 1;
+
+    case KILN_C99_BUILTIN_ARRAY:
+    case KILN_C99_BUILTIN_OBJECT:
+    case KILN_C99_BUILTIN_STRING:
+    case KILN_C99_BUILTIN_NUMBER:
+    case KILN_C99_BUILTIN_BOOLEAN:
+    case KILN_C99_BUILTIN_BIGINT:
+    case KILN_C99_BUILTIN_FUNCTION:
+    case KILN_C99_BUILTIN_PROMISE:
+    case KILN_C99_BUILTIN_ARRAY_BUFFER:
+    case KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER:
+    case KILN_C99_BUILTIN_DATA_VIEW:
+    case KILN_C99_BUILTIN_ERROR:
+    case KILN_C99_BUILTIN_TYPE_ERROR:
+    case KILN_C99_BUILTIN_RANGE_ERROR:
+    case KILN_C99_BUILTIN_REFERENCE_ERROR:
+    case KILN_C99_BUILTIN_SYNTAX_ERROR:
+    case KILN_C99_BUILTIN_URI_ERROR:
+    case KILN_C99_BUILTIN_EVAL_ERROR:
+    case KILN_C99_BUILTIN_EVAL:
+    case KILN_C99_BUILTIN_URL:
+    case KILN_C99_BUILTIN_BUFFER:
+    case KILN_C99_BUILTIN_WEAK_REF:
+    case KILN_C99_BUILTIN_FINALIZATION_REGISTRY:
+    case KILN_C99_BUILTIN_TEMPORAL_INSTANT:
+        *out = 1.0;
+        return 1;
+
+    case KILN_C99_BUILTIN_REGEXP:
+    case KILN_C99_BUILTIN_PROXY:
+    case KILN_C99_BUILTIN_AGGREGATE_ERROR:
+    case KILN_C99_BUILTIN_SUPPRESSED_ERROR:
+    case KILN_C99_BUILTIN_TEMPORAL_PLAIN_YEAR_MONTH:
+    case KILN_C99_BUILTIN_TEMPORAL_PLAIN_MONTH_DAY:
+    case KILN_C99_BUILTIN_TEMPORAL_ZONED_DATE_TIME:
+        *out = 2.0;
+        return 1;
+
+    case KILN_C99_BUILTIN_INT8_ARRAY:
+    case KILN_C99_BUILTIN_UINT8_ARRAY:
+    case KILN_C99_BUILTIN_UINT8_CLAMPED_ARRAY:
+    case KILN_C99_BUILTIN_INT16_ARRAY:
+    case KILN_C99_BUILTIN_UINT16_ARRAY:
+    case KILN_C99_BUILTIN_INT32_ARRAY:
+    case KILN_C99_BUILTIN_UINT32_ARRAY:
+    case KILN_C99_BUILTIN_FLOAT16_ARRAY:
+    case KILN_C99_BUILTIN_FLOAT32_ARRAY:
+    case KILN_C99_BUILTIN_FLOAT64_ARRAY:
+    case KILN_C99_BUILTIN_BIG_INT64_ARRAY:
+    case KILN_C99_BUILTIN_BIG_UINT64_ARRAY:
+    case KILN_C99_BUILTIN_TEMPORAL_PLAIN_DATE:
+    case KILN_C99_BUILTIN_TEMPORAL_PLAIN_DATE_TIME:
+        *out = 3.0;
+        return 1;
+
+    case KILN_C99_BUILTIN_DATE:
+        *out = 7.0;
+        return 1;
+
+    default:
+        return 0;
     }
 }
 

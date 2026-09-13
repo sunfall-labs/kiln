@@ -355,6 +355,11 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
          * what a `.call` borrow off the prototype depends on. */
         return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_DATA_VIEW_GET_INT8,
                                       KILN_C99_METHOD_DATA_VIEW_SET_BIG_UINT64);
+    case KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE:
+        if (kiln_c99_same_name(key, key_len, "slice")) {
+            return KILN_C99_METHOD_SLICE;
+        }
+        return 0;
     default:
         return 0;
     }

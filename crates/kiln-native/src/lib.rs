@@ -88,6 +88,89 @@ fn reduced_graph(
     graph.reduce_to_live(demand).map_err(NativeError::Graph)
 }
 
+/// Specialize direct ESM exports to the closed-world demand, then let Oxc
+/// remove the newly unreferenced local declarations using its purity model.
+///
+/// The source text predates graph reduction, so compiled imports are reconciled
+/// by local binding name with the reduced graph. That both discards already
+/// dead bindings and preserves synthetic re-export retargeting. A module whose
+/// demanded interface cannot be recovered keeps its original program.
+fn dce_release_graph(
+    graph: &ModuleGraph,
+    demand: &kiln_module_graph::LiveDemand,
+) -> (ModuleGraph, kiln_module_graph::LiveDemand) {
+    let mut replacements = BTreeMap::new();
+    let mut remapped = demand.clone();
+
+    for node in graph.modules() {
+        if node.source != ModuleSource::Source {
+            continue;
+        }
+        if node.program.program.source.is_empty() {
+            continue;
+        }
+        let demanded_slots = demand.slots.get(&node.path).cloned().unwrap_or_default();
+        let demanded_names = node
+            .program
+            .exports
+            .iter()
+            .filter(|export| demanded_slots.contains(&export.local_slot))
+            .map(|export| export.exported.clone())
+            .collect::<BTreeSet<_>>();
+        let Some(path) = node.path.to_str() else {
+            continue;
+        };
+        let hir = frontend_oxc::parse_dce(path, &node.program.program.source, &demanded_names);
+        let Ok(mut program) = kiln_ir::compile_module(&hir) else {
+            continue;
+        };
+
+        let mut imports = Vec::new();
+        for mut import in program.imports {
+            let Some(linked) = node
+                .program
+                .imports
+                .iter()
+                .find(|candidate| candidate.local == import.local)
+            else {
+                continue;
+            };
+            import.source.clone_from(&linked.source);
+            import.imported.clone_from(&linked.imported);
+            imports.push(import);
+        }
+        program.imports = imports;
+        program.dependencies.clone_from(&node.program.dependencies);
+
+        let replacement_slots = program
+            .exports
+            .iter()
+            .filter(|export| demanded_names.contains(&export.exported))
+            .map(|export| export.local_slot)
+            .collect::<BTreeSet<_>>();
+        let replacement_names = program
+            .exports
+            .iter()
+            .filter(|export| replacement_slots.contains(&export.local_slot))
+            .map(|export| export.exported.clone())
+            .collect::<BTreeSet<_>>();
+        if !demanded_names.is_subset(&replacement_names) {
+            continue;
+        }
+
+        remapped.slots.insert(node.path.clone(), replacement_slots);
+        replacements.insert(node.path.clone(), program);
+    }
+
+    match graph.replace_programs_and_relink(replacements) {
+        Ok(graph) => (graph, remapped),
+        // Optimization must not turn a valid linked program into a build
+        // failure. An unfamiliar export/re-export shape keeps the already
+        // reduced graph and its original slot numbering.
+        Err(_) => (graph.clone(), demand.clone()),
+    }
+}
+
 // Select the budget only on a generated-C cache miss. Warm builds must not rerun liveness,
 // and the cache payload must remember the actual policy used to compile the emitted body.
 fn emit_graph_module_for_profile(
@@ -1320,7 +1403,12 @@ impl NativeBuilder {
             &selection_options_with_exclusions(&NativeProfile::Dev, &native_plan.excluded),
         )
         .map_err(NativeError::Graph)?;
-        let (reduced, _) = reduced_graph(graph, &demand)?;
+        let (reduced, demand) = reduced_graph(graph, &demand)?;
+        let (reduced, demand) = if options.profile == NativeProfile::Release {
+            dce_release_graph(&reduced, &demand)
+        } else {
+            (reduced, demand)
+        };
         let graph = &reduced;
         let mut emission = options.realm.emission();
         emission.compact = options.profile != NativeProfile::Profile;
@@ -1341,7 +1429,12 @@ impl NativeBuilder {
         let emitted_modules = emit_indexed(nodes.len(), "shared graph module emission", |index| {
             let node = nodes[index];
             let logical_path = logical_module_path(graph.project_root(), &node.path)?;
-            let module_emission = emission.clone();
+            let mut module_emission = emission.clone();
+            if matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs) {
+                module_emission.live_module_slots = Some(Arc::new(
+                    demand.slots.get(&node.path).cloned().unwrap_or_default(),
+                ));
+            }
             cached_graph_module(
                 &self.cache,
                 &target,
@@ -1881,6 +1974,11 @@ impl NativeBuilder {
         // live edges. With everything live this is the identity transform.
         let demand = selected.demand();
         let (reduced, demand) = reduced_graph(graph, &demand)?;
+        let (reduced, demand) = if options.profile == NativeProfile::Release {
+            dce_release_graph(&reduced, &demand)
+        } else {
+            (reduced, demand)
+        };
         let graph = &reduced;
         // Dispatch-group mask for the prelude: same closed-world selection,
         // so the `-D` flags below only ever remove what nothing retained can
@@ -2879,6 +2977,152 @@ Console.prototype.Console = Console;
 if (typeof console !== "undefined") {
     console.Console = Console;
 }
+
+const __kilnUint8ToHex = globalThis.__kilnUint8ToHex;
+delete globalThis.__kilnUint8ToHex;
+const __kilnUint8ToBase64 = globalThis.__kilnUint8ToBase64;
+delete globalThis.__kilnUint8ToBase64;
+
+if (typeof Uint8Array !== "undefined" && Uint8Array.prototype) {
+    Uint8Array.prototype.toHex = function toHex() {
+        if (!(this instanceof Uint8Array)) {
+            throw new TypeError("toHex called on incompatible receiver");
+        }
+        return __kilnUint8ToHex(this);
+    };
+
+    Uint8Array.prototype.toBase64 = function toBase64(options) {
+        if (!(this instanceof Uint8Array)) {
+            throw new TypeError("toBase64 called on incompatible receiver");
+        }
+        let url = false;
+        let omitPadding = false;
+        if (options !== undefined) {
+            if (typeof options !== "object" || options === null) {
+                throw new TypeError("options must be an object");
+            }
+            if (options.alphabet !== undefined) {
+                const alphabet = String(options.alphabet);
+                if (alphabet === "base64url") {
+                    url = true;
+                } else if (alphabet === "base64") {
+                    url = false;
+                } else {
+                    throw new TypeError('alphabet must be "base64" or "base64url"');
+                }
+            }
+            omitPadding = Boolean(options.omitPadding);
+        }
+        return __kilnUint8ToBase64(this, url, omitPadding);
+    };
+}
+
+if (typeof JSON !== "undefined") {
+    const __kilnOriginalParse = JSON.parse;
+    const __kilnOriginalStringify = JSON.stringify;
+
+    JSON.parse = function parse(text, reviver) {
+        const root = __kilnOriginalParse(text);
+        if (typeof reviver !== "function") return root;
+
+        function internalize(holder, name) {
+            const val = holder[name];
+            if (val && typeof val === "object") {
+                if (Array.isArray(val)) {
+                    for (let i = 0; i < val.length; i++) {
+                        const newElement = internalize(val, String(i));
+                        if (newElement === undefined) {
+                            delete val[i];
+                        } else {
+                            val[i] = newElement;
+                        }
+                    }
+                } else {
+                    for (const key of Object.keys(val)) {
+                        const newProperty = internalize(val, key);
+                        if (newProperty === undefined) {
+                            delete val[key];
+                        } else {
+                            val[key] = newProperty;
+                        }
+                    }
+                }
+            }
+            return reviver.call(holder, name, val);
+        }
+
+        return internalize({ "": root }, "");
+    };
+
+    JSON.stringify = function stringify(value, replacer, space) {
+        if (typeof replacer !== "function" && !Array.isArray(replacer)) {
+            return __kilnOriginalStringify(value, replacer, space);
+        }
+        let replacerFn = null;
+        let propertyList = null;
+        if (typeof replacer === "function") {
+            replacerFn = replacer;
+        } else if (Array.isArray(replacer)) {
+            propertyList = [];
+            for (let i = 0; i < replacer.length; i++) {
+                const item = replacer[i];
+                if (typeof item === "string" || typeof item === "number") {
+                    const str = String(item);
+                    if (propertyList.indexOf(str) === -1) {
+                        propertyList.push(str);
+                    }
+                }
+            }
+        }
+
+        const stack = [];
+        function serialize(holder, key) {
+            let val = holder[key];
+            if (val && typeof val === "object" && typeof val.toJSON === "function") {
+                val = val.toJSON(key);
+            }
+            if (replacerFn !== null) {
+                val = replacerFn.call(holder, key, val);
+            }
+            if (val === undefined || typeof val === "function" || typeof val === "symbol") {
+                return undefined;
+            }
+            if (val === null || typeof val !== "object") {
+                return val;
+            }
+            if (stack.indexOf(val) !== -1) {
+                throw new TypeError("Converting circular structure to JSON");
+            }
+            stack.push(val);
+            let res;
+            if (Array.isArray(val)) {
+                res = [];
+                for (let i = 0; i < val.length; i++) {
+                    const item = serialize(val, String(i));
+                    res.push(item === undefined ? null : item);
+                }
+            } else {
+                res = {};
+                const keys = propertyList !== null ? propertyList : Object.keys(val);
+                for (let i = 0; i < keys.length; i++) {
+                    const k = keys[i];
+                    if (Object.prototype.hasOwnProperty.call(val, k)) {
+                        const propVal = serialize(val, k);
+                        if (propVal !== undefined) {
+                            res[k] = propVal;
+                        }
+                    }
+                }
+            }
+            stack.pop();
+            return res;
+        }
+
+        const transformed = serialize({ "": value }, "");
+        if (transformed === undefined) return undefined;
+        return __kilnOriginalStringify(transformed, undefined, space);
+    };
+}
 "#;
 
 fn native_builtin_bootstrap_module(
@@ -2944,6 +3188,7 @@ fn native_builtin_supported_exports(
     use kiln_module_resolver::NodeBuiltin;
 
     match builtin {
+        NodeBuiltin::Process => kiln_builtins::PROCESS_EXPORTS,
         NodeBuiltin::Console => kiln_builtins::CONSOLE_EXPORTS,
         NodeBuiltin::Events => &["EventEmitter", "default"],
         NodeBuiltin::Ffi => &[
@@ -2953,25 +3198,13 @@ fn native_builtin_supported_exports(
             "suffix",
             "toArrayBuffer",
         ],
-        NodeBuiltin::Net => &["connect", "createConnection", "createServer", "default"],
-        // `METHODS` is a constant array rather than a function, so it costs nothing to answer and
-        // a placeholder served it worst: the unmaterialized-callable fallback made
-        // `typeof http.METHODS` "function" against the interpreter's "object", which is a wrong
-        // answer rather than a refusal.
-        NodeBuiltin::Http => &[
-            "METHODS",
-            "Server",
-            "ServerResponse",
-            "createServer",
-            "default",
-            "get",
-            "request",
-        ],
+        NodeBuiltin::Net => kiln_builtins::NET_EXPORTS,
+        NodeBuiltin::Http => kiln_builtins::HTTP_EXPORTS,
         NodeBuiltin::Util => kiln_builtins::UTIL_EXPORTS,
         NodeBuiltin::DiagnosticsChannel => kiln_builtins::DIAGNOSTICS_CHANNEL_EXPORTS,
-        NodeBuiltin::Https => &["createServer", "default"],
-        NodeBuiltin::Http2 => &["createSecureServer", "createServer", "default"],
-        NodeBuiltin::Dns => &["default", "lookup"],
+        NodeBuiltin::Https => kiln_builtins::HTTPS_EXPORTS,
+        NodeBuiltin::Http2 => kiln_builtins::HTTP2_EXPORTS,
+        NodeBuiltin::Dns => kiln_builtins::DNS_EXPORTS,
         // `EOL` and `devNull` are constants rather than readings of the machine, so answering them
         // costs nothing and reads nothing -- and they are the two members of `node:os` that are
         // not functions, which makes them the two that a refusal would serve worst. `os.EOL` is
@@ -2979,23 +3212,10 @@ fn native_builtin_supported_exports(
         // it had been answering `undefined` here against the interpreter's "\n".
         NodeBuiltin::Os => kiln_builtins::OS_EXPORTS,
         NodeBuiltin::Tty => kiln_builtins::TTY_EXPORTS,
-        NodeBuiltin::Stream => &[
-            "Readable",
-            "Writable",
-            "addAbortSignal",
-            "default",
-            "finished",
-        ],
+        NodeBuiltin::Stream => kiln_builtins::STREAM_EXPORTS,
         NodeBuiltin::PerfHooks => kiln_builtins::PERF_HOOKS_EXPORTS,
-        NodeBuiltin::FsPromises => &["appendFile", "mkdir", "readFile", "stat", "writeFile"],
-        NodeBuiltin::Fs => &[
-            "appendFileSync",
-            "default",
-            "existsSync",
-            "promises",
-            "readFileSync",
-            "writeFileSync",
-        ],
+        NodeBuiltin::FsPromises => kiln_builtins::FS_PROMISES_EXPORTS,
+        NodeBuiltin::Fs => kiln_builtins::FS_EXPORTS,
         NodeBuiltin::Path => &[
             "basename",
             "default",
@@ -3038,9 +3258,9 @@ fn native_builtin_supported_exports(
         NodeBuiltin::Url => kiln_builtins::URL_EXPORTS,
         NodeBuiltin::Buffer => kiln_builtins::BUFFER_EXPORTS,
         NodeBuiltin::StringDecoder => kiln_builtins::STRING_DECODER_EXPORTS,
-        NodeBuiltin::AsyncHooks => &["AsyncLocalStorage", "AsyncResource", "default"],
-        NodeBuiltin::Crypto => &["createHash", "default", "randomUUID"],
-        _ => &[],
+        NodeBuiltin::AsyncHooks => kiln_builtins::ASYNC_HOOKS_EXPORTS,
+        NodeBuiltin::Crypto => kiln_builtins::CRYPTO_EXPORTS,
+        NodeBuiltin::Zlib => kiln_builtins::ZLIB_EXPORTS,
     }
 }
 
@@ -3580,64 +3800,6 @@ status = kiln_c99_put(host, namespace, "performance", 11, performance, 0, NULL);
 if (status != KILN_C99_OK) return status;
 exports[0] = namespace;
 exports[1] = performance;"#,
-        ),
-        NodeBuiltin::FsPromises => Some(
-            r#"kiln_value unmaterialized = kiln_c99_method(KILN_C99_METHOD_NODE_BUILTIN_UNMATERIALIZED);
-kiln_value mkdir = kiln_c99_method(KILN_C99_METHOD_NODE_FS_MKDIR);
-kiln_value read_file = kiln_c99_method(KILN_C99_METHOD_NODE_FS_READ_FILE);
-kiln_value stat = kiln_c99_method(KILN_C99_METHOD_NODE_FS_STAT);
-kiln_value write_file = kiln_c99_method(KILN_C99_METHOD_NODE_FS_WRITE_FILE);
-exports[0] = unmaterialized;
-exports[1] = mkdir;
-exports[2] = read_file;
-exports[3] = stat;
-exports[4] = write_file;"#,
-        ),
-        NodeBuiltin::Fs => Some(
-            r#"kiln_value unmaterialized = kiln_c99_method(KILN_C99_METHOD_NODE_BUILTIN_UNMATERIALIZED);
-kiln_value exists_sync = kiln_c99_method(KILN_C99_METHOD_NODE_FS_EXISTS_SYNC);
-kiln_value promises;
-int status = kiln_c99_new_object(&promises);
-if (status != KILN_C99_OK) return status;
-status = kiln_c99_put(host, promises, "readFile", 8, kiln_c99_method(KILN_C99_METHOD_NODE_FS_READ_FILE), 0, NULL);
-if (status != KILN_C99_OK) return status;
-status = kiln_c99_put(host, promises, "stat", 4, kiln_c99_method(KILN_C99_METHOD_NODE_FS_STAT), 0, NULL);
-if (status != KILN_C99_OK) return status;
-status = kiln_c99_put(host, promises, "writeFile", 9, kiln_c99_method(KILN_C99_METHOD_NODE_FS_WRITE_FILE), 0, NULL);
-if (status != KILN_C99_OK) return status;
-kiln_value namespace;
-status = kiln_c99_new_object(&namespace);
-if (status != KILN_C99_OK) return status;
-status = kiln_c99_put(host, namespace, "appendFileSync", 14, unmaterialized, 0, NULL);
-if (status != KILN_C99_OK) return status;
-status = kiln_c99_put(host, namespace, "existsSync", 10, exists_sync, 0, NULL);
-if (status != KILN_C99_OK) return status;
-status = kiln_c99_put(host, namespace, "promises", 8, promises, 0, NULL);
-if (status != KILN_C99_OK) return status;
-status = kiln_c99_put(host, namespace, "readFileSync", 12, unmaterialized, 0, NULL);
-if (status != KILN_C99_OK) return status;
-status = kiln_c99_put(host, namespace, "writeFileSync", 13, unmaterialized, 0, NULL);
-if (status != KILN_C99_OK) return status;
-exports[0] = kiln_c99_undefined();
-exports[1] = unmaterialized;
-exports[2] = kiln_c99_undefined();
-exports[3] = kiln_c99_undefined();
-exports[4] = namespace;
-exports[5] = exists_sync;
-exports[6] = kiln_c99_undefined();
-exports[7] = kiln_c99_undefined();
-exports[8] = kiln_c99_undefined();
-exports[9] = promises;
-exports[10] = unmaterialized;
-exports[11] = kiln_c99_undefined();
-exports[12] = kiln_c99_undefined();
-exports[13] = kiln_c99_undefined();
-exports[14] = kiln_c99_undefined();
-exports[15] = kiln_c99_undefined();
-exports[16] = kiln_c99_undefined();
-exports[17] = kiln_c99_undefined();
-exports[18] = kiln_c99_undefined();
-exports[19] = unmaterialized;"#,
         ),
         NodeBuiltin::Path => Some(
             r#"kiln_value unmaterialized = kiln_c99_method(KILN_C99_METHOD_NODE_BUILTIN_UNMATERIALIZED);
@@ -5580,6 +5742,7 @@ extern int kiln_realm_gc_mark_value(void *heap, const void *value);
 #define KILN_C99_THROWN (-7)
 #define KILN_C99_CONTROL_ERROR (-2)
 #define KILN_C99_HOST_ERROR (-3)
+extern int kiln_c99_process_object(kiln_value *result);
 #define KILN_C99_HINT_STRING 1
 extern int kiln_c99_new_object(kiln_value *result);
 extern int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
@@ -5891,6 +6054,85 @@ static int kiln_graph_prepare_completion(kiln_graph_context *graph, size_t index
     );
     output.push_str(
         r#"
+static int kiln_install_native_modules(kiln_host *host) {
+    kiln_value proc_obj = kiln_c99_undefined();
+    kiln_value modules_obj = kiln_c99_undefined();
+    int status = kiln_c99_process_object(&proc_obj);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_new_object(&modules_obj);
+    if (status != KILN_C99_OK) return status;
+
+    kiln_value net_obj = kiln_c99_undefined();
+    status = kiln_c99_new_object(&net_obj);
+    if (status != KILN_C99_OK) return status;
+    kiln_value net_connect = (kiln_value){ 11, 0, { 338 /* KILN_C99_METHOD_NODE_NET_CONNECT */ } };
+    kiln_value net_create_server = (kiln_value){ 11, 0, { 268 /* KILN_C99_METHOD_NODE_NET_CREATE_SERVER */ } };
+    status = kiln_c99_put(host, net_obj, "connect", 7, net_connect, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, net_obj, "createConnection", 16, net_connect, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, net_obj, "createServer", 12, net_create_server, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, modules_obj, "net", 3, net_obj, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+
+    kiln_value http_obj = kiln_c99_undefined();
+    status = kiln_c99_new_object(&http_obj);
+    if (status != KILN_C99_OK) return status;
+    kiln_value http_server = (kiln_value){ 11, 0, { 403 /* KILN_C99_METHOD_NODE_HTTP_SERVER */ } };
+    kiln_value http_server_response = (kiln_value){ 11, 0, { 426 /* KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE */ } };
+    kiln_value http_create_server = (kiln_value){ 11, 0, { 275 /* KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER */ } };
+    kiln_value http_get = (kiln_value){ 11, 0, { 280 /* KILN_C99_METHOD_NODE_HTTP_GET */ } };
+    kiln_value http_request = (kiln_value){ 11, 0, { 281 /* KILN_C99_METHOD_NODE_HTTP_REQUEST */ } };
+    status = kiln_c99_put(host, http_obj, "Server", 6, http_server, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, http_obj, "ServerResponse", 14, http_server_response, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, http_obj, "createServer", 12, http_create_server, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, http_obj, "get", 3, http_get, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, http_obj, "request", 7, http_request, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, modules_obj, "http", 4, http_obj, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+
+    kiln_value fsp_obj = kiln_c99_undefined();
+    status = kiln_c99_new_object(&fsp_obj);
+    if (status != KILN_C99_OK) return status;
+    kiln_value fs_append_file = (kiln_value){ 11, 0, { 482 /* KILN_C99_METHOD_NODE_BUILTIN_UNMATERIALIZED */ } };
+    kiln_value fs_mkdir = (kiln_value){ 11, 0, { 507 /* KILN_C99_METHOD_NODE_FS_MKDIR */ } };
+    kiln_value fs_read_file = (kiln_value){ 11, 0, { 379 /* KILN_C99_METHOD_NODE_FS_READ_FILE */ } };
+    kiln_value fs_stat = (kiln_value){ 11, 0, { 380 /* KILN_C99_METHOD_NODE_FS_STAT */ } };
+    kiln_value fs_write_file = (kiln_value){ 11, 0, { 381 /* KILN_C99_METHOD_NODE_FS_WRITE_FILE */ } };
+    status = kiln_c99_put(host, fsp_obj, "appendFile", 10, fs_append_file, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, fsp_obj, "mkdir", 5, fs_mkdir, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, fsp_obj, "readFile", 8, fs_read_file, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, fsp_obj, "stat", 4, fs_stat, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, fsp_obj, "writeFile", 9, fs_write_file, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, modules_obj, "fs_promises", 11, fsp_obj, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+
+    kiln_value fs_obj = kiln_c99_undefined();
+    status = kiln_c99_new_object(&fs_obj);
+    if (status != KILN_C99_OK) return status;
+    kiln_value fs_exists_sync = (kiln_value){ 11, 0, { 378 /* KILN_C99_METHOD_NODE_FS_EXISTS_SYNC */ } };
+    status = kiln_c99_put(host, fs_obj, "existsSync", 10, fs_exists_sync, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, fs_obj, "promises", 8, fsp_obj, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, modules_obj, "fs", 2, fs_obj, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+
+    status = kiln_c99_put(host, proc_obj, "__kilnNativeModules", 19, modules_obj, 0, NULL);
+    return status;
+}
+
 static int kiln_graph_enter(void *opaque) {
     kiln_graph_context *graph = (kiln_graph_context *)opaque;
     kiln_graph_entry_context context;
@@ -5905,6 +6147,8 @@ static int kiln_graph_enter(void *opaque) {
         status = kiln_realm_gc_register_roots(kiln_graph_gc_roots, graph, KILN_GC_ROOT_SURVIVES_TEARDOWN);
         if (status != 0) return status;
         graph->roots_registered = 1;
+        status = kiln_install_native_modules(host);
+        if (status != 0) return status;
 "#,
     );
     if let Some(bootstrap) = bootstrap {

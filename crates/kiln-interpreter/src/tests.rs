@@ -850,11 +850,12 @@ fn node_events_builtin_exposes_event_emitter() {
 #[test]
 fn node_builtin_defaults_preserve_namespace_or_callable_shape() {
     for specifier in ["async_hooks", "crypto", "fs", "http", "net"] {
-        let default = node_builtin_exports(specifier)
-            .unwrap_or_else(|| panic!("builtin missing: {specifier}"))
-            .into_iter()
-            .find_map(|(name, value)| (name == "default").then_some(value))
-            .expect("builtin advertises a default export");
+        let default = match node_builtin_native_namespace(specifier) {
+            Some(Value::Native(namespace, _)) => namespace
+                .property("default")
+                .unwrap_or(Value::Native(namespace, RealmId::PRIMARY)),
+            _ => panic!("builtin missing: {specifier}"),
+        };
         assert_eq!(default.type_name(), "object", "node:{specifier}");
     }
 
@@ -863,11 +864,12 @@ fn node_builtin_defaults_preserve_namespace_or_callable_shape() {
     // graph execution is the authoritative materialization path for this builtin.
     assert!(node_builtin_exports("node:module").is_none());
     assert!(node_builtin_commonjs_value("node:module").is_none());
-    let stream_default = node_builtin_exports("stream")
-        .expect("legacy stream builtin")
-        .into_iter()
-        .find_map(|(name, value)| (name == "default").then_some(value))
-        .expect("stream advertises a default export");
+    let stream_default = match node_builtin_native_namespace("stream") {
+        Some(Value::Native(namespace, _)) => namespace
+            .property("default")
+            .unwrap_or(Value::Native(namespace, RealmId::PRIMARY)),
+        _ => panic!("legacy stream builtin"),
+    };
     assert_eq!(stream_default.type_name(), "function");
     for specifier in kiln_builtins::ts_builtin_specifiers() {
         assert!(

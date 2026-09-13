@@ -20,7 +20,7 @@ use kiln_interpreter::{
     ExecutionLimits, ExecutionResult, ImportAttributes, ModuleBinding, ModuleLoadError,
     ModuleLoadRequest, ModuleLoaderService, ModulePlan, ModuleRealmSession, ModuleSelfExport,
     ModuleSelfImport, ModuleValueRef, PlannedModule, Value, execute_module_in_runtime_with_loader,
-    execute_node_module_in_session_with_loader, node_builtin_commonjs_value,
+    execute_node_module_in_session_with_loader, node_builtin_commonjs_value_for_graph,
     node_builtin_export_names, node_builtin_exports, ordinary_object, own_data_property,
     parse_json_module, read_through_cell,
 };
@@ -947,6 +947,47 @@ impl ModuleGraph {
         Some(patched)
     }
 
+    /// Replace several programs and rebuild the graph's export tables.
+    ///
+    /// Unlike [`Self::patch_module`], this accepts a smaller import/export
+    /// interface. It is intended for a closed-world specialization that has
+    /// already reduced the graph to live nodes and reconciled every replacement
+    /// with the node's resolved dependencies. Relinking is all-or-nothing: an
+    /// invalid replacement returns the ordinary graph error and leaves `self`
+    /// untouched.
+    pub fn replace_programs_and_relink(
+        &self,
+        mut replacements: BTreeMap<PathBuf, ModuleProgram>,
+    ) -> Result<Self, ModuleGraphError> {
+        let mut modules = BTreeMap::new();
+        for path in self.order.iter() {
+            let mut node = self
+                .module_node(path)
+                .ok_or_else(|| ModuleGraphError::InternalMissingModule { path: path.clone() })?
+                .clone();
+            if let Some(program) = replacements.remove(path) {
+                node.program = program;
+            }
+            modules.insert(path.clone(), node);
+        }
+        if let Some((path, _)) = replacements.into_iter().next() {
+            return Err(ModuleGraphError::InternalMissingModule { path });
+        }
+        let export_resolutions = resolve_exports(&modules, &self.order)?;
+        validate_links(&modules, &self.order, &export_resolutions)?;
+        Ok(Self {
+            entry: self.entry.clone(),
+            project_root: self.project_root.clone(),
+            modules: Arc::new(modules),
+            order: Arc::clone(&self.order),
+            export_resolutions: Arc::new(export_resolutions),
+            patched_modules: Arc::new(BTreeMap::new()),
+            dynamic_dependencies: Arc::clone(&self.dynamic_dependencies),
+            dynamic_failures: Arc::clone(&self.dynamic_failures),
+            runtime_failures: Arc::clone(&self.runtime_failures),
+        })
+    }
+
     /// Return the subgraph of live modules as a self-consistent graph.
     ///
     /// Filters `modules` and `order` to `demand.live` (dependency-first
@@ -1755,7 +1796,7 @@ impl ModuleGraph {
                 ModuleSource::NodeBuiltin(builtin) if !kiln_builtins::is_ts_builtin(builtin) => {
                     Some((
                         path.clone(),
-                        node_builtin_commonjs_value(builtin.specifier())
+                        node_builtin_commonjs_value_for_graph(builtin.specifier())
                             .expect("a linkable builtin has a CommonJS projection"),
                     ))
                 }
@@ -2508,7 +2549,7 @@ impl<H: HostOps + ?Sized> CommonJsModuleLoader for CommonJsLoader<'_, H> {
         specifier: &str,
         instruction: usize,
     ) -> Result<Option<Value>, ExecutionError> {
-        if let Some(value) = node_builtin_commonjs_value(specifier) {
+        if let Some(value) = node_builtin_commonjs_value_for_graph(specifier) {
             return Ok(Some(value));
         }
         let builtin = NodeBuiltin::parse(specifier).ok_or_else(|| ExecutionError::Host {
@@ -2521,15 +2562,23 @@ impl<H: HostOps + ?Sized> CommonJsModuleLoader for CommonJsLoader<'_, H> {
         let Some(path) = path else {
             return Ok(None);
         };
+        // A TypeScript builtin may probe its native counterpart through
+        // `process.getBuiltinModule` while that same builtin is being lazily
+        // evaluated.  There is no completed canonical value to return yet;
+        // report the probe as unavailable so the builtin's host-capability
+        // fallback can install its own behavior.  Runtime CommonJS cycles do
+        // not pass through this path and retain their cache semantics.
+        if self.ensuring_targets.contains(path) {
+            return Ok(None);
+        }
         if unsafe { (&*self.values).get(path).is_none() } {
             self.ensure_target_value(path, instruction)?;
         }
-        let provider = unsafe { (&*self.values).get(path) }.ok_or_else(|| {
-            ExecutionError::Host {
+        let provider =
+            unsafe { (&*self.values).get(path) }.ok_or_else(|| ExecutionError::Host {
                 instruction,
                 message: format!("builtin module `{specifier}` has not been evaluated"),
-            }
-        })?;
+            })?;
         let value = provider
             .get("default")
             .cloned()
@@ -2605,7 +2654,7 @@ impl<H: HostOps + ?Sized> CommonJsModuleLoader for CommonJsLoader<'_, H> {
                 if let Some(dependency) = runtime_dependency {
                     return self.ensure_target_value(&dependency.target, instruction);
                 }
-                if let Some(value) = node_builtin_commonjs_value(specifier) {
+                if let Some(value) = node_builtin_commonjs_value_for_graph(specifier) {
                     return Ok(value);
                 }
                 if NodeBuiltin::parse(specifier).is_some_and(kiln_builtins::is_ts_builtin) {

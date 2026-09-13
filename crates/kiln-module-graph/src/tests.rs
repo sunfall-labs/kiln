@@ -2031,6 +2031,45 @@ fn node_builtin_static_imports_are_typed_virtual_modules() {
 }
 
 #[test]
+fn node_builtin_fs_ts_evaluates_and_exports_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.js",
+        concat!(
+            "import fs, { existsSync, promises, readFileSync } from 'node:fs';\n",
+            "import { readFile } from 'node:fs/promises';\n",
+            "console.log(typeof fs, typeof existsSync, typeof promises, typeof readFileSync, typeof readFile, fs.default === fs);\n",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with fs builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute fs builtin");
+    assert_eq!(
+        host.output,
+        ["object function object function function true"]
+    );
+}
+
+#[test]
 fn node_builtin_os_ts_evaluates_and_exports_cleanly() {
     let project = TempProject::new();
     let entry = project.write(
@@ -3407,6 +3446,645 @@ fn commonjs_loader_clears_nested_thrown_values_before_next_require() {
 }
 
 #[test]
+fn node_builtin_dns_evaluates_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import dns, { lookup, ADDRCONFIG, promises } from 'node:dns';\n",
+            "let lookedUp = false;\n",
+            "lookup('localhost', (err, address, family) => {\n",
+            "  lookedUp = address === '127.0.0.1' && family === 4;\n",
+            "});\n",
+            "console.log(\n",
+            "  typeof dns === 'object',\n",
+            "  typeof lookup === 'function',\n",
+            "  ADDRCONFIG === 32,\n",
+            "  typeof promises.lookup === 'function',\n",
+            "  lookedUp,\n",
+            ");\n",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with dns builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute dns builtin");
+    assert_eq!(host.output, ["true true true true true"]);
+}
+
+#[test]
+fn node_builtin_dns_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const dns = require('node:dns');\n",
+            "let lookedUp = false;\n",
+            "dns.lookup('localhost', (err, address, family) => {\n",
+            "  lookedUp = address === '127.0.0.1' && family === 4;\n",
+            "});\n",
+            "module.exports = {\n",
+            "  isObj: typeof dns === 'object',\n",
+            "  hasLookup: typeof dns.lookup === 'function',\n",
+            "  addrconfig: dns.ADDRCONFIG,\n",
+            "  lookedUp,\n",
+            "};\n",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import bridge from './bridge.cjs';\n",
+            "console.log(bridge.isObj, bridge.hasLookup, bridge.addrconfig === 32, bridge.lookedUp);\n",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with dns builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute dns builtin cjs");
+    assert_eq!(host.output, ["true true true true"]);
+}
+
+#[test]
+fn node_builtin_crypto_evaluates_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import crypto, { createHash, createHmac, randomUUID, randomBytes, timingSafeEqual, getHashes } from 'node:crypto';\n",
+            "const hash = createHash('sha256').update('hello world').digest('hex');\n",
+            "const hmac = createHmac('sha256', 'key').update('The quick brown fox jumps over the lazy dog').digest('hex');\n",
+            "const uuid = randomUUID();\n",
+            "const bytes = randomBytes(8);\n",
+            "const eq = timingSafeEqual(bytes, bytes);\n",
+            "console.log(\n",
+            "  typeof crypto === 'object',\n",
+            "  hash === 'b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9',\n",
+            "  hmac === 'f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8',\n",
+            "  typeof uuid === 'string' && uuid.length === 36,\n",
+            "  bytes.length === 8,\n",
+            "  eq,\n",
+            "  getHashes().includes('sha256'),\n",
+            ");\n",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with crypto builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute crypto builtin");
+    assert_eq!(host.output, ["true true true true true true true"]);
+}
+
+#[test]
+fn node_builtin_crypto_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const crypto = require('node:crypto');\n",
+            "const hash = crypto.createHash('sha256').update('hello world').digest('hex');\n",
+            "module.exports = {\n",
+            "  isObj: typeof crypto === 'object',\n",
+            "  hashMatches: hash === 'b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9',\n",
+            "  hasRandomUUID: typeof crypto.randomUUID === 'function',\n",
+            "  hasGetHashes: Array.isArray(crypto.getHashes()),\n",
+            "};\n",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import bridge from './bridge.cjs';\n",
+            "console.log(bridge.isObj, bridge.hashMatches, bridge.hasRandomUUID, bridge.hasGetHashes);\n",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with crypto builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute crypto builtin cjs");
+    assert_eq!(host.output, ["true true true true"]);
+}
+
+#[test]
+fn node_builtin_http2_evaluates_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import http2, { createServer, createSecureServer } from 'node:http2';\n",
+            "let threw = false;\n",
+            "try {\n",
+            "  createServer();\n",
+            "} catch (e) {\n",
+            "  threw = e.message.includes('requires an HTTP/2 host capability');\n",
+            "}\n",
+            "console.log(\n",
+            "  typeof http2 === 'object',\n",
+            "  typeof createServer === 'function',\n",
+            "  typeof createSecureServer === 'function',\n",
+            "  threw,\n",
+            ");\n",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with http2 builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute http2 builtin");
+    assert_eq!(host.output, ["true true true true"]);
+}
+
+#[test]
+fn node_builtin_http2_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const http2 = require('node:http2');\n",
+            "let threw = false;\n",
+            "try {\n",
+            "  http2.createSecureServer();\n",
+            "} catch (e) {\n",
+            "  threw = e.message.includes('requires an HTTP/2 host capability');\n",
+            "}\n",
+            "module.exports = {\n",
+            "  isObj: typeof http2 === 'object',\n",
+            "  hasCreateServer: typeof http2.createServer === 'function',\n",
+            "  hasCreateSecure: typeof http2.createSecureServer === 'function',\n",
+            "  threw,\n",
+            "};\n",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import bridge from './bridge.cjs';\n",
+            "console.log(bridge.isObj, bridge.hasCreateServer, bridge.hasCreateSecure, bridge.threw);\n",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with http2 builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute http2 builtin cjs");
+    assert_eq!(host.output, ["true true true true"]);
+}
+
+#[test]
+fn node_builtin_zlib_evaluates_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import zlib, { constants, deflateSync, inflateSync, gzipSync, gunzipSync, unzipSync } from 'node:zlib';\n",
+            "const def = deflateSync('hello zlib');\n",
+            "const inf = inflateSync(def);\n",
+            "const gz = gzipSync('hello gzip');\n",
+            "const ungz = gunzipSync(gz);\n",
+            "const unz = unzipSync(def);\n",
+            "console.log(\n",
+            "  constants.Z_OK === 0,\n",
+            "  inf.toString() === 'hello zlib',\n",
+            "  ungz.toString() === 'hello gzip',\n",
+            "  unz.toString() === 'hello zlib',\n",
+            ");\n",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with zlib builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute zlib builtin");
+    assert_eq!(host.output, ["true true true true"]);
+}
+
+#[test]
+fn node_builtin_zlib_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const zlib = require('node:zlib');\n",
+            "const def = zlib.deflateSync('hello zlib cjs');\n",
+            "const inf = zlib.inflateSync(def);\n",
+            "const gz = zlib.gzipSync('hello gzip cjs');\n",
+            "const ungz = zlib.gunzipSync(gz);\n",
+            "module.exports = {\n",
+            "  hasConst: zlib.constants.Z_OK === 0,\n",
+            "  infMatch: inf.toString() === 'hello zlib cjs',\n",
+            "  ungzMatch: ungz.toString() === 'hello gzip cjs',\n",
+            "  isObj: typeof zlib === 'object',\n",
+            "};\n",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import bridge from './bridge.cjs';\n",
+            "console.log(bridge.hasConst, bridge.infMatch, bridge.ungzMatch, bridge.isObj);\n",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with zlib builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute zlib builtin cjs");
+    assert_eq!(host.output, ["true true true true"]);
+}
+
+#[test]
+fn node_builtin_stream_evaluates_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import Stream, { Readable, Writable, addAbortSignal, finished } from 'node:stream';\n",
+            "const r = new Readable();\n",
+            "r.push('hello stream');\n",
+            "const data = r.read();\n",
+            "const w = new Writable({ write(c, e, cb) { cb(); } });\n",
+            "w.write('chunk');\n",
+            "w.end();\n",
+            "console.log(\n",
+            "  typeof Stream === 'function',\n",
+            "  typeof Readable === 'function',\n",
+            "  typeof Writable === 'function',\n",
+            "  data.toString() === 'hello stream',\n",
+            "  w.writableEnded,\n",
+            ");\n",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with stream builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute stream builtin");
+    assert_eq!(host.output, ["true true true true true"]);
+}
+
+#[test]
+fn node_builtin_stream_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const Stream = require('node:stream');\n",
+            "module.exports = {\n",
+            "  isFn: typeof Stream === 'function',\n",
+            "  hasReadable: typeof Stream.Readable === 'function',\n",
+            "  hasWritable: typeof Stream.Writable === 'function',\n",
+            "  hasFinished: typeof Stream.finished === 'function',\n",
+            "};\n",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import bridge from './bridge.cjs';\n",
+            "console.log(bridge.isFn, bridge.hasReadable, bridge.hasWritable, bridge.hasFinished);\n",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with stream builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute stream builtin cjs");
+    assert_eq!(host.output, ["true true true true"]);
+}
+
+#[test]
+fn node_builtin_https_evaluates_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import https, { createServer } from 'node:https';\n",
+            "let threw = false;\n",
+            "try {\n",
+            "  createServer();\n",
+            "} catch (e) {\n",
+            "  threw = e.message.includes('requires a TLS host capability');\n",
+            "}\n",
+            "console.log(\n",
+            "  typeof https === 'object',\n",
+            "  typeof createServer === 'function',\n",
+            "  threw,\n",
+            ");\n",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with https builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute https builtin");
+    assert_eq!(host.output, ["true true true"]);
+}
+
+#[test]
+fn node_builtin_https_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const https = require('node:https');\n",
+            "let threw = false;\n",
+            "try {\n",
+            "  https.createServer();\n",
+            "} catch (e) {\n",
+            "  threw = e.message.includes('requires a TLS host capability');\n",
+            "}\n",
+            "module.exports = {\n",
+            "  isObj: typeof https === 'object',\n",
+            "  hasCreateServer: typeof https.createServer === 'function',\n",
+            "  threw,\n",
+            "};\n",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import bridge from './bridge.cjs';\n",
+            "console.log(bridge.isObj, bridge.hasCreateServer, bridge.threw);\n",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with https builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute https builtin cjs");
+    assert_eq!(host.output, ["true true true"]);
+}
+
+#[test]
+fn node_builtin_async_hooks_evaluates_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import hooks, { AsyncLocalStorage, AsyncResource } from 'node:async_hooks';\n",
+            "const als = new AsyncLocalStorage();\n",
+            "const sync = als.run(123, () => als.getStore());\n",
+            "const res = new AsyncResource('probe');\n",
+            "const bound = res.bind((x) => x * 2);\n",
+            "console.log(\n",
+            "  typeof hooks === 'object',\n",
+            "  typeof AsyncLocalStorage === 'function',\n",
+            "  typeof AsyncResource === 'function',\n",
+            "  sync,\n",
+            "  bound(21),\n",
+            ");\n",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with async_hooks builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute async_hooks builtin");
+    assert_eq!(host.output, ["true true true 123 42"]);
+}
+
+#[test]
+fn node_builtin_async_hooks_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const hooks = require('node:async_hooks');\n",
+            "const als = new hooks.AsyncLocalStorage();\n",
+            "const sync = als.run('ok', () => als.getStore());\n",
+            "const res = new hooks.AsyncResource('probe');\n",
+            "module.exports = {\n",
+            "  isObj: typeof hooks === 'object',\n",
+            "  hasAls: typeof hooks.AsyncLocalStorage === 'function',\n",
+            "  hasAr: typeof hooks.AsyncResource === 'function',\n",
+            "  sync,\n",
+            "  hasBind: typeof res.bind === 'function',\n",
+            "};\n",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import bridge from './bridge.cjs';\n",
+            "console.log(bridge.isObj, bridge.hasAls, bridge.hasAr, bridge.sync, bridge.hasBind);\n",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with async_hooks builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute async_hooks builtin cjs");
+    assert_eq!(host.output, ["true true true ok true"]);
+}
+
+#[test]
 fn node_net_connect_is_a_typed_virtual_module_export() {
     let project = TempProject::new();
     let entry = project.write(
@@ -4668,6 +5346,43 @@ fn body_patch_preserves_linkage_and_rejects_interface_changes() {
     ))
     .expect("compile import edit");
     assert!(graph.patch_module(&dependency, changed_import).is_none());
+}
+
+#[test]
+fn replacement_relinks_a_smaller_export_interface() {
+    let project = TempProject::new();
+    let dependency = project.write(
+        "dependency.js",
+        "export const answer = 42; export function unused() { return 0; }",
+    );
+    let entry = project.write(
+        "entry.js",
+        "import { answer } from './dependency.js'; console.log(answer);",
+    );
+    let graph = project.graph(&entry).expect("build graph");
+    let dependency = fs::canonicalize(dependency).expect("canonical dependency");
+    let demanded = BTreeSet::from(["answer".to_owned()]);
+    let replacement = compile_module(&frontend_oxc::parse_dce(
+        dependency.to_str().expect("utf8 dependency"),
+        &graph.module(&dependency).unwrap().program.program.source,
+        &demanded,
+    ))
+    .expect("compile specialized dependency");
+
+    let specialized = graph
+        .replace_programs_and_relink(BTreeMap::from([(dependency.clone(), replacement)]))
+        .expect("relink smaller interface");
+    assert!(specialized.resolved_export(&dependency, "answer").is_some());
+    assert!(specialized.resolved_export(&dependency, "unused").is_none());
+    let mut host = TestHost::default();
+    specialized
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute relinked graph");
+    assert_eq!(host.output, ["42"]);
 }
 
 #[test]

@@ -563,6 +563,55 @@ impl kiln_module_graph::Frontend for OxcFrontend {
     }
 }
 
+#[test]
+fn release_dce_relinks_only_demanded_exports() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let project = TestDirectory::new("release-demand-dce");
+    let dependency = project.path.join("dependency.mjs");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &dependency,
+        "export function used() { return 42 } export function unused() { return 0 }",
+    )
+    .expect("write dependency");
+    fs::write(
+        &entry,
+        "import { used } from './dependency.mjs'; console.log(used())",
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build source graph");
+    let selected = kiln_liveness::select_executable_modules(
+        &graph,
+        &kiln_liveness::SelectionOptions::production(),
+    )
+    .expect("select live modules");
+    let demand = selected.demand();
+    let (reduced, demand) = reduced_graph(&graph, &demand).expect("reduce graph");
+    let (specialized, remapped) = dce_release_graph(&reduced, &demand);
+    let dependency = fs::canonicalize(dependency).expect("canonical dependency");
+    let node = specialized
+        .module(&dependency)
+        .expect("specialized dependency");
+
+    assert_eq!(node.program.program.functions.len(), 1);
+    assert_eq!(
+        node.program
+            .exports
+            .iter()
+            .map(|export| export.exported.as_str())
+            .collect::<Vec<_>>(),
+        ["used"]
+    );
+    assert_eq!(remapped.slots[&dependency].len(), 1);
+}
+
 fn shared_test_cache_root() -> PathBuf {
     static CACHE_DIR: OnceLock<PathBuf> = OnceLock::new();
     CACHE_DIR
@@ -1440,38 +1489,62 @@ fn node_events_is_a_ts_builtin_and_https_has_a_native_runtime_materializer() {
         NodeBuiltin::Module,
         "builtinModules"
     ));
-    assert!(native_builtin_body(NodeBuiltin::Https).is_some());
+    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Https));
+    assert!(native_builtin_supports_export(
+        NodeBuiltin::Https,
+        "createServer"
+    ));
     assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Path));
     assert!(native_builtin_supports_export(NodeBuiltin::Path, "join"));
     assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Assert));
     assert!(native_builtin_supports_export(NodeBuiltin::Assert, "ok"));
+    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Zlib));
+    assert!(native_builtin_supports_export(
+        NodeBuiltin::Zlib,
+        "deflateSync"
+    ));
 }
 
 #[test]
-fn node_net_has_one_native_runtime_module_materializer() {
+fn node_net_is_typescript_builtin_and_supports_exports() {
     use kiln_module_resolver::NodeBuiltin;
 
-    let body = native_builtin_body(NodeBuiltin::Net).expect("net materializes");
-    assert!(body.contains("KILN_C99_METHOD_NODE_NET_CREATE_SERVER"));
-    assert!(body.contains("exports[0] = connect;"));
-    assert!(body.contains("exports[1] = connect;"));
-    assert!(body.contains("exports[2] = create_server;"));
-    assert!(native_builtin_body(NodeBuiltin::Https).is_some());
+    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Net));
+    assert!(native_builtin_supports_export(NodeBuiltin::Net, "connect"));
+    assert!(native_builtin_supports_export(
+        NodeBuiltin::Net,
+        "createConnection"
+    ));
+    assert!(native_builtin_supports_export(
+        NodeBuiltin::Net,
+        "createServer"
+    ));
+    assert!(native_builtin_supports_export(NodeBuiltin::Net, "default"));
+    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Https));
     assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Path));
     assert!(native_builtin_supports_export(NodeBuiltin::Path, "resolve"));
 }
 
 #[test]
-fn node_stream_has_native_runtime_module_materializer() {
+fn node_stream_is_typescript_builtin_and_supports_exports() {
     use kiln_module_resolver::NodeBuiltin;
 
-    let stream = native_builtin_body(NodeBuiltin::Stream).expect("stream materializes");
-    assert!(stream.contains("KILN_C99_METHOD_NODE_READABLE"));
-    assert!(stream.contains("KILN_C99_METHOD_NODE_WRITABLE"));
-    assert!(stream.contains("KILN_C99_METHOD_NODE_STREAM_FINISHED"));
+    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Stream));
+    assert!(native_builtin_supports_export(
+        NodeBuiltin::Stream,
+        "Readable"
+    ));
+    assert!(native_builtin_supports_export(
+        NodeBuiltin::Stream,
+        "Writable"
+    ));
     assert!(native_builtin_supports_export(
         NodeBuiltin::Stream,
         "addAbortSignal"
+    ));
+    assert!(native_builtin_supports_export(
+        NodeBuiltin::Stream,
+        "finished"
     ));
 }
 
@@ -1614,36 +1687,44 @@ writeFile({path:?}, 'héllo').then(() => readFile({path:?}, 'utf8')).then((text)
 }
 
 #[test]
-fn node_http_native_materializer_matches_the_authoritative_export_order() {
+fn node_fs_is_typescript_builtin_and_supports_exports() {
     use kiln_module_resolver::NodeBuiltin;
 
-    // These indices were six slots wide and started at `Server`, which is the layout that
-    // shipped and did not work: the authoritative list is eight names beginning
-    // `IncomingMessage, METHODS, Server`, so every slot sat two low. `default` resolved to
-    // `request` and `typeof http` answered "function" where node answers "object";
-    // `createServer` resolved to `get`, so the first real server refused with "a function is
-    // not a request options object". Node is the arbiter on both and the corrected layout
-    // Slot 1 held `undefined` too until `METHODS` was materialized. It is a constant array,
-    // so the alignment slot it used to be became a wrong answer once the CommonJS projection
-    // started publishing a stand-in callable for every unbuilt name: `typeof http.METHODS`
-    // answered "function" against the interpreter's "object".
-    let body = native_builtin_body(NodeBuiltin::Http).expect("http materializes");
-    assert!(body.contains("exports[0] = kiln_c99_undefined();"));
-    assert!(body.contains("exports[1] = methods;"));
-    assert!(body.contains("exports[2] = server;"));
-    assert!(body.contains("exports[3] = server_response;"));
-    assert!(body.contains("exports[4] = create_server;"));
-    assert!(body.contains("exports[5] = namespace;"));
-    assert!(body.contains("exports[6] = get;"));
-    assert!(body.contains("exports[7] = request;"));
-    assert!(body.contains("KILN_C99_METHOD_NODE_HTTP_SERVER"));
-    assert!(body.contains("KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE"));
-    assert!(body.contains("KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER"));
+    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Fs));
+    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::FsPromises));
+    for export in kiln_builtins::FS_EXPORTS {
+        assert!(native_builtin_supports_export(NodeBuiltin::Fs, export));
+    }
+    for export in kiln_builtins::FS_PROMISES_EXPORTS {
+        assert!(native_builtin_supports_export(
+            NodeBuiltin::FsPromises,
+            export
+        ));
+    }
+}
+
+#[test]
+fn node_http_is_typescript_builtin_and_supports_exports() {
+    use kiln_module_resolver::NodeBuiltin;
+
+    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Http));
+    assert!(native_builtin_supports_export(
+        NodeBuiltin::Http,
+        "IncomingMessage"
+    ));
+    assert!(native_builtin_supports_export(NodeBuiltin::Http, "METHODS"));
     assert!(native_builtin_supports_export(NodeBuiltin::Http, "Server"));
     assert!(native_builtin_supports_export(
         NodeBuiltin::Http,
         "ServerResponse"
     ));
+    assert!(native_builtin_supports_export(
+        NodeBuiltin::Http,
+        "createServer"
+    ));
+    assert!(native_builtin_supports_export(NodeBuiltin::Http, "default"));
+    assert!(native_builtin_supports_export(NodeBuiltin::Http, "get"));
+    assert!(native_builtin_supports_export(NodeBuiltin::Http, "request"));
 }
 
 #[test]
@@ -8478,9 +8559,13 @@ fn native_builtin_support_is_the_materialized_subset_not_the_declared_surface() 
         NodeBuiltin::Fs,
         "existsSync"
     ));
-    assert!(!native_builtin_supports_export(
+    assert!(native_builtin_supports_export(
         NodeBuiltin::Fs,
         "accessSync"
+    ));
+    assert!(!native_builtin_supports_export(
+        NodeBuiltin::Fs,
+        "nonexistent"
     ));
     assert!(native_builtin_supports_export(NodeBuiltin::Path, "join"));
     assert!(native_builtin_supports_export(
@@ -8497,7 +8582,7 @@ fn native_builtin_support_is_the_materialized_subset_not_the_declared_surface() 
     ));
     assert!(!native_builtin_supports_export(
         NodeBuiltin::Http,
-        "IncomingMessage"
+        "nonexistent"
     ));
 }
 
@@ -10839,4 +10924,900 @@ fn native_node_module_commonjs_require_builds_and_runs() {
     );
     let stdout = String::from_utf8_lossy(&result.stdout);
     assert!(stdout.contains("cjs-module: function function true true"));
+}
+
+#[test]
+fn native_node_dns_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-dns-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import dns, { lookup, ADDRCONFIG } from 'node:dns';\n",
+            "let lookedUp = false;\n",
+            "lookup('localhost', (err, address, family) => {\n",
+            "  lookedUp = address === '127.0.0.1' && family === 4;\n",
+            "});\n",
+            "console.log('dns-ts:', typeof dns, typeof lookup, ADDRCONFIG === 32, lookedUp);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("dns_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run dns binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("dns-ts: object function true true"));
+}
+
+#[test]
+fn native_node_dns_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-dns-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const dns = require('node:dns');\n",
+            "let lookedUp = false;\n",
+            "dns.lookup('localhost', (err, address, family) => {\n",
+            "  lookedUp = address === '127.0.0.1' && family === 4;\n",
+            "});\n",
+            "console.log('cjs-dns:', typeof dns, typeof dns.lookup, dns.ADDRCONFIG === 32, lookedUp);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("dns_cjs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run dns cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("cjs-dns: object function true true"));
+}
+
+#[test]
+fn native_node_crypto_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-crypto-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import crypto, { createHash, randomUUID } from 'node:crypto';\n",
+            "const hash = createHash('sha256').update('hello world').digest('hex');\n",
+            "const uuid = randomUUID();\n",
+            "console.log('crypto-ts:', typeof crypto, hash === 'b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9', typeof uuid === 'string' && uuid.length === 36);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("crypto_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run crypto binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("crypto-ts: object true true"));
+}
+
+#[test]
+fn native_node_crypto_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-crypto-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const crypto = require('node:crypto');\n",
+            "const hash = crypto.createHash('sha256').update('hello world').digest('hex');\n",
+            "console.log('cjs-crypto:', typeof crypto, typeof crypto.createHash, hash === 'b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9');\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("crypto_cjs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run crypto cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("cjs-crypto: object function true"));
+}
+
+#[test]
+fn native_node_http2_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-http2-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import http2, { createServer, createSecureServer } from 'node:http2';\n",
+            "let threw = false;\n",
+            "try {\n",
+            "  createServer();\n",
+            "} catch (e) {\n",
+            "  threw = true;\n",
+            "}\n",
+            "console.log('http2-ts:', typeof http2, typeof createServer, typeof createSecureServer, threw);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("http2_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run http2 binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("http2-ts: object function function true"));
+}
+
+#[test]
+fn native_node_http2_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-http2-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const http2 = require('node:http2');\n",
+            "let threw = false;\n",
+            "try {\n",
+            "  http2.createSecureServer();\n",
+            "} catch (e) {\n",
+            "  threw = true;\n",
+            "}\n",
+            "console.log('cjs-http2:', typeof http2, typeof http2.createServer, threw);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("http2_cjs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run http2 cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("cjs-http2: object function true"));
+}
+
+#[test]
+fn native_node_zlib_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-zlib-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import zlib, { constants, deflateSync, inflateSync, gzipSync, gunzipSync } from 'node:zlib';\n",
+            "const def = deflateSync('native zlib string');\n",
+            "const inf = inflateSync(def);\n",
+            "const gz = gzipSync('native gzip string');\n",
+            "const ungz = gunzipSync(gz);\n",
+            "console.log('zlib-ts:', typeof zlib, constants.Z_OK === 0, inf.toString() === 'native zlib string', ungz.toString() === 'native gzip string');\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("zlib_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run zlib binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("zlib-ts: object true true true"));
+}
+
+#[test]
+fn native_node_zlib_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-zlib-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const zlib = require('node:zlib');\n",
+            "const def = zlib.deflateSync('native zlib cjs');\n",
+            "const inf = zlib.inflateSync(def);\n",
+            "console.log('cjs-zlib:', typeof zlib, zlib.constants.Z_OK === 0, inf.toString() === 'native zlib cjs');\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("zlib_cjs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run zlib cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("cjs-zlib: object true true"));
+}
+
+#[test]
+fn native_node_stream_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-stream-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import Stream, { Readable, Writable, addAbortSignal, finished } from 'node:stream';\n",
+            "const r = new Readable();\n",
+            "r.push('native stream data');\n",
+            "const data = r.read();\n",
+            "console.log('stream-ts:', typeof Stream, typeof Readable, typeof Writable, data.toString() === 'native stream data');\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("stream_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run stream binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("stream-ts: function function function true"));
+}
+
+#[test]
+fn native_node_stream_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-stream-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const Stream = require('node:stream');\n",
+            "console.log('cjs-stream:', typeof Stream, typeof Stream.Readable, typeof Stream.Writable);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("stream_cjs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run stream cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("cjs-stream: function function function"));
+}
+
+#[test]
+fn native_node_https_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-https-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import https, { createServer } from 'node:https';\n",
+            "let threw = false;\n",
+            "try {\n",
+            "  createServer();\n",
+            "} catch (e) {\n",
+            "  threw = e.message.includes('requires a TLS host capability');\n",
+            "}\n",
+            "console.log('https-ts:', typeof https, typeof createServer, threw);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("https_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run https binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("https-ts: object function true"));
+}
+
+#[test]
+fn native_node_https_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-https-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const https = require('node:https');\n",
+            "let threw = false;\n",
+            "try {\n",
+            "  https.createServer();\n",
+            "} catch (e) {\n",
+            "  threw = e.message.includes('requires a TLS host capability');\n",
+            "}\n",
+            "console.log('cjs-https:', typeof https, typeof https.createServer, threw);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("https_cjs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run https cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("cjs-https: object function true"));
+}
+
+#[test]
+fn native_node_async_hooks_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-async-hooks-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import hooks, { AsyncLocalStorage, AsyncResource } from 'node:async_hooks';\n",
+            "const als = new AsyncLocalStorage();\n",
+            "const sync = als.run(999, () => als.getStore());\n",
+            "const res = new AsyncResource('probe');\n",
+            "const bound = res.bind((x) => x + 1);\n",
+            "console.log('ah-ts:', typeof hooks, typeof AsyncLocalStorage, typeof AsyncResource, sync, bound(10));\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("async_hooks_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run async_hooks binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("ah-ts: object function function 999 11"));
+}
+
+#[test]
+fn native_node_async_hooks_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-async-hooks-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const hooks = require('node:async_hooks');\n",
+            "const als = new hooks.AsyncLocalStorage();\n",
+            "const sync = als.run('cjs-store', () => als.getStore());\n",
+            "const res = new hooks.AsyncResource('probe');\n",
+            "const bound = res.bind((x) => x * 2);\n",
+            "console.log('cjs-ah:', typeof hooks, typeof hooks.AsyncLocalStorage, typeof hooks.AsyncResource, sync, bound(5));\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(
+                project.path.join("async_hooks_cjs_bin"),
+                NativeProfile::Release,
+            ),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run async_hooks cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("cjs-ah: object function function cjs-store 10"));
+}
+
+#[test]
+fn native_node_net_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-net-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import net, { connect, createConnection, createServer } from 'node:net';\n",
+            "console.log('net-ts:', typeof net, typeof connect, typeof createConnection, typeof createServer, net.default === net);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("net_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run net binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("net-ts: object function function function true"));
+}
+
+#[test]
+fn native_node_net_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-net-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const net = require('node:net');\n",
+            "console.log('cjs-net:', typeof net, typeof net.connect, typeof net.createConnection, typeof net.createServer, net.default === net);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("net_cjs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run net cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("cjs-net: object function function function true"));
+}
+
+#[test]
+fn native_node_http_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-http-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import http, { createServer, Server, ServerResponse, METHODS } from 'node:http';\n",
+            "console.log('http-ts:', typeof http, typeof createServer, typeof Server, typeof ServerResponse, Array.isArray(METHODS), http.default === http);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("http_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run http binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("http-ts: object function function function true true"));
+}
+
+#[test]
+fn native_node_http_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-http-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const http = require('node:http');\n",
+            "console.log('cjs-http:', typeof http, typeof http.createServer, typeof http.Server, typeof http.ServerResponse, Array.isArray(http.METHODS), http.default === http);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("http_cjs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run http cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("cjs-http: object function function function true true"));
+}
+
+#[test]
+fn native_node_fs_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-fs-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import fs, { existsSync, promises, readFileSync } from 'node:fs';\n",
+            "import { readFile } from 'node:fs/promises';\n",
+            "console.log('fs-ts:', typeof fs, typeof existsSync, typeof promises, typeof readFileSync, typeof readFile, fs.default === fs);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("fs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run fs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("fs-ts: object function object function function true"));
+}
+
+#[test]
+fn native_node_fs_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-fs-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const fs = require('node:fs');\n",
+            "console.log('cjs-fs:', typeof fs, typeof fs.existsSync, typeof fs.promises, typeof fs.readFileSync, typeof fs.promises.readFile, fs.default === fs);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("fs_cjs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run fs cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("cjs-fs: object function object function function true"));
 }

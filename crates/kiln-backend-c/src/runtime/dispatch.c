@@ -1355,6 +1355,10 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
     int status;
     if (code == KILN_C99_METHOD_INTL_SEGMENT_RAW)
         return kiln_c99_intl_segment_raw(result, args, argc, thrown);
+    if (code == KILN_C99_METHOD_UINT8_TO_HEX_RAW)
+        return kiln_c99_uint8_to_hex_raw(result, args, argc, thrown);
+    if (code == KILN_C99_METHOD_UINT8_TO_BASE64_RAW)
+        return kiln_c99_uint8_to_base64_raw(result, args, argc, thrown);
     if ((code & KILN_C99_FFI_DYNAMIC_BASE) != 0 ||
         code == KILN_C99_METHOD_NODE_FFI_DLOPEN ||
         code == KILN_C99_METHOD_NODE_FFI_GET_RAW_POINTER ||
@@ -5072,6 +5076,10 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             if (subject.tag == KILN_VALUE_DATA_VIEW) {
                 /* One table for every view, because a DataView has no kind to pick one by. */
                 *result = kiln_c99_builtin(KILN_C99_BUILTIN_DATA_VIEW_PROTOTYPE);
+                return KILN_C99_OK;
+            }
+            if (subject.tag == KILN_VALUE_ARRAY_BUFFER) {
+                *result = kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE);
                 return KILN_C99_OK;
             }
             if (subject.tag == KILN_VALUE_FUNCTION || subject.tag == KILN_VALUE_METHOD ||

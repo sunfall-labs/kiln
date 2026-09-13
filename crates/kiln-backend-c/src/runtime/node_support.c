@@ -110,15 +110,40 @@ static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value rec
     }
     if (code == KILN_C99_METHOD_BUFFER_TO_STRING) {
         kiln_typed_array *view;
-        kiln_value encoding = argc > 0 ? kiln_c99_text(args[0]) : kiln_c99_copy_text("utf8", 4);
-        if (receiver.tag != KILN_VALUE_TYPED_ARRAY ||
-            !(encoding.len == 4 && memcmp(encoding.ptr, "utf8", 4) == 0) )
+        kiln_value encoding = (argc > 0 && args[0].tag != KILN_VALUE_UNDEFINED)
+            ? kiln_c99_text(args[0])
+            : kiln_c99_copy_text("utf8", 4);
+        char norm[32];
+        size_t nlen;
+        size_t i;
+        if (receiver.tag != KILN_VALUE_TYPED_ARRAY || encoding.tag != KILN_VALUE_STRING)
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                         "unsupported Buffer encoding");
-        view = kiln_c99_typed_array_of(receiver);
-        *out = kiln_c99_copy_text((const char *)view->buffer->bytes + view->byte_offset,
-                                  view->length);
-        return out->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
+        nlen = encoding.len < 31 ? encoding.len : 31;
+        for (i = 0; i < nlen; ++i)
+            norm[i] = (char)tolower((unsigned char)encoding.ptr[i]);
+        norm[nlen] = '\0';
+        if ((nlen == 4 && memcmp(norm, "utf8", 4) == 0) ||
+            (nlen == 5 && memcmp(norm, "utf-8", 5) == 0)) {
+            view = kiln_c99_typed_array_of(receiver);
+            *out = kiln_c99_copy_text((const char *)view->buffer->bytes + view->byte_offset,
+                                      view->length);
+            return out->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
+        }
+        if (nlen == 3 && memcmp(norm, "hex", 3) == 0) {
+            kiln_value hex_args[1] = { receiver };
+            return kiln_c99_uint8_to_hex_raw(out, hex_args, 1, thrown);
+        }
+        if (nlen == 6 && memcmp(norm, "base64", 6) == 0) {
+            kiln_value b64_args[3] = { receiver, kiln_c99_boolean(0), kiln_c99_boolean(0) };
+            return kiln_c99_uint8_to_base64_raw(out, b64_args, 3, thrown);
+        }
+        if (nlen == 9 && memcmp(norm, "base64url", 9) == 0) {
+            kiln_value b64_args[3] = { receiver, kiln_c99_boolean(1), kiln_c99_boolean(1) };
+            return kiln_c99_uint8_to_base64_raw(out, b64_args, 3, thrown);
+        }
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "unsupported Buffer encoding");
     }
     KILN_C99_REFUSE("a Buffer method this backend has not implemented");
 }
