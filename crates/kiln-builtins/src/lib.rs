@@ -546,4 +546,19 @@ declare_ts_builtins! {
             "timingSafeEqual",
         ],
     },
+    Http2 {
+        variant: Http2,
+        file: "node/http2.ts",
+        logical_path: "node:http2.ts",
+        source_const: HTTP2_SOURCE,
+        exports_const: HTTP2_EXPORTS,
+        sample_source_check: "export function createServer",
+        presence_test: http2_builtin_source_is_present,
+        compilation_test: http2_builtin_compiles_cleanly,
+        exports: [
+            "createSecureServer",
+            "createServer",
+            "default",
+        ],
+    },
 }

@@ -2976,7 +2976,7 @@ fn native_builtin_supported_exports(
         NodeBuiltin::Util => kiln_builtins::UTIL_EXPORTS,
         NodeBuiltin::DiagnosticsChannel => kiln_builtins::DIAGNOSTICS_CHANNEL_EXPORTS,
         NodeBuiltin::Https => &["createServer", "default"],
-        NodeBuiltin::Http2 => &["createSecureServer", "createServer", "default"],
+        NodeBuiltin::Http2 => kiln_builtins::HTTP2_EXPORTS,
         NodeBuiltin::Dns => kiln_builtins::DNS_EXPORTS,
         // `EOL` and `devNull` are constants rather than readings of the machine, so answering them
         // costs nothing and reads nothing -- and they are the two members of `node:os` that are
