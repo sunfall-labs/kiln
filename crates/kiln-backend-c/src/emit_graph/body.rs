@@ -1624,15 +1624,21 @@ fn emit_blocks(
                 output.push_str("    return KILN_C99_CONTROL_ERROR;\n");
             }
         }
-        Site::Entry { .. } => {
-            // Nothing above the entry point catches, so a throw that reaches here is uncaught:
-            // it leaves as text in `*result`, the site it was refused at appended when there is
-            // one. A label nothing jumps to is a warning, so each exists only when used.
+        Site::Entry { exports, .. } => {
+            // Entry unwinds cross either the internal module ABI or the final embedding boundary.
+            // Graph module entries preserve the raw language value for dynamic-import rejection;
+            // standalone entries format it at their embedding boundary.
             let unwinds = output[body_start..].contains("goto kiln_unwind;");
             let refuses = output[body_start..].contains("goto kiln_refusal;");
             if unwinds {
                 output.push_str("kiln_unwind:;\n");
-                if scalar_proto {
+                if exports.is_some() {
+                    // A graph module must carry the original throw through its C ABI. The graph
+                    // launcher settles dynamic import rejection with this value; formatting it
+                    // here would turn an object or undefined into a diagnostic string.
+                    output.push_str("    *result = *thrown;\n");
+                    output.push_str("    return KILN_C99_THROWN;\n");
+                } else if scalar_proto {
                     output.push_str("    return KILN_C99_THROWN;\n");
                 } else {
                     output.push_str("    { kiln_value message = kiln_c99_text(*thrown); kiln_value site = kiln_c99_control_diagnostic(); if (message.tag == KILN_VALUE_STRING && site.tag == KILN_VALUE_STRING && site.len != 0) { kiln_value separator = kiln_c99_copy_text(\" at \" , 4); *result = kiln_c99_concat(kiln_c99_concat(message, separator), site); } else { *result = message; } }\n");
@@ -1823,7 +1829,7 @@ fn emit_terminator(
                     }
                     None => output.push_str("    *result = kiln_c99_undefined();\n"),
                 }
-                if !scalar_proto {
+                if !scalar_proto && exports.is_none() {
                     output.push_str(
                         "    if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);\n",
                     );
