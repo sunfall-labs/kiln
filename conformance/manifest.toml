@@ -1432,6 +1432,7 @@ An async generator delegating with `yield*` must expose the delegated iterator r
 getter throws. The internal abrupt completion must not be sent back to the delegate's `throw`.
 """
 expected_stdout = """
-42 done,value
+42,9 done,value
+8 true done,value
 getter boom 0 true
 """
