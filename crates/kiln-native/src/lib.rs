@@ -2975,15 +2975,8 @@ fn native_builtin_supported_exports(
         NodeBuiltin::Tty => kiln_builtins::TTY_EXPORTS,
         NodeBuiltin::Stream => kiln_builtins::STREAM_EXPORTS,
         NodeBuiltin::PerfHooks => kiln_builtins::PERF_HOOKS_EXPORTS,
-        NodeBuiltin::FsPromises => &["appendFile", "mkdir", "readFile", "stat", "writeFile"],
-        NodeBuiltin::Fs => &[
-            "appendFileSync",
-            "default",
-            "existsSync",
-            "promises",
-            "readFileSync",
-            "writeFileSync",
-        ],
+        NodeBuiltin::FsPromises => kiln_builtins::FS_PROMISES_EXPORTS,
+        NodeBuiltin::Fs => kiln_builtins::FS_EXPORTS,
         NodeBuiltin::Path => &[
             "basename",
             "default",
@@ -3549,64 +3542,6 @@ status = kiln_c99_put(host, namespace, "performance", 11, performance, 0, NULL);
 if (status != KILN_C99_OK) return status;
 exports[0] = namespace;
 exports[1] = performance;"#,
-        ),
-        NodeBuiltin::FsPromises => Some(
-            r#"kiln_value unmaterialized = kiln_c99_method(KILN_C99_METHOD_NODE_BUILTIN_UNMATERIALIZED);
-kiln_value mkdir = kiln_c99_method(KILN_C99_METHOD_NODE_FS_MKDIR);
-kiln_value read_file = kiln_c99_method(KILN_C99_METHOD_NODE_FS_READ_FILE);
-kiln_value stat = kiln_c99_method(KILN_C99_METHOD_NODE_FS_STAT);
-kiln_value write_file = kiln_c99_method(KILN_C99_METHOD_NODE_FS_WRITE_FILE);
-exports[0] = unmaterialized;
-exports[1] = mkdir;
-exports[2] = read_file;
-exports[3] = stat;
-exports[4] = write_file;"#,
-        ),
-        NodeBuiltin::Fs => Some(
-            r#"kiln_value unmaterialized = kiln_c99_method(KILN_C99_METHOD_NODE_BUILTIN_UNMATERIALIZED);
-kiln_value exists_sync = kiln_c99_method(KILN_C99_METHOD_NODE_FS_EXISTS_SYNC);
-kiln_value promises;
-int status = kiln_c99_new_object(&promises);
-if (status != KILN_C99_OK) return status;
-status = kiln_c99_put(host, promises, "readFile", 8, kiln_c99_method(KILN_C99_METHOD_NODE_FS_READ_FILE), 0, NULL);
-if (status != KILN_C99_OK) return status;
-status = kiln_c99_put(host, promises, "stat", 4, kiln_c99_method(KILN_C99_METHOD_NODE_FS_STAT), 0, NULL);
-if (status != KILN_C99_OK) return status;
-status = kiln_c99_put(host, promises, "writeFile", 9, kiln_c99_method(KILN_C99_METHOD_NODE_FS_WRITE_FILE), 0, NULL);
-if (status != KILN_C99_OK) return status;
-kiln_value namespace;
-status = kiln_c99_new_object(&namespace);
-if (status != KILN_C99_OK) return status;
-status = kiln_c99_put(host, namespace, "appendFileSync", 14, unmaterialized, 0, NULL);
-if (status != KILN_C99_OK) return status;
-status = kiln_c99_put(host, namespace, "existsSync", 10, exists_sync, 0, NULL);
-if (status != KILN_C99_OK) return status;
-status = kiln_c99_put(host, namespace, "promises", 8, promises, 0, NULL);
-if (status != KILN_C99_OK) return status;
-status = kiln_c99_put(host, namespace, "readFileSync", 12, unmaterialized, 0, NULL);
-if (status != KILN_C99_OK) return status;
-status = kiln_c99_put(host, namespace, "writeFileSync", 13, unmaterialized, 0, NULL);
-if (status != KILN_C99_OK) return status;
-exports[0] = kiln_c99_undefined();
-exports[1] = unmaterialized;
-exports[2] = kiln_c99_undefined();
-exports[3] = kiln_c99_undefined();
-exports[4] = namespace;
-exports[5] = exists_sync;
-exports[6] = kiln_c99_undefined();
-exports[7] = kiln_c99_undefined();
-exports[8] = kiln_c99_undefined();
-exports[9] = promises;
-exports[10] = unmaterialized;
-exports[11] = kiln_c99_undefined();
-exports[12] = kiln_c99_undefined();
-exports[13] = kiln_c99_undefined();
-exports[14] = kiln_c99_undefined();
-exports[15] = kiln_c99_undefined();
-exports[16] = kiln_c99_undefined();
-exports[17] = kiln_c99_undefined();
-exports[18] = kiln_c99_undefined();
-exports[19] = unmaterialized;"#,
         ),
         NodeBuiltin::Path => Some(
             r#"kiln_value unmaterialized = kiln_c99_method(KILN_C99_METHOD_NODE_BUILTIN_UNMATERIALIZED);
@@ -5655,6 +5590,38 @@ static int kiln_install_native_modules(kiln_host *host) {
     status = kiln_c99_put(host, http_obj, "request", 7, http_request, 0, NULL);
     if (status != KILN_C99_OK) return status;
     status = kiln_c99_put(host, modules_obj, "http", 4, http_obj, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+
+    kiln_value fsp_obj = kiln_c99_undefined();
+    status = kiln_c99_new_object(&fsp_obj);
+    if (status != KILN_C99_OK) return status;
+    kiln_value fs_append_file = (kiln_value){ 11, 0, { 482 /* KILN_C99_METHOD_NODE_BUILTIN_UNMATERIALIZED */ } };
+    kiln_value fs_mkdir = (kiln_value){ 11, 0, { 507 /* KILN_C99_METHOD_NODE_FS_MKDIR */ } };
+    kiln_value fs_read_file = (kiln_value){ 11, 0, { 379 /* KILN_C99_METHOD_NODE_FS_READ_FILE */ } };
+    kiln_value fs_stat = (kiln_value){ 11, 0, { 380 /* KILN_C99_METHOD_NODE_FS_STAT */ } };
+    kiln_value fs_write_file = (kiln_value){ 11, 0, { 381 /* KILN_C99_METHOD_NODE_FS_WRITE_FILE */ } };
+    status = kiln_c99_put(host, fsp_obj, "appendFile", 10, fs_append_file, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, fsp_obj, "mkdir", 5, fs_mkdir, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, fsp_obj, "readFile", 8, fs_read_file, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, fsp_obj, "stat", 4, fs_stat, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, fsp_obj, "writeFile", 9, fs_write_file, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, modules_obj, "fs_promises", 11, fsp_obj, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+
+    kiln_value fs_obj = kiln_c99_undefined();
+    status = kiln_c99_new_object(&fs_obj);
+    if (status != KILN_C99_OK) return status;
+    kiln_value fs_exists_sync = (kiln_value){ 11, 0, { 378 /* KILN_C99_METHOD_NODE_FS_EXISTS_SYNC */ } };
+    status = kiln_c99_put(host, fs_obj, "existsSync", 10, fs_exists_sync, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, fs_obj, "promises", 8, fsp_obj, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, modules_obj, "fs", 2, fs_obj, 0, NULL);
     if (status != KILN_C99_OK) return status;
 
     status = kiln_c99_put(host, proc_obj, "__kilnNativeModules", 19, modules_obj, 0, NULL);
