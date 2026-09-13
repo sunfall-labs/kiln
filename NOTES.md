@@ -5659,3 +5659,16 @@ with CommonJS callable projection `Stream` whose constructor and prototype hiera
 Verified with native probe `conformance/native/node-stream-members.cjs` (byte-for-byte identical output
 between interpreter and native CLI), integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`,
 and full `scripts/native.sh` parity (185 matched, 3 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
+
+---
+
+## Phase 5.2 TypeScript built-ins: `node:https` (2026-09-13)
+
+Migrated `node:https` completely to TypeScript via `crates/kiln-builtins/src/node/https.ts`
+with zero additions to the C runtime prelude (Phase 5.1 freeze strictly honored). Implemented canonical
+exports (`createServer`, `default`), deterministically reporting that TLS host capabilities are unavailable
+in this realm across both interpreter and native CLI.
+Verified with native probe `conformance/native/node-https-members.cjs` (byte-for-byte identical output
+between interpreter and native CLI), integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`,
+and full `scripts/native.sh` parity (186 matched, 3 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
+

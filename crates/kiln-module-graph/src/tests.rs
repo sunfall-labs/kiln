@@ -3123,6 +3123,98 @@ fn node_builtin_stream_commonjs_require_evaluates_cleanly() {
 }
 
 #[test]
+fn node_builtin_https_evaluates_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import https, { createServer } from 'node:https';\n",
+            "let threw = false;\n",
+            "try {\n",
+            "  createServer();\n",
+            "} catch (e) {\n",
+            "  threw = e.message.includes('requires a TLS host capability');\n",
+            "}\n",
+            "console.log(\n",
+            "  typeof https === 'object',\n",
+            "  typeof createServer === 'function',\n",
+            "  threw,\n",
+            ");\n",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with https builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute https builtin");
+    assert_eq!(host.output, ["true true true"]);
+}
+
+#[test]
+fn node_builtin_https_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const https = require('node:https');\n",
+            "let threw = false;\n",
+            "try {\n",
+            "  https.createServer();\n",
+            "} catch (e) {\n",
+            "  threw = e.message.includes('requires a TLS host capability');\n",
+            "}\n",
+            "module.exports = {\n",
+            "  isObj: typeof https === 'object',\n",
+            "  hasCreateServer: typeof https.createServer === 'function',\n",
+            "  threw,\n",
+            "};\n",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import bridge from './bridge.cjs';\n",
+            "console.log(bridge.isObj, bridge.hasCreateServer, bridge.threw);\n",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with https builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute https builtin cjs");
+    assert_eq!(host.output, ["true true true"]);
+}
+
+#[test]
 fn node_net_connect_is_a_typed_virtual_module_export() {
     let project = TempProject::new();
     let entry = project.write(

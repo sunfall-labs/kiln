@@ -603,4 +603,18 @@ declare_ts_builtins! {
             "finished",
         ],
     },
+    Https {
+        variant: Https,
+        file: "node/https.ts",
+        logical_path: "node:https.ts",
+        source_const: HTTPS_SOURCE,
+        exports_const: HTTPS_EXPORTS,
+        sample_source_check: "export function createServer",
+        presence_test: https_builtin_source_is_present,
+        compilation_test: https_builtin_compiles_cleanly,
+        exports: [
+            "createServer",
+            "default",
+        ],
+    },
 }
