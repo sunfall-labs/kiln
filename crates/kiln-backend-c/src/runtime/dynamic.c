@@ -1822,7 +1822,8 @@ static int kiln_c99_validate_dynamic_import_options(kiln_host *host, kiln_value 
     int status;
     if (options.tag == KILN_VALUE_UNDEFINED) return KILN_C99_OK;
     if (options.tag == KILN_VALUE_NULL || options.tag == KILN_VALUE_BOOLEAN ||
-        options.tag == KILN_VALUE_NUMBER || options.tag == KILN_VALUE_STRING) {
+        options.tag == KILN_VALUE_NUMBER || options.tag == KILN_VALUE_STRING ||
+        options.tag == KILN_VALUE_SYMBOL || options.tag == KILN_VALUE_BIGINT) {
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                     "import options must be an object");
     }
@@ -1830,7 +1831,8 @@ static int kiln_c99_validate_dynamic_import_options(kiln_host *host, kiln_value 
     if (status != KILN_C99_OK) return status;
     if (attrs.tag == KILN_VALUE_UNDEFINED) return KILN_C99_OK;
     if (attrs.tag == KILN_VALUE_NULL || attrs.tag == KILN_VALUE_BOOLEAN ||
-        attrs.tag == KILN_VALUE_NUMBER || attrs.tag == KILN_VALUE_STRING) {
+        attrs.tag == KILN_VALUE_NUMBER || attrs.tag == KILN_VALUE_STRING ||
+        attrs.tag == KILN_VALUE_SYMBOL || attrs.tag == KILN_VALUE_BIGINT) {
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                     "import attributes must be an object");
     }

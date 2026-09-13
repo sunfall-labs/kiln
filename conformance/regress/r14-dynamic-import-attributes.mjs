@@ -53,8 +53,12 @@ async function verdict(label, promise) {
 
 await verdict('options-null', import('./r14-dynamic-import-target.mjs', null));
 await verdict('options-number', import('./r14-dynamic-import-target.mjs', 1));
+await verdict('options-symbol', import('./r14-dynamic-import-target.mjs', Symbol('options')));
+await verdict('options-bigint', import('./r14-dynamic-import-target.mjs', 1n));
 await verdict('with-null', import('./r14-dynamic-import-target.mjs', { with: null }));
 await verdict('with-number', import('./r14-dynamic-import-target.mjs', { with: 1 }));
+await verdict('with-symbol', import('./r14-dynamic-import-target.mjs', { with: Symbol('with') }));
+await verdict('with-bigint', import('./r14-dynamic-import-target.mjs', { with: 1n }));
 await verdict('type-number', import('./r14-dynamic-import-target.mjs', { with: { type: 123 } }));
 await verdict('type-undefined', import('./r14-dynamic-import-target.mjs', { with: { type: undefined } }));
 await verdict('type-unsupported', import('./r14-dynamic-import-target.mjs', { with: { type: 'json' } }));
