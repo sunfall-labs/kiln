@@ -600,6 +600,7 @@ impl NativeBuilder {
                     cache_hits: CacheHits {
                         generated_c: generated_c_hit,
                         application_object: true,
+                        prelude_object: true,
                         runtime_object: true,
                         launcher_object: true,
                         executable: true,
@@ -607,6 +608,7 @@ impl NativeBuilder {
                     sizes: ArtifactSizes {
                         generated_c: module_source.len() as u64,
                         application_object: app_info.1,
+                        prelude_object: prelude_info.1,
                         runtime_object: runtime_info.1,
                         launcher_object: launcher_info.1,
                         executable: artifact.bytes.len() as u64,
@@ -772,6 +774,7 @@ impl NativeBuilder {
             cache_hits: CacheHits {
                 generated_c: generated_c_hit,
                 application_object: application_hit,
+                prelude_object: prelude_hit,
                 runtime_object: runtime_hit,
                 launcher_object: launcher_hit,
                 executable: executable_hit,
@@ -779,6 +782,7 @@ impl NativeBuilder {
             sizes: ArtifactSizes {
                 generated_c: module_source.len() as u64,
                 application_object: application.len() as u64,
+                prelude_object: prelude_object.len() as u64,
                 runtime_object: runtime_object.len() as u64,
                 launcher_object: launcher_object.len() as u64,
                 executable: executable.len() as u64,
@@ -2004,6 +2008,7 @@ impl NativeBuilder {
                     cache_hits: CacheHits {
                         generated_c: module_sources.iter().all(|(_, _, hit)| *hit),
                         application_object: true,
+                        prelude_object: true,
                         runtime_object: true,
                         launcher_object: true,
                         executable: true,
@@ -2014,6 +2019,7 @@ impl NativeBuilder {
                             .map(|(source, _, _)| source.len() as u64)
                             .sum(),
                         application_object: module_object_infos.iter().map(|(_, size)| *size).sum(),
+                        prelude_object: prelude_info.1,
                         runtime_object: runtime_info.1,
                         launcher_object: launcher_info.1,
                         executable: artifact.bytes.len() as u64,
@@ -2203,6 +2209,7 @@ impl NativeBuilder {
             cache_hits: CacheHits {
                 generated_c: module_sources.iter().all(|(_, _, hit)| *hit),
                 application_object: module_objects.iter().all(|(_, _, hit)| *hit),
+                prelude_object: prelude_hit,
                 runtime_object: runtime_hit,
                 launcher_object: launcher_hit,
                 executable: executable_hit,
@@ -2216,6 +2223,7 @@ impl NativeBuilder {
                     .iter()
                     .map(|(bytes, _, _)| bytes.len() as u64)
                     .sum(),
+                prelude_object: prelude_object.len() as u64,
                 runtime_object: runtime_object.len() as u64,
                 launcher_object: launcher_object.len() as u64,
                 executable: executable.len() as u64,

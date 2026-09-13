@@ -174,6 +174,15 @@ pub fn native_build(source: &str, summary: &NativeBuildSummary) -> String {
     );
     row(
         &mut out,
+        "prelude object",
+        &format!(
+            "{} bytes ({})",
+            summary.prelude_object_bytes,
+            hit(summary.prelude_object_cache_hit)
+        ),
+    );
+    row(
+        &mut out,
         "runtime object",
         &format!(
             "{} bytes ({})",
@@ -744,11 +753,13 @@ mod tests {
             compiler_identity: "cc".to_owned(),
             generated_c_cache_hit: false,
             app_object_cache_hit: false,
+            prelude_object_cache_hit: false,
             runtime_object_cache_hit: false,
             launcher_object_cache_hit: false,
             executable_cache_hit: false,
             generated_c_bytes: 100,
             app_object_bytes: 200,
+            prelude_object_bytes: 250,
             runtime_object_bytes: 300,
             launcher_object_bytes: 400,
             executable_bytes: 500,
