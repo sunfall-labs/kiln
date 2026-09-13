@@ -10,7 +10,18 @@ set -euo pipefail
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
+source "$(dirname -- "${BASH_SOURCE[0]}")/provider-contract.sh"
 cd "$(kiln_repo_root)"
+KILN_PROVIDER_ROOT="$(kiln_repo_root)"
+kiln_provider_contract_init "$KILN_PROVIDER_ROOT"
+KILN_PROVIDER_PROFILE=$(kiln_provider_contract_field profile)
+KILN_PROVIDER_RUSTFLAGS=$(kiln_provider_contract_field rustflags)
+KILN_PROVIDER_FULL_FEATURES=$(kiln_provider_contract_field full_features)
+KILN_PROVIDER_SLIM_FEATURES=$(kiln_provider_contract_field slim_features)
+KILN_PROVIDER_FULL_ARCHIVE=$(kiln_provider_contract_field full_archive)
+KILN_PROVIDER_SLIM_ARCHIVE=$(kiln_provider_contract_field slim_archive)
+KILN_PROVIDER_FULL_MANIFEST=$(kiln_provider_contract_field full_manifest)
+KILN_PROVIDER_SLIM_MANIFEST=$(kiln_provider_contract_field slim_manifest)
 
 # The slim variant builds the same crate without `realm-http`: same schema, provider ABI
 # and export list, but no Hyper-backed HTTP engines. Both variants publish into one
@@ -85,17 +96,16 @@ kiln_provider_sha256_stream() {
 # outranks Cargo config; removing the encoded form prevents a caller's host-only flags from silently
 # changing that deployment contract. The unwind policy is required because provider entries catch
 # Rust panics before returning across the private C ABI.
-KILN_PROVIDER_RUSTFLAGS="-C panic=unwind -C relocation-model=pic -C target-cpu=generic -C debuginfo=0"
 
 # Without `default-features = false` on the `kiln-runtime` edge in
 # `crates/kiln-native-number-ffi/Cargo.toml`, the slim `--no-default-features` selection
 # below would still unify `kiln-runtime/http` back on through that dependency's defaults
 # and ship a full archive under a slim manifest.
 if [[ $KILN_PROVIDER_HTTP -eq 1 ]]; then
-	KILN_PROVIDER_FEATURES="regexp,bigint,temporal,json,intl,parallel,ffi"
+	KILN_PROVIDER_FEATURES="$KILN_PROVIDER_FULL_FEATURES"
 	KILN_PROVIDER_DEFAULT_FEATURES=()
 else
-	KILN_PROVIDER_FEATURES="realm,regexp,bigint,temporal,json,intl,parallel,ffi"
+	KILN_PROVIDER_FEATURES="$KILN_PROVIDER_SLIM_FEATURES"
 	KILN_PROVIDER_DEFAULT_FEATURES=(--no-default-features)
 fi
 
@@ -121,12 +131,12 @@ fi
 
 mkdir -p "$KILN_PROVIDER_OUTPUT"
 if [[ $KILN_PROVIDER_HTTP -eq 1 ]]; then
-	KILN_PROVIDER_ARCHIVE_NAME=libkiln_native_number_ffi.a
-	KILN_PROVIDER_MANIFEST_NAME=kiln-native-number-provider.json
+	KILN_PROVIDER_ARCHIVE_NAME="$KILN_PROVIDER_FULL_ARCHIVE"
+	KILN_PROVIDER_MANIFEST_NAME="$KILN_PROVIDER_FULL_MANIFEST"
 	KILN_PROVIDER_HTTP_JSON=true
 else
-	KILN_PROVIDER_ARCHIVE_NAME=libkiln_native_number_ffi.slim.a
-	KILN_PROVIDER_MANIFEST_NAME=kiln-native-number-provider.slim.json
+	KILN_PROVIDER_ARCHIVE_NAME="$KILN_PROVIDER_SLIM_ARCHIVE"
+	KILN_PROVIDER_MANIFEST_NAME="$KILN_PROVIDER_SLIM_MANIFEST"
 	KILN_PROVIDER_HTTP_JSON=false
 fi
 KILN_PROVIDER_ARCHIVE="$KILN_PROVIDER_OUTPUT/$KILN_PROVIDER_ARCHIVE_NAME"
@@ -141,7 +151,7 @@ trap kiln_provider_cleanup EXIT
 # Keep the shipped manifest tied to the ABI the resolver validates. This is intentionally read from
 # the Rust source rather than duplicated as a second version constant in the shell packager.
 KILN_PROVIDER_ABI_VERSION=$(
-	"$KILN_PROVIDER_CARGO" run --quiet -p kiln-native-provider-contract --bin kiln-native-provider-contract -- abi
+	"$KILN_PROVIDER_CONTRACT_BIN" abi
 )
 if [[ ! $KILN_PROVIDER_ABI_VERSION =~ ^[0-9]+$ ]]; then
 	printf 'could not determine number-provider ABI version\n' >&2
@@ -152,7 +162,7 @@ fi
 # manifest does not name *exactly* the symbols it requires. This intentionally bounded extraction
 # reads the registry entries, rather than maintaining another list in the packager.
 KILN_PROVIDER_EXPORTS=$(
-	"$KILN_PROVIDER_CARGO" run --quiet -p kiln-native-provider-contract --bin kiln-native-provider-contract -- exports |
+	"$KILN_PROVIDER_CONTRACT_BIN" exports |
 		awk '{for (i=1; i<=NF; i++) printf "%s\"%s\"", (i==1 ? "" : ","), $i}'
 )
 if [[ -z $KILN_PROVIDER_EXPORTS ]]; then
@@ -223,8 +233,7 @@ KILN_PROVIDER_ARCHIVE_DIGEST=$(kiln_provider_sha256_file "$KILN_PROVIDER_ARCHIVE
 KILN_PROVIDER_RUSTC_DIGEST=$("$KILN_PROVIDER_RUSTC" -vV | kiln_provider_sha256_stream)
 KILN_PROVIDER_LISTED="$(mktemp)"
 KILN_PROVIDER_SOURCE_DIGEST=$(
-	"$KILN_PROVIDER_CARGO" run --quiet -p kiln-native-provider-contract --bin kiln-native-provider-contract -- \
-		source-digest "$(kiln_repo_root)"
+	"$KILN_PROVIDER_CONTRACT_BIN" source-digest "$(kiln_repo_root)"
 )
 while IFS= read -r KILN_PROVIDER_SOURCE || [[ -n $KILN_PROVIDER_SOURCE ]]; do
 	[[ -z $KILN_PROVIDER_SOURCE ]] || printf '%s\n' "$KILN_PROVIDER_SOURCE" >>"$KILN_PROVIDER_LISTED"
