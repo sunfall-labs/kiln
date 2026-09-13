@@ -651,18 +651,66 @@ impl NativeBuilder {
         let embedding_abi = shared_embedding_abi_identity();
         let provider = self.number_provider()?;
         let mut identities = BTreeSet::new();
-        let mut allow = |compiler: String, family: NativeArtifactFamily, profile| {
-            let (backend, abi) = family.backend_abi(&module_abi, &runtime_abi, &embedding_abi);
-            identities.insert(cache_identity(compiler, backend, &abi, &target, profile));
+
+        let mut allow = |compiler: String, backend: Backend, abi: &str, profile| {
+            identities.insert(cache_identity(compiler, backend, abi, &target, profile));
         };
-        for family in NativeArtifactFamily::SOURCES {
-            if matches!(family, NativeArtifactFamily::NumberProvider) {
-                let provider = self.number_provider()?;
-                allow(provider.identity, family, CacheProfile::Release);
-            } else {
-                allow(family.compiler_version(), family, CacheProfile::Debug);
-            }
-        }
+
+        // Deterministic generated sources are always stored under the debug cache profile. Graph
+        // module sources share the ordinary module-source identity byte-for-byte.
+        allow(
+            format!("kiln-c-abi-{C_ABI_VERSION}-generator-{C_GENERATOR_VERSION}"),
+            Backend::C,
+            &module_abi,
+            CacheProfile::Debug,
+        );
+        allow(
+            format!("kiln-runtime-{NATIVE_RUNTIME_VERSION}"),
+            Backend::Custom("native-runtime-source".to_owned()),
+            &runtime_abi,
+            CacheProfile::Debug,
+        );
+        allow(
+            format!("kiln-runtime-prelude-{NATIVE_PRELUDE_VERSION}"),
+            Backend::Custom("native-prelude-source".to_owned()),
+            &runtime_abi,
+            CacheProfile::Debug,
+        );
+        allow(
+            format!("kiln-launcher-{NATIVE_RUNTIME_VERSION}"),
+            Backend::Custom("native-launcher-source".to_owned()),
+            &runtime_abi,
+            CacheProfile::Debug,
+        );
+        allow(
+            format!("kiln-graph-launcher-{NATIVE_RUNTIME_VERSION}"),
+            Backend::Custom("native-graph-launcher-source".to_owned()),
+            &runtime_abi,
+            CacheProfile::Debug,
+        );
+        allow(
+            format!("kiln-c-abi-{C_ABI_VERSION}-module-api-{EMBEDDING_MODULE_API_VERSION}"),
+            Backend::Custom("native-shared-library-source".to_owned()),
+            &embedding_abi,
+            CacheProfile::Debug,
+        );
+        allow(
+            format!(
+                "kiln-shared-graph-wrapper-{NATIVE_RUNTIME_VERSION}-module-api-{EMBEDDING_MODULE_API_VERSION}"
+            ),
+            Backend::Custom("native-shared-graph-wrapper-source".to_owned()),
+            &runtime_abi,
+            CacheProfile::Debug,
+        );
+
+        // The Rust number provider is profile-independent and is cached as one release archive.
+        allow(
+            provider.identity,
+            Backend::Custom("rust-native-number-provider".to_owned()),
+            &native_number_abi_identity(),
+            CacheProfile::Release,
+        );
+
         for profile in [
             NativeProfile::Dev,
             NativeProfile::Check,
@@ -670,8 +718,47 @@ impl NativeBuilder {
             NativeProfile::Profile,
         ] {
             let profile = profile.cache();
-            for family in NativeArtifactFamily::OBJECTS {
-                allow(compiler.clone(), family, profile.clone());
+            for (backend, abi) in [
+                (Backend::C, module_abi.as_str()),
+                (
+                    Backend::Custom("native-runtime".to_owned()),
+                    runtime_abi.as_str(),
+                ),
+                (
+                    Backend::Custom("native-runtime-prelude".to_owned()),
+                    runtime_abi.as_str(),
+                ),
+                (
+                    Backend::Custom("native-launcher".to_owned()),
+                    runtime_abi.as_str(),
+                ),
+                (Backend::C, runtime_abi.as_str()),
+                (
+                    Backend::Custom("native-shared-library".to_owned()),
+                    embedding_abi.as_str(),
+                ),
+                (
+                    Backend::Custom("native-shared-prelude".to_owned()),
+                    embedding_abi.as_str(),
+                ),
+                (
+                    Backend::Custom("native-shared-graph-module".to_owned()),
+                    module_abi.as_str(),
+                ),
+                (
+                    Backend::Custom("native-shared-graph-wrapper".to_owned()),
+                    runtime_abi.as_str(),
+                ),
+                (
+                    Backend::Custom("native-shared-graph".to_owned()),
+                    runtime_abi.as_str(),
+                ),
+                (
+                    Backend::Custom("native-graph-launcher".to_owned()),
+                    runtime_abi.as_str(),
+                ),
+            ] {
+                allow(compiler.clone(), backend, abi, profile.clone());
             }
         }
 
@@ -3272,24 +3359,6 @@ if (typeof JSON !== "undefined") {
 }
 "#;
 
-fn native_builtin_bootstrap_module(
-    policy: &EmissionPolicy,
-) -> Result<kiln_backend_c::CModule, NativeError> {
-    const LOGICAL_PATH: &str = "@kiln/runtime-bootstrap.ts";
-    let hir = frontend_oxc::parse(LOGICAL_PATH, NATIVE_BUILTIN_BOOTSTRAP_SOURCE);
-    let program = kiln_ir::compile_module(&hir).map_err(|diagnostics| {
-        NativeError::Graph(ModuleGraphError::Compile {
-            path: PathBuf::from(LOGICAL_PATH),
-            diagnostics,
-        })
-    })?;
-    Ok(emit_module_with_logical_path_and_policy(
-        &program,
-        LOGICAL_PATH,
-        policy.clone(),
-    )?)
-}
-
 fn emit_native_graph_module(
     node: &kiln_module_graph::ModuleNode,
     logical_path: &str,
@@ -3437,6 +3506,887 @@ fn emit_native_graph_module_with_policy(
             logical_path,
             policy.clone(),
         )?),
+    }
+}
+
+fn native_builtin_bootstrap_module(
+    policy: &EmissionPolicy,
+) -> Result<kiln_backend_c::CModule, NativeError> {
+    const LOGICAL_PATH: &str = "@kiln/runtime-bootstrap.ts";
+    let hir = frontend_oxc::parse(LOGICAL_PATH, NATIVE_BUILTIN_BOOTSTRAP_SOURCE);
+    let program = kiln_ir::compile_module(&hir).map_err(|diagnostics| {
+        NativeError::Graph(ModuleGraphError::Compile {
+            path: PathBuf::from(LOGICAL_PATH),
+            diagnostics,
+        })
+    })?;
+    Ok(emit_module_with_logical_path_and_policy(
+        &program,
+        LOGICAL_PATH,
+        policy.clone(),
+    )?)
+}
+
+fn cached_payload(
+    cache: &ArtifactCache,
+    key: &ArtifactKey,
+    expected: &[u8],
+) -> Result<(Vec<u8>, Digest, bool), NativeError> {
+    match cache.lookup_digest(key)? {
+        Some((digest, size)) => {
+            let expected_digest = Digest::hash(expected);
+            if digest != expected_digest || size != expected.len() as u64 {
+                match cache.lookup(key)? {
+                    Lookup::Hit(artifact) if artifact.bytes != expected => {
+                        return Err(CacheError::Corrupt {
+                            path: artifact.path,
+                            reason: format!(
+                                "cached payload digest {} does not match deterministic expected digest {}",
+                                artifact.digest.to_hex(),
+                                expected_digest.to_hex()
+                            ),
+                        }
+                        .into());
+                    }
+                    _ => {}
+                }
+            }
+            Ok((expected.to_vec(), digest, true))
+        }
+        None => {
+            let stored = cache.put(key, expected)?;
+            Ok((expected.to_vec(), stored.digest, false))
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn module_abi_identity() -> String {
+    // Generated modules carry the private value runtime in their translation unit today. Any
+    // change to that source therefore changes the object ABI even when the public scalar C ABI
+    // does not. Pin the generator revision here so a stale object can never be linked beside a
+    // freshly generated sibling merely because both still expose C ABI v1.
+    format!("host-{HOST_ABI_VERSION};c-{C_ABI_VERSION};generator-{C_GENERATOR_VERSION}")
+}
+
+fn runtime_abi_identity() -> String {
+    format!(
+        "{};runtime-{NATIVE_RUNTIME_VERSION};async-{PRIVATE_ASYNC_ABI_VERSION}",
+        module_abi_identity()
+    )
+}
+
+fn shared_embedding_abi_identity() -> String {
+    format!(
+        "{};module-api-{EMBEDDING_MODULE_API_VERSION}",
+        runtime_abi_identity()
+    )
+}
+
+fn native_number_abi_identity() -> String {
+    format!("kiln-native-number-provider-{PROVIDER_ABI_VERSION}")
+}
+
+fn target_identity(identity: &ToolIdentity) -> String {
+    let sdk_root = std::env::var("SDKROOT").unwrap_or_default();
+    let deployment = std::env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_default();
+    format!(
+        "compiler-target={};host={}-{};sdk={sdk_root};deployment={deployment}",
+        identity.target,
+        std::env::consts::ARCH,
+        std::env::consts::OS,
+    )
+}
+
+fn compiler_identity(identity: &ToolIdentity) -> String {
+    compiler_identity_from_parts(
+        &identity.stable_key(),
+        compiler_environment_digest(identity.kind),
+    )
+}
+
+fn compiler_identity_from_parts(tool: &str, environment: Digest) -> String {
+    format!(
+        "{}:{tool}|compiler-environment-sha256:{}",
+        tool.len(),
+        environment.to_hex()
+    )
+}
+
+fn compiler_environment_digest(kind: CompilerKind) -> Digest {
+    compiler_environment_digest_with(kind, |name| std::env::var_os(name))
+}
+
+fn compiler_environment_digest_with(
+    kind: CompilerKind,
+    mut value: impl FnMut(&str) -> Option<std::ffi::OsString>,
+) -> Digest {
+    fn frame(output: &mut Vec<u8>, bytes: &[u8]) {
+        output.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        output.extend_from_slice(bytes);
+    }
+
+    let mut encoded = Vec::new();
+    encoded.extend_from_slice(b"kiln-native-compiler-environment-v1\0");
+    let driver_environment: &[&str] = match kind {
+        CompilerKind::Zig => &ZIG_COMPILER_ENVIRONMENT,
+        CompilerKind::Gcc | CompilerKind::Cc => &GCC_COMPILER_ENVIRONMENT,
+        CompilerKind::Clang => &[],
+    };
+    for name in C_COMPILER_ENVIRONMENT
+        .into_iter()
+        .chain(driver_environment.iter().copied())
+    {
+        frame(&mut encoded, name.as_bytes());
+        match value(name) {
+            Some(value) => {
+                encoded.push(1);
+                frame(&mut encoded, value.as_os_str().as_encoded_bytes());
+            }
+            None => encoded.push(0),
+        }
+    }
+    Digest::hash(&encoded)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LogicalModulePath(String);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CommonJsFilename(String);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CommonJsDirname(String);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CommonJsModulePaths {
+    filename: CommonJsFilename,
+    dirname: CommonJsDirname,
+    diagnostic: LogicalModulePath,
+}
+
+impl LogicalModulePath {
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl CommonJsFilename {
+    fn new(path: &Path) -> Result<Self, NativeError> {
+        if !path.is_absolute() {
+            return Err(NativeError::Emit(EmitError::InvalidProgram {
+                message: format!("CommonJS module path {} is not absolute", path.display()),
+            }));
+        }
+        Ok(Self(path.to_string_lossy().into_owned()))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+impl CommonJsDirname {
+    fn new(path: &Path) -> Result<Self, NativeError> {
+        let dirname = path.parent().ok_or_else(|| {
+            NativeError::Emit(EmitError::InvalidProgram {
+                message: format!("CommonJS module path {} has no parent", path.display()),
+            })
+        })?;
+        Ok(Self(dirname.to_string_lossy().into_owned()))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl CommonJsModulePaths {
+    fn new(root: &Path, path: &Path) -> Result<Self, NativeError> {
+        Ok(Self {
+            filename: CommonJsFilename::new(path)?,
+            dirname: CommonJsDirname::new(path)?,
+            diagnostic: LogicalModulePath(logical_module_path(root, path)?),
+        })
+    }
+}
+
+fn logical_module_path(root: &Path, path: &Path) -> Result<String, NativeError> {
+    let relative = path.strip_prefix(root).map_err(|_| {
+        NativeError::Emit(EmitError::InvalidProgram {
+            message: format!(
+                "module path {} is outside project root {}",
+                path.display(),
+                root.display()
+            ),
+        })
+    })?;
+    let mut logical = String::new();
+    for component in relative.components() {
+        let Component::Normal(component) = component else {
+            return Err(NativeError::Emit(EmitError::InvalidProgram {
+                message: format!(
+                    "module path {} is not a normalized project-relative path",
+                    path.display()
+                ),
+            }));
+        };
+        let component = component.to_str().ok_or_else(|| {
+            NativeError::Emit(EmitError::InvalidProgram {
+                message: format!("module path {} is not valid UTF-8", path.display()),
+            })
+        })?;
+        if component.is_empty() || component.contains(['\\', '\0']) {
+            return Err(NativeError::Emit(EmitError::InvalidProgram {
+                message: format!(
+                    "module path {} is not a normalized slash-separated path",
+                    path.display()
+                ),
+            }));
+        }
+        if !logical.is_empty() {
+            logical.push('/');
+        }
+        logical.push_str(component);
+    }
+    if logical.is_empty() {
+        return Err(NativeError::Emit(EmitError::InvalidProgram {
+            message: format!(
+                "module path {} has no logical relative path",
+                path.display()
+            ),
+        }));
+    }
+    Ok(logical)
+}
+
+fn digest_graph_path(graph: &ModuleGraph, path: &Path) -> String {
+    logical_module_path(graph.project_root(), path)
+        .unwrap_or_else(|_| path.to_string_lossy().into_owned())
+}
+
+fn append_runtime_digest(
+    bytes: &mut Vec<u8>,
+    graph: &ModuleGraph,
+    modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
+    native_runtime_failures: Option<&BTreeMap<(PathBuf, PathBuf, String), String>>,
+) {
+    let mut indices = std::collections::HashMap::with_capacity(modules.len());
+    for (index, (node, _)) in modules.iter().enumerate() {
+        indices.insert(node.path.clone(), index);
+    }
+    for (node, _) in modules {
+        for dependency in &node.runtime_dependencies {
+            bytes.extend_from_slice(b"runtime:");
+            bytes.extend_from_slice(digest_graph_path(graph, &dependency.importer).as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(dependency.specifier.as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(digest_graph_path(graph, &dependency.target).as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(
+                indices
+                    .get(&dependency.target)
+                    .copied()
+                    .unwrap_or(usize::MAX)
+                    .to_string()
+                    .as_bytes(),
+            );
+            bytes.push(0);
+        }
+        for ((captured, specifier), message) in graph.runtime_failures(&node.path) {
+            bytes.extend_from_slice(b"runtime-failure:");
+            bytes.extend_from_slice(digest_graph_path(graph, &node.path).as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(digest_graph_path(graph, captured).as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(specifier.as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(message.as_bytes());
+            bytes.push(0);
+        }
+    }
+    if let Some(failures) = native_runtime_failures {
+        for ((owner, captured, specifier), message) in failures {
+            bytes.extend_from_slice(b"native-runtime-failure:");
+            bytes.extend_from_slice(digest_graph_path(graph, owner).as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(digest_graph_path(graph, captured).as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(specifier.as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(message.as_bytes());
+            bytes.push(0);
+        }
+    }
+}
+
+fn graph_topology_digest(
+    graph: &ModuleGraph,
+    modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
+    native_failures: Option<&BTreeMap<(PathBuf, String), String>>,
+    native_runtime_failures: Option<&BTreeMap<(PathBuf, PathBuf, String), String>>,
+) -> Digest {
+    let mut bytes = Vec::new();
+    let mut indices = std::collections::HashMap::with_capacity(modules.len());
+    for (index, (node, _)) in modules.iter().enumerate() {
+        indices.insert(node.path.clone(), index);
+    }
+    let entry_index = modules
+        .iter()
+        .position(|(node, _)| node.path == graph.entry())
+        .unwrap_or(usize::MAX);
+    bytes.extend_from_slice(entry_index.to_string().as_bytes());
+    bytes.push(0);
+    for (node, module) in modules {
+        bytes.extend_from_slice(module.symbol.as_bytes());
+        bytes.push(0);
+        for dependency in &node.dependencies {
+            bytes.extend_from_slice(dependency.specifier.as_bytes());
+            bytes.push(0);
+            let index = indices
+                .get(&dependency.target)
+                .copied()
+                .unwrap_or(usize::MAX);
+            bytes.extend_from_slice(index.to_string().as_bytes());
+            bytes.push(0);
+        }
+        for dependency in graph.dynamic_dependencies(&node.path) {
+            bytes.extend_from_slice(b"dynamic:");
+            bytes.extend_from_slice(dependency.specifier.as_bytes());
+            bytes.push(0);
+            let index = indices
+                .get(&dependency.target)
+                .copied()
+                .unwrap_or(usize::MAX);
+            bytes.extend_from_slice(index.to_string().as_bytes());
+            bytes.push(0);
+        }
+        for import in &node.program.imports {
+            bytes.extend_from_slice(import.source.as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(import.imported.as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(import.local.as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(import.local_slot.to_string().as_bytes());
+            bytes.push(0);
+        }
+        for export in &node.program.exports {
+            bytes.extend_from_slice(export.exported.as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(export.local_slot.to_string().as_bytes());
+            bytes.push(0);
+        }
+    }
+    for ((importer, specifier), message) in graph.dynamic_failures() {
+        bytes.extend_from_slice(b"dynamic-failure:");
+        bytes.extend_from_slice(importer.to_string_lossy().as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(specifier.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(message.as_bytes());
+        bytes.push(0);
+    }
+    if let Some(failures) = native_failures {
+        for ((importer, specifier), message) in failures {
+            bytes.extend_from_slice(b"native-dynamic-failure:");
+            bytes.extend_from_slice(importer.to_string_lossy().as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(specifier.as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(message.as_bytes());
+            bytes.push(0);
+        }
+    }
+    append_runtime_digest(&mut bytes, graph, modules, native_runtime_failures);
+    Digest::hash(&bytes)
+}
+
+/// Identity of the graph wiring used by the shared wrapper. Local bytecode slot assignments are
+/// deliberately excluded: changing a module body may renumber those private slots without
+/// changing the provider/import topology or the wrapper source.
+fn graph_shared_topology_digest(
+    graph: &ModuleGraph,
+    modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
+    native_failures: Option<&BTreeMap<(PathBuf, String), String>>,
+    native_runtime_failures: Option<&BTreeMap<(PathBuf, PathBuf, String), String>>,
+) -> Digest {
+    let mut bytes = Vec::new();
+    let mut indices = std::collections::HashMap::with_capacity(modules.len());
+    for (index, (node, _)) in modules.iter().enumerate() {
+        indices.insert(node.path.clone(), index);
+    }
+    let entry_index = modules
+        .iter()
+        .position(|(node, _)| node.path == graph.entry())
+        .unwrap_or(usize::MAX);
+    bytes.extend_from_slice(entry_index.to_string().as_bytes());
+    bytes.push(0);
+    for (node, module) in modules {
+        bytes.extend_from_slice(module.symbol.as_bytes());
+        bytes.push(0);
+        for dependency in &node.dependencies {
+            bytes.extend_from_slice(dependency.specifier.as_bytes());
+            bytes.push(0);
+            let index = indices
+                .get(&dependency.target)
+                .copied()
+                .unwrap_or(usize::MAX);
+            bytes.extend_from_slice(index.to_string().as_bytes());
+            bytes.push(0);
+        }
+        for dependency in graph.dynamic_dependencies(&node.path) {
+            bytes.extend_from_slice(b"dynamic:");
+            bytes.extend_from_slice(dependency.specifier.as_bytes());
+            bytes.push(0);
+            let index = indices
+                .get(&dependency.target)
+                .copied()
+                .unwrap_or(usize::MAX);
+            bytes.extend_from_slice(index.to_string().as_bytes());
+            bytes.push(0);
+        }
+        for import in &node.program.imports {
+            bytes.extend_from_slice(import.source.as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(import.imported.as_bytes());
+            bytes.push(0);
+        }
+        for export in &node.program.exports {
+            bytes.extend_from_slice(export.exported.as_bytes());
+            bytes.push(0);
+        }
+    }
+    for ((importer, specifier), message) in graph.dynamic_failures() {
+        bytes.extend_from_slice(b"dynamic-failure:");
+        bytes.extend_from_slice(importer.to_string_lossy().as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(specifier.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(message.as_bytes());
+        bytes.push(0);
+    }
+    if let Some(failures) = native_failures {
+        for ((importer, specifier), message) in failures {
+            bytes.extend_from_slice(b"native-dynamic-failure:");
+            bytes.extend_from_slice(importer.to_string_lossy().as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(specifier.as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(message.as_bytes());
+            bytes.push(0);
+        }
+    }
+    append_runtime_digest(&mut bytes, graph, modules, native_runtime_failures);
+    Digest::hash(&bytes)
+}
+
+/// Derive the public graph wrapper identity from topology, ordered module bodies, and every
+/// absolute CommonJS runtime path embedded by the wrapper. Private module symbols intentionally
+/// remain topology-based, but a public wrapper must not collide with another DSO containing the
+/// same logical graph and bytecode but different observable `__filename`/`__dirname` values.
+fn graph_shared_public_digest(
+    topology: Digest,
+    modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
+) -> Result<Digest, NativeError> {
+    let mut bytes = topology.to_hex().into_bytes();
+    bytes.push(0);
+    for (_, module) in modules {
+        let digest = Digest::hash(module.source.as_bytes());
+        bytes.extend_from_slice(digest.to_hex().as_bytes());
+        bytes.push(0);
+    }
+    if modules
+        .iter()
+        .any(|(node, _)| node.source == ModuleSource::CommonJs)
+    {
+        bytes.extend_from_slice(b"commonjs-runtime-paths-v1\0");
+        for (node, _) in modules {
+            if node.source != ModuleSource::CommonJs {
+                continue;
+            }
+            let filename = CommonJsFilename::new(&node.path)?;
+            bytes.extend_from_slice(&(filename.as_bytes().len() as u64).to_le_bytes());
+            bytes.extend_from_slice(filename.as_bytes());
+        }
+    }
+    Ok(Digest::hash(&bytes))
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum NativeGraphImport {
+    Internal,
+    Binding {
+        provider_index: usize,
+        export_index: usize,
+    },
+    Namespace {
+        provider_index: usize,
+    },
+    CommonJsNamed {
+        provider_index: usize,
+        property: String,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum NativeNamespaceValue {
+    Binding {
+        provider_index: usize,
+        export_index: usize,
+    },
+    Namespace {
+        provider_index: usize,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NativeNamespaceEntry {
+    name: String,
+    value: NativeNamespaceValue,
+}
+
+/// Resolve one canonical binding slot from the graph's export table.
+///
+/// Raw provider export tables are insufficient here: `export *` deliberately has only one
+/// synthetic entry, while the graph linker resolves each forwarded name to its canonical origin.
+fn graph_export_slot(
+    modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
+    indices: &std::collections::HashMap<PathBuf, usize>,
+    importer: &Path,
+    origin: &Path,
+    local_slot: u32,
+    exported_name: &str,
+) -> Result<(usize, usize), NativeError> {
+    let provider_index = *indices.get(origin).ok_or_else(|| {
+        NativeError::Graph(ModuleGraphError::InternalMissingModule {
+            path: origin.to_path_buf(),
+        })
+    })?;
+    /* A CommonJS module publishes its entire `module.exports` projection in slot zero. Named
+     * re-export aliases still resolve to that same origin even though their final spelling is no
+     * longer `default`. */
+    if modules[provider_index].0.source == ModuleSource::CommonJs {
+        return Ok((provider_index, 0));
+    }
+    let export_index = modules[provider_index]
+        .0
+        .program
+        .exports
+        .iter()
+        .position(|export| {
+            export.local_slot == local_slot
+                && !export.exported.starts_with(kiln_ir::STAR_REEXPORT_PREFIX)
+        })
+        .ok_or_else(|| {
+            NativeError::Graph(ModuleGraphError::MissingExport {
+                importer: importer.to_path_buf(),
+                provider: origin.to_path_buf(),
+                name: exported_name.to_owned(),
+            })
+        })?;
+    Ok((provider_index, export_index))
+}
+
+/// Resolve one module import to either its concrete export-array slot or one graph namespace.
+///
+/// The synthetic namespace import used solely to carry a star table remains internal. A visible
+/// namespace is a single snapshot object built after its provider finishes, then shared by every
+/// importer during this graph invocation.
+fn graph_import_value(
+    graph: &ModuleGraph,
+    modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
+    indices: &std::collections::HashMap<PathBuf, usize>,
+    node: &kiln_module_graph::ModuleNode,
+    import: &kiln_ir::ImportBinding,
+) -> Result<NativeGraphImport, NativeError> {
+    /* CommonJS's five wrapper bindings are supplied by the graph launcher, not by another
+     * module node. Keeping this sentinel out of ordinary dependency resolution is what lets the
+     * launcher preserve one cache identity for `exports`/`module.exports` and attach a require
+     * function whose target table is scoped to this importer. */
+    if node.source == ModuleSource::CommonJs && import.source == "*commonjs-wrapper*" {
+        return Ok(NativeGraphImport::Internal);
+    }
+    let dependency = node
+        .dependencies
+        .iter()
+        .find(|dependency| dependency.specifier == import.source)
+        .ok_or_else(|| {
+            NativeError::Graph(ModuleGraphError::UnresolvedImport {
+                importer: node.path.clone(),
+                source: import.source.clone(),
+            })
+        })?;
+    if import.imported == kiln_ir::NAMESPACE_IMPORT {
+        let internal_star_table = node.program.exports.iter().any(|export| {
+            export.local_slot == import.local_slot
+                && export.exported.starts_with(kiln_ir::STAR_REEXPORT_PREFIX)
+        });
+        if internal_star_table {
+            return Ok(NativeGraphImport::Internal);
+        }
+        let provider_index = *indices.get(&dependency.target).ok_or_else(|| {
+            NativeError::Graph(ModuleGraphError::InternalMissingModule {
+                path: dependency.target.clone(),
+            })
+        })?;
+        let importer_index = *indices.get(&node.path).ok_or_else(|| {
+            NativeError::Graph(ModuleGraphError::InternalMissingModule {
+                path: node.path.clone(),
+            })
+        })?;
+        if provider_index >= importer_index {
+            return Err(NativeError::Emit(EmitError::Unsupported {
+                feature: "self or cyclic namespace imports in native module graphs".to_owned(),
+            }));
+        }
+        return Ok(NativeGraphImport::Namespace { provider_index });
+    }
+
+    let (origin, local_slot) = match graph.resolved_export(&dependency.target, &import.imported) {
+        Some(ResolvedExport::CommonJsNamed { module, property }) => {
+            let provider_index = *indices.get(module).ok_or_else(|| {
+                NativeError::Graph(ModuleGraphError::InternalMissingModule {
+                    path: module.clone(),
+                })
+            })?;
+            let importer_index = *indices.get(&node.path).ok_or_else(|| {
+                NativeError::Graph(ModuleGraphError::InternalMissingModule {
+                    path: node.path.clone(),
+                })
+            })?;
+            if provider_index >= importer_index {
+                return Err(NativeError::Emit(EmitError::Unsupported {
+                    feature: format!(
+                        "`{}`, imported across a module cycle before `{}` has run, in native module graphs",
+                        property,
+                        module.display()
+                    ),
+                }));
+            }
+            return Ok(NativeGraphImport::CommonJsNamed {
+                provider_index,
+                property: property.clone(),
+            });
+        }
+        Some(ResolvedExport::Local { module, local_slot }) => (module, *local_slot),
+        Some(ResolvedExport::Namespace { module }) => {
+            let provider_index = *indices.get(module).ok_or_else(|| {
+                NativeError::Graph(ModuleGraphError::InternalMissingModule {
+                    path: module.clone(),
+                })
+            })?;
+            let importer_index = *indices.get(&node.path).ok_or_else(|| {
+                NativeError::Graph(ModuleGraphError::InternalMissingModule {
+                    path: node.path.clone(),
+                })
+            })?;
+            if provider_index >= importer_index {
+                return Err(NativeError::Emit(EmitError::Unsupported {
+                    feature: "self or cyclic namespace re-exports in native module graphs"
+                        .to_owned(),
+                }));
+            }
+            return Ok(NativeGraphImport::Namespace { provider_index });
+        }
+        Some(ResolvedExport::Ambiguous) => {
+            return Err(NativeError::Graph(ModuleGraphError::AmbiguousExport {
+                importer: node.path.clone(),
+                provider: dependency.target.clone(),
+                name: import.imported.clone(),
+            }));
+        }
+        None => {
+            return Err(NativeError::Graph(ModuleGraphError::MissingExport {
+                importer: node.path.clone(),
+                provider: dependency.target.clone(),
+                name: import.imported.clone(),
+            }));
+        }
+    };
+    let (provider_index, export_index) = graph_export_slot(
+        modules,
+        indices,
+        &node.path,
+        origin,
+        local_slot,
+        &import.imported,
+    )?;
+    /* The launcher is straight-line C: it calls each module in order and takes an importer's
+     * values out of the export array the provider already returned. A cycle can make the origin
+     * of a name come *after* the module that imports it, and there is no array to read then --
+     * the generated code would read one that has not been filled. The interpreter answers that
+     * with a binding cell it fills in later; this backend has no such thing, so it refuses by
+     * name. A cyclic graph whose back edges carry no binding still compiles, because nothing in
+     * it reads forward. */
+    let importer_index = *indices.get(&node.path).ok_or_else(|| {
+        NativeError::Graph(ModuleGraphError::InternalMissingModule {
+            path: node.path.clone(),
+        })
+    })?;
+    if provider_index >= importer_index {
+        return Err(NativeError::Emit(EmitError::Unsupported {
+            feature: format!(
+                "`{}`, imported across a module cycle before `{}` has run, in native module \
+                 graphs",
+                import.imported,
+                origin.display()
+            ),
+        }));
+    }
+    Ok(NativeGraphImport::Binding {
+        provider_index,
+        export_index,
+    })
+}
+
+/// The sorted snapshot contents each graph module would expose through `import * as`.
+fn graph_namespace_plans(
+    graph: &ModuleGraph,
+    modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
+    indices: &std::collections::HashMap<PathBuf, usize>,
+    live_imports: Option<&BTreeSet<(PathBuf, usize)>>,
+    partial_namespace_members: Option<&BTreeMap<PathBuf, BTreeSet<String>>>,
+) -> Result<Vec<Option<Vec<NativeNamespaceEntry>>>, NativeError> {
+    let has_any_dynamic_import = modules
+        .iter()
+        .any(|(node, _)| node.program.program.has_dynamic_import());
+    let mut required = vec![false; modules.len()];
+    for (node, _) in modules {
+        for (import_index, import) in node.program.imports.iter().enumerate() {
+            if live_imports
+                .is_some_and(|imports| !imports.contains(&(node.path.clone(), import_index)))
+            {
+                continue;
+            }
+            if let NativeGraphImport::Namespace { provider_index } =
+                graph_import_value(graph, modules, indices, node, import)?
+            {
+                required[provider_index] = true;
+            }
+        }
+    }
+    if has_any_dynamic_import {
+        for (idx, (node, _)) in modules.iter().enumerate() {
+            if node.source != ModuleSource::CommonJs {
+                required[idx] = true;
+            }
+        }
+    }
+
+    let mut plans = vec![None; modules.len()];
+    /* Dependencies precede importers. Walking backwards lets a required barrel namespace mark
+     * the namespace it re-exports before that provider is planned. */
+    for module_index in (0..modules.len()).rev() {
+        if !required[module_index] {
+            continue;
+        }
+        let node = modules[module_index].0;
+        if node.source == ModuleSource::CommonJs {
+            plans[module_index] = None;
+            continue;
+        }
+        let mut names = graph.resolved_export_names(&node.path).ok_or_else(|| {
+            NativeError::Graph(ModuleGraphError::InternalMissingModule {
+                path: node.path.clone(),
+            })
+        })?;
+        if !has_any_dynamic_import {
+            if let Some(members) = partial_namespace_members.and_then(|all| all.get(&node.path)) {
+                names.retain(|name| members.contains(name));
+            }
+        }
+        let entries = names
+            .into_iter()
+            .map(|name| {
+                if name.starts_with("@@") {
+                    return Err(NativeError::Emit(EmitError::Unsupported {
+                        feature: "@@-prefixed exports in native module namespaces".to_owned(),
+                    }));
+                }
+                let value = match graph.resolved_export(&node.path, &name) {
+                    Some(ResolvedExport::Local { module, local_slot }) => {
+                        let (provider_index, export_index) = graph_export_slot(
+                            modules,
+                            indices,
+                            &node.path,
+                            module,
+                            *local_slot,
+                            &name,
+                        )?;
+                        NativeNamespaceValue::Binding {
+                            provider_index,
+                            export_index,
+                        }
+                    }
+                    Some(ResolvedExport::CommonJsNamed { module, .. }) => {
+                        let (provider_index, export_index) =
+                            graph_export_slot(modules, indices, &node.path, module, 0, &name)?;
+                        NativeNamespaceValue::Binding {
+                            provider_index,
+                            export_index,
+                        }
+                    }
+                    Some(ResolvedExport::Namespace { module }) => {
+                        let provider_index = *indices.get(module).ok_or_else(|| {
+                            NativeError::Graph(ModuleGraphError::InternalMissingModule {
+                                path: module.clone(),
+                            })
+                        })?;
+                        if provider_index >= module_index {
+                            return Err(NativeError::Emit(EmitError::Unsupported {
+                                feature:
+                                    "self or cyclic namespace re-exports in native module graphs"
+                                        .to_owned(),
+                            }));
+                        }
+                        required[provider_index] = true;
+                        NativeNamespaceValue::Namespace { provider_index }
+                    }
+                    Some(ResolvedExport::Ambiguous) | None => {
+                        return Err(NativeError::Graph(ModuleGraphError::MissingExport {
+                            importer: node.path.clone(),
+                            provider: node.path.clone(),
+                            name: name.clone(),
+                        }));
+                    }
+                };
+                Ok(NativeNamespaceEntry { name, value })
+            })
+            .collect::<Result<Vec<_>, NativeError>>()?;
+        plans[module_index] = Some(entries);
+    }
+    Ok(plans)
+}
+
+fn native_graph_export_count(node: &kiln_module_graph::ModuleNode) -> usize {
+    if node.source == ModuleSource::CommonJs {
+        1
+    } else if let ModuleSource::NodeBuiltin(_builtin) = node.source {
+        node.program.exports.len()
+    } else {
+        node.program.exports.len()
+    }
+}
+
+/// The slot whose value CommonJS receives from `require()` for a typed builtin.
+///
+/// Typed builtins reserve one private slot after their public ESM exports. That slot is the only
+/// CommonJS projection; loaders never guess that `default` or export zero happens to be suitable.
+fn native_commonjs_projection_index(node: &kiln_module_graph::ModuleNode) -> Option<usize> {
+    match node.source {
+        ModuleSource::Json | ModuleSource::Asset => Some(0),
+        ModuleSource::NodeBuiltin(_) => node
+            .program
+            .exports
+            .iter()
+            .position(|e| e.exported == "default"),
+        ModuleSource::Source | ModuleSource::CommonJs => None,
     }
 }
 
