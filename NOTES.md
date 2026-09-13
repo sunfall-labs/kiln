@@ -5569,4 +5569,17 @@ Verified with native probe `conformance/native/node-worker-threads-members.cjs` 
 between interpreter and native CLI), integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`,
 and full `scripts/native.sh` parity (177 matched, 5 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
 
+---
+
+## Phase 5.2 TypeScript built-ins: `node:module` (2026-09-13)
+
+Migrated `node:module` completely to TypeScript via `crates/kiln-builtins/src/node/module.ts`
+with zero additions to the C runtime prelude (Phase 5.1 freeze strictly honored). Implemented canonical
+exports (`Module`, `builtinModules`, `createRequire`, `default`, `isBuiltin`). Default export is the `Module` class
+(ensuring `typeof require("node:module") === "function"` per Node specification and historical parity), while
+providing `createRequire`, `isBuiltin`, and complete `builtinModules` lists.
+Verified with native probe `conformance/native/node-module-members.cjs` (byte-for-byte identical output
+between interpreter and native CLI), integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`,
+and full `scripts/native.sh` parity (178 matched, 5 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
+
 

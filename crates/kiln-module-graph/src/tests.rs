@@ -2932,6 +2932,92 @@ fn node_builtin_worker_threads_commonjs_require_evaluates_cleanly() {
 }
 
 #[test]
+fn node_builtin_module_evaluates_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import defaultModule, { Module, createRequire, builtinModules, isBuiltin } from 'node:module';\n",
+            "console.log(\n",
+            "  typeof defaultModule === 'function',\n",
+            "  defaultModule === Module,\n",
+            "  typeof createRequire === 'function',\n",
+            "  Array.isArray(builtinModules),\n",
+            "  isBuiltin('fs'),\n",
+            "  isBuiltin('node:path'),\n",
+            "  isBuiltin('unknown_xyz'),\n",
+            ");\n",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with module builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute module builtin");
+    assert_eq!(host.output, ["true true true true true true false"]);
+}
+
+#[test]
+fn node_builtin_module_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const m = require('node:module');\n",
+            "module.exports = {\n",
+            "  isFn: typeof m === 'function',\n",
+            "  hasCreateRequire: typeof m.createRequire === 'function',\n",
+            "  hasBuiltinModules: Array.isArray(m.builtinModules),\n",
+            "  isBuiltin: m.isBuiltin('os'),\n",
+            "  selfEq: m.default === m,\n",
+            "};\n",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import bridge from './bridge.cjs';\n",
+            "console.log(bridge.isFn, bridge.hasCreateRequire, bridge.hasBuiltinModules, bridge.isBuiltin, bridge.selfEq);\n",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with module builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute module builtin cjs");
+    assert_eq!(host.output, ["true true true true true"]);
+}
+
+#[test]
 fn node_net_connect_is_a_typed_virtual_module_export() {
     let project = TempProject::new();
     let entry = project.write(
