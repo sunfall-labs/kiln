@@ -1144,7 +1144,11 @@ fn node_events_is_a_ts_builtin_and_https_has_a_native_runtime_materializer() {
         NodeBuiltin::Module,
         "builtinModules"
     ));
-    assert!(native_builtin_body(NodeBuiltin::Https).is_some());
+    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Https));
+    assert!(native_builtin_supports_export(
+        NodeBuiltin::Https,
+        "createServer"
+    ));
     assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Path));
     assert!(native_builtin_supports_export(NodeBuiltin::Path, "join"));
     assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Assert));
@@ -1165,7 +1169,7 @@ fn node_net_has_one_native_runtime_module_materializer() {
     assert!(body.contains("exports[0] = connect;"));
     assert!(body.contains("exports[1] = connect;"));
     assert!(body.contains("exports[2] = create_server;"));
-    assert!(native_builtin_body(NodeBuiltin::Https).is_some());
+    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Https));
     assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Path));
     assert!(native_builtin_supports_export(NodeBuiltin::Path, "resolve"));
 }
@@ -10072,4 +10076,100 @@ fn native_node_stream_commonjs_require_builds_and_runs() {
     );
     let stdout = String::from_utf8_lossy(&result.stdout);
     assert!(stdout.contains("cjs-stream: function function function"));
+}
+
+#[test]
+fn native_node_https_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-https-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import https, { createServer } from 'node:https';\n",
+            "let threw = false;\n",
+            "try {\n",
+            "  createServer();\n",
+            "} catch (e) {\n",
+            "  threw = e.message.includes('requires a TLS host capability');\n",
+            "}\n",
+            "console.log('https-ts:', typeof https, typeof createServer, threw);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("https_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run https binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("https-ts: object function true"));
+}
+
+#[test]
+fn native_node_https_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-https-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const https = require('node:https');\n",
+            "let threw = false;\n",
+            "try {\n",
+            "  https.createServer();\n",
+            "} catch (e) {\n",
+            "  threw = e.message.includes('requires a TLS host capability');\n",
+            "}\n",
+            "console.log('cjs-https:', typeof https, typeof https.createServer, threw);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("https_cjs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run https cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("cjs-https: object function true"));
 }
