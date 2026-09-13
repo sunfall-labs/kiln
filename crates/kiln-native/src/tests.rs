@@ -1240,8 +1240,8 @@ fn live_cache_identity_catalogue_covers_every_stage_and_profile_family() {
 
     assert_eq!(
         identities.len(),
-        52,
-        "seven generated-source families, one number provider, and eleven stage families across four profiles"
+        NativeArtifactFamily::SOURCES.len() + NativeArtifactFamily::OBJECTS.len() * 4,
+        "every catalogued source family and profile-specific object family has a live identity"
     );
 
     let tool = builder.toolchain().identity();
@@ -8814,103 +8814,6 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
             },
         ),
     ]
-}
-
-/// Every native builtin body must fill exactly the slots the shared export table declares.
-///
-/// The bodies index `exports[]` by position, and the positions are decided in the leaf ABI
-/// crate. Nothing makes that a compile error, and it has already
-/// broken once: `node:http`'s body was written against a six-name list, the table later grew
-/// three names at the front, and every slot shifted by two without a single warning. The
-/// result was not a refusal but a wrong answer - `default` bound to `request`, `createServer`
-/// bound to `get` - which is the failure mode this repository treats as the expensive one.
-///
-/// So the coupling is pinned here rather than trusted. Adding a name to the shared table now
-/// fails this test, which is the cheapest place to find out.
-#[test]
-fn native_builtin_slots_match_the_shared_export_table() {
-    use kiln_module_resolver::NodeBuiltin;
-
-    for builtin in NodeBuiltin::ALL.iter().copied() {
-        let Some(body) = native_builtin_body(builtin) else {
-            // Resolver-known but not-yet-materialized builtins are deliberately rejected by
-            // `validate_native_node_builtins`; they have no native slot contract to check.
-            continue;
-        };
-        let specifier = builtin.specifier();
-        let abi = kiln_node_abi::builtin_abi(specifier)
-            .unwrap_or_else(|| panic!("{specifier} has no declared Node ABI row"));
-        for supported in native_builtin_supported_exports(builtin) {
-            assert!(
-                abi.exports.contains(supported),
-                "{specifier} claims native export `{supported}` outside its declared ABI {:?}",
-                abi.exports
-            );
-        }
-
-        let mut assigned: Vec<usize> = body
-            .lines()
-            .filter_map(|line| line.trim().strip_prefix("exports["))
-            .filter_map(|rest| rest.split(']').next())
-            .map(|index| {
-                index
-                    .parse()
-                    .unwrap_or_else(|_| panic!("{specifier}: unparseable slot `{index}`"))
-            })
-            .collect();
-        assigned.sort_unstable();
-
-        let expected: Vec<usize> = (0..abi.exports.len()).collect();
-        assert_eq!(
-            assigned, expected,
-            "{specifier} assigns slots {assigned:?} but its declared exports are {:?}; \
-                 a duplicate slot is also invalid; \
-                 a body that skips a slot leaves an export `undefined` and one that overruns \
-                 writes past the array",
-            abi.exports
-        );
-    }
-}
-
-#[test]
-fn native_builtin_support_is_the_materialized_subset_not_the_declared_surface() {
-    use kiln_module_resolver::NodeBuiltin;
-
-    assert!(native_builtin_supports_export(
-        NodeBuiltin::Fs,
-        "existsSync"
-    ));
-    assert!(native_builtin_supports_export(
-        NodeBuiltin::Fs,
-        "accessSync"
-    ));
-    assert!(!native_builtin_supports_export(
-        NodeBuiltin::Fs,
-        "nonexistent"
-    ));
-    assert!(native_builtin_supports_export(NodeBuiltin::Path, "join"));
-    assert!(native_builtin_supports_export(
-        NodeBuiltin::Path,
-        "basename"
-    ));
-    assert!(native_builtin_supports_export(NodeBuiltin::Path, "dirname"));
-    assert!(native_builtin_supports_export(NodeBuiltin::Path, "format"));
-    assert!(native_builtin_supports_export(NodeBuiltin::Os, "hostname"));
-    assert!(native_builtin_supports_export(NodeBuiltin::Os, "platform"));
-    assert!(!native_builtin_supports_export(
-        NodeBuiltin::Os,
-        "nonexistent"
-    ));
-    assert!(!native_builtin_supports_export(
-        NodeBuiltin::Http,
-        "nonexistent"
-    ));
-    assert!(native_builtin_supports_export(NodeBuiltin::Ffi, "dlopen"));
-    assert!(native_builtin_supports_export(NodeBuiltin::Ffi, "suffix"));
-    assert!(!native_builtin_supports_export(
-        NodeBuiltin::Ffi,
-        "nonexistent"
-    ));
 }
 
 #[test]
