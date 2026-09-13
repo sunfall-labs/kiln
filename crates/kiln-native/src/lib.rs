@@ -5416,7 +5416,8 @@ fn write_dynamic_failure_dispatch(
     indent: &str,
     native_failures: Option<&BTreeMap<(PathBuf, String), String>>,
 ) {
-    for ((importer_path, specifier), message) in graph.dynamic_failures() {
+    let native_iter = native_failures.into_iter().flat_map(BTreeMap::iter);
+    for ((importer_path, specifier), message) in graph.dynamic_failures().chain(native_iter) {
         let Some(importer_index) = modules
             .iter()
             .position(|(node, _)| node.path == *importer_path)
@@ -5433,20 +5434,6 @@ fn write_dynamic_failure_dispatch(
             specifier.len()
         )
         .unwrap();
-    }
-    if let Some(failures) = native_failures {
-        for ((importer_path, specifier), message) in failures {
-            let Some(importer_index) = modules
-                .iter()
-                .position(|(node, _)| node.path == *importer_path)
-            else {
-                continue;
-            };
-            let importer = native_c_string(&modules[importer_index].1.symbol);
-            let c_spec = native_c_string(specifier);
-            let c_message = native_c_string(message);
-            writeln!(output, "{indent}if (importer != NULL && strcmp(importer, {importer}) == 0 && specifier.tag == KILN_VALUE_STRING && specifier.len == (size_t){} && memcmp(specifier.ptr, {c_spec}, (size_t){}) == 0) {{ kiln_value err = kiln_c99_undefined(); (void)kiln_c99_new_type_error(&err, {c_message}); return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown); }}", specifier.len(), specifier.len()).unwrap();
-        }
     }
 }
 
