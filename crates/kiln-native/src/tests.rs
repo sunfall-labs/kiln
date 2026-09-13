@@ -1161,14 +1161,20 @@ fn node_events_is_a_ts_builtin_and_https_has_a_native_runtime_materializer() {
 }
 
 #[test]
-fn node_net_has_one_native_runtime_module_materializer() {
+fn node_net_is_typescript_builtin_and_supports_exports() {
     use kiln_module_resolver::NodeBuiltin;
 
-    let body = native_builtin_body(NodeBuiltin::Net).expect("net materializes");
-    assert!(body.contains("KILN_C99_METHOD_NODE_NET_CREATE_SERVER"));
-    assert!(body.contains("exports[0] = connect;"));
-    assert!(body.contains("exports[1] = connect;"));
-    assert!(body.contains("exports[2] = create_server;"));
+    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Net));
+    assert!(native_builtin_supports_export(NodeBuiltin::Net, "connect"));
+    assert!(native_builtin_supports_export(
+        NodeBuiltin::Net,
+        "createConnection"
+    ));
+    assert!(native_builtin_supports_export(
+        NodeBuiltin::Net,
+        "createServer"
+    ));
+    assert!(native_builtin_supports_export(NodeBuiltin::Net, "default"));
     assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Https));
     assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Path));
     assert!(native_builtin_supports_export(NodeBuiltin::Path, "resolve"));
@@ -10267,4 +10273,88 @@ fn native_node_async_hooks_commonjs_require_builds_and_runs() {
     );
     let stdout = String::from_utf8_lossy(&result.stdout);
     assert!(stdout.contains("cjs-ah: object function function cjs-store 10"));
+}
+
+#[test]
+fn native_node_net_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-net-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import net, { connect, createConnection, createServer } from 'node:net';\n",
+            "console.log('net-ts:', typeof net, typeof connect, typeof createConnection, typeof createServer, net.default === net);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("net_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run net binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("net-ts: object function function function true"));
+}
+
+#[test]
+fn native_node_net_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-net-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const net = require('node:net');\n",
+            "console.log('cjs-net:', typeof net, typeof net.connect, typeof net.createConnection, typeof net.createServer, net.default === net);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("net_cjs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run net cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("cjs-net: object function function function true"));
 }
