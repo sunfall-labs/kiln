@@ -3518,6 +3518,109 @@ int main(void) {{
     );
 }
 
+#[test]
+fn embedded_shared_graph_dynamic_import_keeps_context_after_body_returns() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        eprintln!("skipping delayed shared dynamic import on unsupported platform");
+        return;
+    }
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping delayed shared dynamic import: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-shared-delayed-dynamic");
+    let project = root.path.join("project");
+    fs::create_dir_all(&project).expect("create delayed dynamic project");
+    let entry = project.join("main.mjs");
+    fs::write(
+        &entry,
+        "import * as staticNs from './target.mjs';\nPromise.resolve().then(() => import('./target.mjs')).then(ns => console.log(`${ns.x}:${ns === staticNs}`));\n",
+    )
+    .expect("write delayed dynamic entry");
+    fs::write(project.join("target.mjs"), "export const x = 99;\n")
+        .expect("write delayed dynamic target");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build delayed dynamic graph");
+    let library = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain.clone())
+        .build_shared_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join(shared_library_name()),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .expect("build delayed dynamic shared graph");
+    let header_name = library
+        .header
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("delayed dynamic header");
+    let host_source = root.path.join("host.c");
+    fs::write(
+        &host_source,
+        format!(
+            r#"#include "{header_name}"
+#include <stdio.h>
+static int host_call(void *context, uint16_t operation, uint16_t argc,
+                     const kiln_value *arguments, kiln_value *result) {{
+    (void)context;
+    if (operation != KILN_HOST_OP_WRITE_STDOUT || argc != 1 || arguments == NULL ||
+        result == NULL || arguments[0].tag != KILN_VALUE_STRING) return KILN_C99_HOST_ERROR;
+    if (arguments[0].len != 0 && arguments[0].ptr == NULL) return KILN_C99_HOST_ERROR;
+    if (fwrite(arguments[0].ptr, 1, arguments[0].len, stdout) != arguments[0].len ||
+        fputc('\n', stdout) == EOF) return KILN_C99_HOST_ERROR;
+    *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};
+    return KILN_C99_OK;
+}}
+int main(void) {{
+    kiln_host host = {{ host_call, NULL }};
+    kiln_value result;
+    return {symbol}(&host, &result) == KILN_C99_OK ? 0 : 1;
+}}
+"#,
+            symbol = library.module_symbol,
+        ),
+    )
+    .expect("write delayed dynamic host");
+    let host_object = root.path.join("host.o");
+    let mut compile = CompileOptions::default();
+    compile.include_dirs.push(root.path.clone());
+    toolchain
+        .compile_c(&host_source, &host_object, &compile)
+        .expect("compile delayed dynamic host");
+    let host_executable = root.path.join("host");
+    let loader_directory = library.loader.parent().expect("loader directory");
+    let mut link = LinkOptions::default();
+    link.runtime_libraries.push(library.output.clone());
+    link.extra_args
+        .push(format!("-Wl,-rpath,{}", loader_directory.display()).into());
+    toolchain
+        .link_executable(&[host_object], &host_executable, &link)
+        .expect("link delayed dynamic host");
+    let mut command = Command::new(&host_executable);
+    #[cfg(target_os = "linux")]
+    command.env("LD_LIBRARY_PATH", loader_directory);
+    #[cfg(target_os = "macos")]
+    command.env("DYLD_LIBRARY_PATH", loader_directory);
+    let output = command.output().expect("run delayed dynamic host");
+    assert!(
+        output.status.success(),
+        "delayed dynamic host failed with {:?}: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"99:true\n");
+}
+
 fn star_reexport_graph(project: &Path) -> ModuleGraph {
     fs::create_dir_all(project).expect("create star graph project");
     for name in ["origin.js", "barrel.js", "main.js"] {
