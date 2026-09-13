@@ -109,8 +109,9 @@ cd "$REPO_ROOT"
 # closes the race where another process edits a caller-supplied checkout after the first check.
 validate_checkout "$CHECKOUT"
 
-# The default CLI mode uses the resident daemon.  Do not add --one-shot here: a full suite must
-# pay one compiler/daemon startup, then stream all selected variants through the existing batch.
+# Run the whole suite in one owned child.  `--one-shot` still batches all selected variants in one
+# process, amortizing compiler startup, while ensuring the memory-capped child owns the workload
+# rather than merely supervising an uncapped resident daemon.
 set +e
 STDOUT_LOG="$LOG_DIR/test262.log"
 python3 - "$KILN_BIN" "$CHECKOUT/test" "$RAW_RESULTS" "$RESULTS" "$TEST262_REPOSITORY" "$TEST262_COMMIT" "$STDOUT_LOG" <<-'PY'
@@ -133,7 +134,7 @@ from test262_memory import run_limited, verify_effective_cap
 	started = time.monotonic()
 	with open(stdout_path, "w", encoding="utf-8") as stream:
 	    completed, exceeded = run_limited(
-	        [kiln, "test", test_root, "--out", raw_path],
+	        [kiln, "--one-shot", "test", test_root, "--out", raw_path],
 	        cwd=os.getcwd(), stdout=stream, stderr=subprocess.STDOUT,
 	    )
 	elapsed = time.monotonic() - started
@@ -141,20 +142,21 @@ from test262_memory import run_limited, verify_effective_cap
 	    print(stream.read(), end="")
 	if exceeded:
 	    sys.stderr.write(f"test262.sh: child exceeded memory cap; full log: {stdout_path}\n")
+	    raise SystemExit(1)
 	if not os.path.isfile(raw_path):
-	    sys.stderr.write("test262.sh: kiln wrote no result document\n")
+	    sys.stderr.write(f"test262.sh: kiln wrote no result document; full log: {stdout_path}\n")
 	    raise SystemExit(completed.returncode or 1)
 
 	try:
 	    with open(raw_path, encoding="utf-8") as handle:
 	        report = json.load(handle)
 	except (OSError, ValueError) as error:
-	    sys.stderr.write(f"test262.sh: invalid Kiln result document: {error}\n")
+	    sys.stderr.write(f"test262.sh: invalid Kiln result document: {error}; full log: {stdout_path}\n")
 	    raise SystemExit(completed.returncode or 1)
 
 	tests = report.get("tests")
 	if not isinstance(tests, list) or not tests:
-	    sys.stderr.write("test262.sh: Kiln result document has no test entries\n")
+	    sys.stderr.write(f"test262.sh: Kiln result document has no test entries; full log: {stdout_path}\n")
 	    raise SystemExit(completed.returncode or 1)
 
 outcomes = {"pass": 0, "fail": 0, "unsupported": 0, "skipped": 0}
