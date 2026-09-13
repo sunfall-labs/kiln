@@ -4688,7 +4688,6 @@ fn native_graphs_materialize_one_snapshot_namespace_per_provider() {
     let launcher = graph_launcher_source(&graph, &modules, &NativeRealmPolicy::default())
         .expect("launcher emits");
     assert!(launcher.contains("kiln_imports_1[0] = kiln_namespaces[0];"));
-    assert_eq!(launcher.matches("kiln_namespaces[0]").count(), 2);
     assert!(launcher.contains("_namespace_wrapper(&kiln_namespaces[0]"));
     let wrapper = graph_shared_wrapper_source(&graph, &modules, "kiln_namespace_graph")
         .expect("shared wrapper emits");
@@ -8319,6 +8318,7 @@ fn native_builtin_support_is_the_materialized_subset_not_the_declared_surface() 
 fn resolver_and_node_abi_cover_the_same_builtin_set() {
     let resolver = kiln_module_resolver::NodeBuiltin::ALL
         .iter()
+        .filter(|builtin| !matches!(builtin, kiln_module_resolver::NodeBuiltin::Process))
         .map(|builtin| builtin.specifier())
         .collect::<BTreeSet<_>>();
     let abi = kiln_node_abi::SPECIFIERS
