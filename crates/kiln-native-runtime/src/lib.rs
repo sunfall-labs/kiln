@@ -334,7 +334,6 @@ const EMBEDDING_HEADER: &str = r#"/* Kiln native embedding ABI. */
  * returning this, because a reference cannot cross the boundary and the launcher's whole job with
  * it is to print it. */
 #define KILN_C99_THROWN (-7)
-#define KILN_C99_BUILTIN_TYPE_ERROR 11
 
 #define KILN_HOST_OP_WRITE_STDOUT 1
 #define KILN_HOST_OP_CLOCK_NOW 2

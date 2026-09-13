@@ -552,3 +552,6 @@ static int kiln_c99_throw_node_invalid_arg_type(kiln_value *thrown, const char *
     }
     return KILN_C99_THROWN;
 }
+int kiln_c99_new_type_error(kiln_value *out, const char *message) {
+    return kiln_c99_throw_error(out, KILN_C99_BUILTIN_TYPE_ERROR, message);
+}

@@ -5268,7 +5268,7 @@ int kiln_graph_dynamic_import(kiln_host *host, const char *importer, kiln_value 
     }
     if (specifier.tag != KILN_VALUE_STRING || (specifier.len != 0 && specifier.ptr == NULL)) {
         kiln_value err = kiln_c99_undefined();
-        (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, "invalid import specifier");
+        (void)kiln_c99_new_type_error(&err, "invalid import specifier");
         return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);
     }
     int attribute_type = 0;
@@ -5419,7 +5419,7 @@ import_attributes_valid:
     output.push_str(
         r#"    {
         kiln_value err = kiln_c99_undefined();
-        (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, "no module loader is installed");
+        (void)kiln_c99_new_type_error(&err, "no module loader is installed");
         return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);
     }
 }
@@ -5450,7 +5450,7 @@ int kiln_graph_dynamic_import(kiln_host *host, const char *importer, kiln_value 
     }
     if (specifier.tag != KILN_VALUE_STRING || (specifier.len != 0 && specifier.ptr == NULL)) {
         kiln_value err = kiln_c99_undefined();
-        (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, "invalid import specifier");
+        (void)kiln_c99_new_type_error(&err, "invalid import specifier");
         return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);
     }
     int attribute_type = 0;
@@ -5463,7 +5463,7 @@ int kiln_graph_dynamic_import(kiln_host *host, const char *importer, kiln_value 
 import_attributes_valid:
     if (specifier.tag != KILN_VALUE_STRING || (specifier.len != 0 && specifier.ptr == NULL)) {
         kiln_value err = kiln_c99_undefined();
-        (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, "invalid import specifier");
+        (void)kiln_c99_new_type_error(&err, "invalid import specifier");
         return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);
     }
     if (specifier.len >= 14 && memcmp(specifier.ptr, "@opentui/core-", 14) == 0) {
@@ -5602,7 +5602,7 @@ import_attributes_valid:
         r#"    }
     {
         kiln_value err = kiln_c99_undefined();
-        (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, "no module loader is installed");
+        (void)kiln_c99_new_type_error(&err, "no module loader is installed");
         return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);
     }
 }
@@ -5812,7 +5812,6 @@ enum kiln_value_tag {
     KILN_VALUE_NUMBER = 3,
     KILN_VALUE_STRING = 4
 };
-#define KILN_C99_BUILTIN_TYPE_ERROR 11
 
 typedef struct kiln_value {
     uint32_t tag;
@@ -5899,6 +5898,7 @@ extern kiln_value kiln_c99_undefined(void);
 extern int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int hint, kiln_value *out, int depth, kiln_value *thrown);
 extern kiln_value kiln_c99_text(kiln_value value);
 extern int kiln_c99_throw_error(kiln_value *out, uint64_t kind, const char *message);
+extern int kiln_c99_new_type_error(kiln_value *out, const char *message);
 extern int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
                                   kiln_value receiver, const kiln_value *args, size_t argc,
                                   int depth, kiln_value *thrown);
@@ -6912,6 +6912,7 @@ extern kiln_value kiln_c99_undefined(void);
 extern int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int hint, kiln_value *out, int depth, kiln_value *thrown);
 extern kiln_value kiln_c99_text(kiln_value value);
 extern int kiln_c99_throw_error(kiln_value *out, uint64_t kind, const char *message);
+extern int kiln_c99_new_type_error(kiln_value *out, const char *message);
 extern int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
                                   kiln_value receiver, const kiln_value *args, size_t argc,
                                   int depth, kiln_value *thrown);
