@@ -25976,6 +25976,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // must not fall back to a second legacy namespace with different identity.
         let native_modules = ordinary_object([
             (
+                "async_hooks".to_owned(),
+                Value::Native(Native::NodeAsyncHooks, RealmId::PRIMARY),
+            ),
+            (
                 "fs".to_owned(),
                 Value::Native(Native::NodeFs, RealmId::PRIMARY),
             ),

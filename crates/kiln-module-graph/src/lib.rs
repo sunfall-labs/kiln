@@ -2562,15 +2562,6 @@ impl<H: HostOps + ?Sized> CommonJsModuleLoader for CommonJsLoader<'_, H> {
         let Some(path) = path else {
             return Ok(None);
         };
-        // A TypeScript builtin may probe its native counterpart through
-        // `process.getBuiltinModule` while that same builtin is being lazily
-        // evaluated.  There is no completed canonical value to return yet;
-        // report the probe as unavailable so the builtin's host-capability
-        // fallback can install its own behavior.  Runtime CommonJS cycles do
-        // not pass through this path and retain their cache semantics.
-        if self.ensuring_targets.contains(path) {
-            return Ok(None);
-        }
         if unsafe { (&*self.values).get(path).is_none() } {
             self.ensure_target_value(path, instruction)?;
         }
