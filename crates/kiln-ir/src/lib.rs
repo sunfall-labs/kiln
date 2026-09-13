@@ -10,7 +10,7 @@ pub use kiln_hir::{Span, TypeAnnotation, VariableKind};
 pub use kiln_host_abi::HostOp;
 
 /// Version of the bytecode contract produced by this crate.
-pub const BYTECODE_VERSION: u16 = 4;
+pub const BYTECODE_VERSION: u16 = 5;
 
 /// A constant embedded in a [`Program`].
 #[derive(Debug, Clone, PartialEq, Eq)]
