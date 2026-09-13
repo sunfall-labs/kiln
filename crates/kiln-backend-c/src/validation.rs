@@ -785,7 +785,11 @@ pub(crate) fn stack_effect(
             }
         }
         Instruction::DynamicImportWithOptions => {
-            if height < 2 { Err(underflow(2)) } else { Ok((height - 1, false)) }
+            if height < 2 {
+                Err(underflow(2))
+            } else {
+                Ok((height - 1, false))
+            }
         }
         // Both write a slot in place and touch no stack.
         Instruction::NewCell(_) | Instruction::MarkUninitialized(_) => Ok((height, false)),
