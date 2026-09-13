@@ -1593,6 +1593,9 @@ typedef struct kiln_node_fs_completion {
 
 typedef struct kiln_node_process_completion {
     kiln_value promise;
+    kiln_value result;
+    kiln_value stdout_value;
+    kiln_value stderr_value;
 } kiln_node_process_completion;
 
 /* A cursor over JSON source, moved forward as text is consumed. */
