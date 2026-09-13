@@ -74,6 +74,21 @@ pub(super) fn status_check(
     )
 }
 
+fn call_status_check(diagnostic_site: &str, pc: u32, operation: &str, unwind: &str) -> String {
+    let source = diagnostic_source(diagnostic_site);
+    let note = format!(
+        "if (kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = KILN_VALUE_FUNCTION; kiln_c99_diagnostic_detail = \"Call invocation threw\"; }} kiln_c99_note_refusal({source}, (size_t){pc}, \"{operation}\", (size_t)kiln_c99_diagnostic_active_depth);"
+    );
+    if compact_diagnostic_site(diagnostic_site) {
+        return format!(
+            "if (status == KILN_C99_THROWN) {{ {note} {unwind} }} KU_STATUS({pc}, \"{operation}\", {unwind}); /* goto kiln_refusal; */"
+        );
+    }
+    format!(
+        "if (status == KILN_C99_THROWN) {{ {note} {unwind} }} if (status == KILN_C99_CONTROL_ERROR) {{ kiln_c99_note_refusal({source}, (size_t){pc}, \"{operation}\", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; }} if (status != KILN_C99_OK) return status;"
+    )
+}
+
 /// The numeric fast path of a binary operator on two unboxed doubles `a` and `b`, as the C
 /// expression producing a `kiln_val`, or `None` for an operator with no numeric form.
 /// The arithmetic of a binary operation on two doubles `a` and `b`, as a double.
@@ -743,7 +758,7 @@ pub(super) fn emit_graph_op(
                 } else {
                     String::new()
                 };
-                let check = status_check(diagnostic_site, pc, label, unwind);
+                let check = call_status_check(diagnostic_site, pc, label, unwind);
                 writeln!(
                     output,
                     "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow} else {{ kiln_val call_args[{n}] = {{ {init} }}; {receiver} kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status = {symbol}_fn_{target}{fast}(&ctx_call, &v{v}, {upvalues}, &recv, {argc} > 0 ? call_args : NULL, (size_t){argc}); {check}{twin} }}",
@@ -807,10 +822,11 @@ pub(super) fn emit_graph_op(
                     "{static_branches} else {{ status = plain->body(&ctx_call, &call_result, plain->upvalues, &recv, call_args, (size_t){argc}); }}"
                 )
             };
-            let check = status_check(diagnostic_site, pc, label, unwind);
+            let check = call_status_check(diagnostic_site, pc, label, unwind);
+            let closure_diagnostic = "if ((status == KILN_C99_THROWN || status == KILN_C99_CONTROL_ERROR) && kiln_c99_diagnostic_function == NULL && plain != NULL) { kiln_c99_diagnostic_function = plain->name; kiln_c99_diagnostic_function_len = plain->name_len; }";
             writeln!(
                 output,
-                "    {{ kiln_val call_stack[{n}] = {{ {init} }}; const kiln_val *call_args = {argc} > 0 ? &call_stack[1] : NULL; kiln_closure *plain = KILN_VAL_IS_CLOSURE(call_stack[0]) ? (kiln_closure *)KILN_VAL_PTR(call_stack[0]) : NULL; if (KILN_LIKELY(plain != NULL && !plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ kiln_val call_result = KILN_VAL_UNDEFINED; kiln_val recv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&recv); kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status; {indirect} {check} v{v} = call_result; }} else {{ int status = kiln_c99_val_call(host, call_stack[0], call_args, (size_t){argc}, depth, thrown, {diagnostic_source}, (size_t){pc}, \"{label}\", &v{v}); {check} }} }}",
+                "    {{ kiln_val call_stack[{n}] = {{ {init} }}; const kiln_val *call_args = {argc} > 0 ? &call_stack[1] : NULL; kiln_closure *plain = KILN_VAL_IS_CLOSURE(call_stack[0]) ? (kiln_closure *)KILN_VAL_PTR(call_stack[0]) : NULL; if (KILN_LIKELY(plain != NULL && !plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ kiln_val call_result = KILN_VAL_UNDEFINED; kiln_val recv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&recv); kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status; {indirect} {closure_diagnostic} {check} v{v} = call_result; }} else {{ int status = kiln_c99_val_call(host, call_stack[0], call_args, (size_t){argc}, depth, thrown, {diagnostic_source}, (size_t){pc}, \"{label}\", &v{v}); {check} }} }}",
                 n = argc + 1
             )
             .unwrap();
