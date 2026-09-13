@@ -738,6 +738,24 @@ fn native_non_callable_caught_error_does_not_leak_into_later_throw() {
 }
 
 #[test]
+fn native_non_callable_nested_error_names_innermost_function() {
+    let Some(stderr) = run_native_failure_fixture(
+        "kiln-native-non-callable-nested-function",
+        "function outer() { function inner() { const value = {}; value(); } inner(); }\nouter();\n",
+    ) else {
+        return;
+    };
+    assert!(
+        stderr.contains("function=inner"),
+        "missing innermost owning function: {stderr}"
+    );
+    assert!(
+        !stderr.contains("function=outer"),
+        "enclosing function leaked into diagnostic: {stderr}"
+    );
+}
+
+#[test]
 fn owned_result_wrapper_source_is_deterministic_and_has_no_static_result_state() {
     let source = owned_result_wrapper_source(
         "kiln_probe",

@@ -310,7 +310,7 @@ static void kiln_c99_note_refusal(const char *site, size_t instruction,
     if (kiln_c99_diagnostic_site != NULL &&
         kiln_c99_diagnostic_operation != NULL &&
         strcmp(kiln_c99_diagnostic_operation, "FunctionBody") != 0 &&
-        depth <= kiln_c99_diagnostic_depth) return;
+        depth <= kiln_c99_diagnostic_depth && kiln_c99_diagnostic_function == NULL) return;
     kiln_c99_diagnostic_site = site;
     kiln_c99_diagnostic_instruction = instruction;
     kiln_c99_diagnostic_operation = operation;
@@ -318,11 +318,11 @@ static void kiln_c99_note_refusal(const char *site, size_t instruction,
     /* FunctionBody is only a fallback for a body that returned before any emitted instruction.
      * Once an instruction claims the failure, its operation owns the payload too. */
     if (replaces_body_fallback) {
-        kiln_c99_diagnostic_function = NULL;
-        kiln_c99_diagnostic_function_len = 0;
         if (kiln_c99_diagnostic_detail != NULL &&
             strcmp(kiln_c99_diagnostic_detail,
                    "generated function body refused before an instruction owned the failure") == 0) {
+            kiln_c99_diagnostic_function = NULL;
+            kiln_c99_diagnostic_function_len = 0;
             kiln_c99_diagnostic_detail = NULL;
             kiln_c99_diagnostic_receiver_tag = 0;
             kiln_c99_diagnostic_has_method = 0;
