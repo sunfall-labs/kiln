@@ -273,6 +273,9 @@ pub fn select_executable_modules<'a>(
         // part of the closed graph: the runtime loader may request any one of them.
         for dependency in &node.runtime_dependencies {
             mark_live(&dependency.target, &mut live, &mut queue);
+            // A lazy require returns the target's complete runtime value. Preserve its CommonJS
+            // module.exports slot or, for ESM, demand the full namespace before reduction.
+            namespace_demands.insert(dependency.target.clone());
         }
 
         for (import_index, import) in node.program.imports.iter().enumerate() {
