@@ -215,26 +215,20 @@ non-zero on this class alone. It costs several hundred native compiles, so it is
 `scripts/native.sh` is, and `conformance/native/*-refuses.ts` is where a decision to keep refusing
 gets written down so that the next person does not "fix" it into an `undefined`.
 
-## Editing the C prelude poisons the native caches
+## Editing the C prelude and native caches
 
-Change anything under `crates/kiln-backend-c/src/runtime/` and the next native build fails with
+Native generated-C, object, runtime and link keys include the content digests of the prelude
+source or header they consume. The backend emitter build fingerprint also participates in the
+generated-module key. Editing `crates/kiln-backend-c/src/runtime/` therefore creates cache misses
+for the affected layers; an ordinary build does not require manual cache deletion. The native
+tests use a separate cache root under `target/kiln-test-cache`, but it follows the same content
+addressing rules.
 
-    kiln: native cache failed: corrupt cache artifact <path>: same cache key already contains a
-    different payload
-
-in every probe at once, which reads exactly like the change having broken the backend. It has
-not: the cache key does not include the prelude source, so the entry recorded before the edit is
-still there and the payload no longer matches it. Refusing is the right behaviour -- serving the
-stale object would be a silently wrong binary -- but the message names the artifact rather than
-the fix.
-
-Clear **both**, because they are separate stores and clearing one leaves the other to fail next:
-
-    rm -rf .kiln/cache target/kiln-test-cache
-
-`.kiln/cache` is what `kiln build` and `scripts/native.sh` use; `target/kiln-test-cache` is what
-`kiln-native`'s crate tests use, and a gate that clears only the first fails in a different step
-the second time round. Only ever clear the ones in a worktree you own.
+If a record is found under the same key with a different payload, the cache reports
+`corrupt cache artifact <path>: same cache key already contains a different payload` and stops.
+That is an integrity failure, not a stale-prelude recovery path: preserve the full diagnostic,
+inspect the key and payload provenance, and remove only the exact bad cache layer or record after
+confirming the cause. `kiln cache gc` bounds `.kiln/cache`; it does not change cache identity.
 
 Run `scripts/native.sh` and `scripts/thirdparty.sh` by **executing** them, never as `bash
 scripts/native.sh`: macOS's `/bin/bash` is 3.2, the cleanup trap loses `BASHPID` under it and

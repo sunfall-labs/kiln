@@ -2127,66 +2127,87 @@ const fn assert_refusals_name_themselves(source: &str, internal_sites: usize, ab
 /// `prelude_runtime.c`, split into domain files under `runtime/` (see `runtime/README.md`); the
 /// concatenation in this order is byte-identical to the original single file, and order is
 /// load-bearing because C needs a declaration before its use.
-macro_rules! runtime_parts {
-    () => {
-        concat!(
-            include_str!("runtime/foundation.c"),
-            include_str!("runtime/heap.c"),
-            include_str!("runtime/shapes.c"),
-            include_str!("runtime/platform.c"),
-            include_str!("runtime/node_support.c"),
-            include_str!("runtime/arrays.c"),
-            include_str!("runtime/properties.c"),
-            include_str!("runtime/generators.c"),
-            include_str!("runtime/methods.c"),
-            include_str!("runtime/web.c"),
-            include_str!("runtime/ryu_tables.c"),
-            include_str!("runtime/numbers.c"),
-            include_str!("runtime/builtins.c"),
-            include_str!("runtime/globals.c"),
-            include_str!("runtime/bigint.c"),
-            include_str!("runtime/temporal_values.c"),
-            include_str!("runtime/regexp.c"),
-            include_str!("runtime/symbols.c"),
+macro_rules! runtime_part_manifest {
+    ($callback:ident) => {
+        $callback!(
+            "runtime/foundation.c",
+            "runtime/heap.c",
+            "runtime/shapes.c",
+            "runtime/platform.c",
+            "runtime/node_support.c",
+            "runtime/arrays.c",
+            "runtime/properties.c",
+            "runtime/generators.c",
+            "runtime/methods.c",
+            "runtime/web.c",
+            "runtime/ryu_tables.c",
+            "runtime/numbers.c",
+            "runtime/builtins.c",
+            "runtime/globals.c",
+            "runtime/bigint.c",
+            "runtime/temporal_values.c",
+            "runtime/regexp.c",
+            "runtime/symbols.c",
         )
     };
 }
 
-/// `prelude_core.c`, split into domain files under `runtime/` (see `runtime/README.md`); the
-/// concatenation in this order is byte-identical to the original single file, and order is
-/// load-bearing because C needs a declaration before its use.
-macro_rules! core_parts {
-    () => {
-        concat!(
-            include_str!("runtime/surface.c"),
-            include_str!("runtime/values.c"),
-            include_str!("runtime/text.c"),
-            include_str!("runtime/stores.c"),
-            include_str!("runtime/proxies.c"),
-            include_str!("runtime/keys.c"),
-            include_str!("runtime/read.c"),
-            include_str!("runtime/write.c"),
-            include_str!("runtime/inspect.c"),
-            include_str!("runtime/strings.c"),
-            include_str!("runtime/node.c"),
-            include_str!("runtime/temporal.c"),
-            include_str!("runtime/dispatch.c"),
-            include_str!("runtime/enumeration.c"),
-            include_str!("runtime/spread.c"),
-            include_str!("runtime/definitions.c"),
-            include_str!("runtime/json.c"),
-            include_str!("runtime/dates.c"),
-            include_str!("runtime/collections.c"),
-            include_str!("runtime/iterators.c"),
-            include_str!("runtime/errors.c"),
-            include_str!("runtime/promises.c"),
-            include_str!("runtime/constructors.c"),
-            include_str!("runtime/dynamic.c"),
-            include_str!("runtime/calls.c"),
-            include_str!("runtime/operators.c"),
-            include_str!("runtime/boxed.c"),
+macro_rules! core_part_manifest {
+    ($callback:ident) => {
+        $callback!(
+            "runtime/surface.c",
+            "runtime/values.c",
+            "runtime/text.c",
+            "runtime/stores.c",
+            "runtime/proxies.c",
+            "runtime/keys.c",
+            "runtime/read.c",
+            "runtime/write.c",
+            "runtime/inspect.c",
+            "runtime/strings.c",
+            "runtime/node.c",
+            "runtime/temporal.c",
+            "runtime/dispatch.c",
+            "runtime/enumeration.c",
+            "runtime/spread.c",
+            "runtime/definitions.c",
+            "runtime/json.c",
+            "runtime/dates.c",
+            "runtime/collections.c",
+            "runtime/iterators.c",
+            "runtime/errors.c",
+            "runtime/promises.c",
+            "runtime/constructors.c",
+            "runtime/dynamic.c",
+            "runtime/calls.c",
+            "runtime/operators.c",
+            "runtime/boxed.c",
         )
     };
+}
+
+macro_rules! concat_parts {
+    ($($name:literal),* $(,)?) => { concat!($(include_str!($name)),*) };
+}
+macro_rules! array_parts {
+    ($($name:literal),* $(,)?) => { &[$(($name, include_str!($name))),*] };
+}
+macro_rules! runtime_parts {
+    () => {
+        runtime_part_manifest!(concat_parts)
+    };
+}
+macro_rules! core_parts {
+    () => {
+        core_part_manifest!(concat_parts)
+    };
+}
+
+pub(crate) fn prelude_source_parts() -> Vec<(&'static str, &'static str)> {
+    let mut parts = Vec::new();
+    parts.extend_from_slice(core_part_manifest!(array_parts));
+    parts.extend_from_slice(runtime_part_manifest!(array_parts));
+    parts
 }
 
 #[allow(long_running_const_eval)]

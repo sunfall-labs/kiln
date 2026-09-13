@@ -1247,36 +1247,51 @@ fn live_cache_identity_catalogue_covers_every_stage_and_profile_family() {
     let tool = builder.toolchain().identity();
     let target = target_identity(tool);
     let compiler = compiler_identity(tool);
+    for family in NativeArtifactFamily::SOURCES {
+        let (backend, abi) = family.backend_abi(
+            &module_abi_identity(),
+            &runtime_abi_identity(),
+            &shared_embedding_abi_identity(),
+        );
+        let compiler_version = if matches!(family, NativeArtifactFamily::NumberProvider) {
+            builder
+                .number_provider()
+                .expect("provider identity")
+                .identity
+        } else {
+            family.compiler_version()
+        };
+        assert!(identities.contains(&cache_identity(
+            compiler_version,
+            backend,
+            &abi,
+            &target,
+            if matches!(family, NativeArtifactFamily::NumberProvider) {
+                CacheProfile::Release
+            } else {
+                CacheProfile::Debug
+            },
+        )));
+    }
     for profile in [
         CacheProfile::Debug,
         CacheProfile::Check,
         CacheProfile::Release,
         CacheProfile::Profile,
     ] {
-        for identity in [
-            cache_identity(
-                compiler.clone(),
-                Backend::C,
+        for family in NativeArtifactFamily::OBJECTS {
+            let (backend, abi) = family.backend_abi(
                 &module_abi_identity(),
-                &target,
-                profile.clone(),
-            ),
-            cache_identity(
-                compiler.clone(),
-                Backend::Custom("native-runtime".to_owned()),
                 &runtime_abi_identity(),
-                &target,
-                profile.clone(),
-            ),
-            cache_identity(
+                &shared_embedding_abi_identity(),
+            );
+            assert!(identities.contains(&cache_identity(
                 compiler.clone(),
-                Backend::Custom("native-shared-graph".to_owned()),
-                &runtime_abi_identity(),
+                backend,
+                &abi,
                 &target,
-                profile,
-            ),
-        ] {
-            assert!(identities.contains(&identity));
+                profile.clone()
+            )));
         }
     }
 }
