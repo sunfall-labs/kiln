@@ -2985,13 +2985,7 @@ fn native_builtin_supported_exports(
         // it had been answering `undefined` here against the interpreter's "\n".
         NodeBuiltin::Os => kiln_builtins::OS_EXPORTS,
         NodeBuiltin::Tty => kiln_builtins::TTY_EXPORTS,
-        NodeBuiltin::Stream => &[
-            "Readable",
-            "Writable",
-            "addAbortSignal",
-            "default",
-            "finished",
-        ],
+        NodeBuiltin::Stream => kiln_builtins::STREAM_EXPORTS,
         NodeBuiltin::PerfHooks => kiln_builtins::PERF_HOOKS_EXPORTS,
         NodeBuiltin::FsPromises => &["appendFile", "mkdir", "readFile", "stat", "writeFile"],
         NodeBuiltin::Fs => &[
