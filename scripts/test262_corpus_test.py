@@ -69,7 +69,7 @@ class CorpusPolicyTests(unittest.TestCase):
         with self.assertRaises(corpus.CorpusError):
             corpus.discover_chunks(root / "test", ["language/missing"])
         fake = root / "fake-kiln"
-        fake.write_text("#!/usr/bin/env python3\nimport os, pathlib, sys\nif os.environ.get('FAKE_NO_WRITE') != '1': pathlib.Path(sys.argv[5]).write_text(os.environ['FAKE_REPORT'])\n")
+        fake.write_text("#!/usr/bin/env python3\nimport os, pathlib, sys\nif os.environ.get('FAKE_NO_WRITE') != '1': pathlib.Path(sys.argv[5]).write_text(os.environ['FAKE_REPORT'])\nsys.exit(int(os.environ.get('FAKE_EXIT', '0')))\n")
         fake.chmod(0o755)
         raw = root / "result.json"
         log = root / "run.log"
@@ -77,6 +77,13 @@ class CorpusPolicyTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"FAKE_REPORT": json.dumps(valid), "FAKE_NO_WRITE": "0"}):
             report, _ = corpus.run_result(str(fake), root / "test/language/a", raw, log)
         self.assertEqual(report["_kiln_counts"]["pass"], 1)
+        failing = {"tests": [{"id": "a", "outcome": "fail"}], "totals": {"total": 1, "passed": 0, "failed": 1, "unsupported": 0, "skipped": 0}}
+        with mock.patch.dict(os.environ, {"FAKE_REPORT": json.dumps(failing), "FAKE_NO_WRITE": "0", "FAKE_EXIT": "1"}):
+            report, completed = corpus.run_result(str(fake), root / "test/language/a", raw, log)
+        self.assertEqual((report["_kiln_counts"]["fail"], completed.returncode), (1, 1))
+        with mock.patch.dict(os.environ, {"FAKE_REPORT": json.dumps(valid), "FAKE_NO_WRITE": "0", "FAKE_EXIT": "9"}):
+            with self.assertRaisesRegex(corpus.CorpusError, "exited 9"):
+                corpus.run_result(str(fake), root / "test/language/a", raw, log)
         invalid_reports = ({}, {"tests": []}, {"tests": [{"id": "a", "outcome": "wat"}]}, {"tests": [{"id": "a", "outcome": "pass"}], "totals": {"total": 2, "passed": 2, "failed": 0, "unsupported": 0, "skipped": 0}})
         for invalid in invalid_reports:
             with mock.patch.dict(os.environ, {"FAKE_REPORT": json.dumps(invalid), "FAKE_NO_WRITE": "0"}):
