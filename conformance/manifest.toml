@@ -1064,15 +1064,10 @@ existing Uint8Array storage, so `Buffer.concat`, byte length, and UTF-8 decoding
 byte container or ABI type. The native-run and standalone gates copy the canonical corpus file \
 and require the same recorded JSON as interpreted mode. \
 
-Getting `s01` there needed one fix, recorded because the shape of it will recur. The native \
-`node:http` materializer writes `exports[]` by position, and the positions are declared by \
-`node_builtin_export_names` in another crate. That list grew `IncomingMessage`, `METHODS` and \
-`ServerResponse` at the front after the materializer was written, shifting every slot by two \
-with nothing failing to compile: `default` bound to `request`, so `typeof http` was "function" \
-where node says "object", and `createServer` bound to `get`, so the first real server refused \
-with `a function is not a request options object`. A wrong answer wearing a plausible \
-diagnostic - the class regress/r07 exists to catch. \
-`native_builtin_slots_match_the_shared_export_table` now pins the coupling.
+Getting `s01` there needed one fix, recorded because the shape of it will recur. The public \
+`node:http` export list is declared beside its TypeScript source, so both graph engines compile and \
+link the same names. The regression remains in the native and interpreter HTTP identity tests, which \
+exercise the complete source export contract and the private host capability separately.
 
 The interpreter and native backend now agree with node that object-shaped builtin defaults such \
 as `http`, `net`, `async_hooks`, `string_decoder` and `perf_hooks` have `typeof` `object`, while \
@@ -1456,4 +1451,3 @@ promise-not-unwrapped: is-same=true
 return-missing-awaited: val=42 done=true
 throw-missing-closed: closed=true is-type-error=true
 """
-

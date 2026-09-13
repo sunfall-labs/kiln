@@ -14,7 +14,6 @@ kiln-runtime = { workspace = true }
 kiln-temporal = { workspace = true }
 kiln-json = { workspace = true }
 kiln-intl = { workspace = true }
-kiln-node-abi = { workspace = true }
 kiln-node-path = { workspace = true }
 num-bigint = { workspace = true }
 num-traits = { workspace = true }

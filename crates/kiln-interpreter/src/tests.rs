@@ -881,7 +881,7 @@ fn node_events_builtin_exposes_event_emitter() {
         Some(Value::Native(Native::NodeEventEmitter, RealmId::PRIMARY))
     );
     assert_eq!(
-        node_builtin_export_names("events"),
+        kiln_builtins::builtin_exports_for_specifier("events"),
         Some(&["EventEmitter", "default"][..])
     );
 }
@@ -910,7 +910,8 @@ fn node_console_exports_and_methods() {
         Native::NodeConsole.property("Console"),
         Some(Value::Native(Native::ConsoleConstructor, RealmId::PRIMARY))
     );
-    let names = node_builtin_export_names("node:console").expect("console builtin exists");
+    let names = kiln_builtins::builtin_exports_for_specifier("node:console")
+        .expect("console builtin exists");
     assert!(names.contains(&"Console"));
     assert!(names.contains(&"log"));
     assert!(names.contains(&"error"));
@@ -959,7 +960,7 @@ fn node_http_exports_a_server_constructor_with_coded_option_errors() {
         Some(Value::Native(Native::NodeHttpServer, RealmId::PRIMARY))
     );
     assert!(
-        node_builtin_export_names("node:http")
+        kiln_builtins::builtin_exports_for_specifier("node:http")
             .expect("http builtin exists")
             .contains(&"Server")
     );

@@ -1431,7 +1431,6 @@ dependencies = [
  "kiln-intl",
  "kiln-ir",
  "kiln-json",
- "kiln-node-abi",
  "kiln-node-path",
  "kiln-runtime",
  "kiln-temporal",
@@ -1499,7 +1498,6 @@ dependencies = [
  "kiln-interpreter",
  "kiln-ir",
  "kiln-module-resolver",
- "kiln-node-abi",
  "kiln-runtime",
  "serde",
  "url",
@@ -1531,9 +1529,9 @@ dependencies = [
  "kiln-module-resolver",
  "kiln-native-number",
  "kiln-native-number-abi",
+ "kiln-native-provider-contract",
  "kiln-native-runtime",
  "kiln-native-toolchain",
- "kiln-node-abi",
  "kiln-runtime",
  "parking_lot",
  "rayon",
@@ -1575,6 +1573,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiln-native-provider-contract"
+version = "0.0.0"
+dependencies = [
+ "kiln-digest",
+ "kiln-native-number",
+ "kiln-native-number-abi",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kiln-native-runtime"
 version = "0.0.0"
 dependencies = [
@@ -1584,10 +1593,6 @@ dependencies = [
 
 [[package]]
 name = "kiln-native-toolchain"
-version = "0.0.0"
-
-[[package]]
-name = "kiln-node-abi"
 version = "0.0.0"
 
 [[package]]
