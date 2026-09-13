@@ -7113,6 +7113,11 @@ struct Frame {
     stack_base: usize,
 }
 
+enum DynamicModuleState {
+    Evaluated(Rc<Vec<Value>>),
+    Failed(Value),
+}
+
 struct Vm<'host, H: HostOps + ?Sized> {
     /// The program the *running* frame belongs to, swapped on every call and restored on return.
     program: Rc<Program>,
@@ -7335,10 +7340,11 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// registry itself keeps nothing alive -- it exists only so [`Vm::release_cycles`] can find
     /// the closures again and cut the links.
     closures: Vec<Weak<Closure>>,
-    /// What each module a dynamic import has already evaluated exported, by the host's key for
-    /// it.
+    /// What each module a dynamic import has already evaluated, or how it failed, by the host's
+    /// key for it.
     ///
-    /// The module cache, and the whole of what makes `import("./m.js")` twice run `m.js` once.
+    /// The module cache, and the whole of what makes `import("./m.js")` twice run `m.js` once
+    /// (including the once-only evaluation rule for a rejected module).
     /// It is realm state rather than the loader's, because it holds *values* -- a second
     /// evaluation would produce a second set of objects, and a program that compared the two
     /// namespaces would see them differ.
@@ -7348,16 +7354,12 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// `ShadowRealm` from sharing module state with the realm that made it: a shared map would
     /// let a write to an export in one realm be read in the other, and no amount of wrapping
     /// values at the boundary would close that.
-    dynamic_modules: std::collections::HashMap<(RealmId, String), Rc<Vec<Value>>>,
+    dynamic_modules: std::collections::HashMap<(RealmId, String), DynamicModuleState>,
     /// The namespace object handed back for each module, so two imports of one module hand back
     /// the same object rather than two equal ones. A namespace has identity in the
     /// specification, and `import(s).then(a => import(s).then(b => a === b))` is how a program
     /// sees it.
     dynamic_namespaces: std::collections::HashMap<(RealmId, String), Value>,
-    /// The original rejection for a module whose body threw, by realm and module key. A failed
-    /// module is evaluated once too: later imports receive the same thrown value without replaying
-    /// its side effects.
-    dynamic_failures: std::collections::HashMap<(RealmId, String), Value>,
     limits: ExecutionLimits,
 }
 
@@ -7498,7 +7500,6 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             closures: Vec::new(),
             dynamic_modules: std::collections::HashMap::new(),
             dynamic_namespaces: std::collections::HashMap::new(),
-            dynamic_failures: std::collections::HashMap::new(),
             limits,
         })
     }
@@ -33259,7 +33260,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
 
         let realm = self.current_realm;
-        if let Some(failure) = self.dynamic_failures.get(&(realm, plan.key.clone())) {
+        if let Some(DynamicModuleState::Failed(failure)) =
+            self.dynamic_modules.get(&(realm, plan.key.clone()))
+        {
             return Ok(Err(failure.clone()));
         }
         if let Some(namespace) = self.dynamic_namespaces.get(&(realm, plan.key.clone())) {
@@ -33268,12 +33271,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
         let mut evaluated: Vec<Rc<Vec<Value>>> = Vec::with_capacity(plan.modules.len());
         for planned in &plan.modules {
-            if let Some(failure) = self.dynamic_failures.get(&(realm, planned.key.clone())) {
-                return Ok(Err(failure.clone()));
-            }
-            if let Some(cached) = self.dynamic_modules.get(&(realm, planned.key.clone())) {
-                evaluated.push(Rc::clone(cached));
-                continue;
+            if let Some(state) = self.dynamic_modules.get(&(realm, planned.key.clone())) {
+                match state {
+                    DynamicModuleState::Evaluated(cached) => {
+                        evaluated.push(Rc::clone(cached));
+                        continue;
+                    }
+                    DynamicModuleState::Failed(failure) => return Ok(Err(failure.clone())),
+                }
             }
             let mut locals = vec![Value::Undefined; planned.program.local_count as usize];
             for (slot, binding) in &planned.bindings {
@@ -33302,22 +33307,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                                 planned.key
                             ))],
                         );
-                        self.dynamic_failures
-                            .insert((realm, planned.key.clone()), error.clone());
+                        self.dynamic_modules.insert(
+                            (realm, planned.key.clone()),
+                            DynamicModuleState::Failed(error.clone()),
+                        );
                         return Ok(Err(error));
                     };
                     let exported = Rc::new(exported.items.borrow().clone());
-                    self.dynamic_modules
-                        .insert((realm, planned.key.clone()), Rc::clone(&exported));
+                    self.dynamic_modules.insert(
+                        (realm, planned.key.clone()),
+                        DynamicModuleState::Evaluated(Rc::clone(&exported)),
+                    );
                     evaluated.push(exported);
                 }
-                // A module that throws while evaluating rejects the import. It is deliberately
-                // not cached: the specification remembers the failure and hands the same error
-                // to a later import of the same module, and re-running the body instead is a
-                // gap rather than a wrong answer.
                 Err(thrown) => {
-                    self.dynamic_failures
-                        .insert((realm, planned.key.clone()), thrown.clone());
+                    self.dynamic_modules.insert(
+                        (realm, planned.key.clone()),
+                        DynamicModuleState::Failed(thrown.clone()),
+                    );
                     return Ok(Err(thrown));
                 }
             }
