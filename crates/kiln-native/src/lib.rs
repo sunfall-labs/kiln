@@ -2959,7 +2959,7 @@ fn native_builtin_supported_exports(
             "suffix",
             "toArrayBuffer",
         ],
-        NodeBuiltin::Net => &["connect", "createConnection", "createServer", "default"],
+        NodeBuiltin::Net => kiln_builtins::NET_EXPORTS,
         // `METHODS` is a constant array rather than a function, so it costs nothing to answer and
         // a placeholder served it worst: the unmaterialized-callable fallback made
         // `typeof http.METHODS` "function" against the interpreter's "object", which is a wrong
@@ -5394,6 +5394,7 @@ extern int kiln_realm_gc_mark_value(void *heap, const void *value);
 #define KILN_C99_THROWN (-7)
 #define KILN_C99_CONTROL_ERROR (-2)
 #define KILN_C99_HOST_ERROR (-3)
+extern int kiln_c99_process_object(kiln_value *result);
 extern int kiln_c99_new_object(kiln_value *result);
 extern int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value value, int depth, kiln_value *thrown);
@@ -5625,6 +5626,32 @@ typedef struct kiln_graph_context {
     render_graph_roots(&mut output, modules);
     output.push_str(
         r#"
+static int kiln_install_native_modules(kiln_host *host) {
+    kiln_value proc_obj = kiln_c99_undefined();
+    kiln_value modules_obj = kiln_c99_undefined();
+    int status = kiln_c99_process_object(&proc_obj);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_new_object(&modules_obj);
+    if (status != KILN_C99_OK) return status;
+
+    kiln_value net_obj = kiln_c99_undefined();
+    status = kiln_c99_new_object(&net_obj);
+    if (status != KILN_C99_OK) return status;
+    kiln_value net_connect = (kiln_value){ 11, 0, { 338 /* KILN_C99_METHOD_NODE_NET_CONNECT */ } };
+    kiln_value net_create_server = (kiln_value){ 11, 0, { 268 /* KILN_C99_METHOD_NODE_NET_CREATE_SERVER */ } };
+    status = kiln_c99_put(host, net_obj, "connect", 7, net_connect, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, net_obj, "createConnection", 16, net_connect, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, net_obj, "createServer", 12, net_create_server, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, modules_obj, "net", 3, net_obj, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+
+    status = kiln_c99_put(host, proc_obj, "__kilnNativeModules", 19, modules_obj, 0, NULL);
+    return status;
+}
+
 static int kiln_graph_enter(void *opaque) {
     kiln_graph_context *graph = (kiln_graph_context *)opaque;
     kiln_graph_entry_context context;
@@ -5639,6 +5666,8 @@ static int kiln_graph_enter(void *opaque) {
         status = kiln_realm_gc_register_roots(kiln_graph_gc_roots, graph, KILN_GC_ROOT_SURVIVES_TEARDOWN);
         if (status != 0) return status;
         graph->roots_registered = 1;
+        status = kiln_install_native_modules(host);
+        if (status != 0) return status;
 "#,
     );
     if let Some(bootstrap) = bootstrap {

@@ -5697,5 +5697,16 @@ between interpreter and native CLI), integration tests in `kiln-builtins`, `kiln
 regression suite (`conformance/regress/r08-node-async-context.js` passing 12/12), and full `scripts/native.sh` parity
 (189 matched, 1 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
 
+---
 
+## Phase 5.2 TypeScript built-ins: `node:net` (2026-09-13)
 
+Migrated `node:net` completely to TypeScript via `crates/kiln-builtins/src/node/net.ts` with zero additions
+to the C runtime prelude (`crates/kiln-backend-c/src/runtime/` strictly frozen per Phase 5.1).
+Implemented canonical exports (`connect`, `createConnection`, `createServer`, `default`) bridging to
+`process.getBuiltinModule("net")` under Node host mode and `process.__kilnNativeModules.net` under native mode,
+wiring `KILN_C99_METHOD_NODE_NET_CONNECT` and `KILN_C99_METHOD_NODE_NET_CREATE_SERVER` through the graph
+launcher without polluting `globalThis` (leaving `global-surface.ts` with exact 84-member parity).
+Verified with native probe `conformance/native/node-net-members.cjs` (byte-for-byte identical output between
+interpreter and native CLI), HTTP close contract (`scripts/check-http-close-contract.sh`), native integration
+tests in `kiln-native`, and full `scripts/native.sh` parity (190 matched, 1 refused, 0 diverged).
