@@ -1226,7 +1226,6 @@ impl NativeBuilder {
         let identity = self.toolchain.identity().clone();
         let profile = options.profile;
         let module_abi = module_abi_identity();
-        let runtime_abi = runtime_abi_identity();
         let embedding_abi = shared_embedding_abi_identity();
         let target = target_identity(&identity);
         let compiler = compiler_identity(&identity);
@@ -1246,11 +1245,8 @@ impl NativeBuilder {
         );
         let (base_source, base_source_digest, _) =
             self.cached_payload(&module_source_key, module.source.as_bytes())?;
-        let shared_source_key = key(
-            ArtifactKind::GeneratedC,
+        let shared_source_key = NativeArtifactFamily::SharedModuleSource.key(
             format!("kiln-c-abi-{C_ABI_VERSION}-module-api-{EMBEDDING_MODULE_API_VERSION}"),
-            Backend::Custom("native-shared-library-source".to_owned()),
-            &embedding_abi,
             &target,
             CacheProfile::Debug,
             Digest::hash(b"deterministic-c11-owned-result-v2"),
@@ -1274,22 +1270,16 @@ impl NativeBuilder {
             )
             .as_bytes(),
         );
-        let object_key = key(
-            ArtifactKind::NativeObject,
+        let object_key = NativeArtifactFamily::SharedLibraryObject.key(
             &compiler,
-            Backend::Custom("native-shared-library".to_owned()),
-            &embedding_abi,
             &target,
             profile.cache(),
             object_options,
             [module_source_digest, prelude_header_digest()],
         );
         let prelude_source = kiln_backend_c::runtime_prelude_source_with_policy(&emission);
-        let prelude_source_key = key(
-            ArtifactKind::GeneratedC,
+        let prelude_source_key = NativeArtifactFamily::PreludeSource.key(
             format!("kiln-runtime-prelude-{NATIVE_PRELUDE_VERSION}"),
-            Backend::Custom("native-prelude-source".to_owned()),
-            &runtime_abi,
             &target,
             CacheProfile::Debug,
             Digest::hash(b"portable-prelude-c11"),
@@ -1297,11 +1287,8 @@ impl NativeBuilder {
         );
         let (prelude_bytes, prelude_source_digest, _) =
             self.cached_payload(&prelude_source_key, prelude_source.as_bytes())?;
-        let prelude_key = key(
-            ArtifactKind::NativeObject,
+        let prelude_key = NativeArtifactFamily::SharedPreludeObject.key(
             &compiler,
-            Backend::Custom("native-shared-prelude".to_owned()),
-            &embedding_abi,
             &target,
             profile.cache(),
             object_options,
@@ -1336,11 +1323,8 @@ impl NativeBuilder {
                 )
                 .as_bytes(),
             );
-            let library_key = key(
-                ArtifactKind::LinkedArtifact,
+            let library_key = NativeArtifactFamily::SharedLibraryLink.key(
                 &compiler,
-                Backend::Custom("native-shared-library".to_owned()),
-                &embedding_abi,
                 &target,
                 profile.cache(),
                 link_options_digest,
@@ -1445,11 +1429,8 @@ impl NativeBuilder {
             )
             .as_bytes(),
         );
-        let library_key = key(
-            ArtifactKind::LinkedArtifact,
+        let library_key = NativeArtifactFamily::SharedLibraryLink.key(
             &compiler,
-            Backend::Custom("native-shared-library".to_owned()),
-            &embedding_abi,
             &target,
             profile.cache(),
             link_options_digest,
@@ -1560,7 +1541,6 @@ impl NativeBuilder {
         let total_started = Instant::now();
         let emit_started = Instant::now();
         let identity = self.toolchain.identity().clone();
-        let module_abi = module_abi_identity();
         let target = target_identity(&identity);
         let nodes = graph
             .modules()
@@ -1667,13 +1647,10 @@ impl NativeBuilder {
                 )
             })
             .collect::<Vec<_>>();
-        let wrapper_source_key = key(
-            ArtifactKind::GeneratedC,
+        let wrapper_source_key = NativeArtifactFamily::SharedGraphWrapperSource.key(
             format!(
                 "kiln-shared-graph-wrapper-{NATIVE_RUNTIME_VERSION}-module-api-{EMBEDDING_MODULE_API_VERSION}"
             ),
-            Backend::Custom("native-shared-graph-wrapper-source".to_owned()),
-            &embedding_abi,
             &target,
             CacheProfile::Debug,
             Digest::hash(b"deterministic-c11-shared-graph-wrapper-owned-result-v2"),
@@ -1742,33 +1719,24 @@ impl NativeBuilder {
         let mut module_keys = Vec::with_capacity(modules.len());
         for (index, _) in modules.iter().enumerate() {
             let (_, source_digest, _) = &module_sources[index];
-            module_keys.push(key(
-                ArtifactKind::NativeObject,
+            module_keys.push(NativeArtifactFamily::SharedGraphModuleObject.key(
                 &compiler,
-                Backend::Custom("native-shared-graph-module".to_owned()),
-                &module_abi,
                 &target,
                 profile.cache(),
                 module_object_options[index],
                 [*source_digest, prelude_header_digest()],
             ));
         }
-        let wrapper_object_key = key(
-            ArtifactKind::NativeObject,
+        let wrapper_object_key = NativeArtifactFamily::SharedGraphWrapperObject.key(
             &compiler,
-            Backend::Custom("native-shared-graph-wrapper".to_owned()),
-            &embedding_abi,
             &target,
             profile.cache(),
             wrapper_object_options,
             [wrapper_source_digest, topology],
         );
         let prelude_source = kiln_backend_c::runtime_prelude_source_with_policy(&emission);
-        let prelude_source_key = key(
-            ArtifactKind::GeneratedC,
+        let prelude_source_key = NativeArtifactFamily::PreludeSource.key(
             format!("kiln-runtime-prelude-{NATIVE_PRELUDE_VERSION}"),
-            Backend::Custom("native-prelude-source".to_owned()),
-            &embedding_abi,
             &target,
             CacheProfile::Debug,
             Digest::hash(b"portable-prelude-c11"),
@@ -1784,11 +1752,8 @@ impl NativeBuilder {
             )
             .as_bytes(),
         );
-        let prelude_key = key(
-            ArtifactKind::NativeObject,
+        let prelude_key = NativeArtifactFamily::SharedPreludeObject.key(
             &compiler,
-            Backend::Custom("native-shared-prelude".to_owned()),
-            &shared_embedding_abi_identity(),
             &target,
             profile.cache(),
             shared_prelude_object_options,
@@ -1841,11 +1806,8 @@ impl NativeBuilder {
                 )
                 .as_bytes(),
             );
-            let library_key = key(
-                ArtifactKind::LinkedArtifact,
+            let library_key = NativeArtifactFamily::SharedGraphLink.key(
                 &compiler,
-                Backend::Custom("native-shared-graph".to_owned()),
-                &embedding_abi,
                 &target,
                 profile.cache(),
                 link_options_digest,
@@ -1990,11 +1952,8 @@ impl NativeBuilder {
             )
             .as_bytes(),
         );
-        let library_key = key(
-            ArtifactKind::LinkedArtifact,
+        let library_key = NativeArtifactFamily::SharedGraphLink.key(
             &compiler,
-            Backend::Custom("native-shared-graph".to_owned()),
-            &embedding_abi,
             &target,
             profile.cache(),
             link_options_digest,
@@ -2108,7 +2067,6 @@ impl NativeBuilder {
             emission.type_profile = Some(std::sync::Arc::new(profile));
         }
         let identity = self.toolchain.identity().clone();
-        let module_abi = module_abi_identity();
         let target = target_identity(&identity);
         let selected = kiln_liveness::select_executable_modules(
             graph,
@@ -2205,7 +2163,6 @@ impl NativeBuilder {
         symbol_list.push(&bootstrap.symbol);
         let paths = GraphBuildPaths::new(workspace.path(), &symbol_list);
         let profile = options.profile;
-        let runtime_abi = runtime_abi_identity();
         let compiler = compiler_identity(&identity);
         let want_http = Self::graph_wants_http_provider(graph);
         let (number_provider, number_provider_digest, _, number_provider_http) =
@@ -2222,11 +2179,8 @@ impl NativeBuilder {
                 )
             })
             .collect::<Vec<_>>();
-        let bootstrap_source_key = key(
-            ArtifactKind::GeneratedC,
+        let bootstrap_source_key = NativeArtifactFamily::ModuleSource.key(
             format!("kiln-c-abi-{C_ABI_VERSION}-generator-{C_GENERATOR_VERSION}"),
-            Backend::C,
-            &module_abi,
             &target,
             CacheProfile::Debug,
             Digest::hash(b"native-builtin-bootstrap-c11"),
@@ -2234,11 +2188,8 @@ impl NativeBuilder {
         );
         module_sources
             .push(self.cached_payload(&bootstrap_source_key, bootstrap.source.as_bytes())?);
-        let runtime_source_key = key(
-            ArtifactKind::GeneratedC,
+        let runtime_source_key = NativeArtifactFamily::RuntimeSource.key(
             format!("kiln-runtime-{NATIVE_RUNTIME_VERSION}"),
-            Backend::Custom("native-runtime-source".to_owned()),
-            &runtime_abi,
             &target,
             CacheProfile::Debug,
             Digest::hash(b"portable-runtime-c11"),
@@ -2247,11 +2198,8 @@ impl NativeBuilder {
         let (runtime_bytes, runtime_source_digest, runtime_generated_c_cache_hit) =
             self.cached_payload(&runtime_source_key, runtime.as_bytes())?;
         let prelude_source = kiln_backend_c::runtime_prelude_source_with_policy(&emission);
-        let prelude_source_key = key(
-            ArtifactKind::GeneratedC,
+        let prelude_source_key = NativeArtifactFamily::PreludeSource.key(
             format!("kiln-runtime-prelude-{NATIVE_PRELUDE_VERSION}"),
-            Backend::Custom("native-prelude-source".to_owned()),
-            &runtime_abi,
             &target,
             CacheProfile::Debug,
             Digest::hash(b"portable-prelude-c11"),
@@ -2260,11 +2208,8 @@ impl NativeBuilder {
         let (prelude_bytes, prelude_source_digest, _) =
             self.cached_payload(&prelude_source_key, prelude_source.as_bytes())?;
 
-        let launcher_source_key = key(
-            ArtifactKind::GeneratedC,
+        let launcher_source_key = NativeArtifactFamily::GraphLauncherSource.key(
             format!("kiln-graph-launcher-{NATIVE_RUNTIME_VERSION}"),
-            Backend::Custom("native-graph-launcher-source".to_owned()),
-            &runtime_abi,
             &target,
             CacheProfile::Debug,
             Digest::hash(b"portable-graph-launcher-c11"),
@@ -2355,42 +2300,30 @@ impl NativeBuilder {
         let mut module_keys = Vec::with_capacity(module_sources.len());
         for index in 0..module_sources.len() {
             let (_, source_digest, _) = &module_sources[index];
-            module_keys.push(key(
-                ArtifactKind::NativeObject,
+            module_keys.push(NativeArtifactFamily::ModuleObject.key(
                 &compiler,
-                Backend::C,
-                &module_abi,
                 &target,
                 profile.cache(),
                 module_object_options[index],
                 [*source_digest, prelude_header_digest()],
             ));
         }
-        let prelude_key = key(
-            ArtifactKind::RuntimeLibrary,
+        let prelude_key = NativeArtifactFamily::RuntimePreludeLibrary.key(
             &compiler,
-            Backend::Custom("native-runtime-prelude".to_owned()),
-            &runtime_abi,
             &target,
             profile.cache(),
             prelude_object_options_masked(object_options, profile, group_mask),
             [prelude_source_digest],
         );
-        let runtime_key = key(
-            ArtifactKind::RuntimeLibrary,
+        let runtime_key = NativeArtifactFamily::RuntimeLibrary.key(
             &compiler,
-            Backend::Custom("native-runtime".to_owned()),
-            &runtime_abi,
             &target,
             profile.cache(),
             object_options,
             [runtime_source_digest],
         );
-        let launcher_key = key(
-            ArtifactKind::NativeObject,
+        let launcher_key = NativeArtifactFamily::GraphLauncherObject.key(
             &compiler,
-            Backend::Custom("native-graph-launcher".to_owned()),
-            &runtime_abi,
             &target,
             profile.cache(),
             object_options,
@@ -2425,11 +2358,8 @@ impl NativeBuilder {
             link_inputs.push(runtime_info.0);
             link_inputs.push(launcher_info.0);
             link_inputs.push(number_provider_digest);
-            let candidate_executable_key = key(
-                ArtifactKind::LinkedArtifact,
+            let candidate_executable_key = NativeArtifactFamily::ExecutableLink.key(
                 &compiler,
-                Backend::C,
-                &runtime_abi,
                 &target,
                 profile.cache(),
                 link_options_digest,
@@ -2576,11 +2506,8 @@ impl NativeBuilder {
         link_inputs.push(runtime_digest);
         link_inputs.push(launcher_digest);
         link_inputs.push(number_provider_digest);
-        let executable_key = key(
-            ArtifactKind::LinkedArtifact,
+        let executable_key = NativeArtifactFamily::ExecutableLink.key(
             &compiler,
-            Backend::C,
-            &runtime_abi,
             &target,
             profile.cache(),
             link_options_digest,
@@ -3312,11 +3239,8 @@ fn cached_graph_module(
     let input = Digest::hash(
         format!("{:?}", (&node.program, node.source, logical_path, policy)).as_bytes(),
     );
-    let cache_key = key(
-        ArtifactKind::GeneratedC,
+    let cache_key = NativeArtifactFamily::ModuleSource.key(
         format!("kiln-c-abi-{C_ABI_VERSION}-generator-{C_GENERATOR_VERSION}"),
-        Backend::C,
-        &module_abi_identity(),
         target,
         CacheProfile::Debug,
         Digest::hash(b"native-graph-emission-input-v2"),
