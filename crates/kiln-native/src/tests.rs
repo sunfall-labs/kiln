@@ -693,6 +693,7 @@ fn run_native_failure_fixture_with_dependency(
     name: &str,
     source: &str,
     dependency_source: &str,
+    profile: NativeProfile,
 ) -> Option<String> {
     use kiln_module_resolver::NodeRuntimeResolver;
     use std::process::Command;
@@ -719,7 +720,7 @@ fn run_native_failure_fixture_with_dependency(
             &graph,
             &NativeBuildOptions {
                 output: project.path.join("program"),
-                profile: NativeProfile::Dev,
+                profile,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
             },
@@ -804,12 +805,17 @@ fn native_non_callable_cross_module_error_keeps_innermost_site() {
         "kiln-native-non-callable-cross-module",
         "import { outer } from './dep.mjs';\nouter();\n",
         "export function outer() { function inner() { const value = {}; value(); } inner(); }\n",
+        NativeProfile::Dev,
     ) else {
         return;
     };
     assert!(
         stderr.contains("operation=Call"),
         "missing operation: {stderr}"
+    );
+    assert!(
+        stderr.contains("module=dep.mjs"),
+        "missing innermost module: {stderr}"
     );
     assert!(
         stderr.contains("function=inner"),
@@ -819,6 +825,16 @@ fn native_non_callable_cross_module_error_keeps_innermost_site() {
         !stderr.contains("function=outer"),
         "outer function leaked: {stderr}"
     );
+
+    let Some(stderr) = run_native_failure_fixture_with_dependency(
+        "kiln-native-non-callable-cross-module-release",
+        "import { outer } from './dep.mjs';\nouter();\n",
+        "export function outer() { function inner() { const value = {}; value(); } inner(); }\n",
+        NativeProfile::Release,
+    ) else {
+        return;
+    };
+    assert!(!stderr.is_empty(), "release produced no diagnostic output");
 }
 
 #[test]
