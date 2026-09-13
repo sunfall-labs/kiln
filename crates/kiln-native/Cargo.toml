@@ -8,6 +8,7 @@ repository.workspace = true
 [dependencies]
 kiln-artifact-cache = { workspace = true }
 kiln-backend-c = { workspace = true }
+kiln-builtins = { workspace = true }
 kiln-builtin-surface = { workspace = true }
 kiln-host-abi = { workspace = true }
 kiln-ir = { workspace = true }

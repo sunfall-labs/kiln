@@ -16,6 +16,7 @@ repository = "https://github.com/sunfall-labs/kiln"
 kiln-artifact-cache = { path = "crates/kiln-artifact-cache" }
 kiln-backend-c = { path = "crates/kiln-backend-c" }
 kiln-builtin-surface = { path = "crates/kiln-builtin-surface" }
+kiln-builtins = { path = "crates/kiln-builtins" }
 kiln-data-formats = { path = "crates/kiln-data-formats" }
 kiln-db = { path = "crates/kiln-db" }
 kiln-digest = { path = "crates/kiln-digest" }

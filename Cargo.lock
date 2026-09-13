@@ -1296,6 +1296,15 @@ name = "kiln-builtin-surface"
 version = "0.0.0"
 
 [[package]]
+name = "kiln-builtins"
+version = "0.0.0"
+dependencies = [
+ "frontend-oxc",
+ "kiln-ir",
+ "kiln-module-resolver",
+]
+
+[[package]]
 name = "kiln-cli"
 version = "0.0.0"
 dependencies = [
@@ -1458,6 +1467,7 @@ name = "kiln-module-graph"
 version = "0.0.0"
 dependencies = [
  "frontend-oxc",
+ "kiln-builtins",
  "kiln-data-formats",
  "kiln-hir",
  "kiln-host-abi",
@@ -1485,6 +1495,7 @@ dependencies = [
  "kiln-artifact-cache",
  "kiln-backend-c",
  "kiln-builtin-surface",
+ "kiln-builtins",
  "kiln-hir",
  "kiln-host-abi",
  "kiln-interpreter",

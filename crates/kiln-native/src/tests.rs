@@ -7119,7 +7119,11 @@ fn native_builtin_support_is_the_materialized_subset_not_the_declared_surface() 
     assert!(native_builtin_supports_export(NodeBuiltin::Path, "dirname"));
     assert!(!native_builtin_supports_export(NodeBuiltin::Path, "format"));
     assert!(native_builtin_supports_export(NodeBuiltin::Os, "hostname"));
-    assert!(!native_builtin_supports_export(NodeBuiltin::Os, "platform"));
+    assert!(native_builtin_supports_export(NodeBuiltin::Os, "platform"));
+    assert!(!native_builtin_supports_export(
+        NodeBuiltin::Os,
+        "nonexistent"
+    ));
     assert!(!native_builtin_supports_export(
         NodeBuiltin::Http,
         "IncomingMessage"
@@ -7812,4 +7816,88 @@ fn native_build_launcher_supports_http3_flag() {
         .expect("run with --http3");
     assert!(out_flag.status.success());
     assert!(String::from_utf8_lossy(&out_flag.stdout).contains("http3-active"));
+}
+
+#[test]
+fn native_node_os_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-os-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import os, { platform, homedir, EOL } from 'node:os';\n",
+            "console.log('os-test:', typeof platform(), typeof homedir(), EOL === '\\n', typeof os.tmpdir());\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("os_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run os binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert_eq!(stdout.trim(), "os-test: string string true string");
+}
+
+#[test]
+fn native_node_os_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-os-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const os = require('node:os');\n",
+            "console.log('cjs-os:', typeof os.platform, typeof os.homedir, os.EOL === '\\n', typeof os.tmpdir);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("os_cjs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run os cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert_eq!(stdout.trim(), "cjs-os: function function true function");
 }

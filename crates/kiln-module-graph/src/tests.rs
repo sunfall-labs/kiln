@@ -1360,6 +1360,41 @@ fn node_builtin_static_imports_are_typed_virtual_modules() {
 }
 
 #[test]
+fn node_builtin_os_ts_evaluates_and_exports_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.js",
+        concat!(
+            "import os, { platform, homedir, EOL } from 'node:os';",
+            "console.log(typeof platform, typeof homedir, typeof EOL, typeof os.tmpdir, os.EOL === '\\n');",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with os builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute os builtin");
+    assert_eq!(host.output, ["function function string function true"]);
+}
+
+#[test]
 fn node_net_connect_is_a_typed_virtual_module_export() {
     let project = TempProject::new();
     let entry = project.write(
