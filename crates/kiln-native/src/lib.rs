@@ -5256,6 +5256,7 @@ fn write_launcher_dynamic_import(
         r#"
 int kiln_graph_dynamic_import(kiln_host *host, kiln_value specifier, kiln_value options, kiln_value *promise, int depth, kiln_value *thrown) {
     if (promise == NULL) return KILN_C99_CONTROL_ERROR;
+    if (options.tag == KILN_VALUE_UNDEFINED) goto import_attributes_valid;
     kiln_value attrs = kiln_c99_undefined();
     int attr_status = kiln_c99_get(host, options, "with", 4, &attrs, depth, thrown);
     if (attr_status != KILN_C99_OK) return attr_status;
@@ -5267,6 +5268,7 @@ int kiln_graph_dynamic_import(kiln_host *host, kiln_value specifier, kiln_value 
         (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, "unsupported import attribute type");
         return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);
     }
+import_attributes_valid:
     if (specifier.tag != KILN_VALUE_STRING || (specifier.len != 0 && specifier.ptr == NULL)) {
         kiln_value err = kiln_c99_undefined();
         (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, "invalid import specifier");
@@ -5428,6 +5430,7 @@ fn write_shared_wrapper_dynamic_import(
         r#"
 int kiln_graph_dynamic_import(kiln_host *host, kiln_value specifier, kiln_value options, kiln_value *promise, int depth, kiln_value *thrown) {
     if (promise == NULL) return KILN_C99_CONTROL_ERROR;
+    if (options.tag == KILN_VALUE_UNDEFINED) goto import_attributes_valid;
     kiln_value attrs = kiln_c99_undefined();
     int attr_status = kiln_c99_get(host, options, "with", 4, &attrs, depth, thrown);
     if (attr_status != KILN_C99_OK) return attr_status;
@@ -5439,6 +5442,7 @@ int kiln_graph_dynamic_import(kiln_host *host, kiln_value specifier, kiln_value 
         (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, "unsupported import attribute type");
         return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);
     }
+import_attributes_valid:
     if (specifier.tag != KILN_VALUE_STRING || (specifier.len != 0 && specifier.ptr == NULL)) {
         kiln_value err = kiln_c99_undefined();
         (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, "invalid import specifier");
