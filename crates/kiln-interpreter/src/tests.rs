@@ -823,15 +823,18 @@ fn node_events_builtin_exposes_event_emitter() {
         locale: None,
     };
     let mut vm = test_vm(&program, &mut host);
-    assert_eq!(
-        vm.dispatch_native(
-            Native::ProcessGetBuiltinModule,
-            &Value::Undefined,
-            &[Value::String("node:events".to_owned())],
-            0,
-        ),
-        Ok(Value::Native(Native::NodeEvents, RealmId::PRIMARY))
-    );
+    for specifier in ["node:events", "node:module"] {
+        assert!(matches!(
+            vm.dispatch_native(
+                Native::ProcessGetBuiltinModule,
+                &Value::Undefined,
+                &[Value::String(specifier.to_owned())],
+                0,
+            ),
+            Err(ExecutionError::TypeErrorMessage { message })
+                if message.contains("graph-materialized")
+        ));
+    }
     assert_eq!(
         Native::NodeEvents.property("EventEmitter"),
         Some(Value::Native(Native::NodeEventEmitter, RealmId::PRIMARY))
@@ -840,50 +843,37 @@ fn node_events_builtin_exposes_event_emitter() {
         node_builtin_export_names("events"),
         Some(&["EventEmitter", "default"][..])
     );
-    assert_eq!(
-        node_builtin_exports("node:events"),
-        Some(vec![
-            (
-                "EventEmitter".to_owned(),
-                Value::Native(Native::NodeEventEmitter, RealmId::PRIMARY),
-            ),
-            (
-                "default".to_owned(),
-                Value::Native(Native::NodeEventEmitter, RealmId::PRIMARY),
-            ),
-        ])
-    );
+    assert!(node_builtin_exports("node:events").is_none());
+    assert!(node_builtin_commonjs_value("node:events").is_none());
 }
 
 #[test]
 fn node_builtin_defaults_preserve_namespace_or_callable_shape() {
-    for specifier in [
-        "async_hooks",
-        "buffer",
-        "console",
-        "crypto",
-        "fs",
-        "http",
-        "net",
-        "perf_hooks",
-        "string_decoder",
-        "util",
-    ] {
+    for specifier in ["async_hooks", "crypto", "fs", "http", "net"] {
         let default = node_builtin_exports(specifier)
-            .expect("builtin exists")
+            .unwrap_or_else(|| panic!("builtin missing: {specifier}"))
             .into_iter()
             .find_map(|(name, value)| (name == "default").then_some(value))
             .expect("builtin advertises a default export");
         assert_eq!(default.type_name(), "object", "node:{specifier}");
     }
 
-    for specifier in ["assert", "events", "module", "stream"] {
-        let default = node_builtin_exports(specifier)
-            .expect("builtin exists")
-            .into_iter()
-            .find_map(|(name, value)| (name == "default").then_some(value))
-            .expect("builtin advertises a default export");
-        assert_eq!(default.type_name(), "function", "node:{specifier}");
+    // node:module is implemented by its TypeScript source program.  The legacy direct
+    // projection intentionally declines to manufacture a partial Native::NodeModule object;
+    // graph execution is the authoritative materialization path for this builtin.
+    assert!(node_builtin_exports("node:module").is_none());
+    assert!(node_builtin_commonjs_value("node:module").is_none());
+    let stream_default = node_builtin_exports("stream")
+        .expect("legacy stream builtin")
+        .into_iter()
+        .find_map(|(name, value)| (name == "default").then_some(value))
+        .expect("stream advertises a default export");
+    assert_eq!(stream_default.type_name(), "function");
+    for specifier in kiln_builtins::ts_builtin_specifiers() {
+        assert!(
+            node_builtin_exports(specifier).is_none(),
+            "TS builtin must use graph materialization: node:{specifier}"
+        );
     }
 }
 
@@ -4513,69 +4503,6 @@ fn dynamic_import_with_unsupported_loader_rejects_with_type_error() {
         }
         other => panic!("expected unhandled rejection from dynamic import, got {other:?}"),
     }
-}
-
-#[test]
-fn node_module_create_require_returns_callable_require() {
-    let mut host = TestHost {
-        calls: Vec::new(),
-        clock_now: None,
-        entropy: std::collections::VecDeque::new(),
-        timezone: None,
-        locale: None,
-    };
-    let module_val = node_builtin_commonjs_value("node:module").expect("node:module value");
-    let create_require = match &module_val {
-        Value::Native(n, _) => n.property("createRequire"),
-        Value::Function(f) => f.properties.borrow().get("createRequire"),
-        Value::Object(o) => o.borrow().get_own("createRequire").cloned(),
-        _ => None,
-    }
-    .expect("createRequire property");
-
-    let program = Program {
-        source: "".into(),
-        template_sites: Vec::new(),
-        version: kiln_ir::BYTECODE_VERSION,
-        constants: vec![
-            Constant::String("import.meta.url".to_owned()),
-            Constant::String("node:path".to_owned()),
-        ],
-        code: vec![
-            Instruction::LoadCell(0),
-            Instruction::Const(0),
-            Instruction::Call { argc: 1 },
-            Instruction::Const(1),
-            Instruction::Call { argc: 1 },
-            Instruction::Return,
-        ],
-        local_count: 1,
-        functions: Vec::new(),
-    };
-    let module_prog = ModuleProgram {
-        program,
-        dependencies: Vec::new(),
-        imports: vec![kiln_ir::ImportBinding {
-            source: "".into(),
-            imported: "".into(),
-            local: "createRequire".into(),
-            local_slot: 0,
-        }],
-        exports: Vec::new(),
-        ..Default::default()
-    };
-    let result = execute_module(
-        &module_prog,
-        &[create_require],
-        &mut host,
-        ExecutionLimits::default(),
-        ExecutionCapabilities::default(),
-    )
-    .expect("execute module calling createRequire");
-    assert!(matches!(
-        result.execution.value,
-        Value::Native(Native::NodePath, _)
-    ));
 }
 
 #[test]
