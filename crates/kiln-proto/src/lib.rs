@@ -33,7 +33,7 @@ pub enum StepBudget {
 
 /// Bumped whenever old and new peers could interpret the wire contract differently. The daemon
 /// refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 28;
+pub const PROTOCOL_VERSION: u32 = 29;
 
 /// SHA-256 of a source file's exact UTF-8 bytes.
 ///
@@ -659,11 +659,13 @@ pub struct NativeBuildSummary {
     pub compiler_identity: String,
     pub generated_c_cache_hit: bool,
     pub app_object_cache_hit: bool,
+    pub prelude_object_cache_hit: bool,
     pub runtime_object_cache_hit: bool,
     pub launcher_object_cache_hit: bool,
     pub executable_cache_hit: bool,
     pub generated_c_bytes: u64,
     pub app_object_bytes: u64,
+    pub prelude_object_bytes: u64,
     pub runtime_object_bytes: u64,
     pub launcher_object_bytes: u64,
     pub executable_bytes: u64,
@@ -916,7 +918,7 @@ mod tests {
 
     #[test]
     fn protocol_v25_run_step_budget_wire_contract_round_trips() {
-        assert_eq!(PROTOCOL_VERSION, 28);
+        assert_eq!(PROTOCOL_VERSION, 29);
 
         let requests = [
             (

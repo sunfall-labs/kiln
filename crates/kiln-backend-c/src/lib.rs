@@ -2785,7 +2785,9 @@ fn stored_declaration(code: &[Instruction], pc: usize) -> Option<(u32, bool)> {
 /// Only the compiler's simplest declaration shape, `MakeFunction; Store*`, is removable. Class
 /// methods and functions installed into objects remain live. A hand-authored program whose
 /// capture parent is ambiguous falls back to the complete function table.
-fn closed_world_function_liveness(
+///
+/// `pub(crate)` so the facts analysis can read retained code for member-name demand.
+pub(crate) fn closed_world_function_liveness(
     program: &Program,
     demanded: &BTreeSet<u32>,
     direct_eval: bool,

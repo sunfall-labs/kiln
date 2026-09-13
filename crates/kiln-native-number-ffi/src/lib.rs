@@ -43,10 +43,13 @@ mod realm {
     use kiln_host_abi::{
         AsyncHostError, AsyncHostOp, AsyncHostValue, RequestId, ResourceId, ResourceKind,
     };
+    #[cfg(feature = "realm-http")]
     use kiln_runtime::{
-        ActiveHttpRuntime, HttpCloseMode, Realm, RealmRuntime, RuntimeTurn, TimerId, WorkItem,
-        duration_from_milliseconds,
+        ActiveHttpRuntime, HttpCloseMode,
         node_http_agent::{AgentDecision, AgentRelease, HttpOrigin},
+    };
+    use kiln_runtime::{
+        Realm, RealmRuntime, RuntimeTurn, TimerId, WorkItem, duration_from_milliseconds,
     };
     use std::cell::{Cell, RefCell};
     use std::collections::{HashMap, HashSet};
@@ -67,23 +70,41 @@ mod realm {
     type RunHttpEvent =
         unsafe extern "C" fn(*mut c_void, *const HttpEventView, *mut c_void, *mut c_void) -> i32;
 
+    #[cfg(feature = "realm-http")]
     const HTTP_EVENT_REQUEST_HEAD: u32 = 1;
+    #[cfg(feature = "realm-http")]
     const HTTP_EVENT_REQUEST_DATA: u32 = 2;
+    #[cfg(feature = "realm-http")]
     const HTTP_EVENT_REQUEST_END: u32 = 3;
+    #[cfg(feature = "realm-http")]
     const HTTP_EVENT_DRAIN: u32 = 4;
+    #[cfg(feature = "realm-http")]
     const HTTP_EVENT_FINISH: u32 = 5;
+    #[cfg(feature = "realm-http")]
     const HTTP_EVENT_RESPONSE_HEAD: u32 = 6;
+    #[cfg(feature = "realm-http")]
     const HTTP_EVENT_RESPONSE_DATA: u32 = 7;
+    #[cfg(feature = "realm-http")]
     const HTTP_EVENT_RESPONSE_END: u32 = 8;
+    #[cfg(feature = "realm-http")]
     const HTTP_EVENT_ERROR: u32 = 9;
+    #[cfg(feature = "realm-http")]
     const HTTP_EVENT_CLOSED: u32 = 10;
+    #[cfg(feature = "realm-http")]
     const HTTP_AGENT_CONNECT: i32 = 1;
+    #[cfg(feature = "realm-http")]
     const HTTP_AGENT_REUSE: i32 = 2;
+    #[cfg(feature = "realm-http")]
     const HTTP_AGENT_QUEUED: i32 = 3;
+    #[cfg(feature = "realm-http")]
     const HTTP_AGENT_IDLE: i32 = 4;
+    #[cfg(feature = "realm-http")]
     const HTTP_AGENT_DISPATCH: i32 = 5;
+    #[cfg(feature = "realm-http")]
     const HTTP_AGENT_RETIRE: i32 = 6;
+    #[cfg(feature = "realm-http")]
     const HTTP_CLOSE_GRACEFUL: i32 = 0;
+    #[cfg(feature = "realm-http")]
     const HTTP_CLOSE_ABORT: i32 = 1;
 
     #[repr(C)]
@@ -363,12 +384,14 @@ mod realm {
         drop: DropWork,
     }
 
+    #[cfg(feature = "realm-http")]
     struct HttpEventOwner {
         pointer: *mut c_void,
         run: RunHttpEvent,
         drop: DropWork,
     }
 
+    #[cfg(feature = "realm-http")]
     impl Drop for HttpEventOwner {
         fn drop(&mut self) {
             // SAFETY: attach transfers one live adapter allocation and its matching disposer.
@@ -376,17 +399,20 @@ mod realm {
         }
     }
 
+    #[cfg(feature = "realm-http")]
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum HttpRole {
         Server,
         Client,
     }
 
+    #[cfg(feature = "realm-http")]
     struct NativeHttpConnection {
         role: HttpRole,
         events: Rc<HttpEventOwner>,
     }
 
+    #[cfg(feature = "realm-http")]
     fn event_bytes(bytes: &[u8]) -> (*const u8, u64) {
         (
             bytes.as_ptr(),
@@ -632,7 +658,9 @@ mod realm {
         runtime: RefCell<RealmRuntime>,
         work: RefCell<Realm<NativeMicrotask, NativeWork>>,
         continuations: RefCell<HashMap<RequestId, AsyncContinuation>>,
+        #[cfg(feature = "realm-http")]
         http_connections: RefCell<HashMap<kiln_host_abi::ResourceId, NativeHttpConnection>>,
+        #[cfg(feature = "realm-http")]
         next_http_client_request_id: Cell<u64>,
         cancelled: Rc<RefCell<HashSet<RequestId>>>,
         queued: Rc<RefCell<HashSet<RequestId>>>,
@@ -857,6 +885,7 @@ mod realm {
         for continuation in realm.continuations.borrow().values() {
             marker.block(continuation.pointer);
         }
+        #[cfg(feature = "realm-http")]
         for connection in realm.http_connections.borrow().values() {
             marker.block(connection.events.pointer);
         }
@@ -919,6 +948,7 @@ mod realm {
             // the rest, and finally let every unit reset the statics that pointed into the heap.
             *self.work.borrow_mut() = Realm::new();
             self.continuations.borrow_mut().clear();
+            #[cfg(feature = "realm-http")]
             self.http_connections.borrow_mut().clear();
             self.callable_stores.borrow_mut().clear();
             self.value_slots.borrow_mut().clear();
@@ -964,7 +994,9 @@ mod realm {
                 runtime: RefCell::new(RealmRuntime::new()?),
                 work: RefCell::new(Realm::new()),
                 continuations: RefCell::new(HashMap::new()),
+                #[cfg(feature = "realm-http")]
                 http_connections: RefCell::new(HashMap::new()),
+                #[cfg(feature = "realm-http")]
                 next_http_client_request_id: Cell::new(1),
                 cancelled: Rc::new(RefCell::new(HashSet::new())),
                 queued: Rc::new(RefCell::new(HashSet::new())),
@@ -1077,6 +1109,18 @@ mod realm {
         catch_unwind(AssertUnwindSafe(operation)).unwrap_or(RUNTIME_ERROR)
     }
 
+    /// Whether the engine's `KILN_HTTP_TRACE` log is on. Without `realm-http` there is no
+    /// engine, so the trace is always off; the call sites stay shared.
+    #[cfg(feature = "realm-http")]
+    fn http_trace_enabled() -> bool {
+        kiln_runtime::http_engine::trace_enabled()
+    }
+
+    #[cfg(not(feature = "realm-http"))]
+    fn http_trace_enabled() -> bool {
+        false
+    }
+
     fn realm(handle: u64) -> Option<Rc<NativeRealm>> {
         if handle == 0 {
             return None;
@@ -1178,6 +1222,7 @@ mod realm {
         })
     }
 
+    #[cfg(feature = "realm-http")]
     unsafe fn parse_headers(pointer: *const u8, length: u64) -> Option<Vec<(String, String)>> {
         // SAFETY: callers keep this private ABI span live until the synchronous command returns.
         let bytes = unsafe { borrowed_bytes(pointer, length) }?;
@@ -1196,6 +1241,7 @@ mod realm {
         Some(headers)
     }
 
+    #[cfg(feature = "realm-http")]
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_realm_http_server_close_active(resource: u64, mode: i32) -> i32 {
         ffi(|| {
@@ -1294,7 +1340,7 @@ mod realm {
                     runtime.completion_signal(),
                 )
             };
-            if kiln_runtime::http_engine::trace_enabled() {
+            if http_trace_enabled() {
                 eprintln!(
                     "[kiln-drive] referenced={referenced} pending={pending} in_flight={in_flight} deadline={deadline:?} host={}",
                     realm.runtime.borrow().describe_host_work(),
@@ -2498,6 +2544,7 @@ mod realm {
             let Some(operation) = (unsafe { host_operation(operation_view) }) else {
                 return INVALID_ARGUMENT;
             };
+            #[cfg(feature = "realm-http")]
             if let AsyncHostOp::CloseResource { resource } = &operation
                 && realm.http_connections.borrow().contains_key(resource)
             {
@@ -2515,7 +2562,7 @@ mod realm {
             // `flags & 1` is the generic request-liveness bit; zero leaves incidental inspection
             // requests unreferenced while resource creation still records its own resource state.
             let referenced = operation_view.flags & 1 != 0;
-            if kiln_runtime::http_engine::trace_enabled() {
+            if http_trace_enabled() {
                 eprintln!("[kiln-host] start {operation:?} referenced={referenced}");
             }
             let request = unsafe { &mut *runtime }.start_host_op(operation, referenced);
@@ -2638,6 +2685,7 @@ mod realm {
     }
 
     /// Whether a checkpoint would run anything: either lane the realm owns, or the prelude's.
+    #[cfg(feature = "realm-http")]
     fn realm_has_queued_work(realm: &NativeRealm) -> bool {
         if realm.work.borrow().has_queued_work() {
             return true;
@@ -2648,12 +2696,14 @@ mod realm {
     /// The realm's side of a direct connection, server or client: protocol events become the
     /// private ABI's event view and go straight to the generated C handler; the checkpoint
     /// drains the queues.
+    #[cfg(feature = "realm-http")]
     struct NativeHttpDispatch {
         realm: std::rc::Weak<NativeRealm>,
         resource: kiln_host_abi::ResourceId,
         owner: Rc<HttpEventOwner>,
     }
 
+    #[cfg(feature = "realm-http")]
     impl kiln_runtime::HttpDispatch for NativeHttpDispatch {
         fn event(&self, event: &kiln_runtime::HttpEvent<'_>) -> i32 {
             use kiln_runtime::HttpEventKind;
@@ -2745,6 +2795,7 @@ mod realm {
         }
     }
 
+    #[cfg(feature = "realm-http")]
     fn attach_http(
         resource: u64,
         role: HttpRole,
@@ -2797,6 +2848,7 @@ mod realm {
         })
     }
 
+    #[cfg(feature = "realm-http")]
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_realm_http_server_attach_active(
         resource: u64,
@@ -2807,6 +2859,7 @@ mod realm {
         attach_http(resource, HttpRole::Server, false, run, drop, work)
     }
 
+    #[cfg(feature = "realm-http")]
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_realm_http_server_attach_with_options_active(
         resource: u64,
@@ -2825,6 +2878,7 @@ mod realm {
         )
     }
 
+    #[cfg(feature = "realm-http")]
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_realm_http_client_attach_active(
         resource: u64,
@@ -2835,6 +2889,7 @@ mod realm {
         attach_http(resource, HttpRole::Client, false, run, drop, work)
     }
 
+    #[cfg(feature = "realm-http")]
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_realm_http_client_request_id_active(out_id: *mut u64) -> i32 {
         ffi(|| {
@@ -2853,6 +2908,7 @@ mod realm {
         })
     }
 
+    #[cfg(feature = "realm-http")]
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_realm_http_agent_acquire_active(
         host: *const u8,
@@ -2889,6 +2945,7 @@ mod realm {
         })
     }
 
+    #[cfg(feature = "realm-http")]
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_realm_http_client_owner_active(
         resource: u64,
@@ -2912,6 +2969,7 @@ mod realm {
         })
     }
 
+    #[cfg(feature = "realm-http")]
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_realm_http_agent_connected_active(
         host: *const u8,
@@ -2938,6 +2996,7 @@ mod realm {
         })
     }
 
+    #[cfg(feature = "realm-http")]
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_realm_http_agent_release_active(
         resource: u64,
@@ -2966,6 +3025,7 @@ mod realm {
         })
     }
 
+    #[cfg(feature = "realm-http")]
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_realm_http_client_start_active(
         resource: u64,
@@ -3024,6 +3084,7 @@ mod realm {
         })
     }
 
+    #[cfg(feature = "realm-http")]
     fn write_http_client_request(
         resource: u64,
         id: u64,
@@ -3054,6 +3115,7 @@ mod realm {
         })
     }
 
+    #[cfg(feature = "realm-http")]
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_realm_http_client_write_active(
         resource: u64,
@@ -3064,6 +3126,7 @@ mod realm {
         write_http_client_request(resource, id, data, data_len, false)
     }
 
+    #[cfg(feature = "realm-http")]
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_realm_http_client_end_active(
         resource: u64,
@@ -3074,6 +3137,7 @@ mod realm {
         write_http_client_request(resource, id, data, data_len, true)
     }
 
+    #[cfg(feature = "realm-http")]
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_realm_http_response_start_active(
         resource: u64,
@@ -3113,6 +3177,7 @@ mod realm {
         })
     }
 
+    #[cfg(feature = "realm-http")]
     fn write_http_response(
         resource: u64,
         id: u64,
@@ -3143,6 +3208,7 @@ mod realm {
         })
     }
 
+    #[cfg(feature = "realm-http")]
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_realm_http_response_write_active(
         resource: u64,
@@ -3153,6 +3219,7 @@ mod realm {
         write_http_response(resource, id, data, data_len, false)
     }
 
+    #[cfg(feature = "realm-http")]
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_realm_http_response_end_active(
         resource: u64,
@@ -3162,6 +3229,50 @@ mod realm {
     ) -> i32 {
         write_http_response(resource, id, data, data_len, true)
     }
+
+    /// Linkable HTTP stubs for archives built without `realm-http`.
+    ///
+    /// Every symbol the provider ABI registry names must still link (PROVIDER_EXPORTS keeps
+    /// its 99 entries and PROVIDER_ABI_VERSION stays 37), so each entry point keeps its exact
+    /// signature and answers invalid-argument. The stubs are unreachable in an HTTP-free
+    /// graph: generated adapters only call them after a successful attach, and every attach
+    /// fails without the engines. Enforcement of that "no HTTP calls" invariant belongs to a
+    /// later packaging phase; nothing here can distinguish "HTTP stripped" from "no HTTP
+    /// used" at link time.
+    #[cfg(not(feature = "realm-http"))]
+    mod http_stubs {
+        use super::{DropWork, HttpRequestView, HttpResponseView, INVALID_ARGUMENT, RunHttpEvent};
+        use core::ffi::c_void;
+
+        macro_rules! http_stub {
+            ($name:ident ($($arg:ident : $ty:ty),*) -> i32) => {
+                #[unsafe(no_mangle)]
+                pub unsafe extern "C" fn $name($($arg: $ty),*) -> i32 {
+                    $(let _ = $arg;)*
+                    INVALID_ARGUMENT
+                }
+            };
+        }
+
+        http_stub!(kiln_realm_http_server_close_active(resource: u64, mode: i32) -> i32);
+        http_stub!(kiln_realm_http_server_attach_active(resource: u64, run: Option<RunHttpEvent>, drop: Option<DropWork>, work: *mut c_void) -> i32);
+        http_stub!(kiln_realm_http_server_attach_with_options_active(resource: u64, allow_half_close: i32, run: Option<RunHttpEvent>, drop: Option<DropWork>, work: *mut c_void) -> i32);
+        http_stub!(kiln_realm_http_client_attach_active(resource: u64, run: Option<RunHttpEvent>, drop: Option<DropWork>, work: *mut c_void) -> i32);
+        http_stub!(kiln_realm_http_client_request_id_active(out_id: *mut u64) -> i32);
+        http_stub!(kiln_realm_http_agent_acquire_active(host: *const u8, host_len: u64, port: u16, request: u64, out_resource: *mut u64) -> i32);
+        http_stub!(kiln_realm_http_client_owner_active(resource: u64, out_owner: *mut *mut c_void) -> i32);
+        http_stub!(kiln_realm_http_agent_connected_active(host: *const u8, host_len: u64, port: u16, resource: u64, request: u64) -> i32);
+        http_stub!(kiln_realm_http_agent_release_active(resource: u64, reusable: i32, out_request: *mut u64) -> i32);
+        http_stub!(kiln_realm_http_client_start_active(resource: u64, id: u64, request: *const HttpRequestView, high_water_mark: u64) -> i32);
+        http_stub!(kiln_realm_http_client_write_active(resource: u64, id: u64, data: *const u8, data_len: u64) -> i32);
+        http_stub!(kiln_realm_http_client_end_active(resource: u64, id: u64, data: *const u8, data_len: u64) -> i32);
+        http_stub!(kiln_realm_http_response_start_active(resource: u64, id: u64, response: *const HttpResponseView, high_water_mark: u64) -> i32);
+        http_stub!(kiln_realm_http_response_write_active(resource: u64, id: u64, data: *const u8, data_len: u64) -> i32);
+        http_stub!(kiln_realm_http_response_end_active(resource: u64, id: u64, data: *const u8, data_len: u64) -> i32);
+    }
+
+    #[cfg(not(feature = "realm-http"))]
+    pub use http_stubs::*;
 
     fn set_timer(
         repeating: bool,
@@ -3559,6 +3670,7 @@ mod realm {
             assert_eq!(kiln_realm_destroy(handle), 0);
         }
 
+        #[cfg(feature = "realm-http")]
         unsafe extern "C" fn close_unregistered_http_connection(context: *mut c_void) -> i32 {
             // A missing HTTP registration is a failed capability lookup, never permission to
             // reinterpret this protocol socket as a raw node:net resource.
@@ -3569,6 +3681,7 @@ mod realm {
         }
 
         #[test]
+        #[cfg(feature = "realm-http")]
         fn missing_http_registration_never_falls_back_to_raw_close() {
             let mut handle = 0;
             let mut observed = 0;
@@ -4142,12 +4255,14 @@ mod realm {
             status
         }
 
+        #[cfg(feature = "realm-http")]
         struct RegisteredHttpCloseAttempt {
             status: i32,
             request: u64,
             observation: HostObservation,
         }
 
+        #[cfg(feature = "realm-http")]
         unsafe extern "C" fn ignore_http_event(
             _work: *mut c_void,
             _event: *const HttpEventView,
@@ -4157,8 +4272,10 @@ mod realm {
             0
         }
 
+        #[cfg(feature = "realm-http")]
         unsafe extern "C" fn retain_test_http_owner(_work: *mut c_void) {}
 
+        #[cfg(feature = "realm-http")]
         unsafe extern "C" fn try_raw_close_on_registered_http(context: *mut c_void) -> i32 {
             if context.is_null() {
                 return INVALID_ARGUMENT;
@@ -4202,6 +4319,7 @@ mod realm {
         }
 
         #[test]
+        #[cfg(feature = "realm-http")]
         fn registered_http_connection_rejects_raw_hostops_close() {
             let mut handle = 0;
             let mut attempt = RegisteredHttpCloseAttempt {
@@ -4526,11 +4644,13 @@ mod realm {
             unsafe { kiln_realm_performance_now(context.cast::<f64>()) }
         }
 
+        #[cfg(feature = "realm-http")]
         unsafe extern "C" fn allocates_http_request_id(context: *mut c_void) -> i32 {
             // SAFETY: the test supplies one live `u64` slot while this callback runs.
             unsafe { kiln_realm_http_client_request_id_active(context.cast::<u64>()) }
         }
 
+        #[cfg(feature = "realm-http")]
         unsafe extern "C" fn exercises_http_agent(context: *mut c_void) -> i32 {
             if context.is_null() {
                 return INVALID_ARGUMENT;
@@ -4610,6 +4730,7 @@ mod realm {
         }
 
         #[test]
+        #[cfg(feature = "realm-http")]
         fn http_client_request_ids_are_monotonic_and_realm_scoped() {
             let mut first_realm = 0;
             let mut second_realm = 0;
@@ -4655,6 +4776,7 @@ mod realm {
         }
 
         #[test]
+        #[cfg(feature = "realm-http")]
         fn native_http_agent_abi_maps_runtime_decisions_without_rust_layout() {
             let mut handle = 0;
             let mut reused = 0;

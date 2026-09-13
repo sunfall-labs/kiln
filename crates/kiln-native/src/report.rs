@@ -17,6 +17,7 @@ pub struct CacheHits {
     pub generated_c: bool,
     /// For graph builds, true only when every module's application object hit.
     pub application_object: bool,
+    pub prelude_object: bool,
     pub runtime_object: bool,
     pub launcher_object: bool,
     pub executable: bool,
@@ -27,6 +28,7 @@ pub struct CacheHits {
 pub struct ArtifactSizes {
     pub generated_c: u64,
     pub application_object: u64,
+    pub prelude_object: u64,
     pub runtime_object: u64,
     pub launcher_object: u64,
     pub executable: u64,
@@ -67,6 +69,9 @@ pub struct NativeBuildReport {
     /// Cache status of the generated runtime and graph-launcher C sources.
     pub runtime_generated_c_cache_hit: bool,
     pub launcher_generated_c_cache_hit: bool,
+    /// Which number-provider variant the executable links: true for the full archive with
+    /// the Hyper-backed HTTP engines, false for the slim archive without them.
+    pub number_provider_http: bool,
 }
 
 /// Cache facts for an embedded scalar shared library.
