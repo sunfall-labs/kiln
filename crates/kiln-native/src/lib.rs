@@ -2564,42 +2564,7 @@ impl NativeBuilder {
 /// accepted builtin has an explicit native materializer.
 fn validate_native_node_builtins(graph: &ModuleGraph) -> Result<(), NativeError> {
     for node in graph.modules() {
-        let ModuleSource::NodeBuiltin(builtin) = node.source else {
-            continue;
-        };
-        if kiln_builtins::is_ts_builtin(builtin) {
-            continue;
-        }
-        if native_builtin_body(builtin).is_none() {
-            return Err(NativeError::UnsupportedNodeBuiltin {
-                specifier: builtin.specifier(),
-            });
-        }
-    }
-    for importer in graph.modules() {
-        for import in &importer.program.imports {
-            let Some(dependency) = importer
-                .dependencies
-                .iter()
-                .find(|dependency| dependency.specifier == import.source)
-            else {
-                continue;
-            };
-            let Some(provider) = graph.module(&dependency.target) else {
-                continue;
-            };
-            let ModuleSource::NodeBuiltin(builtin) = provider.source else {
-                continue;
-            };
-            if import.imported != kiln_ir::NAMESPACE_IMPORT
-                && !native_builtin_supports_export(builtin, &import.imported)
-            {
-                return Err(NativeError::UnsupportedNodeBuiltinExport {
-                    specifier: builtin.specifier(),
-                    export_name: import.imported.clone(),
-                });
-            }
-        }
+        validate_native_builtin_node(graph, node)?;
     }
     Ok(())
 }
@@ -4712,7 +4677,8 @@ pub fn executable_demand(
     graph: &ModuleGraph,
     profile: NativeProfile,
 ) -> Result<ExecutableDemand, NativeError> {
-    let selected = native_executable_graph(graph, profile, &BTreeSet::new())?;
+    let plan = native_graph_plan(graph)?;
+    let selected = native_executable_graph(graph, profile, &plan.excluded)?;
     Ok(ExecutableDemand {
         live: selected
             .modules
