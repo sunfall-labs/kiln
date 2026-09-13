@@ -63,8 +63,10 @@ def fetch_managed(destination: pathlib.Path | None = None, *, minimum_files: int
     if destination.exists() and (destination / ".git").exists():
         try:
             return validate_checkout(destination, minimum_files=minimum_files)
-        except CorpusError:
-            pass
+        except CorpusError as exc:
+            raise CorpusError(f"managed checkout is invalid; refusing to delete it: {exc}") from exc
+    if destination.exists():
+        raise CorpusError(f"managed checkout path exists but is not a checkout; refusing to delete it: {destination}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     stage = pathlib.Path(tempfile.mkdtemp(prefix=f".{destination.name}.staging-", dir=destination.parent))
     try:
@@ -74,8 +76,11 @@ def fetch_managed(destination: pathlib.Path | None = None, *, minimum_files: int
         subprocess.run(["git", "-C", str(stage), "checkout", "--quiet", "--detach", COMMIT], check=True)
         validate_checkout(stage, minimum_files=minimum_files)
         if destination.exists():
-            shutil.rmtree(destination)
-        os.replace(stage, destination)
+            raise CorpusError(f"managed checkout appeared during fetch; refusing to replace it: {destination}")
+        try:
+            os.rename(stage, destination)
+        except FileExistsError as exc:
+            raise CorpusError(f"managed checkout appeared during fetch; refusing to replace it: {destination}") from exc
         return validate_checkout(destination, minimum_files=minimum_files)
     except Exception:
         shutil.rmtree(stage, ignore_errors=True)
@@ -97,7 +102,7 @@ def resolve_test_root(checkout: pathlib.Path, selected: str = "") -> tuple[pathl
             candidate.relative_to(root)
         except ValueError as exc:
             raise CorpusError(f"--path escapes test/: {selected}") from exc
-        report_path = selected
+        report_path = "/".join(path.parts)
     if not candidate.is_dir():
         raise CorpusError(f"--path does not name a directory under test/: {selected}")
     if not any(p.is_file() for p in candidate.rglob("*")):
@@ -116,7 +121,14 @@ def discover_chunks(root: pathlib.Path, existing: list[str] | None = None) -> li
             children = [p for p in sorted(top.iterdir()) if p.is_dir()]
             chunks.extend(f"{top.name}/{p.name}" for p in children) if children else chunks.append(top.name)
     for chunk in chunks:
-        path = root / chunk
+        relative = pathlib.PurePosixPath(chunk)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise CorpusError(f"baseline names a chunk outside the checkout: {chunk}")
+        path = (root / pathlib.Path(*relative.parts)).resolve()
+        try:
+            path.relative_to(root.resolve())
+        except ValueError as exc:
+            raise CorpusError(f"baseline names a chunk outside the checkout: {chunk}") from exc
         if not path.is_dir():
             raise CorpusError(f"baseline names {chunk}, which is not in the checkout")
         if not any(p.is_file() for p in path.rglob("*")):
@@ -126,6 +138,12 @@ def discover_chunks(root: pathlib.Path, existing: list[str] | None = None) -> li
 
 def run_result(kiln: str, root: pathlib.Path, output: pathlib.Path, log: pathlib.Path) -> tuple[dict[str, Any], subprocess.CompletedProcess[str]]:
     verify_effective_cap()
+    try:
+        output.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise CorpusError(f"cannot remove stale result document {output}: {exc}") from exc
     log.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     with log.open("w", encoding="utf-8") as stream:
@@ -150,7 +168,19 @@ def run_result(kiln: str, root: pathlib.Path, output: pathlib.Path, log: pathlib
         if outcome not in counts:
             raise CorpusError(f"unknown test outcome: {outcome!r}")
         counts[outcome] += 1
-        paths.add(test.get("path", test["id"]))
+        path = test.get("path", test["id"])
+        if not isinstance(path, str):
+            raise CorpusError("test result path must be a string")
+        paths.add(path)
+    totals = report.get("totals")
+    if not isinstance(totals, dict):
+        raise CorpusError("Kiln result document has no totals object")
+    expected = {"passed": counts["pass"], "failed": counts["fail"], "unsupported": counts["unsupported"], "skipped": counts["skipped"], "total": len(tests)}
+    for key, value in expected.items():
+        if not isinstance(totals.get(key), int) or totals[key] != value:
+            raise CorpusError(f"Kiln result totals disagree with test entries for {key}: expected {value}, got {totals.get(key)!r}")
+    if completed.returncode and counts["fail"] == 0:
+        raise CorpusError(f"Kiln exited {completed.returncode} without reported test failures; full log: {log}")
     report["_kiln_elapsed_millis"] = max(1, round((time.monotonic() - started) * 1000))
     report["_kiln_paths"] = len(paths)
     report["_kiln_counts"] = counts
