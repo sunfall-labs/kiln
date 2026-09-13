@@ -431,6 +431,11 @@ pub(super) fn emit_graph_op(
             )
             .unwrap();
         }
+        GraphOp::ResumeValue => {
+            // The caller-provided value is restored from frame->sent at the synthetic resume
+            // label. The SSA slot remains deliberately uninitialised here: it has no value while
+            // the suspended activation is returning to its caller.
+        }
         GraphOp::IsReturnSignal(value) => {
             writeln!(
                 output,
