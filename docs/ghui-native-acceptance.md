@@ -1,5 +1,15 @@
 # Native ghui acceptance probe
 
+The latest live acceptance passed with compiler production revision `fea2802b`. The verified app
+binary is `/Users/alee/Developer/Personal/ghui-process-capability/.scratch/ghui-live/ghui-fea2802b`
+(SHA-256 `c4ca4c0b36d2f24d533fba8119ac25ce1e56a13a886223246890c6c687cdbe0e`, 112,841,320 bytes).
+Its build log is `/Users/alee/Developer/Personal/kiln-ghui-integration/.scratch/ghui-fea2802b-build.log`
+and its transcript is `/Users/alee/Developer/Personal/ghui-process-capability/.scratch/ghui-live/fea2802b-live.log`.
+The real read-only session again rendered 16 repositories, 50+ pull requests, and 15 issues; it
+selected PR #3, entered details, traversed markdown with a down-scroll, returned with Escape,
+restored the terminal with `q`, and exited 0. No timeout notice appeared and no GitHub mutation was
+performed.
+
 The live acceptance passed on app source fixture `afd00085f5aa925bb8220a091f932b1bc21e1ac8` with
 the local process capability adapter at `9484c3f`. The compiler production revision was `66d07dd9`
 and the integration checkout used for the build was `01aaaca5`. The exact
@@ -44,16 +54,15 @@ The acceptance exercises the timer payload/keep-alive fix through the same async
 The corresponding release regression was run in both the normal configuration and with GC stress;
 the process capability and timer liveness fixtures remain the durable checks for that behavior.
 
-There was one transient footer notice while entering PR details: `Timed out after 15000ms`. This is
+The earlier `66d07dd9` acceptance had one transient footer notice while entering PR details: `Timed out after 15000ms`. This is
 the ghui command runner's blanket 15-second command budget, not a proof of a runtime failure. The
 transcript has no command IDs or timestamps, so it cannot identify whether the selected detail query
 or a neighbor prefetch crossed the budget. Full PR details rendered afterward and navigation, scroll,
 back, terminal restoration, and exit all succeeded. A local follow-up records the app-side work to
 add per-operation telemetry and distinguish foreground detail requests from silent prefetches.
 
-The repository-wide gate was still running at the time of this acceptance record (`558b05c6`). Native
-parity had an independently investigated callable-name divergence; native stress and push checks were
-pending. This document records the ghui acceptance only and does not claim the overall gate complete.
+The repository-wide gate status is recorded separately. This document records ghui acceptance only
+and does not claim the overall gate complete.
 
 The four facts-baseline updates accepted during this gate come from backend commit `ecfad131`, which
 models generator suspension and `yield*` resume edges in the CFG. The resulting narrower return facts

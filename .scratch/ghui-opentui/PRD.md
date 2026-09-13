@@ -16,6 +16,12 @@ The verified app source fixture is `afd00085f5aa925bb8220a091f932b1bc21e1ac8`, u
 `01aaaca5`. Binary SHA-256 is
 `e112a489242695ad94a14bb6b16f1f47e96a9243792ebe88a8399fe8d6c7fefc` (112,840,824 bytes).
 
+The latest production rerun used compiler revision `fea2802b` and binary SHA-256
+`c4ca4c0b36d2f24d533fba8119ac25ce1e56a13a886223246890c6c687cdbe0e` (112,841,320 bytes).
+It repeated the live read-only flow successfully and showed no timeout notice. The earlier
+`66d07dd9` run and its bounded timeout finding remain historical evidence for the observability
+follow-up below.
+
 The same application exposed a module scheduler bug in the interpreter: a dynamic-import job was
 queued on the interpreter's private realm while Node module execution drained the shared module
 realm. The dependency remained suspended at top-level await and its importer observed an
@@ -45,11 +51,11 @@ markdown details scrolled, Escape returned to the list, `q` restored the termina
 exited 0. No GitHub mutation was performed.
 
 The session exercised the timer payload/keep-alive fix. Release regression coverage was run in the
-normal configuration and with GC stress. A transient `Timed out after 15000ms` footer appeared while
-entering PR details. The terminal transcript cannot identify the exact request because it has no
-structured command IDs or timestamps; it may have been the selected GraphQL detail query or a
-neighbor prefetch. Details rendered afterward and the rest of the acceptance passed, so this is
-currently classified as an app/network budget issue rather than evidence of a Kiln runtime defect.
+normal configuration and with GC stress. The earlier `66d07dd9` run showed a transient
+`Timed out after 15000ms` footer while entering PR details; its transcript cannot identify the exact
+request because it has no structured command IDs or timestamps. The latest `fea2802b` rerun showed no
+timeout notice. The bounded finding remains classified as an app/network budget issue rather than
+evidence of a Kiln runtime defect.
 
 The local follow-up issue is `.scratch/ghui-opentui/issues/06-ghui-command-timeout-observability.md`.
 
