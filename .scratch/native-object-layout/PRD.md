@@ -1,6 +1,6 @@
 # PRD: Native Object Layout Field Alignment with Private Members
 
-Status: needs-triage
+Status: resolved
 Branch: `investigate/native-object-layout`
 
 ## Problem Statement

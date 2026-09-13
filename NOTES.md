@@ -5408,3 +5408,54 @@ cycles a call where we spend five, and it gets there by checking the shape once 
 rather than once per element. Folding the prototype into the shape identity would remove two or
 three of those loads; winning the row outright needs the loop-level guard, which is a larger
 piece of work than anything here.
+
+---
+
+## Phase 5.2 TypeScript built-ins: `node:events` (2026-09-13)
+
+Implemented `node:events` (`EventEmitter`) completely in TypeScript via
+`crates/kiln-builtins/src/node/events.ts` with zero additions to C runtime prelude (honoring
+the Phase 5.1 freeze). Verified byte-for-byte output parity between interpreter and native CLI on
+`conformance/native/node-events-members.cjs`, and full clean pass on `scripts/native.sh` (164 matched,
+0 diverged). Whole-program fact extraction updated in `bench/results/facts-baseline.json`.
+
+Reminder: Do not rerun the full gate or gate-quick repeatedly mid-flight when individual targeted suites
+and parity scripts already passed; test runs share CPU budgets across active worktrees and are costly.
+
+---
+
+## Phase 5.2 TypeScript built-ins: `node:buffer` (2026-09-13)
+
+Migrated `node:buffer` to a pure TypeScript built-in in `crates/kiln-builtins/src/node/buffer.ts`
+covering all 10 canonical exports (`Buffer`, `alloc`, `allocUnsafe`, `allocUnsafeSlow`,
+`byteLength`, `concat`, `constants`, `default`, `from`, `isBuffer`). Zero additions to the C runtime
+prelude (Phase 5.1 freeze honored). Verified with native probe `conformance/native/node-buffer-namespace.cjs`
+(byte-for-byte identical output between interpreter and native), `native_commonjs_builtin_namespace_is_not_its_default_export`,
+and full `scripts/native.sh` parity (165 matched, 0 diverged).
+
+---
+
+## Phase 5.2 TypeScript built-ins: `node:string_decoder` (2026-09-13)
+
+Implemented `node:string_decoder` completely in TypeScript via `crates/kiln-builtins/src/node/string_decoder.ts`
+with zero additions to the C runtime prelude. Implemented `StringDecoder` class with support for UTF-8
+multi-byte boundary chunk preservation across `write()` calls and trailing replacement character (`\uFFFD`)
+flushing on `end()`. Added integration tests in `kiln-module-graph` and `kiln-native`, along with
+`conformance/native/node-string-decoder-members.cjs` (167 matched, 0 diverged in `scripts/native.sh`).
+Per user guidance and AGENTS.md rules, gate/gate-quick was not re-run mid-flight as targeted tests
+and native parity verified the changes cleanly without wasting shared CPU budget on costly whole-workspace runs.
+
+---
+
+## Phase 5.2 TypeScript built-ins: `node:querystring` (2026-09-13)
+
+Migrated `node:querystring` completely from C runtime to TypeScript via `crates/kiln-builtins/src/node/querystring.ts`
+with zero additions to the C runtime prelude (Phase 5.1 freeze strictly honored). Implemented all 7 canonical
+exports (`decode`, `default`, `encode`, `escape`, `parse`, `stringify`, `unescape`) with robust UTF-8 percent-decoding
+with replacement character (`\uFFFD`) and definition-style own property insertion via `Object.defineProperty` for
+safe `__proto__` data preservation on `Object.create(null)` dictionaries. Verified with native probe
+`conformance/native/node-querystring-members.cjs` (byte-for-byte identical between interpreter and native CLI),
+integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`, and `scripts/native.sh` (168 matched,
+0 diverged). In accordance with user instructions, avoided expensive gate re-runs mid-flight to preserve shared CPU resources.
+
+
