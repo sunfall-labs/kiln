@@ -2,6 +2,15 @@
 #if defined(__unix__) || defined(__APPLE__)
 #include <sys/ioctl.h>
 #endif
+#if defined(__APPLE__)
+#include <crt_externs.h>
+#define kiln_c99_environ (*_NSGetEnviron())
+#elif defined(_WIN32)
+#define kiln_c99_environ NULL
+#else
+extern char **environ;
+#define kiln_c99_environ environ
+#endif
 
 static int kiln_c99_realm_value_slot(uint32_t key, kiln_value **out) {
     void *slot = NULL;
@@ -100,6 +109,25 @@ static int kiln_c99_process_object(kiln_value *out) {
     status = kiln_c99_new_object(process);
     if (status == KILN_C99_OK) status = kiln_c99_install_event_emitter_methods(*process);
     if (status == KILN_C99_OK) status = kiln_c99_new_object(&env);
+    if (status == KILN_C99_OK && kiln_c99_environ != NULL) {
+        for (char **entry_ptr = kiln_c99_environ; *entry_ptr != NULL; ++entry_ptr) {
+            const char *entry = *entry_ptr;
+            const char *eq = strchr(entry, '=');
+            if (eq != NULL) {
+                size_t key_len = (size_t)(eq - entry);
+                const char *val = eq + 1;
+                size_t val_len = 0;
+                while (val[val_len] != '\0') val_len++;
+                kiln_value val_obj = kiln_c99_copy_text(val, val_len);
+                if (val_obj.tag != KILN_VALUE_STRING) {
+                    status = KILN_C99_OUT_OF_MEMORY;
+                    break;
+                }
+                status = kiln_c99_put(NULL, env, entry, key_len, val_obj, 0, NULL);
+                if (status != KILN_C99_OK) break;
+            }
+        }
+    }
     if (status == KILN_C99_OK) status = kiln_c99_new_array(&argv);
     if (status == KILN_C99_OK) status = kiln_c99_new_array(&exec_argv);
     if (status == KILN_C99_OK) status = kiln_c99_new_object(&versions);

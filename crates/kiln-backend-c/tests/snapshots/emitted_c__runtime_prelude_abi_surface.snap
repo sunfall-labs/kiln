@@ -1655,6 +1655,15 @@ static int kiln_c99_visible_arguments(kiln_value *out) {
 #if defined(__unix__) || defined(__APPLE__)
 #include <sys/ioctl.h>
 #endif
+#if defined(__APPLE__)
+#include <crt_externs.h>
+#define kiln_c99_environ (*_NSGetEnviron())
+#elif defined(_WIN32)
+#define kiln_c99_environ NULL
+#else
+extern char **environ;
+#define kiln_c99_environ environ
+#endif
 static int kiln_c99_realm_value_slot(uint32_t key, kiln_value **out) {
 static int kiln_c99_atomics_object(kiln_value *out) {
 static int kiln_c99_console_object(kiln_value *out) {
