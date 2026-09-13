@@ -1334,7 +1334,7 @@ impl NativeBuilder {
                 },
             ));
         }
-        let topology = graph_shared_topology_digest(graph, &modules);
+        let topology = graph_shared_topology_digest(graph, &modules, Some(&native_plan.failures));
         let wrapper_symbol = format!(
             "kiln_shared_graph_{}",
             graph_shared_public_digest(topology, &modules)?.to_hex()
@@ -1984,7 +1984,7 @@ impl NativeBuilder {
             Digest::hash(b"portable-graph-launcher-c11"),
             [
                 Digest::hash(launcher.as_bytes()),
-                graph_topology_digest(graph, &modules),
+                graph_topology_digest(graph, &modules, Some(&native_plan.failures)),
             ],
         );
         let (launcher_bytes, launcher_source_digest, launcher_generated_c_cache_hit) =
@@ -2615,41 +2615,54 @@ fn native_graph_plan(graph: &ModuleGraph) -> Result<NativeGraphPlan, NativeError
     validate_native_builtins_in_paths(graph, &static_reachable)?;
     let mut plan = NativeGraphPlan::default();
     let mut retained = static_reachable.clone();
-    for importer in graph.modules() {
-        for dependency in graph.dynamic_dependencies(&importer.path) {
-            let mut closure = BTreeSet::new();
-            let mut pending = vec![dependency.target.clone()];
-            let mut unsupported = None;
-            while let Some(path) = pending.pop() {
-                if !closure.insert(path.clone()) {
-                    continue;
-                }
-                let Some(node) = graph.module(&path) else {
-                    continue;
-                };
-                if let Err(error) = validate_native_builtin_node(graph, node) {
-                    unsupported = Some(error.to_string());
-                    break;
-                }
-                pending.extend(node.dependencies.iter().map(|edge| edge.target.clone()));
+    let mut pending = static_reachable
+        .iter()
+        .flat_map(|path| {
+            graph
+                .dynamic_dependencies(path)
+                .iter()
+                .map(move |dependency| (path.clone(), dependency.clone()))
+        })
+        .collect::<Vec<_>>();
+    let mut processed = BTreeSet::new();
+    while let Some((importer, dependency)) = pending.pop() {
+        if !processed.insert((importer.clone(), dependency.specifier.clone())) {
+            continue;
+        }
+        let mut closure = BTreeSet::new();
+        let mut walk = vec![dependency.target.clone()];
+        let mut unsupported = None;
+        while let Some(path) = walk.pop() {
+            if !closure.insert(path.clone()) {
+                continue;
             }
-            let Some(message) = unsupported else {
-                retained.extend(closure);
+            let Some(node) = graph.module(&path) else {
                 continue;
             };
-            if closure.iter().any(|path| static_reachable.contains(path)) {
-                return Err(NativeError::UnsupportedNodeBuiltin {
-                    specifier: "dynamic static dependency",
-                });
+            if let Err(error) = validate_native_builtin_node(graph, node) {
+                unsupported.get_or_insert(error.to_string());
             }
-            plan.excluded.extend(closure);
+            walk.extend(node.dependencies.iter().map(|edge| edge.target.clone()));
+        }
+        if let Some(message) = unsupported {
             plan.failures.insert(
-                (importer.path.clone(), dependency.specifier.clone()),
+                (importer, dependency.specifier),
                 format!("dynamic import failed: {message}"),
             );
+            continue;
+        }
+        for path in &closure {
+            retained.insert(path.clone());
+            for nested in graph.dynamic_dependencies(path) {
+                pending.push((path.clone(), nested.clone()));
+            }
         }
     }
-    plan.excluded.retain(|path| !retained.contains(path));
+    plan.excluded = graph
+        .modules()
+        .map(|node| node.path.clone())
+        .filter(|path| !retained.contains(path))
+        .collect();
     Ok(plan)
 }
 
@@ -4086,6 +4099,7 @@ fn logical_module_path(root: &Path, path: &Path) -> Result<String, NativeError> 
 fn graph_topology_digest(
     graph: &ModuleGraph,
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
+    native_failures: Option<&BTreeMap<(PathBuf, String), String>>,
 ) -> Digest {
     let mut bytes = Vec::new();
     let mut indices = std::collections::HashMap::with_capacity(modules.len());
@@ -4148,6 +4162,17 @@ fn graph_topology_digest(
         bytes.extend_from_slice(message.as_bytes());
         bytes.push(0);
     }
+    if let Some(failures) = native_failures {
+        for ((importer, specifier), message) in failures {
+            bytes.extend_from_slice(b"native-dynamic-failure:");
+            bytes.extend_from_slice(importer.to_string_lossy().as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(specifier.as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(message.as_bytes());
+            bytes.push(0);
+        }
+    }
     Digest::hash(&bytes)
 }
 
@@ -4157,6 +4182,7 @@ fn graph_topology_digest(
 fn graph_shared_topology_digest(
     graph: &ModuleGraph,
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
+    native_failures: Option<&BTreeMap<(PathBuf, String), String>>,
 ) -> Digest {
     let mut bytes = Vec::new();
     let mut indices = std::collections::HashMap::with_capacity(modules.len());
@@ -4212,6 +4238,17 @@ fn graph_shared_topology_digest(
         bytes.push(0);
         bytes.extend_from_slice(message.as_bytes());
         bytes.push(0);
+    }
+    if let Some(failures) = native_failures {
+        for ((importer, specifier), message) in failures {
+            bytes.extend_from_slice(b"native-dynamic-failure:");
+            bytes.extend_from_slice(importer.to_string_lossy().as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(specifier.as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(message.as_bytes());
+            bytes.push(0);
+        }
     }
     Digest::hash(&bytes)
 }
@@ -4648,7 +4685,7 @@ fn native_executable_graph<'a>(
 
     let modules = graph
         .modules()
-        .filter(|node| live.contains(&node.path))
+        .filter(|node| live.contains(&node.path) && !excluded.contains(&node.path))
         .collect::<Vec<_>>();
     Ok(NativeExecutableGraph {
         modules,
