@@ -3213,13 +3213,7 @@ fn native_builtin_supported_exports(
         NodeBuiltin::Process => kiln_builtins::PROCESS_EXPORTS,
         NodeBuiltin::Console => kiln_builtins::CONSOLE_EXPORTS,
         NodeBuiltin::Events => &["EventEmitter", "default"],
-        NodeBuiltin::Ffi => &[
-            "default",
-            "dlopen",
-            "getRawPointer",
-            "suffix",
-            "toArrayBuffer",
-        ],
+        NodeBuiltin::Ffi => kiln_builtins::FFI_EXPORTS,
         NodeBuiltin::Net => kiln_builtins::NET_EXPORTS,
         NodeBuiltin::Http => kiln_builtins::HTTP_EXPORTS,
         NodeBuiltin::Util => kiln_builtins::UTIL_EXPORTS,
@@ -3586,36 +3580,6 @@ exports[23] = error;"#,
             r#"kiln_value constructor = kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_EMITTER);
 exports[0] = constructor;
 exports[1] = constructor;"#,
-        ),
-        NodeBuiltin::Ffi => Some(
-            r#"kiln_value dlopen = kiln_c99_method(KILN_C99_METHOD_NODE_FFI_DLOPEN);
-kiln_value get_raw_pointer = kiln_c99_method(KILN_C99_METHOD_NODE_FFI_GET_RAW_POINTER);
-kiln_value to_array_buffer = kiln_c99_method(KILN_C99_METHOD_NODE_FFI_TO_ARRAY_BUFFER);
-#if defined(_WIN32)
-kiln_value suffix = kiln_c99_copy_text(".dll", 4);
-#elif defined(__APPLE__)
-kiln_value suffix = kiln_c99_copy_text(".dylib", 6);
-#else
-kiln_value suffix = kiln_c99_copy_text(".so", 3);
-#endif
-kiln_value namespace;
-int status = kiln_c99_new_object(&namespace);
-if (status != KILN_C99_OK) return status;
-status = kiln_c99_put(host, namespace, "default", 7, namespace, 0, NULL);
-if (status != KILN_C99_OK) return status;
-status = kiln_c99_put(host, namespace, "dlopen", 6, dlopen, 0, NULL);
-if (status != KILN_C99_OK) return status;
-status = kiln_c99_put(host, namespace, "getRawPointer", 13, get_raw_pointer, 0, NULL);
-if (status != KILN_C99_OK) return status;
-status = kiln_c99_put(host, namespace, "suffix", 6, suffix, 0, NULL);
-if (status != KILN_C99_OK) return status;
-status = kiln_c99_put(host, namespace, "toArrayBuffer", 13, to_array_buffer, 0, NULL);
-if (status != KILN_C99_OK) return status;
-exports[0] = namespace;
-exports[1] = dlopen;
-exports[2] = get_raw_pointer;
-exports[3] = suffix;
-exports[4] = to_array_buffer;"#,
         ),
         NodeBuiltin::Net => Some(
             r#"kiln_value connect = kiln_c99_method(KILN_C99_METHOD_NODE_NET_CONNECT);
@@ -6347,6 +6311,30 @@ static int kiln_install_native_modules(kiln_host *host) {
     status = kiln_c99_put(host, fs_obj, "promises", 8, fsp_obj, 0, NULL);
     if (status != KILN_C99_OK) return status;
     status = kiln_c99_put(host, modules_obj, "fs", 2, fs_obj, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+
+    kiln_value ffi_obj = kiln_c99_undefined();
+    status = kiln_c99_new_object(&ffi_obj);
+    if (status != KILN_C99_OK) return status;
+    kiln_value ffi_dlopen = (kiln_value){ 11, 0, { 495 /* KILN_C99_METHOD_NODE_FFI_DLOPEN */ } };
+    kiln_value ffi_get_raw_pointer = (kiln_value){ 11, 0, { 496 /* KILN_C99_METHOD_NODE_FFI_GET_RAW_POINTER */ } };
+    kiln_value ffi_to_array_buffer = (kiln_value){ 11, 0, { 497 /* KILN_C99_METHOD_NODE_FFI_TO_ARRAY_BUFFER */ } };
+#if defined(_WIN32)
+    kiln_value ffi_suffix = kiln_c99_copy_text(".dll", 4);
+#elif defined(__APPLE__)
+    kiln_value ffi_suffix = kiln_c99_copy_text(".dylib", 6);
+#else
+    kiln_value ffi_suffix = kiln_c99_copy_text(".so", 3);
+#endif
+    status = kiln_c99_put(host, ffi_obj, "dlopen", 6, ffi_dlopen, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, ffi_obj, "getRawPointer", 13, ffi_get_raw_pointer, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, ffi_obj, "toArrayBuffer", 13, ffi_to_array_buffer, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, ffi_obj, "suffix", 6, ffi_suffix, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, modules_obj, "ffi", 3, ffi_obj, 0, NULL);
     if (status != KILN_C99_OK) return status;
 
     status = kiln_c99_put(host, proc_obj, "__kilnNativeModules", 19, modules_obj, 0, NULL);
