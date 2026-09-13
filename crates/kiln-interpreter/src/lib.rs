@@ -4041,16 +4041,6 @@ impl PartialEq for Value {
     }
 }
 
-/// Materialize the public exports of a Node builtin module.
-///
-/// Resolution and graph construction deliberately traffic only in the builtin's stable string
-/// identity. This function is the single execution-side table used by both static ESM imports
-/// and `process.getBuiltinModule`, so the two access paths cannot acquire different native
-/// implementations.
-pub fn node_builtin_export_names(specifier: &str) -> Option<&'static [&'static str]> {
-    kiln_node_abi::builtin_abi(specifier).map(|builtin| builtin.exports)
-}
-
 /// The specifier a Node builtin namespace value stands for.
 ///
 /// The inverse of the builtin namespace projection, and the only thing that lets a `Native` reach its
@@ -21489,7 +21479,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if let Some(target) = require.resolve(&specifier) {
                     return Ok(Value::String(target));
                 }
-                if kiln_node_abi::builtin_abi(&specifier).is_some() {
+                if kiln_builtins::is_builtin_specifier(&specifier) {
                     return Ok(Value::String(specifier));
                 }
                 self.throw_error(
@@ -45530,9 +45520,9 @@ fn intrinsic_static_property_names(target: &Value) -> &'static [&'static str] {
     // that arm was written to give.
     if let Value::Native(native, _) = target
         && let Some(specifier) = node_builtin_specifier(*native)
-        && let Some(abi) = kiln_node_abi::builtin_abi(specifier)
+        && let Some(exports) = kiln_builtins::builtin_exports_for_specifier(specifier)
     {
-        return abi.exports;
+        return exports;
     }
     &[]
 }

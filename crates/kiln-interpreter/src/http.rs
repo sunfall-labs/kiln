@@ -5,15 +5,11 @@
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 
-use kiln_node_abi::HTTP_METHODS;
-
 use crate::net::{NetSocketState, NodeServerState};
 use crate::{
-    ArrayData, ExecutionError, Native, NodeObject, ObjectData, Property, RealmId, Value,
-    is_callable,
+    ExecutionError, Native, NodeObject, ObjectData, Property, RealmId, Value, is_callable,
 };
 
-#[derive(Debug)]
 pub(crate) struct HttpClientRequestState {
     pub(crate) host: String,
     pub(crate) port: u16,
@@ -259,12 +255,6 @@ pub(crate) fn property(prop: &str) -> Option<Value> {
             Native::NodeHttpServerResponse,
             RealmId::PRIMARY,
         )),
-        "METHODS" => Some(Value::Array(ArrayData::new(
-            HTTP_METHODS
-                .iter()
-                .map(|method| Value::String((*method).into()))
-                .collect(),
-        ))),
         "default" => Some(Value::Native(Native::NodeHttp, RealmId::PRIMARY)),
         _ => None,
     }

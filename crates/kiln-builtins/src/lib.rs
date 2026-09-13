@@ -55,6 +55,11 @@ macro_rules! declare_ts_builtins {
             }
         }
 
+        /// Return the authoritative TS exports for a builtin specifier, including bare aliases.
+        pub fn builtin_exports_for_specifier(specifier: &str) -> Option<&'static [&'static str]> {
+            NodeBuiltin::parse(specifier).map(builtin_supported_exports)
+        }
+
         /// Logical path with `.ts` extension for frontend parsing.
         pub fn builtin_logical_path(builtin: NodeBuiltin) -> &'static str {
             match builtin {
