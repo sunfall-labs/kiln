@@ -1928,6 +1928,104 @@ fn node_builtin_querystring_commonjs_require_evaluates_cleanly() {
 }
 
 #[test]
+fn node_builtin_util_evaluates_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import util, { format, inherits, inspect, promisify, types, isArray } from 'node:util';",
+            "const fmt = format('hello %s: %d', 'world', 42);",
+            "function Base() {}",
+            "Base.prototype.greet = function() { return 'base'; };",
+            "function Sub() {}",
+            "inherits(Sub, Base);",
+            "const sub = new Sub();",
+            "const isArr = isArray([1, 2]);",
+            "const isPromise = types.isPromise(Promise.resolve(1));",
+            "console.log(",
+            "  typeof util === 'object',",
+            "  util.default === util,",
+            "  fmt,",
+            "  sub.greet() === 'base',",
+            "  Sub.super_ === Base,",
+            "  isArr,",
+            "  isPromise,",
+            ");",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with util builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute util builtin");
+    assert_eq!(
+        host.output,
+        ["true true hello world: 42 true true true true"]
+    );
+}
+
+#[test]
+fn node_builtin_util_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const util = require('node:util');",
+            "const fmt = util.format('count: %d', 100);",
+            "module.exports = {",
+            "  isObj: typeof util === 'object',",
+            "  isFn: typeof util.format === 'function',",
+            "  hasPromisify: typeof util.promisify === 'function',",
+            "  selfEq: util.default === util,",
+            "  fmt,",
+            "};",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import bridge from './bridge.cjs';",
+            "console.log(bridge.isObj, bridge.isFn, bridge.hasPromisify, bridge.selfEq, bridge.fmt);",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with util builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute util builtin cjs");
+    assert_eq!(host.output, ["true true true true count: 100"]);
+}
+
+#[test]
 fn node_net_connect_is_a_typed_virtual_module_export() {
     let project = TempProject::new();
     let entry = project.write(

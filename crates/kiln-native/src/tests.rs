@@ -1063,6 +1063,12 @@ fn node_events_is_a_ts_builtin_and_https_has_a_native_runtime_materializer() {
         NodeBuiltin::QueryString,
         "parse"
     ));
+    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Util));
+    assert!(native_builtin_supports_export(NodeBuiltin::Util, "format"));
+    assert!(native_builtin_supports_export(
+        NodeBuiltin::Util,
+        "promisify"
+    ));
     assert!(native_builtin_body(NodeBuiltin::Https).is_some());
     assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Path));
     assert!(native_builtin_supports_export(NodeBuiltin::Path, "join"));
@@ -8777,5 +8783,104 @@ fn native_node_querystring_commonjs_require_builds_and_runs() {
     assert_eq!(
         stdout.trim(),
         "cjs-qs: object function true alice admin ok=true"
+    );
+}
+
+#[test]
+fn native_node_util_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-util-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import util, { format, inherits, inspect, promisify, types, isArray } from 'node:util';\n",
+            "const fmt = format('%s is %d years old', 'Bob', 30);\n",
+            "function Animal() {}\n",
+            "Animal.prototype.speak = function() { return 'noise'; };\n",
+            "function Dog() {}\n",
+            "inherits(Dog, Animal);\n",
+            "const d = new Dog();\n",
+            "const isArr = isArray([10, 20]);\n",
+            "const isPromise = types.isPromise(Promise.resolve(1));\n",
+            "console.log('util-ts:', typeof format, util.default === util, fmt, d.speak(), Dog.super_ === Animal, isArr, isPromise);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("util_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run util binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "util-ts: function true Bob is 30 years old noise true true true"
+    );
+}
+
+#[test]
+fn native_node_util_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-util-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const util = require('node:util');\n",
+            "const formatted = util.format('status: %s', 'running');\n",
+            "console.log('cjs-util:', typeof util, typeof util.format, typeof util.promisify, util.default === util, formatted);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("util_cjs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run util cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "cjs-util: object function function true status: running"
     );
 }
