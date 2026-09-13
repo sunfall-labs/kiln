@@ -6059,7 +6059,11 @@ typedef struct kiln_graph_module_state {
     kiln_value result;
     kiln_value active_promise;
     int module_settling;
+    int phase;
 } kiln_graph_module_state;
+
+enum { KILN_MODULE_UNINITIALIZED = 0, KILN_MODULE_EVALUATING = 1,
+       KILN_MODULE_EVALUATED = 2, KILN_MODULE_FAILED = 3 };
 
 static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *result,
                                     kiln_value *thrown) {
@@ -6163,6 +6167,9 @@ typedef struct kiln_graph_context {
         .unwrap();
     }
     output.push_str(
+        "static int kiln_graph_ensure_module(kiln_graph_context *graph, size_t index);\n",
+    );
+    output.push_str(
         r#"
 static int kiln_graph_enter(void *opaque) {
     kiln_graph_context *graph = (kiln_graph_context *)opaque;
@@ -6215,17 +6222,20 @@ static int kiln_graph_enter(void *opaque) {
                                 module: &kiln_backend_c::CModule|
      -> Result<(), NativeError> {
         let mut evaluation = &mut helper_defs;
-        writeln!(
-            evaluation,
-            "static int kiln_graph_eval_module_{index}(kiln_graph_context *graph) {{\n    kiln_graph_entry_context context;\n    kiln_graph_module_state *state = &graph->module_states[{index}];\n    kiln_host *host = &graph->host;\n    kiln_value *result = &state->result;\n    int status = 0;"
-        )
-        .unwrap();
         let is_async = node
             .program
             .program
             .code
             .iter()
             .any(|i| matches!(i, kiln_ir::Instruction::Await | kiln_ir::Instruction::Yield));
+        writeln!(
+            evaluation,
+            "static int kiln_graph_eval_module_{index}(kiln_graph_context *graph) {{\n    kiln_graph_entry_context context;\n    kiln_graph_module_state *state = &graph->module_states[{index}];\n    kiln_host *host = &graph->host;\n    kiln_value *result = &state->result;\n    int status = 0;"
+        )
+        .unwrap();
+        if !is_async {
+            evaluation.push_str("    if (state->phase == KILN_MODULE_EVALUATED) return 0;\n    state->phase = KILN_MODULE_EVALUATING;\n");
+        }
         let export_count = native_graph_export_count(node);
         let exports = if export_count == 0 {
             "NULL".to_owned()
@@ -6255,6 +6265,9 @@ static int kiln_graph_enter(void *opaque) {
                     native_c_string(&logical_paths[index])
                 )
                 .unwrap();
+            }
+            if !is_async {
+                evaluation.push_str("    state->phase = KILN_MODULE_EVALUATED;\n");
             }
             evaluation.push_str("    return 0;\n}\n");
             return Ok(());
@@ -6437,6 +6450,9 @@ static int kiln_graph_enter(void *opaque) {
             )
             .unwrap();
         }
+        if !is_async {
+            evaluation.push_str("    state->phase = KILN_MODULE_EVALUATED;\n");
+        }
         evaluation.push_str("    return 0;\n}\n");
         Ok(())
     };
@@ -6444,11 +6460,18 @@ static int kiln_graph_enter(void *opaque) {
         emit_module_case(index, node, module)?;
     }
     for index in 0..modules.len() {
-        writeln!(
-            evaluation,
-            "        case {index}: {{ status = kiln_graph_eval_module_{index}(graph); graph->result = graph->module_states[{index}].result; if (status != 0) return status; if (!graph->module_states[{index}].module_settling) graph->current_module++; return 0; }}"
-        )
-        .unwrap();
+        let is_async = modules[index]
+            .0
+            .program
+            .program
+            .code
+            .iter()
+            .any(|i| matches!(i, kiln_ir::Instruction::Await | kiln_ir::Instruction::Yield));
+        if is_async {
+            writeln!(evaluation, "        case {index}: {{ status = kiln_graph_eval_module_{index}(graph); graph->result = graph->module_states[{index}].result; if (status != 0) return status; if (!graph->module_states[{index}].module_settling) graph->current_module++; return 0; }}").unwrap();
+        } else {
+            writeln!(evaluation, "        case {index}: {{ status = kiln_graph_ensure_module(graph, (size_t){index}); graph->result = graph->module_states[{index}].result; if (status != 0) return status; graph->current_module++; return 0; }}").unwrap();
+        }
     }
     evaluation.push_str(
         r#"        default:
@@ -6460,6 +6483,22 @@ static int kiln_graph_enter(void *opaque) {
     output.push_str(&evaluation);
     output.push_str("    return 0;\n}\n");
     output.push_str(&helper_defs);
+    output.push_str(
+        "static int kiln_graph_ensure_module(kiln_graph_context *graph, size_t index) {\n",
+    );
+    output.push_str("    if (graph == NULL || index >= (size_t)");
+    output.push_str(&modules.len().to_string());
+    output.push_str(
+        ") return KILN_C99_CONTROL_ERROR;\n    if (graph->module_states[index].phase == KILN_MODULE_EVALUATED) return 0;\n    if (graph->module_states[index].phase == KILN_MODULE_EVALUATING) return 0;\n    switch (index) {\n",
+    );
+    for index in 0..modules.len() {
+        writeln!(
+            output,
+            "        case {index}: return kiln_graph_eval_module_{index}(graph);"
+        )
+        .unwrap();
+    }
+    output.push_str("        default: return KILN_C99_CONTROL_ERROR;\n    }\n}\n");
     output.push_str(
         r#"/* argc/argv reach the realm before it is entered, so the first `process` a module builds
  * already has the command line. The strings are copied on the other side of this call. */
