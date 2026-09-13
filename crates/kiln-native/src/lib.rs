@@ -5256,6 +5256,15 @@ fn write_launcher_dynamic_import(
         r#"
 int kiln_graph_dynamic_import(kiln_host *host, kiln_value specifier, kiln_value options, kiln_value *promise, int depth, kiln_value *thrown) {
     if (promise == NULL) return KILN_C99_CONTROL_ERROR;
+    if (specifier.tag != KILN_VALUE_STRING) {
+        kiln_value primitive = kiln_c99_undefined();
+        int specifier_status = kiln_c99_to_primitive(host, specifier, KILN_C99_HINT_STRING, &primitive, depth, thrown);
+        if (specifier_status != KILN_C99_OK) {
+            if (thrown != NULL) return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), thrown, 1, depth, thrown);
+            return specifier_status;
+        }
+        specifier = kiln_c99_text(primitive);
+    }
     if (specifier.tag != KILN_VALUE_STRING || (specifier.len != 0 && specifier.ptr == NULL)) {
         kiln_value err = kiln_c99_undefined();
         (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, "invalid import specifier");
@@ -5438,6 +5447,20 @@ fn write_shared_wrapper_dynamic_import(
         r#"
 int kiln_graph_dynamic_import(kiln_host *host, kiln_value specifier, kiln_value options, kiln_value *promise, int depth, kiln_value *thrown) {
     if (promise == NULL) return KILN_C99_CONTROL_ERROR;
+    if (specifier.tag != KILN_VALUE_STRING) {
+        kiln_value primitive = kiln_c99_undefined();
+        int specifier_status = kiln_c99_to_primitive(host, specifier, KILN_C99_HINT_STRING, &primitive, depth, thrown);
+        if (specifier_status != KILN_C99_OK) {
+            if (thrown != NULL) return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), thrown, 1, depth, thrown);
+            return specifier_status;
+        }
+        specifier = kiln_c99_text(primitive);
+    }
+    if (specifier.tag != KILN_VALUE_STRING || (specifier.len != 0 && specifier.ptr == NULL)) {
+        kiln_value err = kiln_c99_undefined();
+        (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, "invalid import specifier");
+        return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);
+    }
     if (options.tag == KILN_VALUE_UNDEFINED) goto import_attributes_valid;
     kiln_value attrs = kiln_c99_undefined();
     int attr_status = kiln_c99_get(host, options, "with", 4, &attrs, depth, thrown);
@@ -5877,17 +5900,20 @@ extern int kiln_realm_gc_mark_value(void *heap, const void *value);
 #define KILN_C99_THROWN (-7)
 #define KILN_C99_CONTROL_ERROR (-2)
 #define KILN_C99_HOST_ERROR (-3)
+#define KILN_C99_HINT_STRING 1
+#define KILN_C99_BUILTIN_TYPE_ERROR 11 /* prelude.rs ErrorKind::Type ABI */
 extern int kiln_c99_new_object(kiln_value *result);
 extern int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value value, int depth, kiln_value *thrown);
 extern kiln_value kiln_c99_copy_text(const char *text, size_t len);
 extern kiln_value kiln_c99_undefined(void);
+extern int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int hint, kiln_value *out, int depth, kiln_value *thrown);
+extern kiln_value kiln_c99_text(kiln_value value);
 extern int kiln_c99_throw_error(kiln_value *out, uint64_t kind, const char *message);
 extern int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
                                   kiln_value receiver, const kiln_value *args, size_t argc,
                                   int depth, kiln_value *thrown);
 #define KILN_C99_OK 0
-#define KILN_C99_BUILTIN_TYPE_ERROR 3
 #define KILN_C99_METHOD_PROMISE_RESOLVE 110
 #define KILN_C99_METHOD_PROMISE_REJECT 111
 "#,
@@ -6878,6 +6904,8 @@ extern int kiln_realm_gc_unregister_roots(kiln_gc_roots_fn roots, void *context)
 extern int kiln_realm_gc_mark_value(void *heap, const void *value);
 #define KILN_GC_ROOT_SURVIVES_TEARDOWN 1u
 #define KILN_GC_PHASE_RESET 2
+#define KILN_C99_HINT_STRING 1
+#define KILN_C99_BUILTIN_TYPE_ERROR 11 /* prelude.rs ErrorKind::Type ABI */
 extern int kiln_realm_is_active(void);
 
 typedef int (*kiln_graph_module_fn)(kiln_host *host, kiln_value *result,
@@ -6893,12 +6921,13 @@ extern int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
                         kiln_value value, int depth, kiln_value *thrown);
 extern kiln_value kiln_c99_copy_text(const char *text, size_t len);
 extern kiln_value kiln_c99_undefined(void);
+extern int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int hint, kiln_value *out, int depth, kiln_value *thrown);
+extern kiln_value kiln_c99_text(kiln_value value);
 extern int kiln_c99_throw_error(kiln_value *out, uint64_t kind, const char *message);
 extern int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
                                   kiln_value receiver, const kiln_value *args, size_t argc,
                                   int depth, kiln_value *thrown);
 #define KILN_C99_OK 0
-#define KILN_C99_BUILTIN_TYPE_ERROR 3
 #define KILN_C99_METHOD_PROMISE_RESOLVE 110
 #define KILN_C99_METHOD_PROMISE_REJECT 111
 static __thread kiln_value *kiln_shared_namespaces = NULL;

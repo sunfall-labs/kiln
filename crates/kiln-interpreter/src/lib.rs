@@ -33071,21 +33071,27 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let outcome = self
             .read_property(options, "with", instruction)
             .and_then(|with| {
-                if matches!(with, Value::Undefined | Value::Null) {
-                    return Ok(None);
+                if matches!(with, Value::Undefined) {
+                    return Ok(Ok(None));
                 }
-                self.read_property(&with, "type", instruction).map(|kind| {
-                    Some(ImportAttributes {
-                        type_: match kind {
-                            Value::String(value) => Some(value),
-                            _ => None,
-                        },
-                    })
-                })
+                match self.read_property(&with, "type", instruction) {
+                    Ok(Value::String(value)) => {
+                        Ok(Ok(Some(ImportAttributes { type_: Some(value) })))
+                    }
+                    Ok(Value::Undefined) => Ok(Ok(Some(ImportAttributes { type_: None }))),
+                    Ok(_) => Ok(Err(build_error(
+                        ErrorKind::Type,
+                        &[Value::String(
+                            "import attribute type must be a string".into(),
+                        )],
+                    ))),
+                    Err(error) => Err(error),
+                }
             });
         self.handlers.truncate(installed);
         match outcome {
-            Ok(attributes) => Ok(Ok(attributes)),
+            Ok(Ok(attributes)) => Ok(Ok(attributes)),
+            Ok(Err(error)) => Ok(Err(error)),
             Err(ExecutionError::CaughtByHost) => {
                 Ok(Err(self.caught.take().unwrap_or(Value::Undefined)))
             }
