@@ -178,7 +178,7 @@ def aggregate(directory: str, expected: list[str], output: str) -> dict[str, Any
     current_binary = binary_snapshot()
     if len(binaries) > 1 or (binaries and current_binary not in binaries):
         raise ResultError("gate steps were produced with mixed binaries")
-    result = {"schema": 1, "verdict": "passed" if all(doc["verdict"] == "passed" for doc in documents) else "failed", "source": {"kind": "gate", "name": "gate aggregate", "code_snapshot_sha256": snapshots.pop(), "binary_sha256": next(iter(binaries), None)}, "evidence": {"steps": names}, "failed_steps": [name for name, doc in zip(names, documents) if doc["verdict"] != "passed"]}
+    result = {"schema": 1, "verdict": "passed" if all(doc["verdict"] == "passed" for doc in documents) else "failed", "source": {"kind": "gate", "name": "gate aggregate", "code_snapshot_sha256": snapshots.pop(), "binary_sha256": next(iter(binaries), None)}, "evidence": {"steps": names}, "steps": documents, "failed_steps": [name for name, doc in zip(names, documents) if doc["verdict"] != "passed"]}
     write_atomic(output, result)
     return result
 
