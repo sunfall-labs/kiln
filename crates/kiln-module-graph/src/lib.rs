@@ -1992,6 +1992,7 @@ enum WorkItem {
     Enter {
         path: PathBuf,
         source: ModuleSource,
+        classify: bool,
     },
     /// A module whose own compilation is finished, waiting below its dependencies' work.
     ///
@@ -2016,10 +2017,15 @@ where
         let mut work = vec![WorkItem::Enter {
             path,
             source: ModuleSource::Source,
+            classify: true,
         }];
         while let Some(item) = work.pop() {
             match item {
-                WorkItem::Enter { path, source } => match self.states.get(&path).copied() {
+                WorkItem::Enter {
+                    path,
+                    source,
+                    classify,
+                } => match self.states.get(&path).copied() {
                     Some(VisitState::Done) => continue,
                     // A back edge: this module is an ancestor of itself, so the graph has a
                     // cycle. The edge stays recorded on the parent that is being built; only the
@@ -2036,41 +2042,47 @@ where
                     // evaluation error is recorded -- neither of which changes the order.
                     Some(VisitState::Visiting) => continue,
                     None => {
-                        let source = match source {
-                            ModuleSource::Source
-                                if path
-                                    .extension()
-                                    .and_then(|extension| extension.to_str())
-                                    .is_some_and(is_asset_extension) =>
-                            {
-                                ModuleSource::Asset
-                            }
-                            ModuleSource::Source if !self.typed_sources => ModuleSource::Source,
-                            ModuleSource::Source => {
-                                if path
-                                    .extension()
-                                    .and_then(|extension| extension.to_str())
-                                    .is_some_and(kiln_data_formats::is_data_extension)
+                        let source = if !classify {
+                            source
+                        } else {
+                            match source {
+                                ModuleSource::Source
+                                    if path
+                                        .extension()
+                                        .and_then(|extension| extension.to_str())
+                                        .is_some_and(is_asset_extension) =>
                                 {
-                                    ModuleSource::Json
-                                } else {
-                                    match self
-                                        .resolver
-                                        .node_format(&ResolvedModule {
-                                            path: path.clone(),
-                                            kind: ResolutionKind::Relative,
-                                        })
-                                        .map_err(|error| ModuleGraphError::Resolve {
-                                            importer: path.clone(),
-                                            specifier: String::new(),
-                                            error,
-                                        })? {
-                                        Some(NodeModuleFormat::CommonJs) => ModuleSource::CommonJs,
-                                        _ => ModuleSource::Source,
+                                    ModuleSource::Asset
+                                }
+                                ModuleSource::Source if !self.typed_sources => ModuleSource::Source,
+                                ModuleSource::Source => {
+                                    if path
+                                        .extension()
+                                        .and_then(|extension| extension.to_str())
+                                        .is_some_and(kiln_data_formats::is_data_extension)
+                                    {
+                                        ModuleSource::Json
+                                    } else {
+                                        match self
+                                            .resolver
+                                            .node_format(&ResolvedModule {
+                                                path: path.clone(),
+                                                kind: ResolutionKind::Relative,
+                                            })
+                                            .map_err(|error| ModuleGraphError::Resolve {
+                                                importer: path.clone(),
+                                                specifier: String::new(),
+                                                error,
+                                            })? {
+                                            Some(NodeModuleFormat::CommonJs) => {
+                                                ModuleSource::CommonJs
+                                            }
+                                            _ => ModuleSource::Source,
+                                        }
                                     }
                                 }
+                                source => source,
                             }
-                            source => source,
                         };
                         self.states.insert(path.clone(), VisitState::Visiting);
                         self.stack.push(path.clone());
@@ -2251,6 +2263,7 @@ where
                             work.push(WorkItem::Enter {
                                 path: dependency.target,
                                 source,
+                                classify: false,
                             });
                         }
                     }
