@@ -5128,6 +5128,7 @@ fn native_dynamic_top_level_await_import_waits_for_completion() {
             },
         )
         .expect("dynamic TLA graph builds and runs");
+    assert_eq!(report.exit_code, Some(0), "stderr={:?}", report.stderr);
     assert_eq!(report.stdout, b"42 42 true 1\n");
 }
 
@@ -5175,6 +5176,7 @@ fn native_dynamic_import_static_tla_dependency_waits_for_completion() {
             },
         )
         .expect("dynamic static-TLA graph builds and runs");
+    assert_eq!(report.exit_code, Some(0), "stderr={:?}", report.stderr);
     assert_eq!(report.stdout, b"43 43 true 1\n");
 }
 
@@ -5208,7 +5210,85 @@ fn native_dynamic_tla_rejection_preserves_original_error() {
             },
         )
         .unwrap();
+    assert_eq!(report.exit_code, Some(0), "stderr={:?}", report.stderr);
     assert_eq!(report.stdout, b"true true true 1 true true 1\n");
+}
+
+#[test]
+fn native_dynamic_import_static_tla_target_rejection_is_cached() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-dynamic-static-tla-reject");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).unwrap();
+    fs::write(
+        root.path.join("dep.mjs"),
+        "export const x = await Promise.resolve(42);\n",
+    )
+    .unwrap();
+    fs::write(root.path.join("target.mjs"), "import { x } from './dep.mjs'; globalThis.targetEffect = (globalThis.targetEffect || 0) + 1; throw globalThis.sentinel;\n").unwrap();
+    fs::write(root.path.join("target-undefined.mjs"), "import { x } from './dep.mjs'; globalThis.targetUndefinedEffect = (globalThis.targetUndefinedEffect || 0) + 1; throw undefined;\n").unwrap();
+    let entry = root.path.join("main.mjs");
+    fs::write(&entry, "const sentinel = { marker: 9 }; globalThis.sentinel = sentinel; const a = import('./target.mjs').catch(error => error); const b = import('./target.mjs').catch(error => error); const u1 = import('./target-undefined.mjs').catch(error => error); const u2 = import('./target-undefined.mjs').catch(error => error); const [ea, eb, eu1, eu2] = await Promise.all([a, b, u1, u2]); const ec = await import('./target.mjs').catch(error => error); console.log(typeof ea, ea === sentinel, ea === eb, ea === ec, globalThis.targetEffect, eu1 === undefined, eu2 === undefined, globalThis.targetUndefinedEffect);\n").unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .unwrap();
+    assert_eq!(report.exit_code, Some(0), "stderr={:?}", report.stderr);
+    assert_eq!(report.stdout, b"object true true true 1 true true 1\n");
+}
+
+#[test]
+fn native_dynamic_import_rejected_static_dependency_skips_target_body() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-dynamic-static-dep-reject");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).unwrap();
+    fs::write(
+        root.path.join("dep.mjs"),
+        "await Promise.resolve(); throw globalThis.sentinel;\n",
+    )
+    .unwrap();
+    fs::write(root.path.join("target.mjs"), "import './dep.mjs'; globalThis.targetEffect = (globalThis.targetEffect || 0) + 1; export const answer = 42;\n").unwrap();
+    let entry = root.path.join("main.mjs");
+    fs::write(&entry, "const sentinel = { marker: 8 }; globalThis.sentinel = sentinel; const a = import('./target.mjs').catch(error => error); const b = import('./target.mjs').catch(error => error); const [ea, eb] = await Promise.all([a, b]); console.log(ea === sentinel, eb === sentinel, ea === eb, globalThis.targetEffect || 0);\n").unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .unwrap();
+    assert_eq!(report.exit_code, Some(0), "stderr={:?}", report.stderr);
+    assert_eq!(report.stdout, b"true true true 0\n");
 }
 
 #[test]
@@ -5444,7 +5524,7 @@ fn native_failed_dynamic_dependency_is_cached_with_original_error() {
         )
         .expect("dynamic failure graph builds and runs");
         assert_eq!(
-            report.stdout, b"1 0 true boom at unknown native operation\n",
+            report.stdout, b"1 0 true boom\n",
             "profile {name}"
         );
     }
