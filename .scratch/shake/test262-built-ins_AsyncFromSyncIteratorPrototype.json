@@ -1,0 +1,318 @@
+{
+  "schema": 1,
+  "runner": "kiln-cli 0.0.0",
+  "totals": {
+    "total": 76,
+    "passed": 24,
+    "failed": 52,
+    "unsupported": 0,
+    "skipped": 0,
+    "not_yet_runnable": 0
+  },
+  "tests": [
+    {
+      "id": "next/absent-value-not-passed.js#sloppy",
+      "outcome": "pass"
+    },
+    {
+      "id": "next/absent-value-not-passed.js#strict",
+      "outcome": "pass"
+    },
+    {
+      "id": "next/for-await-iterator-next-rejected-promise-close.js#sloppy",
+      "outcome": "pass"
+    },
+    {
+      "id": "next/for-await-iterator-next-rejected-promise-close.js#strict",
+      "outcome": "pass"
+    },
+    {
+      "id": "next/for-await-next-rejected-promise-close.js#sloppy",
+      "outcome": "pass"
+    },
+    {
+      "id": "next/for-await-next-rejected-promise-close.js#strict",
+      "outcome": "pass"
+    },
+    {
+      "id": "next/iterator-result-poisoned-done.js#sloppy",
+      "outcome": "pass"
+    },
+    {
+      "id": "next/iterator-result-poisoned-done.js#strict",
+      "outcome": "pass"
+    },
+    {
+      "id": "next/iterator-result-poisoned-value.js#sloppy",
+      "outcome": "fail"
+    },
+    {
+      "id": "next/iterator-result-poisoned-value.js#strict",
+      "outcome": "fail"
+    },
+    {
+      "id": "next/iterator-result-poisoned-wrapper.js#sloppy",
+      "outcome": "fail"
+    },
+    {
+      "id": "next/iterator-result-poisoned-wrapper.js#strict",
+      "outcome": "fail"
+    },
+    {
+      "id": "next/iterator-result-prototype.js#sloppy",
+      "outcome": "pass"
+    },
+    {
+      "id": "next/iterator-result-prototype.js#strict",
+      "outcome": "pass"
+    },
+    {
+      "id": "next/iterator-result-rejected.js#sloppy",
+      "outcome": "pass"
+    },
+    {
+      "id": "next/iterator-result-rejected.js#strict",
+      "outcome": "pass"
+    },
+    {
+      "id": "next/iterator-result-unwrap-promise.js#sloppy",
+      "outcome": "fail"
+    },
+    {
+      "id": "next/iterator-result-unwrap-promise.js#strict",
+      "outcome": "fail"
+    },
+    {
+      "id": "next/next-result-poisoned-wrapper.js#sloppy",
+      "outcome": "fail"
+    },
+    {
+      "id": "next/next-result-poisoned-wrapper.js#strict",
+      "outcome": "fail"
+    },
+    {
+      "id": "next/return-promise.js#sloppy",
+      "outcome": "pass"
+    },
+    {
+      "id": "next/return-promise.js#strict",
+      "outcome": "pass"
+    },
+    {
+      "id": "next/yield-iterator-next-rejected-promise-close.js#sloppy",
+      "outcome": "fail"
+    },
+    {
+      "id": "next/yield-iterator-next-rejected-promise-close.js#strict",
+      "outcome": "fail"
+    },
+    {
+      "id": "next/yield-next-rejected-promise-close.js#sloppy",
+      "outcome": "fail"
+    },
+    {
+      "id": "next/yield-next-rejected-promise-close.js#strict",
+      "outcome": "fail"
+    },
+    {
+      "id": "return/absent-value-not-passed.js#sloppy",
+      "outcome": "pass"
+    },
+    {
+      "id": "return/absent-value-not-passed.js#strict",
+      "outcome": "pass"
+    },
+    {
+      "id": "return/iterator-result-poisoned-done.js#sloppy",
+      "outcome": "fail"
+    },
+    {
+      "id": "return/iterator-result-poisoned-done.js#strict",
+      "outcome": "fail"
+    },
+    {
+      "id": "return/iterator-result-poisoned-value.js#sloppy",
+      "outcome": "fail"
+    },
+    {
+      "id": "return/iterator-result-poisoned-value.js#strict",
+      "outcome": "fail"
+    },
+    {
+      "id": "return/iterator-result-unwrap-promise.js#sloppy",
+      "outcome": "fail"
+    },
+    {
+      "id": "return/iterator-result-unwrap-promise.js#strict",
+      "outcome": "fail"
+    },
+    {
+      "id": "return/iterator-result.js#sloppy",
+      "outcome": "pass"
+    },
+    {
+      "id": "return/iterator-result.js#strict",
+      "outcome": "pass"
+    },
+    {
+      "id": "return/poisoned-get-return.js#sloppy",
+      "outcome": "fail"
+    },
+    {
+      "id": "return/poisoned-get-return.js#strict",
+      "outcome": "fail"
+    },
+    {
+      "id": "return/poisoned-return.js#sloppy",
+      "outcome": "fail"
+    },
+    {
+      "id": "return/poisoned-return.js#strict",
+      "outcome": "fail"
+    },
+    {
+      "id": "return/result-object-error.js#sloppy",
+      "outcome": "fail"
+    },
+    {
+      "id": "return/result-object-error.js#strict",
+      "outcome": "fail"
+    },
+    {
+      "id": "return/return-null.js#sloppy",
+      "outcome": "pass"
+    },
+    {
+      "id": "return/return-null.js#strict",
+      "outcome": "pass"
+    },
+    {
+      "id": "return/return-undefined.js#sloppy",
+      "outcome": "pass"
+    },
+    {
+      "id": "return/return-undefined.js#strict",
+      "outcome": "pass"
+    },
+    {
+      "id": "throw/iterator-result-poisoned-done.js#sloppy",
+      "outcome": "fail"
+    },
+    {
+      "id": "throw/iterator-result-poisoned-done.js#strict",
+      "outcome": "fail"
+    },
+    {
+      "id": "throw/iterator-result-poisoned-value.js#sloppy",
+      "outcome": "fail"
+    },
+    {
+      "id": "throw/iterator-result-poisoned-value.js#strict",
+      "outcome": "fail"
+    },
+    {
+      "id": "throw/iterator-result-rejected-promise-close.js#sloppy",
+      "outcome": "fail"
+    },
+    {
+      "id": "throw/iterator-result-rejected-promise-close.js#strict",
+      "outcome": "fail"
+    },
+    {
+      "id": "throw/iterator-result-unwrap-promise.js#sloppy",
+      "outcome": "fail"
+    },
+    {
+      "id": "throw/iterator-result-unwrap-promise.js#strict",
+      "outcome": "fail"
+    },
+    {
+      "id": "throw/iterator-result.js#sloppy",
+      "outcome": "pass"
+    },
+    {
+      "id": "throw/iterator-result.js#strict",
+      "outcome": "pass"
+    },
+    {
+      "id": "throw/poisoned-get-throw.js#sloppy",
+      "outcome": "fail"
+    },
+    {
+      "id": "throw/poisoned-get-throw.js#strict",
+      "outcome": "fail"
+    },
+    {
+      "id": "throw/poisoned-throw.js#sloppy",
+      "outcome": "fail"
+    },
+    {
+      "id": "throw/poisoned-throw.js#strict",
+      "outcome": "fail"
+    },
+    {
+      "id": "throw/result-object-error.js#sloppy",
+      "outcome": "fail"
+    },
+    {
+      "id": "throw/result-object-error.js#strict",
+      "outcome": "fail"
+    },
+    {
+      "id": "throw/throw-null.js#sloppy",
+      "outcome": "fail"
+    },
+    {
+      "id": "throw/throw-null.js#strict",
+      "outcome": "fail"
+    },
+    {
+      "id": "throw/throw-result-poisoned-wrapper.js#sloppy",
+      "outcome": "fail"
+    },
+    {
+      "id": "throw/throw-result-poisoned-wrapper.js#strict",
+      "outcome": "fail"
+    },
+    {
+      "id": "throw/throw-undefined-get-return-undefined.js#sloppy",
+      "outcome": "fail"
+    },
+    {
+      "id": "throw/throw-undefined-get-return-undefined.js#strict",
+      "outcome": "fail"
+    },
+    {
+      "id": "throw/throw-undefined-poisoned-return.js#sloppy",
+      "outcome": "fail"
+    },
+    {
+      "id": "throw/throw-undefined-poisoned-return.js#strict",
+      "outcome": "fail"
+    },
+    {
+      "id": "throw/throw-undefined-return-not-object.js#sloppy",
+      "outcome": "fail"
+    },
+    {
+      "id": "throw/throw-undefined-return-not-object.js#strict",
+      "outcome": "fail"
+    },
+    {
+      "id": "throw/throw-undefined-return-object.js#sloppy",
+      "outcome": "fail"
+    },
+    {
+      "id": "throw/throw-undefined-return-object.js#strict",
+      "outcome": "fail"
+    },
+    {
+      "id": "throw/throw-undefined.js#sloppy",
+      "outcome": "fail"
+    },
+    {
+      "id": "throw/throw-undefined.js#strict",
+      "outcome": "fail"
+    }
+  ]
+}

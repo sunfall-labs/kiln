@@ -1,0 +1,4 @@
+  hello: 6441120 -> 6467680 bytes (+0.4%) ok
+  http-server: 7680056 -> 7719840 bytes (+0.5%) ok
+  modules: 6456120 -> 6486776 bytes (+0.5%) ok
+binary-sizes: within threshold
