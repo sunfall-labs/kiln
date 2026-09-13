@@ -169,11 +169,13 @@ class GateResultsCliIntegrationTests(unittest.TestCase):
         self.assertEqual(envelope["verdict"], "infrastructure")
         self.assertIn("exited 1 despite a passing report", envelope["error"])
 
+        out.unlink()
         self.process("build", status=1)
         self.process("crate tests")
         result = self.aggregate(["build", "crate tests"])
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(self.aggregate_document["verdict"], "infrastructure")
+        self.assertEqual(self.aggregate_document["verdict"], "failed")
+        self.assertIn("build", self.aggregate_document["failed_steps"])
 
 
 if __name__ == "__main__":
