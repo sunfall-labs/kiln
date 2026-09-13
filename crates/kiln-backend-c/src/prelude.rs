@@ -2189,6 +2189,7 @@ macro_rules! core_part_manifest {
 macro_rules! concat_parts {
     ($($name:literal),* $(,)?) => { concat!($(include_str!($name)),*) };
 }
+#[cfg(test)]
 macro_rules! array_parts {
     ($($name:literal),* $(,)?) => { &[$(($name, include_str!($name))),*] };
 }
@@ -2203,6 +2204,7 @@ macro_rules! core_parts {
     };
 }
 
+#[cfg(test)]
 pub(crate) fn prelude_source_parts() -> Vec<(&'static str, &'static str)> {
     let mut parts = Vec::new();
     parts.extend_from_slice(core_part_manifest!(array_parts));
