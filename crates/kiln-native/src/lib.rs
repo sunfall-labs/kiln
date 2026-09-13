@@ -6052,6 +6052,12 @@ typedef struct kiln_graph_entry_context {
     size_t export_count;
 } kiln_graph_entry_context;
 
+typedef struct kiln_graph_module_state {
+    kiln_value result;
+    kiln_value active_promise;
+    int module_settling;
+} kiln_graph_module_state;
+
 static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *result,
                                     kiln_value *thrown) {
     int status;
@@ -6142,9 +6148,16 @@ typedef struct kiln_graph_context {
     size_t current_module;
     int roots_registered;
     int module_settling;
+    struct kiln_graph_module_state *module_states;
 } kiln_graph_context;
 "#,
     );
+    writeln!(
+        output,
+        "static kiln_graph_module_state kiln_module_states[{}];",
+        modules.len()
+    )
+    .unwrap();
     render_graph_roots(&mut output, modules);
     for index in 0..modules.len() {
         writeln!(
@@ -6208,7 +6221,7 @@ static int kiln_graph_enter(void *opaque) {
         let mut evaluation = &mut helper_defs;
         writeln!(
             evaluation,
-            "static int kiln_graph_eval_module_{index}(kiln_graph_context *graph) {{\n    kiln_graph_entry_context context;\n    kiln_host *host = &graph->host;\n    kiln_value *result = &graph->result;\n    int status = 0;"
+            "static int kiln_graph_eval_module_{index}(kiln_graph_context *graph) {{\n    kiln_graph_entry_context context;\n    kiln_graph_module_state *state = &graph->module_states[{index}];\n    kiln_host *host = &graph->host;\n    kiln_value *result = &graph->result;\n    int status = 0;"
         )
         .unwrap();
         let is_async = node
@@ -6254,8 +6267,8 @@ static int kiln_graph_enter(void *opaque) {
         if is_async {
             writeln!(
                 evaluation,
-                r#"            if (graph->module_settling) {{
-                kiln_launcher_promise_view *promise = (kiln_launcher_promise_view *)(uintptr_t)graph->active_promise.bits;
+                r#"            if (state->module_settling) {{
+                kiln_launcher_promise_view *promise = (kiln_launcher_promise_view *)(uintptr_t)state->active_promise.bits;
                 if (promise != NULL) {{
                     if (promise->state == 2 /* KILN_C99_REJECTED */) {{
                         *result = kiln_cli_describe_error(promise->value);
@@ -6283,7 +6296,7 @@ static int kiln_graph_enter(void *opaque) {
                 .unwrap();
             }
             evaluation.push_str(
-                r#"                graph->module_settling = 0;
+                r#"                state->module_settling = 0;
                 return 0;
             }
 "#,
@@ -6390,8 +6403,8 @@ static int kiln_graph_enter(void *opaque) {
                 r#"            if (result->tag == 16 /* KILN_VALUE_PROMISE */) {{
                 kiln_launcher_promise_view *promise = (kiln_launcher_promise_view *)(uintptr_t)result->bits;
                 if (promise != NULL && promise->state == 0 /* KILN_C99_PENDING */) {{
-                    graph->active_promise = *result;
-                    graph->module_settling = 1;
+                    state->active_promise = *result;
+                    state->module_settling = 1;
                     return 0;
                 }}
                 if (promise != NULL && promise->state == 2 /* KILN_C99_REJECTED */) {{
@@ -6437,7 +6450,7 @@ static int kiln_graph_enter(void *opaque) {
     for index in 0..modules.len() {
         writeln!(
             evaluation,
-            "        case {index}: {{ status = kiln_graph_eval_module_{index}(graph); if (status != 0) return status; if (!graph->module_settling) graph->current_module++; return 0; }}"
+            "        case {index}: {{ status = kiln_graph_eval_module_{index}(graph); if (status != 0) return status; if (!graph->module_states[{index}].module_settling) graph->current_module++; return 0; }}"
         )
         .unwrap();
     }
@@ -6466,6 +6479,7 @@ static int kiln_cli_run_realm(int argc, char **argv, int writes_result) {
     graph.entry_result.tag = KILN_VALUE_UNDEFINED;
     graph.host.call = kiln_cli_host_call;
     graph.host.context = NULL;
+    graph.module_states = kiln_module_states;
     status = kiln_realm_create(&realm);
     if (status == 0 && argc > 0)
         status = kiln_realm_set_argv(realm, (uint64_t)argc, (const char *const *)argv);
