@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use frontend_oxc::parse_with_goal;
 use kiln_hir::SourceGoal;
-use kiln_interpreter::{ModuleLoadError, ModulePlan};
+use kiln_interpreter::{ModuleLoadError, ModuleLoadRequest, ModuleLoaderService, ModulePlan};
 use kiln_module_graph::{ModuleGraph, ModuleGraphError, ResolveError};
 
 thread_local! {
@@ -57,6 +57,41 @@ pub(crate) fn load(specifier: &str) -> Result<ModulePlan, ModuleLoadError> {
     })?;
 
     let graph = ModuleGraph::build_with_module_provider(&entry, &base, compile_module_at)
+        .map_err(classify)?;
+    graph.import_plan().map_err(classify)
+}
+
+pub(crate) struct ConformanceModuleLoader;
+
+impl ModuleLoaderService for ConformanceModuleLoader {
+    fn load(&self, request: ModuleLoadRequest) -> Result<ModulePlan, ModuleLoadError> {
+        if request
+            .attributes
+            .as_ref()
+            .and_then(|attributes| attributes.type_.as_deref())
+            .is_some_and(|kind| kind != "file")
+        {
+            return Err(ModuleLoadError::Unsupported(
+                "unsupported import attribute `type`".to_owned(),
+            ));
+        }
+        if let Some(importer) = request.importer {
+            return load_from(
+                Path::new(&importer)
+                    .parent()
+                    .unwrap_or_else(|| Path::new(".")),
+                &request.specifier,
+            );
+        }
+        load(&request.specifier)
+    }
+}
+
+fn load_from(base: &Path, specifier: &str) -> Result<ModulePlan, ModuleLoadError> {
+    let entry = base.join(specifier).canonicalize().map_err(|error| {
+        ModuleLoadError::NotFound(format!("could not resolve module `{specifier}`: {error}"))
+    })?;
+    let graph = ModuleGraph::build_with_module_provider(&entry, base, compile_module_at)
         .map_err(classify)?;
     graph.import_plan().map_err(classify)
 }
