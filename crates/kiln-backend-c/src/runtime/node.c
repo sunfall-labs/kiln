@@ -1562,6 +1562,7 @@ static int kiln_c99_node_process_complete(void *opaque, const kiln_async_complet
             &result, KILN_C99_BUILTIN_ERROR,
             kiln_c99_copy_text((const char *)completion->error_message,
                                (size_t)completion->error_message_len));
+        work->result = result;
         if (status == KILN_C99_OK)
             status = kiln_c99_node_fs_error_property(result, "code", 4, completion->error_code,
                                                      completion->error_code_len);
@@ -1608,7 +1609,10 @@ int kiln_c99_node_process_raw(kiln_host *host, kiln_value *result, uint64_t code
     (void)host; (void)depth;
     if (code == KILN_C99_METHOD_PROCESS_CANCEL_RAW) {
         double number = argc && args[0].tag == KILN_VALUE_NUMBER ? kiln_c99_as_number(args[0]) : -1;
-        uint64_t request = number >= 0 && number <= UINT64_MAX ? (uint64_t)number : 0;
+        uint64_t request = number >= 0 && isfinite(number) && number == floor(number) &&
+                                   number <= 9007199254740991.0
+                               ? (uint64_t)number
+                               : 0;
         *result = kiln_c99_boolean(kiln_realm_cancel_active_request(request) == KILN_C99_OK);
         return KILN_C99_OK;
     }
@@ -1635,6 +1639,7 @@ int kiln_c99_node_process_raw(kiln_host *host, kiln_value *result, uint64_t code
         (void)kiln_realm_cancel_active_request(request);
         return KILN_C99_OUT_OF_MEMORY;
     }
+    work->result = pair;
     status_code = kiln_c99_put(NULL, pair, "requestId", 9, kiln_c99_number((double)request), 0, NULL);
     if (status_code == KILN_C99_OK)
         status_code = kiln_c99_put(NULL, pair, "promise", 7, promise, 0, NULL);
