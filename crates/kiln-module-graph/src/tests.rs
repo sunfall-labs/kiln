@@ -1475,6 +1475,94 @@ fn node_builtin_path_commonjs_require_evaluates_cleanly() {
 }
 
 #[test]
+fn node_builtin_assert_evaluates_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.js",
+        concat!(
+            "import assert, { ok, strict, strictEqual, deepStrictEqual, throws, doesNotThrow, AssertionError } from 'node:assert';",
+            "assert(true);",
+            "ok(true);",
+            "strict(true);",
+            "strictEqual(1 + 1, 2);",
+            "deepStrictEqual({ a: [1, 2] }, { a: [1, 2] });",
+            "doesNotThrow(() => 42);",
+            "let caught = false;",
+            "try { strictEqual(1, 2); } catch (e) { caught = e instanceof AssertionError; }",
+            "console.log('assert ok', caught);",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with assert builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute assert builtin");
+    assert_eq!(host.output, ["assert ok true"]);
+}
+
+#[test]
+fn node_builtin_assert_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const assert = require('node:assert');",
+            "assert(true);",
+            "assert.strictEqual(2 + 2, 4);",
+            "module.exports = {",
+            "  isFn: typeof assert === 'function',",
+            "  name: assert.name,",
+            "  defaultEq: assert.default === assert,",
+            "  strictOk: typeof assert.strict.ok === 'function',",
+            "  strictEq: assert.strict === assert.strict.strict,",
+            "};",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import bridge from './bridge.cjs';",
+            "console.log(bridge.isFn, bridge.name, bridge.defaultEq, bridge.strictOk, bridge.strictEq);",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with assert builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute assert builtin cjs");
+    assert_eq!(host.output, ["true assert true true true"]);
+}
+
+#[test]
 fn node_net_connect_is_a_typed_virtual_module_export() {
     let project = TempProject::new();
     let entry = project.write(

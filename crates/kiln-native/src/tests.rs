@@ -1092,6 +1092,8 @@ fn node_events_has_a_native_runtime_module_materializer() {
     assert!(native_builtin_body(NodeBuiltin::Https).is_some());
     assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Path));
     assert!(native_builtin_supports_export(NodeBuiltin::Path, "join"));
+    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Assert));
+    assert!(native_builtin_supports_export(NodeBuiltin::Assert, "ok"));
 }
 
 #[test]
@@ -8336,4 +8338,98 @@ fn number_provider_variant_selection_is_conservative() {
         ),
         "a CommonJS require selects the full archive"
     );
+}
+
+#[test]
+fn native_node_assert_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-assert-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import assert, { ok, strict, strictEqual, deepStrictEqual, throws, doesNotThrow, AssertionError } from 'node:assert';\n",
+            "assert(true);\n",
+            "ok(true);\n",
+            "strict(true);\n",
+            "strictEqual(10 + 20, 30);\n",
+            "deepStrictEqual({ x: [1, 2] }, { x: [1, 2] });\n",
+            "doesNotThrow(() => 42);\n",
+            "let caught = false;\n",
+            "try { strictEqual(1, 2); } catch (e) { caught = e instanceof AssertionError; }\n",
+            "console.log('assert-test:', caught);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("assert_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run assert binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert_eq!(stdout.trim(), "assert-test: true");
+}
+
+#[test]
+fn native_node_assert_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-assert-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const assert = require('node:assert');\n",
+            "assert(true);\n",
+            "assert.strictEqual(3 * 3, 9);\n",
+            "console.log('cjs-assert:', typeof assert, assert.name, assert.default === assert, assert.strict === assert.strict.strict);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("assert_cjs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run assert cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert_eq!(stdout.trim(), "cjs-assert: function assert true true");
 }
