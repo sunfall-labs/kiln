@@ -34,3 +34,15 @@ console.log(new Legacy(3));
 function Bare() {}
 Bare.prototype = {};
 console.log(new Bare().constructor === Bare);
+
+// Generator and async generator functions have distinct constructors and prototypes.
+function* gen() {}
+async function* asyncGen() {}
+console.log(Object.getPrototypeOf(gen) === gen.constructor.prototype);
+console.log(Object.getPrototypeOf(asyncGen) === asyncGen.constructor.prototype);
+console.log(gen.constructor.name, asyncGen.constructor.name);
+console.log(Object.getPrototypeOf(gen.constructor) === Function);
+console.log(Object.getPrototypeOf(asyncGen.constructor) === Function);
+console.log(Object.getPrototypeOf(gen.constructor.prototype) === Function.prototype);
+console.log(Object.getPrototypeOf(asyncGen.constructor.prototype) === Function.prototype);
+

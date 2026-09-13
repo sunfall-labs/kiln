@@ -1474,6 +1474,17 @@ fn indexed_definition(
 /// out of Rust stack is not.
 fn inherited_builtin(closure: &Rc<Closure>) -> Option<Native> {
     let mut current = closure.properties.borrow().prototype().cloned();
+    if current.is_none() {
+        match generator_prototype_table(closure) {
+            Some(PrototypeTable::AsyncGenerator) => {
+                return Some(Native::AsyncGeneratorFunctionPrototype);
+            }
+            Some(PrototypeTable::Generator) => {
+                return Some(Native::GeneratorFunctionPrototype);
+            }
+            _ => {}
+        }
+    }
     for _ in 0..MAX_PROTOTYPE_DEPTH {
         current = match current {
             Some(Value::Native(native, _)) => return Some(native),
@@ -1645,6 +1656,8 @@ pub enum PrototypeTable {
     /// along. Both sit above `%IteratorPrototype%`.
     Generator,
     AsyncGenerator,
+    /// `%AsyncIteratorPrototype%`, where `@@asyncIterator` lives.
+    AsyncIterator,
     /// `%ArrayIteratorPrototype%` and its four siblings. Each owns `next` and a tag naming the
     /// kind, and each sits above `%IteratorPrototype%` -- so the iterator objects themselves own
     /// nothing, which is what `Object.getOwnPropertyNames` on one reports.
@@ -4119,6 +4132,10 @@ impl Value {
             // function that does nothing.
             Self::Native(Native::PrototypeOf(PrototypeTable::Function), _) => "function",
             Self::Native(Native::PrototypeOf(_), _) => "object",
+            Self::Native(
+                Native::GeneratorFunctionPrototype | Native::AsyncGeneratorFunctionPrototype,
+                _,
+            ) => "object",
             // A namespace is an object holding functions, not a function: `Math` and `JSON`
             // and `Reflect` cannot be called, and a library that feature-detects with
             // `typeof Math === "object"` has to find one.
@@ -4211,6 +4228,10 @@ impl Value {
             Self::Object(_) => "object",
             Self::Native(Native::PrototypeOf(PrototypeTable::Function), _) => "function",
             Self::Native(Native::PrototypeOf(_), _) => "object",
+            Self::Native(
+                Native::GeneratorFunctionPrototype | Native::AsyncGeneratorFunctionPrototype,
+                _,
+            ) => "object",
             // A namespace is an object holding functions, not a function: `Math` and `JSON`
             // and `Reflect` cannot be called, and a library that feature-detects with
             // `typeof Math === "object"` has to find one.
@@ -17225,7 +17246,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // entered as a frame and run -- so neither can live in `call_native`, which is a
             // free function with no VM to enter one on.
             Native::Eval => self.indirect_eval(arguments),
-            Native::FunctionConstructor => self.function_from_source(arguments, instruction),
+            Native::FunctionConstructor => {
+                self.function_from_source(arguments, instruction, "function")
+            }
+            Native::GeneratorFunctionConstructor => {
+                self.function_from_source(arguments, instruction, "function*")
+            }
+            Native::AsyncGeneratorFunctionConstructor => {
+                self.function_from_source(arguments, instruction, "async function*")
+            }
             // `run` and `exit` call the program's own function, so they need the machine for the
             // same reason those two do. The other three are here to keep one storage's five
             // methods in one place rather than splitting them across two dispatchers.
@@ -26784,7 +26813,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Native::DataViewConstructor => self.construct_data_view(arguments, current)?,
             Native::PromiseConstructor => self.construct_promise(arguments, current)?,
-            Native::FunctionConstructor => self.function_from_source(arguments, current)?,
+            Native::FunctionConstructor => {
+                self.function_from_source(arguments, current, "function")?
+            }
+            Native::GeneratorFunctionConstructor => {
+                self.function_from_source(arguments, current, "function*")?
+            }
+            Native::AsyncGeneratorFunctionConstructor => {
+                self.function_from_source(arguments, current, "async function*")?
+            }
             Native::UrlConstructor => self.dispatch_native(
                 Native::UrlConstructor,
                 &Value::Undefined,
@@ -27074,7 +27111,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // specification routes both through the same steps and differs only in a `NewTarget`
             // that decides which prototype the result inherits, which this realm does not model.
             Value::Native(Native::FunctionConstructor, _) => {
-                let built = self.function_from_source(&arguments, current)?;
+                let built = self.function_from_source(&arguments, current, "function")?;
+                self.stack.push(built);
+            }
+            Value::Native(Native::GeneratorFunctionConstructor, _) => {
+                let built = self.function_from_source(&arguments, current, "function*")?;
+                self.stack.push(built);
+            }
+            Value::Native(Native::AsyncGeneratorFunctionConstructor, _) => {
+                let built = self.function_from_source(&arguments, current, "async function*")?;
                 self.stack.push(built);
             }
             Value::Native(Native::ArrayBufferConstructor, _) => {
@@ -34060,9 +34105,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         &mut self,
         arguments: &[Value],
         instruction: usize,
+        kind: &str,
     ) -> Result<Value, ExecutionError> {
         let Some((body, parameters)) = arguments.split_last() else {
-            return self.drive_eval("(function anonymous(\n) {\n\n})", None, false);
+            return self.drive_eval(&format!("({kind} anonymous(\n) {{\n\n}})"), None, false);
         };
         // Every parameter first, in order, and only then the body. That order is the
         // specification's and it is observable: when both a parameter's `toString` and the
@@ -34077,7 +34123,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let body = self.as_string(body, instruction)?;
         // The newlines are the specification's own: they stop a `//` comment in the parameter
         // list from swallowing the brace, and one in the body from swallowing the close.
-        let source = format!("(function anonymous({joined}\n) {{\n{body}\n}})");
+        let source = format!("({kind} anonymous({joined}\n) {{\n{body}\n}})");
         self.drive_eval(&source, None, false)
     }
 
@@ -35411,7 +35457,10 @@ fn call_native(
         // entered as a frame and run. `Vm::dispatch_native` intercepts them before this, and
         // every call of a built-in goes through it -- so reaching here means a caller found a
         // route around the machine, and refusing says so rather than answering `undefined`.
-        Native::FunctionConstructor | Native::Eval => {
+        Native::FunctionConstructor
+        | Native::GeneratorFunctionConstructor
+        | Native::AsyncGeneratorFunctionConstructor
+        | Native::Eval => {
             return Err(ExecutionError::EvalUnsupported {
                 message: "source compilation reached without a machine to run it".to_owned(),
             });
@@ -37992,7 +38041,9 @@ fn call_native(
         // A namespace, not a function: `Math` has no call behaviour of its own, and reaching
         // here means something called it.
         | Native::Math
-        | Native::Json => Value::Undefined,
+        | Native::Json
+        | Native::GeneratorFunctionPrototype
+        | Native::AsyncGeneratorFunctionPrototype => Value::Undefined,
     })
 }
 
@@ -38342,10 +38393,23 @@ fn prototype_of(value: &Value) -> Value {
         // walks to. Falling to `Object.prototype` with the arm below broke exactly that:
         // `Iterator.from(x)` must hand back `x` when it is already an iterator, and stopped.
         Value::Native(
+            Native::AsyncGeneratorFunctionConstructor | Native::GeneratorFunctionConstructor,
+            _,
+        ) => Value::Native(Native::FunctionConstructor, realm),
+        Value::Native(
+            Native::AsyncGeneratorFunctionPrototype | Native::GeneratorFunctionPrototype,
+            _,
+        ) => Value::Native(Native::PrototypeOf(PrototypeTable::Function), realm),
+        Value::Native(Native::PrototypeOf(PrototypeTable::AsyncGenerator), _) => {
+            Value::Native(Native::PrototypeOf(PrototypeTable::AsyncIterator), realm)
+        }
+        Value::Native(Native::PrototypeOf(PrototypeTable::AsyncIterator), _) => {
+            Value::Native(Native::PrototypeOf(PrototypeTable::Object), realm)
+        }
+        Value::Native(
             Native::PrototypeOf(
                 PrototypeTable::IteratorFor(_)
-                | PrototypeTable::Generator
-                | PrototypeTable::AsyncGenerator,
+                | PrototypeTable::Generator,
             ),
             _,
         ) => Value::Native(Native::PrototypeOf(PrototypeTable::Iterator), realm),
@@ -38405,6 +38469,21 @@ fn prototype_of(value: &Value) -> Value {
         // `Object.prototype`. A primitive has no chain of its own to walk. The two the promise
         // machinery makes are callables too -- a program is handed `resolve` and `reject` and can
         // ask what they inherit from, and answering null said they were not functions at all.
+        Value::Function(closure) => {
+            if let Some(table) = generator_prototype_table(closure) {
+                match table {
+                    PrototypeTable::AsyncGenerator => {
+                        Value::Native(Native::AsyncGeneratorFunctionPrototype, realm)
+                    }
+                    PrototypeTable::Generator => {
+                        Value::Native(Native::GeneratorFunctionPrototype, realm)
+                    }
+                    _ => Value::Native(Native::PrototypeOf(PrototypeTable::Function), realm),
+                }
+            } else {
+                Value::Native(Native::PrototypeOf(PrototypeTable::Function), realm)
+            }
+        }
         Value::Native(_, _)
         | Value::Bound(_)
         // A wrapped function's `realm` is its own -- the caller's -- so this reads
@@ -38412,7 +38491,6 @@ fn prototype_of(value: &Value) -> Value {
         // `WrappedFunctionCreate` sets and what a program checks with `getPrototypeOf`.
         | Value::Wrapped(_)
         | Value::Callback(_, _)
-        | Value::Function(_)
         | Value::Settler(..)
         | Value::Capability(_) | Value::Element(_) => {
             Value::Native(Native::PrototypeOf(PrototypeTable::Function), realm)
@@ -43159,6 +43237,7 @@ fn native_is_constructor(native: Native) -> bool {
         | Native::ConsoleConstructor
         | Native::NodeHttpServer
         | Native::NodeAsyncLocalStorage => true,
+        Native::GeneratorFunctionPrototype | Native::AsyncGeneratorFunctionPrototype => false,
         // Each error kind's `prototype` is a per-realm object rather than a table, which the
         // marker alone cannot answer for.
         Native::Error(_) => true,
@@ -45279,6 +45358,7 @@ fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'static [&'static
         PrototypeTable::Readable => READABLE_MEMBERS.names(),
         PrototypeTable::Writable => WRITABLE_MEMBERS.names(),
         PrototypeTable::Console => CONSOLE_MEMBERS.names(),
+        PrototypeTable::AsyncIterator => &[],
     }
 }
 
