@@ -4708,6 +4708,7 @@ pub type SourceCompiler = fn(&EvalSource<'_>) -> Result<(Program, Strictness), E
 pub struct ExecutionCapabilities {
     source_compiler: Option<SourceCompiler>,
     module_loader: Option<ModuleLoader>,
+    module_loader_with_options: Option<ModuleLoaderWithOptions>,
     host_realms: bool,
     host_agents: Option<&'static str>,
     /// The command line this execution's `process.argv` reports, exactly as the host spelled it.
@@ -4736,6 +4737,15 @@ impl ExecutionCapabilities {
 
     pub const fn module_loader(&self) -> Option<ModuleLoader> {
         self.module_loader
+    }
+
+    pub const fn with_module_loader_with_options(mut self, loader: ModuleLoaderWithOptions) -> Self {
+        self.module_loader_with_options = Some(loader);
+        self
+    }
+
+    pub const fn module_loader_with_options(&self) -> Option<ModuleLoaderWithOptions> {
+        self.module_loader_with_options
     }
 
     /// Let this execution make further realms, and publish the hook that does it.
@@ -4855,6 +4865,7 @@ pub enum ModuleLoadError {
 /// referrer-aware service object that replaces this is part of the remaining module-realm kernel
 /// migration.
 pub type ModuleLoader = fn(&str) -> Result<ModulePlan, ModuleLoadError>;
+pub type ModuleLoaderWithOptions = fn(&str, &Value) -> Result<ModulePlan, ModuleLoadError>;
 
 /// Whether a program reads or writes module scope through the frame stack.
 ///
@@ -6968,7 +6979,7 @@ enum Job {
     /// settle the promise before `import(x).then(f)` had attached `f`, which is not observable
     /// on its own -- but the module's *side effects* would then happen before the statement
     /// after the `import()`, and that is.
-    Import(Rc<PromiseData>, String),
+    Import(Rc<PromiseData>, String, Option<Value>),
     /// `ShadowRealm.prototype.importValue(specifier, exportName)`.
     ///
     /// A job for the same reason `Import` is one, and carries the two realms because both
@@ -7194,6 +7205,7 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// execution's host granted agents at all. `None` disables `$262AgentStart` and its siblings.
     host_agents: Option<&'static str>,
     module_loader: Option<ModuleLoader>,
+    module_loader_with_options: Option<ModuleLoaderWithOptions>,
     /// The command line `process.argv` reports, as the host stated it. Empty when no host did.
     argv: Vec<String>,
     /// Promise state waiting for a Tokio-owned host request, keyed by opaque request identity.
@@ -7429,6 +7441,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             default_locale,
             source_compiler: execution.source_compiler(),
             module_loader: execution.module_loader(),
+            module_loader_with_options: execution.module_loader_with_options(),
             host_realms: execution.host_realms(),
             host_agents: execution.host_agents(),
             argv: execution.argv().to_vec(),
@@ -11699,22 +11712,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     };
                     let specifier = self.pop(current)?;
                     let promise = PromiseState::pending();
-                    if _options.is_some() {
-                        let error = self.construct_error(
-                            ErrorKind::Type,
-                            &[Value::String("import attributes are unsupported by this loader".to_owned())],
-                        );
-                        self.settle(&promise, &Settled::Rejected(error));
-                        self.stack.push(Value::Promise(promise));
-                        continue;
-                    }
                     // Everything from the coercion onwards rejects rather than throws: the
                     // specification hands the promise back first and only then looks at what it
                     // was given, so `import({ toString() { throw x } })` is a rejection and not
                     // an exception at the call site.
                     match self.import_specifier(&specifier, current)? {
                         Ok(text) => {
-                            let scheduled = self.scheduled(Job::Import(Rc::clone(&promise), text));
+                            let scheduled = self.scheduled(Job::Import(Rc::clone(&promise), text, _options));
                             self.with_realm_mut(|realm| realm.queue_microtask(scheduled));
                         }
                         Err(thrown) => self.settle(&promise, &Settled::Rejected(thrown)),
@@ -22953,8 +22957,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 );
                 Ok(())
             }
-            Job::Import(promise, specifier) => {
-                match self.import_module(&specifier)? {
+            Job::Import(promise, specifier, options) => {
+                match self.import_module(&specifier, options.as_ref())? {
                     Ok(namespace) => self.settle(&promise, &Settled::Fulfilled(namespace)),
                     Err(thrown) => self.settle(&promise, &Settled::Rejected(thrown)),
                 }
@@ -25089,7 +25093,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         evaluated: RealmId,
         caller: RealmId,
     ) -> Result<Settled, ExecutionError> {
-        let imported = self.entering(evaluated, |vm| vm.import_module(specifier));
+        let imported = self.entering(evaluated, |vm| vm.import_module(specifier, None));
         let namespace = match imported {
             Ok(Ok(namespace)) => namespace,
             // Both the module's own failure and any error `entering` turned into a thrown value.
@@ -32974,15 +32978,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ///
     /// `Ok(Err(value))` is the rejection the promise gets: a specifier that names nothing, a
     /// module that is not a module, a host that cannot load the module, or a module whose body threw.
-    fn import_module(&mut self, specifier: &str) -> Result<Result<Value, Value>, ExecutionError> {
-        let Some(load) = self.module_loader else {
-            let error = self.construct_error(
-                ErrorKind::Type,
-                &[Value::String("no module loader is installed".to_owned())],
-            );
-            return Ok(Err(error));
+    fn import_module(&mut self, specifier: &str, options: Option<&Value>) -> Result<Result<Value, Value>, ExecutionError> {
+        let plan_result = match options {
+            Some(options) => match self.module_loader_with_options {
+                Some(load) => load(specifier, options),
+                None => return Ok(Err(self.construct_error(ErrorKind::Type, &[Value::String("no option-aware module loader is installed".to_owned())]))),
+            },
+            None => match self.module_loader {
+                Some(load) => load(specifier),
+                None => return Ok(Err(self.construct_error(ErrorKind::Type, &[Value::String("no module loader is installed".to_owned())]))),
+            },
         };
-        let plan = match load(specifier) {
+        let plan = match plan_result {
             Ok(plan) => plan,
             Err(ModuleLoadError::Unsupported(message)) => {
                 let error = self.construct_error(ErrorKind::Type, &[Value::String(message)]);
