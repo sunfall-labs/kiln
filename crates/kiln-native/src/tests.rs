@@ -303,19 +303,12 @@ fn executable_demanded_members_names_builtins_and_computed() {
         OxcFrontend,
     )
     .expect("members graph");
-    let demand =
-        executable_demand(&graph, NativeProfile::Dev).expect("demand");
-    let members = kiln_backend_c::facts::analyze_demanded_members(
-        &graph,
-        &demand.live,
-        &demand.slots,
-    );
+    let demand = executable_demand(&graph, NativeProfile::Dev).expect("demand");
+    let members =
+        kiln_backend_c::facts::analyze_demanded_members(&graph, &demand.live, &demand.slots);
     assert!(members.names.contains("push"), "{members:?}");
     assert!(members.names.contains("log"), "{members:?}");
-    assert!(
-        members.builtins.contains("SetTimeout"),
-        "{members:?}"
-    );
+    assert!(members.builtins.contains("SetTimeout"), "{members:?}");
     assert!(
         members.has_computed_access,
         "xs[key] names nothing statically: {members:?}"
@@ -8152,4 +8145,98 @@ fn executable_host_refusal_preserves_bounded_diagnostics() {
             );
         }
     }
+}
+
+#[test]
+fn number_provider_variant_selection_is_conservative() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    fn selection(entry_name: &str, files: &[(&str, &str)]) -> bool {
+        let project = TestDirectory::new("kiln-provider-variant-selection");
+        for (name, source) in files {
+            fs::write(project.path.join(name), source).expect("write selection fixture");
+        }
+        let graph = ModuleGraph::build_node(
+            &project.path.join(entry_name),
+            NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("selection graph");
+        NativeBuilder::graph_wants_http_provider(&graph)
+    }
+
+    assert!(
+        !selection("main.mjs", &[("main.mjs", "console.log(1 + 2);\n")]),
+        "a plain ESM entry links the slim archive"
+    );
+    assert!(
+        !selection(
+            "main.mjs",
+            &[
+                (
+                    "main.mjs",
+                    "import { a } from './dep.mjs';\nconsole.log(a);\n"
+                ),
+                ("dep.mjs", "export const a = 1;\n"),
+            ]
+        ),
+        "an HTTP-free static graph links the slim archive"
+    );
+    assert!(
+        selection(
+            "main.mjs",
+            &[(
+                "main.mjs",
+                "import http from 'node:http';\nconsole.log(typeof http.createServer);\n",
+            )]
+        ),
+        "node:http selects the full archive"
+    );
+    assert!(
+        selection(
+            "main.mjs",
+            &[(
+                "main.mjs",
+                "import https from 'node:https';\nconsole.log(typeof https);\n",
+            )]
+        ),
+        "node:https selects the full archive"
+    );
+    assert!(
+        selection(
+            "main.mjs",
+            &[(
+                "main.mjs",
+                "import { dlopen } from 'node:ffi';\nconsole.log(typeof dlopen);\n",
+            )]
+        ),
+        "node:ffi selects the full archive"
+    );
+    assert!(
+        selection(
+            "main.mjs",
+            &[
+                (
+                    "main.mjs",
+                    "import('./dep.mjs').then((m) => console.log(m.a));\n",
+                ),
+                ("dep.mjs", "export const a = 1;\n"),
+            ]
+        ),
+        "a dynamic import selects the full archive"
+    );
+    assert!(
+        selection(
+            "main.cjs",
+            &[
+                (
+                    "main.cjs",
+                    "const dep = require('./dep.cjs');\nmodule.exports = dep;\n",
+                ),
+                ("dep.cjs", "module.exports = 1;\n"),
+            ]
+        ),
+        "a CommonJS require selects the full archive"
+    );
 }

@@ -11,8 +11,17 @@ set -euo pipefail
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
 cd "$(kiln_repo_root)"
 
+# The slim variant builds the same crate without `realm-http`: same schema, provider ABI
+# and export list, but no Hyper-backed HTTP engines. Both variants publish into one
+# directory under distinct archive/manifest names; the `http` manifest field tells them
+# apart.
+KILN_PROVIDER_HTTP=1
+if [[ ${1:-} == "--slim" ]]; then
+	KILN_PROVIDER_HTTP=0
+	shift
+fi
 if [[ $# -ne 1 ]]; then
-	printf 'usage: %s OUTPUT_DIRECTORY\n' "$0" >&2
+	printf 'usage: %s [--slim] OUTPUT_DIRECTORY\n' "$0" >&2
 	exit 2
 fi
 
@@ -77,12 +86,25 @@ kiln_provider_sha256_stream() {
 # Rust panics before returning across the private C ABI.
 KILN_PROVIDER_RUSTFLAGS="-C panic=unwind -C relocation-model=pic -C target-cpu=generic -C debuginfo=0"
 
+# Without `default-features = false` on the `kiln-runtime` edge in
+# `crates/kiln-native-number-ffi/Cargo.toml`, the slim `--no-default-features` selection
+# below would still unify `kiln-runtime/http` back on through that dependency's defaults
+# and ship a full archive under a slim manifest.
+if [[ $KILN_PROVIDER_HTTP -eq 1 ]]; then
+	KILN_PROVIDER_FEATURES="regexp,bigint,temporal,json,intl,parallel,ffi"
+	KILN_PROVIDER_DEFAULT_FEATURES=()
+else
+	KILN_PROVIDER_FEATURES="realm,regexp,bigint,temporal,json,intl,parallel,ffi"
+	KILN_PROVIDER_DEFAULT_FEATURES=(--no-default-features)
+fi
+
 env -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \
 	RUSTC_WRAPPER= RUSTC_WORKSPACE_WRAPPER= \
 	CARGO_BUILD_RUSTC_WRAPPER= CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER= \
 	RUSTC="$KILN_PROVIDER_RUSTC" CARGO_BUILD_RUSTC="$KILN_PROVIDER_RUSTC" \
 	RUSTFLAGS="$KILN_PROVIDER_RUSTFLAGS" "$KILN_PROVIDER_CARGO" rustc --locked \
-	-p kiln-native-number-ffi --profile provider --features regexp,bigint,temporal,json,intl,parallel,ffi \
+	-p kiln-native-number-ffi --profile provider "${KILN_PROVIDER_DEFAULT_FEATURES[@]}" \
+	--features "$KILN_PROVIDER_FEATURES" \
 	--target "$KILN_PROVIDER_TARGET" --crate-type staticlib
 
 KILN_PROVIDER_TARGET_DIR="${CARGO_TARGET_DIR:-target}"
@@ -97,8 +119,15 @@ if [[ ! -f $KILN_PROVIDER_BUILT_ARCHIVE ]]; then
 fi
 
 mkdir -p "$KILN_PROVIDER_OUTPUT"
-KILN_PROVIDER_ARCHIVE_NAME=libkiln_native_number_ffi.a
-KILN_PROVIDER_MANIFEST_NAME=kiln-native-number-provider.json
+if [[ $KILN_PROVIDER_HTTP -eq 1 ]]; then
+	KILN_PROVIDER_ARCHIVE_NAME=libkiln_native_number_ffi.a
+	KILN_PROVIDER_MANIFEST_NAME=kiln-native-number-provider.json
+	KILN_PROVIDER_HTTP_JSON=true
+else
+	KILN_PROVIDER_ARCHIVE_NAME=libkiln_native_number_ffi.slim.a
+	KILN_PROVIDER_MANIFEST_NAME=kiln-native-number-provider.slim.json
+	KILN_PROVIDER_HTTP_JSON=false
+fi
 KILN_PROVIDER_ARCHIVE="$KILN_PROVIDER_OUTPUT/$KILN_PROVIDER_ARCHIVE_NAME"
 KILN_PROVIDER_MANIFEST="$KILN_PROVIDER_OUTPUT/$KILN_PROVIDER_MANIFEST_NAME"
 KILN_PROVIDER_ARCHIVE_TEMP="$KILN_PROVIDER_OUTPUT/.$KILN_PROVIDER_ARCHIVE_NAME.$$.tmp"
@@ -179,8 +208,9 @@ if command -v "$KILN_PROVIDER_NM" >/dev/null 2>&1; then
 			'Packaging it would ship a manifest promising symbols the archive lacks, and the' \
 			'failure would resurface as "Undefined symbols" from an unrelated native link.' >&2
 		printf '%s\n' \
-			'Most often the archive was built without the optional features. This script builds' \
-			'with --features regexp,bigint,temporal,json,intl,parallel,ffi; check that those still cover every group in' \
+			'Most often the archive was built without the optional features. The full variant builds' \
+			'with --features regexp,bigint,temporal,json,intl,parallel,ffi and the slim variant adds' \
+			'--no-default-features with realm but not realm-http; check that those still cover every group in' \
 			'provider_abi_registry! in crates/kiln-native-number-abi/src/lib.rs.' >&2
 		exit 1
 	fi
@@ -314,7 +344,8 @@ printf '%s\n' \
 	'  "cpu_features": "generic",' \
 	"  \"deployment\": \"$KILN_PROVIDER_DEPLOYMENT\"," \
 	"  \"libc_baseline\": \"$KILN_PROVIDER_LIBC\"," \
-	"  \"exports\": [$KILN_PROVIDER_EXPORTS]" \
+	"  \"exports\": [$KILN_PROVIDER_EXPORTS]," \
+	"  \"http\": $KILN_PROVIDER_HTTP_JSON" \
 	'}' >"$KILN_PROVIDER_MANIFEST_TEMP"
 
 mv -f "$KILN_PROVIDER_ARCHIVE_TEMP" "$KILN_PROVIDER_ARCHIVE"

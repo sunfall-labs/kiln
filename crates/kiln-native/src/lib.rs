@@ -397,7 +397,30 @@ impl NativeBuilder {
         &self,
         target: &str,
     ) -> Result<(Arc<[u8]>, Digest, bool), NativeError> {
-        let provider = self.number_provider()?;
+        let (archive, digest, hit, _) = self.cached_number_provider_with_http(target, true)?;
+        Ok((archive, digest, hit))
+    }
+
+    /// Resolve the provider archive for a program that needs the HTTP engines only when
+    /// `want_http` is set, caching the archive bytes under a key that folds in the loaded
+    /// variant so full and slim archives never alias. Returns the archive, its digest, the
+    /// artifact-cache hit flag, and the linked variant.
+    fn cached_number_provider_with_http(
+        &self,
+        target: &str,
+        want_http: bool,
+    ) -> Result<(Arc<[u8]>, Digest, bool, bool), NativeError> {
+        let provider = if want_http {
+            self.number_provider()?
+        } else {
+            // The shared slot caches the full archive; a slim resolution is per-build so the
+            // two variants cannot alias there either.
+            number_provider::discover_with_http(self.toolchain.identity(), false).map_err(
+                |error| NativeError::NumberProvider {
+                    message: error.to_string(),
+                },
+            )?
+        };
         let provider_key = key(
             ArtifactKind::RuntimeLibrary,
             &provider.identity,
@@ -407,23 +430,74 @@ impl NativeBuilder {
             CacheProfile::Release,
             Digest::hash(
                 format!(
-                    "schema={PROVIDER_SCHEMA_VERSION};abi={PROVIDER_ABI_VERSION};target={};pic=true;linkage=static",
-                    provider.rust_target
+                    "schema={PROVIDER_SCHEMA_VERSION};abi={PROVIDER_ABI_VERSION};target={};pic=true;linkage=static;http={}",
+                    provider.rust_target,
+                    provider.http,
                 )
                 .as_bytes(),
             ),
             [provider.archive_digest],
         );
+        let http = provider.http;
         match self.lookup_digest(&provider_key)? {
             Some((digest, _size)) => {
                 debug_assert_eq!(digest, provider.archive_digest);
-                Ok((Arc::clone(&provider.archive), digest, true))
+                Ok((Arc::clone(&provider.archive), digest, true, http))
             }
             None => {
                 let stored = self.cache.put(&provider_key, &provider.archive)?;
-                Ok((Arc::clone(&provider.archive), stored.digest, false))
+                Ok((Arc::clone(&provider.archive), stored.digest, false, http))
             }
         }
+    }
+
+    /// Conservative HTTP-engine demand for one module graph: true on any doubt.
+    ///
+    /// The slim provider archive omits the Hyper-backed HTTP engines (linkable stubs keep
+    /// the export list identical), so any program that can reach them must link the full
+    /// archive. Reachability is undecidable for dynamic `import()` targets and for
+    /// CommonJS `require()` with a non-literal argument (which leaves no graph edge at
+    /// all), so those select the full archive, as does any `node:ffi` usage.
+    fn graph_wants_http_provider(graph: &ModuleGraph) -> bool {
+        use kiln_module_resolver::NodeBuiltin;
+        fn needs_http_engine(specifier: &str) -> bool {
+            matches!(
+                NodeBuiltin::parse(specifier),
+                Some(
+                    NodeBuiltin::Http | NodeBuiltin::Https | NodeBuiltin::Http2 | NodeBuiltin::Ffi
+                )
+            )
+        }
+        graph.modules().any(|node| {
+            if let ModuleSource::NodeBuiltin(builtin) = node.source
+                && matches!(
+                    builtin,
+                    NodeBuiltin::Http | NodeBuiltin::Https | NodeBuiltin::Http2 | NodeBuiltin::Ffi
+                )
+            {
+                return true;
+            }
+            // Static specifier text: ESM imports, plus CJS literal `require()` calls, which
+            // the graph records as dependencies rather than imports.
+            if node
+                .program
+                .imports
+                .iter()
+                .any(|import| needs_http_engine(&import.source))
+                || node
+                    .dependencies
+                    .iter()
+                    .any(|dependency| needs_http_engine(&dependency.specifier))
+            {
+                return true;
+            }
+            if !node.program.link_facts.dynamic_imports.is_empty()
+                || node.program.program.has_dynamic_import()
+            {
+                return true;
+            }
+            matches!(node.source, ModuleSource::CommonJs)
+        })
     }
 
     /// Build one bytecode module and its separate host runtime into an executable.
@@ -457,7 +531,10 @@ impl NativeBuilder {
         let runtime_abi = runtime_abi_identity();
         let target = target_identity(&identity);
         let compiler = compiler_identity(&identity);
-        let (number_provider, number_provider_digest, _) = self.cached_number_provider(&target)?;
+        // The single-module API sees only bytecode, not the import table, so a static
+        // `node:http` use is invisible here: stay on the full archive.
+        let (number_provider, number_provider_digest, _, number_provider_http) =
+            self.cached_number_provider_with_http(&target, true)?;
 
         let module_source_key = key(
             ArtifactKind::GeneratedC,
@@ -628,6 +705,7 @@ impl NativeBuilder {
                     }],
                     runtime_generated_c_cache_hit,
                     launcher_generated_c_cache_hit,
+                    number_provider_http,
                 });
             }
         }
@@ -802,6 +880,7 @@ impl NativeBuilder {
             }],
             runtime_generated_c_cache_hit,
             launcher_generated_c_cache_hit,
+            number_provider_http,
         })
     }
 
@@ -1772,7 +1851,9 @@ impl NativeBuilder {
         let profile = options.profile;
         let runtime_abi = runtime_abi_identity();
         let compiler = compiler_identity(&identity);
-        let (number_provider, number_provider_digest, _) = self.cached_number_provider(&target)?;
+        let want_http = Self::graph_wants_http_provider(graph);
+        let (number_provider, number_provider_digest, _, number_provider_http) =
+            self.cached_number_provider_with_http(&target, want_http)?;
 
         let mut module_sources = modules
             .iter()
@@ -2033,6 +2114,7 @@ impl NativeBuilder {
                     module_artifacts,
                     runtime_generated_c_cache_hit,
                     launcher_generated_c_cache_hit,
+                    number_provider_http,
                 });
             }
         }
@@ -2237,6 +2319,7 @@ impl NativeBuilder {
             module_artifacts,
             runtime_generated_c_cache_hit,
             launcher_generated_c_cache_hit,
+            number_provider_http,
         })
     }
 
@@ -2336,6 +2419,26 @@ impl NativeBuilder {
         let identities = self
             .live_cache_identities()
             .expect("a build that constructs cache keys can enumerate its live identities");
+        if identities.contains(&key.identity_digest()) {
+            return;
+        }
+        // The slim provider archive is the same key family as the full one: its identity
+        // names `;http=false;` where the catalogued full identity names `;http=true;`, with
+        // a different archive digest for the smaller bytes. Accept the slim key when its
+        // full twin is catalogued, so the catalogue keeps one entry per family per variant
+        // set rather than one per build configuration.
+        if key.backend == Backend::Custom("rust-native-number-provider".to_owned())
+            && key.compiler_version.contains(";http=false;")
+        {
+            let mut twin = key.clone();
+            twin.compiler_version = self
+                .number_provider()
+                .expect("a build that links the slim provider can resolve its full twin")
+                .identity;
+            if identities.contains(&twin.identity_digest()) {
+                return;
+            }
+        }
         assert!(
             identities.contains(&key.identity_digest()),
             "native cache identity catalogue omitted key family: {key:?}"

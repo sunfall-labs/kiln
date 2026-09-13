@@ -69,6 +69,9 @@ pub struct NativeBuildReport {
     /// Cache status of the generated runtime and graph-launcher C sources.
     pub runtime_generated_c_cache_hit: bool,
     pub launcher_generated_c_cache_hit: bool,
+    /// Which number-provider variant the executable links: true for the full archive with
+    /// the Hyper-backed HTTP engines, false for the slim archive without them.
+    pub number_provider_http: bool,
 }
 
 /// Cache facts for an embedded scalar shared library.
