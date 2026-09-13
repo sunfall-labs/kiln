@@ -1639,7 +1639,25 @@ pub(crate) fn native_build_graph(
     ) {
         Ok(report) => {
             let explanation = if explain {
-                Some(kiln_backend_c::facts::analyze_graph(graph).format_explain())
+                let mut text = kiln_backend_c::facts::analyze_graph(graph).format_explain();
+                // Out-of-band attribution: failures here must never fail the
+                // build, so each section is skipped rather than propagated.
+                if let Ok(demand) = kiln_native::executable_demand(graph, native_profile(profile)) {
+                    if let Ok(sizes) =
+                        kiln_native::executable_module_sizes_from_demand(graph, &demand)
+                    {
+                        text.push_str(&kiln_backend_c::facts::format_module_sizes(&sizes));
+                    }
+                    let members = kiln_backend_c::facts::analyze_demanded_members(
+                        graph,
+                        &demand.live,
+                        &demand.slots,
+                    );
+                    text.push_str(&kiln_backend_c::facts::format_demanded_members(&members));
+                    let mask = kiln_native::retained_method_groups(graph, &demand, &members);
+                    text.push_str(&kiln_backend_c::facts::format_retained_groups(mask));
+                }
+                Some(text)
             } else {
                 None
             };
@@ -1767,11 +1785,13 @@ fn native_summary(report: kiln_native::NativeBuildReport) -> NativeBuildSummary 
         ),
         generated_c_cache_hit: report.cache_hits.generated_c,
         app_object_cache_hit: report.cache_hits.application_object,
+        prelude_object_cache_hit: report.cache_hits.prelude_object,
         runtime_object_cache_hit: report.cache_hits.runtime_object,
         launcher_object_cache_hit: report.cache_hits.launcher_object,
         executable_cache_hit: report.cache_hits.executable,
         generated_c_bytes: report.sizes.generated_c,
         app_object_bytes: report.sizes.application_object,
+        prelude_object_bytes: report.sizes.prelude_object,
         runtime_object_bytes: report.sizes.runtime_object,
         launcher_object_bytes: report.sizes.launcher_object,
         executable_bytes: report.sizes.executable,

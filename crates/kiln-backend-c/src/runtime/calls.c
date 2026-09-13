@@ -33,10 +33,16 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
                                            kiln_c99_temporal_kind_of_builtin(callee.bits), args,
                                            argc, depth, thrown);
     }
+    /* Demand-driven prelude: the Buffer constructor fast path is compiled out
+     * when the executable retains no code that can name the Buffer global
+     * (see `retained_method_groups`). Unreachable then, like a dropped
+     * dispatch block. */
+#if KILN_RETAIN_GROUP_BUFFER
     if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_BUFFER) {
         return kiln_c99_buffer_from(result,
                                     argc > 0 ? args[0] : kiln_c99_number(0.0), thrown);
     }
+#endif
     if (callee.tag == KILN_VALUE_PROXY) {
         kiln_value trap;
         kiln_value inner = kiln_c99_proxy_of(callee)->target;
@@ -85,7 +91,13 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
         }
         /* Runtime-provided constructors are methods so their identity can cross generated
          * modules without exporting a backend-private closure. EventEmitter is constructible,
-         * and its ordinary-call and `new` forms deliberately share one initializer. */
+         * and its ordinary-call and `new` forms deliberately share one initializer.
+         *
+         * Demand-driven prelude: each branch below is compiled out when its
+         * group is not retained (see `retained_method_groups`). A dropped
+         * branch is unreachable: its method values only materialize through
+         * the corresponding node builtin. */
+#if KILN_RETAIN_GROUP_NODE_HTTP
         if (callee.bits == KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER ||
             callee.bits == KILN_C99_METHOD_NODE_HTTP_SERVER) {
             if (argc > 0 && args[0].tag != KILN_VALUE_UNDEFINED &&
@@ -97,6 +109,8 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
             return kiln_c99_node_http(host, result, callee.bits, kiln_c99_undefined(), args, argc,
                                       depth, thrown);
         }
+#endif
+#if KILN_RETAIN_GROUP_NODE_EVENT
         if (callee.bits == KILN_C99_METHOD_NODE_EVENT_EMITTER) {
             kiln_value prototype;
             status = kiln_c99_node_event(host, result, callee.bits, kiln_c99_undefined(), args,
@@ -107,6 +121,8 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
                 status = kiln_c99_set_prototype(*result, prototype);
             return status;
         }
+#endif
+#if KILN_RETAIN_GROUP_NODE_STREAM
         if (callee.bits == KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE) {
             status = kiln_c99_node_stream(host, result, KILN_C99_METHOD_NODE_WRITABLE,
                                           kiln_c99_undefined(), args, argc, depth, thrown);
@@ -127,6 +143,7 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
             if (status == KILN_C99_OK) status = kiln_c99_set_prototype(*result, prototype);
         }
         return status;
+#endif
     }
     if (callee.tag == KILN_VALUE_BUILTIN && (callee.bits == KILN_C99_BUILTIN_STRING ||
                                              callee.bits == KILN_C99_BUILTIN_NUMBER ||

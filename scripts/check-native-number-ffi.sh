@@ -126,6 +126,48 @@ if [[ $KILN_NUMBER_MANIFEST_RUSTC_IDENTITY != "$KILN_NUMBER_EXPECTED_RUSTC_IDENT
 	exit 1
 fi
 
+# The slim variant ships the same crate without the Hyper-backed HTTP engines: same
+# schema, provider ABI, and export list, differing only in the `http` manifest field.
+# The packager itself proves the slim archive defines every export; here prove the pair
+# is published under distinct names with matching source and rustc identities.
+env RUSTFLAGS='--kiln-provider-must-not-inherit' \
+	CARGO_ENCODED_RUSTFLAGS='--kiln-provider-must-not-inherit' \
+	CARGO_BUILD_RUSTFLAGS='--kiln-provider-must-not-inherit' \
+	CARGO_BUILD_RUSTC='/kiln/provider/must/not/inherit' \
+	RUSTC_WRAPPER='/kiln/provider/must/not/inherit' \
+	RUSTC_WORKSPACE_WRAPPER='/kiln/provider/must/not/inherit' \
+	CARGO_BUILD_RUSTC_WRAPPER='/kiln/provider/must/not/inherit' \
+	CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER='/kiln/provider/must/not/inherit' \
+	bash scripts/package-native-number-provider.sh --slim "$KILN_NUMBER_TEMP/slim-package" >/dev/null
+KILN_NUMBER_SLIM_ARCHIVE="$KILN_NUMBER_TEMP/slim-package/libkiln_native_number_ffi.slim.a"
+KILN_NUMBER_SLIM_MANIFEST="$KILN_NUMBER_TEMP/slim-package/kiln-native-number-provider.slim.json"
+if [[ ! -f $KILN_NUMBER_SLIM_ARCHIVE || ! -f $KILN_NUMBER_SLIM_MANIFEST ]]; then
+	printf 'slim number provider is incomplete under %s\n' "$KILN_NUMBER_TEMP/slim-package" >&2
+	exit 1
+fi
+KILN_NUMBER_SLIM_HTTP=$(sed -n 's/^  "http": \([a-z]*\)$/\1/p' "$KILN_NUMBER_SLIM_MANIFEST")
+if [[ $KILN_NUMBER_SLIM_HTTP != "false" ]]; then
+	printf 'slim number-provider manifest must carry `"http": false`, found %s\n' \
+		"$KILN_NUMBER_SLIM_HTTP" >&2
+	exit 1
+fi
+KILN_NUMBER_SLIM_SOURCE_DIGEST=$(
+	sed -n 's/^  "source_sha256": "\([0-9a-f]*\)",$/\1/p' "$KILN_NUMBER_SLIM_MANIFEST"
+)
+if [[ $KILN_NUMBER_SLIM_SOURCE_DIGEST != "$KILN_NUMBER_EXPECTED_SOURCE_DIGEST" ]]; then
+	printf 'slim number-provider source identity drift: manifest has %s, expected %s\n' \
+		"$KILN_NUMBER_SLIM_SOURCE_DIGEST" "$KILN_NUMBER_EXPECTED_SOURCE_DIGEST" >&2
+	exit 1
+fi
+KILN_NUMBER_SLIM_RUSTC_IDENTITY=$(
+	sed -n 's/^  "rustc_identity": "\([^"]*\)",$/\1/p' "$KILN_NUMBER_SLIM_MANIFEST"
+)
+if [[ $KILN_NUMBER_SLIM_RUSTC_IDENTITY != "$KILN_NUMBER_EXPECTED_RUSTC_IDENTITY" ]]; then
+	printf 'slim number-provider rustc identity drift: manifest has %s, expected %s\n' \
+		"$KILN_NUMBER_SLIM_RUSTC_IDENTITY" "$KILN_NUMBER_EXPECTED_RUSTC_IDENTITY" >&2
+	exit 1
+fi
+
 "$KILN_NUMBER_CC" -std=c11 -pedantic -Wall -Wextra -Werror \
 	crates/kiln-native-number-ffi/tests/ffi_harness.c \
 	"$KILN_NUMBER_ARCHIVE" -lm -o "$KILN_NUMBER_TEMP/probe"

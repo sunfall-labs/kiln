@@ -10,11 +10,32 @@
     clippy::wrong_self_convention
 )]
 
+#[cfg(feature = "http")]
 mod http_body;
+#[cfg(feature = "http")]
 pub mod http_client;
+#[cfg(feature = "http")]
 pub mod http_engine;
+#[cfg(feature = "http")]
 pub use http_client::HttpClientEngine;
+#[cfg(feature = "http")]
 pub use http_engine::{HostTransport, HttpDispatch, HttpEvent, HttpEventKind, HttpServerEngine};
+/// Hyper-free transport seam used when the `http` feature is off: the boxed Tokio
+/// socket a host hands over has no Hyper in it, so it lives here rather than in the
+/// gated engine.
+#[cfg(not(feature = "http"))]
+pub struct HostTransport(pub Box<dyn HostIo>);
+/// What a transport must be without Hyper: nothing more than Tokio's I/O traits.
+#[cfg(not(feature = "http"))]
+pub trait HostIo: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin {}
+#[cfg(not(feature = "http"))]
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> HostIo for T {}
+#[cfg(not(feature = "http"))]
+impl std::fmt::Debug for HostTransport {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("HostTransport")
+    }
+}
 pub mod node_http;
 pub mod node_http_agent;
 pub mod node_net;
@@ -759,9 +780,17 @@ pub struct RealmState<H> {
     capabilities: RealmCapabilities,
     http_agent: HttpAgent,
     /// Server connections that are Hyper tasks over host transports (ADR 0046).
+    #[cfg(feature = "http")]
     http_server: HttpServerEngine,
     /// Client connections, likewise.
+    #[cfg(feature = "http")]
     http_client: HttpClientEngine,
+    /// Without `http` there is no engine to own a connection; the field stays so
+    /// constructors and destructuring compile unchanged.
+    #[cfg(not(feature = "http"))]
+    http_server: (),
+    #[cfg(not(feature = "http"))]
+    http_client: (),
     /// Protocol events parked by the queued adapter for a loop that drains them at its
     /// checkpoint, and the signal that wakes that loop.
     queued_http: Rc<QueuedHttp>,
@@ -837,8 +866,14 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
                 host,
                 capabilities,
                 http_agent: HttpAgent::default(),
+                #[cfg(feature = "http")]
                 http_server: HttpServerEngine::default(),
+                #[cfg(feature = "http")]
                 http_client: HttpClientEngine::default(),
+                #[cfg(not(feature = "http"))]
+                http_server: (),
+                #[cfg(not(feature = "http"))]
+                http_client: (),
                 queued_http: Rc::new(QueuedHttp::default()),
                 lifecycle: RealmRuntimeLifecycle::Open,
             },
@@ -999,6 +1034,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
 
     /// Attach the HTTP engine to an accepted stream (ADR 0046): the host hands over its
     /// transport and Hyper drives it, calling `dispatch` directly for every protocol event.
+    #[cfg(feature = "http")]
     pub fn server_attach(
         &mut self,
         resource: ResourceId,
@@ -1018,6 +1054,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
 
     /// Attach the HTTP client engine to a connected stream (ADR 0046): the host hands over its
     /// transport and Hyper drives it, calling `dispatch` directly for every response event.
+    #[cfg(feature = "http")]
     pub fn client_attach(&mut self, resource: ResourceId, dispatch: Rc<dyn HttpDispatch>) -> bool {
         if self.is_shutdown() || self.state.http_owns(resource) {
             return false;
@@ -1033,6 +1070,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
     /// Attach a server connection whose events are queued for
     /// [`RealmState::take_queued_server_events`]
     /// (the queued adapter of ADR 0046, for a loop that drains events at its checkpoint).
+    #[cfg(feature = "http")]
     pub fn server_attach_queued(&mut self, resource: ResourceId, allow_half_close: bool) -> bool {
         let dispatch = Rc::new(QueuedDispatch {
             resource,
@@ -1044,6 +1082,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
 
     /// Attach a client connection whose events are queued for
     /// [`Self::take_http_client_events`].
+    #[cfg(feature = "http")]
     pub fn client_attach_queued(&mut self, resource: ResourceId) -> bool {
         let dispatch = Rc::new(QueuedDispatch {
             resource,
@@ -1054,11 +1093,13 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
     }
 
     /// The direct HTTP server engine.
+    #[cfg(feature = "http")]
     pub fn http_server(&mut self) -> &mut HttpServerEngine {
         &mut self.state.http_server
     }
 
     /// The direct HTTP client engine.
+    #[cfg(feature = "http")]
     pub fn http_client(&mut self) -> &mut HttpClientEngine {
         &mut self.state.http_client
     }
@@ -1066,6 +1107,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
     /// Stop the connection on `resource`, whichever engine owns it. The transport is released
     /// once the engine has published `Closed`; a caller closing from outside an engine
     /// callback sees that on its next turn.
+    #[cfg(feature = "http")]
     pub fn http_close(&mut self, resource: ResourceId, mode: HttpCloseMode) -> bool {
         let engine = &mut self.state;
         self.executor.run(|| {
@@ -1073,20 +1115,47 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         })
     }
 
+    /// Without `http` no engine can own a transport, so there is nothing to stop.
+    #[cfg(not(feature = "http"))]
+    pub fn http_close(&mut self, _resource: ResourceId, _mode: HttpCloseMode) -> bool {
+        false
+    }
+
     /// Whether any direct server connection is still open.
+    #[cfg(feature = "http")]
     pub fn has_open_server_connections(&self) -> bool {
         self.state.http_server.open_connections() != 0
     }
 
+    /// Without `http` no server connection can be open.
+    #[cfg(not(feature = "http"))]
+    pub fn has_open_server_connections(&self) -> bool {
+        false
+    }
+
     /// How many server connections are open. The boolean above answers the drive's question;
     /// this answers a person's, through the `SIGUSR1` dump.
+    #[cfg(feature = "http")]
     pub fn open_server_connections(&self) -> usize {
         self.state.http_server.open_connections()
     }
 
+    /// Without `http` no server connection can be open.
+    #[cfg(not(feature = "http"))]
+    pub fn open_server_connections(&self) -> usize {
+        0
+    }
+
     /// How many client connections are open, likewise.
+    #[cfg(feature = "http")]
     pub fn open_client_connections(&self) -> usize {
         self.state.http_client.open_connections()
+    }
+
+    /// Without `http` no client connection can be open.
+    #[cfg(not(feature = "http"))]
+    pub fn open_client_connections(&self) -> usize {
+        0
     }
 
     /// The host's completion signal, for a drive that waits outside any borrow of this runtime.
@@ -1148,8 +1217,15 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
 
     /// Requests in flight on direct connections: server responses the language has not
     /// finished, and client requests whose response has not ended.
+    #[cfg(feature = "http")]
     pub fn requests_in_flight(&self) -> usize {
         self.state.http_server.requests_in_flight() + self.state.http_client.requests_in_flight()
+    }
+
+    /// Without `http` no request can be in flight on a direct connection.
+    #[cfg(not(feature = "http"))]
+    pub fn requests_in_flight(&self) -> usize {
+        0
     }
 
     /// A one-line description of the host's pending work, for `KILN_HTTP_TRACE`.
@@ -1281,7 +1357,9 @@ impl<H: RealmHostProvider> RealmState<H> {
         }
         self.lifecycle = RealmRuntimeLifecycle::Closing;
 
+        #[cfg(feature = "http")]
         self.http_server.shutdown();
+        #[cfg(feature = "http")]
         self.http_client.shutdown();
         self.queued_http.clear();
         self.http_agent = HttpAgent::default();
@@ -1342,17 +1420,32 @@ impl<H: RealmHostProvider> RealmState<H> {
     }
 
     /// Whether an HTTP engine owns the transport of `resource`.
+    #[cfg(feature = "http")]
     pub fn http_owns(&self, resource: ResourceId) -> bool {
         self.http_server.is_attached(resource) || self.http_client.is_attached(resource)
+    }
+
+    /// Without `http` no engine can own a transport.
+    #[cfg(not(feature = "http"))]
+    pub fn http_owns(&self, _resource: ResourceId) -> bool {
+        false
     }
 
     /// Whether the HTTP engines can still produce something the language must hear: a
     /// request in flight on either side, or a queued event nobody has drained. A taken
     /// transport is unreferenced by design, so this is what keeps a loop waiting on HTTP.
+    #[cfg(feature = "http")]
     pub fn has_live_http_work(&self) -> bool {
         self.http_server.requests_in_flight() != 0
             || self.http_client.requests_in_flight() != 0
             || self.queued_http.has_events()
+    }
+
+    /// Without `http` no engine can hold a request in flight; only queued events (which
+    /// nothing can queue, since every attach fails) can keep a loop waiting.
+    #[cfg(not(feature = "http"))]
+    pub fn has_live_http_work(&self) -> bool {
+        self.queued_http.has_events()
     }
 
     /// Drain the server events the queued adapter parked for `resource`. A `Closed` here is
@@ -1528,6 +1621,7 @@ impl QueuedHttp {
     }
 }
 
+#[cfg(feature = "http")]
 #[derive(Clone, Copy)]
 enum QueuedRole {
     Server,
@@ -1536,6 +1630,7 @@ enum QueuedRole {
 
 /// The queued adapter: one per connection, converting each engine event into the owned event
 /// the interpreter already consumes and parking it for `take_queued_*_events`.
+#[cfg(feature = "http")]
 struct QueuedDispatch {
     resource: ResourceId,
     role: QueuedRole,
@@ -1561,6 +1656,7 @@ fn unflatten_headers(bytes: &[u8]) -> Vec<(String, String)> {
     headers
 }
 
+#[cfg(feature = "http")]
 impl HttpDispatch for QueuedDispatch {
     fn event(&self, event: &HttpEvent<'_>) -> i32 {
         match self.role {
@@ -1639,6 +1735,7 @@ impl HttpDispatch for QueuedDispatch {
 }
 
 /// `name NUL value NUL` per header: the flattening the engines parse straight into Hyper's map.
+#[cfg(feature = "http")]
 fn flatten_headers(headers: &[(String, String)]) -> Vec<u8> {
     let mut flattened = Vec::with_capacity(
         headers
@@ -1706,11 +1803,27 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
     }
 
     fn start_connection(&mut self, resource: ResourceId, allow_half_close: bool) -> bool {
-        self.server_attach_queued(resource, allow_half_close)
+        #[cfg(feature = "http")]
+        {
+            return self.server_attach_queued(resource, allow_half_close);
+        }
+        #[cfg(not(feature = "http"))]
+        {
+            let _ = (resource, allow_half_close);
+            return false;
+        }
     }
 
     fn close_connection(&mut self, resource: ResourceId, mode: HttpCloseMode) -> bool {
-        self.http_close(resource, mode)
+        #[cfg(feature = "http")]
+        {
+            return self.http_close(resource, mode);
+        }
+        #[cfg(not(feature = "http"))]
+        {
+            let _ = (resource, mode);
+            return false;
+        }
     }
 
     fn take_events(&mut self, resource: ResourceId) -> Vec<RuntimeHttpEvent> {
@@ -1725,13 +1838,21 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
         headers: Vec<(String, String)>,
         high_water_mark: usize,
     ) -> bool {
-        self.state.http_server.start_response(
-            resource,
-            id,
-            status,
-            &flatten_headers(&headers),
-            high_water_mark,
-        )
+        #[cfg(feature = "http")]
+        {
+            return self.state.http_server.start_response(
+                resource,
+                id,
+                status,
+                &flatten_headers(&headers),
+                high_water_mark,
+            );
+        }
+        #[cfg(not(feature = "http"))]
+        {
+            let _ = (resource, id, status, headers, high_water_mark);
+            return false;
+        }
     }
 
     fn write_response(
@@ -1740,7 +1861,15 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
         id: u64,
         data: Vec<u8>,
     ) -> Option<node_stream::WriteDisposition> {
-        self.state.http_server.write_response(resource, id, &data)
+        #[cfg(feature = "http")]
+        {
+            return self.state.http_server.write_response(resource, id, &data);
+        }
+        #[cfg(not(feature = "http"))]
+        {
+            let _ = (resource, id, data);
+            return None;
+        }
     }
 
     fn end_response(
@@ -1749,11 +1878,22 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
         id: u64,
         data: Vec<u8>,
     ) -> Option<node_stream::WriteDisposition> {
-        self.state
-            .http_server
-            .end_response_bytes(resource, id, bytes::Bytes::from(data))
+        #[cfg(feature = "http")]
+        {
+            return self.state.http_server.end_response_bytes(
+                resource,
+                id,
+                bytes::Bytes::from(data),
+            );
+        }
+        #[cfg(not(feature = "http"))]
+        {
+            let _ = (resource, id, data);
+            return None;
+        }
     }
 
+    #[cfg(feature = "http")]
     fn end_response_bytes(
         &mut self,
         resource: ResourceId,
@@ -1766,7 +1906,15 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
     }
 
     fn start_client_connection(&mut self, resource: ResourceId) -> bool {
-        self.client_attach_queued(resource)
+        #[cfg(feature = "http")]
+        {
+            return self.client_attach_queued(resource);
+        }
+        #[cfg(not(feature = "http"))]
+        {
+            let _ = resource;
+            return false;
+        }
     }
 
     fn send_client_request(
@@ -1776,14 +1924,22 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
         id: u64,
         high_water_mark: usize,
     ) -> bool {
-        self.state.http_client.send_request(
-            resource,
-            id,
-            &request.method,
-            &request.target,
-            &request.headers,
-            high_water_mark,
-        )
+        #[cfg(feature = "http")]
+        {
+            return self.state.http_client.send_request(
+                resource,
+                id,
+                &request.method,
+                &request.target,
+                &request.headers,
+                high_water_mark,
+            );
+        }
+        #[cfg(not(feature = "http"))]
+        {
+            let _ = (resource, request, id, high_water_mark);
+            return false;
+        }
     }
 
     fn write_client_request(
@@ -1792,7 +1948,15 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
         id: u64,
         data: Vec<u8>,
     ) -> Option<node_stream::WriteDisposition> {
-        self.state.http_client.write_request(resource, id, &data)
+        #[cfg(feature = "http")]
+        {
+            return self.state.http_client.write_request(resource, id, &data);
+        }
+        #[cfg(not(feature = "http"))]
+        {
+            let _ = (resource, id, data);
+            return None;
+        }
     }
 
     fn end_client_request(
@@ -1801,7 +1965,15 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
         id: u64,
         data: Vec<u8>,
     ) -> Option<node_stream::WriteDisposition> {
-        self.state.http_client.end_request(resource, id, &data)
+        #[cfg(feature = "http")]
+        {
+            return self.state.http_client.end_request(resource, id, &data);
+        }
+        #[cfg(not(feature = "http"))]
+        {
+            let _ = (resource, id, data);
+            return None;
+        }
     }
 
     fn take_client_events(&mut self, resource: ResourceId) -> Vec<RuntimeHttpClientEvent> {

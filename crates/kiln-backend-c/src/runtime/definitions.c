@@ -659,7 +659,11 @@ static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const 
         if (object->shape != NULL) {
             kiln_c99_ensure_dictionary(object);
         }
+        /* See the note at the matching probe in `read.c`: without the HTTP
+         * group no headers object can exist, so this is compiled out. */
+#if KILN_RETAIN_GROUP_NODE_HTTP
         kiln_c99_node_materialize_header(store, key, key_len, NULL);
+#endif
         for (index = 0; index < object->count; ++index) {
             kiln_property property;
             if (!kiln_c99_same_key(&object->properties[index], key, key_len)) {

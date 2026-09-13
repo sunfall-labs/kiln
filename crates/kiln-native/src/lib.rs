@@ -117,6 +117,51 @@ fn prelude_object_options(base: Digest, profile: NativeProfile) -> Digest {
     Digest::hash(&identity)
 }
 
+/// Prelude object options folded with a dispatch-group mask.
+///
+/// A full mask returns today's identity byte-for-byte: programs that retain
+/// every group reuse every cached prelude object. Any dropped group extends
+/// the identity so masked preludes never alias unmasked ones.
+fn prelude_object_options_masked(base: Digest, profile: NativeProfile, mask: u32) -> Digest {
+    use kiln_backend_c::facts::{CORE_METHOD_GROUPS, PRUNABLE_METHOD_GROUPS};
+    let unmasked = prelude_object_options(base, profile);
+    if mask == CORE_METHOD_GROUPS | PRUNABLE_METHOD_GROUPS {
+        return unmasked;
+    }
+    let mut identity = Vec::with_capacity(unmasked.as_bytes().len() + std::mem::size_of::<u32>());
+    identity.extend_from_slice(unmasked.as_bytes());
+    identity.extend_from_slice(&mask.to_le_bytes());
+    Digest::hash(&identity)
+}
+
+/// `-D` flags compiling dispatch groups out of the prelude.
+///
+/// One `-DKILN_RETAIN_GROUP_<name>=0` per dropped prunable group; a full mask
+/// yields no flags, so fully retained builds compile exactly today's prelude.
+fn prelude_group_defines(mask: u32) -> Vec<std::ffi::OsString> {
+    use kiln_backend_c::facts::method_groups as groups;
+    const FLAGS: [(u32, &str); 10] = [
+        (groups::NODE_EVENT, "KILN_RETAIN_GROUP_NODE_EVENT"),
+        (groups::NODE_NET, "KILN_RETAIN_GROUP_NODE_NET"),
+        (groups::NODE_SERVER, "KILN_RETAIN_GROUP_NODE_SERVER"),
+        (groups::NODE_HTTP, "KILN_RETAIN_GROUP_NODE_HTTP"),
+        (groups::NODE_RESPONSE, "KILN_RETAIN_GROUP_NODE_RESPONSE"),
+        (groups::BUFFER, "KILN_RETAIN_GROUP_BUFFER"),
+        (groups::NODE_UTIL, "KILN_RETAIN_GROUP_NODE_UTIL"),
+        (
+            groups::NODE_DIAGNOSTICS,
+            "KILN_RETAIN_GROUP_NODE_DIAGNOSTICS",
+        ),
+        (groups::NODE_STREAM, "KILN_RETAIN_GROUP_NODE_STREAM"),
+        (groups::NODE_PATH, "KILN_RETAIN_GROUP_NODE_PATH"),
+    ];
+    FLAGS
+        .iter()
+        .filter(|(bit, _)| mask & bit == 0)
+        .map(|(_, name)| std::ffi::OsString::from(format!("-D{name}=0")))
+        .collect()
+}
+
 fn prelude_header_digest() -> Digest {
     Digest::hash(runtime_prelude_header().as_bytes())
 }
@@ -397,7 +442,30 @@ impl NativeBuilder {
         &self,
         target: &str,
     ) -> Result<(Arc<[u8]>, Digest, bool), NativeError> {
-        let provider = self.number_provider()?;
+        let (archive, digest, hit, _) = self.cached_number_provider_with_http(target, true)?;
+        Ok((archive, digest, hit))
+    }
+
+    /// Resolve the provider archive for a program that needs the HTTP engines only when
+    /// `want_http` is set, caching the archive bytes under a key that folds in the loaded
+    /// variant so full and slim archives never alias. Returns the archive, its digest, the
+    /// artifact-cache hit flag, and the linked variant.
+    fn cached_number_provider_with_http(
+        &self,
+        target: &str,
+        want_http: bool,
+    ) -> Result<(Arc<[u8]>, Digest, bool, bool), NativeError> {
+        let provider = if want_http {
+            self.number_provider()?
+        } else {
+            // The shared slot caches the full archive; a slim resolution is per-build so the
+            // two variants cannot alias there either.
+            number_provider::discover_with_http(self.toolchain.identity(), false).map_err(
+                |error| NativeError::NumberProvider {
+                    message: error.to_string(),
+                },
+            )?
+        };
         let provider_key = key(
             ArtifactKind::RuntimeLibrary,
             &provider.identity,
@@ -407,23 +475,74 @@ impl NativeBuilder {
             CacheProfile::Release,
             Digest::hash(
                 format!(
-                    "schema={PROVIDER_SCHEMA_VERSION};abi={PROVIDER_ABI_VERSION};target={};pic=true;linkage=static",
-                    provider.rust_target
+                    "schema={PROVIDER_SCHEMA_VERSION};abi={PROVIDER_ABI_VERSION};target={};pic=true;linkage=static;http={}",
+                    provider.rust_target,
+                    provider.http,
                 )
                 .as_bytes(),
             ),
             [provider.archive_digest],
         );
+        let http = provider.http;
         match self.lookup_digest(&provider_key)? {
             Some((digest, _size)) => {
                 debug_assert_eq!(digest, provider.archive_digest);
-                Ok((Arc::clone(&provider.archive), digest, true))
+                Ok((Arc::clone(&provider.archive), digest, true, http))
             }
             None => {
                 let stored = self.cache.put(&provider_key, &provider.archive)?;
-                Ok((Arc::clone(&provider.archive), stored.digest, false))
+                Ok((Arc::clone(&provider.archive), stored.digest, false, http))
             }
         }
+    }
+
+    /// Conservative HTTP-engine demand for one module graph: true on any doubt.
+    ///
+    /// The slim provider archive omits the Hyper-backed HTTP engines (linkable stubs keep
+    /// the export list identical), so any program that can reach them must link the full
+    /// archive. Reachability is undecidable for dynamic `import()` targets and for
+    /// CommonJS `require()` with a non-literal argument (which leaves no graph edge at
+    /// all), so those select the full archive, as does any `node:ffi` usage.
+    fn graph_wants_http_provider(graph: &ModuleGraph) -> bool {
+        use kiln_module_resolver::NodeBuiltin;
+        fn needs_http_engine(specifier: &str) -> bool {
+            matches!(
+                NodeBuiltin::parse(specifier),
+                Some(
+                    NodeBuiltin::Http | NodeBuiltin::Https | NodeBuiltin::Http2 | NodeBuiltin::Ffi
+                )
+            )
+        }
+        graph.modules().any(|node| {
+            if let ModuleSource::NodeBuiltin(builtin) = node.source
+                && matches!(
+                    builtin,
+                    NodeBuiltin::Http | NodeBuiltin::Https | NodeBuiltin::Http2 | NodeBuiltin::Ffi
+                )
+            {
+                return true;
+            }
+            // Static specifier text: ESM imports, plus CJS literal `require()` calls, which
+            // the graph records as dependencies rather than imports.
+            if node
+                .program
+                .imports
+                .iter()
+                .any(|import| needs_http_engine(&import.source))
+                || node
+                    .dependencies
+                    .iter()
+                    .any(|dependency| needs_http_engine(&dependency.specifier))
+            {
+                return true;
+            }
+            if !node.program.link_facts.dynamic_imports.is_empty()
+                || node.program.program.has_dynamic_import()
+            {
+                return true;
+            }
+            matches!(node.source, ModuleSource::CommonJs)
+        })
     }
 
     /// Build one bytecode module and its separate host runtime into an executable.
@@ -457,7 +576,10 @@ impl NativeBuilder {
         let runtime_abi = runtime_abi_identity();
         let target = target_identity(&identity);
         let compiler = compiler_identity(&identity);
-        let (number_provider, number_provider_digest, _) = self.cached_number_provider(&target)?;
+        // The single-module API sees only bytecode, not the import table, so a static
+        // `node:http` use is invisible here: stay on the full archive.
+        let (number_provider, number_provider_digest, _, number_provider_http) =
+            self.cached_number_provider_with_http(&target, true)?;
 
         let module_source_key = key(
             ArtifactKind::GeneratedC,
@@ -600,6 +722,7 @@ impl NativeBuilder {
                     cache_hits: CacheHits {
                         generated_c: generated_c_hit,
                         application_object: true,
+                        prelude_object: true,
                         runtime_object: true,
                         launcher_object: true,
                         executable: true,
@@ -607,6 +730,7 @@ impl NativeBuilder {
                     sizes: ArtifactSizes {
                         generated_c: module_source.len() as u64,
                         application_object: app_info.1,
+                        prelude_object: prelude_info.1,
                         runtime_object: runtime_info.1,
                         launcher_object: launcher_info.1,
                         executable: artifact.bytes.len() as u64,
@@ -626,6 +750,7 @@ impl NativeBuilder {
                     }],
                     runtime_generated_c_cache_hit,
                     launcher_generated_c_cache_hit,
+                    number_provider_http,
                 });
             }
         }
@@ -772,6 +897,7 @@ impl NativeBuilder {
             cache_hits: CacheHits {
                 generated_c: generated_c_hit,
                 application_object: application_hit,
+                prelude_object: prelude_hit,
                 runtime_object: runtime_hit,
                 launcher_object: launcher_hit,
                 executable: executable_hit,
@@ -779,6 +905,7 @@ impl NativeBuilder {
             sizes: ArtifactSizes {
                 generated_c: module_source.len() as u64,
                 application_object: application.len() as u64,
+                prelude_object: prelude_object.len() as u64,
                 runtime_object: runtime_object.len() as u64,
                 launcher_object: launcher_object.len() as u64,
                 executable: executable.len() as u64,
@@ -798,6 +925,7 @@ impl NativeBuilder {
             }],
             runtime_generated_c_cache_hit,
             launcher_generated_c_cache_hit,
+            number_provider_http,
         })
     }
 
@@ -1693,6 +1821,22 @@ impl NativeBuilder {
         let module_abi = module_abi_identity();
         let target = target_identity(&identity);
         let selected = native_executable_graph(graph, options.profile)?;
+        // Dispatch-group mask for the prelude: same closed-world selection,
+        // so the `-D` flags below only ever remove what nothing retained can
+        // reach. Computed once; the explain path recomputes it out-of-band.
+        let group_mask = {
+            let demand = ExecutableDemand {
+                live: selected
+                    .modules
+                    .iter()
+                    .map(|node| node.path.clone())
+                    .collect(),
+                slots: selected.live_export_slots.clone(),
+            };
+            let members =
+                kiln_backend_c::facts::analyze_demanded_members(graph, &demand.live, &demand.slots);
+            retained_method_groups(graph, &demand, &members)
+        };
         let nodes = selected.modules;
         let emitted_modules = emit_indexed(nodes.len(), "graph module emission", |index| {
             let node = nodes[index];
@@ -1768,7 +1912,9 @@ impl NativeBuilder {
         let profile = options.profile;
         let runtime_abi = runtime_abi_identity();
         let compiler = compiler_identity(&identity);
-        let (number_provider, number_provider_digest, _) = self.cached_number_provider(&target)?;
+        let want_http = Self::graph_wants_http_provider(graph);
+        let (number_provider, number_provider_digest, _, number_provider_http) =
+            self.cached_number_provider_with_http(&target, want_http)?;
 
         let mut module_sources = modules
             .iter()
@@ -1865,6 +2011,12 @@ impl NativeBuilder {
         if profile == NativeProfile::Release {
             configure_release_prelude_compile(&mut prelude_compile_options);
         }
+        // Dispatch groups the program cannot reach compile out of the prelude
+        // (see the `#if KILN_RETAIN_GROUP_*` guards). A full mask yields no
+        // flags: fully retained builds compile exactly today's prelude.
+        prelude_compile_options
+            .extra_args
+            .extend(prelude_group_defines(group_mask));
         let module_compile_options = modules
             .iter()
             .map(|(_, module)| module.generic_only)
@@ -1921,7 +2073,7 @@ impl NativeBuilder {
             &runtime_abi,
             &target,
             profile.cache(),
-            prelude_object_options(object_options, profile),
+            prelude_object_options_masked(object_options, profile, group_mask),
             [prelude_source_digest],
         );
         let runtime_key = key(
@@ -2004,6 +2156,7 @@ impl NativeBuilder {
                     cache_hits: CacheHits {
                         generated_c: module_sources.iter().all(|(_, _, hit)| *hit),
                         application_object: true,
+                        prelude_object: true,
                         runtime_object: true,
                         launcher_object: true,
                         executable: true,
@@ -2014,6 +2167,7 @@ impl NativeBuilder {
                             .map(|(source, _, _)| source.len() as u64)
                             .sum(),
                         application_object: module_object_infos.iter().map(|(_, size)| *size).sum(),
+                        prelude_object: prelude_info.1,
                         runtime_object: runtime_info.1,
                         launcher_object: launcher_info.1,
                         executable: artifact.bytes.len() as u64,
@@ -2027,6 +2181,7 @@ impl NativeBuilder {
                     module_artifacts,
                     runtime_generated_c_cache_hit,
                     launcher_generated_c_cache_hit,
+                    number_provider_http,
                 });
             }
         }
@@ -2203,6 +2358,7 @@ impl NativeBuilder {
             cache_hits: CacheHits {
                 generated_c: module_sources.iter().all(|(_, _, hit)| *hit),
                 application_object: module_objects.iter().all(|(_, _, hit)| *hit),
+                prelude_object: prelude_hit,
                 runtime_object: runtime_hit,
                 launcher_object: launcher_hit,
                 executable: executable_hit,
@@ -2216,6 +2372,7 @@ impl NativeBuilder {
                     .iter()
                     .map(|(bytes, _, _)| bytes.len() as u64)
                     .sum(),
+                prelude_object: prelude_object.len() as u64,
                 runtime_object: runtime_object.len() as u64,
                 launcher_object: launcher_object.len() as u64,
                 executable: executable.len() as u64,
@@ -2229,6 +2386,7 @@ impl NativeBuilder {
             module_artifacts,
             runtime_generated_c_cache_hit,
             launcher_generated_c_cache_hit,
+            number_provider_http,
         })
     }
 
@@ -2328,6 +2486,26 @@ impl NativeBuilder {
         let identities = self
             .live_cache_identities()
             .expect("a build that constructs cache keys can enumerate its live identities");
+        if identities.contains(&key.identity_digest()) {
+            return;
+        }
+        // The slim provider archive is the same key family as the full one: its identity
+        // names `;http=false;` where the catalogued full identity names `;http=true;`, with
+        // a different archive digest for the smaller bytes. Accept the slim key when its
+        // full twin is catalogued, so the catalogue keeps one entry per family per variant
+        // set rather than one per build configuration.
+        if key.backend == Backend::Custom("rust-native-number-provider".to_owned())
+            && key.compiler_version.contains(";http=false;")
+        {
+            let mut twin = key.clone();
+            twin.compiler_version = self
+                .number_provider()
+                .expect("a build that links the slim provider can resolve its full twin")
+                .identity;
+            if identities.contains(&twin.identity_digest()) {
+                return;
+            }
+        }
         assert!(
             identities.contains(&key.identity_digest()),
             "native cache identity catalogue omitted key family: {key:?}"
@@ -4278,6 +4456,198 @@ fn native_executable_graph(
         inactive_commonjs_dependencies,
         partial_namespace_members,
     })
+}
+
+/// Closed-world demand for an executable graph: which modules are live and
+/// which export slots each one must keep. Computed once by
+/// [`executable_demand`] and shared by size attribution and member analysis
+/// so both read the same selection the build emits.
+#[derive(Debug, Clone, Default)]
+pub struct ExecutableDemand {
+    pub live: BTreeSet<PathBuf>,
+    pub slots: BTreeMap<PathBuf, BTreeSet<u32>>,
+}
+
+/// Run the same closed-world selection as [`NativeBuilder::build_graph`]
+/// without emitting or compiling anything.
+pub fn executable_demand(
+    graph: &ModuleGraph,
+    profile: NativeProfile,
+) -> Result<ExecutableDemand, NativeError> {
+    let selected = native_executable_graph(graph, profile)?;
+    Ok(ExecutableDemand {
+        live: selected
+            .modules
+            .iter()
+            .map(|node| node.path.clone())
+            .collect(),
+        slots: selected.live_export_slots,
+    })
+}
+
+/// Method dispatch groups retained by one executable, as a bitmask over
+/// `kiln_backend_c::facts::method_groups`.
+///
+/// Core groups always; node-ish groups only on demand. A group is implicated
+/// by an imported node builtin (conservative supersets: an HTTP server also
+/// needs net/stream/event implementations), by the `Buffer`/`Process` globals
+/// behind retained `LoadBuiltin`s, or by computed access (which can resolve
+/// through `process` and `globalThis`). Direct eval, `new Function`,
+/// indirect `eval`, and dynamic imports keep the full table: their targets
+/// are unknowable. Successful builds resolve every static require, so CJS
+/// literal requires are already covered by the graph edges below.
+pub fn retained_method_groups(
+    graph: &ModuleGraph,
+    demand: &ExecutableDemand,
+    members: &kiln_backend_c::facts::DemandedMembers,
+) -> u32 {
+    use kiln_backend_c::facts::{
+        CORE_METHOD_GROUPS, PRUNABLE_METHOD_GROUPS, method_groups as groups,
+    };
+    use kiln_module_resolver::NodeBuiltin;
+
+    const FULL: u32 = CORE_METHOD_GROUPS | PRUNABLE_METHOD_GROUPS;
+
+    // Builtin globals with group-backed methods behind them.
+    let uses_buffer = members
+        .builtins
+        .iter()
+        .any(|name| name.as_str() == "Buffer");
+    // `process.stdout` is a stream and `process.on` an emitter: touching the
+    // `process` global can reach both implementations without any import.
+    let uses_process = members
+        .builtins
+        .iter()
+        .any(|name| name.as_str() == "Process");
+    // `process[k]()` and `globalThis[k]()` dynamics resolve through process
+    // members (events/streams) and globals (`Buffer`); user objects implicate
+    // nothing the router serves.
+    let dynamic = members.has_computed_access;
+    // Indirect `eval` runs arbitrary code.
+    let indirect_eval = members.builtins.iter().any(|name| name.as_str() == "Eval");
+
+    // Imported node builtins, from resolved graph edges: ESM imports and CJS
+    // literal requires alike. Unknown `node:*` specifiers bail: failing closed
+    // keeps a program working.
+    fn builtin_groups(builtin: &NodeBuiltin) -> Option<u32> {
+        use NodeBuiltin::*;
+        Some(match builtin {
+            Http | Https | Http2 => {
+                groups::NODE_HTTP
+                    | groups::NODE_RESPONSE
+                    | groups::NODE_SERVER
+                    | groups::NODE_NET
+                    | groups::NODE_STREAM
+                    | groups::NODE_EVENT
+            }
+            Net => {
+                groups::NODE_NET | groups::NODE_SERVER | groups::NODE_STREAM | groups::NODE_EVENT
+            }
+            Events => groups::NODE_EVENT,
+            Stream => groups::NODE_STREAM | groups::NODE_EVENT,
+            Buffer => groups::BUFFER,
+            Path => groups::NODE_PATH,
+            Util => groups::NODE_UTIL,
+            DiagnosticsChannel => groups::NODE_DIAGNOSTICS,
+            Fs | FsPromises => groups::NODE_STREAM | groups::NODE_EVENT,
+            // Audited `Direct`-only (see phase1-PRD): no groups implicated.
+            Assert | Console | Crypto | Dns | Module | Os | Tty | Zlib | StringDecoder
+            | QueryString | Url | WorkerThreads | PerfHooks | AsyncHooks => 0,
+            // `dlopen` hands out raw pointers: anything is reachable.
+            Ffi => return None,
+        })
+    }
+
+    let mut mask = CORE_METHOD_GROUPS;
+    if uses_buffer || dynamic {
+        mask |= groups::BUFFER;
+    }
+    if uses_process || dynamic {
+        mask |= groups::NODE_EVENT | groups::NODE_STREAM;
+    }
+    for node in graph.modules() {
+        if !demand.live.contains(&node.path) {
+            continue;
+        }
+        // Dynamic import targets and `new Function` bodies are unknowable.
+        if !node.program.link_facts.dynamic_imports.is_empty()
+            || node.program.program.has_dynamic_import()
+            || node.program.link_facts.new_function
+            || indirect_eval
+        {
+            return FULL;
+        }
+        for dependency in &node.dependencies {
+            let target = graph.module(&dependency.target);
+            match target.map(|module| &module.source) {
+                Some(ModuleSource::NodeBuiltin(builtin)) => match builtin_groups(builtin) {
+                    Some(groups) => mask |= groups,
+                    None => return FULL,
+                },
+                // An explicit `node:` specifier that resolved anywhere else is
+                // unexpected; failing closed keeps the program working.
+                _ if dependency.specifier.starts_with("node:") => return FULL,
+                _ => {}
+            }
+        }
+    }
+    // The members walk already bails the open world (direct eval, dynamic
+    // import) into `has_open_world`; `new Function` and indirect eval are
+    // checked above, so reaching here is closed.
+    if members.has_open_world {
+        return FULL;
+    }
+    mask
+}
+
+/// Per-module retained-size attribution for an executable graph.
+///
+/// Runs the same closed-world selection as [`NativeBuilder::build_graph`]
+/// without emitting or compiling anything, so `build --explain` can show
+/// where bytes go. The demand applied per module mirrors emission exactly:
+/// `Source`/`CommonJs` modules keep their demanded export slots, every other
+/// module is retained whole. Out-of-band: failures here must never fail a
+/// build, so callers skip the section on error rather than propagating it.
+pub fn executable_module_sizes(
+    graph: &ModuleGraph,
+    profile: NativeProfile,
+) -> Result<Vec<kiln_backend_c::facts::ModuleSizeFacts>, NativeError> {
+    executable_module_sizes_from_demand(graph, &executable_demand(graph, profile)?)
+}
+
+/// [`executable_module_sizes`] over an already-computed [`executable_demand`],
+/// so callers needing both sizes and demand run the selection once.
+pub fn executable_module_sizes_from_demand(
+    graph: &ModuleGraph,
+    demand: &ExecutableDemand,
+) -> Result<Vec<kiln_backend_c::facts::ModuleSizeFacts>, NativeError> {
+    use kiln_backend_c::facts::ModuleSizeFacts;
+
+    let mut sizes = Vec::with_capacity(graph.module_count());
+    for node in graph.modules() {
+        let (total_instructions, total_functions) =
+            kiln_backend_c::retained_module_size(&node.program, None);
+        let is_live = demand.live.contains(&node.path);
+        let (retained_instructions, retained_functions) = if !is_live {
+            (0, 0)
+        } else if matches!(
+            node.source,
+            kiln_module_graph::ModuleSource::Source | kiln_module_graph::ModuleSource::CommonJs
+        ) {
+            kiln_backend_c::retained_module_size(&node.program, demand.slots.get(&node.path))
+        } else {
+            (total_instructions, total_functions)
+        };
+        sizes.push(ModuleSizeFacts {
+            path: node.path.display().to_string(),
+            live: is_live,
+            total_instructions,
+            total_functions,
+            retained_instructions,
+            retained_functions,
+        });
+    }
+    Ok(sizes)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

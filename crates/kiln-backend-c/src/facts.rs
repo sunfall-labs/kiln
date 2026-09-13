@@ -8,10 +8,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use kiln_ir::{Constant, FunctionProto, Instruction, Program};
-use kiln_module_graph::{ClosedWorldVerdict, ModuleGraph};
+use kiln_module_graph::{ClosedWorldVerdict, ModuleGraph, ModuleSource};
 use serde::{Deserialize, Serialize};
 
 use crate::graph::{FunctionGraph, GraphOp, build_function_graph};
@@ -76,6 +76,288 @@ pub struct ProgramFacts {
     pub modules: Vec<ModuleFactsReport>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub handlers: Vec<HandlerFacts>,
+}
+
+/// Retained-size attribution for one module in a linked executable.
+///
+/// `total_*` counts every instruction/function in the module; `retained_*`
+/// counts what closed-world liveness keeps under the build's export demand.
+/// A module the executable drops entirely is reported with `live: false` and
+/// zero retained counts. Paths are display strings, like [`ModuleFactsReport`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModuleSizeFacts {
+    pub path: String,
+    pub live: bool,
+    pub total_instructions: usize,
+    pub total_functions: usize,
+    pub retained_instructions: usize,
+    pub retained_functions: usize,
+}
+
+/// Format per-module retained sizes as a `kiln build --explain` section.
+///
+/// Sorted by retained instructions descending (then path) so the largest
+/// contributors read first regardless of the caller's order.
+pub fn format_module_sizes(sizes: &[ModuleSizeFacts]) -> String {
+    let mut ordered: Vec<&ModuleSizeFacts> = sizes.iter().collect();
+    ordered.sort_by(|a, b| {
+        b.retained_instructions
+            .cmp(&a.retained_instructions)
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    let mut out = String::new();
+    out.push_str("\n=== Module Sizes (retained / total IR) ===\n");
+    let live = ordered.iter().filter(|size| size.live).count();
+    let dropped = ordered.len() - live;
+    let (retained_instructions, total_instructions, retained_functions, total_functions) =
+        ordered.iter().fold((0, 0, 0, 0), |sums, size| {
+            (
+                sums.0 + size.retained_instructions,
+                sums.1 + size.total_instructions,
+                sums.2 + size.retained_functions,
+                sums.3 + size.total_functions,
+            )
+        });
+    let _ = writeln!(
+        out,
+        "Summary: {live} live modules, {dropped} dropped, {retained_instructions}/{total_instructions} instructions, {retained_functions}/{total_functions} functions retained"
+    );
+    for size in ordered {
+        if size.live {
+            let _ = writeln!(
+                out,
+                "  {:>8} instr {:>4} fns  {}",
+                format!("{}/{}", size.retained_instructions, size.total_instructions),
+                format!("{}/{}", size.retained_functions, size.total_functions),
+                size.path
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "  dropped ({}/{} instr, {}/{} fns)  {}",
+                size.retained_instructions,
+                size.total_instructions,
+                size.retained_functions,
+                size.total_functions,
+                size.path
+            );
+        }
+    }
+    out
+}
+
+/// Static member-name and builtin demand read off retained IR.
+///
+/// `names` holds every member name in a retained static position (`CallMethod`,
+/// `GetProperty`, setters): the exact set a demand-driven method router would
+/// serve. `builtins` holds retained `LoadBuiltin` variants by debug name.
+/// Computed access (`x[k]`) and open-world needs (direct eval, dynamic import)
+/// name nothing and are reported as flags: either forces the router to keep
+/// its full table.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DemandedMembers {
+    pub names: BTreeSet<String>,
+    pub builtins: BTreeSet<String>,
+    pub has_computed_access: bool,
+    pub has_open_world: bool,
+}
+
+/// Read the demand in retained code: for every live module, scan its top-level
+/// body and every function the closed-world analysis retains, mirroring the
+/// demand emission applies (`Source`/`CommonJs` modules keep demanded slots,
+/// every other module is retained whole; dropped modules are skipped).
+pub fn analyze_demanded_members(
+    graph: &ModuleGraph,
+    live: &BTreeSet<PathBuf>,
+    demands: &BTreeMap<PathBuf, BTreeSet<u32>>,
+) -> DemandedMembers {
+    let mut demanded = DemandedMembers::default();
+    for node in graph.modules() {
+        if !live.contains(&node.path) {
+            continue;
+        }
+        let module = &node.program;
+        let program = &module.program;
+        demanded.has_open_world |= program.has_direct_eval() || program.has_dynamic_import();
+        let is_closed_world = matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs);
+        // Retained function bodies, by index into `program.functions`. Top-level
+        // code is always retained: it runs when the module evaluates.
+        let reachable: Option<HashSet<usize>> = is_closed_world.then(|| {
+            crate::closed_world_function_liveness(
+                program,
+                &demands.get(&node.path).cloned().unwrap_or_default(),
+                module.link_facts.direct_eval,
+                &module.link_facts.removable_declarations,
+            )
+            .0
+        });
+        let name_at = |index: u32| match program.constants.get(index as usize) {
+            Some(Constant::String(name)) => Some(name.clone()),
+            _ => None,
+        };
+        let mut scan = |code: &[Instruction]| {
+            for instruction in code {
+                match instruction {
+                    Instruction::LoadBuiltin(builtin) => {
+                        demanded.builtins.insert(format!("{builtin:?}"));
+                    }
+                    Instruction::CallMethod { name, .. } => {
+                        if let Some(name) = name_at(*name) {
+                            demanded.names.insert(name);
+                        }
+                    }
+                    Instruction::GetProperty(index) | Instruction::SetProperty(index) => {
+                        if let Some(name) = name_at(*index) {
+                            demanded.names.insert(name);
+                        }
+                    }
+                    Instruction::SetPropertyStrict { name, .. } => {
+                        if let Some(name) = name_at(*name) {
+                            demanded.names.insert(name);
+                        }
+                    }
+                    Instruction::GetComputed
+                    | Instruction::CallComputed { .. }
+                    | Instruction::SetComputed
+                    | Instruction::SetComputedStrict { .. } => {
+                        demanded.has_computed_access = true;
+                    }
+                    _ => {}
+                }
+            }
+        };
+        scan(&program.code);
+        for (index, function) in program.functions.iter().enumerate() {
+            if reachable.as_ref().is_none_or(|set| set.contains(&index)) {
+                scan(&function.code);
+            }
+        }
+    }
+    demanded
+}
+
+/// Format member-name demand as a `kiln build --explain` section.
+pub fn format_demanded_members(demanded: &DemandedMembers) -> String {
+    let mut out = String::new();
+    out.push_str("\n=== Demanded Members (retained IR) ===\n");
+    let _ = writeln!(
+        out,
+        "Summary: {} distinct names, {} builtins, computed access: {}, open world: {}",
+        demanded.names.len(),
+        demanded.builtins.len(),
+        demanded.has_computed_access,
+        demanded.has_open_world
+    );
+    if !demanded.builtins.is_empty() {
+        out.push_str("Builtins:\n");
+        for builtin in &demanded.builtins {
+            let _ = writeln!(out, "  {builtin}");
+        }
+    }
+    if !demanded.names.is_empty() {
+        out.push_str("Names:\n");
+        for name in &demanded.names {
+            let _ = writeln!(out, "  {name}");
+        }
+    }
+    out
+}
+
+/// Method dispatch group bits for the demand-driven prelude router.
+///
+/// Values mirror the `KILN_C99_GROUP_*` defines in `prelude.rs` exactly; the
+/// `method_registry_covers_every_group` test fails if the C table ever uses a
+/// bit this module does not classify, forcing the new group into either the
+/// always-core set or the prunable set.
+pub mod method_groups {
+    pub const DIRECT: u32 = 1;
+    pub const ARRAY_LOOKUP: u32 = 2;
+    pub const STRING_DISPATCH: u32 = 4;
+    pub const GENERIC: u32 = 8;
+    pub const TEMPORAL: u32 = 16;
+    pub const TEMPORAL_FROM: u32 = 32;
+    pub const TEMPORAL_COMPARE: u32 = 64;
+    pub const TEMPORAL_NOW_READ: u32 = 128;
+    pub const TEMPORAL_OP: u32 = 256;
+    pub const DATE_SETTER: u32 = 512;
+    pub const NODE_EVENT: u32 = 1024;
+    pub const NODE_NET: u32 = 2048;
+    pub const NODE_SERVER: u32 = 4096;
+    pub const NODE_HTTP: u32 = 8192;
+    pub const NODE_RESPONSE: u32 = 16384;
+    pub const BUFFER: u32 = 32768;
+    pub const NODE_UTIL: u32 = 65536;
+    pub const NODE_DIAGNOSTICS: u32 = 131072;
+    pub const NODE_STREAM: u32 = 262144;
+    pub const NODE_PATH: u32 = 524288;
+    pub const MATH_NUMBER: u32 = 1048576;
+}
+
+/// Groups the router always retains: core dispatch plus Temporal, whose use
+/// is invisible to import signals (a global namespace, not a builtin).
+pub const CORE_METHOD_GROUPS: u32 = method_groups::DIRECT
+    | method_groups::ARRAY_LOOKUP
+    | method_groups::STRING_DISPATCH
+    | method_groups::GENERIC
+    | method_groups::TEMPORAL
+    | method_groups::TEMPORAL_FROM
+    | method_groups::TEMPORAL_COMPARE
+    | method_groups::TEMPORAL_NOW_READ
+    | method_groups::TEMPORAL_OP
+    | method_groups::DATE_SETTER
+    | method_groups::MATH_NUMBER;
+
+/// Groups the router may drop when no demand implicates them.
+pub const PRUNABLE_METHOD_GROUPS: u32 = method_groups::NODE_EVENT
+    | method_groups::NODE_NET
+    | method_groups::NODE_SERVER
+    | method_groups::NODE_HTTP
+    | method_groups::NODE_RESPONSE
+    | method_groups::BUFFER
+    | method_groups::NODE_UTIL
+    | method_groups::NODE_DIAGNOSTICS
+    | method_groups::NODE_STREAM
+    | method_groups::NODE_PATH;
+
+/// Human names for a group mask, in canonical dispatch order.
+pub fn method_group_names(mask: u32) -> Vec<&'static str> {
+    const ALL: [(u32, &str); 21] = [
+        (method_groups::DIRECT, "Direct"),
+        (method_groups::ARRAY_LOOKUP, "ArrayLookup"),
+        (method_groups::STRING_DISPATCH, "StringDispatch"),
+        (method_groups::GENERIC, "Generic"),
+        (method_groups::TEMPORAL, "Temporal"),
+        (method_groups::TEMPORAL_FROM, "TemporalFrom"),
+        (method_groups::TEMPORAL_COMPARE, "TemporalCompare"),
+        (method_groups::TEMPORAL_NOW_READ, "TemporalNowRead"),
+        (method_groups::TEMPORAL_OP, "TemporalOp"),
+        (method_groups::DATE_SETTER, "DateSetter"),
+        (method_groups::NODE_EVENT, "NodeEvent"),
+        (method_groups::NODE_NET, "NodeNet"),
+        (method_groups::NODE_SERVER, "NodeServer"),
+        (method_groups::NODE_HTTP, "NodeHttp"),
+        (method_groups::NODE_RESPONSE, "NodeResponse"),
+        (method_groups::BUFFER, "Buffer"),
+        (method_groups::NODE_UTIL, "NodeUtil"),
+        (method_groups::NODE_DIAGNOSTICS, "NodeDiagnostics"),
+        (method_groups::NODE_STREAM, "NodeStream"),
+        (method_groups::NODE_PATH, "NodePath"),
+        (method_groups::MATH_NUMBER, "MathNumber"),
+    ];
+    ALL.into_iter()
+        .filter(|(bit, _)| mask & bit != 0)
+        .map(|(_, name)| name)
+        .collect()
+}
+
+/// Format a retained dispatch-group mask as a `kiln build --explain` section.
+pub fn format_retained_groups(mask: u32) -> String {
+    let mut out = String::new();
+    out.push_str("Retained dispatch groups:\n");
+    for name in method_group_names(mask) {
+        let _ = writeln!(out, "  {name}");
+    }
+    out
 }
 
 impl ProgramFacts {
@@ -1039,6 +1321,84 @@ mod tests {
             FactsBaseline::from_json_str(&json_str).expect("deserializes from json string");
         assert_eq!(baseline, loaded);
         assert!(baseline.compare(&loaded).is_empty());
+    }
+
+    #[test]
+    fn module_sizes_format_sorts_and_marks_dropped() {
+        let sizes = vec![
+            ModuleSizeFacts {
+                path: "small.mjs".to_string(),
+                live: true,
+                total_instructions: 10,
+                total_functions: 1,
+                retained_instructions: 10,
+                retained_functions: 1,
+            },
+            ModuleSizeFacts {
+                path: "big.mjs".to_string(),
+                live: true,
+                total_instructions: 100,
+                total_functions: 5,
+                retained_instructions: 60,
+                retained_functions: 3,
+            },
+            ModuleSizeFacts {
+                path: "dropped.mjs".to_string(),
+                live: false,
+                total_instructions: 40,
+                total_functions: 2,
+                retained_instructions: 0,
+                retained_functions: 0,
+            },
+        ];
+        let text = format_module_sizes(&sizes);
+        assert!(text.contains("Module Sizes"), "{text}");
+        assert!(text.contains("2 live modules, 1 dropped"), "{text}");
+        assert!(text.contains("70/150 instructions"), "{text}");
+        assert!(text.contains("4/8 functions"), "{text}");
+        let big = text.find("big.mjs").expect("big module listed");
+        let small = text.find("small.mjs").expect("small module listed");
+        assert!(big < small, "largest contributor reads first:\n{text}");
+        assert!(
+            text.contains("dropped (0/40 instr, 0/2 fns)  dropped.mjs"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn demanded_members_format_reports_flags() {
+        let demanded = DemandedMembers {
+            names: BTreeSet::from(["log".to_string(), "push".to_string()]),
+            builtins: BTreeSet::from(["SetTimeout".to_string()]),
+            has_computed_access: true,
+            has_open_world: false,
+        };
+        let text = format_demanded_members(&demanded);
+        assert!(text.contains("Demanded Members"), "{text}");
+        assert!(text.contains("2 distinct names, 1 builtins"), "{text}");
+        assert!(text.contains("computed access: true"), "{text}");
+        assert!(text.contains("open world: false"), "{text}");
+        assert!(text.contains("  log"), "{text}");
+        assert!(text.contains("  SetTimeout"), "{text}");
+    }
+
+    #[test]
+    fn method_registry_covers_every_group() {
+        let mut used = 0u32;
+        for method in crate::prelude::METHOD_IDS {
+            used |= method.groups;
+        }
+        let known = CORE_METHOD_GROUPS | PRUNABLE_METHOD_GROUPS;
+        assert_eq!(
+            used & !known,
+            0,
+            "method table uses group bits this module does not classify: {used:#x}"
+        );
+        assert_eq!(
+            CORE_METHOD_GROUPS & PRUNABLE_METHOD_GROUPS,
+            0,
+            "a group cannot be both core and prunable"
+        );
     }
 
     #[test]

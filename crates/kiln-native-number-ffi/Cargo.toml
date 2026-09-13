@@ -15,8 +15,15 @@ crate-type = ["rlib"]
 # Realm entry is always present: this archive is the private Rust implementation package shipped
 # with native artifacts. The larger semantic engines remain opt-in so ordinary workspace tests do
 # not compile code used only by generated native programs.
-default = ["realm"]
+default = ["realm", "realm-http"]
 realm = ["dep:kiln-runtime"]
+# Hyper-backed HTTP server/client engines inside `kiln-runtime`. On by default so the
+# default build is behavior-identical to before; the slim archive disables default
+# features and enables `realm` without `realm-http`. This works because the
+# `kiln-runtime` dependency below sets `default-features = false`: without it, the
+# slim `--no-default-features` selection would still unify `kiln-runtime/http` back
+# on through the dependency's own defaults.
+realm-http = ["kiln-runtime/http"]
 regexp = ["dep:regress"]
 bigint = ["dep:num-bigint", "dep:num-traits"]
 # `Temporal` over the same adapter the interpreter links, so the two engines cannot disagree about
@@ -39,7 +46,11 @@ kiln-native-number-abi = { workspace = true }
 kiln-number-core = { workspace = true }
 kiln-host-abi = { workspace = true }
 kiln-node-path = { workspace = true }
-kiln-runtime = { workspace = true, optional = true }
+# Path-only (not workspace-inherited): Cargo forbids `default-features` on an inherited
+# edge, and this edge must default off so the slim `--no-default-features` build does
+# not unify `kiln-runtime/http` back on through the dependency's own defaults. Every
+# other workspace member keeps the inherited edge with HTTP on.
+kiln-runtime = { path = "../kiln-runtime", optional = true, default-features = false }
 # The calendar engine, wrapped by the adapter that already keeps `temporal_rs` out of every public
 # signature -- which is what lets it cross a C ABI as scalars and an opaque handle.
 kiln-temporal = { workspace = true, optional = true }

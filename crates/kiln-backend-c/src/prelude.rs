@@ -1,10 +1,10 @@
 use super::*;
 
 #[derive(Clone, Copy)]
-struct MethodId {
-    name: &'static str,
-    value: u16,
-    groups: u32,
+pub(crate) struct MethodId {
+    pub(crate) name: &'static str,
+    pub(crate) value: u16,
+    pub(crate) groups: u32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -267,7 +267,7 @@ macro_rules! method_ids {
             $(($name) => { $value };)*
         }
 
-        const METHOD_IDS: &[MethodId] = &[
+        pub(crate) const METHOD_IDS: &[MethodId] = &[
             $(MethodId {
                 name: stringify!($name),
                 value: $value,
@@ -2304,6 +2304,47 @@ macro_rules! header_prefix {
 #else
 #define KILN_LIKELY(x) (x)
 #define KILN_UNLIKELY(x) (x)
+#endif
+
+/* Demand-driven prelude: one flag per prunable method dispatch group. A
+ * native build passes `-DKILN_RETAIN_GROUP_<name>=0` for groups its program
+ * cannot reach (see `retained_method_groups`). Every other compilation --
+ * including test translation units that embed the runtime parts without the
+ * declarations header -- keeps the default of 1 and links exactly what it
+ * always has. Flags are read only by `#if` guards on dispatch blocks,
+ * constructor fast paths, header materialization, and global installs, never
+ * by hot-path expressions, so a fully retained build compiles to identical
+ * code. This block lives in the prefix (not the declarations header) so that
+ * every translation unit assembling the runtime parts sees the defaults. */
+#ifndef KILN_RETAIN_GROUP_NODE_EVENT
+#define KILN_RETAIN_GROUP_NODE_EVENT 1
+#endif
+#ifndef KILN_RETAIN_GROUP_NODE_NET
+#define KILN_RETAIN_GROUP_NODE_NET 1
+#endif
+#ifndef KILN_RETAIN_GROUP_NODE_SERVER
+#define KILN_RETAIN_GROUP_NODE_SERVER 1
+#endif
+#ifndef KILN_RETAIN_GROUP_NODE_HTTP
+#define KILN_RETAIN_GROUP_NODE_HTTP 1
+#endif
+#ifndef KILN_RETAIN_GROUP_NODE_RESPONSE
+#define KILN_RETAIN_GROUP_NODE_RESPONSE 1
+#endif
+#ifndef KILN_RETAIN_GROUP_BUFFER
+#define KILN_RETAIN_GROUP_BUFFER 1
+#endif
+#ifndef KILN_RETAIN_GROUP_NODE_UTIL
+#define KILN_RETAIN_GROUP_NODE_UTIL 1
+#endif
+#ifndef KILN_RETAIN_GROUP_NODE_DIAGNOSTICS
+#define KILN_RETAIN_GROUP_NODE_DIAGNOSTICS 1
+#endif
+#ifndef KILN_RETAIN_GROUP_NODE_STREAM
+#define KILN_RETAIN_GROUP_NODE_STREAM 1
+#endif
+#ifndef KILN_RETAIN_GROUP_NODE_PATH
+#define KILN_RETAIN_GROUP_NODE_PATH 1
 #endif
 
 "#

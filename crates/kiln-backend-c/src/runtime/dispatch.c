@@ -1377,15 +1377,25 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
     if (code >= KILN_C99_METHOD_ITERATOR_MAP && code <= KILN_C99_METHOD_ITERATOR_FROM) {
         return kiln_c99_iterator_method(host, result, code, receiver, args, argc, depth, thrown);
     }
+    /* Demand-driven prelude: each group block below is compiled out when the
+     * executable retains no code that can produce its method codes (see
+     * `retained_method_groups`). A dropped block is unreachable, so control
+     * falls through to the remaining tests exactly as an unknown method would. */
+#if KILN_RETAIN_GROUP_NODE_EVENT
     if ((groups & KILN_C99_GROUP_NODE_EVENT)) {
         return kiln_c99_node_event(host, result, code, receiver, args, argc, depth, thrown);
     }
+#endif
     /* `setEncoding` is the one method name three unrelated Node receivers own: a `net.Socket`,
      * an `http.IncomingMessage`, and a `stream.Readable`. A dispatch group answers "which handler
      * owns this code", so a code carrying three group bits is answered by whichever group happens
      * to be tested first -- which is not a property of the call. Route this one by the receiver's
      * own hidden state, above every group test, so the name resolves to the object it was called
      * on rather than to the order these ifs are written in. */
+    /* Receiver-routed, above every group test (see the note above): reachable
+     * only through node socket/response/stream objects. Guarded on the union
+     * of the three groups that can own this code. */
+#if KILN_RETAIN_GROUP_NODE_NET || KILN_RETAIN_GROUP_NODE_HTTP || KILN_RETAIN_GROUP_NODE_STREAM
     if (code == KILN_C99_METHOD_NODE_READABLE_SET_ENCODING) {
         if (receiver.tag == KILN_VALUE_OBJECT) {
             if (kiln_c99_node_hidden_pointer(receiver, "@@node:socket", 13) != NULL) {
@@ -1401,36 +1411,53 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
          * that state -- by name, from the handler whose prototype the method came off. */
         return kiln_c99_node_stream(host, result, code, receiver, args, argc, depth, thrown);
     }
+#endif
+#if KILN_RETAIN_GROUP_NODE_NET
     if ((groups & KILN_C99_GROUP_NODE_NET)) {
         return kiln_c99_node_net(host, result, code, receiver, args, argc, depth, thrown);
     }
+#endif
+#if KILN_RETAIN_GROUP_NODE_HTTP
     if ((groups & KILN_C99_GROUP_NODE_HTTP)) {
         return kiln_c99_node_http(host, result, code, receiver, args, argc, depth, thrown);
     }
     if (code == KILN_C99_METHOD_NODE_HTTP_SERVER) {
         return kiln_c99_node_http(host, result, code, receiver, args, argc, depth, thrown);
     }
+#endif
+#if KILN_RETAIN_GROUP_NODE_NET || KILN_RETAIN_GROUP_NODE_SERVER
     if (code == KILN_C99_METHOD_NODE_SERVER_SET_TIMEOUT) {
         return kiln_c99_node_net(host, result, code, receiver, args, argc, depth, thrown);
     }
+#endif
+#if KILN_RETAIN_GROUP_NODE_RESPONSE
     if ((groups & KILN_C99_GROUP_NODE_RESPONSE)) {
         return kiln_c99_node_http(host, result, code, receiver, args, argc, depth, thrown);
     }
+#endif
+#if KILN_RETAIN_GROUP_NODE_NET
     if (code == KILN_C99_METHOD_NODE_NET_CONNECT) {
         return kiln_c99_node_net(host, result, code, receiver, args, argc, depth, thrown);
     }
+#endif
     if (code == KILN_C99_METHOD_URL_SEARCH_PARAMS_GET) {
         return kiln_c99_url_search_params_get(result, receiver, args, argc, thrown);
     }
+#if KILN_RETAIN_GROUP_BUFFER
     if ((groups & KILN_C99_GROUP_BUFFER)) {
         return kiln_c99_buffer_method(result, code, receiver, args, argc, thrown);
     }
+#endif
+#if KILN_RETAIN_GROUP_NODE_UTIL
     if ((groups & KILN_C99_GROUP_NODE_UTIL)) {
         return kiln_c99_node_util(host, result, code, args, argc, depth, thrown);
     }
+#endif
+#if KILN_RETAIN_GROUP_NODE_DIAGNOSTICS
     if ((groups & KILN_C99_GROUP_NODE_DIAGNOSTICS)) {
         return kiln_c99_node_diagnostics(host, result, code, args, argc, depth, thrown);
     }
+#endif
     if (code == KILN_C99_METHOD_NODE_HTTPS_CREATE_SERVER) {
         return kiln_c99_throw_error(
             thrown, KILN_C99_BUILTIN_ERROR,
@@ -1515,9 +1542,11 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             return KILN_C99_OK;
         }
     }
+#if KILN_RETAIN_GROUP_NODE_STREAM
     if ((groups & KILN_C99_GROUP_NODE_STREAM)) {
         return kiln_c99_node_stream(host, result, code, receiver, args, argc, depth, thrown);
     }
+#endif
     /* The global `performance.now` and `require("perf_hooks").performance.now` are the same
      * function in the language, so they are the same code here -- as `parseInt` and
      * `Number.parseInt` already are.
@@ -1563,9 +1592,11 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         code == KILN_C99_METHOD_NODE_STAT_IS_DIRECTORY) {
         return kiln_c99_node_fs(host, result, code, receiver, args, argc, depth, thrown);
     }
+#if KILN_RETAIN_GROUP_NODE_PATH
     if ((groups & KILN_C99_GROUP_NODE_PATH)) {
         return kiln_c99_node_path(result, code, args, argc, thrown);
     }
+#endif
     if (code == KILN_C99_METHOD_NODE_ASSERT_OK) {
         if (!kiln_c99_truthy(argc > 0 ? args[0] : kiln_c99_undefined())) {
             kiln_value message = argc > 1 ? kiln_c99_text(args[1])
@@ -1788,10 +1819,15 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             kiln_value ignored;
             kiln_value process_val;
             kiln_value signal = args[1];
+#if KILN_RETAIN_GROUP_NODE_EVENT
             if (kiln_c99_process_object(&process_val) == KILN_C99_OK) {
                 kiln_c99_node_event(host, &ignored, KILN_C99_METHOD_NODE_EVENT_EMIT,
                                     process_val, &signal, 1, depth, NULL);
             }
+#else
+            (void)process_val;
+            (void)signal;
+#endif
         }
         *result = kiln_c99_boolean(1);
         return KILN_C99_OK;
