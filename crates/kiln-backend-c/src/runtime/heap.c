@@ -2225,6 +2225,7 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
         kiln_c99_gc_mark_value(heap, &frame->receiver);
         kiln_c99_gc_mark_value(heap, &frame->promise);
         kiln_c99_gc_mark_value(heap, &frame->sent);
+        kiln_c99_gc_mark_value(heap, &frame->delegate);
         if (frame->function.tag == KILN_VALUE_FUNCTION) {
             const kiln_closure *closure = (const kiln_closure *)(uintptr_t)frame->function.bits;
             kiln_c99_gc_mark_vals(heap, frame->locals, closure->local_count);

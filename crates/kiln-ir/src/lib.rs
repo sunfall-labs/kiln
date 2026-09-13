@@ -115,6 +115,7 @@ pub enum Instruction {
     JumpIfFalse(u32),
     JumpIfTruthy(u32),
     JumpIfNotNullish(u32),
+    JumpIfReturnSignal(u32),
     HostCall {
         op: HostOp,
         argc: u16,
@@ -208,6 +209,11 @@ pub enum Instruction {
     /// Leaves whatever the caller sends with the next `next(v)` in its place, which is why
     /// `yield` is an expression rather than a statement.
     Yield,
+    /// Suspend the running generator in a `yield*` delegation.
+    ///
+    /// Stack: `[iterator, value] -> [sent]`.
+    /// `exit` is the jump target if the inner iterator's `throw()` completes with `done: true`.
+    YieldStar(u32),
     /// Push this frame's `arguments` as an array.
     ///
     /// Built on demand rather than on every call: most functions never mention it, and

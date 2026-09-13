@@ -86,7 +86,8 @@ KILN_VALUE_TYPED_ARRAY = 23,
 KILN_VALUE_PROXY = 24,
 KILN_VALUE_TEMPORAL = 25,
 KILN_VALUE_COMMONJS_REQUIRE = 26,
-KILN_VALUE_DATA_VIEW = 27
+KILN_VALUE_DATA_VIEW = 27,
+KILN_VALUE_RETURN_SIGNAL = 28
 #define KILN_C99_BUILTIN_PROMISE 15
 #define KILN_C99_BUILTIN_BOOLEAN 16
 #define KILN_C99_BUILTIN_REFLECT 17
@@ -665,6 +666,7 @@ typedef uint64_t kiln_val;
 #define KILN_VAL_TRUE           UINT64_C(0xFFF8000000000005)
 #define KILN_VAL_HOLE           UINT64_C(0xFFF8000000000006)
 #define KILN_VAL_UNINITIALIZED  UINT64_C(0xFFF8000000000007)
+#define KILN_VAL_RETURN_SIGNAL  UINT64_C(0xFFF8000000000009)
 #define KILN_VAL_BUILTIN_PREFIX UINT64_C(0xFFF8000100000000)
 #define KILN_VAL_BUILTIN(id)    (KILN_VAL_BUILTIN_PREFIX | ((uint64_t)(id) & UINT64_C(0xFFFFFFFF)))
 #define KILN_VAL_IS_BUILTIN(v)  (((uint64_t)(v) & UINT64_C(0xFFFFFFFF00000000)) == KILN_VAL_BUILTIN_PREFIX)
@@ -738,6 +740,7 @@ static kiln_value kiln_val_to_boundary(kiln_val v);
 static kiln_value kiln_val_binding_to_boundary(kiln_val v);
 #endif
 static inline kiln_val kiln_val_from_boundary(kiln_value v) {
+static inline kiln_value kiln_c99_return_signal(void) {
 static inline kiln_val kiln_c99_val_from_double(double d) {
 int32_t kiln_bigint_is_zero(const void *handle);
 typedef void (*kiln_parallel_chunk_fn)(const void *in, void *out, size_t start, size_t end,
@@ -2037,6 +2040,11 @@ KILN_DEF_TIMSORT(val, kiln_val, kiln_c99_sort_context, kiln_c99_sort_compare_val
 KILN_DEF_TIMSORT(typed, double, kiln_c99_typed_sort_context, kiln_c99_sort_compare_typed)
 static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_generator_step(kiln_host *host, kiln_value produced, int done, kiln_value *result,
+static int kiln_c99_is_object(kiln_value val) {
+static int kiln_c99_generator_raise(kiln_host *host, kiln_generator *frame, kiln_value error,
+static int kiln_c99_generator_close_with(kiln_host *host, kiln_generator *frame, kiln_value return_val,
+static int kiln_c99_generator_delegate_return(kiln_host *host, kiln_generator *frame, kiln_value sent_val,
+static int kiln_c99_generator_delegate_throw(kiln_host *host, kiln_generator *frame, kiln_value thrown_val,
 static int kiln_c99_default_require(void *context, kiln_host *host, kiln_value specifier,
 static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value source, int depth,

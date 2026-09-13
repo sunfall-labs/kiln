@@ -71,6 +71,7 @@ static kiln_value kiln_val_to_boundary(kiln_val v) {
         case KILN_VAL_TRUE:          return kiln_c99_boolean(1);
         case KILN_VAL_HOLE:          return kiln_c99_hole();
         case KILN_VAL_UNINITIALIZED: return kiln_c99_uninitialized();
+        case KILN_VAL_RETURN_SIGNAL: return kiln_c99_return_signal();
         default: {
             uint64_t tag = v & KILN_TAG_MASK;
             void *ptr = KILN_VAL_PTR(v);

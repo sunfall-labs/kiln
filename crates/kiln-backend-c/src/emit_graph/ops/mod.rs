@@ -431,6 +431,14 @@ pub(super) fn emit_graph_op(
             )
             .unwrap();
         }
+        GraphOp::IsReturnSignal(value) => {
+            writeln!(
+                output,
+                "    v{v} = (v{} == KILN_VAL_RETURN_SIGNAL) ? KILN_VAL_TRUE : KILN_VAL_FALSE;",
+                value.0
+            )
+            .unwrap();
+        }
         GraphOp::Bridge {
             instruction,
             operands,

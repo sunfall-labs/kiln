@@ -187,12 +187,19 @@ pub fn verify_function_graph(graph: &FunctionGraph) -> Result<(), VerifierError>
                     });
                 }
             }
-            Terminator::Suspend { resume, .. } => {
+            Terminator::Suspend {
+                resume, delegate, ..
+            } => {
                 // Not an edge: the body returns, and a later call re-enters at the target
                 // through the dispatch switch with nothing of this activation alive. What
                 // crosses is spilled into the frame and comes back through the target's phis.
                 if !block_map.contains_key(resume) {
                     return Err(VerifierError::UnknownBlock(*resume));
+                }
+                if let Some((_, exit_block, _)) = delegate
+                    && !block_map.contains_key(exit_block)
+                {
+                    return Err(VerifierError::UnknownBlock(*exit_block));
                 }
             }
             Terminator::Return(_) | Terminator::Throw(_) | Terminator::Unreachable => {}
@@ -284,7 +291,8 @@ pub fn verify_function_graph(graph: &FunctionGraph) -> Result<(), VerifierError>
                 | GraphOp::StoreUpvalue { value, .. }
                 | GraphOp::StoreGlobal { value, .. }
                 | GraphOp::CheckTdz { value, .. }
-                | GraphOp::Unary { value, .. } => {
+                | GraphOp::Unary { value, .. }
+                | GraphOp::IsReturnSignal(value) => {
                     check_operand(*value)?;
                 }
                 GraphOp::Binary { left, right, .. } => {
@@ -418,8 +426,17 @@ pub fn verify_function_graph(graph: &FunctionGraph) -> Result<(), VerifierError>
                     });
                 }
             }
-            Terminator::Suspend { value, spilled, .. } => {
-                for used in std::iter::once(value).chain(spilled.iter()) {
+            Terminator::Suspend {
+                value,
+                spilled,
+                delegate,
+                ..
+            } => {
+                let delegate_iter = delegate.as_ref().map(|(iter, _, _)| iter);
+                for used in std::iter::once(value)
+                    .chain(delegate_iter)
+                    .chain(spilled.iter())
+                {
                     let &(def_block, _) =
                         def_site.get(used).ok_or(VerifierError::UseBeforeDef {
                             value: *used,

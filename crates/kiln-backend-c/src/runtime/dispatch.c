@@ -1130,6 +1130,198 @@ static int kiln_c99_generator_step(kiln_host *host, kiln_value produced, int don
     return KILN_C99_OK;
 }
 
+static int kiln_c99_is_object(kiln_value val) {
+    return val.tag != KILN_VALUE_UNDEFINED && val.tag != KILN_VALUE_NULL &&
+           (kiln_c99_is_reference(val) || val.tag == KILN_VALUE_DATE);
+}
+
+static int kiln_c99_generator_raise(kiln_host *host, kiln_generator *frame, kiln_value error,
+                                    kiln_value *result, int depth, kiln_value *thrown) {
+    frame->delegate = kiln_c99_undefined();
+    frame->delegate_exit = 0;
+    if (frame->handler_top != 0 && !frame->done && !frame->async_generator) {
+        kiln_val vproduced = KILN_VAL_UNDEFINED;
+        frame->raising = 1;
+        frame->sent = error;
+        kiln_closure *closure = kiln_c99_closure_of(frame->function);
+        frame->running = 1;
+        int status = kiln_c99_invoke_closure_body(
+            host, &vproduced, closure, kiln_val_from_boundary(frame->receiver), NULL, 0, depth, thrown, frame, 0);
+        frame->running = 0;
+        frame->raising = 0;
+        if (status == KILN_C99_YIELDED) {
+            return kiln_c99_generator_step(host, kiln_val_to_boundary(vproduced), 0, result, depth, thrown);
+        }
+        frame->done = 1;
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        return kiln_c99_generator_step(host, kiln_val_to_boundary(vproduced), 1, result, depth, thrown);
+    }
+    frame->done = 1;
+    if (thrown != NULL) {
+        *thrown = error;
+    }
+    return KILN_C99_THROWN;
+}
+
+static int kiln_c99_generator_close_with(kiln_host *host, kiln_generator *frame, kiln_value return_val,
+                                         kiln_value *result, int depth, kiln_value *thrown) {
+    frame->delegate = kiln_c99_undefined();
+    frame->delegate_exit = 0;
+    if (frame->handler_top != 0 && !frame->done && !frame->async_generator) {
+        frame->raising = 1;
+        frame->sent = kiln_c99_return_signal();
+        kiln_closure *closure = kiln_c99_closure_of(frame->function);
+        frame->running = 1;
+        kiln_val vproduced = KILN_VAL_UNDEFINED;
+        int status = kiln_c99_invoke_closure_body(
+            host, &vproduced, closure, kiln_val_from_boundary(frame->receiver), NULL, 0, depth, thrown, frame, 0);
+        frame->running = 0;
+        frame->raising = 0;
+        if (status == KILN_C99_YIELDED) {
+            return kiln_c99_generator_step(host, kiln_val_to_boundary(vproduced), 0, result, depth, thrown);
+        }
+        frame->done = 1;
+        if (status != KILN_C99_OK && thrown != NULL && kiln_val_from_boundary(*thrown) != KILN_VAL_RETURN_SIGNAL) {
+            return status;
+        }
+    }
+    frame->done = 1;
+    return kiln_c99_generator_step(host, return_val, 1, result, depth, thrown);
+}
+
+static int kiln_c99_generator_delegate_return(kiln_host *host, kiln_generator *frame, kiln_value sent_val,
+                                              kiln_value *result, int depth, kiln_value *thrown) {
+    kiln_value delegate = frame->delegate;
+    kiln_value return_method = kiln_c99_undefined();
+    int status = kiln_c99_get(host, delegate, "return", 6, &return_method, depth, thrown);
+    if (status != KILN_C99_OK) {
+        return kiln_c99_generator_raise(host, frame, *thrown, result, depth, thrown);
+    }
+    if (return_method.tag == KILN_VALUE_UNDEFINED || return_method.tag == KILN_VALUE_NULL) {
+        return kiln_c99_generator_close_with(host, frame, sent_val, result, depth, thrown);
+    }
+    if (!kiln_c99_is_callable(return_method)) {
+        kiln_value err;
+        kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, "return property is not callable");
+        return kiln_c99_generator_raise(host, frame, err, result, depth, thrown);
+    }
+    kiln_value inner_res = kiln_c99_undefined();
+    status = kiln_c99_call(host, &inner_res, return_method, delegate, &sent_val, 1, depth, thrown);
+    if (status != KILN_C99_OK) {
+        return kiln_c99_generator_raise(host, frame, *thrown, result, depth, thrown);
+    }
+    if (!kiln_c99_is_object(inner_res)) {
+        kiln_value err;
+        kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, "Iterator result is not an object");
+        return kiln_c99_generator_raise(host, frame, err, result, depth, thrown);
+    }
+    kiln_value done_val = kiln_c99_undefined();
+    status = kiln_c99_get(host, inner_res, "done", 4, &done_val, depth, thrown);
+    if (status != KILN_C99_OK) {
+        return kiln_c99_generator_raise(host, frame, *thrown, result, depth, thrown);
+    }
+    if (kiln_c99_truthy(done_val)) {
+        kiln_value inner_val = kiln_c99_undefined();
+        status = kiln_c99_get(host, inner_res, "value", 5, &inner_val, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return kiln_c99_generator_raise(host, frame, *thrown, result, depth, thrown);
+        }
+        return kiln_c99_generator_close_with(host, frame, inner_val, result, depth, thrown);
+    } else {
+        *result = inner_res;
+        return KILN_C99_OK;
+    }
+}
+
+static int kiln_c99_generator_delegate_throw(kiln_host *host, kiln_generator *frame, kiln_value thrown_val,
+                                             kiln_value *result, int depth, kiln_value *thrown) {
+    kiln_value delegate = frame->delegate;
+    kiln_value throw_method = kiln_c99_undefined();
+    int status = kiln_c99_get(host, delegate, "throw", 5, &throw_method, depth, thrown);
+    if (status != KILN_C99_OK) {
+        return kiln_c99_generator_raise(host, frame, *thrown, result, depth, thrown);
+    }
+    if (throw_method.tag == KILN_VALUE_UNDEFINED || throw_method.tag == KILN_VALUE_NULL) {
+        kiln_value return_method = kiln_c99_undefined();
+        status = kiln_c99_get(host, delegate, "return", 6, &return_method, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return kiln_c99_generator_raise(host, frame, *thrown, result, depth, thrown);
+        }
+        if (return_method.tag != KILN_VALUE_UNDEFINED && return_method.tag != KILN_VALUE_NULL) {
+            if (kiln_c99_is_callable(return_method)) {
+                kiln_value close_res = kiln_c99_undefined();
+                status = kiln_c99_call(host, &close_res, return_method, delegate, NULL, 0, depth, thrown);
+                if (status != KILN_C99_OK) {
+                    return kiln_c99_generator_raise(host, frame, *thrown, result, depth, thrown);
+                }
+                if (!kiln_c99_is_object(close_res)) {
+                    kiln_value err;
+                    kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, "Iterator result is not an object");
+                    return kiln_c99_generator_raise(host, frame, err, result, depth, thrown);
+                }
+            }
+        }
+        kiln_value err;
+        kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, "Iterator does not have a throw method");
+        return kiln_c99_generator_raise(host, frame, err, result, depth, thrown);
+    }
+    if (!kiln_c99_is_callable(throw_method)) {
+        kiln_value err;
+        kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, "throw property is not callable");
+        return kiln_c99_generator_raise(host, frame, err, result, depth, thrown);
+    }
+    kiln_value inner_res = kiln_c99_undefined();
+    status = kiln_c99_call(host, &inner_res, throw_method, delegate, &thrown_val, 1, depth, thrown);
+    if (status != KILN_C99_OK) {
+        return kiln_c99_generator_raise(host, frame, *thrown, result, depth, thrown);
+    }
+    if (!kiln_c99_is_object(inner_res)) {
+        kiln_value err;
+        kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, "Iterator result is not an object");
+        return kiln_c99_generator_raise(host, frame, err, result, depth, thrown);
+    }
+    kiln_value done_val = kiln_c99_undefined();
+    status = kiln_c99_get(host, inner_res, "done", 4, &done_val, depth, thrown);
+    if (status != KILN_C99_OK) {
+        return kiln_c99_generator_raise(host, frame, *thrown, result, depth, thrown);
+    }
+    if (kiln_c99_truthy(done_val)) {
+        kiln_value inner_val = kiln_c99_undefined();
+        status = kiln_c99_get(host, inner_res, "value", 5, &inner_val, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return kiln_c99_generator_raise(host, frame, *thrown, result, depth, thrown);
+        }
+        frame->delegate = kiln_c99_undefined();
+        frame->resume = frame->delegate_exit;
+        frame->delegate_exit = 0;
+        frame->raising = 0;
+        frame->sent = inner_val;
+        kiln_closure *closure = kiln_c99_closure_of(frame->function);
+        frame->running = 1;
+        kiln_val vproduced = KILN_VAL_UNDEFINED;
+        status = kiln_c99_invoke_closure_body(
+            host, &vproduced, closure, kiln_val_from_boundary(frame->receiver), NULL, 0, depth, thrown, frame, 0);
+        kiln_value produced = kiln_val_to_boundary(vproduced);
+        frame->running = 0;
+        int finished = 1;
+        if (status == KILN_C99_YIELDED) {
+            frame->started = 1;
+            finished = 0;
+        } else if (status != KILN_C99_OK) {
+            frame->done = 1;
+            return status;
+        } else {
+            frame->done = 1;
+        }
+        return kiln_c99_generator_step(host, produced, finished || frame->done, result, depth, thrown);
+    } else {
+        *result = inner_res;
+        return KILN_C99_OK;
+    }
+}
+
 static int kiln_c99_default_require(void *context, kiln_host *host, kiln_value specifier,
                                     kiln_value *result, kiln_value *thrown) {
     (void)context;
@@ -4547,6 +4739,10 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                             "Generator is already running");
             }
+            if (frame->delegate.tag != KILN_VALUE_UNDEFINED && !frame->async_generator) {
+                kiln_value thrown_val = argc > 0 ? args[0] : kiln_c99_undefined();
+                return kiln_c99_generator_delegate_throw(host, frame, thrown_val, result, depth, thrown);
+            }
             /* A suspended body with a handler over the suspension gets the value thrown *at*
              * the `yield`, so its `catch` or `finally` runs; it may yield again, finish, or
              * let the throw out. A body that has not started, is done, or has nothing to
@@ -4639,16 +4835,23 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     host, receiver, sent_val, 0, depth, thrown);
             }
             if (code == KILN_C99_METHOD_GENERATOR_RETURN) {
+                if (frame->delegate.tag != KILN_VALUE_UNDEFINED && !frame->async_generator) {
+                    kiln_value sent_val = argc > 0 ? args[0] : kiln_c99_undefined();
+                    return kiln_c99_generator_delegate_return(host, frame, sent_val, result, depth, thrown);
+                }
                 if (frame->handler_top != 0 && !frame->done) {
                     frame->raising = 1;
-                    frame->sent = kiln_c99_undefined();
+                    frame->sent = kiln_c99_return_signal();
                     closure = kiln_c99_closure_of(frame->function);
                     frame->running = 1;
                     kiln_val vproduced = KILN_VAL_UNDEFINED;
-                    (void)kiln_c99_invoke_closure_body(
+                    int status = kiln_c99_invoke_closure_body(
                         host, &vproduced, closure, kiln_val_from_boundary(frame->receiver), NULL, 0, depth, thrown, frame, 0);
                     produced = kiln_val_to_boundary(vproduced);
                     frame->running = 0;
+                    if (status != KILN_C99_OK && thrown != NULL && kiln_val_from_boundary(*thrown) != KILN_VAL_RETURN_SIGNAL) {
+                        return status;
+                    }
                 }
                 frame->done = 1;
                 produced = argc > 0 ? args[0] : kiln_c99_undefined();
@@ -4671,6 +4874,10 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 } else {
                     frame->done = 1;
                 }
+            }
+            if (status == KILN_C99_YIELDED && frame->delegate.tag != KILN_VALUE_UNDEFINED) {
+                *result = produced;
+                return KILN_C99_OK;
             }
             return kiln_c99_generator_step(host, produced, finished || frame->done, result, depth, thrown);
         }

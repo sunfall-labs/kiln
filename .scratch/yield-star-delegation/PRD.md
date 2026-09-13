@@ -1,6 +1,6 @@
 # PRD: Specification-Compliant `yield*` Iterator Delegation Protocol
 
-Status: ready-for-agent
+Status: resolved
 Branch: `feat/yield-star-delegation`
 
 ## Problem Statement

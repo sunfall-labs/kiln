@@ -2610,7 +2610,8 @@ enum kiln_value_tag {
      * The tag is cheap for the reason the ones above it are: the embedding boundary carries
      * exactly tags 0 through 4, so KILN_C_ABI_VERSION does not move, and every switch over
      * `value.tag` here has a `default`. */
-    KILN_VALUE_DATA_VIEW = 27
+    KILN_VALUE_DATA_VIEW = 27,
+    KILN_VALUE_RETURN_SIGNAL = 28
 };
 
 #define KILN_C99_BUILTIN_PROMISE 15
