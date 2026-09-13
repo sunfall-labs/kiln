@@ -111,7 +111,10 @@ for index, chunk in enumerate(chunks, 1):
         passed, failed = int(totals["passed"]), int(totals["failed"])
     except (OSError, ValueError, KeyError, TypeError) as error:
         sys.exit(f"chunk {chunk} has invalid result ({error}); full log: {log}")
-    if passed + failed <= 0:
+    # A chunk can be non-empty while every selected case is currently unsupported. Treat that
+    # as measured coverage; only a selected count of zero indicates an empty/missing corpus.
+    total = int(totals.get("total", 0))
+    if total <= 0:
         sys.exit(f"chunk {chunk} has zero test results; full log: {log}")
     passed, failed = totals["passed"], totals["failed"]
     measured[chunk] = {"passed": passed, "failed": failed}

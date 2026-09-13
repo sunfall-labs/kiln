@@ -702,7 +702,9 @@ expected_stdout = "bundle\n"
         ] {
             let root = manifest.directory().join(group);
             assert!(
-                manifest.tests_under(&root).any(|test| test.id == representative),
+                manifest
+                    .tests_under(&root)
+                    .any(|test| test.id == representative),
                 "manifest is missing representative {representative}"
             );
         }
@@ -734,6 +736,10 @@ expected_stdout = "bundle\n"
             dynamic_import.source,
             Path::new("regress/r14-dynamic-import-attributes.mjs")
         );
-        assert!(dynamic_import.features.contains(&"import-attributes".to_owned()));
+        assert!(
+            dynamic_import
+                .features
+                .contains(&"import-attributes".to_owned())
+        );
     }
 }
