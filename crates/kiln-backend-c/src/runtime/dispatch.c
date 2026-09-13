@@ -1366,6 +1366,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
     if (code == KILN_C99_METHOD_NODE_FS_READ_FILE ||
         code == KILN_C99_METHOD_NODE_FS_STAT ||
         code == KILN_C99_METHOD_NODE_FS_WRITE_FILE ||
+        code == KILN_C99_METHOD_NODE_FS_MKDIR ||
         code == KILN_C99_METHOD_NODE_STAT_IS_FILE ||
         code == KILN_C99_METHOD_NODE_STAT_IS_DIRECTORY) {
         return kiln_c99_node_fs(host, result, code, receiver, args, argc, depth, thrown);

@@ -1671,6 +1671,7 @@ typedef int (*kiln_realm_entry_fn)(void *context);
 #define KILN_REALM_OP_TCP_WRITE 11
 #define KILN_REALM_OP_TCP_SHUTDOWN 12
 #define KILN_REALM_OP_STDIN_READ 13
+#define KILN_REALM_OP_MKDIR 14
 #define KILN_REALM_HTTP_CLOSE_GRACEFUL 0
 #define KILN_REALM_HTTP_CLOSE_ABORT 1
 typedef struct kiln_async_host_op {

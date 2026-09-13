@@ -438,6 +438,7 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_NODE_READABLE_SET_RAW_MODE: return "setRawMode";
     case KILN_C99_METHOD_NODE_OS_HOMEDIR: return "homedir";
     case KILN_C99_METHOD_NODE_OS_TMPDIR: return "tmpdir";
+    case KILN_C99_METHOD_NODE_FS_MKDIR: return "mkdir";
     default: return NULL;
     }
 }

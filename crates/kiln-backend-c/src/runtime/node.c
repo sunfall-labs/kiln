@@ -1510,7 +1510,8 @@ static int kiln_c99_node_fs_complete(void *opaque, const kiln_async_completion *
         if (status != KILN_C99_OK) return status;
         return kiln_c99_settle(work->promise, value, 1);
     }
-    if (work->operation == KILN_REALM_OP_WRITE_FILE) {
+    if (work->operation == KILN_REALM_OP_WRITE_FILE ||
+        work->operation == KILN_REALM_OP_MKDIR) {
         if (completion->value_kind != KILN_REALM_ASYNC_UNDEFINED)
             KILN_C99_REFUSE("writeFile completed carrying a value where it should have none");
         return kiln_c99_settle(work->promise, kiln_c99_undefined(), 0);
@@ -1624,6 +1625,14 @@ static int kiln_c99_node_fs(kiln_host *host, kiln_value *result, uint64_t code,
         } else {
             return kiln_c99_throw_not_a(thrown, data, "string or typed array data");
         }
+    } else if (code == KILN_C99_METHOD_NODE_FS_MKDIR) {
+        if (argc > 1 && args[1].tag == KILN_VALUE_OBJECT) {
+            kiln_value rec_val;
+            int rec_status = kiln_c99_get(host, args[1], "recursive", 9, &rec_val, depth, thrown);
+            if (rec_status == KILN_C99_OK && kiln_c99_truthy(rec_val)) {
+                width = 1; // reuse width variable as recursive flag
+            }
+        }
     }
     status = kiln_c99_new_promise(&promise);
     if (status != KILN_C99_OK) return status;
@@ -1634,7 +1643,9 @@ static int kiln_c99_node_fs(kiln_host *host, kiln_value *result, uint64_t code,
                           ? KILN_REALM_OP_READ_FILE
                           : code == KILN_C99_METHOD_NODE_FS_WRITE_FILE
                                 ? KILN_REALM_OP_WRITE_FILE
-                                : KILN_REALM_OP_STAT;
+                                : code == KILN_C99_METHOD_NODE_FS_MKDIR
+                                      ? KILN_REALM_OP_MKDIR
+                                      : KILN_REALM_OP_STAT;
     work->utf8 = utf8;
     memset(&operation, 0, sizeof operation);
     operation.operation = work->operation;
@@ -1643,6 +1654,9 @@ static int kiln_c99_node_fs(kiln_host *host, kiln_value *result, uint64_t code,
     operation.text_len = path.len;
     operation.bytes = bytes;
     operation.bytes_len = bytes_len;
+    if (code == KILN_C99_METHOD_NODE_FS_MKDIR && width == 1) {
+        operation.argument = 1;
+    }
     status = kiln_realm_start_active_host_op(&operation, kiln_c99_node_fs_complete,
                                              kiln_c99_node_drop_fs_completion, work, &request);
     if (status != KILN_C99_OK) {

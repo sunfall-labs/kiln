@@ -193,6 +193,7 @@ mod realm {
     const OP_TCP_WRITE: u32 = 11;
     const OP_TCP_SHUTDOWN: u32 = 12;
     const OP_STDIN_READ: u32 = 13;
+    const OP_MKDIR: u32 = 14;
 
     const VALUE_UNDEFINED: u32 = 0;
     const VALUE_BYTES: u32 = 1;
@@ -1168,6 +1169,10 @@ mod realm {
             },
             OP_STDIN_READ => AsyncHostOp::StdinRead {
                 max_bytes: usize::try_from(view.argument).ok()?,
+            },
+            OP_MKDIR => AsyncHostOp::Mkdir {
+                path: text,
+                recursive: view.argument != 0,
             },
             _ => return None,
         })
