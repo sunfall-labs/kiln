@@ -330,13 +330,18 @@ pub(crate) fn include_reachable_dependencies(
     // CommonJS requires are runtime-reachable subtrees: capture anything that exists, but do not
     // reject the whole snapshot when a descendant is unavailable.
     let mut pending = vec![(entry, true)];
-    let mut visited = HashSet::new();
+    // Keep the strongest reachability mode seen for each module. A dynamic edge may be popped
+    // before a later static edge to the same path; the latter must still validate its subtree.
+    let mut visited = HashMap::<PathBuf, bool>::new();
     let mut resolutions = BTreeMap::new();
     let mut node_formats = BTreeMap::new();
 
     while let Some((importer, strict)) = pending.pop() {
-        if !visited.insert(importer.clone()) {
-            continue;
+        match visited.get(&importer).copied() {
+            Some(previous_strict) if previous_strict || !strict => continue,
+            Some(_) | None => {
+                visited.insert(importer.clone(), strict);
+            }
         }
         // Every module reaches `pending` only after being inserted into `indexes` -- the entry
         // just above, each import target below -- so a miss here is a broken invariant in this
@@ -1026,6 +1031,38 @@ mod tests {
         assert!(error.to_string().contains("missing.mjs"));
     }
 
+    #[test]
+    fn a_shared_module_reached_dynamically_then_statically_remains_strict() {
+        let tree = Tree::new("shared-static-and-dynamic");
+        tree.file("src/main.mjs");
+        tree.file("src/strict.mjs");
+        tree.file("src/shared.mjs");
+        let entry = tree.0.join("src/main.mjs");
+        std::fs::write(
+            &entry,
+            "import './strict.mjs';\nimport('./shared.mjs').catch(() => {});\n",
+        )
+        .expect("write entry");
+        std::fs::write(tree.0.join("src/strict.mjs"), "import './shared.mjs';\n")
+            .expect("write strict importer");
+        std::fs::write(tree.0.join("src/shared.mjs"), "import './missing.mjs';\n")
+            .expect("write shared importer");
+
+        let entry = entry.canonicalize().expect("entry");
+        let mut texts = vec![(
+            entry.to_string_lossy().into_owned(),
+            std::fs::read_to_string(&entry).expect("read entry"),
+        )];
+        let error = include_reachable_dependencies(
+            &tree.0,
+            entry.to_str().expect("UTF-8 entry"),
+            &mut texts,
+            true,
+        )
+        .expect_err("the later static edge must make the shared subtree strict");
+        assert!(error.to_string().contains("missing.mjs"));
+    }
+
     /// The project walk skips every dot-directory, so nothing under `.scratch/` is in the
     /// snapshot. Naming such a file as the entry used to fail with "reachable module was not
     /// captured in the source snapshot", which reads like a compiler bug and cost several people
@@ -1149,13 +1186,13 @@ mod tests {
     }
 
     #[test]
-    fn node_commonjs_conditional_require_and_import_are_deferred() {
+    fn node_commonjs_missing_require_is_left_for_runtime_catch() {
         let tree = Tree::new("commonjs-optional-require");
         tree.file("main.cjs");
         let entry = tree.0.join("main.cjs");
         std::fs::write(
             &entry,
-            "if (false) require('./missing.cjs');\nif (false) import('./missing.mjs');\n",
+            "try { require('not-installed'); } catch { console.log('caught'); }",
         )
         .expect("write entry");
         let canonical = entry.canonicalize().expect("canonical entry");
@@ -1175,6 +1212,58 @@ mod tests {
         assert!(resolutions.is_empty());
         assert_eq!(node_formats.len(), 1);
         assert_eq!(texts.len(), 1);
+    }
+
+    #[test]
+    fn node_commonjs_conditional_require_and_import_use_export_conditions() {
+        let tree = Tree::new("commonjs-export-conditions");
+        tree.file("main.cjs");
+        tree.file("node_modules/pkg/package.json");
+        tree.file("node_modules/pkg/cjs.cjs");
+        tree.file("node_modules/pkg/esm.mjs");
+        std::fs::write(
+            tree.0.join("main.cjs"),
+            "const cjs = require('pkg');\nif (false) import('pkg');\n",
+        )
+        .expect("write entry");
+        std::fs::write(
+            tree.0.join("node_modules/pkg/package.json"),
+            r#"{"exports":{"import":"./esm.mjs","require":"./cjs.cjs"}}"#,
+        )
+        .expect("write package manifest");
+        std::fs::write(
+            tree.0.join("node_modules/pkg/cjs.cjs"),
+            "module.exports = 1;\n",
+        )
+        .expect("write CommonJS target");
+        std::fs::write(
+            tree.0.join("node_modules/pkg/esm.mjs"),
+            "export default 2;\n",
+        )
+        .expect("write ESM target");
+
+        let entry = tree.0.join("main.cjs").canonicalize().expect("entry");
+        let mut texts = vec![(
+            entry.to_string_lossy().into_owned(),
+            std::fs::read_to_string(&entry).expect("read entry"),
+        )];
+        let (resolutions, formats) = include_reachable_dependencies(
+            &tree.0,
+            entry.to_str().expect("UTF-8 entry"),
+            &mut texts,
+            true,
+        )
+        .expect("both package conditions resolve");
+
+        assert_eq!(resolutions.len(), 2);
+        assert!(resolutions.iter().any(|resolution| resolution.condition
+            == kiln_proto::NodeRequestKind::Require
+            && resolution.target.ends_with("/node_modules/pkg/cjs.cjs")));
+        assert!(resolutions.iter().any(|resolution| resolution.condition
+            == kiln_proto::NodeRequestKind::Import
+            && resolution.target.ends_with("/node_modules/pkg/esm.mjs")));
+        assert_eq!(texts.len(), 3);
+        assert_eq!(formats.len(), 3);
     }
 
     #[test]
