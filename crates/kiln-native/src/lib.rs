@@ -2715,6 +2715,13 @@ struct NativeGraphPlan {
 }
 
 fn native_graph_plan(graph: &ModuleGraph) -> Result<NativeGraphPlan, NativeError> {
+    native_graph_plan_with_validator(graph, &validate_native_builtin_node)
+}
+
+fn native_graph_plan_with_validator(
+    graph: &ModuleGraph,
+    validate: &dyn Fn(&ModuleGraph, &kiln_module_graph::ModuleNode) -> Result<(), NativeError>,
+) -> Result<NativeGraphPlan, NativeError> {
     #[derive(Clone)]
     struct LazyEdge {
         owner: PathBuf,
@@ -2725,7 +2732,7 @@ fn native_graph_plan(graph: &ModuleGraph) -> Result<NativeGraphPlan, NativeError
     }
 
     let static_reachable = graph.statically_reachable();
-    validate_native_builtins_in_paths(graph, &static_reachable)?;
+    validate_native_builtins_in_paths(graph, &static_reachable, validate)?;
     let mut plan = NativeGraphPlan::default();
     let mut retained = static_reachable.clone();
     let mut pending = static_reachable
@@ -2775,7 +2782,7 @@ fn native_graph_plan(graph: &ModuleGraph) -> Result<NativeGraphPlan, NativeError
             let Some(node) = graph.module(&path) else {
                 continue;
             };
-            if let Err(error) = validate_native_builtin_node(graph, node) {
+            if let Err(error) = validate(graph, node) {
                 unsupported.get_or_insert(error.to_string());
             }
             walk.extend(node.dependencies.iter().map(|edge| edge.target.clone()));
@@ -2829,10 +2836,11 @@ fn native_graph_plan(graph: &ModuleGraph) -> Result<NativeGraphPlan, NativeError
 fn validate_native_builtins_in_paths(
     graph: &ModuleGraph,
     paths: &BTreeSet<PathBuf>,
+    validate: &dyn Fn(&ModuleGraph, &kiln_module_graph::ModuleNode) -> Result<(), NativeError>,
 ) -> Result<(), NativeError> {
     for path in paths {
         if let Some(node) = graph.module(path) {
-            validate_native_builtin_node(graph, node)?;
+            validate(graph, node)?;
         }
     }
     Ok(())
