@@ -26,6 +26,7 @@ extern kiln_value kiln_c99_number_bits(uint64_t bits);
 extern kiln_value kiln_c99_concat(kiln_value left, kiln_value right);
 extern int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_value value);
 extern void kiln_c99_note_refusal(const char *site, size_t instruction, const char *operation, size_t depth);
+extern void kiln_c99_publish_diagnostic(void);
 extern void kiln_c99_gc_unit_roots(void *opaque, void *context, int phase);
 extern int kiln_c99_refuse(const char *lacked);
 extern int kiln_c99_refuse_named(const char *lacked, const char *subject, size_t subject_len);

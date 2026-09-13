@@ -689,6 +689,49 @@ fn run_native_failure_fixture(name: &str, source: &str) -> Option<String> {
     Some(String::from_utf8(output.stderr).expect("diagnostic output is UTF-8"))
 }
 
+fn run_native_failure_fixture_with_dependency(
+    name: &str,
+    source: &str,
+    dependency_source: &str,
+) -> Option<String> {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    use std::process::Command;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native diagnostic fixture: no C compiler found");
+        return None;
+    };
+    let project = TestDirectory::new(name);
+    fs::write(project.path.join("main.mjs"), source).expect("write native diagnostic fixture");
+    fs::write(project.path.join("dep.mjs"), dependency_source)
+        .expect("write native diagnostic dependency");
+    let entry = project.path.join("main.mjs");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("diagnostic source graph compiles");
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: project.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .expect("native diagnostic graph builds");
+    let output = Command::new(&report.output)
+        .output()
+        .expect("run native diagnostic fixture");
+    assert!(!output.status.success(), "fixture unexpectedly succeeded");
+    Some(String::from_utf8(output.stderr).expect("diagnostic output is UTF-8"))
+}
+
 #[test]
 fn native_non_callable_diagnostic_keeps_call_site_and_callee_context() {
     let Some(stderr) = run_native_failure_fixture(
@@ -752,6 +795,29 @@ fn native_non_callable_nested_error_names_innermost_function() {
     assert!(
         !stderr.contains("function=outer"),
         "enclosing function leaked into diagnostic: {stderr}"
+    );
+}
+
+#[test]
+fn native_non_callable_cross_module_error_keeps_innermost_site() {
+    let Some(stderr) = run_native_failure_fixture_with_dependency(
+        "kiln-native-non-callable-cross-module",
+        "import { outer } from './dep.mjs';\nouter();\n",
+        "export function outer() { function inner() { const value = {}; value(); } inner(); }\n",
+    ) else {
+        return;
+    };
+    assert!(
+        stderr.contains("operation=Call"),
+        "missing operation: {stderr}"
+    );
+    assert!(
+        stderr.contains("function=inner"),
+        "missing innermost function: {stderr}"
+    );
+    assert!(
+        !stderr.contains("function=outer"),
+        "outer function leaked: {stderr}"
     );
 }
 

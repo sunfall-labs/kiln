@@ -1,4 +1,6 @@
 
+void kiln_c99_publish_diagnostic(void);
+
 static kiln_value kiln_c99_builtin(uint64_t code) {
     return kiln_c99_value(KILN_VALUE_BUILTIN, code, NULL, 0);
 }
@@ -405,8 +407,7 @@ static void kiln_c99_attribute_body_function(const kiln_closure *closure) {
          * closure returns. Re-publish the completed cold record so the rendered control value
          * sees the function name too. */
         if (kiln_c99_diagnostic_site != NULL && kiln_c99_diagnostic_operation != NULL) {
-            kiln_c99_note_refusal(kiln_c99_diagnostic_site, kiln_c99_diagnostic_instruction,
-                                  kiln_c99_diagnostic_operation, kiln_c99_diagnostic_depth);
+            kiln_c99_publish_diagnostic();
         }
     }
 }
