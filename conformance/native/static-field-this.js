@@ -7,3 +7,19 @@ class Service {
 }
 
 console.log(Service.self === Service, Service.arrow === Service);
+
+const delayed = Service.arrow;
+console.log(delayed === Service);
+
+class Derived extends Service {
+  static self = this;
+}
+console.log(Derived.self === Derived, Derived.self === Service);
+
+const receiver = { key: "computed" };
+const Computed = (function () {
+  return class {
+    static [this.key] = this;
+  };
+}).call(receiver);
+console.log(Computed.computed === Computed, Computed.computed === receiver);
