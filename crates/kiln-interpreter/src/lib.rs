@@ -31463,7 +31463,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // reached, so both go through one path.
             // A wrapped function ignores it too, and for a stronger reason: a receiver would be
             // one more object crossing the boundary, which the wrapping does not permit.
-            value if is_receiver_transparent_callable(&value) => self
+            value if forwards_to_call_value(&value) => self
                 .call_value(&value, receiver, arguments, instruction)
                 .map(Some),
             Value::Function(closure) => {
@@ -42064,7 +42064,7 @@ fn string_coerced_argument(native: Native, index: usize) -> bool {
 /// Native and compiled functions are intentionally excluded: their receiver is observable and
 /// each dispatch path must preserve its specialized fast path. This match is deliberately
 /// exhaustive: adding a `Value` representation forces its call classification to be decided here.
-fn is_receiver_transparent_callable(value: &Value) -> bool {
+fn forwards_to_call_value(value: &Value) -> bool {
     match value {
         Value::Settler(..)
         | Value::Capability(..)
@@ -42111,7 +42111,7 @@ pub(crate) fn is_callable(value: &Value) -> bool {
             matches!(
                 other,
                 Value::Function(_) | Value::Native(_, _) | Value::Callback(_, _)
-            ) || is_receiver_transparent_callable(other)
+            ) || forwards_to_call_value(other)
         }
     }
 }
