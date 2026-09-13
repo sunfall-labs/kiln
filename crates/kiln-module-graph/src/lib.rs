@@ -171,6 +171,8 @@ pub struct ModuleGraph {
     export_resolutions: Arc<HashMap<PathBuf, BTreeMap<String, ResolvedExport>>>,
     /// Body replacements layered over the shared immutable graph storage.
     patched_modules: Arc<BTreeMap<PathBuf, ModuleNode>>,
+    dynamic_dependencies: Arc<HashMap<PathBuf, Vec<Dependency>>>,
+    dynamic_failures: Arc<BTreeMap<(PathBuf, String), String>>,
 }
 
 /// A realm-scoped dynamic importer backed by one immutable graph snapshot.
@@ -201,10 +203,27 @@ impl ModuleLoaderService for GraphModuleLoader {
                 importer.display()
             ))
         })?;
-        let dependency = node
-            .dependencies
-            .iter()
-            .find(|dependency| dependency.specifier == request.specifier)
+        if let Some(message) = self
+            .graph
+            .dynamic_failures
+            .get(&(importer.clone(), request.specifier.clone()))
+        {
+            return Err(ModuleLoadError::Unsupported(message.clone()));
+        }
+        let dependency = self
+            .graph
+            .dynamic_dependencies
+            .get(&importer)
+            .and_then(|dependencies| {
+                dependencies
+                    .iter()
+                    .find(|dependency| dependency.specifier == request.specifier)
+            })
+            .or_else(|| {
+                node.dependencies
+                    .iter()
+                    .find(|dependency| dependency.specifier == request.specifier)
+            })
             .ok_or_else(|| {
                 ModuleLoadError::NotFound(format!(
                     "could not resolve module `{}` from `{}`",
@@ -735,10 +754,13 @@ impl ModuleGraph {
             provider,
             typed_sources,
             modules: BTreeMap::new(),
-            source_kinds: HashMap::new(),
             states: HashMap::new(),
             stack: Vec::new(),
             order: Vec::new(),
+            dynamic_dependencies: HashMap::new(),
+            dynamic_failures: HashMap::new(),
+            dynamic_work: Vec::new(),
+            dynamic_journal: None,
         };
         builder.visit(entry_path.clone())?;
         let export_resolutions = resolve_exports(&builder.modules, &builder.order)?;
@@ -750,6 +772,8 @@ impl ModuleGraph {
             order: Arc::new(builder.order),
             export_resolutions: Arc::new(export_resolutions),
             patched_modules: Arc::new(BTreeMap::new()),
+            dynamic_dependencies: Arc::new(builder.dynamic_dependencies),
+            dynamic_failures: Arc::new(builder.dynamic_failures.into_iter().collect()),
         })
     }
 
@@ -785,6 +809,44 @@ impl ModuleGraph {
 
     pub fn module_order(&self) -> &[PathBuf] {
         &self.order
+    }
+
+    /// Dependencies reached by literal `import()` from one importer.
+    pub fn dynamic_dependencies(&self, importer: impl AsRef<Path>) -> &[Dependency] {
+        self.dynamic_dependencies
+            .get(importer.as_ref())
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// Return the deferred failure recorded for one literal dynamic import, if any.
+    pub fn dynamic_failure(&self, importer: impl AsRef<Path>, specifier: &str) -> Option<&str> {
+        self.dynamic_failures
+            .get(&(importer.as_ref().to_path_buf(), specifier.to_owned()))
+            .map(String::as_str)
+    }
+
+    /// Return deferred dynamic failures in deterministic importer/specifier order.
+    pub fn dynamic_failures(&self) -> impl Iterator<Item = (&(PathBuf, String), &String)> {
+        self.dynamic_failures.iter()
+    }
+
+    fn statically_reachable(&self) -> HashSet<PathBuf> {
+        let mut reachable = HashSet::new();
+        let mut pending = vec![self.entry.clone()];
+        while let Some(path) = pending.pop() {
+            if !reachable.insert(path.clone()) {
+                continue;
+            }
+            if let Some(node) = self.module_node(&path) {
+                pending.extend(
+                    node.dependencies
+                        .iter()
+                        .map(|dependency| dependency.target.clone()),
+                );
+            }
+        }
+        reachable
     }
 
     /// Return a new graph with one source module's body replaced when its link shape is unchanged.
@@ -862,10 +924,21 @@ impl ModuleGraph {
                         ));
                     }
                     kiln_ir::DynamicImportTarget::Static(specifier) => {
+                        if self.dynamic_failure(&node.path, specifier).is_some() {
+                            continue;
+                        }
                         let target_in_graph =
                             node.dependencies.iter().any(|d| {
                                 d.specifier == *specifier && self.module(&d.target).is_some()
                             }) || self.module(specifier).is_some()
+                                || self.dynamic_dependencies.get(&node.path).is_some_and(
+                                    |dependencies| {
+                                        dependencies.iter().any(|d| {
+                                            d.specifier == *specifier
+                                                && self.module(&d.target).is_some()
+                                        })
+                                    },
+                                )
                                 || node.path.parent().is_some_and(|dir| {
                                     let candidate = dir.join(specifier);
                                     self.module(&candidate).is_some()
@@ -1161,8 +1234,13 @@ impl ModuleGraph {
             }
         }
 
-        let position: HashMap<&Path, usize> = self
+        let static_reachable = self.statically_reachable();
+        let plan_order = self
             .order
+            .iter()
+            .filter(|path| static_reachable.contains(*path))
+            .collect::<Vec<_>>();
+        let position: HashMap<&Path, usize> = plan_order
             .iter()
             .enumerate()
             .map(|(index, path)| (path.as_path(), index))
@@ -1174,8 +1252,8 @@ impl ModuleGraph {
             })
         };
 
-        let mut modules = Vec::with_capacity(self.order.len());
-        for path in self.order.iter() {
+        let mut modules = Vec::with_capacity(plan_order.len());
+        for path in plan_order {
             let node = self
                 .module_node(path)
                 .ok_or_else(|| ModuleGraphError::InternalMissingModule { path: path.clone() })?;
@@ -1464,7 +1542,11 @@ impl ModuleGraph {
             node,
         };
 
+        let static_reachable = self.statically_reachable();
         for path in self.order.iter() {
+            if !static_reachable.contains(path) {
+                continue;
+            }
             let module_node = self
                 .module_node(path)
                 .ok_or_else(|| ModuleGraphError::InternalMissingModule { path: path.clone() })?;
@@ -1984,17 +2066,19 @@ struct Builder<P, R> {
     provider: P,
     typed_sources: bool,
     modules: BTreeMap<PathBuf, ModuleNode>,
-    source_kinds: HashMap<PathBuf, ModuleSource>,
     states: HashMap<PathBuf, VisitState>,
     stack: Vec<PathBuf>,
     order: Vec<PathBuf>,
+    dynamic_dependencies: HashMap<PathBuf, Vec<Dependency>>,
+    dynamic_failures: HashMap<(PathBuf, String), String>,
+    dynamic_work: Vec<DynamicWork>,
+    dynamic_journal: Option<DynamicJournal>,
 }
 
 enum WorkItem {
     Enter {
         path: PathBuf,
-        source: ModuleSource,
-        classify: bool,
+        source: Option<ModuleSource>,
     },
     /// A module whose own compilation is finished, waiting below its dependencies' work.
     ///
@@ -2002,6 +2086,24 @@ enum WorkItem {
     /// and boxed, because it is an order of magnitude larger than `Enter` and every item in the
     /// queue would otherwise be sized for it.
     Exit(Box<ModuleNode>),
+}
+
+struct DynamicWork {
+    importer: PathBuf,
+    specifier: String,
+    path: PathBuf,
+    source: ModuleSource,
+}
+
+#[derive(Default)]
+struct DynamicJournal {
+    order_before: usize,
+    stack_before: usize,
+    pending_before: usize,
+    new_modules: Vec<PathBuf>,
+    new_states: Vec<PathBuf>,
+    new_dynamic_dependencies: Vec<PathBuf>,
+    new_failures: Vec<(PathBuf, String)>,
 }
 
 #[derive(Clone, Copy)]
@@ -2016,18 +2118,100 @@ where
     R: ResolutionPolicy,
 {
     fn visit(&mut self, path: PathBuf) -> Result<(), ModuleGraphError> {
-        let mut work = vec![WorkItem::Enter {
-            path,
-            source: ModuleSource::Source,
-            classify: true,
-        }];
+        self.visit_static(path, None)?;
+        let export_resolutions = resolve_exports(&self.modules, &self.order)?;
+        validate_links(&self.modules, &self.order, &export_resolutions)?;
+        while let Some(dynamic) = self.dynamic_work.pop() {
+            self.dynamic_journal = Some(DynamicJournal {
+                order_before: self.order.len(),
+                stack_before: self.stack.len(),
+                pending_before: self.dynamic_work.len(),
+                ..DynamicJournal::default()
+            });
+            let result = self
+                .visit_static(dynamic.path.clone(), Some(dynamic.source))
+                .and_then(|_| {
+                    let export_resolutions = resolve_exports(&self.modules, &self.order)?;
+                    validate_links(&self.modules, &self.order, &export_resolutions)
+                });
+            let journal = self.dynamic_journal.take().expect("dynamic journal exists");
+            if let Err(error) = result {
+                self.rollback_dynamic(journal);
+                self.dynamic_failures.insert(
+                    (dynamic.importer, dynamic.specifier),
+                    format!("dynamic import failed: {error}"),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn rollback_dynamic(&mut self, journal: DynamicJournal) {
+        self.dynamic_work.truncate(journal.pending_before);
+        self.stack.truncate(journal.stack_before);
+        self.order.truncate(journal.order_before);
+        for path in journal.new_modules {
+            self.modules.remove(&path);
+        }
+        for path in journal.new_states {
+            self.states.remove(&path);
+        }
+        for path in journal.new_dynamic_dependencies {
+            self.dynamic_dependencies.remove(&path);
+        }
+        for key in journal.new_failures {
+            self.dynamic_failures.remove(&key);
+        }
+    }
+
+    fn record_state(&mut self, path: &Path) {
+        if !self.states.contains_key(path) {
+            if let Some(journal) = &mut self.dynamic_journal {
+                journal.new_states.push(path.to_path_buf());
+            }
+        }
+        self.states.insert(path.to_path_buf(), VisitState::Visiting);
+    }
+
+    fn record_module(&mut self, node: ModuleNode) {
+        if !self.modules.contains_key(&node.path) {
+            if let Some(journal) = &mut self.dynamic_journal {
+                journal.new_modules.push(node.path.clone());
+            }
+        }
+        self.modules.insert(node.path.clone(), node);
+    }
+
+    fn record_dynamic_dependency(&mut self, path: &Path, dependency: Dependency) {
+        if !self.dynamic_dependencies.contains_key(path) {
+            if let Some(journal) = &mut self.dynamic_journal {
+                journal.new_dynamic_dependencies.push(path.to_path_buf());
+            }
+        }
+        self.dynamic_dependencies
+            .entry(path.to_path_buf())
+            .or_default()
+            .push(dependency);
+    }
+
+    fn record_dynamic_failure(&mut self, key: (PathBuf, String), message: String) {
+        if !self.dynamic_failures.contains_key(&key) {
+            if let Some(journal) = &mut self.dynamic_journal {
+                journal.new_failures.push(key.clone());
+            }
+        }
+        self.dynamic_failures.insert(key, message);
+    }
+
+    fn visit_static(
+        &mut self,
+        path: PathBuf,
+        source: Option<ModuleSource>,
+    ) -> Result<(), ModuleGraphError> {
+        let mut work = vec![WorkItem::Enter { path, source }];
         while let Some(item) = work.pop() {
             match item {
-                WorkItem::Enter {
-                    path,
-                    source,
-                    classify,
-                } => match self.states.get(&path).copied() {
+                WorkItem::Enter { path, source } => match self.states.get(&path).copied() {
                     Some(VisitState::Done) => continue,
                     // A back edge: this module is an ancestor of itself, so the graph has a
                     // cycle. The edge stays recorded on the parent that is being built; only the
@@ -2044,10 +2228,9 @@ where
                     // evaluation error is recorded -- neither of which changes the order.
                     Some(VisitState::Visiting) => continue,
                     None => {
-                        let source = if !classify {
-                            source
-                        } else {
-                            match source {
+                        let source = match source {
+                            Some(source) => source,
+                            None => match ModuleSource::Source {
                                 ModuleSource::Source
                                     if path
                                         .extension()
@@ -2084,10 +2267,9 @@ where
                                     }
                                 }
                                 source => source,
-                            }
+                            },
                         };
-                        self.source_kinds.insert(path.clone(), source);
-                        self.states.insert(path.clone(), VisitState::Visiting);
+                        self.record_state(&path);
                         self.stack.push(path.clone());
                         let (program, data) = match source {
                             ModuleSource::Source | ModuleSource::CommonJs => {
@@ -2146,6 +2328,8 @@ where
                         };
                         validate_exports(&path, &program)?;
                         let mut dependencies = Vec::with_capacity(program.dependencies.len());
+                        let mut dynamic_dependencies = Vec::new();
+                        let mut dynamic_sources = Vec::new();
                         let mut dependency_sources = Vec::with_capacity(program.dependencies.len());
                         let request = if source == ModuleSource::CommonJs {
                             NodeRequestKind::Require
@@ -2213,23 +2397,54 @@ where
                             let kiln_ir::DynamicImportTarget::Static(specifier) = target else {
                                 continue;
                             };
-                            if dependencies
-                                .iter()
-                                .any(|dependency| dependency.specifier == *specifier)
-                            {
-                                continue;
-                            }
-                            let Ok(resolved) = self.resolver.resolve_for_request(
+                            let resolved = match self.resolver.resolve_for_request(
                                 specifier,
                                 &path,
                                 NodeRequestKind::Import,
-                            ) else {
-                                continue;
+                            ) {
+                                Ok(resolved) => resolved,
+                                Err(error) => {
+                                    self.record_dynamic_failure(
+                                        (path.clone(), specifier.clone()),
+                                        format!(
+                                            "dynamic import failed: could not resolve {} from {}: {}",
+                                            specifier,
+                                            path.display(),
+                                            error
+                                        ),
+                                    );
+                                    continue;
+                                }
                             };
                             let target_path = resolved.path.clone();
-                            let source = if let Some(source) = self.source_kinds.get(&target_path) {
-                                *source
-                            } else if let Some(builtin) = resolved.builtin() {
+                            let node_format = if self.typed_sources
+                                && resolved.builtin().is_none()
+                                && !target_path
+                                    .extension()
+                                    .and_then(|ext| ext.to_str())
+                                    .is_some_and(is_asset_extension)
+                                && !target_path
+                                    .extension()
+                                    .and_then(|ext| ext.to_str())
+                                    .is_some_and(kiln_data_formats::is_data_extension)
+                            {
+                                match self.resolver.node_format(&resolved) {
+                                    Ok(format) => format,
+                                    Err(error) => {
+                                        self.record_dynamic_failure(
+                                            (path.clone(), specifier.clone()),
+                                            format!(
+                                                "dynamic import failed while classifying {}: {}",
+                                                specifier, error
+                                            ),
+                                        );
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                None
+                            };
+                            let source = if let Some(builtin) = resolved.builtin() {
                                 ModuleSource::NodeBuiltin(builtin)
                             } else if target_path
                                 .extension()
@@ -2245,29 +2460,25 @@ where
                                 ModuleSource::Json
                             } else if !self.typed_sources {
                                 ModuleSource::Source
-                            } else if self.resolver.node_format(&resolved).map_err(|error| {
-                                ModuleGraphError::Resolve {
-                                    importer: path.clone(),
-                                    specifier: specifier.clone(),
-                                    error,
-                                }
-                            })? == Some(NodeModuleFormat::CommonJs)
-                            {
+                            } else if node_format == Some(NodeModuleFormat::CommonJs) {
                                 ModuleSource::CommonJs
                             } else {
                                 ModuleSource::Source
                             };
-                            dependencies.push(Dependency {
+                            dynamic_dependencies.push(Dependency {
                                 specifier: specifier.clone(),
                                 target: target_path,
                             });
-                            dependency_sources.push(source);
+                            for dependency in dynamic_dependencies.drain(..) {
+                                self.record_dynamic_dependency(&path, dependency);
+                            }
+                            dynamic_sources.push(source);
                         }
 
                         // LIFO work preserves the original source order: the first dependency is
                         // entered first, while Exit remains below all child work.
                         work.push(WorkItem::Exit(Box::new(ModuleNode {
-                            path,
+                            path: path.clone(),
                             source,
                             program,
                             data,
@@ -2278,9 +2489,18 @@ where
                         {
                             work.push(WorkItem::Enter {
                                 path: dependency.target,
-                                source,
-                                classify: false,
+                                source: Some(source),
                             });
+                        }
+                        if let Some(dynamic) = self.dynamic_dependencies.get(&path).cloned() {
+                            for (dependency, source) in dynamic.iter().zip(dynamic_sources).rev() {
+                                self.dynamic_work.push(DynamicWork {
+                                    importer: path.clone(),
+                                    specifier: dependency.specifier.clone(),
+                                    path: dependency.target.clone(),
+                                    source,
+                                });
+                            }
                         }
                     }
                 },
@@ -2288,7 +2508,7 @@ where
                     self.stack.pop();
                     self.states.insert(node.path.clone(), VisitState::Done);
                     self.order.push(node.path.clone());
-                    self.modules.insert(node.path.clone(), *node);
+                    self.record_module(*node);
                 }
             }
         }

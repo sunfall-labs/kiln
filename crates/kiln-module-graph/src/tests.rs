@@ -107,6 +107,144 @@ fn dynamic_loader_resolves_against_the_requesting_module() {
 }
 
 #[test]
+fn failed_dynamic_subtree_is_deferred_until_import() {
+    let project = TempProject::new();
+    let entry = project.write("main.mjs", "import('./optional.mjs');");
+    project.write(
+        "optional.mjs",
+        "import './missing.mjs'; export const value = 1;",
+    );
+    let graph = Arc::new(project.graph(&entry).expect("optional subtree is deferred"));
+    assert_eq!(graph.module_count(), 1);
+
+    let loader = GraphModuleLoader::new(Arc::clone(&graph));
+    let error = match loader.load(ModuleLoadRequest {
+        importer: Some(entry.canonicalize().unwrap().to_string_lossy().into_owned()),
+        specifier: "./optional.mjs".into(),
+        attributes: None,
+    }) {
+        Ok(_) => panic!("importing the failed subtree must reject"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(error, ModuleLoadError::Unsupported(message) if message.contains("missing.mjs"))
+    );
+}
+
+#[test]
+fn failed_dynamic_subtree_rolls_back_link_errors() {
+    let project = TempProject::new();
+    let entry = project.write("main.mjs", "import('./optional.mjs');");
+    project.write(
+        "optional.mjs",
+        "import { missing } from './dep.mjs'; export const value = missing;",
+    );
+    project.write("dep.mjs", "export const present = 1;");
+    let graph = project
+        .graph(&entry)
+        .expect("link failure is deferred with the dynamic subtree");
+    assert_eq!(graph.module_count(), 1);
+    let loader = GraphModuleLoader::new(Arc::new(graph));
+    let error = match loader.load(ModuleLoadRequest {
+        importer: Some(entry.canonicalize().unwrap().to_string_lossy().into_owned()),
+        specifier: "./optional.mjs".into(),
+        attributes: None,
+    }) {
+        Ok(_) => panic!("importing the link-failed subtree must reject"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, ModuleLoadError::Unsupported(message) if message.contains("missing")));
+}
+
+#[test]
+fn failed_dynamic_subtree_rolls_back_compile_errors() {
+    let project = TempProject::new();
+    let entry = project.write("main.mjs", "import('./optional.mjs');");
+    project.write("optional.mjs", "export const = 1;");
+    let graph = project
+        .graph(&entry)
+        .expect("compile failure is deferred with the dynamic subtree");
+    assert_eq!(graph.module_count(), 1);
+}
+
+#[test]
+fn failed_dynamic_import_rejects_and_can_be_caught_by_interpreter() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        "import('./optional.mjs').catch(error => console.log(error.message));",
+    );
+    project.write("optional.mjs", "import './missing.mjs';");
+    let graph = Arc::new(project.graph(&entry).expect("dynamic failure is deferred"));
+    let mut host = TestHost::default();
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default()
+                .with_module_loader_service(Arc::new(GraphModuleLoader::new(Arc::clone(&graph)))),
+        )
+        .expect("caught dynamic import rejection");
+    assert!(
+        host.output
+            .iter()
+            .any(|line| line.contains("dynamic import failed")),
+        "unexpected output: {:?}",
+        host.output
+    );
+}
+
+#[test]
+fn failed_dynamic_sibling_does_not_rollback_successful_sibling() {
+    let project = TempProject::new();
+    let entry = project.write("main.mjs", "import('./bad.mjs'); import('./good.mjs');");
+    project.write("bad.mjs", "import './missing.mjs';");
+    project.write("good.mjs", "export const value = 42;");
+    let graph = Arc::new(project.graph(&entry).expect("one dynamic sibling failed"));
+    assert_eq!(graph.module_count(), 2);
+    let loader = GraphModuleLoader::new(Arc::clone(&graph));
+    let plan = loader
+        .load(ModuleLoadRequest {
+            importer: Some(entry.canonicalize().unwrap().to_string_lossy().into_owned()),
+            specifier: "./good.mjs".into(),
+            attributes: None,
+        })
+        .unwrap_or_else(|_| panic!("successful dynamic sibling remains loadable"));
+    assert!(plan.key.ends_with("/good.mjs"));
+}
+
+#[test]
+fn failed_static_subtree_still_rejects_graph_build() {
+    let project = TempProject::new();
+    let entry = project.write("main.mjs", "import './optional.mjs';");
+    project.write("optional.mjs", "import './missing.mjs';");
+    let error = project
+        .graph(&entry)
+        .expect_err("a static bad dependency remains fatal");
+    assert!(error.to_string().contains("missing.mjs"));
+}
+
+#[test]
+fn literal_dynamic_module_is_not_evaluated_with_static_entry() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        "console.log('entry'); if (false) import('./side.mjs');",
+    );
+    project.write("side.mjs", "console.log('side'); export const value = 1;");
+    let graph = project.graph(&entry).expect("build dynamic graph");
+    let mut host = TestHost::default();
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute entry");
+    assert_eq!(host.output, ["entry"]);
+}
+
+#[test]
 fn node_graph_records_package_commonjs_source_identity() {
     let project = TempProject::new();
     fs::create_dir_all(project.root.join("node_modules/pkg")).unwrap();
