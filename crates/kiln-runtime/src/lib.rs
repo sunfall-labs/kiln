@@ -2811,11 +2811,18 @@ impl RealmHostProvider for TokioHost {
         for (_, cancel) in std::mem::take(&mut self.process_cancellers) {
             let _ = cancel.send(());
         }
-        executor.block_on(async {
-            while !self.tasks.is_empty() {
-                let _ = self.tasks.join_next().await;
+        // Do not await the whole task map: unrelated resource operations are intentionally
+        // aborted at shutdown and may never complete. A bounded set of executor turns is enough
+        // for process cancellation to kill and reap its child; anything still present gets the
+        // existing abort-on-teardown treatment below.
+        for _ in 0..64 {
+            while self.tasks.try_join_next().is_some() {}
+            if self.tasks.is_empty() {
+                break;
             }
-        });
+            executor.block_on(yield_to_tasks());
+        }
+        self.tasks.abort_all();
     }
 
     fn shutdown_on_realm(&mut self) {
