@@ -72910,6 +72910,10 @@
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
+              "returned_sites": [
+                3,
+                4
+              ],
               "sites": [
                 {
                   "id": 0,
@@ -72970,7 +72974,8 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
-                0
+                0,
+                5
               ],
               "sites": [
                 {
@@ -73049,7 +73054,7 @@
               "parameter_types": [
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Undefined",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -90755,7 +90760,7 @@
               "parameter_types": [
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Boolean",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -93277,7 +93282,7 @@
               ]
             },
             {
-              "return_type": "Unknown",
+              "return_type": "Undefined",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -93387,7 +93392,7 @@
               "reads_arguments": false
             },
             {
-              "return_type": "Unknown",
+              "return_type": "Undefined",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -93444,7 +93449,7 @@
               ]
             },
             {
-              "return_type": "Unknown",
+              "return_type": "Undefined",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -93487,7 +93492,7 @@
               ]
             },
             {
-              "return_type": "Unknown",
+              "return_type": "Undefined",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -93565,7 +93570,7 @@
               "reads_arguments": false
             },
             {
-              "return_type": "Unknown",
+              "return_type": "Undefined",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -93608,7 +93613,7 @@
               ]
             },
             {
-              "return_type": "Unknown",
+              "return_type": "Undefined",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -93786,7 +93791,7 @@
               ]
             },
             {
-              "return_type": "Unknown",
+              "return_type": "Undefined",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -93972,7 +93977,7 @@
               "reads_arguments": false
             },
             {
-              "return_type": "Unknown",
+              "return_type": "Undefined",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -94172,7 +94177,7 @@
               ]
             },
             {
-              "return_type": "Unknown",
+              "return_type": "Undefined",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -94445,7 +94450,7 @@
             },
             {
               "name": "withFinally",
-              "return_type": "Unknown",
+              "return_type": "Undefined",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -94552,7 +94557,7 @@
             },
             {
               "name": "main",
-              "return_type": "Unknown",
+              "return_type": "Undefined",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -100748,7 +100753,7 @@
             },
             {
               "name": "_a",
-              "return_type": "Unknown",
+              "return_type": "Undefined",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -100889,7 +100894,7 @@
             },
             {
               "name": "_a",
-              "return_type": "Unknown",
+              "return_type": "Undefined",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -101938,7 +101943,7 @@
             },
             {
               "name": "_a",
-              "return_type": "Unknown",
+              "return_type": "Undefined",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -161642,6 +161647,9 @@
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
+              "returned_sites": [
+                1
+              ],
               "sites": [
                 {
                   "id": 0,
@@ -232018,7 +232026,7 @@
             },
             {
               "name": "main",
-              "return_type": "Unknown",
+              "return_type": "Undefined",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
