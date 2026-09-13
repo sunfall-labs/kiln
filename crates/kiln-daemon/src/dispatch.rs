@@ -610,6 +610,9 @@ fn snapshot_module_payload(
     path: &Path,
     source_kind: kiln_module_graph::ModuleSource,
 ) -> Result<kiln_module_graph::ModulePayload, kiln_module_graph::ModuleGraphError> {
+    if source_kind == kiln_module_graph::ModuleSource::Asset {
+        return Ok(kiln_module_graph::ModulePayload::AssetPath(path.to_path_buf()));
+    }
     let source =
         snapshot
             .sources
@@ -999,6 +1002,9 @@ fn module_payload<E: QueryEngine>(
     module_path: &Path,
     source_kind: kiln_module_graph::ModuleSource,
 ) -> Result<kiln_module_graph::ModulePayload, kiln_module_graph::ModuleGraphError> {
+    if source_kind == kiln_module_graph::ModuleSource::Asset {
+        return Ok(kiln_module_graph::ModulePayload::AssetPath(module_path.to_path_buf()));
+    }
     let module_path_string =
         module_path
             .to_str()
