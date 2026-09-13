@@ -22,6 +22,10 @@ KILN_PROVIDER_FULL_ARCHIVE=$(kiln_provider_contract_field full_archive)
 KILN_PROVIDER_SLIM_ARCHIVE=$(kiln_provider_contract_field slim_archive)
 KILN_PROVIDER_FULL_MANIFEST=$(kiln_provider_contract_field full_manifest)
 KILN_PROVIDER_SLIM_MANIFEST=$(kiln_provider_contract_field slim_manifest)
+KILN_PROVIDER_SCHEMA=$(kiln_provider_contract_field schema)
+KILN_PROVIDER_NAME=$(kiln_provider_contract_field provider)
+KILN_PROVIDER_FORMAT=$(kiln_provider_contract_field format_version)
+KILN_PROVIDER_PARSE=$(kiln_provider_contract_field parse_version)
 
 # The slim variant builds the same crate without `realm-http`: same schema, provider ABI
 # and export list, but no Hyper-backed HTTP engines. Both variants publish into one
@@ -42,7 +46,7 @@ if [[ $KILN_PROVIDER_OUTPUT != /* ]]; then
 	KILN_PROVIDER_OUTPUT="$(kiln_repo_root)/$KILN_PROVIDER_OUTPUT"
 fi
 
-KILN_PROVIDER_CARGO="${CARGO:-cargo}"
+KILN_PROVIDER_CARGO="${KILN_PROVIDER_CARGO:-${CARGO:-mbx}}"
 KILN_PROVIDER_RUSTC="${RUSTC:-rustc}"
 if ! command -v "$KILN_PROVIDER_CARGO" >/dev/null 2>&1; then
 	printf 'Cargo executable %s is not available\n' "$KILN_PROVIDER_CARGO" >&2
@@ -287,11 +291,11 @@ done
 
 printf '%s\n' \
 	'{' \
-	'  "schema": 1,' \
-	'  "provider": "kiln-native-number-ffi",' \
+	"  \"schema\": $KILN_PROVIDER_SCHEMA," \
+	"  \"provider\": \"$KILN_PROVIDER_NAME\"," \
 	"  \"provider_abi\": $KILN_PROVIDER_ABI_VERSION," \
-	'  "format_version": 1,' \
-	'  "parse_version": 1,' \
+	"  \"format_version\": $KILN_PROVIDER_FORMAT," \
+	"  \"parse_version\": $KILN_PROVIDER_PARSE," \
 	"  \"rust_target\": \"$KILN_PROVIDER_TARGET\"," \
 	"  \"rustc_identity\": \"sha256:$KILN_PROVIDER_RUSTC_DIGEST\"," \
 	"  \"source_sha256\": \"$KILN_PROVIDER_SOURCE_DIGEST\"," \
@@ -299,7 +303,7 @@ printf '%s\n' \
 	"  \"archive\": \"$KILN_PROVIDER_ARCHIVE_NAME\"," \
 	'  "linkage": "static",' \
 	'  "pic": true,' \
-	'  "profile": "provider",' \
+	"  \"profile\": \"$KILN_PROVIDER_PROFILE\"," \
 	'  "cpu_features": "generic",' \
 	"  \"deployment\": \"$KILN_PROVIDER_DEPLOYMENT\"," \
 	"  \"libc_baseline\": \"$KILN_PROVIDER_LIBC\"," \
