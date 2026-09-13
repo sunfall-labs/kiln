@@ -2602,6 +2602,14 @@ struct NativeGraphPlan {
 }
 
 fn native_graph_plan(graph: &ModuleGraph) -> Result<NativeGraphPlan, NativeError> {
+    #[derive(Clone)]
+    struct LazyEdge {
+        owner: PathBuf,
+        specifier: String,
+        captured_importer: PathBuf,
+        target: PathBuf,
+    }
+
     let static_reachable = graph.statically_reachable();
     validate_native_builtins_in_paths(graph, &static_reachable)?;
     let mut plan = NativeGraphPlan::default();
@@ -2609,19 +2617,39 @@ fn native_graph_plan(graph: &ModuleGraph) -> Result<NativeGraphPlan, NativeError
     let mut pending = static_reachable
         .iter()
         .flat_map(|path| {
-            graph
+            let dynamic = graph
                 .dynamic_dependencies(path)
                 .iter()
-                .map(move |dependency| (path.clone(), dependency.clone()))
+                .map(move |dependency| LazyEdge {
+                    owner: path.clone(),
+                    specifier: dependency.specifier.clone(),
+                    captured_importer: path.clone(),
+                    target: dependency.target.clone(),
+                });
+            let runtime = graph.module(path).into_iter().flat_map(move |node| {
+                node.runtime_dependencies
+                    .iter()
+                    .map(move |dependency| LazyEdge {
+                        owner: path.clone(),
+                        specifier: dependency.specifier.clone(),
+                        captured_importer: dependency.importer.clone(),
+                        target: dependency.target.clone(),
+                    })
+            });
+            dynamic.chain(runtime)
         })
         .collect::<Vec<_>>();
     let mut processed = BTreeSet::new();
-    while let Some((importer, dependency)) = pending.pop() {
-        if !processed.insert((importer.clone(), dependency.specifier.clone())) {
+    while let Some(edge) = pending.pop() {
+        if !processed.insert((
+            edge.owner.clone(),
+            edge.captured_importer.clone(),
+            edge.specifier.clone(),
+        )) {
             continue;
         }
         let mut closure = BTreeSet::new();
-        let mut walk = vec![dependency.target.clone()];
+        let mut walk = vec![edge.target.clone()];
         let mut unsupported = None;
         while let Some(path) = walk.pop() {
             if !closure.insert(path.clone()) {
@@ -2634,18 +2662,44 @@ fn native_graph_plan(graph: &ModuleGraph) -> Result<NativeGraphPlan, NativeError
                 unsupported.get_or_insert(error.to_string());
             }
             walk.extend(node.dependencies.iter().map(|edge| edge.target.clone()));
+            walk.extend(
+                node.runtime_dependencies
+                    .iter()
+                    .map(|dependency| dependency.target.clone()),
+            );
+            walk.extend(
+                graph
+                    .dynamic_dependencies(&node.path)
+                    .iter()
+                    .map(|dependency| dependency.target.clone()),
+            );
         }
         if let Some(message) = unsupported {
             plan.failures.insert(
-                (importer, dependency.specifier),
-                format!("dynamic import failed: {message}"),
+                (edge.owner, edge.specifier),
+                format!("lazy runtime request failed: {message}"),
             );
             continue;
         }
         for path in &closure {
             retained.insert(path.clone());
             for nested in graph.dynamic_dependencies(path) {
-                pending.push((path.clone(), nested.clone()));
+                pending.push(LazyEdge {
+                    owner: path.clone(),
+                    specifier: nested.specifier.clone(),
+                    captured_importer: path.clone(),
+                    target: nested.target.clone(),
+                });
+            }
+            if let Some(node) = graph.module(path) {
+                for nested in &node.runtime_dependencies {
+                    pending.push(LazyEdge {
+                        owner: path.clone(),
+                        specifier: nested.specifier.clone(),
+                        captured_importer: nested.importer.clone(),
+                        target: nested.target.clone(),
+                    });
+                }
             }
         }
     }

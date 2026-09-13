@@ -5176,6 +5176,36 @@ fn native_static_unsupported_builtin_remains_fatal() {
 }
 
 #[test]
+fn native_runtime_unsupported_builtin_is_deferred_and_excluded() {
+    use kiln_module_resolver::{NodeBuiltin, NodeRuntimeResolver};
+
+    let root = TestDirectory::new("kiln-native-runtime-unsupported");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "import { createRequire } from 'node:module'; createRequire(import.meta.url)('node:zlib');\n",
+    )
+    .expect("write runtime builtin entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build runtime builtin graph");
+    let plan = native_graph_plan(&graph).expect("runtime unsupported builtin is deferred");
+    let zlib = graph
+        .modules()
+        .find(|node| node.source == ModuleSource::NodeBuiltin(NodeBuiltin::Zlib))
+        .expect("zlib runtime target");
+    assert!(plan.excluded.contains(&zlib.path));
+    assert!(
+        plan.failures
+            .contains_key(&(graph.entry().to_path_buf(), "node:zlib".to_owned()))
+    );
+}
+
+#[test]
 fn native_failed_dynamic_closure_preserves_shared_successful_dependencies() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
