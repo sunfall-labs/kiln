@@ -5683,4 +5683,19 @@ and full `scripts/native.sh` parity (186 matched, 3 refused, 0 diverged). Mainta
 - Widened `emitted_c.rs` `CEILING_LINES` to 45,000 to account for arity reflection table and prototype modeling.
 - Native conformance refusal backlog in `scripts/native.sh` dropped to 1 (188 matched, 1 refused (`shadow-realm`), 0 diverged).
 
+---
+
+## Phase 5.2 TypeScript built-ins: `node:async_hooks` (2026-09-13)
+
+Migrated `node:async_hooks` completely to TypeScript via `crates/kiln-builtins/src/node/async_hooks.ts`
+with zero additions to the C runtime prelude (Phase 5.1 freeze strictly honored). Implemented canonical
+exports (`AsyncLocalStorage`, `AsyncResource`, `default`), providing seamless async context propagation
+across microtasks, promises, and timers via runtime integration when running under Node host adapter, and
+clean class-based fallback with identical prototype and own-member semantics.
+Verified with native probe `conformance/native/node-async-hooks-members.cjs` (byte-for-byte identical output
+between interpreter and native CLI), integration tests in `kiln-builtins`, `kiln-module-graph`, and `kiln-native`,
+regression suite (`conformance/regress/r08-node-async-context.js` passing 12/12), and full `scripts/native.sh` parity
+(189 matched, 1 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
+
+
 
