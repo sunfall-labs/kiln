@@ -31463,18 +31463,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // reached, so both go through one path.
             // A wrapped function ignores it too, and for a stronger reason: a receiver would be
             // one more object crossing the boundary, which the wrapping does not permit.
-            Value::Settler(..)
-            | Value::Capability(..)
-            | Value::Element(_)
-            | Value::Bound(_)
-            | Value::Wrapped(_)
-            // `require.resolve(...)` is a method call, so it arrives here after property
-            // lookup rather than through the bare-call dispatcher. Keep both CommonJS
-            // callables on the same canonical path so their loader state and builtin fallback
-            // semantics cannot diverge between `resolve(specifier)` and `require.resolve(specifier)`.
-            | Value::CommonJsRequire(_)
-            | Value::CommonJsResolve(_) => self
-                .call_value(&method, receiver, arguments, instruction)
+            value if is_receiver_transparent_callable(&value) => self
+                .call_value(&value, receiver, arguments, instruction)
                 .map(Some),
             Value::Function(closure) => {
                 // The receiver becomes `this`. Pushing a placeholder plus the arguments is how
@@ -42069,6 +42059,24 @@ fn string_coerced_argument(native: Native, index: usize) -> bool {
     }
 }
 
+/// Callables whose receiver is ignored or whose own call object already owns the receiver.
+///
+/// Native and compiled functions are intentionally excluded: their receiver is observable and
+/// each dispatch path must preserve its specialized fast path. Keeping this classification in one
+/// exhaustive helper prevents member-call dispatch and `is_callable` from growing different lists.
+fn is_receiver_transparent_callable(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::Settler(..)
+            | Value::Capability(..)
+            | Value::Element(_)
+            | Value::Bound(_)
+            | Value::Wrapped(_)
+            | Value::CommonJsRequire(_)
+            | Value::CommonJsResolve(_)
+    )
+}
+
 pub(crate) fn is_callable(value: &Value) -> bool {
     match value {
         // A proxy has a `[[Call]]` method exactly when its target has one, decided when the
@@ -42077,19 +42085,12 @@ pub(crate) fn is_callable(value: &Value) -> bool {
         // a function at all -- and `typeof` said so too. The target survives revocation, which
         // is what keeps a revoked function proxy a function.
         Value::Proxy(proxy) => is_callable(&proxy.target),
-        other => matches!(
-            other,
-            Value::Function(_)
-                | Value::Native(_, _)
-                | Value::Callback(_, _)
-                | Value::Settler(..)
-                | Value::Capability(..)
-                | Value::Element(_)
-                | Value::Bound(_)
-                | Value::Wrapped(_)
-                | Value::CommonJsRequire(_)
-                | Value::CommonJsResolve(_)
-        ),
+        other => {
+            matches!(
+                other,
+                Value::Function(_) | Value::Native(_, _) | Value::Callback(_, _)
+            ) || is_receiver_transparent_callable(other)
+        }
     }
 }
 
