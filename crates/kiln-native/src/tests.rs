@@ -256,7 +256,11 @@ fn executable_module_sizes_reports_retained_and_dropped() {
         OxcFrontend,
     )
     .expect("sizes graph");
-    let sizes = executable_module_sizes(&graph, NativeProfile::Dev).expect("module sizes");
+    let sizes = kiln_liveness::executable_module_sizes(
+        &graph,
+        &kiln_liveness::SelectionOptions::development(),
+    )
+    .expect("module sizes");
     assert_eq!(sizes.len(), 3, "entry plus two dependencies");
     let by_name = |name: &str| {
         sizes
@@ -303,7 +307,9 @@ fn executable_demanded_members_names_builtins_and_computed() {
         OxcFrontend,
     )
     .expect("members graph");
-    let demand = executable_demand(&graph, NativeProfile::Dev).expect("demand");
+    let demand =
+        kiln_liveness::executable_demand(&graph, &kiln_liveness::SelectionOptions::development())
+            .expect("demand");
     let members =
         kiln_backend_c::facts::analyze_demanded_members(&graph, &demand.live, &demand.slots);
     assert!(members.names.contains("push"), "{members:?}");
@@ -335,10 +341,14 @@ fn retained_method_groups_drops_node_groups_without_demand() {
             OxcFrontend,
         )
         .expect("mask graph");
-        let demand = executable_demand(&graph, NativeProfile::Dev).expect("demand");
+        let demand = kiln_liveness::executable_demand(
+            &graph,
+            &kiln_liveness::SelectionOptions::development(),
+        )
+        .expect("demand");
         let members =
             kiln_backend_c::facts::analyze_demanded_members(&graph, &demand.live, &demand.slots);
-        retained_method_groups(&graph, &demand, &members)
+        kiln_liveness::retained_method_groups(&graph, &demand, &members)
     }
 
     assert_eq!(
@@ -360,6 +370,7 @@ fn retained_method_groups_drops_node_groups_without_demand() {
         groups::NODE_NET,
         groups::NODE_STREAM,
         groups::NODE_EVENT,
+        groups::BUFFER,
     ] {
         assert!(
             http_mask & group != 0,
@@ -393,8 +404,8 @@ fn retained_method_groups_drops_node_groups_without_demand() {
     );
     assert_eq!(
         fs_mask & PRUNABLE_METHOD_GROUPS,
-        groups::NODE_STREAM | groups::NODE_EVENT,
-        "node:fs keeps only stream/event groups: {fs_mask:#x}"
+        groups::NODE_STREAM | groups::NODE_EVENT | groups::BUFFER,
+        "node:fs keeps stream/event and the Buffer methods its reads can return: {fs_mask:#x}"
     );
     let dynamic_mask = mask_for(
         "main.mjs",
@@ -2038,10 +2049,18 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
             "HTTP read failed: {error}; status={status}; response={response:?}; stderr={stderr:?}"
         );
     }
-    assert!(
-        response.starts_with("HTTP/1.1 201 Created\r\n"),
-        "{response:?}"
-    );
+    if !response.starts_with("HTTP/1.1 201 Created\r\n") {
+        child.kill().expect("kill server after unexpected response");
+        let status = child.wait().expect("reap server after unexpected response");
+        let mut stderr = String::new();
+        child
+            .stderr
+            .take()
+            .expect("capture stderr")
+            .read_to_string(&mut stderr)
+            .expect("read stderr");
+        panic!("status={status} response={response:?} stderr={stderr:?}");
+    }
     let response_lower = response.to_ascii_lowercase();
     assert!(
         response_lower.contains("content-type: text/plain\r\n"),
@@ -7366,8 +7385,11 @@ fn executable_graph_omits_unused_modules_only_with_package_permission() {
     )
     .expect("source graph compiles");
 
-    let selected =
-        native_executable_graph(&graph, NativeProfile::Release).expect("select executable modules");
+    let selected = kiln_liveness::select_executable_modules(
+        &graph,
+        &kiln_liveness::SelectionOptions::production(),
+    )
+    .expect("select executable modules");
     let names = selected
         .modules
         .iter()
@@ -7410,8 +7432,11 @@ fn executable_graph_keeps_unused_import_without_package_permission() {
     )
     .expect("source graph compiles");
 
-    let selected =
-        native_executable_graph(&graph, NativeProfile::Release).expect("select executable modules");
+    let selected = kiln_liveness::select_executable_modules(
+        &graph,
+        &kiln_liveness::SelectionOptions::production(),
+    )
+    .expect("select executable modules");
     assert_eq!(selected.modules.len(), 2);
     assert!(
         selected
@@ -7457,8 +7482,11 @@ fn executable_graph_demands_only_statically_read_namespace_members() {
     )
     .expect("source graph compiles");
 
-    let selected =
-        native_executable_graph(&graph, NativeProfile::Release).expect("select executable graph");
+    let selected = kiln_liveness::select_executable_modules(
+        &graph,
+        &kiln_liveness::SelectionOptions::production(),
+    )
+    .expect("select executable graph");
     let helpers = fs::canonicalize(package.join("helpers.js")).expect("canonical helpers");
     let helper_node = graph.module(&helpers).expect("helpers node");
     let used = helper_node
@@ -7508,8 +7536,11 @@ fn executable_graph_keeps_a_namespace_import_captured_by_a_live_closure() {
     )
     .expect("source graph compiles");
 
-    let selected =
-        native_executable_graph(&graph, NativeProfile::Release).expect("select executable graph");
+    let selected = kiln_liveness::select_executable_modules(
+        &graph,
+        &kiln_liveness::SelectionOptions::production(),
+    )
+    .expect("select executable graph");
     let entry = fs::canonicalize(entry).expect("canonical entry");
     assert!(selected.live_imports.contains(&(entry, 0)));
     let helpers = fs::canonicalize(helpers).expect("canonical helpers");
@@ -7552,8 +7583,11 @@ fn executable_graph_full_namespace_demand_overrides_a_partial_demand() {
     )
     .expect("source graph compiles");
 
-    let selected =
-        native_executable_graph(&graph, NativeProfile::Release).expect("select executable graph");
+    let selected = kiln_liveness::select_executable_modules(
+        &graph,
+        &kiln_liveness::SelectionOptions::production(),
+    )
+    .expect("select executable graph");
     let helpers = fs::canonicalize(helpers).expect("canonical helpers");
     let helper_node = graph.module(&helpers).expect("helpers node");
     let demanded = selected
@@ -7602,8 +7636,11 @@ if (process.env.NODE_ENV === 'production') {
     )
     .expect("source graph compiles");
 
-    let release =
-        native_executable_graph(&graph, NativeProfile::Release).expect("select release graph");
+    let release = kiln_liveness::select_executable_modules(
+        &graph,
+        &kiln_liveness::SelectionOptions::production(),
+    )
+    .expect("select release graph");
     let release_names = release
         .modules
         .iter()
@@ -7613,7 +7650,11 @@ if (process.env.NODE_ENV === 'production') {
     assert!(!release_names.contains(std::ffi::OsStr::new("development.cjs")));
     assert_eq!(release.inactive_commonjs_dependencies.len(), 1);
 
-    let dev = native_executable_graph(&graph, NativeProfile::Dev).expect("select dev graph");
+    let dev = kiln_liveness::select_executable_modules(
+        &graph,
+        &kiln_liveness::SelectionOptions::development(),
+    )
+    .expect("select dev graph");
     let dev_names = dev
         .modules
         .iter()
