@@ -2893,7 +2893,7 @@ fn native_builtin_supported_exports(
             "throws",
         ],
         NodeBuiltin::WorkerThreads => kiln_builtins::WORKER_THREADS_EXPORTS,
-        NodeBuiltin::Module => &["createRequire", "default"],
+        NodeBuiltin::Module => kiln_builtins::MODULE_EXPORTS,
         NodeBuiltin::QueryString => kiln_builtins::QUERYSTRING_EXPORTS,
         NodeBuiltin::Url => kiln_builtins::URL_EXPORTS,
         NodeBuiltin::Buffer => kiln_builtins::BUFFER_EXPORTS,
