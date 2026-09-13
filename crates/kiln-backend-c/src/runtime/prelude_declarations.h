@@ -209,6 +209,7 @@ extern int kiln_c99_iterator_method(kiln_host *host, kiln_value *result, uint64_
 extern kiln_property *kiln_c99_own_private(kiln_value target, const char *key, size_t key_len);
 extern int kiln_c99_private_error(kiln_value *thrown, const char *key, size_t key_len, int mode);
 extern int kiln_c99_throw_error(kiln_value *thrown, uint64_t kind, const char *message);
+extern int kiln_c99_new_type_error(kiln_value *out, const char *message);
 extern kiln_promise *kiln_c99_promise_of(kiln_value value);
 extern int kiln_c99_bind_with(kiln_value *out, kiln_value target, kiln_value receiver, const kiln_value *arguments, size_t count);
 extern int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value callee, const kiln_value *args, size_t argc, int depth, kiln_value *thrown);
