@@ -7,7 +7,11 @@ set -euo pipefail
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
+source "$(dirname -- "${BASH_SOURCE[0]}")/provider-contract.sh"
 cd "$(kiln_repo_root)"
+kiln_provider_contract_init "$(kiln_repo_root)"
+KILN_NUMBER_CONTRACT_FILE="$(mktemp "${TMPDIR:-/tmp}/kiln-provider-contract.XXXXXX.json")"
+printf '%s\n' "$KILN_PROVIDER_CONTRACT_JSON" >"$KILN_NUMBER_CONTRACT_FILE"
 
 KILN_NUMBER_CC="${CC:-cc}"
 if ! command -v "$KILN_NUMBER_CC" >/dev/null 2>&1; then
@@ -17,6 +21,7 @@ fi
 
 KILN_NUMBER_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/kiln-number-ffi.XXXXXX")"
 kiln_number_cleanup() {
+	rm -f "$KILN_NUMBER_CONTRACT_FILE"
 	find "$KILN_NUMBER_TEMP" -type l -delete
 	find "$KILN_NUMBER_TEMP" -type f -delete
 	find "$KILN_NUMBER_TEMP" -depth -type d -exec rmdir {} \;
@@ -56,8 +61,7 @@ kiln_number_sha256_stream() {
 # the two identities independently of the packager so a checkout build and installed archive share
 # native cache entries.
 KILN_NUMBER_EXPECTED_SOURCE_DIGEST=$(
-	"${CARGO:-cargo}" run --quiet -p kiln-native-provider-contract --bin kiln-native-provider-contract -- \
-		source-digest "$(kiln_repo_root)"
+	"$KILN_PROVIDER_CONTRACT_BIN" source-digest "$(kiln_repo_root)"
 )
 KILN_NUMBER_MANIFEST_SOURCE_DIGEST=$(
 	sed -n 's/^  "source_sha256": "\([0-9a-f]*\)",$/\1/p' "$KILN_NUMBER_MANIFEST"
@@ -67,6 +71,31 @@ if [[ $KILN_NUMBER_MANIFEST_SOURCE_DIGEST != "$KILN_NUMBER_EXPECTED_SOURCE_DIGES
 		"$KILN_NUMBER_MANIFEST_SOURCE_DIGEST" "$KILN_NUMBER_EXPECTED_SOURCE_DIGEST" >&2
 	exit 1
 fi
+
+kiln_number_check_manifest_contract() {
+	local manifest=$1 expected_http=$2
+	python3 - "$manifest" "$KILN_NUMBER_CONTRACT_FILE" "$expected_http" <<'PY'
+import json, pathlib, sys
+manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
+contract = json.loads(pathlib.Path(sys.argv[2]).read_text())
+http = sys.argv[3] == "true"
+expected = {
+    "schema": contract["schema"],
+    "provider": contract["provider"],
+    "provider_abi": contract["provider_abi"],
+    "format_version": contract["format_version"],
+    "parse_version": contract["parse_version"],
+    "profile": contract["profile"],
+    "exports": contract["exports"],
+    "http": http,
+}
+for key, value in expected.items():
+    if manifest.get(key) != value:
+        raise SystemExit(f"provider manifest {key} mismatch: {manifest.get(key)!r}, expected {value!r}")
+PY
+}
+
+kiln_number_check_manifest_contract "$KILN_NUMBER_MANIFEST" true
 
 KILN_NUMBER_RUSTC="${RUSTC:-rustc}"
 KILN_NUMBER_EXPECTED_RUSTC_IDENTITY="sha256:$("$KILN_NUMBER_RUSTC" -vV | kiln_number_sha256_stream)"
@@ -104,6 +133,7 @@ if [[ $KILN_NUMBER_SLIM_HTTP != "false" ]]; then
 		"$KILN_NUMBER_SLIM_HTTP" >&2
 	exit 1
 fi
+kiln_number_check_manifest_contract "$KILN_NUMBER_SLIM_MANIFEST" false
 KILN_NUMBER_SLIM_SOURCE_DIGEST=$(
 	sed -n 's/^  "source_sha256": "\([0-9a-f]*\)",$/\1/p' "$KILN_NUMBER_SLIM_MANIFEST"
 )
