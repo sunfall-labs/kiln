@@ -1261,11 +1261,13 @@ impl ModuleGraph {
             .modules
             .iter()
             .filter_map(|(path, node)| match node.source {
-                ModuleSource::NodeBuiltin(builtin) => Some((
-                    path.clone(),
-                    node_builtin_commonjs_value(builtin.specifier())
-                        .expect("a linkable builtin has a CommonJS projection"),
-                )),
+                ModuleSource::NodeBuiltin(builtin) if !kiln_builtins::is_ts_builtin(builtin) => {
+                    Some((
+                        path.clone(),
+                        node_builtin_commonjs_value(builtin.specifier())
+                            .expect("a linkable builtin has a CommonJS projection"),
+                    ))
+                }
                 _ => None,
             })
             .collect();
@@ -1328,7 +1330,9 @@ impl ModuleGraph {
             let module_node = self
                 .module_node(path)
                 .ok_or_else(|| ModuleGraphError::InternalMissingModule { path: path.clone() })?;
-            if let ModuleSource::NodeBuiltin(builtin) = module_node.source {
+            if let ModuleSource::NodeBuiltin(builtin) = module_node.source
+                && !kiln_builtins::is_ts_builtin(builtin)
+            {
                 let exports = node_builtin_exports(builtin.specifier())
                     .expect("only materializable builtins have linkable exports");
                 values.insert(path.clone(), exports.into_iter().collect());
@@ -1927,7 +1931,19 @@ where
                                 (json_module_program(), Some(text))
                             }
                             ModuleSource::NodeBuiltin(builtin) => {
-                                (builtin_module_program(builtin), None)
+                                if let Some(source) = kiln_builtins::builtin_source(builtin) {
+                                    let path_str = kiln_builtins::builtin_logical_path(builtin);
+                                    let hir = frontend_oxc::parse(path_str, source);
+                                    let program = compile_module(&hir).map_err(|diagnostics| {
+                                        ModuleGraphError::Compile {
+                                            path: path.clone(),
+                                            diagnostics,
+                                        }
+                                    })?;
+                                    (program, None)
+                                } else {
+                                    (builtin_module_program(builtin), None)
+                                }
                             }
                         };
                         validate_exports(&path, &program)?;

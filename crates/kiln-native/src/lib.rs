@@ -2380,6 +2380,9 @@ fn validate_native_node_builtins(graph: &ModuleGraph) -> Result<(), NativeError>
         let ModuleSource::NodeBuiltin(builtin) = node.source else {
             continue;
         };
+        if kiln_builtins::is_ts_builtin(builtin) {
+            continue;
+        }
         if native_builtin_body(builtin).is_none() {
             return Err(NativeError::UnsupportedNodeBuiltin {
                 specifier: builtin.specifier(),
@@ -2418,6 +2421,9 @@ fn native_builtin_supports_export(
     builtin: kiln_module_resolver::NodeBuiltin,
     export_name: &str,
 ) -> bool {
+    if let Some(supported) = kiln_builtins::builtin_supported_exports(builtin) {
+        return supported.contains(&export_name);
+    }
     native_builtin_supported_exports(builtin).contains(&export_name)
 }
 
@@ -2638,15 +2644,7 @@ fn native_builtin_supported_exports(
         // not functions, which makes them the two that a refusal would serve worst. `os.EOL` is
         // read far more often than it is called, `text.split(os.EOL)` being the whole of why, and
         // it had been answering `undefined` here against the interpreter's "\n".
-        NodeBuiltin::Os => &[
-            "EOL",
-            "default",
-            "devNull",
-            "homedir",
-            "hostname",
-            "networkInterfaces",
-            "tmpdir",
-        ],
+        NodeBuiltin::Os => kiln_builtins::OS_EXPORTS,
         NodeBuiltin::Tty => &["default", "isatty"],
         NodeBuiltin::Stream => &[
             "Readable",
@@ -2796,6 +2794,13 @@ fn emit_native_graph_module_with_policy(
 ) -> Result<kiln_backend_c::CModule, NativeError> {
     match node.source {
         ModuleSource::NodeBuiltin(builtin) => {
+            if kiln_builtins::is_ts_builtin(builtin) {
+                return Ok(emit_module_with_logical_path_and_policy(
+                    &node.program,
+                    logical_path,
+                    policy.clone(),
+                )?);
+            }
             let materializer =
                 native_builtin_body(builtin).ok_or(NativeError::UnsupportedNodeBuiltin {
                     specifier: builtin.specifier(),
@@ -2912,6 +2917,9 @@ exports[7] = request;"#,
 });
 
 fn native_builtin_body(builtin: kiln_module_resolver::NodeBuiltin) -> Option<&'static str> {
+    if kiln_builtins::is_ts_builtin(builtin) {
+        return None;
+    }
     use kiln_module_resolver::NodeBuiltin;
     match builtin {
         NodeBuiltin::Console => Some(
@@ -4605,8 +4613,12 @@ fn graph_namespace_plans(
 fn native_graph_export_count(node: &kiln_module_graph::ModuleNode) -> usize {
     if node.source == ModuleSource::CommonJs {
         1
-    } else if matches!(node.source, ModuleSource::NodeBuiltin(_)) {
-        node.program.exports.len() + 1
+    } else if let ModuleSource::NodeBuiltin(builtin) = node.source {
+        if kiln_builtins::is_ts_builtin(builtin) {
+            node.program.exports.len()
+        } else {
+            node.program.exports.len() + 1
+        }
     } else {
         node.program.exports.len()
     }
@@ -4619,6 +4631,11 @@ fn native_graph_export_count(node: &kiln_module_graph::ModuleNode) -> usize {
 fn native_commonjs_projection_index(node: &kiln_module_graph::ModuleNode) -> Option<usize> {
     match node.source {
         ModuleSource::Json => Some(0),
+        ModuleSource::NodeBuiltin(builtin) if kiln_builtins::is_ts_builtin(builtin) => node
+            .program
+            .exports
+            .iter()
+            .position(|e| e.exported == "default"),
         ModuleSource::NodeBuiltin(_) => Some(node.program.exports.len()),
         ModuleSource::Source | ModuleSource::CommonJs => None,
     }
