@@ -313,6 +313,10 @@ void kiln_c99_publish_diagnostic(void) {
         kiln_c99_diagnostic_has_method);
 }
 
+int kiln_c99_diagnostic_available(void) {
+    return kiln_c99_diagnostic_site != NULL && kiln_c99_diagnostic_operation != NULL;
+}
+
 static void kiln_c99_note_refusal(const char *site, size_t instruction,
                                   const char *operation, size_t depth) {
     /* Runtime helpers do not own a bytecode instruction and deliberately pass no site. The

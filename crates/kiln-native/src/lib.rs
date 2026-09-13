@@ -6109,6 +6109,9 @@ extern kiln_value kiln_c99_copy_text(const char *text, size_t len);
 extern kiln_value kiln_c99_undefined(void);
 extern int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int hint, kiln_value *out, int depth, kiln_value *thrown);
 extern kiln_value kiln_c99_text(kiln_value value);
+extern kiln_value kiln_c99_control_diagnostic(void);
+extern int kiln_c99_diagnostic_available(void);
+extern kiln_value kiln_c99_concat(kiln_value left, kiln_value right);
 extern int kiln_c99_throw_error(kiln_value *out, uint64_t kind, const char *message);
 extern int kiln_c99_new_type_error(kiln_value *out, const char *message);
 extern int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
@@ -6869,6 +6872,20 @@ static int kiln_cli_run_realm(int argc, char **argv, int writes_result) {
             } else if (promise->state == 1 /* KILN_C99_FULFILLED */) {
                 graph.entry_result = promise->value;
             }
+        }
+    }
+    /* Graph module entries carry the original thrown value across the module ABI so dynamic
+     * import and catch preserve language identity. Only now, after the graph and its turn loop
+     * have established that the value is uncaught, attach the native refusal provenance. A
+     * handled throw resets the realm diagnostic bridge, so this cannot leak an earlier refusal
+     * into a later ordinary error. */
+    if (status == KILN_C99_THROWN) {
+        kiln_value message = kiln_c99_text(graph.result);
+        kiln_value site = kiln_c99_control_diagnostic();
+        if (kiln_c99_diagnostic_available() && message.tag == KILN_VALUE_STRING &&
+            site.tag == KILN_VALUE_STRING && site.len != 0) {
+            kiln_value separator = kiln_c99_copy_text(" at ", 4);
+            graph.result = kiln_c99_concat(kiln_c99_concat(message, separator), site);
         }
     }
     if (status != 0) kiln_cli_report_failure_in(status, graph.result, phase);
