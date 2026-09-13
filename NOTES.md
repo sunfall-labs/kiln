@@ -5795,4 +5795,18 @@ Verified with native probe `conformance/native/node-ffi-members.cjs` (byte-for-b
 interpreter and native CLI), native integration tests in `kiln-native`, module-graph evaluation tests,
 and full `scripts/native.sh` parity (193 matched, 1 refused, 0 diverged).
 
+---
+
+## Third-party Express 404 & `IncomingMessage.prototype.unpipe` parity (2026-09-13)
+
+- **Express 4.x `finalhandler` unpipe compatibility**:
+  In `crates/kiln-builtins/src/node/http.ts`, updated `IncomingMessage` to export `nativeModule.IncomingMessage` directly when available, and ensured `IncomingMessage.prototype.unpipe` is present on its prototype. In Express applications, `finalhandler` invokes `req.unpipe()` on 404s and unhandled routes. `req` inherits from `app.request` which is prototyped off `http.IncomingMessage.prototype`. Previously, `http.ts` declared `IncomingMessage` as a plain constructor function without prototype methods, throwing `TypeError: object.unpipe is not a function`.
+- **Verification**:
+  - `conformance/server --node`: 7/7 passed (100%), including `s05-express` and `s04-fastify`.
+  - `conformance/effect`: 15/15 passed (100%).
+  - `conformance/thirdparty`: 22/22 bundles matched across both interpreter and native (0 refused, 0 diverged).
+  - `scripts/native.sh`: 193 matched, 1 refused (`shadow-realm`), 0 diverged.
+  - `scripts/check-http-close-contract.sh`: passed across all 4 seams.
+  - `cargo fmt --check`: clean.
+
 
