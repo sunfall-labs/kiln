@@ -1288,7 +1288,7 @@ fn typed_node_querystring_has_a_native_materializer() {
     )
     .expect("typed node graph");
 
-    validate_native_node_builtins(&graph).expect("querystring materializes");
+    native_graph_plan(&graph).expect("querystring materializes");
     assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::QueryString));
     for export in kiln_builtins::QUERYSTRING_EXPORTS {
         assert!(native_builtin_supports_export(
