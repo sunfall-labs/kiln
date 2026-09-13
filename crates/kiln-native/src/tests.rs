@@ -1053,9 +1053,11 @@ fn node_events_is_a_ts_builtin_and_https_has_a_native_runtime_materializer() {
         NodeBuiltin::Buffer,
         "Buffer"
     ));
+    assert!(native_builtin_supports_export(NodeBuiltin::Buffer, "alloc"));
+    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::StringDecoder));
     assert!(native_builtin_supports_export(
-        NodeBuiltin::Buffer,
-        "alloc"
+        NodeBuiltin::StringDecoder,
+        "StringDecoder"
     ));
     assert!(native_builtin_body(NodeBuiltin::Https).is_some());
     assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Path));
@@ -8584,9 +8586,96 @@ fn native_node_buffer_commonjs_require_builds_and_runs() {
         String::from_utf8_lossy(&result.stderr)
     );
     let stdout = String::from_utf8_lossy(&result.stdout);
-    assert_eq!(
-        stdout.trim(),
-        "cjs-buffer: object true true abc true"
-    );
+    assert_eq!(stdout.trim(), "cjs-buffer: object true true abc true");
 }
 
+#[test]
+fn native_node_string_decoder_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-string-decoder-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import { StringDecoder } from 'node:string_decoder';\n",
+            "const decoder = new StringDecoder('utf8');\n",
+            "const p1 = decoder.write(new Uint8Array([0xf0, 0x9f]));\n",
+            "const p2 = decoder.write(new Uint8Array([0x92, 0xa9, 0x21]));\n",
+            "const p3 = decoder.end(new Uint8Array([0xe2]));\n",
+            "console.log('sd-test:', typeof StringDecoder, p1 === '', p2 === '💩!', p3 === '\\uFFFD', decoder.encoding);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("sd_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run string_decoder binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert_eq!(stdout.trim(), "sd-test: function true true true utf8");
+}
+
+#[test]
+fn native_node_string_decoder_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-string-decoder-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const sd = require('node:string_decoder');\n",
+            "const SD = sd.StringDecoder;\n",
+            "const dec = new SD();\n",
+            "const res = dec.write(new Uint8Array([119, 111, 114, 108, 100]));\n",
+            "console.log('cjs-sd:', typeof sd, typeof SD, SD.StringDecoder === SD, res);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("sd_cjs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run string_decoder cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert_eq!(stdout.trim(), "cjs-sd: object function true world");
+}

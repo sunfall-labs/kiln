@@ -164,6 +164,20 @@ declare_ts_builtins! {
             "isBuffer",
         ],
     },
+    StringDecoder {
+        variant: StringDecoder,
+        file: "node/string_decoder.ts",
+        logical_path: "node:string_decoder.ts",
+        source_const: STRING_DECODER_SOURCE,
+        exports_const: STRING_DECODER_EXPORTS,
+        sample_source_check: "export class StringDecoder",
+        presence_test: string_decoder_builtin_source_is_present,
+        compilation_test: string_decoder_builtin_compiles_cleanly,
+        exports: [
+            "StringDecoder",
+            "default",
+        ],
+    },
     Os {
         variant: Os,
         file: "node/os.ts",

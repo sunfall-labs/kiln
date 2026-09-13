@@ -1738,6 +1738,95 @@ fn node_builtin_buffer_commonjs_require_evaluates_cleanly() {
     assert_eq!(host.output, ["true true true xyz true"]);
 }
 
+#[test]
+fn node_builtin_string_decoder_evaluates_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.js",
+        concat!(
+            "import { StringDecoder } from 'node:string_decoder';",
+            "const decoder = new StringDecoder('utf8');",
+            "const part1 = decoder.write(new Uint8Array([0xf0, 0x9f]));",
+            "const part2 = decoder.write(new Uint8Array([0x92, 0xa9, 0x21]));",
+            "const part3 = decoder.end(new Uint8Array([0xe2]));",
+            "console.log(",
+            "  typeof StringDecoder === 'function',",
+            "  part1 === '',",
+            "  part2 === '💩!',",
+            "  part3 === '\\uFFFD',",
+            "  decoder.encoding,",
+            ");",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with string_decoder builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute string_decoder builtin");
+    assert_eq!(host.output, ["true true true true utf8"]);
+}
+
+#[test]
+fn node_builtin_string_decoder_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const string_decoder = require('node:string_decoder');",
+            "const SD = string_decoder.StringDecoder;",
+            "const dec = new SD();",
+            "const s = dec.write(new Uint8Array([104, 101, 108, 108, 111]));",
+            "module.exports = {",
+            "  isObj: typeof string_decoder === 'object',",
+            "  isFn: typeof SD === 'function',",
+            "  selfEq: SD.StringDecoder === SD,",
+            "  s,",
+            "};",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import bridge from './bridge.cjs';",
+            "console.log(bridge.isObj, bridge.isFn, bridge.selfEq, bridge.s);",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with string_decoder builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute string_decoder builtin cjs");
+    assert_eq!(host.output, ["true true true hello"]);
+}
 
 #[test]
 fn node_net_connect_is_a_typed_virtual_module_export() {
