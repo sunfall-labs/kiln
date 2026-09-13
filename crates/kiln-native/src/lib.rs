@@ -5290,7 +5290,7 @@ static int kiln_validate_dynamic_import_options(kiln_host *host, kiln_value opti
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "import attribute values must be strings");
         }
         if (value.len != 4 || memcmp(value.ptr, "file", 4) != 0) {
-            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "unsupported import attribute type");
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "unsupported import attribute `type`");
         }
     }
     }

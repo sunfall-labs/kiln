@@ -33069,7 +33069,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             native_depth: self.native_depth,
         });
         let outcome = if !is_an_object(options) {
-            Ok(Err(build_error(
+            Ok(Err(self.construct_error(
                 ErrorKind::Type,
                 &[Value::String("import options must be an object".into())],
             )))
@@ -33080,7 +33080,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         return Ok(Ok(None));
                     }
                     if !is_an_object(&with) {
-                        return Ok(Err(build_error(
+                        return Ok(Err(self.construct_error(
                             ErrorKind::Type,
                             &[Value::String("import attributes must be an object".into())],
                         )));
@@ -33103,7 +33103,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         if key == "type" {
                             type_value = Some(value);
                         } else {
-                            return Ok(Err(build_error(
+                            return Ok(Err(self.construct_error(
                                 ErrorKind::Type,
                                 &[Value::String("unsupported import attribute".into())],
                             )));
@@ -33116,11 +33116,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         Value::String(value) if value == "file" => {
                             Ok(Ok(Some(ImportAttributes { type_: Some(value) })))
                         }
-                        Value::String(_) => Ok(Err(build_error(
+                        Value::String(_) => Ok(Err(self.construct_error(
                             ErrorKind::Type,
-                            &[Value::String("unsupported import attribute type".into())],
+                            &[Value::String("unsupported import attribute `type`".into())],
                         ))),
-                        _ => Ok(Err(build_error(
+                        _ => Ok(Err(self.construct_error(
                             ErrorKind::Type,
                             &[Value::String(
                                 "import attribute values must be strings".into(),
