@@ -158,6 +158,7 @@ pub fn format_module_sizes(sizes: &[ModuleSizeFacts]) -> String {
 pub struct DemandedMembers {
     pub names: BTreeSet<String>,
     pub builtins: BTreeSet<String>,
+    pub globals: BTreeSet<String>,
     pub has_computed_access: bool,
     pub has_open_world: bool,
 }
@@ -201,6 +202,14 @@ pub fn analyze_demanded_members(
                     Instruction::LoadBuiltin(builtin) => {
                         demanded.builtins.insert(format!("{builtin:?}"));
                     }
+                    Instruction::LoadGlobal(name)
+                    | Instruction::RequireGlobalBinding(name)
+                    | Instruction::LoadGlobalBindingOrUndefined(name)
+                    | Instruction::ThrowReference(name) => {
+                        if let Some(name) = name_at(*name) {
+                            demanded.globals.insert(name);
+                        }
+                    }
                     Instruction::CallMethod { name, .. } => {
                         if let Some(name) = name_at(*name) {
                             demanded.names.insert(name);
@@ -242,9 +251,10 @@ pub fn format_demanded_members(demanded: &DemandedMembers) -> String {
     out.push_str("\n=== Demanded Members (retained IR) ===\n");
     let _ = writeln!(
         out,
-        "Summary: {} distinct names, {} builtins, computed access: {}, open world: {}",
+        "Summary: {} distinct names, {} builtins, {} globals, computed access: {}, open world: {}",
         demanded.names.len(),
         demanded.builtins.len(),
+        demanded.globals.len(),
         demanded.has_computed_access,
         demanded.has_open_world
     );
@@ -252,6 +262,12 @@ pub fn format_demanded_members(demanded: &DemandedMembers) -> String {
         out.push_str("Builtins:\n");
         for builtin in &demanded.builtins {
             let _ = writeln!(out, "  {builtin}");
+        }
+    }
+    if !demanded.globals.is_empty() {
+        out.push_str("Globals:\n");
+        for global in &demanded.globals {
+            let _ = writeln!(out, "  {global}");
         }
     }
     if !demanded.names.is_empty() {
@@ -293,19 +309,11 @@ pub mod method_groups {
     pub const MATH_NUMBER: u32 = 1048576;
 }
 
-/// Groups the router always retains: core dispatch plus Temporal, whose use
-/// is invisible to import signals (a global namespace, not a builtin).
+/// Dispatch machinery required by every program regardless of the globals it reaches.
 pub const CORE_METHOD_GROUPS: u32 = method_groups::DIRECT
     | method_groups::ARRAY_LOOKUP
     | method_groups::STRING_DISPATCH
-    | method_groups::GENERIC
-    | method_groups::TEMPORAL
-    | method_groups::TEMPORAL_FROM
-    | method_groups::TEMPORAL_COMPARE
-    | method_groups::TEMPORAL_NOW_READ
-    | method_groups::TEMPORAL_OP
-    | method_groups::DATE_SETTER
-    | method_groups::MATH_NUMBER;
+    | method_groups::GENERIC;
 
 /// Groups the router may drop when no demand implicates them.
 pub const PRUNABLE_METHOD_GROUPS: u32 = method_groups::NODE_EVENT
@@ -317,7 +325,14 @@ pub const PRUNABLE_METHOD_GROUPS: u32 = method_groups::NODE_EVENT
     | method_groups::NODE_UTIL
     | method_groups::NODE_DIAGNOSTICS
     | method_groups::NODE_STREAM
-    | method_groups::NODE_PATH;
+    | method_groups::NODE_PATH
+    | method_groups::TEMPORAL
+    | method_groups::TEMPORAL_FROM
+    | method_groups::TEMPORAL_COMPARE
+    | method_groups::TEMPORAL_NOW_READ
+    | method_groups::TEMPORAL_OP
+    | method_groups::DATE_SETTER
+    | method_groups::MATH_NUMBER;
 
 /// Human names for a group mask, in canonical dispatch order.
 pub fn method_group_names(mask: u32) -> Vec<&'static str> {
@@ -1370,16 +1385,21 @@ mod tests {
         let demanded = DemandedMembers {
             names: BTreeSet::from(["log".to_string(), "push".to_string()]),
             builtins: BTreeSet::from(["SetTimeout".to_string()]),
+            globals: BTreeSet::from(["Temporal".to_string()]),
             has_computed_access: true,
             has_open_world: false,
         };
         let text = format_demanded_members(&demanded);
         assert!(text.contains("Demanded Members"), "{text}");
-        assert!(text.contains("2 distinct names, 1 builtins"), "{text}");
+        assert!(
+            text.contains("2 distinct names, 1 builtins, 1 globals"),
+            "{text}"
+        );
         assert!(text.contains("computed access: true"), "{text}");
         assert!(text.contains("open world: false"), "{text}");
         assert!(text.contains("  log"), "{text}");
         assert!(text.contains("  SetTimeout"), "{text}");
+        assert!(text.contains("  Temporal"), "{text}");
     }
 
     #[test]

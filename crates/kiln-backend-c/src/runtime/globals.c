@@ -337,7 +337,9 @@ static int kiln_c99_global_object(kiln_value *out) {
                         {"Math", KILN_C99_BUILTIN_MATH},
                         {"JSON", KILN_C99_BUILTIN_JSON},
                         {"Reflect", KILN_C99_BUILTIN_REFLECT},
+#if KILN_RETAIN_GROUP_TEMPORAL
                         {"Temporal", KILN_C99_BUILTIN_TEMPORAL},
+#endif
                         {"Proxy", KILN_C99_BUILTIN_PROXY},
                         {"Error", KILN_C99_BUILTIN_ERROR},
                         {"TypeError", KILN_C99_BUILTIN_TYPE_ERROR},

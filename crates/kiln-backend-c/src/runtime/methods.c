@@ -95,12 +95,14 @@ static const char *kiln_c99_method_name(uint64_t code) {
     if (surface != NULL) {
         return surface;
     }
+#if KILN_RETAIN_GROUP_TEMPORAL
     if (kiln_c99_method_in_group(code, KILN_C99_GROUP_TEMPORAL_OP)) {
         return kiln_c99_temporal_op_name(code);
     }
     if (kiln_c99_method_in_group(code, KILN_C99_GROUP_TEMPORAL_NOW_READ)) {
         return kiln_c99_temporal_now_name(code);
     }
+#endif
     switch (code) {
     /* What `require("node:assert")` and `require("node:events")` hand back. Both are the module's
      * callable default, and node names them for the module rather than for the implementation:
