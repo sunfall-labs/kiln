@@ -4707,8 +4707,7 @@ pub type SourceCompiler = fn(&EvalSource<'_>) -> Result<(Program, Strictness), E
 #[derive(Clone, Default)]
 pub struct ExecutionCapabilities {
     source_compiler: Option<SourceCompiler>,
-    module_loader: Option<ModuleLoader>,
-    module_loader_with_options: Option<ModuleLoaderWithOptions>,
+    module_loader: Option<Arc<dyn ModuleLoaderService + Send + Sync>>,
     host_realms: bool,
     host_agents: Option<&'static str>,
     /// The command line this execution's `process.argv` reports, exactly as the host spelled it.
@@ -4730,22 +4729,36 @@ impl ExecutionCapabilities {
         self.source_compiler
     }
 
-    pub const fn with_module_loader(mut self, loader: ModuleLoader) -> Self {
+    pub fn with_module_loader(mut self, loader: ModuleLoader) -> Self {
+        self.module_loader = Some(Arc::new(FunctionModuleLoader {
+            loader: Some(loader),
+            with_options: None,
+        }));
+        self
+    }
+
+    pub fn with_module_loader_service(
+        mut self,
+        loader: Arc<dyn ModuleLoaderService + Send + Sync>,
+    ) -> Self {
         self.module_loader = Some(loader);
         self
     }
 
-    pub const fn module_loader(&self) -> Option<ModuleLoader> {
-        self.module_loader
+    pub fn module_loader(&self) -> Option<Arc<dyn ModuleLoaderService + Send + Sync>> {
+        self.module_loader.clone()
     }
 
-    pub const fn with_module_loader_with_options(mut self, loader: ModuleLoaderWithOptions) -> Self {
-        self.module_loader_with_options = Some(loader);
+    pub fn with_module_loader_with_options(mut self, loader: ModuleLoaderWithOptions) -> Self {
+        self.module_loader = Some(Arc::new(FunctionModuleLoader {
+            loader: None,
+            with_options: Some(loader),
+        }));
         self
     }
 
-    pub const fn module_loader_with_options(&self) -> Option<ModuleLoaderWithOptions> {
-        self.module_loader_with_options
+    pub fn module_loader_with_options(&self) -> Option<Arc<dyn ModuleLoaderService + Send + Sync>> {
+        self.module_loader.clone()
     }
 
     /// Let this execution make further realms, and publish the hook that does it.
@@ -4866,6 +4879,38 @@ pub enum ModuleLoadError {
 /// migration.
 pub type ModuleLoader = fn(&str) -> Result<ModulePlan, ModuleLoadError>;
 pub type ModuleLoaderWithOptions = fn(&str, &Value) -> Result<ModulePlan, ModuleLoadError>;
+
+/// The complete context of one dynamic import request. The service is scoped to an execution
+/// realm, so a loader can retain graph ownership without ambient process state.
+#[derive(Clone)]
+pub struct ModuleLoadRequest {
+    pub importer: Option<String>,
+    pub specifier: String,
+    pub attributes: Option<Value>,
+}
+
+pub trait ModuleLoaderService: Send + Sync {
+    fn load(&self, request: ModuleLoadRequest) -> Result<ModulePlan, ModuleLoadError>;
+}
+
+struct FunctionModuleLoader {
+    loader: Option<ModuleLoader>,
+    with_options: Option<ModuleLoaderWithOptions>,
+}
+
+impl ModuleLoaderService for FunctionModuleLoader {
+    fn load(&self, request: ModuleLoadRequest) -> Result<ModulePlan, ModuleLoadError> {
+        match (&self.with_options, request.attributes) {
+            (Some(loader), Some(options)) => loader(&request.specifier, &options),
+            (None, Some(_)) => Err(ModuleLoadError::Unsupported(
+                "no option-aware module loader is installed".to_owned(),
+            )),
+            (Some(_), None) | (None, None) => self.loader.ok_or_else(|| {
+                ModuleLoadError::Unsupported("no module loader is installed".to_owned())
+            })?(&request.specifier),
+        }
+    }
+}
 
 /// Whether a program reads or writes module scope through the frame stack.
 ///
@@ -6340,6 +6385,7 @@ pub fn execute_module_in_runtime_with_loader<H: HostOps + ?Sized>(
     capabilities: ExecutionCapabilities,
     loader: &mut dyn CommonJsModuleLoader,
     enter_runtime: bool,
+    module_path: Option<&str>,
 ) -> Result<ModuleExecutionResult, ExecutionError> {
     execute_module_in_runtime_mode_with_session(
         module,
@@ -6352,6 +6398,7 @@ pub fn execute_module_in_runtime_with_loader<H: HostOps + ?Sized>(
         None,
         Some(loader),
         enter_runtime,
+        module_path,
     )
 }
 
@@ -6404,6 +6451,7 @@ pub fn execute_node_module_in_session<H: HostOps + ?Sized>(
         Some((session, drain)),
         None,
         true,
+        None,
     )
 }
 
@@ -6421,6 +6469,7 @@ pub fn execute_node_module_in_session_with_loader<H: HostOps + ?Sized>(
     drain: bool,
     loader: &mut dyn CommonJsModuleLoader,
     enter_runtime: bool,
+    module_path: Option<&str>,
 ) -> Result<ModuleExecutionResult, ExecutionError> {
     execute_module_in_runtime_mode_with_session(
         module,
@@ -6433,6 +6482,7 @@ pub fn execute_node_module_in_session_with_loader<H: HostOps + ?Sized>(
         Some((session, drain)),
         Some(loader),
         enter_runtime,
+        module_path,
     )
 }
 
@@ -6458,6 +6508,7 @@ fn execute_module_in_runtime_mode<H: HostOps + ?Sized>(
             Some((&mut session, true)),
             None,
             true,
+            None,
         )
     } else {
         execute_module_in_runtime_mode_with_session(
@@ -6471,6 +6522,7 @@ fn execute_module_in_runtime_mode<H: HostOps + ?Sized>(
             None,
             None,
             true,
+            None,
         )
     }
 }
@@ -6487,6 +6539,7 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
     session: Option<(&mut ModuleRealmSession, bool)>,
     commonjs_loader: Option<&'host mut dyn CommonJsModuleLoader>,
     enter_runtime: bool,
+    module_path: Option<&str>,
 ) -> Result<ModuleExecutionResult, ExecutionError> {
     if import_values.len() != module.imports.len() {
         return Err(ExecutionError::ImportCountMismatch {
@@ -6615,6 +6668,7 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
         capabilities,
     )?;
     vm.self_bindings = self_bindings;
+    vm.module_path = module_path.map(str::to_owned);
     vm.self_namespaces = self_namespaces;
     if session.is_some() {
         vm.async_host = Some(runtime as *mut RealmRuntime as *mut dyn ActiveAsyncHostOps);
@@ -7204,8 +7258,8 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// The text a new agent's realm is given before the program's own source, when this
     /// execution's host granted agents at all. `None` disables `$262AgentStart` and its siblings.
     host_agents: Option<&'static str>,
-    module_loader: Option<ModuleLoader>,
-    module_loader_with_options: Option<ModuleLoaderWithOptions>,
+    module_loader: Option<Arc<dyn ModuleLoaderService + Send + Sync>>,
+    module_path: Option<String>,
     /// The command line `process.argv` reports, as the host stated it. Empty when no host did.
     argv: Vec<String>,
     /// Promise state waiting for a Tokio-owned host request, keyed by opaque request identity.
@@ -7441,7 +7495,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             default_locale,
             source_compiler: execution.source_compiler(),
             module_loader: execution.module_loader(),
-            module_loader_with_options: execution.module_loader_with_options(),
+            module_path: None,
             host_realms: execution.host_realms(),
             host_agents: execution.host_agents(),
             argv: execution.argv().to_vec(),
@@ -11704,7 +11758,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     };
                     self.stack.push(Value::Boolean(!blocked));
                 }
-                instruction @ (Instruction::DynamicImport | Instruction::DynamicImportWithOptions) => {
+                instruction @ (Instruction::DynamicImport
+                | Instruction::DynamicImportWithOptions) => {
                     let _options = if matches!(instruction, Instruction::DynamicImportWithOptions) {
                         Some(self.pop(current)?)
                     } else {
@@ -11718,7 +11773,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // an exception at the call site.
                     match self.import_specifier(&specifier, current)? {
                         Ok(text) => {
-                            let scheduled = self.scheduled(Job::Import(Rc::clone(&promise), text, _options));
+                            let scheduled =
+                                self.scheduled(Job::Import(Rc::clone(&promise), text, _options));
                             self.with_realm_mut(|realm| realm.queue_microtask(scheduled));
                         }
                         Err(thrown) => self.settle(&promise, &Settled::Rejected(thrown)),
@@ -32978,17 +33034,27 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ///
     /// `Ok(Err(value))` is the rejection the promise gets: a specifier that names nothing, a
     /// module that is not a module, a host that cannot load the module, or a module whose body threw.
-    fn import_module(&mut self, specifier: &str, options: Option<&Value>) -> Result<Result<Value, Value>, ExecutionError> {
-        let plan_result = match options {
-            Some(options) => match self.module_loader_with_options {
-                Some(load) => load(specifier, options),
-                None => return Ok(Err(self.construct_error(ErrorKind::Type, &[Value::String("no option-aware module loader is installed".to_owned())]))),
-            },
-            None => match self.module_loader {
-                Some(load) => load(specifier),
-                None => return Ok(Err(self.construct_error(ErrorKind::Type, &[Value::String("no module loader is installed".to_owned())]))),
-            },
+    fn import_module(
+        &mut self,
+        specifier: &str,
+        options: Option<&Value>,
+    ) -> Result<Result<Value, Value>, ExecutionError> {
+        let Some(loader) = self.module_loader.as_ref() else {
+            let message = if options.is_some() {
+                "no option-aware module loader is installed"
+            } else {
+                "no module loader is installed"
+            };
+            return Ok(Err(self.construct_error(
+                ErrorKind::Type,
+                &[Value::String(message.to_owned())],
+            )));
         };
+        let plan_result = loader.load(ModuleLoadRequest {
+            importer: self.module_path.clone(),
+            specifier: specifier.to_owned(),
+            attributes: options.cloned(),
+        });
         let plan = match plan_result {
             Ok(plan) => plan,
             Err(ModuleLoadError::Unsupported(message)) => {

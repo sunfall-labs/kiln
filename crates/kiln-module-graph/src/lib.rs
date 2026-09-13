@@ -17,11 +17,12 @@ use kiln_hir::Module;
 use kiln_host_abi::HostOps;
 use kiln_interpreter::{
     Cell, CommonJsModuleLoader, CommonJsRequire, ExecutionCapabilities, ExecutionError,
-    ExecutionLimits, ExecutionResult, ModuleBinding, ModulePlan, ModuleRealmSession,
-    ModuleSelfExport, ModuleSelfImport, ModuleValueRef, PlannedModule, Value,
-    execute_module_in_runtime_with_loader, execute_node_module_in_session_with_loader,
-    node_builtin_commonjs_value, node_builtin_export_names, node_builtin_exports, ordinary_object,
-    own_data_property, parse_json_module, read_through_cell,
+    ExecutionLimits, ExecutionResult, ModuleBinding, ModuleLoadError, ModuleLoadRequest,
+    ModuleLoaderService, ModulePlan, ModuleRealmSession, ModuleSelfExport, ModuleSelfImport,
+    ModuleValueRef, PlannedModule, Value, execute_module_in_runtime_with_loader,
+    execute_node_module_in_session_with_loader, node_builtin_commonjs_value,
+    node_builtin_export_names, node_builtin_exports, ordinary_object, own_data_property,
+    parse_json_module, read_through_cell,
 };
 use kiln_ir::{
     BYTECODE_VERSION, CompileDiagnostic, ExportBinding, Instruction, ModuleProgram, Program,
@@ -170,6 +171,85 @@ pub struct ModuleGraph {
     export_resolutions: Arc<HashMap<PathBuf, BTreeMap<String, ResolvedExport>>>,
     /// Body replacements layered over the shared immutable graph storage.
     patched_modules: Arc<BTreeMap<PathBuf, ModuleNode>>,
+}
+
+/// A realm-scoped dynamic importer backed by one immutable graph snapshot.
+///
+/// Requests carry their importer, so nested dynamic imports resolve against the module that
+/// issued them. The service owns the graph through `Arc`; no thread-local or process-global
+/// resolver state is involved.
+pub struct GraphModuleLoader {
+    graph: Arc<ModuleGraph>,
+}
+
+impl GraphModuleLoader {
+    pub fn new(graph: Arc<ModuleGraph>) -> Self {
+        Self { graph }
+    }
+}
+
+impl ModuleLoaderService for GraphModuleLoader {
+    fn load(&self, request: ModuleLoadRequest) -> Result<ModulePlan, ModuleLoadError> {
+        let importer = request
+            .importer
+            .as_deref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.graph.entry.clone());
+        let node = self.graph.module(&importer).ok_or_else(|| {
+            ModuleLoadError::NotFound(format!(
+                "importer `{}` is not in the module graph",
+                importer.display()
+            ))
+        })?;
+        let dependency = node
+            .dependencies
+            .iter()
+            .find(|dependency| dependency.specifier == request.specifier)
+            .ok_or_else(|| {
+                ModuleLoadError::NotFound(format!(
+                    "could not resolve module `{}` from `{}`",
+                    request.specifier,
+                    importer.display()
+                ))
+            })?;
+        if dependency
+            .target
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(is_asset_extension)
+            && request.attributes.is_none()
+        {
+            return Err(ModuleLoadError::Unsupported(
+                "file asset imports require `with: { type: 'file' }`".to_owned(),
+            ));
+        }
+        if let Some(attributes) = request.attributes {
+            let attributes = own_data_property(&attributes, "with").unwrap_or(attributes);
+            let Some(kind) = own_data_property(&attributes, "type") else {
+                return Err(ModuleLoadError::Unsupported(
+                    "import attributes must include a string `type`".to_owned(),
+                ));
+            };
+            if !matches!(kind, Value::String(ref value) if value == "file") {
+                return Err(ModuleLoadError::Unsupported(
+                    "unsupported import attribute `type`".to_owned(),
+                ));
+            }
+            if self
+                .graph
+                .module(&dependency.target)
+                .is_none_or(|target| target.source != ModuleSource::Asset)
+            {
+                return Err(ModuleLoadError::Unsupported(format!(
+                    "module `{}` is not a file asset",
+                    dependency.target.display()
+                )));
+            }
+        }
+        self.graph
+            .import_plan_for(&dependency.target)
+            .map_err(|error| ModuleLoadError::Unsupported(error.to_string()))
+    }
 }
 
 /// Link-time identity of one visible export.
@@ -506,7 +586,10 @@ impl ModuleGraph {
     {
         Self::build_with_typed_policy(entry, resolver, move |path, source_kind| {
             if source_kind == ModuleSource::Asset
-                || path.extension().and_then(|value| value.to_str()).is_some_and(is_asset_extension)
+                || path
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(is_asset_extension)
             {
                 return Ok(ModulePayload::AssetPath(path.to_path_buf()));
             }
@@ -1193,8 +1276,11 @@ impl ModuleGraph {
                 .map(|slots| slots.iter().copied().collect())
                 .unwrap_or_default();
             let plan_program = if node.source == ModuleSource::Asset {
-                asset_module_program(node.data.as_deref().ok_or_else(|| ModuleGraphError::Source {
-                    path: path.clone(), message: "asset module has no path metadata".to_owned(),
+                asset_module_program(node.data.as_deref().ok_or_else(|| {
+                    ModuleGraphError::Source {
+                        path: path.clone(),
+                        message: "asset module has no path metadata".to_owned(),
+                    }
                 })?)
             } else {
                 export_epilogue(&node.program.program, slots)
@@ -1216,6 +1302,47 @@ impl ModuleGraph {
             modules,
             namespace,
         })
+    }
+
+    /// Build a plan rooted at a particular graph node, retaining the immutable graph snapshot.
+    /// Dynamic imports use this instead of accidentally returning the original entry plan.
+    pub fn import_plan_for(&self, entry: impl AsRef<Path>) -> Result<ModulePlan, ModuleGraphError> {
+        let entry = entry.as_ref();
+        let canonical = if self.modules.contains_key(entry) {
+            entry.to_path_buf()
+        } else {
+            fs::canonicalize(entry).map_err(|_| ModuleGraphError::InternalMissingModule {
+                path: entry.to_path_buf(),
+            })?
+        };
+        if self.module_node(&canonical).is_none() {
+            return Err(ModuleGraphError::InternalMissingModule { path: canonical });
+        }
+        let mut rooted = self.clone();
+        rooted.entry = canonical;
+        let mut reachable = HashSet::new();
+        let mut pending = vec![rooted.entry.clone()];
+        while let Some(path) = pending.pop() {
+            if !reachable.insert(path.clone()) {
+                continue;
+            }
+            if let Some(node) = rooted.module_node(&path) {
+                pending.extend(
+                    node.dependencies
+                        .iter()
+                        .map(|dependency| dependency.target.clone()),
+                );
+            }
+        }
+        rooted.order = Arc::new(
+            rooted
+                .order
+                .iter()
+                .filter(|path| reachable.contains(*path))
+                .cloned()
+                .collect(),
+        );
+        rooted.import_plan()
     }
 
     /// Every visible export of `module`, paired with where in the plan its value will be.
@@ -1372,10 +1499,13 @@ impl ModuleGraph {
                 continue;
             }
             if module_node.source == ModuleSource::Asset {
-                let path = module_node.data.as_deref().ok_or_else(|| ModuleGraphError::Source {
-                    path: path.clone(),
-                    message: "asset module has no path metadata".to_owned(),
-                })?;
+                let path = module_node
+                    .data
+                    .as_deref()
+                    .ok_or_else(|| ModuleGraphError::Source {
+                        path: path.clone(),
+                        message: "asset module has no path metadata".to_owned(),
+                    })?;
                 values.insert(
                     module_node.path.clone(),
                     HashMap::from([("default".to_owned(), Value::String(path.to_owned()))]),
@@ -1528,6 +1658,7 @@ impl ModuleGraph {
                     path == &self.entry,
                     &mut commonjs_loader,
                     true,
+                    Some(path.to_string_lossy().as_ref()),
                 )
             } else {
                 execute_module_in_runtime_with_loader(
@@ -1540,6 +1671,7 @@ impl ModuleGraph {
                     capabilities.clone(),
                     &mut commonjs_loader,
                     true,
+                    Some(path.to_string_lossy().as_ref()),
                 )
             }
             .map_err(|error| {
@@ -1764,6 +1896,7 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
                     is_entry,
                     self,
                     enter_runtime,
+                    Some(path.to_string_lossy().as_ref()),
                 )
             } else {
                 execute_module_in_runtime_with_loader(
@@ -1776,6 +1909,7 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
                     self.capabilities.clone(),
                     self,
                     enter_runtime,
+                    Some(path.to_string_lossy().as_ref()),
                 )
             }
         }?;
@@ -1909,9 +2043,14 @@ where
                     Some(VisitState::Visiting) => continue,
                     None => {
                         let source = match source {
-                            ModuleSource::Source if path.extension()
-                                .and_then(|extension| extension.to_str())
-                                .is_some_and(is_asset_extension) => ModuleSource::Asset,
+                            ModuleSource::Source
+                                if path
+                                    .extension()
+                                    .and_then(|extension| extension.to_str())
+                                    .is_some_and(is_asset_extension) =>
+                            {
+                                ModuleSource::Asset
+                            }
                             ModuleSource::Source if !self.typed_sources => ModuleSource::Source,
                             ModuleSource::Source => {
                                 if path
@@ -1966,14 +2105,19 @@ where
                                 (json_module_program(), Some(text))
                             }
                             ModuleSource::Asset => {
-                                let ModulePayload::AssetPath(asset) = (self.provider)(&path, source)?
+                                let ModulePayload::AssetPath(asset) =
+                                    (self.provider)(&path, source)?
                                 else {
                                     return Err(ModuleGraphError::Source {
                                         path: path.clone(),
-                                        message: "asset provider returned a non-asset payload".to_owned(),
+                                        message: "asset provider returned a non-asset payload"
+                                            .to_owned(),
                                     });
                                 };
-                                (json_module_program(), Some(asset.to_string_lossy().into_owned()))
+                                (
+                                    json_module_program(),
+                                    Some(asset.to_string_lossy().into_owned()),
+                                )
                             }
                             ModuleSource::NodeBuiltin(builtin) => {
                                 if let Some(source) = kiln_builtins::builtin_source(builtin) {
@@ -2019,7 +2163,9 @@ where
                             };
                             let source = if let Some(builtin) = resolved.builtin() {
                                 ModuleSource::NodeBuiltin(builtin)
-                            } else if resolved.path.extension()
+                            } else if resolved
+                                .path
+                                .extension()
                                 .and_then(|extension| extension.to_str())
                                 .is_some_and(is_asset_extension)
                             {
@@ -2055,22 +2201,44 @@ where
                         // targets materialized too. This is especially important for file
                         // assets: their bytes must never pass through the source loader.
                         for target in &program.link_facts.dynamic_imports {
-                            let kiln_ir::DynamicImportTarget::Static(specifier) = target else { continue };
-                            if dependencies.iter().any(|dependency| dependency.specifier == *specifier) {
+                            let kiln_ir::DynamicImportTarget::Static(specifier) = target else {
+                                continue;
+                            };
+                            if dependencies
+                                .iter()
+                                .any(|dependency| dependency.specifier == *specifier)
+                            {
                                 continue;
                             }
                             let Ok(resolved) = self.resolver.resolve_for_request(
-                                specifier, &path, NodeRequestKind::Import,
-                            ) else { continue };
+                                specifier,
+                                &path,
+                                NodeRequestKind::Import,
+                            ) else {
+                                continue;
+                            };
                             let target_path = resolved.path.clone();
                             let source = if let Some(builtin) = resolved.builtin() {
                                 ModuleSource::NodeBuiltin(builtin)
-                            } else if target_path.extension().and_then(|ext| ext.to_str()).is_some_and(is_asset_extension) {
+                            } else if target_path
+                                .extension()
+                                .and_then(|ext| ext.to_str())
+                                .is_some_and(is_asset_extension)
+                            {
                                 ModuleSource::Asset
-                            } else if target_path.extension().and_then(|ext| ext.to_str()).is_some_and(kiln_data_formats::is_data_extension) {
+                            } else if target_path
+                                .extension()
+                                .and_then(|ext| ext.to_str())
+                                .is_some_and(kiln_data_formats::is_data_extension)
+                            {
                                 ModuleSource::Json
-                            } else { ModuleSource::Source };
-                            dependencies.push(Dependency { specifier: specifier.clone(), target: target_path });
+                            } else {
+                                ModuleSource::Source
+                            };
+                            dependencies.push(Dependency {
+                                specifier: specifier.clone(),
+                                target: target_path,
+                            });
                             dependency_sources.push(source);
                         }
 
@@ -2189,7 +2357,11 @@ fn asset_module_program(path: &str) -> Program {
     Program {
         version: BYTECODE_VERSION,
         constants: vec![kiln_ir::Constant::String(path.to_owned())],
-        code: vec![Instruction::Const(0), Instruction::NewArray { count: 1 }, Instruction::Return],
+        code: vec![
+            Instruction::Const(0),
+            Instruction::NewArray { count: 1 },
+            Instruction::Return,
+        ],
         local_count: 0,
         functions: vec![],
         template_sites: vec![],
