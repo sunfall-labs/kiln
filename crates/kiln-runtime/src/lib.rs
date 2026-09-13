@@ -50,7 +50,7 @@ pub mod scripted_transport;
 pub use scripted_transport::{ScriptedTransport, ScriptedTransportLog};
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BinaryHeap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashSet, VecDeque};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
@@ -2041,6 +2041,7 @@ pub struct TokioHost {
     resources: BTreeMap<ResourceId, HostResource>,
     ready: BTreeMap<u64, Completion>,
     tasks: JoinMap<RequestId, HostCompletion>,
+    process_tasks: BTreeSet<RequestId>,
     process_cancellers: BTreeMap<RequestId, oneshot::Sender<()>>,
     completed: Rc<tokio::sync::Notify>,
     failure: Option<RuntimeFailure>,
@@ -2139,6 +2140,7 @@ impl TokioHost {
             resources: BTreeMap::new(),
             ready: BTreeMap::new(),
             tasks: JoinMap::new(),
+            process_tasks: BTreeSet::new(),
             process_cancellers: BTreeMap::new(),
             completed: Rc::new(tokio::sync::Notify::new()),
             failure: None,
@@ -2181,6 +2183,7 @@ impl TokioHost {
             } => {
                 let (cancel, cancelled) = oneshot::channel();
                 self.process_cancellers.insert(request, cancel);
+                self.process_tasks.insert(request);
                 self.spawn_task(request, sequence, referenced, async move {
                     let result = execute_process(command, args, stdin, cancelled).await;
                     HostCompletion {
@@ -2628,6 +2631,7 @@ impl TokioHost {
 
     fn collect_ready_nonblocking(&mut self) {
         while let Some((request, result)) = self.tasks.try_join_next() {
+            self.process_tasks.remove(&request);
             match result {
                 Ok(completion) => {
                     debug_assert_eq!(completion.request, request);
@@ -2787,6 +2791,7 @@ impl AsyncHostOps for TokioHost {
         } else {
             self.tasks.abort(&request);
         }
+        self.process_tasks.remove(&request);
         self.ready.remove(&pending.sequence);
         true
     }
@@ -2811,16 +2816,18 @@ impl RealmHostProvider for TokioHost {
         for (_, cancel) in std::mem::take(&mut self.process_cancellers) {
             let _ = cancel.send(());
         }
-        // Do not await the whole task map: unrelated resource operations are intentionally
-        // aborted at shutdown and may never complete. A bounded set of executor turns is enough
-        // for process cancellation to kill and reap its child; anything still present gets the
-        // existing abort-on-teardown treatment below.
-        for _ in 0..64 {
-            while self.tasks.try_join_next().is_some() {}
-            if self.tasks.is_empty() {
-                break;
+        // Abort unrelated resource work first; process tasks own explicit kill-and-wait cleanup
+        // and are joined deterministically below.
+        for request in self.pending.keys().copied().collect::<Vec<_>>() {
+            if !self.process_tasks.contains(&request) {
+                self.tasks.abort(&request);
             }
-            executor.block_on(yield_to_tasks());
+        }
+        while !self.process_tasks.is_empty() {
+            let Some((request, _result)) = executor.block_on(self.tasks.join_next()) else {
+                break;
+            };
+            self.process_tasks.remove(&request);
         }
         self.tasks.abort_all();
     }
@@ -2830,12 +2837,6 @@ impl RealmHostProvider for TokioHost {
             return;
         }
         self.shutdown = true;
-        // Give process operations their cooperative cancellation path before aborting the task
-        // map. `execute_process` kills and waits on this path; `kill_on_drop` remains the final
-        // guard for tasks that are already being torn down.
-        for (_, cancel) in std::mem::take(&mut self.process_cancellers) {
-            let _ = cancel.send(());
-        }
         self.tasks.abort_all();
         self.tasks = JoinMap::new();
         self.pending.clear();
@@ -2972,6 +2973,7 @@ impl RealmHostProvider for TokioHost {
                     .join_next()
                     .await
                     .expect("a non-empty task map must yield a task exit");
+                self.process_tasks.remove(&request);
                 match result {
                     Ok(completion) => {
                         debug_assert_eq!(completion.request, request);
