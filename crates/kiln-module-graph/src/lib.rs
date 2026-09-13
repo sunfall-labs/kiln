@@ -694,8 +694,6 @@ impl ModuleGraph {
             if source_kind == ModuleSource::CommonJs {
                 program.dependencies = commonjs.expect("CommonJS parse exists").static_requires;
             }
-            program.link_facts.node_runtime_requests =
-                frontend_oxc::discover_node_runtime_requests(path_string, &source);
             Ok(ModulePayload::Program(program))
         })
     }

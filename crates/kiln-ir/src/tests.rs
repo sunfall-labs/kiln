@@ -20,6 +20,7 @@ fn module(body: Vec<Statement>) -> Module {
         exports: Vec::new(),
         diagnostics: Vec::new(),
         panicked: false,
+        node_runtime_requests: Vec::new(),
     }
 }
 

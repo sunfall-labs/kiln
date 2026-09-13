@@ -81,6 +81,8 @@ pub struct Module {
     pub diagnostics: Vec<Diagnostic>,
     /// Oxc could not recover far enough to produce a meaningful program.
     pub panicked: bool,
+    /// Literal Node loader calls discovered by the same Oxc semantic pass as this module.
+    pub node_runtime_requests: Vec<NodeRuntimeRequest>,
 }
 
 /// A literal Node loader request discovered by the source frontend.
@@ -1728,6 +1730,7 @@ mod tests {
             ],
             diagnostics: Vec::new(),
             panicked: false,
+            node_runtime_requests: Vec::new(),
         };
 
         assert_eq!(module.runtime_export_names(), ["value"]);
@@ -1798,6 +1801,7 @@ mod tests {
             exports: Vec::new(),
             diagnostics: Vec::new(),
             panicked: false,
+            node_runtime_requests: Vec::new(),
         };
 
         module.check_isolate_escapes();
@@ -1844,6 +1848,7 @@ mod tests {
             exports: Vec::new(),
             diagnostics: Vec::new(),
             panicked: false,
+            node_runtime_requests: Vec::new(),
         };
 
         module.check_isolate_escapes();

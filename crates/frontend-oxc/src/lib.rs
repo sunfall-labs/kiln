@@ -176,10 +176,18 @@ pub fn discover_node_runtime_requests(path: &str, source: &str) -> Vec<NodeRunti
         .with_build_nodes(true)
         .build(&parsed.program)
         .semantic;
+    discover_node_runtime_requests_from_semantic(path, &parsed.program, &semantic)
+}
+
+fn discover_node_runtime_requests_from_semantic(
+    path: &str,
+    program: &oxc_ast::ast::Program<'_>,
+    semantic: &oxc_semantic::Semantic<'_>,
+) -> Vec<NodeRuntimeRequest> {
     let scoping = semantic.scoping();
     let mut create_symbols = HashSet::<SymbolId>::new();
     let mut module_symbols = HashMap::<SymbolId, String>::new();
-    for statement in &parsed.program.body {
+    for statement in &program.body {
         let Statement::ImportDeclaration(import) = statement else {
             continue;
         };
@@ -592,8 +600,8 @@ fn parse_source_with_commonjs_requires(
         parsed.diagnostics.extend(ret.diagnostics);
     }
 
-    let requires = if parsed.panicked || !parsed.diagnostics.is_empty() {
-        Vec::new()
+    let (requires, node_runtime_requests) = if parsed.panicked || !parsed.diagnostics.is_empty() {
+        (Vec::new(), Vec::new())
     } else {
         let semantic = SemanticBuilder::new()
             .with_build_nodes(true)
@@ -621,12 +629,21 @@ fn parse_source_with_commonjs_requires(
             .collect::<Vec<_>>();
         requires.sort_by_key(|(start, _)| *start);
         let mut seen = HashSet::new();
-        requires
-            .into_iter()
-            .filter_map(|(_, value)| seen.insert(value.clone()).then_some(value))
-            .collect()
+        (
+            requires
+                .into_iter()
+                .filter_map(|(_, value)| seen.insert(value.clone()).then_some(value))
+                .collect(),
+            discover_node_runtime_requests_from_semantic(
+                path.unwrap_or("inline.cjs"),
+                &parsed.program,
+                &semantic,
+            ),
+        )
     };
-    (lower_parsed(path, &parsed, source, source_type), requires)
+    let mut module = lower_parsed(path, &parsed, source, source_type);
+    module.node_runtime_requests = node_runtime_requests;
+    (module, requires)
 }
 
 fn parse_source(path: Option<&str>, source: &str, source_type: SourceType) -> Module {
@@ -665,7 +682,22 @@ fn parse_source_in_context(
         parsed.diagnostics.extend(ret.diagnostics);
     }
 
-    lower_parsed_in_context(path, &parsed, source, source_type, allow)
+    let node_runtime_requests = if parsed.panicked || !parsed.diagnostics.is_empty() {
+        Vec::new()
+    } else {
+        let semantic = SemanticBuilder::new()
+            .with_build_nodes(true)
+            .build(&parsed.program)
+            .semantic;
+        discover_node_runtime_requests_from_semantic(
+            path.unwrap_or("inline.js"),
+            &parsed.program,
+            &semantic,
+        )
+    };
+    let mut module = lower_parsed_in_context(path, &parsed, source, source_type, allow);
+    module.node_runtime_requests = node_runtime_requests;
+    module
 }
 
 fn lower_parsed(
@@ -861,6 +893,7 @@ fn lower_parsed_in_context(
         exports,
         diagnostics,
         panicked: parsed.panicked,
+        node_runtime_requests: Vec::new(),
     };
     module.check_isolate_escapes();
     module
