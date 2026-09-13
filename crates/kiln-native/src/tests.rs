@@ -10173,3 +10173,98 @@ fn native_node_https_commonjs_require_builds_and_runs() {
     let stdout = String::from_utf8_lossy(&result.stdout);
     assert!(stdout.contains("cjs-https: object function true"));
 }
+
+#[test]
+fn native_node_async_hooks_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-async-hooks-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import hooks, { AsyncLocalStorage, AsyncResource } from 'node:async_hooks';\n",
+            "const als = new AsyncLocalStorage();\n",
+            "const sync = als.run(999, () => als.getStore());\n",
+            "const res = new AsyncResource('probe');\n",
+            "const bound = res.bind((x) => x + 1);\n",
+            "console.log('ah-ts:', typeof hooks, typeof AsyncLocalStorage, typeof AsyncResource, sync, bound(10));\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("async_hooks_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run async_hooks binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("ah-ts: object function function 999 11"));
+}
+
+#[test]
+fn native_node_async_hooks_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-async-hooks-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const hooks = require('node:async_hooks');\n",
+            "const als = new hooks.AsyncLocalStorage();\n",
+            "const sync = als.run('cjs-store', () => als.getStore());\n",
+            "const res = new hooks.AsyncResource('probe');\n",
+            "const bound = res.bind((x) => x * 2);\n",
+            "console.log('cjs-ah:', typeof hooks, typeof hooks.AsyncLocalStorage, typeof hooks.AsyncResource, sync, bound(5));\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(
+                project.path.join("async_hooks_cjs_bin"),
+                NativeProfile::Release,
+            ),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run async_hooks cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("cjs-ah: object function function cjs-store 10"));
+}

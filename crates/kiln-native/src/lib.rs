@@ -3038,7 +3038,7 @@ fn native_builtin_supported_exports(
         NodeBuiltin::Url => kiln_builtins::URL_EXPORTS,
         NodeBuiltin::Buffer => kiln_builtins::BUFFER_EXPORTS,
         NodeBuiltin::StringDecoder => kiln_builtins::STRING_DECODER_EXPORTS,
-        NodeBuiltin::AsyncHooks => &["AsyncLocalStorage", "AsyncResource", "default"],
+        NodeBuiltin::AsyncHooks => kiln_builtins::ASYNC_HOOKS_EXPORTS,
         NodeBuiltin::Crypto => kiln_builtins::CRYPTO_EXPORTS,
         NodeBuiltin::Zlib => kiln_builtins::ZLIB_EXPORTS,
     }

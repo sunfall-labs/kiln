@@ -3215,6 +3215,97 @@ fn node_builtin_https_commonjs_require_evaluates_cleanly() {
 }
 
 #[test]
+fn node_builtin_async_hooks_evaluates_cleanly() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import hooks, { AsyncLocalStorage, AsyncResource } from 'node:async_hooks';\n",
+            "const als = new AsyncLocalStorage();\n",
+            "const sync = als.run(123, () => als.getStore());\n",
+            "const res = new AsyncResource('probe');\n",
+            "const bound = res.bind((x) => x * 2);\n",
+            "console.log(\n",
+            "  typeof hooks === 'object',\n",
+            "  typeof AsyncLocalStorage === 'function',\n",
+            "  typeof AsyncResource === 'function',\n",
+            "  sync,\n",
+            "  bound(21),\n",
+            ");\n",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with async_hooks builtin");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute async_hooks builtin");
+    assert_eq!(host.output, ["true true true 123 42"]);
+}
+
+#[test]
+fn node_builtin_async_hooks_commonjs_require_evaluates_cleanly() {
+    let project = TempProject::new();
+    project.write(
+        "bridge.cjs",
+        concat!(
+            "const hooks = require('node:async_hooks');\n",
+            "const als = new hooks.AsyncLocalStorage();\n",
+            "const sync = als.run('ok', () => als.getStore());\n",
+            "const res = new hooks.AsyncResource('probe');\n",
+            "module.exports = {\n",
+            "  isObj: typeof hooks === 'object',\n",
+            "  hasAls: typeof hooks.AsyncLocalStorage === 'function',\n",
+            "  hasAr: typeof hooks.AsyncResource === 'function',\n",
+            "  sync,\n",
+            "  hasBind: typeof res.bind === 'function',\n",
+            "};\n",
+        ),
+    );
+    let entry = project.write(
+        "main.mjs",
+        concat!(
+            "import bridge from './bridge.cjs';\n",
+            "console.log(bridge.isObj, bridge.hasAls, bridge.hasAr, bridge.sync, bridge.hasBind);\n",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph with async_hooks builtin cjs");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute async_hooks builtin cjs");
+    assert_eq!(host.output, ["true true true ok true"]);
+}
+
+#[test]
 fn node_net_connect_is_a_typed_virtual_module_export() {
     let project = TempProject::new();
     let entry = project.write(
