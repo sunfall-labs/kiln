@@ -737,87 +737,22 @@ mod tests {
     }
 
     #[test]
-    fn source_identity_uses_the_packager_canonical_framing() {
+    fn source_identity_uses_the_shared_contract_inventory() {
         let root = TestDirectory::new();
-        for (relative, bytes) in [
-            ("Cargo.lock", b"lock\n".as_slice()),
-            ("crates/kiln-artifact-cache/Cargo.toml", b"[package]\n"),
-            ("crates/kiln-artifact-cache/src/eviction.rs", b"eviction\n"),
-            ("crates/kiln-artifact-cache/src/lib.rs", b"cache\n"),
-            ("crates/kiln-digest/Cargo.toml", b"[package]\n"),
-            ("crates/kiln-digest/src/lib.rs", b"digest\n"),
-            ("crates/kiln-host-abi/Cargo.toml", b"[package]\n"),
-            ("crates/kiln-host-abi/src/lib.rs", b"host\n"),
-            ("crates/kiln-number-core/Cargo.toml", b"[package]\n"),
-            (
-                "crates/kiln-number-core/src/lib.rs",
-                b"core\0bytes\n".as_slice(),
-            ),
-            ("crates/kiln-native-number-ffi/Cargo.toml", b"[lib]\n"),
-            (
-                "crates/kiln-native-number-ffi/src/ffi.rs",
-                b"dynamic ffi\n".as_slice(),
-            ),
-            (
-                "crates/kiln-native-number-ffi/src/lib.rs",
-                b"ffi\n".as_slice(),
-            ),
-            ("crates/kiln-native-number-abi/Cargo.toml", b"[package]\n"),
-            (
-                "crates/kiln-native-number-abi/src/lib.rs",
-                b"abi\n".as_slice(),
-            ),
-            ("crates/kiln-node-path/Cargo.toml", b"[package]\n"),
-            ("crates/kiln-node-path/src/lib.rs", b"node-path\n"),
-            ("crates/kiln-temporal/Cargo.toml", b"[package]\n"),
-            ("crates/kiln-temporal/src/lib.rs", b"temporal\n"),
-            ("crates/kiln-intl/Cargo.toml", b"[package]\n"),
-            ("crates/kiln-intl/src/collator.rs", b"collator\n"),
-            ("crates/kiln-intl/src/datetime.rs", b"datetime\n"),
-            ("crates/kiln-intl/src/displaynames.rs", b"displaynames\n"),
-            ("crates/kiln-intl/src/duration.rs", b"duration\n"),
-            ("crates/kiln-intl/src/lib.rs", b"intl\n"),
-            ("crates/kiln-intl/src/list.rs", b"list\n"),
-            ("crates/kiln-intl/src/locale.rs", b"locale\n"),
-            ("crates/kiln-intl/src/number.rs", b"number\n"),
-            ("crates/kiln-intl/src/parts.rs", b"parts\n"),
-            ("crates/kiln-intl/src/plurals.rs", b"plurals\n"),
-            ("crates/kiln-intl/src/relative.rs", b"relative\n"),
-            ("crates/kiln-intl/src/segmenter.rs", b"segmenter\n"),
-            ("crates/kiln-json/Cargo.toml", b"[package]\n"),
-            ("crates/kiln-json/src/lib.rs", b"json\n"),
-            ("crates/kiln-json/src/scalar.rs", b"scalar\n"),
-            ("crates/kiln-runtime/Cargo.toml", b"[package]\n"),
-            ("crates/kiln-runtime/src/http_body.rs", b"body\n"),
-            ("crates/kiln-runtime/src/http_client.rs", b"client\n"),
-            ("crates/kiln-runtime/src/http_engine.rs", b"engine\n"),
-            ("crates/kiln-runtime/src/lib.rs", b"runtime\n"),
-            ("crates/kiln-runtime/src/process_wire.rs", b"wire\n"),
-            ("crates/kiln-runtime/src/node_http.rs", b"http\n"),
-            ("crates/kiln-runtime/src/node_http_agent.rs", b"agent\n"),
-            ("crates/kiln-runtime/src/node_net.rs", b"net\n"),
-            ("crates/kiln-runtime/src/node_stream.rs", b"stream\n"),
-            (
-                "crates/kiln-runtime/src/scripted_transport.rs",
-                b"scripted\n",
-            ),
-        ] {
+        for relative in kiln_native_provider_contract::source_paths() {
             let path = root.0.join(relative);
             fs::create_dir_all(path.parent().expect("fixture path has parent"))
-                .expect("create source identity fixture directory");
-            fs::write(path, bytes).expect("write source identity fixture");
+                .expect("create fixture");
+            fs::write(path, relative.as_bytes()).expect("write fixture");
         }
-        let source_list = root.0.join("crates/kiln-native/provider-sources.txt");
-        fs::create_dir_all(source_list.parent().expect("source list has parent"))
-            .expect("create source list directory");
-        fs::write(source_list, include_str!("../provider-sources.txt"))
-            .expect("write source identity manifest");
-
+        let digest = source_digest(&root.0).expect("hash source identity fixture");
         assert_eq!(
-            source_digest(&root.0).expect("hash source identity fixture"),
-            Digest::from_hex("eb5e22a45e4217c32809a61899fb5160b534adb5c58bcef3829704a0ccfa6ecd")
-                .expect("fixture digest")
+            digest,
+            kiln_native_provider_contract::source_digest(&root.0).unwrap()
         );
+        let missing = root.0.join("crates/kiln-native/provider-sources.txt");
+        fs::remove_file(&missing).expect("remove inventory file");
+        assert!(source_digest(&root.0).is_err());
     }
 
     #[test]
