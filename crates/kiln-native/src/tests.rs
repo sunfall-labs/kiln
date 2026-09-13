@@ -1807,6 +1807,16 @@ writeFile({path:?}, 'héllo').then(() => readFile({path:?}, 'utf8')).then((text)
 }
 
 #[test]
+fn node_ffi_is_typescript_builtin_and_supports_exports() {
+    use kiln_module_resolver::NodeBuiltin;
+
+    assert!(kiln_builtins::is_ts_builtin(NodeBuiltin::Ffi));
+    for export in kiln_builtins::FFI_EXPORTS {
+        assert!(native_builtin_supports_export(NodeBuiltin::Ffi, export));
+    }
+}
+
+#[test]
 fn node_fs_is_typescript_builtin_and_supports_exports() {
     use kiln_module_resolver::NodeBuiltin;
 
@@ -8895,6 +8905,12 @@ fn native_builtin_support_is_the_materialized_subset_not_the_declared_surface() 
         NodeBuiltin::Http,
         "nonexistent"
     ));
+    assert!(native_builtin_supports_export(NodeBuiltin::Ffi, "dlopen"));
+    assert!(native_builtin_supports_export(NodeBuiltin::Ffi, "suffix"));
+    assert!(!native_builtin_supports_export(
+        NodeBuiltin::Ffi,
+        "nonexistent"
+    ));
 }
 
 #[test]
@@ -12130,4 +12146,88 @@ fn native_node_fs_commonjs_require_builds_and_runs() {
     );
     let stdout = String::from_utf8_lossy(&result.stdout);
     assert!(stdout.contains("cjs-fs: object function object function function true"));
+}
+
+#[test]
+fn native_node_ffi_typescript_builtin_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-ffi-ts");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        concat!(
+            "import ffi, { dlopen, getRawPointer, suffix, toArrayBuffer } from 'node:ffi';\n",
+            "console.log('ffi-ts:', typeof ffi, typeof dlopen, typeof getRawPointer, typeof suffix, typeof toArrayBuffer, ffi.default === ffi);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("ffi_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run ffi binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("ffi-ts: object function function string function true"));
+}
+
+#[test]
+fn native_node_ffi_commonjs_require_builds_and_runs() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-node-ffi-cjs");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const ffi = require('node:ffi');\n",
+            "console.log('cjs-ffi:', typeof ffi, typeof ffi.dlopen, typeof ffi.getRawPointer, typeof ffi.suffix, typeof ffi.toArrayBuffer, ffi.default === ffi);\n",
+        ),
+    )
+    .unwrap();
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).unwrap(),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .unwrap();
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("ffi_cjs_bin"), NativeProfile::Release),
+        )
+        .unwrap();
+    let result = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run ffi cjs binary");
+    assert!(
+        result.status.success(),
+        "process failed: stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("cjs-ffi: object function function string function true"));
 }
