@@ -6192,7 +6192,11 @@ static int kiln_graph_enter(void *opaque) {
         modules.len()
     )
     .unwrap();
-    for (index, (node, module)) in modules.iter().enumerate() {
+    // Single Rust-level emission point for a module case; generated C remains unchanged.
+    let mut emit_module_case = |index: usize,
+                                node: &kiln_module_graph::ModuleNode,
+                                module: &kiln_backend_c::CModule|
+     -> Result<(), NativeError> {
         let is_async = node
             .program
             .program
@@ -6232,7 +6236,7 @@ static int kiln_graph_enter(void *opaque) {
             }
             evaluation
                 .push_str("            graph->current_module++;\n            break;\n        }\n");
-            continue;
+            return Ok(());
         }
 
         if is_async {
@@ -6415,6 +6419,10 @@ static int kiln_graph_enter(void *opaque) {
         }
         evaluation
             .push_str("            graph->current_module++;\n            break;\n        }\n");
+        Ok(())
+    };
+    for (index, (node, module)) in modules.iter().enumerate() {
+        emit_module_case(index, node, module)?;
     }
     evaluation.push_str(
         r#"        default:
