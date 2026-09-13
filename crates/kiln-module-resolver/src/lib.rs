@@ -207,7 +207,14 @@ impl ResolvedModule {
         let stem = file.strip_suffix(".builtin")?;
         let parent = components.next()?.as_os_str().to_str()?;
         let name = if parent == "builtins" {
-            stem.to_owned()
+            // `kiln:process` is the one explicit Kiln namespace. Its virtual path uses the
+            // unprefixed stem for compatibility with the existing builtin path layout, so
+            // preserve that identity here without making `node:process` a Node builtin.
+            if stem == "process" {
+                "kiln:process".to_owned()
+            } else {
+                stem.to_owned()
+            }
         } else {
             format!("{parent}/{stem}")
         };
