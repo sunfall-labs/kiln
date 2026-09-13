@@ -6133,6 +6133,9 @@ extern int kiln_c99_new_type_error(kiln_value *out, const char *message);
 extern int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
                                   kiln_value receiver, const kiln_value *args, size_t argc,
                                   int depth, kiln_value *thrown);
+extern int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
+                         kiln_value receiver, const kiln_value *args, size_t argc,
+                         int depth, kiln_value *thrown);
 extern int kiln_c99_module_completion(kiln_host *, kiln_value, uint32_t, kiln_value *, int, kiln_value *);
 #define KILN_C99_OK 0
 #define KILN_C99_METHOD_PROMISE_RESOLVE 110
@@ -6484,7 +6487,7 @@ static int kiln_graph_enter(void *opaque) {
             .any(|i| matches!(i, kiln_ir::Instruction::Await | kiln_ir::Instruction::Yield));
         writeln!(
             evaluation,
-            "static int kiln_graph_eval_module_{index}(kiln_graph_context *graph) {{\n    kiln_graph_entry_context context;\n    kiln_graph_module_state *state = &graph->module_states[{index}];\n    kiln_host *host = &graph->host;\n    kiln_value *result = &state->result;\n    int status = 0;"
+            "static int kiln_graph_eval_module_{index}(kiln_graph_context *graph) {{\n    kiln_graph_entry_context context;\n    kiln_graph_module_state *state = &graph->module_states[{index}];\n    kiln_host *host = &graph->host;\n    kiln_value *result = &state->result;\n    kiln_value continuation_promise = kiln_c99_undefined();\n    int status = 0;"
         )
         .unwrap();
         if !is_async {
@@ -6654,7 +6657,7 @@ static int kiln_graph_enter(void *opaque) {
         )
         .unwrap();
         evaluation.push_str(
-            "            status = context.module(context.host, context.result, context.imports, context.import_count, context.exports, context.export_count);\n",
+            "            state->body_started = 1;\n            status = context.module(context.host, context.result, context.imports, context.import_count, context.exports, context.export_count);\n",
         );
         writeln!(
             evaluation,
@@ -6669,7 +6672,9 @@ static int kiln_graph_enter(void *opaque) {
                 kiln_launcher_promise_view *promise = (kiln_launcher_promise_view *)(uintptr_t)result->bits;
                 if (promise != NULL && promise->state == 0 /* KILN_C99_PENDING */) {{
                     state->active_promise = *result;
-                    status = kiln_c99_module_completion(host, *result, (uint32_t){index}, &state->completion_promise, 1, NULL);
+                    status = kiln_graph_prepare_completion(graph, (size_t){index});
+                    if (status != KILN_C99_OK) return status;
+                    status = kiln_c99_module_completion(host, *result, (uint32_t){index}, &continuation_promise, 1, NULL);
                     if (status != KILN_C99_OK) return status;
                     state->module_settling = 1;
                     return 0;
@@ -6720,7 +6725,7 @@ static int kiln_graph_enter(void *opaque) {
     }
     helper_defs.push_str("int kiln_graph_module_completion(kiln_host *host, uint32_t index, int rejected, const kiln_value *value, kiln_value *result, int depth, kiln_value *thrown) {\n    kiln_graph_context *graph = (kiln_graph_context *)host->context;\n    int status = KILN_C99_OK;\n    (void)depth; (void)thrown;\n    if (graph == NULL || result == NULL || value == NULL) return KILN_C99_CONTROL_ERROR;\n    switch (index) {\n");
     for (index, (node, module)) in modules.iter().enumerate() {
-        helper_defs.push_str(&format!("        case {index}: {{\n            kiln_graph_module_state *state = &graph->module_states[{index}];\n            if (rejected) {{ state->result = *value; state->phase = KILN_MODULE_FAILED; state->failure_status = KILN_C99_THROWN; state->module_settling = 0; *result = *value; if (thrown != NULL) *thrown = *value; return KILN_C99_THROWN; }}\n            if (state->phase == KILN_MODULE_EVALUATED) {{ *result = kiln_namespaces[{index}]; return KILN_C99_OK; }}\n", index = index));
+        helper_defs.push_str(&format!("        case {index}: {{\n            kiln_graph_module_state *state = &graph->module_states[{index}];\n            kiln_value settled = kiln_c99_undefined();\n            if (rejected) {{ state->result = *value; state->phase = KILN_MODULE_FAILED; state->failure_status = KILN_C99_THROWN; state->module_settling = 0; *result = *value; if (state->completion_reject.tag != KILN_VALUE_UNDEFINED) {{ (void)kiln_c99_call(host, &settled, state->completion_reject, kiln_c99_undefined(), value, 1, depth, NULL); }} return KILN_C99_OK; }}\n            if (state->phase == KILN_MODULE_EVALUATED) {{ *result = kiln_namespaces[{index}]; return KILN_C99_OK; }}\n", index = index));
         let is_async = node
             .program
             .program
@@ -6737,7 +6742,7 @@ static int kiln_graph_enter(void *opaque) {
         if let Some(plan) = &namespace_plans[index] {
             write_graph_namespace_build(&mut helper_defs, index, &module.symbol, plan, false);
         }
-        helper_defs.push_str(&format!("            state->result = kiln_namespaces[{index}];\n            state->phase = KILN_MODULE_EVALUATED;\n            state->module_settling = 0;\n            *result = state->result;\n", index = index));
+        helper_defs.push_str(&format!("            state->result = kiln_namespaces[{index}];\n            state->phase = KILN_MODULE_EVALUATED;\n            state->module_settling = 0;\n            *result = state->result;\n            if (state->completion_resolve.tag != KILN_VALUE_UNDEFINED) {{ (void)kiln_c99_call(host, &settled, state->completion_resolve, kiln_c99_undefined(), &state->result, 1, depth, NULL); }}\n", index = index));
         if node.path == graph.entry() {
             helper_defs.push_str("            graph->entry_result = state->result;\n");
         }
