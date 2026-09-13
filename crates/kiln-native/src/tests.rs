@@ -5004,6 +5004,48 @@ fn native_deferred_dynamic_import_failures_are_catchable() {
 }
 
 #[test]
+fn native_dynamic_top_level_await_import_waits_for_completion() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping dynamic TLA integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-dynamic-tla");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).expect("write root package");
+    fs::write(
+        root.path.join("dep.mjs"),
+        "globalThis.dynamicTlaCount = (globalThis.dynamicTlaCount || 0) + 1;\nexport const x = await new Promise(resolve => setTimeout(() => resolve(42), 1));\n",
+    )
+    .expect("write dependency");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "const a = import('./dep.mjs'); const b = import('./dep.mjs'); const [na, nb] = await Promise.all([a, b]); console.log(na.x, nb.x, na === nb, globalThis.dynamicTlaCount);\n",
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build dynamic TLA graph");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+            },
+        )
+        .expect("dynamic TLA graph builds and runs");
+    assert_eq!(report.stdout, b"42 42 true 1\n");
+}
+
+#[test]
 fn native_static_top_level_await_resolves_before_entry() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
