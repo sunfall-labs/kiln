@@ -4118,8 +4118,11 @@ pub fn node_builtin_exports(specifier: &str) -> Option<Vec<(String, Value)>> {
             .map(|name| {
                 (
                     (*name).to_owned(),
-                    node_builtin_export_value(namespace, name)
-                        .expect("every advertised builtin export has a native value"),
+                    node_builtin_export_value(namespace, name).unwrap_or_else(|| {
+                        panic!(
+                            "every advertised builtin export has a native value: specifier={specifier} export={name} namespace={namespace:?}"
+                        )
+                    }),
                 )
             })
             .collect(),

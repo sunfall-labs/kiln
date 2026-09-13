@@ -247,6 +247,71 @@ function toHex(bytes: Uint8Array): string {
   return hex;
 }
 
+function toBase64(bytes: Uint8Array, urlSafe: boolean = false): string {
+  const chars = urlSafe
+    ? 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
+    : 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  let result = '';
+  const len = bytes.length;
+  let i = 0;
+  for (; i + 2 < len; i += 3) {
+    const b0 = bytes[i];
+    const b1 = bytes[i + 1];
+    const b2 = bytes[i + 2];
+    result += chars[b0 >> 2];
+    result += chars[((b0 & 3) << 4) | (b1 >> 4)];
+    result += chars[((b1 & 15) << 2) | (b2 >> 6)];
+    result += chars[b2 & 63];
+  }
+  if (i < len) {
+    const b0 = bytes[i];
+    result += chars[b0 >> 2];
+    if (i + 1 < len) {
+      const b1 = bytes[i + 1];
+      result += chars[((b0 & 3) << 4) | (b1 >> 4)];
+      result += chars[(b1 & 15) << 2];
+      if (!urlSafe) result += '=';
+    } else {
+      result += chars[(b0 & 3) << 4];
+      if (!urlSafe) result += '==';
+    }
+  }
+  return result;
+}
+
+function encodeDigest(raw: Uint8Array, encoding?: string): any {
+  if (!encoding) {
+    if (typeof Buffer !== 'undefined') {
+      return Buffer.from(raw);
+    }
+    return raw;
+  }
+  const norm = String(encoding).toLowerCase();
+  if (norm === 'hex') {
+    return toHex(raw);
+  }
+  if (norm === 'base64') {
+    return toBase64(raw, false);
+  }
+  if (norm === 'base64url') {
+    return toBase64(raw, true);
+  }
+  if (norm === 'utf8' || norm === 'utf-8') {
+    return new TextDecoder('utf-8').decode(raw);
+  }
+  if (norm === 'latin1' || norm === 'binary') {
+    let s = '';
+    for (let i = 0; i < raw.length; i++) {
+      s += String.fromCharCode(raw[i]);
+    }
+    return s;
+  }
+  if (typeof Buffer !== 'undefined') {
+    return Buffer.from(raw).toString(encoding as any);
+  }
+  throw new TypeError(`Unknown encoding: ${encoding}`);
+}
+
 export class Hash {
   private _algorithm: string;
   private _buffers: Uint8Array[] = [];
@@ -278,13 +343,7 @@ export class Hash {
     else if (this._algorithm === 'sha1') raw = sha1Bytes(combined);
     else raw = sha256Bytes(combined);
 
-    if (encoding === 'hex') {
-      return toHex(raw);
-    }
-    if (typeof Buffer !== 'undefined') {
-      return Buffer.from(raw);
-    }
-    return raw;
+    return encodeDigest(raw, encoding);
   }
 }
 
@@ -320,13 +379,7 @@ export class Hmac {
       offset += b.length;
     }
     const raw = computeHmac(this._algorithm, this._key, combined);
-    if (encoding === 'hex') {
-      return toHex(raw);
-    }
-    if (typeof Buffer !== 'undefined') {
-      return Buffer.from(raw);
-    }
-    return raw;
+    return encodeDigest(raw, encoding);
   }
 }
 
