@@ -1716,6 +1716,11 @@ pub(crate) struct InternalRefusal {
 /// has to justify is how a gate stops meaning anything.
 pub(crate) const REFUSAL_INTERNAL_STATUS: &[InternalRefusal] = &[
     InternalRefusal {
+        function: "kiln_c99_module_completion",
+        sites: 1,
+        converted_by: "the dynamic importer, which propagates its control status",
+    },
+    InternalRefusal {
         function: "kiln_c99_json_build",
         sites: 5,
         converted_by: "JSON.parse, which turns it into a SyntaxError the program can catch",
