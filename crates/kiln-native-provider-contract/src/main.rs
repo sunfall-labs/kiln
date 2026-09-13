@@ -37,6 +37,14 @@ fn main() {
                 eprintln!("manifest requires 7 arguments");
                 std::process::exit(2);
             }
+            let http = match values[6].as_str() {
+                "true" => true,
+                "false" => false,
+                _ => {
+                    eprintln!("manifest http must be true or false");
+                    std::process::exit(2);
+                }
+            };
             let m = kiln_native_provider_contract::manifest(
                 values[0].clone(),
                 values[1].clone(),
@@ -44,7 +52,7 @@ fn main() {
                 values[3].clone(),
                 values[4].clone(),
                 values[5].clone(),
-                values[6] == "true",
+                http,
             );
             println!("{}", serde_json::to_string_pretty(&m).unwrap());
         }

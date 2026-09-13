@@ -56,36 +56,51 @@ pub struct ProviderManifest {
     pub deployment: String,
     pub libc_baseline: String,
     pub exports: Vec<String>,
-    #[serde(default = "default_http")]
     pub http: bool,
-}
-
-fn default_http() -> bool {
-    true
 }
 
 impl ProviderManifest {
     pub fn identity(&self) -> String {
-        format!(
-            "schema={};provider={};abi={};format={};parse={};target={};rustc={};source={};archive={};linkage={};pic={};profile={};cpu={};http={};deployment={};libc={};exports={}",
-            self.schema,
-            self.provider,
-            self.provider_abi,
-            self.format_version,
-            self.parse_version,
-            self.rust_target,
-            self.rustc_identity,
-            self.source_sha256,
-            self.archive_sha256,
-            self.linkage,
-            self.pic,
-            self.profile,
-            self.cpu_features,
-            self.http,
-            self.deployment,
-            self.libc_baseline,
-            self.exports.join(",")
-        )
+        #[derive(Serialize)]
+        struct Identity<'a> {
+            schema: u16,
+            provider: &'a str,
+            abi: u32,
+            format: u32,
+            parse: u32,
+            target: &'a str,
+            rustc: &'a str,
+            source: &'a str,
+            archive: &'a str,
+            linkage: &'a str,
+            pic: bool,
+            profile: &'a str,
+            cpu: &'a str,
+            http: bool,
+            deployment: &'a str,
+            libc: &'a str,
+            exports: &'a [String],
+        }
+        serde_json::to_string(&Identity {
+            schema: self.schema,
+            provider: &self.provider,
+            abi: self.provider_abi,
+            format: self.format_version,
+            parse: self.parse_version,
+            target: &self.rust_target,
+            rustc: &self.rustc_identity,
+            source: &self.source_sha256,
+            archive: &self.archive_sha256,
+            linkage: &self.linkage,
+            pic: self.pic,
+            profile: &self.profile,
+            cpu: &self.cpu_features,
+            http: self.http,
+            deployment: &self.deployment,
+            libc: &self.libc_baseline,
+            exports: &self.exports,
+        })
+        .expect("provider identity serialization is infallible")
     }
 }
 
