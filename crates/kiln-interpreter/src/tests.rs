@@ -5421,3 +5421,244 @@ fn node_crypto_random_bytes_fill_hashes_and_hmac() {
     let tse_name = vm.read_property(&tse, "name", 0).unwrap();
     assert_eq!(tse_name, Value::String("timingSafeEqual".into()));
 }
+
+#[test]
+fn generator_and_async_generator_prototype_and_constructor_hierarchy() {
+    let program = Program {
+        source: "".into(),
+        template_sites: Vec::new(),
+        version: kiln_ir::BYTECODE_VERSION,
+        constants: Vec::new(),
+        code: Vec::new(),
+        local_count: 0,
+        functions: vec![
+            // Function 0: generator function
+            kiln_ir::FunctionProto {
+                span: kiln_ir::Span::default(),
+                prologue_end: 0,
+                asynchronous: false,
+                name: None,
+                arrow: false,
+                generator: true,
+                async_generator: false,
+                is_method: false,
+                parameter_count: 0,
+                declared_length: 0,
+                mapped_arguments: false,
+                local_count: 0,
+                code: vec![Instruction::Return],
+                upvalues: Vec::new(),
+                type_annotations: None,
+            },
+            // Function 1: async generator function
+            kiln_ir::FunctionProto {
+                span: kiln_ir::Span::default(),
+                prologue_end: 0,
+                asynchronous: true,
+                name: None,
+                arrow: false,
+                generator: false,
+                async_generator: true,
+                is_method: false,
+                parameter_count: 0,
+                declared_length: 0,
+                mapped_arguments: false,
+                local_count: 0,
+                code: vec![Instruction::Return],
+                upvalues: Vec::new(),
+                type_annotations: None,
+            },
+        ],
+    };
+
+    std::thread_local! {
+        static CAPTURED_COMPILER_SOURCE: RefCell<String> = RefCell::new(String::new());
+    }
+
+    fn capturing_compiler(
+        request: &EvalSource<'_>,
+    ) -> Result<(Program, Strictness), EvalCompileError> {
+        CAPTURED_COMPILER_SOURCE.with(|c| *c.borrow_mut() = request.source.to_owned());
+        Ok((
+            Program {
+                source: "".into(),
+                template_sites: Vec::new(),
+                version: kiln_ir::BYTECODE_VERSION,
+                constants: vec![Constant::Number(42.0f64.to_bits())],
+                code: vec![Instruction::Const(0), Instruction::Return],
+                local_count: 0,
+                functions: Vec::new(),
+            },
+            Strictness::default(),
+        ))
+    }
+
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: std::collections::VecDeque::new(),
+        timezone: None,
+        locale: None,
+    };
+    let capabilities = ExecutionCapabilities::default().with_source_compiler(capturing_compiler);
+    let mut vm = Vm::with_entropy_seed(
+        Rc::new(program.clone()),
+        Rc::new(Strictness::sloppy(&program)),
+        &mut host,
+        vec![Value::Undefined; program.local_count as usize],
+        ExecutionLimits::default(),
+        &RealmCapabilities::default(),
+        capabilities,
+    )
+    .expect("realm capabilities resolve");
+
+    let gen_fn = Value::Function(vm.make_closure(0).expect("make generator closure"));
+    let async_gen_fn = Value::Function(vm.make_closure(1).expect("make async generator closure"));
+
+    // 1. GeneratorFunction prototype and constructor checks
+    let gen_proto = prototype_of(&gen_fn);
+    assert_eq!(
+        gen_proto,
+        Value::Native(Native::GeneratorFunctionPrototype, RealmId::PRIMARY)
+    );
+
+    let gen_ctor = vm.read_property(&gen_fn, "constructor", 0).unwrap();
+    assert_eq!(
+        gen_ctor,
+        Value::Native(Native::GeneratorFunctionConstructor, RealmId::PRIMARY)
+    );
+
+    let gen_proto_ctor = vm.read_property(&gen_proto, "constructor", 0).unwrap();
+    assert_eq!(gen_proto_ctor, gen_ctor);
+
+    let to_string_tag_key = Symbol::WellKnown(WellKnown::ToStringTag).property_key();
+    let gen_proto_tag = vm.read_property(&gen_proto, &to_string_tag_key, 0).unwrap();
+    assert_eq!(gen_proto_tag, Value::String("GeneratorFunction".into()));
+
+    let gen_ctor_proto = prototype_of(&gen_ctor);
+    assert_eq!(
+        gen_ctor_proto,
+        Value::Native(Native::FunctionConstructor, RealmId::PRIMARY)
+    );
+
+    let gen_proto_proto = prototype_of(&gen_proto);
+    assert_eq!(
+        gen_proto_proto,
+        Value::Native(
+            Native::PrototypeOf(PrototypeTable::Function),
+            RealmId::PRIMARY
+        )
+    );
+
+    // 2. AsyncGeneratorFunction prototype and constructor checks
+    let async_gen_proto = prototype_of(&async_gen_fn);
+    assert_eq!(
+        async_gen_proto,
+        Value::Native(Native::AsyncGeneratorFunctionPrototype, RealmId::PRIMARY)
+    );
+
+    let async_gen_ctor = vm.read_property(&async_gen_fn, "constructor", 0).unwrap();
+    assert_eq!(
+        async_gen_ctor,
+        Value::Native(Native::AsyncGeneratorFunctionConstructor, RealmId::PRIMARY)
+    );
+
+    let async_gen_proto_ctor = vm
+        .read_property(&async_gen_proto, "constructor", 0)
+        .unwrap();
+    assert_eq!(async_gen_proto_ctor, async_gen_ctor);
+
+    let async_gen_proto_tag = vm
+        .read_property(&async_gen_proto, &to_string_tag_key, 0)
+        .unwrap();
+    assert_eq!(
+        async_gen_proto_tag,
+        Value::String("AsyncGeneratorFunction".into())
+    );
+
+    let async_gen_ctor_proto = prototype_of(&async_gen_ctor);
+    assert_eq!(
+        async_gen_ctor_proto,
+        Value::Native(Native::FunctionConstructor, RealmId::PRIMARY)
+    );
+
+    let async_gen_proto_proto = prototype_of(&async_gen_proto);
+    assert_eq!(
+        async_gen_proto_proto,
+        Value::Native(
+            Native::PrototypeOf(PrototypeTable::Function),
+            RealmId::PRIMARY
+        )
+    );
+
+    // 3. Generator and AsyncGenerator prototype hierarchy
+    let gen_instance_proto = Value::Native(
+        Native::PrototypeOf(PrototypeTable::Generator),
+        RealmId::PRIMARY,
+    );
+    assert_eq!(
+        prototype_of(&gen_instance_proto),
+        Value::Native(
+            Native::PrototypeOf(PrototypeTable::Iterator),
+            RealmId::PRIMARY
+        )
+    );
+
+    let async_gen_instance_proto = Value::Native(
+        Native::PrototypeOf(PrototypeTable::AsyncGenerator),
+        RealmId::PRIMARY,
+    );
+    let async_iter_proto = prototype_of(&async_gen_instance_proto);
+    assert_eq!(
+        async_iter_proto,
+        Value::Native(
+            Native::PrototypeOf(PrototypeTable::AsyncIterator),
+            RealmId::PRIMARY
+        )
+    );
+    assert_eq!(
+        prototype_of(&async_iter_proto),
+        Value::Native(
+            Native::PrototypeOf(PrototypeTable::Object),
+            RealmId::PRIMARY
+        )
+    );
+
+    // AsyncIterator prototype has [Symbol.asyncIterator] returning this
+    let async_iter_key = Symbol::WellKnown(WellKnown::AsyncIterator).property_key();
+    let async_iter_fn = vm
+        .read_property(&async_iter_proto, &async_iter_key, 0)
+        .unwrap();
+    assert_eq!(
+        async_iter_fn,
+        Value::Native(Native::IteratorSelf, RealmId::PRIMARY)
+    );
+    let iter_self = vm
+        .dispatch_native(Native::IteratorSelf, &async_gen_instance_proto, &[], 0)
+        .expect("asyncIterator call succeeds");
+    assert_eq!(iter_self, async_gen_instance_proto);
+
+    // 4. Test dynamic construction via GeneratorFunction and AsyncGeneratorFunction
+    let _ = vm.dispatch_native(
+        Native::GeneratorFunctionConstructor,
+        &Value::Undefined,
+        &[Value::String("a".into()), Value::String("yield a;".into())],
+        0,
+    );
+    CAPTURED_COMPILER_SOURCE.with(|c| {
+        assert_eq!(*c.borrow(), "(function* anonymous(a\n) {\nyield a;\n})");
+    });
+
+    let _ = vm.dispatch_native(
+        Native::AsyncGeneratorFunctionConstructor,
+        &Value::Undefined,
+        &[Value::String("x".into()), Value::String("yield x;".into())],
+        0,
+    );
+    CAPTURED_COMPILER_SOURCE.with(|c| {
+        assert_eq!(
+            *c.borrow(),
+            "(async function* anonymous(x\n) {\nyield x;\n})"
+        );
+    });
+}

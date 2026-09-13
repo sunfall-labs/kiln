@@ -6333,7 +6333,12 @@ impl Compiler {
         // reading `this` at the `return` would have refused it.
         let deferred_this = value.is_none() && self.derived_constructor;
         match value {
-            Some(value) => self.expression(value),
+            Some(value) => {
+                self.expression(value);
+                if self.async_generator {
+                    self.code.push(Instruction::Await);
+                }
+            }
             None if deferred_this => {}
             // Anywhere else a bare `return` is `undefined`, and reaching for `this` there would
             // have made every one of them answer with the receiver.
