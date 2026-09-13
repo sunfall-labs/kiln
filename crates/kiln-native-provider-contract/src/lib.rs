@@ -226,4 +226,29 @@ mod tests {
         assert!(!value.slim_http);
         assert!(!value.exports.is_empty());
     }
+
+    #[test]
+    fn identity_changes_for_semantic_fields_but_ignores_archive_filename() {
+        let mut m = manifest(
+            "target".into(),
+            "rustc".into(),
+            "source".into(),
+            "archive".into(),
+            "deployment".into(),
+            "libc".into(),
+            true,
+        );
+        let base = m.identity();
+        m.profile.push('x');
+        assert_ne!(base, m.identity());
+        m.profile.pop();
+        m.http = false;
+        assert_ne!(base, m.identity());
+        m.http = true;
+        m.exports.push("extra".into());
+        assert_ne!(base, m.identity());
+        m.exports.pop();
+        m.archive.push('x');
+        assert_eq!(base, m.identity());
+    }
 }
