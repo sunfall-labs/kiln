@@ -6,7 +6,7 @@ Status: in-progress; live acceptance is not verified
 
 `../ghui` is the first application in this workspace that combines a large React/TypeScript
 module graph, top-level await, dynamic imports, the Node adapter, and a native terminal renderer.
-It now compiles to a native executable, but it does not yet run to its first frame.
+It compiles to a native executable, but current full live usability is unverified.
 
 ## What is established
 

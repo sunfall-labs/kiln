@@ -5080,6 +5080,12 @@ fn native_failed_dynamic_closure_preserves_shared_successful_dependencies() {
             },
         )
         .expect("run sharing graph");
+    assert_eq!(
+        report.exit_code,
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&report.stderr)
+    );
     assert_eq!(report.stdout, b"true\n42 1 1\n");
 }
 
