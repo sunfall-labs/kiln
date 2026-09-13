@@ -77,7 +77,7 @@ def validate(doc: dict[str, Any]) -> dict[str, Any]:
         raise ResultError("result envelope has no source kind")
     if not isinstance(source.get("code_snapshot_sha256"), str) or not source["code_snapshot_sha256"]:
         raise ResultError("result envelope has no code snapshot identity")
-    if source.get("kind") == "process" and source.get("name") != "build" and not isinstance(source.get("binary_sha256"), str):
+    if source.get("kind") == "process" and doc.get("verdict") == "passed" and not isinstance(source.get("binary_sha256"), str):
         raise ResultError("process step has no binary identity")
     evidence = doc.get("evidence")
     if not isinstance(evidence, dict) or not isinstance(evidence.get("log"), str) or not evidence["log"]:
@@ -155,7 +155,7 @@ def test262(log: str, status: int) -> dict[str, Any]:
 
 def process(log: str, status: int, name: str) -> dict[str, Any]:
     snapshot = os.environ.get("KILN_CODE_SNAPSHOT_SHA256") or code_snapshot()
-    result = {"schema": 1, "verdict": "passed" if status == 0 else "failed", "measurement": "process", "source": {"kind": "process", "name": name, "code_snapshot_sha256": snapshot, "binary_sha256": binary_snapshot() if name != "build" else None}, "evidence": {"log": str(Path(log).resolve())}}
+    result = {"schema": 1, "verdict": "passed" if status == 0 else "failed", "measurement": "process", "source": {"kind": "process", "name": name, "code_snapshot_sha256": snapshot, "binary_sha256": binary_snapshot()}, "evidence": {"log": str(Path(log).resolve())}}
     return validate(result)
 
 

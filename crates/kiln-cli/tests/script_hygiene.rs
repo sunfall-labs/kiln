@@ -336,6 +336,23 @@ fn gate_result_envelope_contract_suite_passes() {
     );
 }
 
+#[test]
+fn gate_result_envelope_cli_integration_suite_passes() {
+    let root = repo_root();
+    let output = Command::new("python3")
+        .args(["-B", "scripts/gate_results_integration_test.py"])
+        .current_dir(&root)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .output()
+        .expect("python3 is available");
+    assert!(
+        output.status.success(),
+        "gate result CLI integration tests failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn every_script_has_the_execute_bit_it_needs() {
