@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use kiln_digest::Digest;
 use serde::Serialize;
@@ -91,15 +91,6 @@ fn digest_paths<'a>(
         bytes.extend_from_slice(&contents);
     }
     Ok(Digest::hash(&bytes))
-}
-
-pub fn repository_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf()
 }
 
 #[cfg(test)]

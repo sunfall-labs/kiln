@@ -118,7 +118,7 @@ env -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \
 	CARGO_BUILD_RUSTC_WRAPPER= CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER= \
 	RUSTC="$KILN_PROVIDER_RUSTC" CARGO_BUILD_RUSTC="$KILN_PROVIDER_RUSTC" \
 	RUSTFLAGS="$KILN_PROVIDER_RUSTFLAGS" "$KILN_PROVIDER_CARGO" rustc --locked \
-	-p kiln-native-number-ffi --profile provider "${KILN_PROVIDER_DEFAULT_FEATURES[@]}" \
+	-p kiln-native-number-ffi --profile "$KILN_PROVIDER_PROFILE" "${KILN_PROVIDER_DEFAULT_FEATURES[@]}" \
 	--features "$KILN_PROVIDER_FEATURES" \
 	--target "$KILN_PROVIDER_TARGET" --crate-type staticlib
 
@@ -126,7 +126,7 @@ KILN_PROVIDER_TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 if [[ $KILN_PROVIDER_TARGET_DIR != /* ]]; then
 	KILN_PROVIDER_TARGET_DIR="$(kiln_repo_root)/$KILN_PROVIDER_TARGET_DIR"
 fi
-KILN_PROVIDER_BUILT_ARCHIVE="$KILN_PROVIDER_TARGET_DIR/$KILN_PROVIDER_TARGET/provider/libkiln_native_number_ffi.a"
+KILN_PROVIDER_BUILT_ARCHIVE="$KILN_PROVIDER_TARGET_DIR/$KILN_PROVIDER_TARGET/$KILN_PROVIDER_PROFILE/libkiln_native_number_ffi.a"
 if [[ ! -f $KILN_PROVIDER_BUILT_ARCHIVE ]]; then
 	printf 'number provider archive was not produced at %s\n' \
 		"$KILN_PROVIDER_BUILT_ARCHIVE" >&2
@@ -252,7 +252,7 @@ done < crates/kiln-native/provider-sources.txt
 # the compiler read from this workspace must be named in the list; anything else is a file whose
 # edits the digest cannot see. The compiler and both scripts consume the same manifest; `kiln-cli`'s
 # `script_hygiene` test keeps that shared boundary present. This is the completeness check.
-KILN_PROVIDER_DEP_INFO="$KILN_PROVIDER_TARGET_DIR/$KILN_PROVIDER_TARGET/provider/libkiln_native_number_ffi.d"
+KILN_PROVIDER_DEP_INFO="$KILN_PROVIDER_TARGET_DIR/$KILN_PROVIDER_TARGET/$KILN_PROVIDER_PROFILE/libkiln_native_number_ffi.d"
 if [[ -f $KILN_PROVIDER_DEP_INFO ]]; then
 	KILN_PROVIDER_ROOT="$(kiln_repo_root)"
 	KILN_PROVIDER_UNLISTED=$(

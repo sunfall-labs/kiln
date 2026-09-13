@@ -17,7 +17,7 @@ kiln_provider_contract_init() {
 		--bin kiln-native-provider-contract --target "$host_target" --offline
 	KILN_PROVIDER_CONTRACT_BIN="$target_dir/$host_target/debug/kiln-native-provider-contract"
 	[[ -x $KILN_PROVIDER_CONTRACT_BIN ]] || { printf 'provider contract CLI was not built\n' >&2; return 1; }
-	KILN_PROVIDER_CONTRACT_JSON=$($KILN_PROVIDER_CONTRACT_BIN contract)
+	KILN_PROVIDER_CONTRACT_JSON=$("$KILN_PROVIDER_CONTRACT_BIN" contract)
 }
 
 kiln_provider_contract_field() {
