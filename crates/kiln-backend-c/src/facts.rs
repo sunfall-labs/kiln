@@ -78,6 +78,74 @@ pub struct ProgramFacts {
     pub handlers: Vec<HandlerFacts>,
 }
 
+/// Retained-size attribution for one module in a linked executable.
+///
+/// `total_*` counts every instruction/function in the module; `retained_*`
+/// counts what closed-world liveness keeps under the build's export demand.
+/// A module the executable drops entirely is reported with `live: false` and
+/// zero retained counts. Paths are display strings, like [`ModuleFactsReport`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModuleSizeFacts {
+    pub path: String,
+    pub live: bool,
+    pub total_instructions: usize,
+    pub total_functions: usize,
+    pub retained_instructions: usize,
+    pub retained_functions: usize,
+}
+
+/// Format per-module retained sizes as a `kiln build --explain` section.
+///
+/// Sorted by retained instructions descending (then path) so the largest
+/// contributors read first regardless of the caller's order.
+pub fn format_module_sizes(sizes: &[ModuleSizeFacts]) -> String {
+    let mut ordered: Vec<&ModuleSizeFacts> = sizes.iter().collect();
+    ordered.sort_by(|a, b| {
+        b.retained_instructions
+            .cmp(&a.retained_instructions)
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    let mut out = String::new();
+    out.push_str("\n=== Module Sizes (retained / total IR) ===\n");
+    let live = ordered.iter().filter(|size| size.live).count();
+    let dropped = ordered.len() - live;
+    let (retained_instructions, total_instructions, retained_functions, total_functions) =
+        ordered.iter().fold((0, 0, 0, 0), |sums, size| {
+            (
+                sums.0 + size.retained_instructions,
+                sums.1 + size.total_instructions,
+                sums.2 + size.retained_functions,
+                sums.3 + size.total_functions,
+            )
+        });
+    let _ = writeln!(
+        out,
+        "Summary: {live} live modules, {dropped} dropped, {retained_instructions}/{total_instructions} instructions, {retained_functions}/{total_functions} functions retained"
+    );
+    for size in ordered {
+        if size.live {
+            let _ = writeln!(
+                out,
+                "  {:>8} instr {:>4} fns  {}",
+                format!("{}/{}", size.retained_instructions, size.total_instructions),
+                format!("{}/{}", size.retained_functions, size.total_functions),
+                size.path
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "  dropped ({}/{} instr, {}/{} fns)  {}",
+                size.retained_instructions,
+                size.total_instructions,
+                size.retained_functions,
+                size.total_functions,
+                size.path
+            );
+        }
+    }
+    out
+}
+
 impl ProgramFacts {
     /// Format these facts as human-readable explanation output for `kiln build --explain`.
     pub fn format_explain(&self) -> String {
@@ -1039,6 +1107,48 @@ mod tests {
             FactsBaseline::from_json_str(&json_str).expect("deserializes from json string");
         assert_eq!(baseline, loaded);
         assert!(baseline.compare(&loaded).is_empty());
+    }
+
+    #[test]
+    fn module_sizes_format_sorts_and_marks_dropped() {
+        let sizes = vec![
+            ModuleSizeFacts {
+                path: "small.mjs".to_string(),
+                live: true,
+                total_instructions: 10,
+                total_functions: 1,
+                retained_instructions: 10,
+                retained_functions: 1,
+            },
+            ModuleSizeFacts {
+                path: "big.mjs".to_string(),
+                live: true,
+                total_instructions: 100,
+                total_functions: 5,
+                retained_instructions: 60,
+                retained_functions: 3,
+            },
+            ModuleSizeFacts {
+                path: "dropped.mjs".to_string(),
+                live: false,
+                total_instructions: 40,
+                total_functions: 2,
+                retained_instructions: 0,
+                retained_functions: 0,
+            },
+        ];
+        let text = format_module_sizes(&sizes);
+        assert!(text.contains("Module Sizes"), "{text}");
+        assert!(text.contains("2 live modules, 1 dropped"), "{text}");
+        assert!(text.contains("70/150 instructions"), "{text}");
+        assert!(text.contains("4/8 functions"), "{text}");
+        let big = text.find("big.mjs").expect("big module listed");
+        let small = text.find("small.mjs").expect("small module listed");
+        assert!(big < small, "largest contributor reads first:\n{text}");
+        assert!(
+            text.contains("dropped (0/40 instr, 0/2 fns)  dropped.mjs"),
+            "{text}"
+        );
     }
 
     #[test]

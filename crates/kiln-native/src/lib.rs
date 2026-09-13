@@ -4280,6 +4280,52 @@ fn native_executable_graph(
     })
 }
 
+/// Per-module retained-size attribution for an executable graph.
+///
+/// Runs the same closed-world selection as [`NativeBuilder::build_graph`]
+/// without emitting or compiling anything, so `build --explain` can show
+/// where bytes go. The demand applied per module mirrors emission exactly:
+/// `Source`/`CommonJs` modules keep their demanded export slots, every other
+/// module is retained whole. Out-of-band: failures here must never fail a
+/// build, so callers skip the section on error rather than propagating it.
+pub fn executable_module_sizes(
+    graph: &ModuleGraph,
+    profile: NativeProfile,
+) -> Result<Vec<kiln_backend_c::facts::ModuleSizeFacts>, NativeError> {
+    use kiln_backend_c::facts::ModuleSizeFacts;
+
+    let selected = native_executable_graph(graph, profile)?;
+    let live: BTreeSet<&PathBuf> = selected.modules.iter().map(|node| &node.path).collect();
+    let mut sizes = Vec::with_capacity(graph.module_count());
+    for node in graph.modules() {
+        let (total_instructions, total_functions) =
+            kiln_backend_c::retained_module_size(&node.program, None);
+        let is_live = live.contains(&node.path);
+        let (retained_instructions, retained_functions) = if !is_live {
+            (0, 0)
+        } else if matches!(
+            node.source,
+            kiln_module_graph::ModuleSource::Source | kiln_module_graph::ModuleSource::CommonJs
+        ) {
+            kiln_backend_c::retained_module_size(
+                &node.program,
+                selected.live_export_slots.get(&node.path),
+            )
+        } else {
+            (total_instructions, total_functions)
+        };
+        sizes.push(ModuleSizeFacts {
+            path: node.path.display().to_string(),
+            live: is_live,
+            total_instructions,
+            total_functions,
+            retained_instructions,
+            retained_functions,
+        });
+    }
+    Ok(sizes)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum NativeNamespaceValue {
     Binding {
