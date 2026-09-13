@@ -5279,6 +5279,8 @@ fn write_launcher_dynamic_import(
     let opentui_path = find_opentui_library(graph.project_root());
     output.push_str(
         &r#"
+typedef struct kiln_graph_context kiln_graph_context;
+static int kiln_graph_ensure_module(kiln_graph_context *graph, size_t index);
 extern int kiln_c99_validate_dynamic_import_options(kiln_host *, kiln_value, int, kiln_value *, int *);
 int kiln_graph_dynamic_import(kiln_host *host, const char *importer, kiln_value specifier, kiln_value options, kiln_value *promise, int depth, kiln_value *thrown) {
     if (promise == NULL) return KILN_C99_CONTROL_ERROR;
@@ -5427,10 +5429,15 @@ import_attributes_valid:
                 "    if (importer != NULL && strcmp(importer, {importer}) == 0{attribute_guard} && specifier.len == (size_t){len} && memcmp(specifier.ptr, {c_spec}, (size_t){len}) == 0) {{"
             )
             .unwrap();
+            writeln!(
+                output,
+                "        int status = kiln_graph_ensure_module((kiln_graph_context *)host->context, (size_t){index});\n        if (status != KILN_C99_OK) return status;"
+            )
+            .unwrap();
             if modules[index].0.source == ModuleSource::CommonJs {
                 writeln!(
                     output,
-                    "        kiln_value load_res;\n        int status = kiln_graph_load_commonjs(&kiln_commonjs_{index}, &load_res, thrown);\n        if (status != KILN_C99_OK) return status;\n        kiln_namespaces[{index}] = kiln_exports_{index}[0];"
+                    "        kiln_value load_res;\n        status = kiln_graph_load_commonjs(&kiln_commonjs_{index}, &load_res, thrown);\n        if (status != KILN_C99_OK) return status;\n        kiln_namespaces[{index}] = kiln_exports_{index}[0];"
                 )
                 .unwrap();
             }
@@ -6147,14 +6154,14 @@ typedef struct kiln_launcher_promise_view {
     kiln_value value;
 } kiln_launcher_promise_view;
 
-typedef struct kiln_graph_context {
+struct kiln_graph_context {
     kiln_host host;
     kiln_value result;
     kiln_value entry_result;
     kiln_graph_module_state module_states[MODULE_COUNT];
     size_t current_module;
     int roots_registered;
-} kiln_graph_context;
+};
 "#
         .replace("MODULE_COUNT", &modules.len().to_string()),
     );
@@ -6513,7 +6520,7 @@ static int kiln_cli_run_realm(int argc, char **argv, int writes_result) {
     graph.result.tag = KILN_VALUE_UNDEFINED;
     graph.entry_result.tag = KILN_VALUE_UNDEFINED;
     graph.host.call = kiln_cli_host_call;
-    graph.host.context = NULL;
+    graph.host.context = &graph;
     status = kiln_realm_create(&realm);
     if (status == 0 && argc > 0)
         status = kiln_realm_set_argv(realm, (uint64_t)argc, (const char *const *)argv);
