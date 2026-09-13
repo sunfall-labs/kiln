@@ -4,9 +4,7 @@ const nativeModules =
   typeof process !== "undefined" ? (process as any).__kilnNativeModules : undefined;
 const nativeModule = nativeModules
   ? nativeModules.ffi || null
-  : typeof process !== "undefined" && typeof (process as any).getBuiltinModule === "function"
-    ? (process as any).getBuiltinModule("node:ffi") || (process as any).getBuiltinModule("ffi")
-    : null;
+  : null;
 
 export const suffix: string =
   typeof nativeModule?.suffix === "string"

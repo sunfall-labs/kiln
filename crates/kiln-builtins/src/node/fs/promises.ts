@@ -3,10 +3,7 @@
 const nativeModule =
   typeof process !== "undefined"
     ? (process as any).__kilnNativeModules?.fs_promises ||
-      (process as any).__kilnNativeModules?.fs?.promises ||
-      (typeof (process as any).getBuiltinModule === "function"
-        ? (process as any).getBuiltinModule("node:fs/promises") || (process as any).getBuiltinModule("fs/promises")
-        : null)
+      (process as any).__kilnNativeModules?.fs?.promises || null
     : null;
 
 export function appendFile(...args: any[]): any {
