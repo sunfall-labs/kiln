@@ -19,6 +19,8 @@ oxc_parser = { workspace = true, features = ["regular_expression"] }
 # Oxc at all (see the module docs); the version must track the `oxc_*` pins in the root manifest,
 # as a split version would put two incompatible copies of the AST types in one build graph.
 oxc_diagnostics = { version = "0.147.0", default-features = false }
+oxc_ecmascript = { version = "0.147.0", default-features = false }
+oxc_minifier = { version = "0.147.0", default-features = false }
 oxc_semantic = { version = "0.147.0", default-features = false }
 oxc_span = { workspace = true }
 oxc_syntax = { workspace = true }
