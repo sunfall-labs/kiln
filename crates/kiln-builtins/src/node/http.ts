@@ -43,10 +43,14 @@ export const METHODS = [
   "UNSUBSCRIBE",
 ];
 
-export function IncomingMessage(this: any, ...args: any[]) {
-  if (nativeModule && typeof nativeModule.IncomingMessage === "function") {
-    return Reflect.construct(nativeModule.IncomingMessage, args, new.target || IncomingMessage);
-  }
+export const IncomingMessage: any =
+  nativeModule && typeof nativeModule.IncomingMessage === "function"
+    ? nativeModule.IncomingMessage
+    : function IncomingMessage() {};
+if (IncomingMessage.prototype && typeof IncomingMessage.prototype.unpipe !== "function") {
+  IncomingMessage.prototype.unpipe = function unpipe() {
+    return this;
+  };
 }
 
 export const Server: any =

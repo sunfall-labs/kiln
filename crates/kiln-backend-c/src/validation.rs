@@ -807,10 +807,10 @@ pub(crate) fn stack_effect(
             }
         }
         Instruction::YieldStar(_) => {
-            if height < 2 {
-                Err(underflow(2))
+            if height < 3 {
+                Err(underflow(3))
             } else {
-                Ok((height - 1, false))
+                Ok((height - 2, false))
             }
         }
         // The name is a constant rather than a stack value. Control does *not* necessarily leave:

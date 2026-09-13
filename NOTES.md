@@ -5596,6 +5596,7 @@ between interpreter and native CLI), integration tests in `kiln-builtins`, `kiln
 and full `scripts/native.sh` parity (179 matched, 5 refused, 0 diverged). Maintained rule to avoid mid-flight gate runs.
 
 ---
+
 ## Phase 5.2 TypeScript built-ins: `node:crypto` (2026-09-13)
 
 Migrated `node:crypto` completely to TypeScript via `crates/kiln-builtins/src/node/crypto.ts`
@@ -5777,4 +5778,34 @@ bridging to host fs capability in interpreter and `process.__kilnNativeModules.f
 Verified with native probe `conformance/native/node-fs-members.cjs` (byte-for-byte identical output between
 interpreter and native CLI), native integration tests in `kiln-native`, module-graph evaluation tests,
 and full `scripts/native.sh` parity (192 matched, 1 refused, 0 diverged).
+
+---
+
+## Phase 5.2 TypeScript built-ins: `node:ffi` (Phase 5.2 Complete: 27/27 Builtins in TypeScript) (2026-09-13)
+
+Migrated `node:ffi` completely to TypeScript via `crates/kiln-builtins/src/node/ffi.ts` with zero additions
+to the C runtime prelude (`crates/kiln-backend-c/src/runtime/` strictly frozen per Phase 5.1).
+Implemented all canonical exports (`default`, `dlopen`, `getRawPointer`, `suffix`, `toArrayBuffer`),
+bridging to host FFI capabilities under interpreter and `process.__kilnNativeModules.ffi` under native launcher,
+wiring `KILN_C99_METHOD_NODE_FFI_DLOPEN`, `KILN_C99_METHOD_NODE_FFI_GET_RAW_POINTER`, and
+`KILN_C99_METHOD_NODE_FFI_TO_ARRAY_BUFFER` through the graph launcher.
+All 27 `NodeBuiltin` variants are now fully migrated to pure TypeScript in `crates/kiln-builtins`.
+Verified with native probe `conformance/native/node-ffi-members.cjs` (byte-for-byte identical output between
+interpreter and native CLI), native integration tests in `kiln-native`, module-graph evaluation tests,
+and full `scripts/native.sh` parity (193 matched, 1 refused, 0 diverged).
+
+---
+
+## Third-party Express 404 & `IncomingMessage.prototype.unpipe` parity (2026-09-13)
+
+- **Express 4.x `finalhandler` unpipe compatibility**:
+  In `crates/kiln-builtins/src/node/http.ts`, updated `IncomingMessage` to export `nativeModule.IncomingMessage` directly when available, and ensured `IncomingMessage.prototype.unpipe` is present on its prototype. In Express applications, `finalhandler` invokes `req.unpipe()` on 404s and unhandled routes. `req` inherits from `app.request` which is prototyped off `http.IncomingMessage.prototype`. Previously, `http.ts` declared `IncomingMessage` as a plain constructor function without prototype methods, throwing `TypeError: object.unpipe is not a function`.
+- **Verification**:
+  - `conformance/server --node`: 7/7 passed (100%), including `s05-express` and `s04-fastify`.
+  - `conformance/effect`: 15/15 passed (100%).
+  - `conformance/thirdparty`: 22/22 bundles matched across both interpreter and native (0 refused, 0 diverged).
+  - `scripts/native.sh`: 193 matched, 1 refused (`shadow-realm`), 0 diverged.
+  - `scripts/check-http-close-contract.sh`: passed across all 4 seams.
+  - `cargo fmt --check`: clean.
+
 
