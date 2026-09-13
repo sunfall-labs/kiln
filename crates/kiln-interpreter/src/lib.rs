@@ -42062,19 +42062,41 @@ fn string_coerced_argument(native: Native, index: usize) -> bool {
 /// Callables whose receiver is ignored or whose own call object already owns the receiver.
 ///
 /// Native and compiled functions are intentionally excluded: their receiver is observable and
-/// each dispatch path must preserve its specialized fast path. Keeping this classification in one
-/// exhaustive helper prevents member-call dispatch and `is_callable` from growing different lists.
+/// each dispatch path must preserve its specialized fast path. This match is deliberately
+/// exhaustive: adding a `Value` representation forces its call classification to be decided here.
 fn is_receiver_transparent_callable(value: &Value) -> bool {
-    matches!(
-        value,
+    match value {
         Value::Settler(..)
-            | Value::Capability(..)
-            | Value::Element(_)
-            | Value::Bound(_)
-            | Value::Wrapped(_)
-            | Value::CommonJsRequire(_)
-            | Value::CommonJsResolve(_)
-    )
+        | Value::Capability(..)
+        | Value::Element(_)
+        | Value::Bound(_)
+        | Value::Wrapped(_)
+        | Value::CommonJsRequire(_)
+        | Value::CommonJsResolve(_) => true,
+        Value::Undefined
+        | Value::Null
+        | Value::Boolean(_)
+        | Value::Number(_)
+        | Value::String(_)
+        | Value::Cell(_)
+        | Value::Native(_, _)
+        | Value::Generator(_)
+        | Value::Promise(_)
+        | Value::RegExp(_)
+        | Value::Date(_)
+        | Value::Temporal(_)
+        | Value::Intl(_)
+        | Value::BigInt(_)
+        | Value::Array(_)
+        | Value::Callback(_, _)
+        | Value::TypedArray(_)
+        | Value::ArrayBuffer(_)
+        | Value::DataView(_)
+        | Value::Proxy(_)
+        | Value::Symbol(_)
+        | Value::Object(_)
+        | Value::Function(_) => false,
+    }
 }
 
 pub(crate) fn is_callable(value: &Value) -> bool {
