@@ -1,19 +1,19 @@
 # Run ghui with OpenTUI
 
-Status: in-progress; live acceptance is not verified
+Status: live acceptance passed; follow-up work remains
 
 ## Why
 
 `../ghui` is the first application in this workspace that combines a large React/TypeScript
 module graph, top-level await, dynamic imports, the Node adapter, and a native terminal renderer.
-It compiles to a native executable, but current full live usability is unverified.
+It now has a verified live native session; the remaining work is to make slow external commands
+diagnosable and predictable.
 
 ## What is established
 
-The current full build at integration `1dbb6fd0` generated 161,313,202 bytes of C and a
-112,237,608-byte executable. It reaches the splash path and then currently exits with SIGSEGV
-during live diagnosis. Earlier mock sessions reached the first frame and accepted navigation;
-that is historical evidence, not current live acceptance.
+The verified production app is `66d07dd9`, built against integration `01aaaca5` with adapter
+`9484c3f`. Binary SHA-256 is
+`e112a489242695ad94a14bb6b16f1f47e96a9243792ebe88a8399fe8d6c7fefc` (112,840,824 bytes).
 
 The same application exposed a module scheduler bug in the interpreter: a dynamic-import job was
 queued on the interpreter's private realm while Node module execution drained the shared module
@@ -38,10 +38,19 @@ the focused checks are `mbx test -p kiln-runtime --offline` and
 stdout/stderr, nonzero exit status, signal nullability, and AbortSignal cancellation in interpreter
 and generated native C execution.
 
-The read-only real process boundary probe is established: the native capability imports and runs a
-real command, returning 1,084 bytes of stdout and a successful schema result in 1.23 seconds
-(binary hash `41f697...`). No GitHub mutation was performed. The live ghui first-frame and input
-acceptance remain pending.
+The read-only real process boundary probe remains established. The live process session also passed:
+real account data rendered (16 repositories, 50+ pull requests, 15 issues), PR #3 details opened,
+markdown details scrolled, Escape returned to the list, `q` restored the terminal, and the process
+exited 0. No GitHub mutation was performed.
+
+The session exercised the timer payload/keep-alive fix. Release regression coverage was run in the
+normal configuration and with GC stress. A transient `Timed out after 15000ms` footer appeared while
+entering PR details. The terminal transcript cannot identify the exact request because it has no
+structured command IDs or timestamps; it may have been the selected GraphQL detail query or a
+neighbor prefetch. Details rendered afterward and the rest of the acceptance passed, so this is
+currently classified as an app/network budget issue rather than evidence of a Kiln runtime defect.
+
+The local follow-up issue is `.scratch/ghui-opentui/issues/06-ghui-command-timeout-observability.md`.
 
 The remaining renderer work is tracked separately. Earlier probes reached OpenTUI's explicit
 platform check and reported:
@@ -66,6 +75,7 @@ would merely move the failure into a less legible branch.
 
 ## Outcome
 
-ghui should render and accept terminal input from a Kiln native executable through an explicit,
-tested native-provider contract. Unsupported host operations must retain a diagnostic naming the
-operation that was refused.
+ghui renders and accepts terminal input from a Kiln native executable through an explicit, tested
+native-provider contract. Unsupported host operations retain diagnostics naming the refused
+operation. The overall repository gate is a separate, still-running result and is not implied by
+this acceptance.
