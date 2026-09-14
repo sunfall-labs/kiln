@@ -1944,13 +1944,17 @@ fn render_constant_declarations(output: &mut String, program: &Program, symbol: 
     for (index, constant) in program.constants.iter().enumerate() {
         match constant {
             Constant::String(value) => {
-                let byte_len = value.len();
-                let utf16_len = value.encode_utf16().count();
+                // The runtime's static C string ABI is still UTF-8 backed. Keep the IR lossless
+                // now; the runtime owner will replace this temporary scalar projection with the
+                // unit-backed initializer when its representation lands.
+                let text = value.to_lossy_string();
+                let byte_len = text.len();
+                let utf16_len = text.encode_utf16().count();
                 writeln!(
                     output,
                     "static const struct {{ kiln_string header; char bytes[{}]; }} {symbol}_string_{index} = {{ {{ {utf16_len}, {byte_len}, {symbol}_string_{index}.bytes }}, {} }};",
                     byte_len + 1,
-                    c_string(value)
+                    c_string(&text)
                 )
                 .unwrap();
                 writeln!(
@@ -2080,25 +2084,27 @@ fn render_template_sites(output: &mut String, program: &Program, symbol: &str) {
     }
     for (site_idx, site) in program.template_sites.iter().enumerate() {
         for (raw_idx, raw) in site.raw.iter().enumerate() {
-            let byte_len = raw.len();
-            let utf16_len = raw.encode_utf16().count();
+            let text = raw.to_lossy_string();
+            let byte_len = text.len();
+            let utf16_len = text.encode_utf16().count();
             writeln!(
                 output,
                 "static const struct {{ kiln_string header; char bytes[{}]; }} {symbol}_site_{site_idx}_raw_{raw_idx} = {{ {{ {utf16_len}, {byte_len}, {symbol}_site_{site_idx}_raw_{raw_idx}.bytes }}, {} }};",
                 byte_len + 1,
-                c_string(raw)
+                c_string(&text)
             )
             .unwrap();
         }
         for (cooked_idx, cooked) in site.cooked.iter().enumerate() {
             if let Some(text) = cooked {
+                let text = text.to_lossy_string();
                 let byte_len = text.len();
                 let utf16_len = text.encode_utf16().count();
                 writeln!(
                     output,
                     "static const struct {{ kiln_string header; char bytes[{}]; }} {symbol}_site_{site_idx}_cooked_{cooked_idx} = {{ {{ {utf16_len}, {byte_len}, {symbol}_site_{site_idx}_cooked_{cooked_idx}.bytes }}, {} }};",
                     byte_len + 1,
-                    c_string(text)
+                    c_string(&text)
                 )
                 .unwrap();
             }

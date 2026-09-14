@@ -1477,7 +1477,7 @@ impl Compiler {
         let coercible = self.emit_jump(Instruction::JumpIfNotNullish(0));
         self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
         self.push_constant(Constant::String(
-            "Cannot destructure 'null' or 'undefined'".to_owned(),
+            "Cannot destructure 'null' or 'undefined'".to_owned().into(),
         ));
         self.code.push(Instruction::New { argc: 1 });
         self.code.push(Instruction::Throw);
@@ -1499,7 +1499,7 @@ impl Compiler {
                 }
             }
             Pattern::Member { property, .. } => {
-                let name = self.constant_index(Constant::String(property.clone()));
+                let name = self.constant_index(Constant::String(property.clone().into()));
                 self.store_through_reference(leaf, self.set_property_instruction(name), span);
             }
             Pattern::Computed { .. } => {
@@ -1507,7 +1507,7 @@ impl Compiler {
             }
             Pattern::PrivateMember { name, .. } => {
                 let brand = self.private_brand(name);
-                let name = self.constant_index(Constant::String(self.private_key(name)));
+                let name = self.constant_index(Constant::String(self.private_key(name).into()));
                 // The store is the first thing `store_through_reference` emits, so the brand
                 // pushed here lands directly beneath it.
                 self.push_private_brand(&brand);
@@ -1541,9 +1541,9 @@ impl Compiler {
                     // reference and before the read, and exactly once even when a rest below
                     // needs the key again.
                     let key = match &property.key {
-                        PatternKey::Static(name) => {
-                            SourceKey::Static(self.constant_index(Constant::String(name.clone())))
-                        }
+                        PatternKey::Static(name) => SourceKey::Static(
+                            self.constant_index(Constant::String(name.clone().into())),
+                        ),
                         PatternKey::Computed(expression) => {
                             self.expression(expression);
                             let held = format!("%key{}", self.hidden_bindings);
@@ -1627,7 +1627,7 @@ impl Compiler {
 
         // `value[Symbol.iterator]()`, which is what makes `const [a] = new Set([1])` bind 1: a
         // pattern reads what the value yields, not what its indices hold.
-        let symbol = self.constant_index(Constant::String("@@iterator".to_owned()));
+        let symbol = self.constant_index(Constant::String("@@iterator".to_owned().into()));
         self.code.push(Instruction::CallMethod {
             name: symbol,
             argc: 0,
@@ -1637,7 +1637,7 @@ impl Compiler {
         // element is taken, and every step calls what it captured -- which is why `const [] = it`
         // reads `next` even though it steps nothing, and why a three-element pattern reads it
         // once rather than three times.
-        let next = self.constant_index(Constant::String("next".to_owned()));
+        let next = self.constant_index(Constant::String("next".to_owned().into()));
         self.load_hidden(&iterator);
         self.code.push(Instruction::GetProperty(next));
         self.declare_hidden(&next_method, span);
@@ -1717,12 +1717,12 @@ impl Compiler {
         self.guard_iterator_result();
         self.store_hidden(step);
         self.load_hidden(step);
-        let finished_key = self.constant_index(Constant::String("done".to_owned()));
+        let finished_key = self.constant_index(Constant::String("done".to_owned().into()));
         self.code.push(Instruction::GetProperty(finished_key));
         let finished = self.emit_jump(Instruction::JumpIfTruthy(0));
         if want_value {
             self.load_hidden(step);
-            let value_key = self.constant_index(Constant::String("value".to_owned()));
+            let value_key = self.constant_index(Constant::String("value".to_owned().into()));
             self.code.push(Instruction::GetProperty(value_key));
         }
         self.push_constant(Constant::Boolean(false));
@@ -1771,14 +1771,14 @@ impl Compiler {
         self.guard_iterator_result();
         self.store_hidden(step);
         self.load_hidden(step);
-        let finished_key = self.constant_index(Constant::String("done".to_owned()));
+        let finished_key = self.constant_index(Constant::String("done".to_owned().into()));
         self.code.push(Instruction::GetProperty(finished_key));
         let ended = self.emit_jump(Instruction::JumpIfTruthy(0));
 
         self.load_hidden(&collected);
         self.load_hidden(&count);
         self.load_hidden(step);
-        let value_key = self.constant_index(Constant::String("value".to_owned()));
+        let value_key = self.constant_index(Constant::String("value".to_owned().into()));
         self.code.push(Instruction::GetProperty(value_key));
         // The value survived, so the iterator is unfinished again.
         self.push_constant(Constant::Boolean(false));
@@ -1837,7 +1837,7 @@ impl Compiler {
     /// read would run an accessor twice. The empty argument array is also what `return` sees as
     /// its own `arguments`, whose length one test asserts.
     fn emit_iterator_return(&mut self, binding: &str, span: Span) -> usize {
-        let name = self.constant_index(Constant::String("return".to_owned()));
+        let name = self.constant_index(Constant::String("return".to_owned().into()));
         let held = format!("%closing{}", self.hidden_bindings);
         self.hidden_bindings += 1;
         self.load_hidden(binding);
@@ -1861,12 +1861,12 @@ impl Compiler {
     fn require_object(&mut self, message: &str) {
         self.code.push(Instruction::Dup);
         self.code.push(Instruction::Unary(UnaryOp::TypeOf));
-        self.push_constant(Constant::String("object".to_owned()));
+        self.push_constant(Constant::String("object".to_owned().into()));
         self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
         let nullable = self.emit_jump(Instruction::JumpIfTruthy(0));
         self.code.push(Instruction::Dup);
         self.code.push(Instruction::Unary(UnaryOp::TypeOf));
-        self.push_constant(Constant::String("function".to_owned()));
+        self.push_constant(Constant::String("function".to_owned().into()));
         self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
         let callable = self.emit_jump(Instruction::JumpIfTruthy(0));
         let refused = self.emit_jump(Instruction::Jump(0));
@@ -1877,7 +1877,7 @@ impl Compiler {
 
         self.patch_jump(refused);
         self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
-        self.push_constant(Constant::String(message.to_owned()));
+        self.push_constant(Constant::String(message.to_owned().into()));
         self.code.push(Instruction::New { argc: 1 });
         self.code.push(Instruction::Throw);
 
@@ -2315,7 +2315,7 @@ impl Compiler {
                 // and what lets a module compile when a branch it never takes mentions a
                 // global this realm does not provide. See ADR 0017.
                 None => {
-                    let name = self.constant_index(Constant::String(name.to_owned()));
+                    let name = self.constant_index(Constant::String(name.to_owned().into()));
                     self.code.push(Instruction::ThrowReference(name));
                 }
             },
@@ -2424,7 +2424,7 @@ impl Compiler {
             self.delete_binding_lexically(name);
             return;
         }
-        let key = self.constant_index(Constant::String(name.to_owned()));
+        let key = self.constant_index(Constant::String(name.to_owned().into()));
         let mut found = Vec::with_capacity(scopes.len());
         for with in &scopes {
             self.load_with_object(with);
@@ -2453,7 +2453,7 @@ impl Compiler {
             // property's own business, and a script's is non-configurable while an `eval`'s is
             // not. So the object is asked, exactly as it is for a name nothing declared.
             Resolution::GlobalObject => {
-                let name = self.constant_index(Constant::String(name.to_owned()));
+                let name = self.constant_index(Constant::String(name.to_owned().into()));
                 self.code.push(Instruction::DeleteGlobalBinding(name));
             }
             // Nothing placed it, so the global object's environment record is the last one
@@ -2468,7 +2468,7 @@ impl Compiler {
                 self.push_constant(Constant::Boolean(false));
             }
             Resolution::Unresolved => {
-                let name = self.constant_index(Constant::String(name.to_owned()));
+                let name = self.constant_index(Constant::String(name.to_owned().into()));
                 self.code.push(Instruction::DeleteGlobalBinding(name));
             }
         }
@@ -2480,7 +2480,7 @@ impl Compiler {
             fallback(self);
             return;
         }
-        let key = self.constant_index(Constant::String(name.to_owned()));
+        let key = self.constant_index(Constant::String(name.to_owned().into()));
         let mut found = Vec::with_capacity(scopes.len());
         for with in &scopes {
             self.load_with_object(with);
@@ -2762,7 +2762,7 @@ impl Compiler {
         // record, where `globalThis` cannot see them, and they keep their slots.
         if self.global_var_scope && scope_index == 0 && kind == VariableKind::Var {
             if self.global_bindings.insert(name.to_owned()) {
-                let index = self.constant_index(Constant::String(name.to_owned()));
+                let index = self.constant_index(Constant::String(name.to_owned().into()));
                 self.code.push(Instruction::DeclareGlobalBinding {
                     name: index,
                     configurable: self.global_bindings_configurable,
@@ -3062,9 +3062,10 @@ impl Compiler {
 
         self.patch_jump(present);
         self.store_hidden(&slot.value);
-        let dispose = self.constant_index(Constant::String("@@dispose".to_owned()));
+        let dispose = self.constant_index(Constant::String("@@dispose".to_owned().into()));
         if awaiting {
-            let asynchronous = self.constant_index(Constant::String("@@asyncDispose".to_owned()));
+            let asynchronous =
+                self.constant_index(Constant::String("@@asyncDispose".to_owned().into()));
             self.load_hidden(&slot.value);
             self.code.push(Instruction::GetProperty(asynchronous));
             self.code.push(Instruction::Dup);
@@ -3100,7 +3101,7 @@ impl Compiler {
     /// choose.
     fn emit_type_error(&mut self, message: &str) {
         self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
-        self.push_constant(Constant::String(message.to_owned()));
+        self.push_constant(Constant::String(message.to_owned().into()));
         self.code.push(Instruction::New { argc: 1 });
         self.code.push(Instruction::Throw);
     }
@@ -3134,7 +3135,7 @@ impl Compiler {
     /// consumes what it reads, and a reload of a local is cheaper than the shuffling that
     /// keeping the receiver around would need.
     fn emit_iterator_close(&mut self, binding: &str) {
-        let name = self.constant_index(Constant::String("return".to_owned()));
+        let name = self.constant_index(Constant::String("return".to_owned().into()));
         self.load_hidden(binding);
         self.code.push(Instruction::GetProperty(name));
         let skip = self.emit_jump(Instruction::JumpIfFalse(0));
@@ -3229,7 +3230,7 @@ impl Compiler {
         let start = self.code.len();
         self.load_hidden(&cursor);
         self.load_hidden(&keys);
-        let length = self.constant_index(Constant::String("length".to_owned()));
+        let length = self.constant_index(Constant::String("length".to_owned().into()));
         self.code.push(Instruction::GetProperty(length));
         self.code.push(Instruction::Binary(BinaryOp::LessThan));
         let exit_jump = self.emit_jump(Instruction::JumpIfFalse(0));
@@ -3319,7 +3320,7 @@ impl Compiler {
 
         self.scopes.push(HashMap::new());
 
-        let symbol = self.constant_index(Constant::String("@@iterator".to_owned()));
+        let symbol = self.constant_index(Constant::String("@@iterator".to_owned().into()));
         if awaiting {
             // `for await` prefers the async iterator and falls back to the sync one, and the two
             // are awaited in different places: an async iterator's `next` returns a promise of
@@ -3335,7 +3336,8 @@ impl Compiler {
             // call it asked an accessor twice and let a program hand back two different methods,
             // one of which was never invoked. It also missed `null`, which `GetMethod` treats as
             // absent exactly as it treats `undefined`.
-            let asynchronous = self.constant_index(Constant::String("@@asyncIterator".to_owned()));
+            let asynchronous =
+                self.constant_index(Constant::String("@@asyncIterator".to_owned().into()));
             self.load_hidden(&subject);
             self.code.push(Instruction::GetProperty(asynchronous));
             self.declare_hidden(&method_binding, span);
@@ -3376,7 +3378,7 @@ impl Compiler {
         // the method the opening captured. Reading it per step is a `Get` the language does not
         // perform: a three-element loop asked a proxy four times where it asks once, and an
         // accessor that answers differently the second time was followed rather than pinned.
-        let next = self.constant_index(Constant::String("next".to_owned()));
+        let next = self.constant_index(Constant::String("next".to_owned().into()));
         self.load_hidden(&iterator_binding);
         self.code.push(Instruction::GetProperty(next));
         self.declare_hidden(&next_binding, span);
@@ -3402,7 +3404,7 @@ impl Compiler {
         self.declare_hidden(&result_binding, span);
 
         self.load_hidden(&result_binding);
-        let done = self.constant_index(Constant::String("done".to_owned()));
+        let done = self.constant_index(Constant::String("done".to_owned().into()));
         self.code.push(Instruction::GetProperty(done));
         let exit_jump = self.emit_jump(Instruction::JumpIfTruthy(0));
 
@@ -3410,7 +3412,7 @@ impl Compiler {
         // value rather than the last one.
         self.scopes.push(HashMap::new());
         self.load_hidden(&result_binding);
-        let value = self.constant_index(Constant::String("value".to_owned()));
+        let value = self.constant_index(Constant::String("value".to_owned().into()));
         self.code.push(Instruction::GetProperty(value));
         if awaiting {
             // The other half of the rule: a sync iterator's values are awaited one by one, which
@@ -3512,8 +3514,8 @@ impl Compiler {
         // Whether each step has to be awaited, and where. Fixed at compile time by the kind of
         // generator this `yield*` was written in, exactly as `GetGeneratorKind` fixes it.
         let asynchronous = self.async_generator;
-        let symbol = self.constant_index(Constant::String("@@iterator".to_owned()));
-        let value_key = self.constant_index(Constant::String("value".to_owned()));
+        let symbol = self.constant_index(Constant::String("@@iterator".to_owned().into()));
+        let value_key = self.constant_index(Constant::String("value".to_owned().into()));
 
         match value {
             Some(value) => self.expression(value),
@@ -3526,7 +3528,7 @@ impl Compiler {
             // must not share a path for.
             self.declare_hidden(&subject_binding, span);
             let asynchronous_key =
-                self.constant_index(Constant::String("@@asyncIterator".to_owned()));
+                self.constant_index(Constant::String("@@asyncIterator".to_owned().into()));
             // Read once and kept: `GetMethod` performs a single `Get`, and the method it answers
             // with is the one that is called. Reading the symbol to decide and again to call it
             // ran an accessor twice and let a program hand back a method that was never invoked.
@@ -3569,7 +3571,7 @@ impl Compiler {
         // The iterator record's `next`, read once when the delegate was opened. Every step calls
         // what was captured, which is what the specification does and what a re-read per step
         // could not be: `yield*` over three values asked for `next` four times.
-        let next = self.constant_index(Constant::String("next".to_owned()));
+        let next = self.constant_index(Constant::String("next".to_owned().into()));
         self.load_hidden(&iterator_binding);
         self.code.push(Instruction::GetProperty(next));
         self.declare_hidden(&next_binding, span);
@@ -3596,7 +3598,7 @@ impl Compiler {
         self.declare_hidden(&step_binding, span);
 
         self.load_hidden(&step_binding);
-        let done = self.constant_index(Constant::String("done".to_owned()));
+        let done = self.constant_index(Constant::String("done".to_owned().into()));
         self.code.push(Instruction::GetProperty(done));
         let not_done = self.emit_jump(Instruction::JumpIfFalse(0));
 
@@ -3661,12 +3663,12 @@ impl Compiler {
         // second test rather than by the first.
         self.code.push(Instruction::Dup);
         self.code.push(Instruction::Unary(UnaryOp::TypeOf));
-        self.push_constant(Constant::String("object".to_owned()));
+        self.push_constant(Constant::String("object".to_owned().into()));
         self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
         let object_like = self.emit_jump(Instruction::JumpIfTruthy(0));
         self.code.push(Instruction::Dup);
         self.code.push(Instruction::Unary(UnaryOp::TypeOf));
-        self.push_constant(Constant::String("function".to_owned()));
+        self.push_constant(Constant::String("function".to_owned().into()));
         self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
         let callable = self.emit_jump(Instruction::JumpIfTruthy(0));
         self.emit_iterator_result_type_error();
@@ -3694,13 +3696,13 @@ impl Compiler {
     fn guard_derived_return(&mut self, binding: &str) {
         self.code.push(Instruction::Dup);
         self.code.push(Instruction::Unary(UnaryOp::TypeOf));
-        self.push_constant(Constant::String("function".to_owned()));
+        self.push_constant(Constant::String("function".to_owned().into()));
         self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
         let callable = self.emit_jump(Instruction::JumpIfTruthy(0));
 
         self.code.push(Instruction::Dup);
         self.code.push(Instruction::Unary(UnaryOp::TypeOf));
-        self.push_constant(Constant::String("object".to_owned()));
+        self.push_constant(Constant::String("object".to_owned().into()));
         self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
         let primitive = self.emit_jump(Instruction::JumpIfFalse(0));
 
@@ -3723,7 +3725,9 @@ impl Compiler {
         self.patch_jump(refused);
         self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
         self.push_constant(Constant::String(
-            "a derived constructor may only return an object or undefined".to_owned(),
+            "a derived constructor may only return an object or undefined"
+                .to_owned()
+                .into(),
         ));
         self.code.push(Instruction::New { argc: 1 });
         self.code.push(Instruction::Throw);
@@ -3744,12 +3748,14 @@ impl Compiler {
     fn guard_static_prototype_key(&mut self) {
         self.code.push(Instruction::ToPropertyKey);
         self.code.push(Instruction::Dup);
-        self.push_constant(Constant::String("prototype".to_owned()));
+        self.push_constant(Constant::String("prototype".to_owned().into()));
         self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
         let usable = self.emit_jump(Instruction::JumpIfFalse(0));
         self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
         self.push_constant(Constant::String(
-            "a static class element may not be named `prototype`".to_owned(),
+            "a static class element may not be named `prototype`"
+                .to_owned()
+                .into(),
         ));
         self.code.push(Instruction::New { argc: 1 });
         self.code.push(Instruction::Throw);
@@ -3781,7 +3787,7 @@ impl Compiler {
     fn emit_iterator_result_type_error(&mut self) {
         self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
         self.push_constant(Constant::String(
-            "iterator result is not an object".to_owned(),
+            "iterator result is not an object".to_owned().into(),
         ));
         self.code.push(Instruction::New { argc: 1 });
         self.code.push(Instruction::Throw);
@@ -4183,7 +4189,8 @@ impl Compiler {
                     // is asked of the global object at run time rather than answered now,
                     // because the realm may have gained it since this was compiled.
                     if unbound {
-                        let name = compiler.constant_index(Constant::String(name.to_owned()));
+                        let name =
+                            compiler.constant_index(Constant::String(name.to_owned().into()));
                         compiler
                             .code
                             .push(Instruction::LoadGlobalBindingOrUndefined(name));
@@ -4214,7 +4221,7 @@ impl Compiler {
                 // Asked of the global object rather than folded: `typeof x` where a `var` in
                 // global code, an `eval`, or a plain `globalThis.x = 1` created `x` is not
                 // `"undefined"`, and only the running realm knows.
-                let name = self.constant_index(Constant::String(name.to_owned()));
+                let name = self.constant_index(Constant::String(name.to_owned().into()));
                 self.code
                     .push(Instruction::LoadGlobalBindingOrUndefined(name));
                 self.code.push(Instruction::Unary(UnaryOp::TypeOf));
@@ -4371,14 +4378,15 @@ impl Compiler {
                 // `false`. Unlike an access, this reports rather than throws -- `#x in o` exists
                 // to ask the question without raising.
                 let brand = self.private_brand(name);
-                let brand_key = self.constant_index(Constant::String(self.private_brand_key(name)));
+                let brand_key =
+                    self.constant_index(Constant::String(self.private_brand_key(name).into()));
                 let key = self.private_key(name);
                 let held = format!("%pin{}", self.hidden_bindings);
                 self.hidden_bindings += 1;
                 self.scopes.push(HashMap::new());
                 self.expression(object);
                 self.declare_hidden(&held, expression.span);
-                self.push_constant(Constant::String(key));
+                self.push_constant(Constant::String(key.into()));
                 self.load_hidden(&held);
                 self.code.push(Instruction::Binary(BinaryOp::In));
                 let absent = self.emit_jump(Instruction::JumpIfFalse(0));
@@ -4398,7 +4406,7 @@ impl Compiler {
                 // *with* a `this`, so writing one before `super()` is the same ReferenceError.
                 self.require_this_binding();
                 self.load_home_prototype();
-                let name = self.constant_index(Constant::String(property.clone()));
+                let name = self.constant_index(Constant::String(property.clone().into()));
                 self.code.push(Instruction::LoadSuperProperty(name));
             }
             ExpressionKind::SuperComputedMember { property } => {
@@ -4566,7 +4574,13 @@ impl Compiler {
                 expressions,
             } => {
                 let mut quasis = quasis.iter();
-                self.push_constant(Constant::String(quasis.next().cloned().unwrap_or_default()));
+                self.push_constant(Constant::String(
+                    quasis
+                        .next()
+                        .cloned()
+                        .unwrap_or_else(|| StringUnits::from(""))
+                        .into(),
+                ));
                 for (expression, quasi) in expressions.iter().zip(quasis) {
                     // `${x}` is ToString(x), which reduces an object with the *string* hint --
                     // `toString` before `valueOf`. Concatenation reduces with the default hint,
@@ -4587,8 +4601,8 @@ impl Compiler {
                     self.code.push(Instruction::Binary(BinaryOp::Add));
                     // A run of text between two holes is skipped when it is empty, which is the
                     // common shape: `${a}${b}` has two empty quasis in the middle and the end.
-                    if !quasi.is_empty() {
-                        self.push_constant(Constant::String(quasi.clone()));
+                    if quasi.unit_len() != 0 {
+                        self.push_constant(Constant::String(quasi.clone().into()));
                         self.code.push(Instruction::Binary(BinaryOp::Add));
                     }
                 }
@@ -4606,8 +4620,8 @@ impl Compiler {
                 self.code.push(Instruction::LoadTemplateObject(site_index));
             }
             ExpressionKind::RegExp { pattern, flags } => {
-                let pattern = self.constant_index(Constant::String(pattern.clone()));
-                let flags = self.constant_index(Constant::String(flags.clone()));
+                let pattern = self.constant_index(Constant::String(pattern.clone().into()));
+                let flags = self.constant_index(Constant::String(flags.clone().into()));
                 self.code.push(Instruction::NewRegExp { pattern, flags });
             }
             ExpressionKind::PrivateMember {
@@ -4621,7 +4635,7 @@ impl Compiler {
                 // `null` and raised the TypeError the `?.` was written to avoid.
                 self.short_circuit_if_nullish(*optional, expression.span);
                 self.load_private_brand(name);
-                let name = self.constant_index(Constant::String(self.private_key(name)));
+                let name = self.constant_index(Constant::String(self.private_key(name).into()));
                 self.code.push(Instruction::GetPrivate(name));
             }
             ExpressionKind::DeleteValue { argument } => {
@@ -4641,7 +4655,7 @@ impl Compiler {
                         format!("`delete` of the private name `#{name}`"),
                     ),
                     ObjectKey::Static(key) => {
-                        let name = self.constant_index(Constant::String(key.clone()));
+                        let name = self.constant_index(Constant::String(key.clone().into()));
                         self.code.push(self.delete_property_instruction(name));
                     }
                     ObjectKey::Computed(key) => {
@@ -4657,7 +4671,7 @@ impl Compiler {
             } => {
                 self.expression(object);
                 self.short_circuit_if_nullish(*optional, expression.span);
-                let name = self.constant_index(Constant::String(property.clone()));
+                let name = self.constant_index(Constant::String(property.clone().into()));
                 self.code.push(Instruction::GetProperty(name));
             }
             ExpressionKind::Unsupported { feature } => {
@@ -4743,7 +4757,7 @@ impl Compiler {
                 // properties, and so is `{ ["__proto__"]: v }`, because the specification asks
                 // whether the key was computed rather than what it evaluated to.
                 ObjectMember::Property(property)
-                    if matches!(&property.key, ObjectKey::Static(key) if key == "__proto__")
+                    if matches!(&property.key, ObjectKey::Static(key) if key == &StringUnits::from("__proto__"))
                         && property.form == kiln_hir::PropertyForm::KeyValue =>
                 {
                     // The prototype is set on an object, so the run of pairs written before it
@@ -4776,7 +4790,7 @@ impl Compiler {
                                 format!("private name `#{name}` in an object literal"),
                             ),
                             ObjectKey::Static(key) => {
-                                self.push_constant(Constant::String(key.clone()));
+                                self.push_constant(Constant::String(key.clone().into()));
                             }
                             ObjectKey::Computed(key) => self.expression(key),
                         }
@@ -4798,7 +4812,7 @@ impl Compiler {
                             format!("private name `#{name}` in an object literal"),
                         ),
                         ObjectKey::Static(key) => {
-                            self.push_constant(Constant::String(key.clone()));
+                            self.push_constant(Constant::String(key.clone().into()));
                         }
                         // Evaluated in source order, between the members around it, because a
                         // computed key is an arbitrary expression and may have side effects.
@@ -4841,7 +4855,7 @@ impl Compiler {
                             format!("private name `#{name}` in an object literal"),
                         ),
                         ObjectKey::Static(name) => {
-                            self.push_constant(Constant::String(name.clone()));
+                            self.push_constant(Constant::String(name.clone().into()));
                         }
                         ObjectKey::Computed(key) => self.expression(key),
                     }
@@ -4933,7 +4947,7 @@ impl Compiler {
         value: &Expression,
         span: Span,
     ) {
-        let key = self.constant_index(Constant::String(target.to_owned()));
+        let key = self.constant_index(Constant::String(target.to_owned().into()));
         let mut found = Vec::with_capacity(scopes.len());
         for with in scopes {
             self.load_with_object(with);
@@ -5058,7 +5072,7 @@ impl Compiler {
             // difference is that declaration instantiation already created the property, so the
             // read cannot throw and the write cannot be the one that creates it.
             Resolution::GlobalObject => {
-                let name = self.constant_index(Constant::String(target.to_owned()));
+                let name = self.constant_index(Constant::String(target.to_owned().into()));
                 return Some((
                     Instruction::ThrowReference(name),
                     Instruction::StoreGlobalBinding(name),
@@ -5066,7 +5080,7 @@ impl Compiler {
             }
             Resolution::Unresolved => {
                 let _ = span;
-                let name = self.constant_index(Constant::String(target.to_owned()));
+                let name = self.constant_index(Constant::String(target.to_owned().into()));
                 // Sloppy code settles an unresolvable reference against the global object, which
                 // creates the property rather than refusing the write. Strict code raises the
                 // `ReferenceError` where the assignment happens rather than when it is compiled.
@@ -5370,7 +5384,7 @@ impl Compiler {
         // The constructor carries the brand too: a static private member lives on it, and the
         // check that reads one has to tell this evaluation's constructor from another's.
         if let Some(brand) = self.private_brands.last().cloned() {
-            let key = self.constant_index(Constant::String(self.own_private_brand_key()));
+            let key = self.constant_index(Constant::String(self.own_private_brand_key().into()));
             self.load_local_or_cell(local);
             self.load_captured_binding(&brand);
             self.code.push(self.set_property_instruction(key));
@@ -5395,7 +5409,7 @@ impl Compiler {
             self.code.push(Instruction::Pop);
         }
 
-        let prototype = self.constant_index(Constant::String("prototype".to_owned()));
+        let prototype = self.constant_index(Constant::String("prototype".to_owned().into()));
 
         // Link the two prototypes so instances inherit the parent's methods, and the two
         // constructors so static methods are inherited too.
@@ -5451,12 +5465,12 @@ impl Compiler {
             self.load_local_or_cell(local);
             match &field.key {
                 ObjectKey::Private(name) => {
-                    let name = self.constant_index(Constant::String(self.private_key(name)));
+                    let name = self.constant_index(Constant::String(self.private_key(name).into()));
                     self.emit_field_value(field, Some(&static_home));
                     self.code.push(self.set_property_instruction(name));
                 }
                 ObjectKey::Static(key) => {
-                    let name = self.constant_index(Constant::String(key.clone()));
+                    let name = self.constant_index(Constant::String(key.clone().into()));
                     self.emit_field_value(field, Some(&static_home));
                     self.code.push(self.set_property_instruction(name));
                 }
@@ -5503,7 +5517,7 @@ impl Compiler {
                 // wrong answer rather than a missing feature.
                 ObjectKey::Private(name) => {
                     let key = self.private_key(name);
-                    let name = self.constant_index(Constant::String(key));
+                    let name = self.constant_index(Constant::String(key.into()));
                     self.code.push(Instruction::MakeFunction(body));
                     self.code.push(Instruction::DefinePrivate {
                         name,
@@ -5511,12 +5525,12 @@ impl Compiler {
                     });
                 }
                 ObjectKey::Static(key) if !accessor => {
-                    self.push_constant(Constant::String(key.clone()));
+                    self.push_constant(Constant::String(key.clone().into()));
                     self.code.push(Instruction::MakeFunction(body));
                     self.code.push(Instruction::DefineMethod);
                 }
                 ObjectKey::Static(key) => {
-                    self.push_constant(Constant::String(key.clone()));
+                    self.push_constant(Constant::String(key.clone().into()));
                     self.code.push(Instruction::MakeFunction(body));
                     self.code.push(Instruction::DefineAccessor {
                         setter: matches!(method.kind, kiln_hir::MethodKind::Set),
@@ -5834,7 +5848,7 @@ impl Compiler {
         // Every instance carries the brand of the evaluation that made it, stored beside its
         // private members and read by each access to tell one evaluation from another.
         if let Some(brand) = self.private_brands.last().cloned() {
-            let key = self.constant_index(Constant::String(self.own_private_brand_key()));
+            let key = self.constant_index(Constant::String(self.own_private_brand_key().into()));
             self.code.push(Instruction::LoadThis);
             self.load_captured_binding(&brand);
             self.code.push(self.set_property_instruction(key));
@@ -5842,7 +5856,7 @@ impl Compiler {
         }
         for (name, kind, binding) in private_elements {
             let key = self.private_key(name);
-            let name = self.constant_index(Constant::String(key));
+            let name = self.constant_index(Constant::String(key.into()));
             // The class made this function once; every instance is given *that* one, which is
             // what makes `a.#m === b.#m` true.
             self.code.push(Instruction::LoadThis);
@@ -5863,12 +5877,12 @@ impl Compiler {
             }
             match &field.key {
                 ObjectKey::Private(name) => {
-                    let name = self.constant_index(Constant::String(self.private_key(name)));
+                    let name = self.constant_index(Constant::String(self.private_key(name).into()));
                     self.emit_field_value(field, None);
                     self.code.push(self.set_property_instruction(name));
                 }
                 ObjectKey::Static(key) => {
-                    let name = self.constant_index(Constant::String(key.clone()));
+                    let name = self.constant_index(Constant::String(key.clone().into()));
                     self.emit_field_value(field, None);
                     self.code.push(self.set_property_instruction(name));
                 }
@@ -6122,12 +6136,15 @@ impl Compiler {
             self.code.push(Instruction::LoadNewTarget);
             let constructed = self.emit_jump(Instruction::JumpIfNotNullish(0));
             self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
-            self.push_constant(Constant::String(match &function.name {
-                Some(name) if !name.is_empty() => {
-                    format!("Class constructor {name} cannot be invoked without 'new'")
+            self.push_constant(Constant::String(
+                match &function.name {
+                    Some(name) if !name.is_empty() => {
+                        format!("Class constructor {name} cannot be invoked without 'new'")
+                    }
+                    _ => "Class constructor cannot be invoked without 'new'".to_owned(),
                 }
-                _ => "Class constructor cannot be invoked without 'new'".to_owned(),
-            }));
+                .into(),
+            ));
             self.code.push(Instruction::New { argc: 1 });
             self.code.push(Instruction::Throw);
             self.patch_jump(constructed);
@@ -6407,7 +6424,7 @@ impl Compiler {
         target: &str,
         span: Span,
     ) {
-        let key = self.constant_index(Constant::String(target.to_owned()));
+        let key = self.constant_index(Constant::String(target.to_owned().into()));
         let held = format!("%update{}", self.hidden_bindings);
         self.hidden_bindings += 1;
         let mut found = Vec::with_capacity(scopes.len());
@@ -6462,7 +6479,7 @@ impl Compiler {
                 Instruction::StoreGlobal(slot),
             ),
             Resolution::GlobalObject => {
-                let name = self.constant_index(Constant::String(target.to_owned()));
+                let name = self.constant_index(Constant::String(target.to_owned().into()));
                 (
                     Instruction::ThrowReference(name),
                     Instruction::StoreGlobalBinding(name),
@@ -6475,7 +6492,7 @@ impl Compiler {
             // program installed earlier, or one global code declared with `var`, is resolvable.
             Resolution::Unresolved => {
                 let _ = span;
-                let name = self.constant_index(Constant::String(target.to_owned()));
+                let name = self.constant_index(Constant::String(target.to_owned().into()));
                 (
                     Instruction::ThrowReference(name),
                     if self.strict {
@@ -6700,7 +6717,7 @@ impl Compiler {
         if let ObjectKey::Private(name) = property {
             let brand = self.private_brand(name);
             let key = self.private_key(name);
-            let name = self.constant_index(Constant::String(key));
+            let name = self.constant_index(Constant::String(key.into()));
             let receiver = format!("%upd{}", self.hidden_bindings);
             let old_binding = format!("%old{}", self.hidden_bindings);
             self.hidden_bindings += 1;
@@ -6743,7 +6760,9 @@ impl Compiler {
         self.expression(object);
         self.declare_hidden(&receiver, span);
         let name = match property {
-            ObjectKey::Static(name) => Some(self.constant_index(Constant::String(name.clone()))),
+            ObjectKey::Static(name) => {
+                Some(self.constant_index(Constant::String(name.clone().into())))
+            }
             ObjectKey::Computed(key) => {
                 self.expression(key);
                 self.declare_hidden(&key_binding, span);
@@ -6810,7 +6829,7 @@ impl Compiler {
         value: &Expression,
     ) {
         let brand = self.private_brand(name);
-        let name = self.constant_index(Constant::String(self.private_key(name)));
+        let name = self.constant_index(Constant::String(self.private_key(name).into()));
         if operator.is_short_circuiting() {
             self.short_circuiting_private(operator, object, name, &brand, value);
             return;
@@ -6882,7 +6901,7 @@ impl Compiler {
         property: &str,
         value: &Expression,
     ) {
-        let name = self.constant_index(Constant::String(property.to_owned()));
+        let name = self.constant_index(Constant::String(property.to_owned().into()));
         if operator.is_short_circuiting() {
             self.short_circuiting_member(operator, object, Some(name), None, value);
             return;
@@ -6913,7 +6932,7 @@ impl Compiler {
         span: Span,
     ) {
         self.require_this_binding();
-        let name = self.constant_index(Constant::String(property.to_owned()));
+        let name = self.constant_index(Constant::String(property.to_owned().into()));
         if operator.is_short_circuiting() {
             let cur_binding = format!("%scur{}", self.hidden_bindings);
             self.hidden_bindings += 1;
@@ -7050,7 +7069,7 @@ impl Compiler {
                 self.short_circuit_if_nullish(*optional, span);
                 self.declare_hidden(&receiver, span);
                 self.load_hidden(&receiver);
-                let name = self.constant_index(Constant::String(property.clone()));
+                let name = self.constant_index(Constant::String(property.clone().into()));
                 self.code.push(Instruction::GetProperty(name));
                 true
             }
@@ -7253,7 +7272,7 @@ impl Compiler {
                 optional,
             } => {
                 let brand = self.private_brand(name);
-                let name = self.constant_index(Constant::String(self.private_key(name)));
+                let name = self.constant_index(Constant::String(self.private_key(name).into()));
                 self.expression(object);
                 self.short_circuit_if_nullish(*optional, span);
                 self.code.push(Instruction::Dup);
@@ -7268,7 +7287,7 @@ impl Compiler {
                 property,
                 optional,
             } => {
-                let name = self.constant_index(Constant::String(property.clone()));
+                let name = self.constant_index(Constant::String(property.clone().into()));
                 self.expression(object);
                 // `a?.b()` short-circuits before the method is even read, so the receiver is the
                 // thing tested and the call never happens.
@@ -7481,12 +7500,12 @@ impl Compiler {
     /// property exists from declaration instantiation onwards, so the throw is unreachable for
     /// as long as nothing deletes it, and correct the moment something does.
     fn load_global_object_binding(&mut self, name: &str) {
-        let name = self.constant_index(Constant::String(name.to_owned()));
+        let name = self.constant_index(Constant::String(name.to_owned().into()));
         self.code.push(Instruction::ThrowReference(name));
     }
 
     fn store_global_object_binding(&mut self, name: &str) {
-        let name = self.constant_index(Constant::String(name.to_owned()));
+        let name = self.constant_index(Constant::String(name.to_owned().into()));
         self.code.push(Instruction::StoreGlobalBinding(name));
     }
 
@@ -7518,7 +7537,7 @@ impl Compiler {
             return None;
         }
 
-        let name_index = self.constant_index(Constant::String(name.to_owned()));
+        let name_index = self.constant_index(Constant::String(name.to_owned().into()));
         let mut source = Upvalue::NamedParentLocal {
             slot: local.slot,
             name: name_index,
@@ -7561,7 +7580,7 @@ impl Compiler {
             Literal::Null => Constant::Null,
             Literal::Boolean(value) => Constant::Boolean(*value),
             Literal::Number(value) => Constant::Number(*value),
-            Literal::String(value) => Constant::String(value.clone()),
+            Literal::String(value) => Constant::String(value.clone().into()),
             Literal::BigInt(digits) => Constant::BigInt(digits.clone()),
         });
     }
@@ -8693,13 +8712,13 @@ fn collect_dynamic_imports_from_expression(
         ExpressionKind::ImportCall { specifier, options } => {
             let target = match &specifier.kind {
                 ExpressionKind::Literal(Literal::String(s)) => {
-                    DynamicImportTarget::Static(s.clone())
+                    DynamicImportTarget::Static(s.to_lossy_string())
                 }
                 ExpressionKind::Template {
                     quasis,
                     expressions,
                 } if expressions.is_empty() && quasis.len() == 1 => {
-                    DynamicImportTarget::Static(quasis[0].clone())
+                    DynamicImportTarget::Static(quasis[0].to_lossy_string())
                 }
                 _ => DynamicImportTarget::Dynamic,
             };
