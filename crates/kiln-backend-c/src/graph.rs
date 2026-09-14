@@ -330,8 +330,9 @@ impl GraphOp {
             | Self::IsReturnSignal(_)
             | Self::LoadThis
             | Self::LoadNewTarget
-            | Self::MarkUninitialized(_)
             | Self::Phi { .. } => Effects::PURE,
+
+            Self::MarkUninitialized(_) => Effects::WRITES_HEAP,
 
             Self::CheckTdz { .. } => Effects::MAY_THROW,
 
@@ -355,13 +356,12 @@ impl GraphOp {
                 | UnaryOp::Negate
                 | UnaryOp::ToNumeric
                 | UnaryOp::Increment
-                | UnaryOp::Decrement => Effects::PURE,
+                | UnaryOp::Decrement => Effects::UNKNOWN,
             },
 
             Self::Binary { op, .. } => match op {
-                BinaryOp::StrictEqual
-                | BinaryOp::StrictNotEqual
-                | BinaryOp::BitwiseAnd
+                BinaryOp::StrictEqual | BinaryOp::StrictNotEqual => Effects::PURE,
+                BinaryOp::BitwiseAnd
                 | BinaryOp::BitwiseOr
                 | BinaryOp::BitwiseXor
                 | BinaryOp::Add
@@ -376,13 +376,11 @@ impl GraphOp {
                 | BinaryOp::GreaterThanOrEqual
                 | BinaryOp::ShiftLeft
                 | BinaryOp::ShiftRight
-                | BinaryOp::UnsignedShiftRight => Effects::PURE,
+                | BinaryOp::UnsignedShiftRight => Effects::UNKNOWN,
                 BinaryOp::In
                 | BinaryOp::InstanceOf
                 | BinaryOp::LooseEqual
-                | BinaryOp::LooseNotEqual => {
-                    Effects::MAY_THROW | Effects::CALLS_USER_CODE | Effects::READS_HEAP
-                }
+                | BinaryOp::LooseNotEqual => Effects::UNKNOWN,
             },
 
             Self::GetProperty { .. } => {
@@ -438,6 +436,57 @@ impl GraphOp {
                 | Instruction::DynamicImportWithOptions => Effects::UNKNOWN,
                 _ => Effects::UNKNOWN,
             },
+        }
+    }
+
+    /// Refine coercion effects only when the graph's type proof establishes numeric operands.
+    /// Unknown values must retain the full effect set: ToPrimitive/ToNumeric can invoke user
+    /// code, allocate, mutate, or throw. Numeric specialization is safe because it bypasses that
+    /// conversion path, and is shared by DCE, LICM, and parallel-map admission.
+    pub fn effects_with_proven_numbers(&self, proven_numbers: &HashSet<ValueId>) -> Effects {
+        let numeric = |value: &ValueId| proven_numbers.contains(value);
+        let proven = match self {
+            Self::Unary { op, value } => {
+                matches!(
+                    op,
+                    UnaryOp::BitwiseNot
+                        | UnaryOp::Plus
+                        | UnaryOp::Negate
+                        | UnaryOp::ToNumeric
+                        | UnaryOp::Increment
+                        | UnaryOp::Decrement
+                ) && numeric(value)
+            }
+            Self::Binary { op, left, right } => {
+                matches!(
+                    op,
+                    BinaryOp::BitwiseAnd
+                        | BinaryOp::BitwiseOr
+                        | BinaryOp::BitwiseXor
+                        | BinaryOp::Add
+                        | BinaryOp::Subtract
+                        | BinaryOp::Multiply
+                        | BinaryOp::Divide
+                        | BinaryOp::Remainder
+                        | BinaryOp::Exponentiate
+                        | BinaryOp::LessThan
+                        | BinaryOp::LessThanOrEqual
+                        | BinaryOp::GreaterThan
+                        | BinaryOp::GreaterThanOrEqual
+                        | BinaryOp::ShiftLeft
+                        | BinaryOp::ShiftRight
+                        | BinaryOp::UnsignedShiftRight
+                        | BinaryOp::LooseEqual
+                        | BinaryOp::LooseNotEqual
+                ) && numeric(left)
+                    && numeric(right)
+            }
+            _ => false,
+        };
+        if proven {
+            Effects::PURE
+        } else {
+            self.effects()
         }
     }
 }
@@ -514,6 +563,67 @@ mod effect_tests {
             }
             .effects()
             .contains(Effects::MAY_THROW | Effects::READS_HEAP)
+        );
+    }
+
+    #[test]
+    fn unknown_coercions_cannot_be_eliminated_as_pure() {
+        for op in [
+            UnaryOp::BitwiseNot,
+            UnaryOp::Plus,
+            UnaryOp::Negate,
+            UnaryOp::ToNumeric,
+            UnaryOp::Increment,
+            UnaryOp::Decrement,
+        ] {
+            assert_eq!(
+                GraphOp::Unary {
+                    op,
+                    value: ValueId(0),
+                }
+                .effects(),
+                Effects::UNKNOWN
+            );
+        }
+        for op in [
+            BinaryOp::Add,
+            BinaryOp::Subtract,
+            BinaryOp::Multiply,
+            BinaryOp::LessThan,
+            BinaryOp::BitwiseAnd,
+        ] {
+            assert_eq!(
+                GraphOp::Binary {
+                    op,
+                    left: ValueId(0),
+                    right: ValueId(1),
+                }
+                .effects(),
+                Effects::UNKNOWN
+            );
+        }
+        assert_eq!(
+            GraphOp::MarkUninitialized(0).effects(),
+            Effects::WRITES_HEAP
+        );
+        let proven = [ValueId(0), ValueId(1)].into_iter().collect();
+        assert_eq!(
+            GraphOp::Binary {
+                op: BinaryOp::Add,
+                left: ValueId(0),
+                right: ValueId(1),
+            }
+            .effects_with_proven_numbers(&proven),
+            Effects::PURE
+        );
+        assert_eq!(
+            GraphOp::Binary {
+                op: BinaryOp::Add,
+                left: ValueId(0),
+                right: ValueId(2),
+            }
+            .effects_with_proven_numbers(&proven),
+            Effects::UNKNOWN
         );
     }
 }
@@ -2749,6 +2859,7 @@ pub fn eliminate_dead_code(graph: &mut FunctionGraph) {
     }
 
     let entry_block = graph.entry_block;
+    let proven_numbers = proven_numbers(graph);
     let is_inherently_live = |op: &GraphOp, block_id: BlockId| -> bool {
         if matches!(op, GraphOp::Phi { .. }) {
             return resumes.contains(&block_id);
@@ -2759,7 +2870,7 @@ pub fn eliminate_dead_code(graph: &mut FunctionGraph) {
         if matches!(op, GraphOp::LoadLocal(_)) && block_id == entry_block {
             return true;
         }
-        let effects = op.effects();
+        let effects = op.effects_with_proven_numbers(&proven_numbers);
         effects.intersects(
             Effects::MAY_THROW
                 | Effects::CALLS_USER_CODE
@@ -2811,6 +2922,7 @@ pub fn hoist_loop_invariants(graph: &mut FunctionGraph) {
     if graph.blocks.len() < 2 {
         return;
     }
+    let proven_numbers = proven_numbers(graph);
 
     // Step 1: Compute dominators for all blocks.
     let all_blocks: HashSet<BlockId> = graph.blocks.iter().map(|b| b.id).collect();
@@ -2966,7 +3078,7 @@ pub fn hoist_loop_invariants(graph: &mut FunctionGraph) {
                     if hoisted_vids.contains(vid) {
                         continue;
                     }
-                    if op.effects() != Effects::PURE {
+                    if op.effects_with_proven_numbers(&proven_numbers) != Effects::PURE {
                         continue;
                     }
                     if matches!(
