@@ -5850,3 +5850,17 @@ and 197 matching native probes with one expected ShadowRealm refusal. Every-allo
 also matched 197 probes; only the number-format fuzz input count was reduced from 200,000 to
 1,000 for stress. The original 200,000-input fixture passed normally. The HTTP close contract
 passed. The prelude ABI snapshot intentionally gains the shared pressure helper declaration.
+
+## Consolidation paired performance record (2026-09-13)
+
+The retained report is `.scratch/perf-consolidation/report.md`; raw HTTP metadata and microtasks
+JSON remain under `.scratch/perf-consolidation/`. The HTTP pair used baseline `b9bbb589` and
+candidate `100c7c7b`, native-release, one worker, four clients of sixteen connections, three
+interleaved five-second passes, with per-client percentile aggregation rather than pooled
+percentiles. All 36 aggregates had zero errors and zero wrong responses. Microtasks ran three
+interleaved passes across baseline, candidate, and Node; all checksums were `20000`, with both
+native binaries at `0.5078125 ms` internal warm median and Node at `0.4375 ms`.
+
+The record is warmed execution only: it excludes launch/cold-JIT comparison, and native method
+metadata generation should not be read as unified interpreter dispatch semantics. Shape and
+multi-worker scaling remain unmeasured.
