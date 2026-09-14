@@ -110,6 +110,208 @@ fn computed_lone_surrogate_reads_share_ordinary_and_proxy_paths() {
     );
 }
 
+#[test]
+fn property_key_units_cover_mutation_descriptors_inherited_accessors_and_proxy_invariants() {
+    let program = no_program();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: Some(1.0),
+        entropy: std::collections::VecDeque::new(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+    let key = StringUnits::from_units(&[0xd800]);
+    let key_value = Value::String(key.clone());
+
+    let target = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    let descriptor = ordinary_object([
+        ("value".to_owned(), Value::Number(7.0)),
+        ("writable".to_owned(), Value::Boolean(true)),
+        ("enumerable".to_owned(), Value::Boolean(true)),
+        ("configurable".to_owned(), Value::Boolean(true)),
+    ]);
+    assert_eq!(
+        vm.dispatch_native(
+            Native::ReflectDefineProperty,
+            &Value::Undefined,
+            &[target.clone(), key_value.clone(), descriptor],
+            0,
+        ),
+        Ok(Value::Boolean(true))
+    );
+    assert_eq!(
+        vm.read_computed(&target, &key_value, 0),
+        Ok(Value::Number(7.0))
+    );
+    assert!(has_property_key(
+        &vm.intrinsics,
+        &target,
+        PropertyKeyRef::Units(&key)
+    ));
+    let described = own_descriptor_key(&vm.intrinsics, &target, PropertyKeyRef::Units(&key))
+        .expect("exact key descriptor");
+    let Value::Object(described) = described else {
+        panic!("descriptor must be an object");
+    };
+    assert_eq!(described.borrow().get("value"), Some(Value::Number(7.0)));
+    assert!(vm.delete(&target, &key_value, 0).expect("delete exact key"));
+    assert!(!has_property_key(
+        &vm.intrinsics,
+        &target,
+        PropertyKeyRef::Units(&key)
+    ));
+
+    // A setter inherited under the exact key is reached by the same walk as an own value. The
+    // native callable is intentionally side-effect free; the absence of an own slot proves the
+    // write was handed to the setter instead of creating a lossy replacement key.
+    let prototype = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    if let Value::Object(prototype) = &prototype {
+        prototype.borrow_mut().define_accessor_units(
+            &key,
+            None,
+            Some(Value::Native(Native::ObjectToStringTag, RealmId::PRIMARY)),
+            Attributes::DEFAULT,
+        );
+    }
+    let inherited = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    if let Value::Object(inherited) = &inherited {
+        inherited.borrow_mut().set_prototype(prototype);
+    }
+    vm.set_computed(&inherited, &key_value, Value::Number(3.0), 0)
+        .expect("inherited setter accepts exact key");
+    if let Value::Object(inherited) = &inherited {
+        assert!(inherited.borrow().get_own_property_units(&key).is_none());
+    }
+
+    // Reflect.get receives and returns the exact UTF-16 key. The target is locked so the get
+    // invariant check has to consult the same unit-preserving descriptor.
+    let locked_target = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    if let Value::Object(locked_target) = &locked_target {
+        locked_target.borrow_mut().define_value_units(
+            &key,
+            Value::Number(9.0),
+            Attributes {
+                writable: false,
+                enumerable: true,
+                configurable: false,
+            },
+        );
+    }
+    let handler = ordinary_object([(
+        "get".to_owned(),
+        Value::Native(Native::ReflectGet, RealmId::PRIMARY),
+    )]);
+    let proxy = Value::Proxy(Rc::new(ProxyData {
+        target: locked_target,
+        handler,
+        revoked: std::cell::Cell::new(false),
+    }));
+    assert_eq!(
+        vm.read_computed(&proxy, &key_value, 0),
+        Ok(Value::Number(9.0))
+    );
+
+    // ToPropertyKey is performed once before strict [[Set]]. The closure records its conversion
+    // through the host call; a second conversion would leave two calls in the host log.
+    let coercion_program = Rc::new(Program {
+        source: "".into(),
+        template_sites: Vec::new(),
+        version: kiln_ir::BYTECODE_VERSION,
+        constants: vec![Constant::String(key.clone())],
+        code: Vec::new(),
+        local_count: 0,
+        functions: vec![kiln_ir::FunctionProto {
+            span: kiln_ir::Span::default(),
+            prologue_end: 0,
+            asynchronous: false,
+            name: Some("toString".to_owned()),
+            arrow: false,
+            generator: false,
+            async_generator: false,
+            is_method: false,
+            parameter_count: 0,
+            declared_length: 0,
+            mapped_arguments: false,
+            local_count: 0,
+            code: vec![
+                Instruction::HostCall {
+                    op: HostOp::ClockNow,
+                    argc: 0,
+                },
+                Instruction::Pop,
+                Instruction::Const(0),
+                Instruction::Return,
+            ],
+            upvalues: Vec::new(),
+            type_annotations: None,
+        }],
+    });
+    let coercion = Value::Function(Rc::new(Closure {
+        program: coercion_program.clone(),
+        function: 0,
+        strictness: Rc::new(Strictness::default()),
+        module_path: None,
+        name: Some("toString".into()),
+        upvalues: Vec::new(),
+        realm: RealmId::PRIMARY,
+        captured_arguments: None,
+        captured_new_target: None,
+        captured_this: None,
+        prototype: RefCell::new(None),
+        properties: RefCell::new(ObjectData::default()),
+    }));
+    let coercion_object = ordinary_object([("toString".to_owned(), coercion)]);
+    let strict_target = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    vm.assign_with_strict(
+        &strict_target,
+        &coercion_object,
+        Value::Number(11.0),
+        0,
+        true,
+    )
+    .expect("strict assignment with object key");
+    assert_eq!(host.calls.len(), 1, "ToPropertyKey must run once");
+    if let Value::Object(strict_target) = &strict_target {
+        assert_eq!(
+            strict_target.borrow().get_own_property_units(&key).cloned(),
+            Some(Property::Value(Value::Number(11.0)))
+        );
+    }
+}
+
+#[test]
+fn wide_backed_ascii_intrinsic_keys_follow_narrow_lookup() {
+    let program = no_program();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: std::collections::VecDeque::new(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+    let narrow = StringUnits::from("length");
+    let wide = StringUnits::from_view(StringView::Utf16(&[
+        b'l' as u16,
+        b'e' as u16,
+        b'n' as u16,
+        b'g' as u16,
+        b't' as u16,
+        b'h' as u16,
+    ]));
+    assert!(matches!(wide.as_view(), StringView::Utf16(_)));
+    let target = Value::Native(Native::ArrayConstructor, RealmId::PRIMARY);
+    assert_eq!(
+        vm.read_property_key(&target, PropertyKeyRef::Units(&narrow), 0),
+        vm.read_property_key(&target, PropertyKeyRef::Units(&wide), 0)
+    );
+    assert_eq!(
+        own_attributes_key(&vm.intrinsics, &target, PropertyKeyRef::Units(&narrow)),
+        own_attributes_key(&vm.intrinsics, &target, PropertyKeyRef::Units(&wide))
+    );
+}
+
 fn string_index_of(text: &str, needle: &str, start: Option<f64>) -> f64 {
     let mut arguments = vec![Value::String(needle.to_owned().into())];
     if let Some(start) = start {
@@ -204,9 +406,9 @@ fn materialized_intrinsic_store_makes_absence_and_symbol_order_authoritative() {
     assert!(!own_property_keys_with_symbols(&intrinsics, &target).contains(&"max".to_owned()));
     assert!(own_attributes(&intrinsics, &target, "max").is_none());
 
-    intrinsics.install(
+    intrinsics.install_key(
         &target,
-        "max",
+        PropertyKeyRef::Utf8("max"),
         Property::Value(Value::Number(7.0)),
         Attributes::DEFAULT,
     );
@@ -251,9 +453,9 @@ fn intrinsic_store_readd_keeps_order_and_retags_cross_realm_markers() {
         &target,
         &Value::String("max".into())
     ));
-    intrinsics.install(
+    intrinsics.install_key(
         &target,
-        "max",
+        PropertyKeyRef::Utf8("max"),
         Property::Value(Value::Number(7.0)),
         Attributes::DEFAULT,
     );
