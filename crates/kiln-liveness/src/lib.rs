@@ -480,7 +480,7 @@ pub fn executable_demand(
 /// Method dispatch groups retained by one executable, as a bitmask over
 /// `kiln_backend_c::facts::method_groups`.
 ///
-/// Core groups always; node-ish groups only on demand. A group is implicated
+/// Core groups always; semantic and node-ish groups only on demand. A group is implicated
 /// by an imported node builtin (conservative supersets: an HTTP server also
 /// needs net/stream/event implementations), by the `Buffer`/`Process` globals
 /// behind retained `LoadBuiltin`s, or by computed access (which can resolve
@@ -517,6 +517,16 @@ pub fn retained_method_groups(
     let dynamic = members.has_computed_access;
     // Indirect `eval` runs arbitrary code.
     let indirect_eval = members.builtins.iter().any(|name| name.as_str() == "Eval");
+    let reaches_global_object = members
+        .builtins
+        .iter()
+        .any(|name| name.as_str() == "GlobalThis");
+    let uses_temporal = members.globals.iter().any(|name| name == "Temporal");
+    let uses_date = members.builtins.iter().any(|name| name == "Date");
+    let uses_math_number = members
+        .builtins
+        .iter()
+        .any(|name| name == "Math" || name == "Number");
 
     // Imported node builtins, from resolved graph edges: ESM imports and CJS
     // literal requires alike. Unknown `node:*` specifiers bail: failing closed
@@ -556,6 +566,22 @@ pub fn retained_method_groups(
     }
 
     let mut mask = CORE_METHOD_GROUPS;
+    if reaches_global_object {
+        return FULL;
+    }
+    if uses_temporal {
+        mask |= groups::TEMPORAL
+            | groups::TEMPORAL_FROM
+            | groups::TEMPORAL_COMPARE
+            | groups::TEMPORAL_NOW_READ
+            | groups::TEMPORAL_OP;
+    }
+    if uses_date {
+        mask |= groups::DATE_SETTER;
+    }
+    if uses_math_number {
+        mask |= groups::MATH_NUMBER;
+    }
     if uses_buffer || dynamic {
         mask |= groups::BUFFER;
     }

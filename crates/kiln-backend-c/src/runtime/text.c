@@ -663,6 +663,7 @@ static kiln_value kiln_c99_text(kiln_value value) {
      * read `undefined` -- and, through `kiln_c99_concat`'s length check, `"x" + d` appended
      * nothing and printed "x". The handle renders itself; there is no second spelling of an ISO
      * date anywhere here for the two to drift apart on. */
+#if KILN_RETAIN_GROUP_TEMPORAL
     case KILN_VALUE_TEMPORAL: {
         char buffer[128];
         int32_t written = kiln_temporal_to_string(kiln_c99_temporal_of(value),
@@ -672,6 +673,7 @@ static kiln_value kiln_c99_text(kiln_value value) {
         }
         return kiln_c99_copy_text(buffer, (size_t)written);
     }
+#endif
     /* The three object kinds whose text form is the tagged `[object X]` and nothing else. They
      * inherit it from `Object.prototype.toString` in the language; this backend models that as
      * `kiln_c99_text` rather than as a method a property walk finds, exactly as it does for a

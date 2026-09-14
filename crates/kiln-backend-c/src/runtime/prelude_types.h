@@ -80,6 +80,7 @@ typedef struct kiln_string {
     const char *bytes;
 } kiln_string;
 
+/* KILN_RUNTIME_ONLY_ASCII_STRINGS_BEGIN */
 static const char kiln_c99_empty_chars[] = "";
 static const kiln_string kiln_c99_empty_string = { 0, 0, kiln_c99_empty_chars };
 
@@ -101,6 +102,7 @@ static const kiln_string kiln_c99_ascii_strings[256] = {
 #undef S16
 #undef S4
 };
+/* KILN_RUNTIME_ONLY_ASCII_STRINGS_END */
 
 static inline kiln_val kiln_c99_val_single_char(unsigned char ch) {
     return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_c99_ascii_strings[ch]);

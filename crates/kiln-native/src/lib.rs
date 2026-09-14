@@ -414,6 +414,51 @@ fn dce_release_graph(
     }
 }
 
+fn demanded_interface(
+    graph: &ModuleGraph,
+    demand: &kiln_module_graph::LiveDemand,
+) -> BTreeMap<PathBuf, BTreeSet<String>> {
+    graph
+        .modules()
+        .filter(|node| demand.live.contains(&node.path))
+        .map(|node| {
+            let slots = demand.slots.get(&node.path).cloned().unwrap_or_default();
+            let names = node
+                .program
+                .exports
+                .iter()
+                .filter(|export| slots.contains(&export.local_slot))
+                .map(|export| export.exported.clone())
+                .collect();
+            (node.path.clone(), names)
+        })
+        .collect()
+}
+
+/// Alternate source-level DCE and graph selection until removing wrappers no longer narrows the
+/// demanded module interface. Export slots are deliberately compared by public name: recompiling
+/// a module may renumber its private slots even when the observable fixed point is unchanged.
+fn dce_release_graph_to_fixpoint(
+    mut graph: ModuleGraph,
+    mut demand: kiln_module_graph::LiveDemand,
+    options: &kiln_liveness::SelectionOptions,
+) -> Result<(ModuleGraph, kiln_module_graph::LiveDemand), NativeError> {
+    for _ in 0..8 {
+        let (specialized, remapped) = dce_release_graph(&graph, &demand);
+        let before = demanded_interface(&specialized, &remapped);
+        let next =
+            kiln_liveness::executable_demand(&specialized, options).map_err(NativeError::Graph)?;
+        let (reduced, next) = reduced_graph(&specialized, &next)?;
+        let after = demanded_interface(&reduced, &next);
+        if before == after && remapped.live == next.live {
+            return Ok((reduced, next));
+        }
+        graph = reduced;
+        demand = next;
+    }
+    Ok((graph, demand))
+}
+
 // Select the budget only on a generated-C cache miss. Warm builds must not rerun liveness,
 // and the cache payload must remember the actual policy used to compile the emitted body.
 fn emit_graph_module_for_profile(
@@ -440,6 +485,9 @@ fn configure_release_prelude_compile(options: &mut CompileOptions) {
 
 fn configure_release_module_compile(options: &mut CompileOptions, generic_only: bool) {
     if generic_only {
+        // Generic bodies are deliberately used for the largest modules, where optimizing them
+        // makes small real-world bundles materially slower despite reducing object size. Keep
+        // this path at O0; whole-program DCE and release stripping provide the safe size wins.
         options.extra_args.push("-O0".into());
         // Clang treats an explicit O0 as its Debug configuration and otherwise injects UBSan
         // calls that the release link intentionally does not carry.
@@ -496,7 +544,20 @@ fn prelude_object_options_masked(base: Digest, profile: NativeProfile, mask: u32
 /// yields no flags, so fully retained builds compile exactly today's prelude.
 fn prelude_group_defines(mask: u32) -> Vec<std::ffi::OsString> {
     use kiln_backend_c::facts::method_groups as groups;
-    const FLAGS: [(u32, &str); 10] = [
+    const FLAGS: [(u32, &str); 17] = [
+        (groups::TEMPORAL, "KILN_RETAIN_GROUP_TEMPORAL"),
+        (groups::TEMPORAL_FROM, "KILN_RETAIN_GROUP_TEMPORAL_FROM"),
+        (
+            groups::TEMPORAL_COMPARE,
+            "KILN_RETAIN_GROUP_TEMPORAL_COMPARE",
+        ),
+        (
+            groups::TEMPORAL_NOW_READ,
+            "KILN_RETAIN_GROUP_TEMPORAL_NOW_READ",
+        ),
+        (groups::TEMPORAL_OP, "KILN_RETAIN_GROUP_TEMPORAL_OP"),
+        (groups::DATE_SETTER, "KILN_RETAIN_GROUP_DATE_SETTER"),
+        (groups::MATH_NUMBER, "KILN_RETAIN_GROUP_MATH_NUMBER"),
         (groups::NODE_EVENT, "KILN_RETAIN_GROUP_NODE_EVENT"),
         (groups::NODE_NET, "KILN_RETAIN_GROUP_NODE_NET"),
         (groups::NODE_SERVER, "KILN_RETAIN_GROUP_NODE_SERVER"),
@@ -1522,7 +1583,11 @@ impl NativeBuilder {
         .map_err(NativeError::Graph)?;
         let (reduced, demand) = reduced_graph(graph, &demand)?;
         let (reduced, demand) = if options.profile == NativeProfile::Release {
-            dce_release_graph(&reduced, &demand)
+            dce_release_graph_to_fixpoint(
+                reduced,
+                demand,
+                &kiln_liveness::SelectionOptions::development(),
+            )?
         } else {
             (reduced, demand)
         };
@@ -2058,18 +2123,16 @@ impl NativeBuilder {
         }
         let identity = self.toolchain.identity().clone();
         let target = target_identity(&identity);
-        let selected = kiln_liveness::select_executable_modules(
-            graph,
-            &selection_options_with_exclusions(&options.profile, &native_plan.excluded),
-        )
-        .map_err(NativeError::Graph)?;
+        let selection = selection_options_with_exclusions(&options.profile, &native_plan.excluded);
+        let selected = kiln_liveness::select_executable_modules(graph, &selection)
+            .map_err(NativeError::Graph)?;
         // One shaken graph feeds emission: reduce to the live subset first,
         // so the emitter and launcher below only ever see live modules and
         // live edges. With everything live this is the identity transform.
         let demand = selected.demand();
         let (reduced, demand) = reduced_graph(graph, &demand)?;
         let (reduced, demand) = if options.profile == NativeProfile::Release {
-            dce_release_graph(&reduced, &demand)
+            dce_release_graph_to_fixpoint(reduced, demand, &selection)?
         } else {
             (reduced, demand)
         };

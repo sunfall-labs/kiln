@@ -2384,6 +2384,27 @@ macro_rules! header_prefix {
 #ifndef KILN_RETAIN_GROUP_NODE_PATH
 #define KILN_RETAIN_GROUP_NODE_PATH 1
 #endif
+#ifndef KILN_RETAIN_GROUP_TEMPORAL
+#define KILN_RETAIN_GROUP_TEMPORAL 1
+#endif
+#ifndef KILN_RETAIN_GROUP_TEMPORAL_FROM
+#define KILN_RETAIN_GROUP_TEMPORAL_FROM 1
+#endif
+#ifndef KILN_RETAIN_GROUP_TEMPORAL_COMPARE
+#define KILN_RETAIN_GROUP_TEMPORAL_COMPARE 1
+#endif
+#ifndef KILN_RETAIN_GROUP_TEMPORAL_NOW_READ
+#define KILN_RETAIN_GROUP_TEMPORAL_NOW_READ 1
+#endif
+#ifndef KILN_RETAIN_GROUP_TEMPORAL_OP
+#define KILN_RETAIN_GROUP_TEMPORAL_OP 1
+#endif
+#ifndef KILN_RETAIN_GROUP_DATE_SETTER
+#define KILN_RETAIN_GROUP_DATE_SETTER 1
+#endif
+#ifndef KILN_RETAIN_GROUP_MATH_NUMBER
+#define KILN_RETAIN_GROUP_MATH_NUMBER 1
+#endif
 
 "#
     };
@@ -4197,6 +4218,24 @@ pub fn runtime_prelude_header() -> &'static str {
             json_document,
             "extern int kiln_c99_json_document(const char *bytes, size_t len, kiln_val *out);",
         );
+        const ASCII_STRINGS_BEGIN: &str = "/* KILN_RUNTIME_ONLY_ASCII_STRINGS_BEGIN */";
+        const ASCII_STRINGS_END: &str = "/* KILN_RUNTIME_ONLY_ASCII_STRINGS_END */";
+        let begin = text
+            .find(ASCII_STRINGS_BEGIN)
+            .expect("runtime-only ASCII strings begin marker moved");
+        let end = text
+            .find(ASCII_STRINGS_END)
+            .expect("runtime-only ASCII strings end marker moved")
+            + ASCII_STRINGS_END.len();
+        text.replace_range(
+            begin..end,
+            concat!(
+                "extern const char kiln_c99_empty_chars[] __attribute__((visibility(\"hidden\")));\n",
+                "extern const kiln_string kiln_c99_empty_string __attribute__((visibility(\"hidden\")));\n",
+                "extern const char kiln_c99_single_char_bytes[256][2] __attribute__((visibility(\"hidden\")));\n",
+                "extern const kiln_string kiln_c99_ascii_strings[256] __attribute__((visibility(\"hidden\")));",
+            ),
+        );
         const RUNTIME_ONLY_BEGIN: &str = "/* KILN_RUNTIME_ONLY_METHOD_GROUPS_BEGIN */";
         const RUNTIME_ONLY_END: &str = "/* KILN_RUNTIME_ONLY_METHOD_GROUPS_END */";
         let begin = text
@@ -4239,6 +4278,10 @@ fn build_runtime_prelude_source(src: &str) -> String {
         "kiln_c99_frame_is_arrow",
         "kiln_c99_frame_mapped_arguments",
         "kiln_c99_frame_callee",
+        "kiln_c99_empty_chars",
+        "kiln_c99_empty_string",
+        "kiln_c99_single_char_bytes",
+        "kiln_c99_ascii_strings",
         "kiln_c99_symbols",
         "kiln_c99_globals",
         "kiln_c99_process",

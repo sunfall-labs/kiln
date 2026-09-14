@@ -471,12 +471,11 @@ fn release_debug_strip_flag(
         return None;
     }
     match platform {
-        // Keep the normal symbol table and unwind information; only DWARF/debug sections are
-        // removed from shipped release artifacts. Zig currently aliases its strip-debug driver
-        // option to strip-all, so it is intentionally excluded until Kiln can run a separate,
-        // verified objcopy stage (Zig 0.16.0 `src/main.zig`, strip option handling).
-        TargetPlatform::Linux => Some("-Wl,--strip-debug"),
-        TargetPlatform::Macos => Some("-Wl,-S"),
+        // Shipped executables need dynamic exports and unwind information, not the ordinary local
+        // linker symbol table. Keep that table in objects and profile builds where symbolization
+        // consumes it; release artifacts discard it at the final link.
+        TargetPlatform::Linux => Some("-Wl,--strip-all"),
+        TargetPlatform::Macos => Some("-Wl,-S,-x"),
         TargetPlatform::Windows | TargetPlatform::Other | TargetPlatform::Unknown => None,
     }
 }
@@ -1814,7 +1813,12 @@ mod tests {
                 .iter()
                 .any(|argument| argument == "-Wl,-dead_strip")
         );
-        assert!(commands[3].args.iter().any(|argument| argument == "-Wl,-S"));
+        assert!(
+            commands[3]
+                .args
+                .iter()
+                .any(|argument| argument == "-Wl,-S,-x")
+        );
         assert!(
             commands[3]
                 .args
@@ -2368,7 +2372,7 @@ mod tests {
             commands[3]
                 .args
                 .iter()
-                .any(|argument| argument == "-Wl,--strip-debug")
+                .any(|argument| argument == "-Wl,--strip-all")
         );
 
         fs::remove_dir_all(directory).expect("temporary directory cleanup");
@@ -2422,12 +2426,12 @@ mod tests {
             (
                 TargetPlatform::Linux,
                 Some("-Wl,--gc-sections"),
-                Some("-Wl,--strip-debug"),
+                Some("-Wl,--strip-all"),
             ),
             (
                 TargetPlatform::Macos,
                 Some("-Wl,-dead_strip"),
-                Some("-Wl,-S"),
+                Some("-Wl,-S,-x"),
             ),
             (TargetPlatform::Windows, None, None),
             (TargetPlatform::Other, None, None),
@@ -2528,8 +2532,8 @@ mod tests {
             assert!(commands[3].args.iter().all(|argument| {
                 argument != "-Wl,--gc-sections"
                     && argument != "-Wl,-dead_strip"
-                    && argument != "-Wl,--strip-debug"
-                    && argument != "-Wl,-S"
+                    && argument != "-Wl,--strip-all"
+                    && argument != "-Wl,-S,-x"
             }));
             fs::remove_dir_all(directory).expect("temporary directory cleanup");
         }

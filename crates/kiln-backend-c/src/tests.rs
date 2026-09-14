@@ -195,6 +195,21 @@ fn decoupled_modules_include_one_external_runtime_header() {
         runtime_prelude_source().contains("uint32_t kiln_c99_method_groups("),
         "the shared prelude must retain the method classifier implementation"
     );
+    assert!(
+        runtime_prelude_header().contains("extern const kiln_string kiln_c99_ascii_strings[256]"),
+        "modules must refer to the program-wide ASCII string table"
+    );
+    assert!(
+        !runtime_prelude_header().contains("static const kiln_string kiln_c99_ascii_strings[256]"),
+        "the declarations header must not instantiate the table in every module"
+    );
+    assert_eq!(
+        runtime_prelude_source()
+            .matches("const kiln_string kiln_c99_ascii_strings[256]")
+            .count(),
+        1,
+        "the prelude must own exactly one ASCII string table"
+    );
 }
 
 #[test]

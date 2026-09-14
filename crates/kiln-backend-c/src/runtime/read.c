@@ -265,6 +265,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         }
         return kiln_c99_get(host, closure->properties, key, key_len, out, depth, thrown);
     }
+#if KILN_RETAIN_GROUP_TEMPORAL
     case KILN_VALUE_TEMPORAL: {
         /* Every calendar and wall-clock field of all eight types comes through one name-keyed call
          * into the engine, so there is no per-field code here and no second table to drift. */
@@ -379,6 +380,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
          * would surface three frames away as "not a function". */
         return kiln_c99_temporal_unsupported(thrown, kiln_c99_temporal_tag(target), key, key_len);
     }
+#endif
     case KILN_VALUE_REGEXP: {
         kiln_regexp *regexp = kiln_c99_regexp_of(target);
         size_t index;
@@ -1048,6 +1050,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         }
         /* `Temporal` first, because the namespace tables below are keyed by method name and every
          * name here is a *value*: `Temporal.PlainDate` is a constructor, not a function to call. */
+#if KILN_RETAIN_GROUP_TEMPORAL
         if (target.bits == KILN_C99_BUILTIN_TEMPORAL) {
             static const struct {
                 const char *name;
@@ -1163,6 +1166,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 KILN_C99_ABSENT("not a static of this Temporal type", out);
             }
         }
+#endif
         {
             kiln_typed_kind typed_kind;
             int concrete = kiln_c99_typed_prototype_kind(target.bits, &typed_kind);

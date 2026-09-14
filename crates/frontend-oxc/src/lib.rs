@@ -685,8 +685,27 @@ fn expose_only_demanded_declarations<'a>(
     demanded_exports: &BTreeSet<String>,
 ) {
     for statement in &mut program.body {
+        match statement {
+            Statement::ExportNamedDeclaration(export) => {
+                export.specifiers.retain(|specifier| {
+                    demanded_exports.contains(specifier.exported.name().as_str())
+                });
+            }
+            Statement::ExportFromDeclaration(export) => {
+                export.specifiers.retain(|specifier| {
+                    demanded_exports.contains(specifier.exported.name().as_str())
+                });
+            }
+            _ => {}
+        }
         let should_deexport = match statement {
             Statement::ExportDeclaration(export) => {
+                // Oxc 0.147 may erase an unused inherited class even though evaluating its
+                // heritage can throw. Keeping just that declaration exported makes it a DCE root
+                // while still allowing every unrelated declaration in the module to be shaken.
+                if declaration_has_class_heritage(&export.declaration) {
+                    continue;
+                }
                 let mut demanded = false;
                 export.declaration.bound_names(&mut |identifier| {
                     demanded |= demanded_exports.contains(identifier.name.as_str());
@@ -705,27 +724,36 @@ fn expose_only_demanded_declarations<'a>(
     }
 }
 
+fn variable_declaration_has_class_heritage(declaration: &VariableDeclaration<'_>) -> bool {
+    declaration.declarations.iter().any(|declarator| {
+        matches!(
+            declarator.init.as_ref(),
+            Some(Expression::ClassExpression(class)) if class.heritage.is_some()
+        )
+    })
+}
+
+fn declaration_has_class_heritage(declaration: &Declaration<'_>) -> bool {
+    match declaration {
+        Declaration::ClassDeclaration(class) => class.heritage.is_some(),
+        Declaration::VariableDeclaration(declaration) => {
+            variable_declaration_has_class_heritage(declaration)
+        }
+        _ => false,
+    }
+}
+
 /// Oxc 0.147 can treat an unused inherited class as removable even though
 /// evaluating its heritage may throw (notably `class A extends Later {}`).
-/// Keep the entire module on Kiln's existing conservative path until that
-/// upstream edge is fixed.
-fn has_top_level_class_heritage(program: &oxc_ast::ast::Program<'_>) -> bool {
-    let variable_has_heritage = |declaration: &VariableDeclaration<'_>| {
-        declaration.declarations.iter().any(|declarator| {
-            matches!(
-                declarator.init.as_ref(),
-                Some(Expression::ClassExpression(class)) if class.heritage.is_some()
-            )
-        })
-    };
+/// Exported declarations can remain roots while their neighbors are shaken. An unexported one
+/// has no equivalent root in the compressor API, so only that narrower case keeps the module on
+/// the conservative path.
+fn has_unexported_top_level_class_heritage(program: &oxc_ast::ast::Program<'_>) -> bool {
     program.body.iter().any(|statement| match statement {
         Statement::ClassDeclaration(class) => class.heritage.is_some(),
-        Statement::VariableDeclaration(declaration) => variable_has_heritage(declaration),
-        Statement::ExportDeclaration(export) => match &export.declaration {
-            Declaration::ClassDeclaration(class) => class.heritage.is_some(),
-            Declaration::VariableDeclaration(declaration) => variable_has_heritage(declaration),
-            _ => false,
-        },
+        Statement::VariableDeclaration(declaration) => {
+            variable_declaration_has_class_heritage(declaration)
+        }
         _ => false,
     })
 }
@@ -771,7 +799,7 @@ fn parse_source_in_context(
         && !parsed.panicked
         && parsed.diagnostics.is_empty()
         && early_errors(&parsed).is_empty()
-        && !has_top_level_class_heritage(&parsed.program)
+        && !has_unexported_top_level_class_heritage(&parsed.program)
     {
         expose_only_demanded_declarations(&allocator, &mut parsed.program, demanded_exports);
         Compressor::new(&allocator)
@@ -790,14 +818,8 @@ fn parse_source_in_context(
             &semantic,
         )
     };
-    let mut module = lower_parsed_in_context(
-        path,
-        &parsed,
-        source,
-        source_type,
-        allow,
-        demanded_exports.is_some(),
-    );
+    let mut module =
+        lower_parsed_in_context(path, &parsed, source, source_type, allow, demanded_exports);
     module.node_runtime_requests = node_runtime_requests;
     module
 }
@@ -808,7 +830,7 @@ fn lower_parsed(
     source: &str,
     source_type: SourceType,
 ) -> Module {
-    lower_parsed_in_context(path, parsed, source, source_type, None, false)
+    lower_parsed_in_context(path, parsed, source, source_type, None, None)
 }
 
 fn lower_parsed_in_context(
@@ -817,8 +839,9 @@ fn lower_parsed_in_context(
     source: &str,
     source_type: SourceType,
     allow: Option<&EvalSyntax>,
-    filter_module_record: bool,
+    demanded_exports: Option<&BTreeSet<String>>,
 ) -> Module {
+    let filter_module_record = demanded_exports.is_some();
     let module_statement_spans = parsed
         .program
         .body
@@ -991,9 +1014,14 @@ fn lower_parsed_in_context(
         .iter()
         .chain(parsed.module_record.indirect_export_entries.iter())
         .filter(|entry| {
-            !filter_module_record
+            (!filter_module_record
                 || module_statement_spans
-                    .contains(&(entry.statement_span.start, entry.statement_span.end))
+                    .contains(&(entry.statement_span.start, entry.statement_span.end)))
+                && demanded_exports.is_none_or(|demanded| match &entry.export_name {
+                    ExportExportName::Name(name) => demanded.contains(name.name.as_str()),
+                    ExportExportName::Default(_) => demanded.contains("default"),
+                    ExportExportName::Null => true,
+                })
         })
         .map(lower_export)
         .collect::<Vec<_>>();
@@ -3598,6 +3626,28 @@ mod tests {
     }
 
     #[test]
+    fn dce_roots_only_demanded_named_export_aliases() {
+        let module = parse_dce(
+            "module.js",
+            "const keep = 1; const drop = 2; export { keep as answer, drop as excess };",
+            &BTreeSet::from(["answer".to_owned()]),
+        );
+
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        assert_eq!(module.runtime_export_names(), ["answer"]);
+        let declares = |name: &str| {
+            module.body.iter().any(|statement| match &statement.kind {
+                HirStatementKind::Variable { declarations, .. } => declarations.iter().any(
+                    |declaration| matches!(&declaration.pattern, kiln_hir::Pattern::Identifier(found) if found == name),
+                ),
+                _ => false,
+            })
+        };
+        assert!(declares("keep"));
+        assert!(!declares("drop"));
+    }
+
+    #[test]
     fn dce_preserves_inherited_class_evaluation() {
         let module = parse_dce(
             "module.js",
@@ -3607,6 +3657,25 @@ mod tests {
 
         assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
         assert_eq!(module.body.len(), 3);
+    }
+
+    #[test]
+    fn dce_shakes_neighbors_of_an_exported_inherited_class() {
+        let module = parse_dce(
+            "module.js",
+            "export class Kept extends Base {} export function dropped() {}",
+            &BTreeSet::new(),
+        );
+
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        assert!(module.body.iter().any(|statement| matches!(
+            &statement.kind,
+            HirStatementKind::Class(class) if class.name.as_deref() == Some("Kept")
+        )));
+        assert!(!module.body.iter().any(|statement| matches!(
+            &statement.kind,
+            HirStatementKind::Function(function) if function.name.as_deref() == Some("dropped")
+        )));
     }
 
     #[test]
