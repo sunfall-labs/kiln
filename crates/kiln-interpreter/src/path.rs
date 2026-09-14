@@ -30,11 +30,11 @@ pub(crate) fn property(prop: &str) -> Option<Value> {
         "relative" => Some(Value::Native(Native::NodePathRelative, RealmId::PRIMARY)),
         "parse" => Some(Value::Native(Native::NodePathParse, RealmId::PRIMARY)),
         "format" => Some(Value::Native(Native::NodePathFormat, RealmId::PRIMARY)),
-        "delimiter" => Some(Value::String(":".to_owned())),
+        "delimiter" => Some(Value::String(":".to_owned().into())),
         "posix" => Some(Value::Native(Native::NodePath, RealmId::PRIMARY)),
         "resolve" => Some(Value::Native(Native::NodePathResolve, RealmId::PRIMARY)),
         "isAbsolute" => Some(Value::Native(Native::NodePathIsAbsolute, RealmId::PRIMARY)),
-        "sep" => Some(Value::String("/".to_owned())),
+        "sep" => Some(Value::String("/".to_owned().into())),
         _ => None,
     }
 }
@@ -96,7 +96,7 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
                 .map_or_else(String::new, Value::to_display_string);
             let suffix = arguments.get(1).map(Value::to_display_string);
             Ok(Value::String(
-                posix_path_part(part, &path, suffix.as_deref()).into_owned(),
+                posix_path_part(part, &path, suffix.as_deref()).into_owned().into(),
             ))
         }
         Native::NodePathRelative => {
@@ -154,13 +154,13 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
                 }
                 base => base,
             };
-            Ok(Value::String(if directory.is_empty() {
+            Ok(Value::String((if directory.is_empty() {
                 base
             } else if directory == "/" {
                 format!("/{base}")
             } else {
                 format!("{directory}/{base}")
-            }))
+            }).into()))
         }
         Native::NodePathIsAbsolute => Ok(Value::Boolean(
             arguments

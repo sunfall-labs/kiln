@@ -31,7 +31,7 @@ pub enum OsFact {
 }
 
 pub(crate) fn os_fact(fact: OsFact) -> Value {
-    let text = |value: &str| Value::String(value.to_owned());
+    let text = |value: &str| Value::String(value.to_owned().into());
     match fact {
         // node's spelling, which is not always Rust's: "macos" is "darwin" to every program that
         // branches on this, and answering Rust's name would fail every one of those branches.
@@ -176,8 +176,8 @@ pub(crate) fn property(prop: &str) -> Option<Value> {
             Native::NodeOsFact(OsFact::UserInfo),
             RealmId::PRIMARY,
         )),
-        "EOL" => Some(Value::String("\n".to_owned())),
-        "devNull" => Some(Value::String("/dev/null".to_owned())),
+        "EOL" => Some(Value::String("\n".to_owned().into())),
+        "devNull" => Some(Value::String("/dev/null".to_owned().into())),
         _ => None,
     }
 }
@@ -211,7 +211,7 @@ pub(crate) const fn js_name(native: Native) -> Option<&'static str> {
 pub(crate) fn dispatch(native: Native) -> Result<Value, ExecutionError> {
     match native {
         Native::NodeOsNetworkInterfaces => Ok(network_interfaces()),
-        Native::NodeOsHostname => Ok(Value::String("kiln".to_owned())),
+        Native::NodeOsHostname => Ok(Value::String("kiln".to_owned().into())),
         Native::NodeOsFact(fact) => Ok(os_fact(fact)),
         _ => Err(ExecutionError::TypeErrorMessage {
             message: "Invalid native os operation".into(),
