@@ -428,6 +428,7 @@ enum kiln_value_tag {
  * a call-bound benchmark, and at nothing on benchmarks whose values already stayed in registers,
  * which is the shape that says the threshold is what moved rather than the byte count. */"#,
     kiln_value_abi_declaration!(),
+    kiln_string_abi_declaration!(),
     r#"/* Argument ptr/len values are borrowed for the callback invocation.  A string stored in *result
  * must remain alive until the module entry point returns.  A nonzero callback return is
  * propagated as KILN_C99_HOST_ERROR. */
