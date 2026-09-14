@@ -54,6 +54,10 @@ pub(super) struct OpContext<'a> {
     /// Emitting the parallel clone of a typed entry; see `emit_graph::parallel_clone`.
     pub parallel: bool,
     pub boxed: Option<&'a HashSet<ValueId>>,
+    /// The value is a `Promise.resolve` result consumed only by the immediately following await.
+    /// The method emitter may feed numeric arguments directly to the existing asynchronous
+    /// suspension path; its generated runtime guard retains the generic fallback for other values.
+    pub await_resolve_arg: Option<ValueId>,
 }
 
 /// One status check after a runtime call. A throw unwinds; a refusal is attributed to this site
@@ -220,6 +224,7 @@ pub(super) fn emit_graph_op(
     this_copy: Option<ValueId>,
     spec: &Speculation,
     boxed: Option<&HashSet<ValueId>>,
+    await_resolve_arg: Option<ValueId>,
 ) {
     let v = vid.0;
     let typed = numbers.contains(&vid);
@@ -254,6 +259,7 @@ pub(super) fn emit_graph_op(
         this_copy,
         spec,
         boxed,
+        await_resolve_arg,
     };
     match op {
         GraphOp::Const { index, constant } => match constant {

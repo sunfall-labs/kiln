@@ -12295,3 +12295,153 @@ fn native_node_ffi_dlopen_calls_compiled_function() {
     );
     assert_eq!(result.stdout, b"42\n");
 }
+
+#[test]
+fn native_await_promise_resolve_preserves_generic_and_ordering_semantics() {
+    let Some(output) = run_native_release_fixture(
+        "native-await-promise-resolve-semantics",
+        r#"
+const events = [];
+async function primitive() {
+  events.push("before");
+  const value = await Promise.resolve(1);
+  events.push(`after:${value}`);
+}
+
+const thenable = { then(resolve) { events.push("thenable"); resolve(2); } };
+const existing = Promise.resolve(3);
+const originalResolve = Promise.resolve;
+const subclass = class extends Promise {};
+primitive();
+events.push("outside");
+Promise.resolve(thenable).then(value => events.push(`then:${value}`));
+Promise.resolve(existing).then(value => events.push(`existing:${value}`));
+Promise.resolve.call(subclass, 4).then(value => events.push(`sub:${value}`));
+Promise.resolve = function (value) { events.push("override"); return originalResolve.call(this, value); };
+Promise.resolve(5).then(value => events.push(`override:${value}`));
+setTimeout(() => console.log(events.join("|")), 0);
+"#,
+    ) else {
+        return;
+    };
+    assert_eq!(
+        output,
+        "before|outside|override|after:1|thenable|existing:3|sub:4|override:5|then:2\n"
+    );
+}
+
+#[test]
+fn native_await_promise_resolve_emits_guard_for_microtasks_shape() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let project = TestDirectory::new("native-await-promise-resolve-emission");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        r#"
+export async function microtasks() {
+  let counter = 0;
+  for (let i = 0; i < 20000; i++) {
+    await Promise.resolve(i);
+    counter += 1;
+  }
+  return counter;
+}
+"#,
+    )
+    .expect("write microtasks emission fixture");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build microtasks emission graph");
+    let emitted = emit_native_graph_module_with_policy(
+        graph.module(graph.entry()).expect("entry module"),
+        "main.mjs",
+        &kiln_backend_c::EmissionPolicy::default(),
+    )
+    .expect("emit microtasks fixture");
+    let guard_start = emitted
+        .source
+        .find("kiln_c99_builtin_store_epoch == 0 && KILN_VAL_IS_BUILTIN")
+        .expect("Promise.resolve await guard emitted");
+    let guard = &emitted.source[guard_start..guard_start + 300];
+    assert!(guard.contains("KILN_VAL_IS_NUMBER(v"), "{guard}");
+    assert!(guard.contains("handled = 1;"), "{guard}");
+}
+
+#[test]
+fn native_await_promise_resolve_honors_constructor_assignment() {
+    let Some(output) = run_native_release_fixture(
+        "native-await-promise-resolve-constructor-assignment",
+        r#"
+Promise.prototype.constructor = function AssignedPromise() {};
+async function run() {
+  const events = [];
+  events.push("before");
+  const value = await Promise.resolve(7);
+  events.push(`after:${value}`);
+  setTimeout(() => console.log(events.join("|")), 0);
+}
+run();
+console.log("outside");
+"#,
+    ) else {
+        return;
+    };
+    assert_eq!(output, "outside\nbefore|after:7\n");
+}
+
+#[test]
+fn native_await_promise_resolve_falls_back_for_non_number() {
+    let Some(output) = run_native_release_fixture(
+        "native-await-promise-resolve-non-number",
+        r#"
+async function run() {
+  console.log(await Promise.resolve("text"));
+}
+run();
+"#,
+    ) else {
+        return;
+    };
+    assert_eq!(output, "text\n");
+}
+
+#[test]
+fn native_await_promise_resolve_falls_back_after_override() {
+    let Some(output) = run_native_release_fixture(
+        "native-await-promise-resolve-await-override",
+        r#"
+const originalResolve = Promise.resolve;
+Promise.resolve = function (value) { return originalResolve.call(this, value + 1); };
+async function run() {
+  console.log(await Promise.resolve(6));
+}
+run();
+"#,
+    ) else {
+        return;
+    };
+    assert_eq!(output, "7\n");
+}
+
+#[test]
+fn native_await_promise_resolve_keeps_prototype_define_property_refusal() {
+    let Some(error) = run_native_failure_fixture(
+        "native-await-promise-resolve-prototype-define-property",
+        r#"
+Object.defineProperty(Promise.prototype, "constructor", {
+  get() { return Promise; }
+});
+"#,
+    ) else {
+        return;
+    };
+    assert!(
+        error.contains("property definition on a value with no property store"),
+        "{error}"
+    );
+}

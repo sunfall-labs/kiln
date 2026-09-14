@@ -617,8 +617,29 @@ pub(super) fn emit_call_method(
     let check = status_check(diagnostic_site, pc, label, unwind);
     let closed_world = !program.has_direct_eval() && !program.has_dynamic_import();
 
+    // `await Promise.resolve(number)` still has to suspend once, but the intermediate fulfilled
+    // promise is unobservable when this call result is consumed only by that await. The graph
+    // supplies this marker only for an exact builtin receiver and immediate await; the runtime
+    // number check and epoch guard cover value type and writes to Promise/prototype stores. Any failed guard falls
+    // through to the generic method call; this marked site deliberately does not use the older
+    // Promise.resolve intrinsic because its result is immediately consumed by the await path.
+    let await_resolve_intrinsic = if ctx.await_resolve_arg.is_some()
+        && closed_world
+        && key_str == "resolve"
+        && argc == 1
+    {
+        Some(format!(
+            "if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_PROMISE && KILN_VAL_IS_NUMBER(v{a0}))) {{ v{v} = v{a0}; handled = 1; }}",
+            o = object.0,
+            a0 = args[0].0,
+            v = v,
+        ))
+    } else {
+        None
+    };
+
     // 1. Math.* intrinsic if closed_world
-    let math_intrinsic = if closed_world {
+    let math_intrinsic = if closed_world && await_resolve_intrinsic.is_none() {
         match (key_str, argc) {
             ("resolve", 1) => Some(format!(
                 "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_PROMISE)) {{ \
@@ -1602,6 +1623,9 @@ pub(super) fn emit_call_method(
         other => other,
     };
     let math_s = math_intrinsic.map(|s| format!(" {s}")).unwrap_or_default();
+    let await_resolve_s = await_resolve_intrinsic
+        .map(|s| format!(" {s}"))
+        .unwrap_or_default();
     let push_s = push_intrinsic.map(|s| format!(" {s}")).unwrap_or_default();
     let regex_s = regex_intrinsic.map(|s| format!(" {s}")).unwrap_or_default();
     let map_s = map_intrinsic.map(|s| format!(" {s}")).unwrap_or_default();
@@ -1647,7 +1671,7 @@ pub(super) fn emit_call_method(
                 "    {{ static kiln_c99_site site = {{0}}; \
                 kiln_val call_args[{n}]; int call_args_ready = 0; (void)call_args_ready; \
                 int handled = 0; int kiln_twin = 0; (void)kiln_twin; {typed_remembered}\
-                {math_s}{push_s}{regex_s}{map_s}{parallel_pool_s}{parallel_map_s}{filter_s}{reduce_s}{slice_s}{join_s}{split_s}{index_of_s}{substring_s}{collection_s}{json_s}{sort_s}{array_extra_s}{string_extra_s}{iterator_s} \
+                {await_resolve_s}{math_s}{push_s}{regex_s}{map_s}{parallel_pool_s}{parallel_map_s}{filter_s}{reduce_s}{slice_s}{join_s}{split_s}{index_of_s}{substring_s}{collection_s}{json_s}{sort_s}{array_extra_s}{string_extra_s}{iterator_s} \
                 if (!handled && KILN_VAL_IS_OBJECT(v{o})) {{ \
                     const kiln_object *obj = (const kiln_object *)KILN_VAL_PTR(v{o}); if (obj == NULL) __builtin_unreachable(); \
                     {typed_fast_block}\
