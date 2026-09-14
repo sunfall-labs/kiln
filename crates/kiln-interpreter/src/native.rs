@@ -1248,6 +1248,13 @@ impl Native {
                 ("timeout", FixedOwnValue::Native(Self::AbortSignalTimeout)),
                 ("any", FixedOwnValue::Native(Self::AbortSignalAny)),
             ],
+            Self::PromiseConstructor => &[
+                ("allKeyed", FixedOwnValue::Native(Self::PromiseAllKeyed)),
+                (
+                    "allSettledKeyed",
+                    FixedOwnValue::Native(Self::PromiseAllSettledKeyed),
+                ),
+            ],
             Self::AsyncGeneratorFunctionPrototype => &[
                 (
                     "constructor",

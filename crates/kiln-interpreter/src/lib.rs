@@ -45510,9 +45510,6 @@ fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
 /// `own_attributes`: a name is included only when the same property machinery can describe it.
 fn intrinsic_extra_property_names(target: &Value) -> Vec<String> {
     match target {
-        Value::Native(Native::PromiseConstructor, _) => {
-            vec!["allKeyed".to_owned(), "allSettledKeyed".to_owned()]
-        }
         Value::Native(Native::Temporal(op), _) => temporal::property_names(*op)
             .iter()
             .map(|name| (*name).to_owned())
