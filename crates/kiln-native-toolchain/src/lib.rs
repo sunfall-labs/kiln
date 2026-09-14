@@ -24,6 +24,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Compilers considered by [`Toolchain::discover`], in preference order.
+///
+/// Apple Clang owns the supported path to Apple's `ld64` and LLVM's `ld64.lld`. Zig remains an
+/// explicit `CC=zig` option on macOS, but its Mach-O linker has failed on generated object sets
+/// that the system linker can consume. Other hosts retain Zig's portable-toolchain preference.
+#[cfg(target_os = "macos")]
+pub const DEFAULT_COMPILER_CANDIDATES: &[&str] = &["clang", "zig", "cc", "gcc"];
+#[cfg(not(target_os = "macos"))]
 pub const DEFAULT_COMPILER_CANDIDATES: &[&str] = &["zig", "clang", "cc", "gcc"];
 
 /// The broad driver family selected for a compiler executable.
@@ -149,9 +156,9 @@ pub enum LinkerKind {
     /// Default platform linker (e.g. GNU ld on Linux, ld64 on macOS, link.exe on Windows).
     #[default]
     Default,
-    /// Fast modern ELF/Mach-O linker `mold`.
+    /// Fast modern ELF linker `mold`.
     Mold,
-    /// LLVM modern linker `lld` (`ld.lld`).
+    /// LLVM modern linker `lld` (`ld.lld` for ELF, `ld64.lld` for Mach-O).
     Lld,
 }
 
@@ -797,19 +804,46 @@ fn detect_linker(
     platform: TargetPlatform,
     search_entries: &[PathBuf],
 ) -> LinkerKind {
-    if compiler == CompilerKind::Zig || platform != TargetPlatform::Linux {
-        return LinkerKind::Default;
+    let configured = std::env::var_os("KILN_LINKER");
+    detect_linker_with(compiler, platform, search_entries, configured.as_deref())
+}
+
+fn detect_linker_with(
+    compiler: CompilerKind,
+    platform: TargetPlatform,
+    search_entries: &[PathBuf],
+    configured: Option<&OsStr>,
+) -> LinkerKind {
+    if let Some(configured) = configured {
+        let value = configured.to_string_lossy();
+        let normalized = value.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "default" | "system" | "ld" | "ld64" | "none" => return LinkerKind::Default,
+            "mold" if compiler != CompilerKind::Zig && platform == TargetPlatform::Linux => {
+                return LinkerKind::Mold;
+            }
+            "lld" | "ld.lld" | "ld64.lld"
+                if compiler != CompilerKind::Zig
+                    && matches!(platform, TargetPlatform::Linux | TargetPlatform::Macos) =>
+            {
+                return LinkerKind::Lld;
+            }
+            "mold" | "gold" | "lld" | "ld.lld" | "ld64.lld" => {
+                eprintln!(
+                    "kiln: KILN_LINKER `{normalized}` is unsupported for {compiler} targeting {platform:?}; using the driver's default linker"
+                );
+                return LinkerKind::Default;
+            }
+            other => {
+                eprintln!(
+                    "kiln: unrecognized KILN_LINKER `{other}`; falling back to auto-detection"
+                );
+            }
+        }
     }
 
-    if let Ok(env_val) = std::env::var("KILN_LINKER") {
-        match env_val.trim().to_ascii_lowercase().as_str() {
-            "mold" => return LinkerKind::Mold,
-            "lld" | "ld.lld" => return LinkerKind::Lld,
-            "default" | "system" | "ld" | "none" => return LinkerKind::Default,
-            other => eprintln!(
-                "kiln: unrecognized KILN_LINKER `{other}`; falling back to auto-detection"
-            ),
-        }
+    if compiler == CompilerKind::Zig {
+        return LinkerKind::Default;
     }
 
     let is_in_path = |name: &str| -> bool {
@@ -831,12 +865,13 @@ fn detect_linker(
         false
     };
 
-    if is_in_path("mold") || is_in_path("ld.mold") {
-        LinkerKind::Mold
-    } else if is_in_path("ld.lld") || is_in_path("lld") {
-        LinkerKind::Lld
-    } else {
-        LinkerKind::Default
+    match platform {
+        TargetPlatform::Linux if is_in_path("mold") || is_in_path("ld.mold") => LinkerKind::Mold,
+        TargetPlatform::Linux if is_in_path("ld.lld") || is_in_path("lld") => LinkerKind::Lld,
+        // Clang maps `-fuse-ld=lld` to the Mach-O `ld64.lld` frontend. Requiring that exact
+        // frontend avoids mistaking an ELF-only `ld.lld` installation for a Darwin linker.
+        TargetPlatform::Macos if is_in_path("ld64.lld") => LinkerKind::Lld,
+        _ => LinkerKind::Default,
     }
 }
 
@@ -1589,8 +1624,9 @@ mod tests {
             true,
         ));
         let runner: Arc<dyn ProcessRunner> = runner_impl.clone();
-        let toolchain =
-            Toolchain::from_compiler_with_runner("/opt/clang", runner).expect("compiler probe");
+        let toolchain = Toolchain::from_compiler_with_runner("/opt/clang", runner)
+            .expect("compiler probe")
+            .with_linker(LinkerKind::Default);
         let report = toolchain
             .build(
                 &[CompileUnit::new(&source, &object)],
@@ -1753,8 +1789,9 @@ mod tests {
             true,
         ));
         let runner: Arc<dyn ProcessRunner> = runner_impl.clone();
-        let toolchain =
-            Toolchain::from_compiler_with_runner("/opt/clang", runner).expect("compiler probe");
+        let toolchain = Toolchain::from_compiler_with_runner("/opt/clang", runner)
+            .expect("compiler probe")
+            .with_linker(LinkerKind::Lld);
         let compile_report = toolchain
             .compile_c(
                 &source,
@@ -1812,6 +1849,12 @@ mod tests {
                 .args
                 .iter()
                 .any(|argument| argument == "-Wl,-dead_strip")
+        );
+        assert!(
+            commands[3]
+                .args
+                .iter()
+                .any(|argument| argument == "-fuse-ld=lld")
         );
         assert!(
             commands[3]
@@ -2243,58 +2286,114 @@ mod tests {
     }
 
     #[test]
-    fn linker_auto_detection_prefers_mold_then_lld() {
+    fn linker_selection_is_target_and_driver_aware() {
         let directory = temp_dir("linker-detection");
         let mold_path = directory.join("mold");
         let lld_path = directory.join("ld.lld");
+        let ld64_lld_path = directory.join("ld64.lld");
         fs::write(&mold_path, "").expect("write fake mold");
         fs::write(&lld_path, "").expect("write fake lld");
+        fs::write(&ld64_lld_path, "").expect("write fake Mach-O lld");
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&mold_path, fs::Permissions::from_mode(0o755)).expect("chmod mold");
             fs::set_permissions(&lld_path, fs::Permissions::from_mode(0o755)).expect("chmod lld");
+            fs::set_permissions(&ld64_lld_path, fs::Permissions::from_mode(0o755))
+                .expect("chmod Mach-O lld");
         }
 
         // Linux + Clang with both mold and lld present selects mold
-        let detected = detect_linker(
+        let detected = detect_linker_with(
             CompilerKind::Clang,
             TargetPlatform::Linux,
             std::slice::from_ref(&directory),
+            None,
         );
         assert_eq!(detected, LinkerKind::Mold);
 
         // Without mold, selects lld
         fs::remove_file(&mold_path).expect("remove mold");
-        let detected_lld = detect_linker(
+        let detected_lld = detect_linker_with(
             CompilerKind::Clang,
             TargetPlatform::Linux,
             std::slice::from_ref(&directory),
+            None,
         );
         assert_eq!(detected_lld, LinkerKind::Lld);
 
-        // Zig stays Default regardless of linkers in path
+        // Mach-O has its own LLD frontend and never selects ELF mold/ld.lld by accident.
         assert_eq!(
-            detect_linker(
-                CompilerKind::Zig,
-                TargetPlatform::Linux,
+            detect_linker_with(
+                CompilerKind::Clang,
+                TargetPlatform::Macos,
                 std::slice::from_ref(&directory),
+                None,
+            ),
+            LinkerKind::Lld
+        );
+        fs::remove_file(&ld64_lld_path).expect("remove Mach-O lld");
+        assert_eq!(
+            detect_linker_with(
+                CompilerKind::Clang,
+                TargetPlatform::Macos,
+                std::slice::from_ref(&directory),
+                None,
             ),
             LinkerKind::Default
         );
 
-        // Non-Linux stays Default
+        // Explicit policy is honored only where the selected driver and object format support it.
         assert_eq!(
-            detect_linker(
+            detect_linker_with(
                 CompilerKind::Clang,
                 TargetPlatform::Macos,
                 std::slice::from_ref(&directory),
+                Some(OsStr::new("lld")),
+            ),
+            LinkerKind::Lld
+        );
+        assert_eq!(
+            detect_linker_with(
+                CompilerKind::Clang,
+                TargetPlatform::Macos,
+                std::slice::from_ref(&directory),
+                Some(OsStr::new("mold")),
+            ),
+            LinkerKind::Default
+        );
+
+        // Zig stays Default regardless of configured or discovered external linkers.
+        assert_eq!(
+            detect_linker_with(
+                CompilerKind::Zig,
+                TargetPlatform::Macos,
+                std::slice::from_ref(&directory),
+                Some(OsStr::new("lld")),
+            ),
+            LinkerKind::Default
+        );
+        assert_eq!(
+            detect_linker_with(
+                CompilerKind::Zig,
+                TargetPlatform::Linux,
+                std::slice::from_ref(&directory),
+                None,
             ),
             LinkerKind::Default
         );
 
         fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn host_default_compiler_uses_the_supported_macho_linker_driver() {
+        if cfg!(target_os = "macos") {
+            assert_eq!(DEFAULT_COMPILER_CANDIDATES[0], "clang");
+        } else {
+            assert_eq!(DEFAULT_COMPILER_CANDIDATES[0], "zig");
+        }
     }
 
     #[test]

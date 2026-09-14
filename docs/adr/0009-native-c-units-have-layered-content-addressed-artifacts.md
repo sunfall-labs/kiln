@@ -62,9 +62,14 @@ by a crashed, PID-reused process cannot block a later build.
 `kiln-native-toolchain` discovers Zig, Clang, a generic `cc`, or GCC, retains the canonical compiler
 path, version, family, and compiler-reported target, and exposes captured structured compile/link
 failures. `native-dev`, `native-check`, and `native-release` select distinct flags. Zig is preferred
-when installed, but it is not a mandatory bootstrap dependency; a compatible system compiler is a
-supported fallback. Unix links request the system math library because generated exponent and
-remainder operations use `pow` and `fmod`.
+when installed except on macOS, where Clang is preferred because it owns the supported Apple
+`ld64`/LLVM `ld64.lld` path and Zig's Mach-O linker has overflowed on otherwise valid large object
+sets. `CC=zig` remains an explicit override. Linux Clang/GCC links auto-select mold then LLD when
+available; macOS Clang links auto-select `ld64.lld` when available and otherwise use Apple `ld64`.
+`KILN_LINKER=system|lld` selects either path explicitly on macOS. The selected linker policy is part
+of compiler identity. A compatible system compiler remains a supported fallback on every host.
+Unix links request the system math library because generated exponent and remainder operations use
+`pow` and `fmod`.
 
 When Zig is selected and `ZIG_GLOBAL_CACHE_DIR` is unset, the toolchain uses one versioned
 Kiln-managed global cache in the system temporary directory. Every Kiln process uses the same
