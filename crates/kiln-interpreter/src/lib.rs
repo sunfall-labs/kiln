@@ -13835,10 +13835,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             let size = object.borrow().get_own(COLLECTION_SIZE).cloned();
             return Ok(size.unwrap_or(Value::Number(0.0)));
         }
+        // DataView's two measurements reject a view stranded by resize or detach. Keep that
+        // check here because the direct slot read below bypasses public property lookup;
+        // otherwise a materialized prototype accessor would dispatch back into this function.
+        if matches!(
+            accessor,
+            BuiltinAccessor::DataViewByteLength | BuiltinAccessor::DataViewByteOffset
+        ) && matches!(receiver, Value::DataView(view) if view.out_of_bounds())
+        {
+            return Err(ExecutionError::DataViewOutOfBounds);
+        }
         // Everything else is the same answer an instance gives for the same name, taken from
         // the one place that knows it -- including the `TypeError` a `DataView` a shrink has
         // stranded raises for its two measurements.
-        self.read_property(receiver, accessor.property_key(), instruction)
+        Ok(self.property(receiver, accessor.property_key()))
     }
 
     /// The specification's `InternalizeJSONProperty`: one node of the parsed document, revived.
