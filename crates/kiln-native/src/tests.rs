@@ -1321,9 +1321,9 @@ fn live_cache_identity_catalogue_covers_every_stage_and_profile_family() {
             },
         )));
     }
-    for want_http in [true, false] {
+    for variant in ProviderVariant::ALL {
         let provider = builder
-            .number_provider_variant(want_http)
+            .number_provider_variant(variant)
             .expect("provider variant identity");
         assert!(identities.contains(&cache_identity(
             provider.identity,
@@ -9792,10 +9792,10 @@ fn executable_host_refusal_preserves_bounded_diagnostics() {
 }
 
 #[test]
-fn number_provider_variant_selection_is_conservative() {
+fn provider_capability_demand_is_typed_and_conservative() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
-    fn selection(entry_name: &str, files: &[(&str, &str)]) -> bool {
+    fn selection(entry_name: &str, files: &[(&str, &str)]) -> ProviderCapabilities {
         let project = TestDirectory::new("kiln-provider-variant-selection");
         for (name, source) in files {
             fs::write(project.path.join(name), source).expect("write selection fixture");
@@ -9814,15 +9814,16 @@ fn number_provider_variant_selection_is_conservative() {
         .expect("selection demand");
         let members =
             kiln_backend_c::facts::analyze_demanded_members(&graph, &demand.live, &demand.slots);
-        NativeBuilder::graph_wants_full_provider(&graph, &members)
+        kiln_liveness::retained_provider_capabilities(&graph, &demand, &members)
     }
 
     assert!(
-        !selection("main.mjs", &[("main.mjs", "console.log(1 + 2);\n")]),
-        "a plain ESM entry links the slim archive"
+        selection("main.mjs", &[("main.mjs", "console.log(1 + 2);\n")])
+            == ProviderCapabilities::COMMON,
+        "a plain ESM entry needs only common capabilities"
     );
     assert!(
-        !selection(
+        selection(
             "main.mjs",
             &[
                 (
@@ -9831,8 +9832,23 @@ fn number_provider_variant_selection_is_conservative() {
                 ),
                 ("dep.mjs", "export const a = 1;\n"),
             ]
+        ) == ProviderCapabilities::COMMON,
+        "an HTTP-free static graph needs only common capabilities"
+    );
+    assert_eq!(
+        selection(
+            "main.mjs",
+            &[
+                ("package.json", "{\"sideEffects\":false}\n"),
+                (
+                    "main.mjs",
+                    "import { unused } from './dead.mjs';\nconsole.log(1);\n",
+                ),
+                ("dead.mjs", "export const unused = typeof Temporal;\n",),
+            ],
         ),
-        "an HTTP-free static graph links the slim archive"
+        ProviderCapabilities::COMMON,
+        "a dead module does not enlarge provider requirements"
     );
     assert!(
         selection(
@@ -9841,8 +9857,8 @@ fn number_provider_variant_selection_is_conservative() {
                 "main.mjs",
                 "import http from 'node:http';\nconsole.log(typeof http.createServer);\n",
             )]
-        ),
-        "node:http selects the full archive"
+        ) == ProviderCapabilities::COMMON.with(ProviderCapability::Http),
+        "node:http declares HTTP demand"
     );
     assert!(
         selection(
@@ -9851,8 +9867,8 @@ fn number_provider_variant_selection_is_conservative() {
                 "main.mjs",
                 "import https from 'node:https';\nconsole.log(typeof https);\n",
             )]
-        ),
-        "node:https selects the full archive"
+        ) == ProviderCapabilities::COMMON.with(ProviderCapability::Http),
+        "node:https declares HTTP demand"
     );
     assert!(
         selection(
@@ -9861,8 +9877,8 @@ fn number_provider_variant_selection_is_conservative() {
                 "main.mjs",
                 "import { dlopen } from 'node:ffi';\nconsole.log(typeof dlopen);\n",
             )]
-        ),
-        "node:ffi selects the full archive"
+        ) == ProviderCapabilities::COMMON.with(ProviderCapability::Ffi),
+        "node:ffi declares FFI demand"
     );
     assert!(
         selection(
@@ -9874,8 +9890,8 @@ fn number_provider_variant_selection_is_conservative() {
                 ),
                 ("dep.mjs", "export const a = 1;\n"),
             ]
-        ),
-        "a dynamic import selects the full archive"
+        ) == ProviderCapabilities::FULL,
+        "a dynamic import conservatively demands every capability"
     );
     assert!(
         selection(
@@ -9887,24 +9903,32 @@ fn number_provider_variant_selection_is_conservative() {
                 ),
                 ("dep.cjs", "module.exports = 1;\n"),
             ]
-        ),
-        "a CommonJS require selects the full archive"
+        ) == ProviderCapabilities::FULL,
+        "a CommonJS graph conservatively demands every capability"
     );
     assert!(
-        !selection(
+        selection(
             "main.mjs",
             &[("main.mjs", "console.log(JSON.parse('1'));\n")]
-        ),
+        ) == ProviderCapabilities::COMMON,
         "JSON is carried by the common archive"
     );
     for (source, capability) in [
-        ("console.log(typeof Temporal);\n", "Temporal"),
-        ("console.log(typeof Intl);\n", "Intl"),
-        ("console.log([1].parallelMap);\n", "parallelMap"),
+        (
+            "console.log(typeof Temporal);\n",
+            ProviderCapability::Temporal,
+        ),
+        ("console.log(typeof Intl);\n", ProviderCapability::Intl),
+        (
+            "console.log([1].parallelMap);\n",
+            ProviderCapability::Parallel,
+        ),
     ] {
-        assert!(
+        assert_eq!(
             selection("main.mjs", &[("main.mjs", source)]),
-            "{capability} selects the full archive"
+            ProviderCapabilities::COMMON.with(capability),
+            "{} is represented as its own capability",
+            capability.as_str()
         );
     }
 }

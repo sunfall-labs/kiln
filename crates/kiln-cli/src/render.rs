@@ -208,6 +208,20 @@ pub fn native_build(source: &str, summary: &NativeBuildSummary) -> String {
             hit(summary.executable_cache_hit)
         ),
     );
+    if !summary.provider_required.is_empty() {
+        row(
+            &mut out,
+            "provider needs",
+            &summary.provider_required.join(","),
+        );
+    }
+    if !summary.provider_supplied.is_empty() {
+        row(
+            &mut out,
+            "provider has",
+            &summary.provider_supplied.join(","),
+        );
+    }
     row(
         &mut out,
         "timing",
@@ -763,6 +777,13 @@ mod tests {
             runtime_object_bytes: 300,
             launcher_object_bytes: 400,
             executable_bytes: 500,
+            provider_required: vec!["realm".to_owned(), "json".to_owned()],
+            provider_supplied: vec![
+                "realm".to_owned(),
+                "reg-exp".to_owned(),
+                "big-int".to_owned(),
+                "json".to_owned(),
+            ],
             emit_millis: 1,
             compile_millis: 2,
             link_millis: 3,
@@ -770,6 +791,11 @@ mod tests {
             explanation: Some("facts:\n  closed world: closed\n".to_string()),
         };
         let out = native_build("src/main.ts", &summary);
+        assert!(out.contains("provider needs  realm,json"), "{out}");
+        assert!(
+            out.contains("provider has    realm,reg-exp,big-int,json"),
+            "{out}"
+        );
         assert!(out.contains("facts:\n  closed world: closed"), "{out}");
     }
 

@@ -77,13 +77,15 @@ if [[ $KILN_NUMBER_MANIFEST_SOURCE_DIGEST != "$KILN_NUMBER_EXPECTED_SOURCE_DIGES
 fi
 
 kiln_number_check_manifest_contract() {
-	local manifest=$1 expected_http=$2
-	python3 - "$manifest" "$KILN_NUMBER_CONTRACT_FILE" "$expected_http" <<'PY'
+	local manifest=$1 expected_variant=$2
+	python3 - "$manifest" "$KILN_NUMBER_CONTRACT_FILE" "$expected_variant" <<'PY'
 import json, pathlib, sys
 manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
 contract = json.loads(pathlib.Path(sys.argv[2]).read_text())
-http = sys.argv[3] == "true"
-archive = contract["full_archive"] if http else contract["slim_archive"]
+variant = sys.argv[3]
+full = variant == "full"
+archive = contract["full_archive"] if full else contract["slim_archive"]
+capabilities = contract["full_capabilities"] if full else contract["common_capabilities"]
 expected = {
     "schema": contract["schema"],
     "provider": contract["provider"],
@@ -92,7 +94,8 @@ expected = {
     "parse_version": contract["parse_version"],
     "profile": contract["profile"],
     "exports": contract["exports"],
-    "http": http,
+    "variant": variant,
+    "capabilities": capabilities,
     "archive": archive,
 }
 for key, value in expected.items():
@@ -101,7 +104,7 @@ for key, value in expected.items():
 PY
 }
 
-kiln_number_check_manifest_contract "$KILN_NUMBER_MANIFEST" true
+kiln_number_check_manifest_contract "$KILN_NUMBER_MANIFEST" full
 
 KILN_NUMBER_RUSTC="${RUSTC:-rustc}"
 KILN_NUMBER_EXPECTED_RUSTC_IDENTITY="sha256:$("$KILN_NUMBER_RUSTC" -vV | kiln_number_sha256_stream)"
@@ -114,8 +117,7 @@ if [[ $KILN_NUMBER_MANIFEST_RUSTC_IDENTITY != "$KILN_NUMBER_EXPECTED_RUSTC_IDENT
 	exit 1
 fi
 
-# The slim variant ships the same crate without the Hyper-backed HTTP engines: same
-# schema, provider ABI, and export list, differing only in the `http` manifest field.
+# The common variant ships the same ABI with a smaller declared capability set.
 # The packager itself proves the slim archive defines every export; here prove the pair
 # is published under distinct names with matching source and rustc identities.
 env RUSTFLAGS='--kiln-provider-must-not-inherit' \
@@ -133,13 +135,13 @@ if [[ ! -f $KILN_NUMBER_SLIM_ARCHIVE || ! -f $KILN_NUMBER_SLIM_MANIFEST ]]; then
 	printf 'slim number provider is incomplete under %s\n' "$KILN_NUMBER_TEMP/slim-package" >&2
 	exit 1
 fi
-KILN_NUMBER_SLIM_HTTP=$(sed -n 's/^  "http": \([a-z]*\)$/\1/p' "$KILN_NUMBER_SLIM_MANIFEST")
-if [[ $KILN_NUMBER_SLIM_HTTP != "false" ]]; then
-	printf 'slim number-provider manifest must carry `"http": false`, found %s\n' \
-		"$KILN_NUMBER_SLIM_HTTP" >&2
+KILN_NUMBER_SLIM_VARIANT=$(sed -n 's/^  "variant": "\([a-z]*\)",$/\1/p' "$KILN_NUMBER_SLIM_MANIFEST")
+if [[ $KILN_NUMBER_SLIM_VARIANT != "common" ]]; then
+	printf 'common number-provider manifest must carry `"variant": "common"`, found %s\n' \
+		"$KILN_NUMBER_SLIM_VARIANT" >&2
 	exit 1
 fi
-kiln_number_check_manifest_contract "$KILN_NUMBER_SLIM_MANIFEST" false
+kiln_number_check_manifest_contract "$KILN_NUMBER_SLIM_MANIFEST" common
 KILN_NUMBER_SLIM_SOURCE_DIGEST=$(
 	sed -n 's/^  "source_sha256": "\([0-9a-f]*\)",$/\1/p' "$KILN_NUMBER_SLIM_MANIFEST"
 )

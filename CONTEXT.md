@@ -85,6 +85,10 @@ for one semantic owner.
 native, differential, third-party, Node, server, guard, effect and regress corpora answer different
 questions and are not interchangeable.
 
+**Provider capability** — One independently demandable engine supplied through the native-provider
+ABI: Realm, RegExp, BigInt, JSON, Temporal, Intl, parallel execution, HTTP or FFI. Liveness computes
+the required set; a manifest declares the supplied set; packaging chooses neither.
+
 **Provider manifest** — The shipped description of one provider archive: schema, ABI, target,
-features, source and archive digests, compiler identity and ordered exports. Its identity is part of
-native artifact caching and installed-provider discovery.
+variant, canonical capability set, source and archive digests, compiler identity and ordered
+exports. Its identity is part of native artifact caching and installed-provider discovery.

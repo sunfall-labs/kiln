@@ -1484,6 +1484,7 @@ dependencies = [
  "kiln-ir",
  "kiln-module-graph",
  "kiln-module-resolver",
+ "kiln-native-provider-contract",
  "serde_json",
 ]
 

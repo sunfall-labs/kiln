@@ -33,6 +33,9 @@ use kiln_host_abi::HOST_ABI_VERSION;
 pub use kiln_host_abi::HostValue;
 use kiln_ir::{ModuleProgram, Program};
 use kiln_module_graph::{ModuleGraph, ModuleGraphError, ModuleSource, ResolvedExport};
+pub use kiln_native_provider_contract::{
+    ProviderCapabilities, ProviderCapability, ProviderVariant,
+};
 use kiln_native_runtime::{
     EMBEDDING_C_ABI_VERSION, EMBEDDING_HOST_ABI_VERSION, EMBEDDING_MODULE_API_VERSION,
     NATIVE_RESULT_PATH_ENV, NATIVE_RUNTIME_VERSION, decode_native_result,
@@ -608,7 +611,7 @@ const ZIG_COMPILER_ENVIRONMENT: [&str; 1] = ["ZIG_LIB_DIR"];
 const _: () = {
     assert!(EMBEDDING_C_ABI_VERSION == C_ABI_VERSION);
     assert!(EMBEDDING_HOST_ABI_VERSION == HOST_ABI_VERSION);
-    assert!(PROVIDER_SCHEMA_VERSION == 2);
+    assert!(PROVIDER_SCHEMA_VERSION == 3);
 };
 
 mod options;
@@ -630,8 +633,8 @@ pub(crate) use worker::*;
 pub struct NativeBuilder {
     cache: ArtifactCache,
     toolchain: Toolchain,
-    number_provider: OnceLock<Result<NumberProvider, String>>,
-    number_provider_slim: OnceLock<Result<NumberProvider, String>>,
+    number_provider_full: OnceLock<Result<NumberProvider, String>>,
+    number_provider_common: OnceLock<Result<NumberProvider, String>>,
 }
 
 fn cache_with_optional_shared(cache_root: impl Into<PathBuf>) -> ArtifactCache {
@@ -704,8 +707,8 @@ impl NativeBuilder {
         Self {
             cache,
             toolchain,
-            number_provider: OnceLock::new(),
-            number_provider_slim: OnceLock::new(),
+            number_provider_full: OnceLock::new(),
+            number_provider_common: OnceLock::new(),
         }
     }
 
@@ -770,8 +773,8 @@ impl NativeBuilder {
                 );
             }
         }
-        for want_http in [true, false] {
-            let provider = self.number_provider_variant(want_http)?;
+        for variant in ProviderVariant::ALL {
+            let provider = self.number_provider_variant(variant)?;
             identities.insert(
                 NativeArtifactFamily::NumberProvider
                     .key(
@@ -789,7 +792,7 @@ impl NativeBuilder {
     }
 
     fn number_provider(&self) -> Result<NumberProvider, NativeError> {
-        self.number_provider
+        self.number_provider_full
             .get_or_init(|| {
                 number_provider::discover(self.toolchain.identity())
                     .map_err(|error| error.to_string())
@@ -798,14 +801,20 @@ impl NativeBuilder {
             .map_err(|message| NativeError::NumberProvider { message })
     }
 
-    fn number_provider_variant(&self, want_http: bool) -> Result<NumberProvider, NativeError> {
-        if want_http {
+    fn number_provider_variant(
+        &self,
+        variant: ProviderVariant,
+    ) -> Result<NumberProvider, NativeError> {
+        if matches!(variant, ProviderVariant::Full) {
             return self.number_provider();
         }
-        self.number_provider_slim
+        self.number_provider_common
             .get_or_init(|| {
-                number_provider::discover_with_http(self.toolchain.identity(), false)
-                    .map_err(|error| error.to_string())
+                number_provider::discover_for(
+                    self.toolchain.identity(),
+                    ProviderCapabilities::COMMON,
+                )
+                .map_err(|error| error.to_string())
             })
             .clone()
             .map_err(|message| NativeError::NumberProvider { message })
@@ -815,132 +824,50 @@ impl NativeBuilder {
         &self,
         target: &str,
     ) -> Result<(Arc<[u8]>, Digest, bool), NativeError> {
-        let (archive, digest, hit, _) = self.cached_number_provider_with_http(target, true)?;
+        let (archive, digest, hit, _) =
+            self.cached_number_provider_for(target, ProviderCapabilities::FULL)?;
         Ok((archive, digest, hit))
     }
 
-    /// Resolve the provider archive for a program that needs the HTTP engines only when
-    /// `want_http` is set, caching the archive bytes under a key that folds in the loaded
-    /// variant so full and slim archives never alias. Returns the archive, its digest, the
-    /// artifact-cache hit flag, and the linked variant.
-    fn cached_number_provider_with_http(
+    /// Resolve and cache the smallest provider variant covering `required`.
+    fn cached_number_provider_for(
         &self,
         target: &str,
-        want_http: bool,
-    ) -> Result<(Arc<[u8]>, Digest, bool, bool), NativeError> {
-        let provider = self.number_provider_variant(want_http)?;
+        required: ProviderCapabilities,
+    ) -> Result<(Arc<[u8]>, Digest, bool, ProviderCapabilities), NativeError> {
+        let variant = ProviderVariant::smallest_covering(required).unwrap_or(ProviderVariant::Full);
+        let provider = self.number_provider_variant(variant)?;
         let provider_key = NativeArtifactFamily::NumberProvider.key(
             &provider.identity,
             target,
             CacheProfile::Release,
             Digest::hash(
                 format!(
-                    "schema={PROVIDER_SCHEMA_VERSION};abi={PROVIDER_ABI_VERSION};target={};pic=true;linkage=static;http={}",
+                    "schema={PROVIDER_SCHEMA_VERSION};abi={PROVIDER_ABI_VERSION};target={};pic=true;linkage=static;variant={};capabilities={:?}",
                     provider.rust_target,
-                    provider.http,
+                    provider.variant.as_str(),
+                    provider.capabilities.names(),
                 )
                 .as_bytes(),
             ),
             [provider.archive_digest],
         );
-        let http = provider.http;
+        let capabilities = provider.capabilities;
         match self.lookup_digest(&provider_key)? {
             Some((digest, _size)) => {
                 debug_assert_eq!(digest, provider.archive_digest);
-                Ok((Arc::clone(&provider.archive), digest, true, http))
+                Ok((Arc::clone(&provider.archive), digest, true, capabilities))
             }
             None => {
                 let stored = self.cache.put(&provider_key, &provider.archive)?;
-                Ok((Arc::clone(&provider.archive), stored.digest, false, http))
+                Ok((
+                    Arc::clone(&provider.archive),
+                    stored.digest,
+                    false,
+                    capabilities,
+                ))
             }
         }
-    }
-
-    /// Conservative demand for an engine that is not in the common provider variant.
-    ///
-    /// The common archive carries Realm, RegExp, BigInt, and JSON. Temporal, Intl, parallelMap,
-    /// node:ffi, and HTTP stay in the full archive. Linkable refusal stubs keep the
-    /// ABI identical, but the selector must still retain every engine a graph can reach.
-    /// Dynamic imports and CommonJS are open-world here and therefore choose full.
-    fn graph_wants_full_provider(
-        graph: &ModuleGraph,
-        members: &kiln_backend_c::facts::DemandedMembers,
-    ) -> bool {
-        use kiln_module_resolver::NodeBuiltin;
-        if members
-            .globals
-            .iter()
-            .any(|name| name == "Temporal" || name == "Intl")
-            || members.names.contains("parallelMap")
-        {
-            return true;
-        }
-        fn needs_full_engine(specifier: &str) -> bool {
-            matches!(
-                NodeBuiltin::parse(specifier),
-                Some(
-                    NodeBuiltin::Http | NodeBuiltin::Https | NodeBuiltin::Http2 | NodeBuiltin::Ffi
-                )
-            )
-        }
-        fn program_needs_full_engine(program: &kiln_ir::Program) -> bool {
-            use kiln_ir::{Constant, Instruction};
-
-            let name_is = |index: u32, expected: &str| {
-                matches!(
-                    program.constants.get(index as usize),
-                    Some(Constant::String(name)) if name == expected
-                )
-            };
-            let needs = |instruction: &Instruction| match instruction {
-                Instruction::LoadGlobal(name)
-                | Instruction::LoadGlobalBindingOrUndefined(name)
-                | Instruction::RequireGlobalBinding(name)
-                | Instruction::GetProperty(name)
-                | Instruction::CallMethod { name, .. } => {
-                    name_is(*name, "Temporal")
-                        || name_is(*name, "Intl")
-                        || name_is(*name, "parallelMap")
-                }
-                _ => false,
-            };
-            program.code.iter().any(needs)
-                || program
-                    .functions
-                    .iter()
-                    .any(|function| function.code.iter().any(needs))
-        }
-        graph.modules().any(|node| {
-            if let ModuleSource::NodeBuiltin(builtin) = node.source
-                && matches!(
-                    builtin,
-                    NodeBuiltin::Http | NodeBuiltin::Https | NodeBuiltin::Http2 | NodeBuiltin::Ffi
-                )
-            {
-                return true;
-            }
-            // Static specifier text: ESM imports, plus CJS literal `require()` calls, which
-            // the graph records as dependencies rather than imports.
-            if node
-                .program
-                .imports
-                .iter()
-                .any(|import| needs_full_engine(&import.source))
-                || node
-                    .dependencies
-                    .iter()
-                    .any(|dependency| needs_full_engine(&dependency.specifier))
-            {
-                return true;
-            }
-            if !node.program.link_facts.dynamic_imports.is_empty()
-                || node.program.program.has_dynamic_import()
-            {
-                return true;
-            }
-            matches!(node.source, ModuleSource::CommonJs)
-                || program_needs_full_engine(&node.program.program)
-        })
     }
 
     /// Build one bytecode module and its separate host runtime into an executable.
@@ -974,8 +901,9 @@ impl NativeBuilder {
         let compiler = compiler_identity(&identity);
         // The single-module API sees only bytecode, not the import table, so a static
         // `node:http` use is invisible here: stay on the full archive.
-        let (number_provider, number_provider_digest, _, number_provider_http) =
-            self.cached_number_provider_with_http(&target, true)?;
+        let required_provider_capabilities = ProviderCapabilities::FULL;
+        let (number_provider, number_provider_digest, _, provider_capabilities) =
+            self.cached_number_provider_for(&target, required_provider_capabilities)?;
 
         let module_source_key = NativeArtifactFamily::ModuleSource.source_key(
             &target,
@@ -1111,7 +1039,8 @@ impl NativeBuilder {
                     }],
                     runtime_generated_c_cache_hit,
                     launcher_generated_c_cache_hit,
-                    number_provider_http,
+                    provider_capabilities,
+                    required_provider_capabilities,
                 });
             }
         }
@@ -1283,7 +1212,8 @@ impl NativeBuilder {
             }],
             runtime_generated_c_cache_hit,
             launcher_generated_c_cache_hit,
-            number_provider_http,
+            provider_capabilities,
+            required_provider_capabilities,
         })
     }
 
@@ -2253,9 +2183,10 @@ impl NativeBuilder {
         let paths = GraphBuildPaths::new(workspace.path(), &symbol_list);
         let profile = options.profile;
         let compiler = compiler_identity(&identity);
-        let want_full_provider = Self::graph_wants_full_provider(graph, &members);
-        let (number_provider, number_provider_digest, _, number_provider_http) =
-            self.cached_number_provider_with_http(&target, want_full_provider)?;
+        let required_provider_capabilities =
+            kiln_liveness::retained_provider_capabilities(graph, &demand, &members);
+        let (number_provider, number_provider_digest, _, provider_capabilities) =
+            self.cached_number_provider_for(&target, required_provider_capabilities)?;
 
         let mut module_sources = modules
             .iter()
@@ -2492,7 +2423,8 @@ impl NativeBuilder {
                     module_artifacts,
                     runtime_generated_c_cache_hit,
                     launcher_generated_c_cache_hit,
-                    number_provider_http,
+                    provider_capabilities,
+                    required_provider_capabilities,
                 });
             }
         }
@@ -2694,7 +2626,8 @@ impl NativeBuilder {
             module_artifacts,
             runtime_generated_c_cache_hit,
             launcher_generated_c_cache_hit,
-            number_provider_http,
+            provider_capabilities,
+            required_provider_capabilities,
         })
     }
 

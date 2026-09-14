@@ -1831,6 +1831,18 @@ fn native_summary(report: kiln_native::NativeBuildReport) -> NativeBuildSummary 
         runtime_object_bytes: report.sizes.runtime_object,
         launcher_object_bytes: report.sizes.launcher_object,
         executable_bytes: report.sizes.executable,
+        provider_required: report
+            .required_provider_capabilities
+            .names()
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        provider_supplied: report
+            .provider_capabilities
+            .names()
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
         emit_millis: millis(report.timings.emit),
         compile_millis: millis(report.timings.compile),
         link_millis: millis(report.timings.link),
