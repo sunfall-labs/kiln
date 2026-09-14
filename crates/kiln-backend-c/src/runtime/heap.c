@@ -143,7 +143,7 @@ static void kiln_c99_gc_aligned_free(void *aligned);
  * interior-pointer fallback for strings already looks one header back from the bytes. The
  * trailing NUL stays so a `%s` diagnostic keeps working; it is not the length. */
 static inline size_t kiln_c99_key_len(const char *ikey) {
-    return ((const kiln_string *)ikey - 1)->unit_len;
+    return ((const kiln_string *)ikey - 1)->byte_len;
 }
 
 typedef struct kiln_key_entry {
@@ -3109,9 +3109,9 @@ static char *kiln_c99_gc_alloc_text(size_t len) {
     kiln_string *s =
         (kiln_string *)kiln_c99_gc_alloc_hot(KILN_GC_STRING, sizeof(kiln_string) + len + 1, 0);
     if (s == NULL) return NULL;
-    s->unit_len = (uint32_t)len;
-    s->flags = KILN_STRING_LATIN1;
-    s->data = (const void *)(s + 1);
+    s->length = len;
+    s->byte_len = len;
+    s->bytes = (const char *)(s + 1);
     char *bytes = (char *)(s + 1);
     bytes[len] = '\0';
     return bytes;
@@ -3120,9 +3120,9 @@ static char *kiln_c99_gc_alloc_text(size_t len) {
 static char *kiln_c99_gc_alloc_text_tenured(size_t len) {
     kiln_string *s = (kiln_string *)kiln_c99_gc_alloc_tenured(KILN_GC_STRING, sizeof(kiln_string) + len + 1);
     if (s == NULL) return NULL;
-    s->unit_len = (uint32_t)len;
-    s->flags = KILN_STRING_LATIN1;
-    s->data = (const void *)(s + 1);
+    s->length = len;
+    s->byte_len = len;
+    s->bytes = (const char *)(s + 1);
     char *bytes = (char *)(s + 1);
     bytes[len] = '\0';
     return bytes;
@@ -3197,9 +3197,9 @@ static size_t kiln_c99_gc_alloc_text_run(size_t count, const size_t *lens, char 
         block->next = NULL;
         header = (kiln_string *)(block + 1);
         bytes = (char *)(header + 1);
-        header->unit_len = (uint32_t)len;
-        header->flags = KILN_STRING_LATIN1;
-        header->data = bytes;
+        header->length = len;
+        header->byte_len = len;
+        header->bytes = bytes;
         bytes[len] = '\0';
         out[index] = bytes;
         counted += payload;
