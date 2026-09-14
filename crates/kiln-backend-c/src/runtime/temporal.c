@@ -191,8 +191,7 @@ static int kiln_c99_temporal_takes_arithmetic_options(int32_t kind) {
 
 /* One text slot: the bytes a field carried, owned by the packing buffer below. */
 typedef struct kiln_temporal_text {
-    const char *bytes;
-    int64_t length;
+    kiln_value value;
 } kiln_temporal_text;
 
 /* Pack text slots into the one buffer plus one length per slot the provider takes.
@@ -206,9 +205,20 @@ static char *kiln_c99_temporal_pack(const kiln_temporal_text *texts, size_t coun
     size_t slot;
     char *packed;
     for (slot = 0; slot < count; ++slot) {
-        lengths[slot] = texts[slot].bytes == NULL ? -1 : texts[slot].length;
-        if (lengths[slot] > 0) {
-            total += (size_t)lengths[slot];
+        if (texts[slot].value.tag != KILN_VALUE_STRING) {
+            lengths[slot] = -1;
+        } else {
+            uint8_t *encoded = NULL;
+            size_t encoded_len = 0;
+            if (kiln_c99_string_to_utf8_lossy(texts[slot].value, &encoded, &encoded_len) !=
+                    KILN_C99_OK || encoded_len > (size_t)INT64_MAX ||
+                total > SIZE_MAX - encoded_len) {
+                free(encoded);
+                return NULL;
+            }
+            lengths[slot] = (int64_t)encoded_len;
+            total += encoded_len;
+            free(encoded);
         }
     }
     packed = (char *)malloc(total == 0 ? 1 : total);
@@ -217,8 +227,17 @@ static char *kiln_c99_temporal_pack(const kiln_temporal_text *texts, size_t coun
     }
     for (slot = 0; slot < count; ++slot) {
         if (lengths[slot] > 0) {
-            memcpy(packed + at, texts[slot].bytes, (size_t)lengths[slot]);
-            at += (size_t)lengths[slot];
+            uint8_t *encoded = NULL;
+            size_t encoded_len = 0;
+            if (kiln_c99_string_to_utf8_lossy(texts[slot].value, &encoded, &encoded_len) !=
+                    KILN_C99_OK || encoded_len != (size_t)lengths[slot]) {
+                free(encoded);
+                free(packed);
+                return NULL;
+            }
+            memcpy(packed + at, encoded, encoded_len);
+            at += encoded_len;
+            free(encoded);
         }
     }
     return packed;
@@ -244,8 +263,7 @@ static void kiln_c99_temporal_options_init(kiln_temporal_options *options) {
         options->numbers[index] = 0.0 / 0.0;
     }
     for (index = 0; index < KILN_C99_TEMPORAL_OPTION_TEXT_SLOTS; ++index) {
-        options->texts[index].bytes = NULL;
-        options->texts[index].length = -1;
+        options->texts[index].value = kiln_c99_undefined();
     }
     options->relative_to = kiln_c99_undefined();
 }
@@ -285,8 +303,7 @@ static int kiln_c99_temporal_read_options(kiln_host *host, kiln_value bag, unsig
             if (text.tag != KILN_VALUE_STRING) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
-            options->texts[key->text_slot].bytes = text.ptr;
-            options->texts[key->text_slot].length = (int64_t)text.len;
+            options->texts[key->text_slot].value = text;
             continue;
         }
         if (key->slot == -2) {
@@ -306,7 +323,9 @@ static int kiln_c99_temporal_read_options(kiln_host *host, kiln_value bag, unsig
         if (kiln_c99_same_name(key->name, strlen(key->name), "fractionalSecondDigits")) {
             /* `"auto"` is a legal spelling and is not a digit count, so it travels as a negative
              * one rather than as a number that would round to zero digits. */
-            if (read.tag == KILN_VALUE_STRING && kiln_c99_same_name(read.ptr, read.len, "auto")) {
+            size_t read_len = 0;
+            const char *read_bytes = kiln_c99_string_ascii_bytes(read, &read_len);
+            if (read_bytes != NULL && kiln_c99_same_name(read_bytes, read_len, "auto")) {
                 options->numbers[key->slot] = -1.0;
                 continue;
             }
@@ -365,8 +384,7 @@ static int kiln_c99_temporal_read_bag(kiln_host *host, kiln_value bag, int durat
             if (text.tag != KILN_VALUE_STRING) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
-            texts[keys[index].text_slot].bytes = text.ptr;
-            texts[keys[index].text_slot].length = (int64_t)text.len;
+            texts[keys[index].text_slot].value = text;
             continue;
         }
         {
@@ -456,8 +474,7 @@ static void kiln_c99_temporal_text_argument(const kiln_value *args, size_t argc,
     if (text.tag != KILN_VALUE_STRING) {
         return;
     }
-    slot->bytes = text.ptr;
-    slot->length = (int64_t)text.len;
+    slot->value = text;
 }
 
 /* `new Temporal.X(...)`: the eight positional constructors.
@@ -490,8 +507,7 @@ static int kiln_c99_temporal_construct(kiln_host *host, kiln_value *result, int3
         numbers[index] = missing;
     }
     for (index = 0; index < KILN_C99_TEMPORAL_FIELD_TEXT_SLOTS; ++index) {
-        texts[index].bytes = NULL;
-        texts[index].length = -1;
+        texts[index].value = kiln_c99_undefined();
     }
     switch (kind) {
     case 0: /* PlainDate(isoYear, isoMonth, isoDay, calendar) */
@@ -601,8 +617,7 @@ static int kiln_c99_temporal_coerce(kiln_host *host, int32_t kind, kiln_value it
         numbers[index] = 0.0 / 0.0;
     }
     for (index = 0; index < KILN_C99_TEMPORAL_FIELD_TEXT_SLOTS; ++index) {
-        texts[index].bytes = NULL;
-        texts[index].length = -1;
+        texts[index].value = kiln_c99_undefined();
     }
     kiln_c99_temporal_options_init(&settings);
     if (item.tag == KILN_VALUE_TEMPORAL) {
@@ -628,6 +643,8 @@ static int kiln_c99_temporal_coerce(kiln_host *host, int32_t kind, kiln_value it
         char *packed_options;
         void *handle = NULL;
         int32_t answered;
+        uint8_t *item_owned = NULL;
+        size_t item_len = 0;
         status = kiln_c99_temporal_read_options(host, options,
                                                 kiln_c99_temporal_overflow_keys(kind), &settings,
                                                 depth, thrown);
@@ -639,11 +656,16 @@ static int kiln_c99_temporal_coerce(kiln_host *host, int32_t kind, kiln_value it
         if (packed_options == NULL) {
             return KILN_C99_OUT_OF_MEMORY;
         }
+        if (kiln_c99_string_to_utf8_lossy(item, &item_owned, &item_len) != KILN_C99_OK) {
+            free(packed_options);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
         /* A `ZonedDateTime` string is the one `from` whose options change the answer, because it
          * has to decide what a wall-clock time that does not exist, or exists twice, means. */
-        answered = kiln_temporal_parse((uint32_t)kind, (const unsigned char *)item.ptr, item.len,
+        answered = kiln_temporal_parse((uint32_t)kind, item_owned, item_len,
                                        (const unsigned char *)packed_options, option_lengths,
                                        KILN_C99_TEMPORAL_OPTION_TEXT_SLOTS, &handle);
+        free(item_owned);
         free(packed_options);
         if (answered != 0) {
             return kiln_c99_temporal_raise(thrown, answered);
@@ -725,6 +747,8 @@ static int kiln_c99_temporal_operation(kiln_host *host, kiln_value *result, uint
     int status = KILN_C99_OK;
     int32_t answered;
     kiln_temporal_call call;
+    uint8_t *zone_owned = NULL;
+    size_t zone_len = 0;
     size_t index;
     if (name == NULL || kind < 0) {
         KILN_C99_REFUSE("a Temporal operation with no name or no kind");
@@ -734,8 +758,7 @@ static int kiln_c99_temporal_operation(kiln_host *host, kiln_value *result, uint
         fields[index] = 0.0 / 0.0;
     }
     for (index = 0; index < KILN_C99_TEMPORAL_FIELD_TEXT_SLOTS; ++index) {
-        field_texts[index].bytes = NULL;
-        field_texts[index].length = -1;
+        field_texts[index].value = kiln_c99_undefined();
     }
 
     /* The arguments, by the shape each operation takes them in. */
@@ -764,8 +787,7 @@ static int kiln_c99_temporal_operation(kiln_host *host, kiln_value *result, uint
          * `total` -- which is how nearly every call in the wild spells it. */
         int totalling = kiln_c99_same_name(name, strlen(name), "total");
         if (first.tag == KILN_VALUE_STRING) {
-            options.texts[totalling ? 8 : 6].bytes = first.ptr;
-            options.texts[totalling ? 8 : 6].length = (int64_t)first.len;
+            options.texts[totalling ? 8 : 6].value = first;
         } else if (first.tag == KILN_VALUE_UNDEFINED) {
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                         totalling ? "total needs a unit" : "round needs a unit");
@@ -783,8 +805,7 @@ static int kiln_c99_temporal_operation(kiln_host *host, kiln_value *result, uint
                     if (text.tag != KILN_VALUE_STRING) {
                         return KILN_C99_OUT_OF_MEMORY;
                     }
-                    options.texts[8].bytes = text.ptr;
-                    options.texts[8].length = (int64_t)text.len;
+                    options.texts[8].value = text;
                 }
             }
         }
@@ -889,6 +910,12 @@ static int kiln_c99_temporal_operation(kiln_host *host, kiln_value *result, uint
         free(packed_fields);
         return KILN_C99_OUT_OF_MEMORY;
     }
+    if (zone.tag == KILN_VALUE_STRING &&
+        kiln_c99_string_to_utf8_lossy(zone, &zone_owned, &zone_len) != KILN_C99_OK) {
+        free(packed_fields);
+        free(packed_options);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
 
     call.receiver = kiln_c99_temporal_of(receiver);
     call.name = (const unsigned char *)name;
@@ -897,8 +924,8 @@ static int kiln_c99_temporal_operation(kiln_host *host, kiln_value *result, uint
     call.relative_to = options.relative_to.tag == KILN_VALUE_TEMPORAL
                            ? kiln_c99_temporal_of(options.relative_to)
                            : NULL;
-    call.argument = zone.tag == KILN_VALUE_STRING ? (const unsigned char *)zone.ptr : NULL;
-    call.argument_len = zone.tag == KILN_VALUE_STRING ? zone.len : 0;
+    call.argument = zone.tag == KILN_VALUE_STRING ? zone_owned : NULL;
+    call.argument_len = zone.tag == KILN_VALUE_STRING ? zone_len : 0;
     call.fields = carries_fields ? fields : NULL;
     call.field_count = carries_fields ? 10u : 0u;
     call.field_text = (const unsigned char *)packed_fields;
@@ -920,6 +947,7 @@ static int kiln_c99_temporal_operation(kiln_host *host, kiln_value *result, uint
         size_t wanted = (size_t)(-length);
         char *spilled = (char *)malloc(wanted);
         if (spilled == NULL) {
+            free(zone_owned);
             free(packed_fields);
             free(packed_options);
             return KILN_C99_OUT_OF_MEMORY;
@@ -929,16 +957,19 @@ static int kiln_c99_temporal_operation(kiln_host *host, kiln_value *result, uint
         answered = kiln_temporal_invoke(&call);
         if (answered != 2 || length < 0) {
             free(spilled);
+            free(zone_owned);
             free(packed_fields);
             free(packed_options);
             KILN_C99_REFUSE("a Temporal answer the provider would not produce into a grown buffer");
         }
         *result = kiln_c99_copy_text(spilled, (size_t)length);
         free(spilled);
+        free(zone_owned);
         free(packed_fields);
         free(packed_options);
         return KILN_C99_OK;
     }
+    free(zone_owned);
     free(packed_fields);
     free(packed_options);
     if (answered == 6) {
@@ -1030,6 +1061,8 @@ static int kiln_c99_temporal_method(kiln_host *host, kiln_value *result, uint64_
         uint64_t low = 0;
         void *handle = NULL;
         int32_t answered;
+        uint8_t *zone_owned = NULL;
+        size_t zone_len = 0;
         if (zone.tag != KILN_VALUE_UNDEFINED && zone.tag != KILN_VALUE_STRING) {
             return KILN_C99_OUT_OF_MEMORY;
         }
@@ -1037,10 +1070,15 @@ static int kiln_c99_temporal_method(kiln_host *host, kiln_value *result, uint64_
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
                                         "the realm clock is not readable here");
         }
+        if (zone.tag == KILN_VALUE_STRING &&
+            kiln_c99_string_to_utf8_lossy(zone, &zone_owned, &zone_len) != KILN_C99_OK) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
         answered = kiln_temporal_now(
             (uint32_t)kind, high, low,
-            zone.tag == KILN_VALUE_STRING ? (const unsigned char *)zone.ptr : NULL,
-            zone.tag == KILN_VALUE_STRING ? zone.len : 0, &handle);
+            zone.tag == KILN_VALUE_STRING ? zone_owned : NULL,
+            zone.tag == KILN_VALUE_STRING ? zone_len : 0, &handle);
+        free(zone_owned);
         if (answered != 0) {
             return kiln_c99_temporal_raise(thrown, answered);
         }
