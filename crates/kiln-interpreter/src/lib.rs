@@ -42340,10 +42340,6 @@ fn string_trim_units(text: &StringUnits, trim_start: bool, trim_end: bool) -> St
     if trim_start {
         let mut offset = 0;
         for decoded in char::decode_utf16(units.iter().copied()) {
-            let length = match &decoded {
-                Ok(character) => character.len_utf16(),
-                Err(_) => 1,
-            };
             match decoded {
                 Ok(character) if is_js_whitespace(character) => offset += character.len_utf16(),
                 _ => break,
@@ -42354,6 +42350,10 @@ fn string_trim_units(text: &StringUnits, trim_start: bool, trim_end: bool) -> St
     if trim_end {
         let mut offset = 0;
         for decoded in char::decode_utf16(units.iter().copied()) {
+            let length = match &decoded {
+                Ok(character) => character.len_utf16(),
+                Err(_) => 1,
+            };
             match decoded {
                 Ok(character) if is_js_whitespace(character) => {}
                 Ok(character) => end = offset + character.len_utf16(),
