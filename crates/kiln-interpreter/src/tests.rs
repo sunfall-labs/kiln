@@ -216,6 +216,110 @@ fn reflection_materialization_preserves_special_native_property_rows() {
 }
 
 #[test]
+fn materialized_branded_accessors_ignore_receiver_shadow_properties() {
+    let program = no_program();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: std::collections::VecDeque::new(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+
+    let typed_proto = Value::Native(
+        Native::PrototypeOf(PrototypeTable::TypedArray),
+        RealmId::PRIMARY,
+    );
+    let data_view_proto = Value::Native(
+        Native::PrototypeOf(PrototypeTable::DataView),
+        RealmId::PRIMARY,
+    );
+    let buffer_proto = Value::Native(
+        Native::PrototypeOf(PrototypeTable::ArrayBuffer),
+        RealmId::PRIMARY,
+    );
+    vm.intrinsics.materialize(&typed_proto);
+    vm.intrinsics.materialize(&data_view_proto);
+    vm.intrinsics.materialize(&buffer_proto);
+
+    let buffer = BufferData::fixed(8);
+    let typed = Value::TypedArray(Rc::new(TypedArrayData {
+        kind: TypedKind::Uint8,
+        buffer: Rc::clone(&buffer),
+        offset: 2,
+        length: Some(2),
+        properties: RefCell::new(ObjectData::default()),
+    }));
+    if let Value::TypedArray(view) = &typed {
+        view.properties.borrow_mut().define_value(
+            "byteOffset",
+            Value::Number(999.0),
+            Attributes::DEFAULT,
+        );
+    }
+    let typed_getter = match own_property_state(&vm.intrinsics, &typed_proto, "byteOffset")
+        .expect("materialized TypedArray getter")
+        .0
+    {
+        Property::Accessor { get: Some(get), .. } => get,
+        other => panic!("expected TypedArray getter, got {other:?}"),
+    };
+    assert_eq!(
+        vm.call_value(&typed_getter, typed.clone(), Vec::new(), 0)
+            .unwrap(),
+        Value::Number(2.0)
+    );
+
+    let data_view = Value::DataView(Rc::new(DataViewData {
+        buffer: Rc::clone(&buffer),
+        offset: 3,
+        length: Some(2),
+        properties: RefCell::new(ObjectData::default()),
+    }));
+    if let Value::DataView(view) = &data_view {
+        view.properties.borrow_mut().define_value(
+            "byteOffset",
+            Value::Number(999.0),
+            Attributes::DEFAULT,
+        );
+    }
+    let data_view_getter = match own_property_state(&vm.intrinsics, &data_view_proto, "byteOffset")
+        .expect("materialized DataView getter")
+        .0
+    {
+        Property::Accessor { get: Some(get), .. } => get,
+        other => panic!("expected DataView getter, got {other:?}"),
+    };
+    assert_eq!(
+        vm.call_value(&data_view_getter, data_view.clone(), Vec::new(), 0)
+            .unwrap(),
+        Value::Number(3.0)
+    );
+
+    let array_buffer = Value::ArrayBuffer(buffer);
+    if let Value::ArrayBuffer(buffer) = &array_buffer {
+        buffer.properties.borrow_mut().define_value(
+            "byteLength",
+            Value::Number(999.0),
+            Attributes::DEFAULT,
+        );
+    }
+    let buffer_getter = match own_property_state(&vm.intrinsics, &buffer_proto, "byteLength")
+        .expect("materialized ArrayBuffer getter")
+        .0
+    {
+        Property::Accessor { get: Some(get), .. } => get,
+        other => panic!("expected ArrayBuffer getter, got {other:?}"),
+    };
+    assert_eq!(
+        vm.call_value(&buffer_getter, array_buffer.clone(), Vec::new(), 0)
+            .unwrap(),
+        Value::Number(8.0)
+    );
+}
+
+#[test]
 fn native_spread_uses_materialized_enumerability_and_honors_deletion() {
     let intrinsics = Intrinsics::default();
     let path = Value::Native(Native::NodePath, RealmId::PRIMARY);
