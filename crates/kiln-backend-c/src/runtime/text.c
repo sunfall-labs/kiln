@@ -68,7 +68,11 @@ static double kiln_c99_as_number(kiln_value value) {
         memcpy(&number, &value.bits, sizeof(number));
         return number;
     case KILN_VALUE_STRING:
-        return kiln_string_to_number(value.ptr, value.len);
+        {
+            size_t length = 0;
+            const char *bytes = kiln_c99_string_ascii_bytes(value, &length);
+            return bytes == NULL ? NAN : kiln_string_to_number(bytes, length);
+        }
     /* `end - start` on two dates is the difference in milliseconds, which is the whole reason
      * `valueOf` on a Date is its instant. */
     case KILN_VALUE_DATE:
@@ -132,8 +136,29 @@ static int kiln_c99_truthy(kiln_value value) {
  * literal is ignored by the tracer, never swept, and never released -- `kiln_c99_gc_release`
  * returns on a table miss for the same reason. That is what makes a constant answer free where
  * `kiln_c99_copy_text` would allocate a block per request. */
+static kiln_value kiln_c99_copy_text(const char *text, size_t len);
 static kiln_value kiln_c99_static_text(const char *text, size_t len) {
-    return kiln_c99_value(KILN_VALUE_STRING, 0, text, len);
+    typedef struct { kiln_string header; const char *source; } static_text;
+    static static_text entries[128];
+    size_t slot;
+    if (len == 0) return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)&kiln_c99_empty_string, 0);
+    if (!kiln_c99_ascii_scan(text, len)) return kiln_c99_copy_text(text, len);
+    for (slot = 0; slot < sizeof(entries) / sizeof(entries[0]); ++slot) {
+        if (entries[slot].source == text && entries[slot].header.unit_len == len)
+            return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)&entries[slot].header, len);
+    }
+    for (slot = 0; slot < sizeof(entries) / sizeof(entries[0]); ++slot) {
+        if (entries[slot].source == NULL) {
+            entries[slot].source = text;
+            entries[slot].header.unit_len = (uint32_t)len;
+            entries[slot].header.flags = KILN_STRING_LATIN1;
+            entries[slot].header.data = text;
+            return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)&entries[slot].header, len);
+        }
+    }
+    /* Builtin text is ASCII and the table is deliberately bounded; an exhausted cache is still
+     * correct, only less allocation-efficient. */
+    return kiln_c99_copy_text(text, len);
 }
 
 static inline size_t kiln_c99_utf8_to_utf16_len(const char *text, size_t len) {
@@ -147,6 +172,44 @@ static inline size_t kiln_c99_utf8_to_utf16_len(const char *text, size_t len) {
     return count;
 }
 
+static uint32_t kiln_c99_utf8_next(const char *text, size_t length, size_t *offset);
+static kiln_string *kiln_c99_gc_alloc_units(size_t count, uint32_t flags) {
+    size_t storage;
+    if (count > UINT32_MAX || !kiln_string_storage_size((uint32_t)count, flags, &storage)) return NULL;
+    kiln_string *string = (kiln_string *)kiln_c99_gc_alloc_hot(
+        KILN_GC_STRING, storage, 1);
+    if (string == NULL) return NULL;
+    string->unit_len = (uint32_t)count;
+    string->flags = flags;
+    string->data = (const void *)(string + 1);
+    return string;
+}
+
+static kiln_string *kiln_c99_string_from_utf8(const char *bytes, size_t len) {
+    if (kiln_c99_ascii_scan(bytes, len)) {
+        kiln_string *string = kiln_c99_gc_alloc_units(len, KILN_STRING_LATIN1);
+        if (string != NULL && len != 0) memcpy((void *)string->data, bytes, len);
+        return string;
+    }
+    size_t count = kiln_c99_utf8_to_utf16_len(bytes, len);
+    kiln_string *string = kiln_c99_gc_alloc_units(count, KILN_STRING_UTF16);
+    if (string == NULL) return NULL;
+    uint16_t *units = (uint16_t *)(uintptr_t)string->data;
+    size_t offset = 0;
+    size_t index = 0;
+    while (index < count) {
+        uint32_t codepoint = kiln_c99_utf8_next(bytes, len, &offset);
+        if (codepoint > UINT32_C(0xFFFF)) {
+            codepoint -= UINT32_C(0x10000);
+            units[index++] = (uint16_t)(UINT32_C(0xD800) | (codepoint >> 10));
+            units[index++] = (uint16_t)(UINT32_C(0xDC00) | (codepoint & UINT32_C(0x3FF)));
+        } else {
+            units[index++] = (uint16_t)codepoint;
+        }
+    }
+    return string;
+}
+
 static kiln_val kiln_c99_val_from_text(const char *bytes, size_t len) {
     if (len == 0 || bytes == NULL) {
         return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_c99_empty_string);
@@ -154,19 +217,21 @@ static kiln_val kiln_c99_val_from_text(const char *bytes, size_t len) {
     if (len == 1 && (unsigned char)bytes[0] < 128) {
         return kiln_c99_val_single_char((unsigned char)bytes[0]);
     }
-    char *copy = kiln_c99_gc_alloc_text(len);
-    if (copy == NULL) {
-        return KILN_VAL_UNDEFINED;
-    }
-    memcpy(copy, bytes, len);
-    kiln_string *s = ((kiln_string *)copy) - 1;
-    /* Eight bytes at a time; the byte loop this replaces was a second pass over every string
-     * built. */
-    int is_ascii = kiln_c99_ascii_scan(copy, len);
-    s->length = is_ascii ? len : kiln_c99_utf8_to_utf16_len(copy, len);
-    s->byte_len = len;
-    s->bytes = copy;
-    return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, s);
+    kiln_string *string = kiln_c99_string_from_utf8(bytes, len);
+    if (string == NULL) return KILN_VAL_UNDEFINED;
+    return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, string);
+}
+
+/* Internal indexed access never decodes through UTF-8.  In particular, a lone surrogate is a
+ * valid JavaScript UTF-16 code unit and must remain one unit when a property read returns it.
+ * Keep the result in the native tagged representation so callers do not accidentally route it
+ * through the lossy boundary codec. */
+static kiln_val kiln_c99_val_from_unit(uint16_t unit) {
+    if (unit < 0x100u) return kiln_c99_val_single_char((unsigned char)unit);
+    kiln_string *string = kiln_c99_gc_alloc_units(1, KILN_STRING_UTF16);
+    if (string == NULL) return KILN_VAL_UNDEFINED;
+    ((uint16_t *)(uintptr_t)string->data)[0] = unit;
+    return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, string);
 }
 
 static kiln_val kiln_c99_val_from_ascii(const char *bytes, size_t len) {
@@ -182,29 +247,40 @@ static kiln_val kiln_c99_val_from_ascii(const char *bytes, size_t len) {
     }
     memcpy(copy, bytes, len);
     kiln_string *s = ((kiln_string *)copy) - 1;
-    s->length = len;
-    s->byte_len = len;
-    s->bytes = copy;
+    s->unit_len = (uint32_t)len;
+    s->flags = KILN_STRING_LATIN1;
+    s->data = copy;
     return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, s);
 }
 
+static kiln_value kiln_c99_copy_ascii(const char *text, size_t len);
 static kiln_value kiln_c99_copy_text(const char *text, size_t len) {
+    kiln_string *decoded;
     if (len == 0 || text == NULL) {
-        return kiln_c99_value(KILN_VALUE_STRING, 0, kiln_c99_empty_chars, 0);
+        return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)&kiln_c99_empty_string, 0);
     }
-    char *copy = kiln_c99_gc_alloc_text(len);
-    if (copy == NULL) {
+    if (kiln_c99_ascii_scan(text, len)) return kiln_c99_copy_ascii(text, len);
+    decoded = kiln_c99_string_from_utf8(text, len);
+    if (decoded == NULL) {
         return kiln_c99_undefined();
     }
-    memcpy(copy, text, len);
-    kiln_string *s = ((kiln_string *)copy) - 1;
-    int is_ascii = kiln_c99_ascii_scan(copy, len);
-    s->length = is_ascii ? len : kiln_c99_utf8_to_utf16_len(copy, len);
-    s->byte_len = len;
-    s->bytes = copy;
-    kiln_value result = kiln_c99_value(KILN_VALUE_STRING, 0, copy, len);
+    kiln_value result = kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)decoded, decoded->unit_len);
     result.flags = KILN_VALUE_FLAG_OWNED_STRING;
     return result;
+}
+
+/* Callers handling protocol bytes or already-decoded Latin1 use this explicitly.  Keeping it
+ * separate prevents arbitrary UTF-8 input from being mislabeled as one-byte JavaScript units. */
+static kiln_value kiln_c99_copy_ascii(const char *text, size_t len) {
+    kiln_string *s;
+    char *copy;
+    if (len == 0 || text == NULL)
+        return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)&kiln_c99_empty_string, 0);
+    copy = kiln_c99_gc_alloc_text(len);
+    if (copy == NULL) return kiln_c99_undefined();
+    memcpy(copy, text, len);
+    s = ((kiln_string *)copy) - 1;
+    return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)s, s->unit_len);
 }
 
 static kiln_value kiln_c99_control_diagnostic(void) {
@@ -481,6 +557,65 @@ oom:
     return kiln_c99_undefined();
 }
 
+static int kiln_c99_string_to_utf8_lossy(kiln_value value, uint8_t **out, size_t *out_len) {
+    const kiln_string *string;
+    size_t capacity;
+    size_t written = 0;
+    size_t index;
+    uint8_t *bytes;
+    if (out == NULL || out_len == NULL || value.tag != KILN_VALUE_STRING || value.ptr == NULL) {
+        return KILN_C99_INVALID_ARGUMENT;
+    }
+    string = (const kiln_string *)value.ptr;
+    if (string->unit_len > (SIZE_MAX - 4) / 3) return KILN_C99_OUT_OF_MEMORY;
+    capacity = (size_t)string->unit_len * 3 + 4;
+    bytes = capacity == 0 ? NULL : (uint8_t *)malloc(capacity);
+    if (capacity != 0 && bytes == NULL) return KILN_C99_OUT_OF_MEMORY;
+    for (index = 0; index < string->unit_len; ++index) {
+        uint32_t unit = kiln_string_unit_at(string, index);
+        uint32_t codepoint = unit;
+        if (kiln_string_is_utf16(string) && unit >= 0xD800 && unit <= 0xDBFF &&
+            index + 1 < string->unit_len) {
+            uint32_t next = kiln_string_unit_at(string, index + 1);
+            if (next >= 0xDC00 && next <= 0xDFFF) {
+                codepoint = 0x10000u + ((unit - 0xD800u) << 10) + (next - 0xDC00u);
+                index += 1;
+            }
+        }
+        if (codepoint >= 0xD800 && codepoint <= 0xDFFF) codepoint = 0xFFFD;
+        if (codepoint < 0x80) {
+            bytes[written++] = (uint8_t)codepoint;
+        } else if (codepoint < 0x800) {
+            bytes[written++] = (uint8_t)(0xC0 | (codepoint >> 6));
+            bytes[written++] = (uint8_t)(0x80 | (codepoint & 0x3F));
+        } else if (codepoint < 0x10000) {
+            bytes[written++] = (uint8_t)(0xE0 | (codepoint >> 12));
+            bytes[written++] = (uint8_t)(0x80 | ((codepoint >> 6) & 0x3F));
+            bytes[written++] = (uint8_t)(0x80 | (codepoint & 0x3F));
+        } else {
+            bytes[written++] = (uint8_t)(0xF0 | (codepoint >> 18));
+            bytes[written++] = (uint8_t)(0x80 | ((codepoint >> 12) & 0x3F));
+            bytes[written++] = (uint8_t)(0x80 | ((codepoint >> 6) & 0x3F));
+            bytes[written++] = (uint8_t)(0x80 | (codepoint & 0x3F));
+        }
+    }
+    *out = bytes;
+    *out_len = written;
+    return KILN_C99_OK;
+}
+
+/* Text builders store UTF-8 bytes until their final escape into the canonical unit string. Keep
+ * this conversion explicit at the few host-facing builders that combine a value with literal
+ * bytes; treating the canonical header as a byte span would serialize its metadata. */
+static int kiln_c99_text_append_string(kiln_text *text, kiln_value value) {
+    uint8_t *owned = NULL;
+    size_t length = 0;
+    int status = kiln_c99_string_to_utf8_lossy(value, &owned, &length);
+    if (status == KILN_C99_OK) status = kiln_c99_text_append(text, (const char *)owned, length);
+    free(owned);
+    return status;
+}
+
 static kiln_value kiln_c99_text(kiln_value value) {
     static const char undefined_text[] = "undefined";
     static const char null_text[] = "null";
@@ -492,14 +627,14 @@ static kiln_value kiln_c99_text(kiln_value value) {
     value = kiln_c99_proxy_inner(value);
     switch (value.tag) {
     case KILN_VALUE_UNDEFINED:
-        return kiln_c99_value(KILN_VALUE_STRING, 0, undefined_text, sizeof(undefined_text) - 1);
+        return kiln_c99_static_text(undefined_text, sizeof(undefined_text) - 1);
     case KILN_VALUE_NULL:
-        return kiln_c99_value(KILN_VALUE_STRING, 0, null_text, sizeof(null_text) - 1);
+        return kiln_c99_static_text(null_text, sizeof(null_text) - 1);
     case KILN_VALUE_BOOLEAN:
         if (value.bits) {
-            return kiln_c99_value(KILN_VALUE_STRING, 0, true_text, sizeof(true_text) - 1);
+            return kiln_c99_static_text(true_text, sizeof(true_text) - 1);
         }
-        return kiln_c99_value(KILN_VALUE_STRING, 0, false_text, sizeof(false_text) - 1);
+        return kiln_c99_static_text(false_text, sizeof(false_text) - 1);
     case KILN_VALUE_STRING:
         return value;
     case KILN_VALUE_NUMBER: {
@@ -522,7 +657,7 @@ static kiln_value kiln_c99_text(kiln_value value) {
             shown.tag == KILN_VALUE_STRING) {
             return shown;
         }
-        return kiln_c99_value(KILN_VALUE_STRING, 0, object_text, sizeof(object_text) - 1);
+        return kiln_c99_static_text(object_text, sizeof(object_text) - 1);
     }
     case KILN_VALUE_DATE: {
         /* `String(date)` is the human form, not the ISO one: the hint is a string and
@@ -551,11 +686,16 @@ static kiln_value kiln_c99_text(kiln_value value) {
             }
             {
                 kiln_value shown = kiln_c99_text(kiln_val_to_boundary(element));
+                uint8_t *encoded = NULL;
+                size_t encoded_len = 0;
                 if (shown.tag != KILN_VALUE_STRING ||
-                    kiln_c99_text_append(&joined, shown.ptr, shown.len) != KILN_C99_OK) {
+                    kiln_c99_string_to_utf8_lossy(shown, &encoded, &encoded_len) != KILN_C99_OK ||
+                    kiln_c99_text_append(&joined, (const char *)encoded, encoded_len) != KILN_C99_OK) {
+                    free(encoded);
                     free(joined.bytes);
                     return kiln_c99_undefined();
                 }
+                free(encoded);
             }
         }
         return kiln_c99_text_value(&joined);
@@ -577,7 +717,8 @@ static kiln_value kiln_c99_text(kiln_value value) {
             }
             shown = kiln_c99_text(kiln_c99_number(kiln_c99_typed_get(view, index)));
             if (shown.tag != KILN_VALUE_STRING ||
-                kiln_c99_text_append(&joined, shown.ptr, shown.len) != KILN_C99_OK) {
+                kiln_c99_text_append(&joined, (const char *)kiln_string_latin1((const kiln_string *)shown.ptr),
+                                     ((const kiln_string *)shown.ptr)->unit_len) != KILN_C99_OK) {
                 free(joined.bytes);
                 return kiln_c99_undefined();
             }
@@ -609,7 +750,9 @@ static kiln_value kiln_c99_text(kiln_value value) {
         kiln_symbol *symbol = kiln_c99_symbol_of(value);
         kiln_text built = {NULL, 0, 0};
         if (kiln_c99_text_append_c(&built, "Symbol(") != KILN_C99_OK ||
-            kiln_c99_text_append(&built, symbol->description, symbol->description_len) !=
+            (symbol->description_value.tag == KILN_VALUE_STRING
+                 ? kiln_c99_text_append_string(&built, symbol->description_value)
+                 : kiln_c99_text_append(&built, symbol->description, symbol->description_len)) !=
                 KILN_C99_OK ||
             kiln_c99_text_append_c(&built, ")") != KILN_C99_OK) {
             free(built.bytes);
@@ -653,6 +796,9 @@ static kiln_value kiln_c99_text(kiln_value value) {
          * pointer into the unit's static source.  The interpreter slices the same span out of
          * the same text, so the two engines answer with identical bytes. */
         kiln_closure *closure = kiln_c99_closure_of(value);
+        if (closure->source_value.tag == KILN_VALUE_STRING) {
+            return closure->source_value;
+        }
         if (closure->source == NULL) {
             /* A closure the runtime built for itself has no text.  It is a built-in in every
              * sense that matters here, so it answers as one. */
@@ -712,36 +858,36 @@ static kiln_value kiln_c99_text(kiln_value value) {
 static kiln_value kiln_c99_concat(kiln_value left, kiln_value right) {
     kiln_value l = kiln_c99_text(left);
     kiln_value r = kiln_c99_text(right);
-    char *copy;
-    int ascii;
-    if ((l.len != 0 && l.ptr == NULL) || (r.len != 0 && r.ptr == NULL) ||
-        l.len > (size_t)-1 - r.len) {
+    const kiln_string *ls = l.ptr == NULL ? NULL : (const kiln_string *)l.ptr;
+    const kiln_string *rs = r.ptr == NULL ? NULL : (const kiln_string *)r.ptr;
+    size_t total;
+    uint32_t flags;
+    kiln_string *joined;
+    if (ls == NULL || rs == NULL || ls->unit_len > SIZE_MAX - rs->unit_len) {
         return kiln_c99_undefined();
     }
-    /* ASCII is closed under concatenation. Knowing both halves before the copy means the new
-     * block can be marked known-ASCII on the way out instead of leaving it to be rescanned the
-     * first time anything asks its length or slices it -- the common case for `"x" + suffix`
-     * request-path assembly (ADR 0041's header is where the answer is cached). */
-    ascii = kiln_c99_string_is_ascii(l) && kiln_c99_string_is_ascii(r);
-    copy = kiln_c99_gc_alloc_text(l.len + r.len);
-    if (copy == NULL) {
+    total = (size_t)ls->unit_len + (size_t)rs->unit_len;
+    if (total > UINT32_MAX) return kiln_c99_undefined();
+    flags = kiln_string_is_utf16(ls) || kiln_string_is_utf16(rs) ? KILN_STRING_UTF16 : KILN_STRING_LATIN1;
+    joined = kiln_c99_gc_alloc_units(total, flags);
+    if (joined == NULL) {
         return kiln_c99_undefined();
     }
-    if (l.len != 0) {
-        memcpy(copy, l.ptr, l.len);
-    }
-    if (r.len != 0) {
-        memcpy(copy + l.len, r.ptr, r.len);
-    }
-    if (ascii) {
-        kiln_gc_heap *heap = kiln_c99_gc_heap();
-        kiln_gc_block *block = heap != NULL ? kiln_c99_gc_lookup(heap, copy) : NULL;
-        if (block != NULL) {
-            block->kind = (block->kind & KILN_GC_KIND_MASK) | KILN_GC_FLAG_ASCII_KNOWN |
-                          KILN_GC_FLAG_ASCII;
+    if (flags == KILN_STRING_UTF16) {
+        uint16_t *units = (uint16_t *)(uintptr_t)joined->data;
+        if (kiln_string_is_utf16(ls) && kiln_string_is_utf16(rs)) {
+            memcpy(units, ls->data, ls->unit_len * sizeof(uint16_t));
+            memcpy(units + ls->unit_len, rs->data, rs->unit_len * sizeof(uint16_t));
+        } else {
+            for (size_t index = 0; index < ls->unit_len; ++index) units[index] = kiln_string_unit_at(ls, index);
+            for (size_t index = 0; index < rs->unit_len; ++index) units[ls->unit_len + index] = kiln_string_unit_at(rs, index);
         }
+    } else {
+        uint8_t *bytes = (uint8_t *)(uintptr_t)joined->data;
+        memcpy(bytes, ls->data, ls->unit_len);
+        memcpy(bytes + ls->unit_len, rs->data, rs->unit_len);
     }
-    return kiln_c99_value(KILN_VALUE_STRING, 0, copy, l.len + r.len);
+    return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)joined, total);
 }
 
 static int kiln_c99_strict_equal(kiln_value left, kiln_value right) {
@@ -760,9 +906,9 @@ static int kiln_c99_strict_equal(kiln_value left, kiln_value right) {
                                    (const void *)(uintptr_t)right.bits) == 0;
     }
     if (left.tag == KILN_VALUE_STRING) {
-        return left.len == right.len &&
-               (left.len == 0 || (left.ptr != NULL && right.ptr != NULL &&
-                                  memcmp(left.ptr, right.ptr, left.len) == 0));
+        const kiln_string *l = left.ptr == NULL ? NULL : (const kiln_string *)left.ptr;
+        const kiln_string *r = right.ptr == NULL ? NULL : (const kiln_string *)right.ptr;
+        return l != NULL && r != NULL && kiln_string_equal(l, r);
     }
     if (left.tag == KILN_VALUE_SYMBOL) {
         /* A registry symbol is identified by its id, not by the object that carries it: two
@@ -893,7 +1039,7 @@ static uint32_t kiln_c99_utf8_next(const char *text, size_t length, size_t *offs
 }
 
 typedef struct kiln_c99_utf16_iter {
-    const char *text;
+    const void *text;
     size_t length;
     size_t offset;
     uint16_t pending;
@@ -901,7 +1047,7 @@ typedef struct kiln_c99_utf16_iter {
 } kiln_c99_utf16_iter;
 
 static int kiln_c99_utf16_next(kiln_c99_utf16_iter *iterator, uint16_t *unit) {
-    uint32_t codepoint;
+    const kiln_string *string;
     if (iterator->has_pending) {
         iterator->has_pending = 0;
         *unit = iterator->pending;
@@ -910,15 +1056,8 @@ static int kiln_c99_utf16_next(kiln_c99_utf16_iter *iterator, uint16_t *unit) {
     if (iterator->offset >= iterator->length || iterator->text == NULL) {
         return 0;
     }
-    codepoint = kiln_c99_utf8_next(iterator->text, iterator->length, &iterator->offset);
-    if (codepoint > UINT32_C(0xFFFF)) {
-        codepoint -= UINT32_C(0x10000);
-        *unit = (uint16_t)(UINT32_C(0xD800) | (codepoint >> 10));
-        iterator->pending = (uint16_t)(UINT32_C(0xDC00) | (codepoint & UINT32_C(0x3FF)));
-        iterator->has_pending = 1;
-    } else {
-        *unit = (uint16_t)codepoint;
-    }
+    string = (const kiln_string *)iterator->text;
+    *unit = kiln_string_unit_at(string, iterator->offset++);
     return 1;
 }
 
@@ -926,44 +1065,18 @@ static int kiln_c99_utf16_next(kiln_c99_utf16_iter *iterator, uint16_t *unit) {
  * ASCII metadata is authoritative for the direct-byte case; every other string follows the
  * same iterator used by length, slicing, and the bulk string operations. */
 static int kiln_c99_utf16_unit_at(kiln_value value, size_t index, uint16_t *unit) {
-    kiln_c99_utf16_iter iterator;
-    size_t current = 0;
+    const kiln_string *string;
     if (unit == NULL) return 0;
-    if (kiln_c99_string_is_ascii(value)) {
-        if (index >= value.len || value.ptr == NULL) return 0;
-        *unit = (uint16_t)(unsigned char)value.ptr[index];
-        return 1;
-    }
-    iterator.text = value.ptr;
-    iterator.length = value.len;
-    iterator.offset = 0;
-    iterator.pending = 0;
-    iterator.has_pending = 0;
-    while (kiln_c99_utf16_next(&iterator, unit)) {
-        if (current == index) return 1;
-        current += 1;
-    }
-    return 0;
+    if (value.ptr == NULL) return 0;
+    string = (const kiln_string *)value.ptr;
+    if (index >= string->unit_len) return 0;
+    *unit = kiln_string_unit_at(string, index);
+    return 1;
 }
 
 /* `length` in UTF-16 code units, which is what JavaScript counts and is neither bytes nor
  * characters. For ASCII text a code unit is a byte (ADR 0022), so `value.len` -- already known,
  * already paid for -- is the answer without walking a single byte. */
 static size_t kiln_c99_string_length(kiln_value value) {
-    kiln_c99_utf16_iter iterator;
-    size_t units;
-    uint16_t unit;
-    if (kiln_c99_string_is_ascii(value)) {
-        return value.len;
-    }
-    iterator.text = value.ptr;
-    iterator.length = value.len;
-    iterator.offset = 0;
-    iterator.pending = 0;
-    iterator.has_pending = 0;
-    units = 0;
-    while (kiln_c99_utf16_next(&iterator, &unit)) {
-        units += 1;
-    }
-    return units;
+    return value.ptr == NULL ? 0 : ((const kiln_string *)value.ptr)->unit_len;
 }

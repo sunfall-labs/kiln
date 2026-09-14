@@ -96,9 +96,11 @@ static int kiln_c99_new_text_decoder(kiln_value *out, const kiln_value *args, si
         kiln_value s = kiln_c99_text(args[0]);
         if (s.tag == KILN_VALUE_STRING && s.ptr != NULL) {
             int ok = 0;
-            if (s.len == 5 && kiln_c99_ascii_iequals(s.ptr, "utf-8", 5)) ok = 1;
-            else if (s.len == 4 && kiln_c99_ascii_iequals(s.ptr, "utf8", 4)) ok = 1;
-            else if (s.len == 16 && kiln_c99_ascii_iequals(s.ptr, "unicode-1-1-utf-8", 16)) ok = 1;
+            size_t s_len = 0;
+            const char *s_bytes = kiln_c99_string_ascii_bytes(s, &s_len);
+            if (s_bytes != NULL && s_len == 5 && kiln_c99_ascii_iequals(s_bytes, "utf-8", 5)) ok = 1;
+            else if (s_bytes != NULL && s_len == 4 && kiln_c99_ascii_iequals(s_bytes, "utf8", 4)) ok = 1;
+            else if (s_bytes != NULL && s_len == 16 && kiln_c99_ascii_iequals(s_bytes, "unicode-1-1-utf-8", 16)) ok = 1;
             if (!ok) {
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
                                             "The encoding label provided is invalid");

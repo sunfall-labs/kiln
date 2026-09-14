@@ -4301,6 +4301,7 @@ mod dead_phi_tests {
         // while block 8 is both the ordinary done path and the delegate-completion path. Both
         // targets must have complete phis before C emission is allowed to run.
         let proto = FunctionProto {
+        inferred_name: None,
             span: Span::default(),
             prologue_end: 0,
             asynchronous: false,

@@ -9,13 +9,16 @@
 use std::sync::OnceLock;
 
 /// Version of the generated native runtime source and its C ABI.
-pub const NATIVE_RUNTIME_VERSION: u32 = 11;
+pub const NATIVE_RUNTIME_VERSION: u32 = 12;
 
 /// Environment variable that enables private scalar-result sidecar emission by the CLI launcher.
 pub const NATIVE_RESULT_PATH_ENV: &str = "KILN_NATIVE_RESULT_PATH_V1";
 
 /// Magic prefix for the private scalar-result sidecar format.
-pub const NATIVE_RESULT_MAGIC: [u8; 8] = *b"KILNRES1";
+///
+/// Version 2 writes every string as little-endian UTF-16 code units.  Keep the version in the
+/// magic so an old reader cannot silently interpret an even-length UTF-8 payload as UTF-16.
+pub const NATIVE_RESULT_MAGIC: [u8; 8] = *b"KILNRES2";
 
 const NATIVE_RESULT_HEADER_LEN: usize = NATIVE_RESULT_MAGIC.len() + 1 + 8;
 
@@ -67,7 +70,7 @@ impl std::fmt::Display for NativeResultError {
 
 impl std::error::Error for NativeResultError {}
 
-/// Decode one complete `KILNRES1` sidecar record into the shared host scalar type.
+/// Decode one complete `KILNRES2` sidecar record into the shared host scalar type.
 pub fn decode_native_result(bytes: &[u8]) -> Result<kiln_host_abi::HostValue, NativeResultError> {
     if bytes.len() < NATIVE_RESULT_HEADER_LEN {
         return Err(NativeResultError::Truncated {
@@ -255,6 +258,37 @@ static inline uint16_t kiln_string_unit_at(const kiln_string *string, size_t ind
     return kiln_string_is_utf16(string) ? kiln_string_utf16(string)[index]
                                         : kiln_string_latin1(string)[index];
 }
+static inline int kiln_string_equal(const kiln_string *left, const kiln_string *right) {
+    if (left == NULL || right == NULL || left->unit_len != right->unit_len) return 0;
+    if (left->flags == right->flags && left->unit_len != 0)
+        return memcmp(left->data, right->data,
+                      (size_t)left->unit_len * (kiln_string_is_utf16(left) ? sizeof(uint16_t) : sizeof(uint8_t))) == 0;
+    for (size_t index = 0; index < left->unit_len; ++index)
+        if (kiln_string_unit_at(left, index) != kiln_string_unit_at(right, index)) return 0;
+    return 1;
+}
+static inline int kiln_string_compare_units(const kiln_string *left, const kiln_string *right) {
+    size_t index;
+    size_t common;
+    if (left == NULL || right == NULL) return left == right ? 0 : (left == NULL ? -1 : 1);
+    common = left->unit_len < right->unit_len ? left->unit_len : right->unit_len;
+    for (index = 0; index < common; ++index) {
+        uint16_t a = kiln_string_unit_at(left, index);
+        uint16_t b = kiln_string_unit_at(right, index);
+        if (a != b) return a < b ? -1 : 1;
+    }
+    return left->unit_len == right->unit_len ? 0 : (left->unit_len < right->unit_len ? -1 : 1);
+}
+static inline size_t kiln_string_unit_width(const kiln_string *string) {
+    return kiln_string_is_utf16(string) ? sizeof(uint16_t) : sizeof(uint8_t);
+}
+static inline int kiln_string_storage_size(uint32_t unit_len, uint32_t flags, size_t *out) {
+    size_t width = (flags & KILN_STRING_UTF16) != 0 ? sizeof(uint16_t) : sizeof(uint8_t);
+    size_t units = (size_t)unit_len;
+    if (units > (SIZE_MAX - sizeof(kiln_string)) / width) return 0;
+    *out = sizeof(kiln_string) + units * width;
+    return 1;
+}
 "#
     };
 }
@@ -401,8 +435,9 @@ const EMBEDDING_HEADER: &str = concat!(
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
-#define KILN_NATIVE_RUNTIME_VERSION 11
+#define KILN_NATIVE_RUNTIME_VERSION 12
 #define KILN_C_ABI_VERSION 1
 #define KILN_HOST_ABI_VERSION 4
 #define KILN_MODULE_API_VERSION 2
@@ -434,7 +469,7 @@ enum kiln_value_tag {
 
 /* This layout is the complete boundary value.  `bits` and `ptr` share one word because a value
  * is a payload or a pointer and never both: `bits` stores booleans and IEEE-754 numbers, `ptr`
- * with `len` stores UTF-8 string bytes and is not required to be NUL terminated.
+ * points at a canonical kiln_string header and `len` mirrors its UTF-16 code-unit count.
  *
  * Sixteen bytes is a threshold rather than a size. AAPCS64 passes a composite of sixteen bytes or
  * fewer in registers and anything larger indirectly, by reference to a copy -- so at the previous
@@ -573,10 +608,47 @@ static int kiln_cli_write_result_u64(FILE *file, uint64_t value) {
         : KILN_C99_HOST_ERROR;
 }
 
-/* Private KILNRES1 scalar-result writer. The explicit-path form is used by focused C tests;
+static int kiln_cli_validate_result_string(const kiln_string *string, int *utf16) {
+    if (string == NULL || utf16 == NULL) return KILN_C99_INVALID_ARGUMENT;
+    /* Only the two canonical encodings are valid at this boundary.  In particular, do not
+     * treat an unknown flag as UTF-16 before checking it: that would dereference a wrongly
+     * typed payload while trying to serialize a malformed value. */
+    if (string->flags != KILN_STRING_LATIN1 && string->flags != KILN_STRING_UTF16) {
+        return KILN_C99_INVALID_ARGUMENT;
+    }
+    if (string->unit_len != 0 && string->data == NULL) return KILN_C99_INVALID_ARGUMENT;
+    *utf16 = string->flags == KILN_STRING_UTF16;
+    return KILN_C99_OK;
+}
+
+static int kiln_cli_write_result_string(FILE *file, const kiln_string *string) {
+    unsigned char bytes[4096];
+    size_t at = 0;
+    int utf16;
+    if (kiln_cli_validate_result_string(string, &utf16) != KILN_C99_OK) {
+        return KILN_C99_INVALID_ARGUMENT;
+    }
+    while (at < string->unit_len) {
+        size_t count = string->unit_len - at;
+        size_t index;
+        if (count > sizeof(bytes) / 2) count = sizeof(bytes) / 2;
+        for (index = 0; index < count; ++index) {
+            uint16_t unit = utf16
+                                ? ((const uint16_t *)string->data)[at + index]
+                                : ((const uint8_t *)string->data)[at + index];
+            bytes[index * 2] = (unsigned char)(unit & 0xffu);
+            bytes[index * 2 + 1] = (unsigned char)((unit >> 8) & 0xffu);
+        }
+        if (fwrite(bytes, 1, count * 2, file) != count * 2) return KILN_C99_HOST_ERROR;
+        at += count;
+    }
+    return KILN_C99_OK;
+}
+
+/* Private KILNRES2 scalar-result writer. The explicit-path form is used by focused C tests;
  * the environment wrapper below is the only launcher-facing entry point. */
 int kiln_cli_write_result_file(const char *path, kiln_value value) {
-    static const unsigned char magic[] = {'K', 'I', 'L', 'N', 'R', 'E', 'S', '1'};
+    static const unsigned char magic[] = {'K', 'I', 'L', 'N', 'R', 'E', 'S', '2'};
     FILE *file;
     uint8_t tag;
     uint64_t length;
@@ -605,20 +677,19 @@ int kiln_cli_write_result_file(const char *path, kiln_value value) {
         length = 8;
         break;
     case KILN_VALUE_STRING:
-        if (value.len != 0 && value.ptr == NULL) {
+        if (value.ptr == NULL) {
             return KILN_C99_INVALID_ARGUMENT;
         }
-#if SIZE_MAX > UINT64_MAX
-        /* `length` is a uint64_t on the wire. Where `size_t` cannot exceed it -- which is every
-         * target this ships to -- the check is a tautology, and gcc says so under `-Wtype-limits`,
-         * which `-Werror` here turns into a build failure. Kept behind the condition that makes it
-         * meaningful rather than deleted, so a 128-bit `size_t` still gets the refusal. */
-        if ((uintmax_t)value.len > UINT64_MAX) {
-            return KILN_C99_INVALID_ARGUMENT;
+        {
+            const kiln_string *string = (const kiln_string *)value.ptr;
+            int utf16;
+            if (kiln_cli_validate_result_string(string, &utf16) != KILN_C99_OK) {
+                return KILN_C99_INVALID_ARGUMENT;
+            }
+            (void)utf16;
+            length = (uint64_t)string->unit_len * 2;
         }
-#endif
         tag = (uint8_t)value.tag;
-        length = (uint64_t)value.len;
         break;
     default:
         return KILN_C99_INVALID_ARGUMENT;
@@ -638,9 +709,8 @@ int kiln_cli_write_result_file(const char *path, kiln_value value) {
         }
     } else if (value.tag == KILN_VALUE_NUMBER) {
         status = kiln_cli_write_result_u64(file, value.bits);
-    } else if (value.tag == KILN_VALUE_STRING && value.len != 0
-               && fwrite(value.ptr, 1, value.len, file) != value.len) {
-        status = KILN_C99_HOST_ERROR;
+    } else if (value.tag == KILN_VALUE_STRING) {
+        status = kiln_cli_write_result_string(file, (const kiln_string *)value.ptr);
     }
     if (fclose(file) != 0) {
         status = KILN_C99_HOST_ERROR;
@@ -1138,7 +1208,7 @@ mod tests {
 
     #[test]
     fn runtime_identity_tracks_native_launcher_changes() {
-        assert_eq!(NATIVE_RUNTIME_VERSION, 11);
+        assert_eq!(NATIVE_RUNTIME_VERSION, 12);
         assert!(embedding_header().contains(&format!(
             "#define KILN_NATIVE_RUNTIME_VERSION {NATIVE_RUNTIME_VERSION}"
         )));
@@ -1215,7 +1285,10 @@ mod tests {
 
         let mut invalid_utf8 =
             encode_native_result(&kiln_host_abi::HostValue::String("ok".to_owned().into()));
-        invalid_utf8[NATIVE_RESULT_HEADER_LEN] = 0xff;
+
+        invalid_utf8.truncate(invalid_utf8.len() - 1);
+        invalid_utf8[9..17].copy_from_slice(&3_u64.to_le_bytes());
+
         assert_eq!(
             decode_native_result(&invalid_utf8),
             Err(NativeResultError::InvalidStringPayload)
@@ -1837,8 +1910,9 @@ int main(int argc, char **argv) {
     /* This is the internal owned-string provenance bit.  The public result writer must
      * consume the ordinary ptr/len span without serializing that provenance. */
     value.flags = KILN_VALUE_FLAG_OWNED_STRING;
-    value.ptr = text;
-    value.len = sizeof(text);
+    static const kiln_string string = {3, KILN_STRING_LATIN1, text};
+    value.ptr = (const char *)&string;
+    value.len = string.unit_len;
     return kiln_cli_write_result_file(argv[5], value) == KILN_C99_OK ? 0 : 1;
 }
 "#;

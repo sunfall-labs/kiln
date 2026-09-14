@@ -826,7 +826,9 @@ static int kiln_c99_node_path(kiln_value *result, uint64_t code,
         kiln_value path = argc > 0 ? args[0] : kiln_c99_undefined();
         if (path.tag != KILN_VALUE_STRING)
             return kiln_c99_throw_not_a(thrown, path, "string path");
-        *result = kiln_c99_boolean(path.len > 0 && path.ptr[0] == '/');
+        size_t path_len = 0;
+        const char *path_bytes = kiln_c99_string_ascii_bytes(path, &path_len);
+        *result = kiln_c99_boolean(path_bytes != NULL && path_len > 0 && path_bytes[0] == '/');
         return KILN_C99_OK;
     }
     if (code == KILN_C99_METHOD_NODE_PATH_DIRNAME ||
@@ -840,13 +842,19 @@ static int kiln_c99_node_path(kiln_value *result, uint64_t code,
                                                                      : 2u;
         if (path.tag != KILN_VALUE_STRING)
             return kiln_c99_throw_not_a(thrown, path, "string path");
+        size_t path_len = 0;
+        const char *path_bytes = kiln_c99_string_ascii_bytes(path, &path_len);
+        if (path_bytes == NULL) return KILN_C99_OUT_OF_MEMORY;
         if (part == 1u && argc > 1 && args[1].tag == KILN_VALUE_STRING) {
-            suffix_ptr = (const uint8_t *)args[1].ptr;
-            suffix_len = (uint64_t)args[1].len;
+            size_t suffix_size = 0;
+            const char *suffix_bytes = kiln_c99_string_ascii_bytes(args[1], &suffix_size);
+            if (suffix_bytes == NULL) return KILN_C99_OUT_OF_MEMORY;
+            suffix_ptr = (const uint8_t *)suffix_bytes;
+            suffix_len = (uint64_t)suffix_size;
         }
         /* No decomposition is longer than the path it came from; the empty path answers ".". */
-        return kiln_c99_node_path_answer(part, (const uint8_t *)path.ptr, (uint64_t)path.len,
-                                         suffix_ptr, suffix_len, path.len + 1, result, thrown);
+        return kiln_c99_node_path_answer(part, (const uint8_t *)path_bytes, (uint64_t)path_len,
+                                         suffix_ptr, suffix_len, path_len + 1, result, thrown);
     }
     if (code == KILN_C99_METHOD_NODE_PATH_RELATIVE) {
         kiln_value from = argc > 0 ? args[0] : kiln_c99_undefined();
@@ -855,11 +863,16 @@ static int kiln_c99_node_path(kiln_value *result, uint64_t code,
             return kiln_c99_throw_not_a(thrown, from, "string path");
         if (to.tag != KILN_VALUE_STRING)
             return kiln_c99_throw_not_a(thrown, to, "string path");
+        size_t from_len = 0;
+        size_t to_len = 0;
+        const char *from_bytes = kiln_c99_string_ascii_bytes(from, &from_len);
+        const char *to_bytes = kiln_c99_string_ascii_bytes(to, &to_len);
+        if (from_bytes == NULL || to_bytes == NULL) return KILN_C99_OUT_OF_MEMORY;
         /* Unlike the decompositions this can outgrow both inputs: every component of `from` that
          * `to` does not share becomes "../", and a component can be a single byte. */
-        return kiln_c99_node_path_answer(KILN_C99_NODE_PATH_RELATIVE, (const uint8_t *)from.ptr,
-                                         (uint64_t)from.len, (const uint8_t *)to.ptr,
-                                         (uint64_t)to.len, from.len * 3 + to.len + 1, result,
+        return kiln_c99_node_path_answer(KILN_C99_NODE_PATH_RELATIVE, (const uint8_t *)from_bytes,
+                                         (uint64_t)from_len, (const uint8_t *)to_bytes,
+                                         (uint64_t)to_len, from_len * 3 + to_len + 1, result,
                                          thrown);
     }
     /* `join` concatenates every argument with a separator and normalizes the result -- the empty
@@ -873,9 +886,12 @@ static int kiln_c99_node_path(kiln_value *result, uint64_t code,
         if (args[index].tag != KILN_VALUE_STRING)
             return kiln_c99_throw_not_a(thrown, args[index], "string path");
         part = args[index];
+        size_t part_len = 0;
+        const char *part_bytes = kiln_c99_string_ascii_bytes(part, &part_len);
+        if (part_bytes == NULL) { status = KILN_C99_OUT_OF_MEMORY; goto done; }
         if (code == KILN_C99_METHOD_NODE_PATH_RESOLVE) {
-            if (part.len == 0) continue;
-            if (part.ptr[0] == '/') {
+            if (part_len == 0) continue;
+            if (part_bytes[0] == '/') {
                 joined.len = 0;
                 absolute = 1;
             }
@@ -884,7 +900,7 @@ static int kiln_c99_node_path(kiln_value *result, uint64_t code,
         } else if (index > 0) {
             status = kiln_c99_text_append_c(&joined, "/");
         }
-        if (status == KILN_C99_OK) status = kiln_c99_text_append(&joined, part.ptr, part.len);
+        if (status == KILN_C99_OK) status = kiln_c99_text_append(&joined, part_bytes, part_len);
         if (status != KILN_C99_OK) goto done;
     }
     if (absolute && (joined.len == 0 || joined.bytes[0] != '/')) {
@@ -964,6 +980,8 @@ static int kiln_c99_intl_segment_raw(kiln_value *out, const kiln_value *args, si
     size_t count = 0;
     size_t index;
     uint32_t granularity;
+    uint8_t *text_owned = NULL;
+    size_t text_len = 0;
     int status;
     kiln_value built;
     kiln_value text = argc > 0 ? args[0] : kiln_c99_undefined();
@@ -975,7 +993,10 @@ static int kiln_c99_intl_segment_raw(kiln_value *out, const kiln_value *args, si
         kiln_c99_as_number(kind) < 0.0 || kiln_c99_as_number(kind) > 2.0)
         return kiln_c99_throw_not_a(thrown, kind, "Intl segment granularity code");
     granularity = (uint32_t)kiln_c99_as_number(kind);
-    status = kiln_intl_segment((const uint8_t *)text.ptr, text.len, granularity, &records, &count);
+    status = kiln_c99_string_to_utf8_lossy(text, &text_owned, &text_len);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_intl_segment(text_owned, text_len, granularity, &records, &count);
+    free(text_owned);
     if (status != 0 || (count != 0 && records == NULL))
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_ERROR,
                                     "Intl segmentation provider failed");
@@ -1158,8 +1179,11 @@ static int kiln_c99_ffi_type(kiln_value value, int result, uint32_t *out,
     size_t len;
     if (value.tag != KILN_VALUE_STRING)
         return kiln_c99_throw_not_a(thrown, value, "node:ffi type string");
-    name = value.ptr;
-    len = value.len;
+    name = kiln_c99_string_ascii_bytes(value, &len);
+    if (name == NULL) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "node:ffi type must be ASCII");
+    }
 #define KILN_FFI_TYPE(text, code) \
     if (kiln_c99_same_name(name, len, text)) { *out = code; return KILN_C99_OK; }
     KILN_FFI_TYPE("void", KILN_C99_FFI_VOID)
@@ -1257,10 +1281,19 @@ static int kiln_c99_ffi_argument(kiln_value value, uint32_t kind, kiln_ffi_value
             int status = kiln_c99_ffi_u64(value, &bits, thrown);
             if (status != KILN_C99_OK) return status;
         } else if (value.tag == KILN_VALUE_STRING) {
-            char *copy = (char *)malloc(value.len + 1);
-            if (copy == NULL) return KILN_C99_OUT_OF_MEMORY;
-            memcpy(copy, value.ptr, value.len);
-            copy[value.len] = '\0';
+            uint8_t *encoded = NULL;
+            size_t encoded_len = 0;
+            int status = kiln_c99_string_to_utf8_lossy(value, &encoded, &encoded_len);
+            char *copy;
+            if (status != KILN_C99_OK) return status;
+            copy = (char *)malloc(encoded_len + 1);
+            if (copy == NULL) {
+                free(encoded);
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            memcpy(copy, encoded, encoded_len);
+            copy[encoded_len] = '\0';
+            free(encoded);
             *owned = copy;
             bits = (uint64_t)(uintptr_t)copy;
         } else if (value.tag == KILN_VALUE_ARRAY_BUFFER) {
@@ -1541,7 +1574,12 @@ call_done:
             return kiln_c99_throw_not_a(thrown, path, "node:ffi library path");
         if (definitions.tag != KILN_VALUE_OBJECT)
             return kiln_c99_throw_not_a(thrown, definitions, "node:ffi definitions object");
-        status = kiln_ffi_open((const uint8_t *)path.ptr, (uint64_t)path.len, &library);
+        uint8_t *path_bytes = NULL;
+        size_t path_len = 0;
+        status = kiln_c99_string_to_utf8_lossy(path, &path_bytes, &path_len);
+        if (status == KILN_C99_OK)
+            status = kiln_ffi_open(path_bytes, (uint64_t)path_len, &library);
+        free(path_bytes);
         if (status != KILN_C99_OK) return kiln_c99_ffi_raise(thrown);
         status = kiln_c99_new_object(&functions);
         if (status == KILN_C99_OK) status = kiln_c99_new_object(&library_object);
@@ -1556,15 +1594,19 @@ call_done:
             uint32_t result_type = 0;
             uint64_t function_handle = 0;
             kiln_ffi_function_meta *metadata;
+            uint8_t *key_bytes = NULL;
+            size_t key_len = 0;
             if (key.tag != KILN_VALUE_STRING) continue;
             status = kiln_c99_get(host, definitions, key.ptr, key.len, &definition, depth, thrown);
             if (status == KILN_C99_OK)
                 status = kiln_c99_ffi_signature(host, definition, &types, &type_count,
                                                  &result_type, depth, thrown);
             if (status == KILN_C99_OK)
-                status = kiln_ffi_prepare(library, (const uint8_t *)key.ptr, (uint64_t)key.len,
-                                          types, (uint64_t)type_count, result_type,
-                                          &function_handle);
+                status = kiln_c99_string_to_utf8_lossy(key, &key_bytes, &key_len);
+            if (status == KILN_C99_OK)
+                status = kiln_ffi_prepare(library, key_bytes, (uint64_t)key_len, types,
+                                          (uint64_t)type_count, result_type, &function_handle);
+            free(key_bytes);
             if (status != KILN_C99_OK) {
                 free(types);
                 if (status < 0 && (thrown == NULL || thrown->tag == KILN_VALUE_UNDEFINED))

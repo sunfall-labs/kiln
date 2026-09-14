@@ -276,8 +276,10 @@ static int kiln_c99_data_view_write_bits(kiln_host *host, uint64_t code, kiln_va
             /* A string that is not an integer literal is a SyntaxError rather than a NaN, which
              * is the answer `BigInt("x")` gives for the same reason: this type has no NaN to
              * become. `kiln_bigint_parse` trims, so " 12 " is twelve. */
-            if (value.len == 0 ||
-                kiln_bigint_parse((const unsigned char *)value.ptr, value.len, 10,
+            size_t value_len = 0;
+            const char *value_bytes = kiln_c99_string_ascii_bytes(value, &value_len);
+            if (value_bytes == NULL || value_len == 0 ||
+                kiln_bigint_parse((const unsigned char *)value_bytes, value_len, 10,
                                   &converted) != 0) {
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
                                             "Cannot convert this string to a BigInt");
@@ -2390,12 +2392,20 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         }
         case KILN_C99_METHOD_TEXT_ENCODER_ENCODE: {
             kiln_value text = argc > 0 ? kiln_c99_text(args[0]) : kiln_c99_from_units(NULL, 0);
+            uint8_t *encoded = NULL;
+            size_t encoded_len = 0;
             size_t byte;
-            status = kiln_c99_typed_alloc(result, KILN_TYPED_UINT8, text.len);
+            status = kiln_c99_string_to_utf8_lossy(text, &encoded, &encoded_len);
             if (status != KILN_C99_OK) return status;
-            for (byte = 0; byte < text.len; ++byte)
+            status = kiln_c99_typed_alloc(result, KILN_TYPED_UINT8, encoded_len);
+            if (status != KILN_C99_OK) {
+                free(encoded);
+                return status;
+            }
+            for (byte = 0; byte < encoded_len; ++byte)
                 kiln_c99_typed_set(kiln_c99_typed_array_of(*result), byte,
-                                   (double)(unsigned char)text.ptr[byte]);
+                                   (double)encoded[byte]);
+            free(encoded);
             return KILN_C99_OK;
         }
         case KILN_C99_METHOD_TEXT_DECODER_DECODE: {
@@ -2616,12 +2626,16 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
              * must not look like a path separator. */
             kiln_value subject = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
             kiln_text built = {NULL, 0, 0};
+            uint8_t *encoded = NULL;
+            size_t encoded_len = 0;
             size_t at;
             if (subject.tag != KILN_VALUE_STRING) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
-            for (at = 0; at < subject.len; ++at) {
-                char character = subject.ptr[at];
+            if (kiln_c99_string_to_utf8_lossy(subject, &encoded, &encoded_len) != KILN_C99_OK)
+                return KILN_C99_OUT_OF_MEMORY;
+            for (at = 0; at < encoded_len; ++at) {
+                char character = (char)encoded[at];
                 unsigned char byte = (unsigned char)character;
                 int unreserved =
                     byte < 128 &&
@@ -2646,39 +2660,47 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 }
                 if (!ok) {
                     free(built.bytes);
+                    free(encoded);
                     return KILN_C99_OUT_OF_MEMORY;
                 }
             }
             *result = kiln_c99_text_value(&built);
+            free(encoded);
             return KILN_C99_OK;
         }
         case KILN_C99_METHOD_DECODE_URI:
         case KILN_C99_METHOD_DECODE_URI_COMPONENT: {
             kiln_value subject = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
             kiln_text built = {NULL, 0, 0};
+            uint8_t *encoded = NULL;
+            size_t encoded_len = 0;
             size_t at = 0;
             if (subject.tag != KILN_VALUE_STRING) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
-            while (at < subject.len) {
+            if (kiln_c99_string_to_utf8_lossy(subject, &encoded, &encoded_len) != KILN_C99_OK)
+                return KILN_C99_OUT_OF_MEMORY;
+            while (at < encoded_len) {
                 int high;
                 int low;
                 char byte;
-                if (subject.ptr[at] != '%') {
-                    if (kiln_c99_text_append(&built, subject.ptr + at, 1) != KILN_C99_OK) {
+                if (encoded[at] != '%') {
+                    if (kiln_c99_text_append(&built, (const char *)encoded + at, 1) != KILN_C99_OK) {
                         free(built.bytes);
+                        free(encoded);
                         return KILN_C99_OUT_OF_MEMORY;
                     }
                     at += 1;
                     continue;
                 }
-                high = at + 2 < subject.len ? kiln_c99_hex_digit(subject.ptr[at + 1]) : -1;
-                low = at + 2 < subject.len ? kiln_c99_hex_digit(subject.ptr[at + 2]) : -1;
+                high = at + 2 < encoded_len ? kiln_c99_hex_digit((char)encoded[at + 1]) : -1;
+                low = at + 2 < encoded_len ? kiln_c99_hex_digit((char)encoded[at + 2]) : -1;
                 if (high < 0 || low < 0) {
                     /* A `%` not followed by two hex digits is malformed, not a literal percent.
                      * `URIError` rather than `TypeError`: that kind exists for exactly this, and
                      * it is what a program guarding `decodeURI` on user input catches. */
                     free(built.bytes);
+                    free(encoded);
                     return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_URI_ERROR,
                                                 "URI malformed");
                 }
@@ -2689,12 +2711,14 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     (byte == ';' || byte == '/' || byte == '?' || byte == ':' || byte == '@' ||
                      byte == '&' || byte == '=' || byte == '+' || byte == '$' || byte == ',' ||
                      byte == '#')) {
-                    if (kiln_c99_text_append(&built, subject.ptr + at, 3) != KILN_C99_OK) {
+                    if (kiln_c99_text_append(&built, (const char *)encoded + at, 3) != KILN_C99_OK) {
                         free(built.bytes);
+                        free(encoded);
                         return KILN_C99_OUT_OF_MEMORY;
                     }
                 } else if (kiln_c99_text_append(&built, &byte, 1) != KILN_C99_OK) {
                     free(built.bytes);
+                    free(encoded);
                     return KILN_C99_OUT_OF_MEMORY;
                 }
                 at += 3;
@@ -2702,9 +2726,11 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             if (!kiln_c99_valid_utf8(built.bytes, built.len)) {
                 /* The escapes named bytes that are not a string. */
                 free(built.bytes);
+                free(encoded);
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_URI_ERROR, "URI malformed");
             }
             *result = kiln_c99_text_value(&built);
+            free(encoded);
             return KILN_C99_OK;
         }
         case KILN_C99_METHOD_GLOBAL_IS_NAN:
@@ -2737,8 +2763,8 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             if (text.tag != KILN_VALUE_STRING) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
-            bytes = text.ptr;
-            len = text.len;
+            bytes = kiln_c99_string_ascii_bytes(text, &len);
+            if (bytes == NULL) return KILN_C99_OUT_OF_MEMORY;
             /* Both read as far as they can and stop, rather than rejecting a string with a tail:
              * `parseInt('12px')` is 12. That tolerance is the whole difference between these and
              * `Number(x)`, which rejects the same input. */
@@ -2965,7 +2991,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             uint16_t stack_units[512];
             int stack_used = 0;
             if (is_ascii && regexp->matcher_ascii != NULL) {
-                status = regexp->matcher_ascii((const uint8_t *)subject.ptr, subject.len, start,
+                status = regexp->matcher_ascii(kiln_string_latin1((const kiln_string *)subject.ptr), subject.len, start,
                                                ranges, ranges_capacity, &groups, &matched);
                 if (status == KILN_C99_OK && matched && groups > ranges_capacity / 2) {
                     ranges = (int64_t *)malloc(groups * 2 * sizeof(int64_t));
@@ -2973,7 +2999,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                         return KILN_C99_OUT_OF_MEMORY;
                     }
                     ranges_capacity = groups * 2;
-                    status = regexp->matcher_ascii((const uint8_t *)subject.ptr, subject.len, start,
+                    status = regexp->matcher_ascii(kiln_string_latin1((const kiln_string *)subject.ptr), subject.len, start,
                                                    ranges, ranges_capacity, &groups, &matched);
                 }
             } else {
@@ -2983,7 +3009,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     count = subject.len;
                     units = stack_units;
                     for (i = 0; i < count; ++i) {
-                        stack_units[i] = (uint16_t)(unsigned char)subject.ptr[i];
+                        stack_units[i] = kiln_string_unit_at((const kiln_string *)subject.ptr, i);
                     }
                 } else {
                     if (kiln_c99_to_units(subject, &units, &count) != KILN_C99_OK) {
@@ -3074,8 +3100,12 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                             if (from < 0) {
                                 val = kiln_c99_undefined();
                             } else if (is_ascii) {
-                                val = kiln_c99_copy_text(subject.ptr + (size_t)from,
-                                                         (size_t)(to - from));
+                                const kiln_string *subject_string = (const kiln_string *)subject.ptr;
+                                val = (to >= from && (size_t)to <= subject_string->unit_len)
+                                          ? kiln_c99_copy_ascii(
+                                                (const char *)kiln_string_latin1(subject_string) + from,
+                                                (size_t)(to - from))
+                                          : kiln_c99_undefined();
                             } else {
                                 val = kiln_c99_from_units(units + (size_t)from, (size_t)(to - from));
                             }
@@ -4473,8 +4503,12 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             /* Parsing accepts the ISO forms and rejects the rest, rather than guessing: a date
              * a program did not write is worse than no date at all. */
             kiln_value source = argc > 0 ? kiln_c99_text(args[0]) : kiln_c99_undefined();
-            *result = kiln_c99_number(source.tag == KILN_VALUE_STRING
-                                          ? kiln_c99_parse_date(source.ptr, source.len)
+            size_t source_len = 0;
+            const char *source_bytes = source.tag == KILN_VALUE_STRING
+                                           ? kiln_c99_string_ascii_bytes(source, &source_len)
+                                           : NULL;
+            *result = kiln_c99_number(source_bytes != NULL
+                                          ? kiln_c99_parse_date(source_bytes, source_len)
                                           : 0.0 / 0.0);
             return KILN_C99_OK;
         }
@@ -4926,7 +4960,12 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             if (source.tag != KILN_VALUE_STRING) {
                 KILN_C99_REFUSE("JSON.parse of a value with no string form");
             }
-            status = kiln_c99_json_document(source.ptr, source.len, &parsed);
+            uint8_t *source_bytes = NULL;
+            size_t source_len = 0;
+            status = kiln_c99_string_to_utf8_lossy(source, &source_bytes, &source_len);
+            if (status != KILN_C99_OK) return status;
+            status = kiln_c99_json_document((const char *)source_bytes, source_len, &parsed);
+            free(source_bytes);
             /* Malformed input is a `SyntaxError` the program catches, not a fault that stops it:
              * `try { JSON.parse(input) } catch {}` around text that came from outside is the most
              * ordinary code there is, and it was unwritable while this ended the process. Only the
@@ -5435,14 +5474,14 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                                        : kiln_val_to_boundary(segments->elements[at]);
                 kiln_value shown = kiln_c99_text(piece);
                 if (shown.tag != KILN_VALUE_STRING ||
-                    kiln_c99_text_append(&built, shown.ptr, shown.len) != KILN_C99_OK) {
+                    kiln_c99_text_append_string(&built, shown) != KILN_C99_OK) {
                     free(built.bytes);
                     return KILN_C99_OUT_OF_MEMORY;
                 }
                 if (at + 1 < segments->count && at + 1 < argc) {
                     kiln_value between = kiln_c99_text(args[at + 1]);
                     if (between.tag != KILN_VALUE_STRING ||
-                        kiln_c99_text_append(&built, between.ptr, between.len) != KILN_C99_OK) {
+                        kiln_c99_text_append_string(&built, between) != KILN_C99_OK) {
                         free(built.bytes);
                         return KILN_C99_OUT_OF_MEMORY;
                     }
@@ -5961,26 +6000,25 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             kiln_text joined = {NULL, 0, 0};
             kiln_value separator = argc > 0 ? args[0] : kiln_c99_undefined();
             kiln_value shown_separator;
-            const char *separator_bytes = ",";
-            size_t separator_len = 1;
+            int has_separator = 0;
             if (separator.tag != KILN_VALUE_UNDEFINED) {
                 shown_separator = kiln_c99_text(separator);
                 if (shown_separator.tag != KILN_VALUE_STRING) {
                     KILN_C99_REFUSE("Array.prototype.join given a separator with no text form");
                 }
-                separator_bytes = shown_separator.ptr;
-                separator_len = shown_separator.len;
+                has_separator = 1;
             }
             for (index = 0; index < view->length; ++index) {
                 kiln_value shown;
-                if (index != 0 && kiln_c99_text_append(&joined, separator_bytes, separator_len) !=
-                                      KILN_C99_OK) {
+                if (index != 0 &&
+                    (has_separator ? kiln_c99_text_append_string(&joined, shown_separator)
+                                   : kiln_c99_text_append(&joined, ",", 1)) != KILN_C99_OK) {
                     free(joined.bytes);
                     return KILN_C99_OUT_OF_MEMORY;
                 }
                 shown = kiln_c99_text(kiln_c99_number(kiln_c99_typed_get(view, index)));
                 if (shown.tag != KILN_VALUE_STRING ||
-                    kiln_c99_text_append(&joined, shown.ptr, shown.len) != KILN_C99_OK) {
+                    kiln_c99_text_append_string(&joined, shown) != KILN_C99_OK) {
                     free(joined.bytes);
                     return KILN_C99_OUT_OF_MEMORY;
                 }
@@ -6297,19 +6335,20 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
     case KILN_C99_METHOD_JOIN: {
         kiln_text joined = {NULL, 0, 0};
         kiln_value separator = argc > 0 ? args[0] : kiln_c99_undefined();
-        const char *bytes = ",";
-        size_t len = 1;
+        int has_separator = 0;
         if (separator.tag != KILN_VALUE_UNDEFINED) {
             kiln_value shown = kiln_c99_text(separator);
             if (shown.tag != KILN_VALUE_STRING) {
                 KILN_C99_REFUSE("join given a separator with no text form");
             }
-            bytes = shown.ptr;
-            len = shown.len;
+            separator = shown;
+            has_separator = 1;
         }
         for (index = 0; index < array->count; ++index) {
             kiln_val element = array->elements[index];
-            if (index != 0 && kiln_c99_text_append(&joined, bytes, len) != KILN_C99_OK) {
+            if (index != 0 &&
+                (has_separator ? kiln_c99_text_append_string(&joined, separator)
+                               : kiln_c99_text_append(&joined, ",", 1)) != KILN_C99_OK) {
                 free(joined.bytes);
                 return KILN_C99_OUT_OF_MEMORY;
             }
@@ -6321,8 +6360,17 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             }
             if (KILN_VAL_IS_STRING(element)) {
                 const kiln_string *s = (const kiln_string *)KILN_VAL_PTR(element);
-                if (s != NULL && s->byte_len > 0) {
-                    if (kiln_c99_text_append(&joined, s->bytes, s->byte_len) != KILN_C99_OK) {
+                if (s != NULL && s->unit_len > 0) {
+                    if (kiln_string_is_utf16(s)) {
+                        /* UTF-16 values are rendered through their scalar UTF-8 form at this
+                         * host-facing text builder boundary. */
+                        kiln_value shown = kiln_c99_text(kiln_val_to_boundary(element));
+                        if (shown.tag != KILN_VALUE_STRING ||
+                            kiln_c99_text_append_string(&joined, shown) != KILN_C99_OK) {
+                            free(joined.bytes);
+                            return KILN_C99_OUT_OF_MEMORY;
+                        }
+                    } else if (kiln_c99_text_append(&joined, (const char *)kiln_string_latin1(s), s->unit_len) != KILN_C99_OK) {
                         free(joined.bytes);
                         return KILN_C99_OUT_OF_MEMORY;
                     }
@@ -6332,7 +6380,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             {
                 kiln_value shown = kiln_c99_text(kiln_val_to_boundary(element));
                 if (shown.tag != KILN_VALUE_STRING ||
-                    kiln_c99_text_append(&joined, shown.ptr, shown.len) != KILN_C99_OK) {
+                    kiln_c99_text_append_string(&joined, shown) != KILN_C99_OK) {
                     free(joined.bytes);
                     return KILN_C99_OUT_OF_MEMORY;
                 }

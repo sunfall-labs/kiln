@@ -243,17 +243,13 @@ static inline kiln_val kiln_val_from_boundary(kiln_value v) {
         case KILN_VALUE_NULL:          return KILN_VAL_NULL;
         case KILN_VALUE_BOOLEAN:       return v.bits ? KILN_VAL_TRUE : KILN_VAL_FALSE;
         case KILN_VALUE_STRING: {
-            if ((v.flags & KILN_VALUE_FLAG_OWNED_STRING) != 0) {
-                const kiln_string *owned = (const kiln_string *)v.ptr - 1;
-                return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, owned);
-            }
             if (v.ptr == NULL || v.len == 0) {
                 return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_c99_empty_string);
             }
-            if (v.len == 1 && (unsigned char)v.ptr[0] < 128) {
-                return kiln_c99_val_single_char((unsigned char)v.ptr[0]);
-            }
-            return kiln_c99_val_from_text(v.ptr, v.len);
+            /* Boundary strings carry the canonical header pointer.  Reading a byte pointer here
+             * would silently reinterpret the first sixteen bytes of the header as text and is
+             * forbidden: there is no legacy recovery path. */
+            return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, v.ptr);
         }
         case KILN_VALUE_FUNCTION:      return KILN_VAL_TAG_PTR(KILN_TAG_CLOSURE_PREFIX, (const void *)(uintptr_t)v.bits);
         case KILN_VALUE_OBJECT:        return KILN_VAL_TAG_PTR(KILN_TAG_OBJECT_PREFIX, (const void *)(uintptr_t)v.bits);
@@ -312,9 +308,22 @@ static inline int kiln_c99_val_truthy(kiln_val v) {
     }
     if ((v & KILN_TAG_MASK) == KILN_TAG_STRING_PREFIX) {
         const kiln_string *s = (const kiln_string *)KILN_VAL_PTR(v);
-        return s != NULL && s->length > 0;
+        return s != NULL && s->unit_len > 0;
     }
     return 1;
+}
+
+/* Host-facing C routines that explicitly require UTF-8 may borrow bytes only from a Latin1
+ * string. UTF-16 callers must select an encoding operation instead of treating the header as a
+ * byte pointer. */
+static inline const char *kiln_c99_string_ascii_bytes(kiln_value value, size_t *length) {
+    const kiln_string *string;
+    if (length != NULL) *length = 0;
+    if (value.tag != KILN_VALUE_STRING || value.ptr == NULL) return NULL;
+    string = (const kiln_string *)value.ptr;
+    if (kiln_string_is_utf16(string)) return NULL;
+    if (length != NULL) *length = string->unit_len;
+    return (const char *)kiln_string_latin1(string);
 }
 
 /* =========================================================================
@@ -516,6 +525,9 @@ typedef struct kiln_closure {
      * allocation, or ambient current-module state. */
     const char *source;
     size_t source_len;
+    /* Runtime-created functions carry their source as a canonical string value. The legacy
+     * pointer/length pair remains for generated static source, whose bytes are UTF-8 literals. */
+    kiln_value source_value;
     /* Immutable module ownership for diagnostics. This is deliberately distinct from `source`:
      * the latter is the function's exact source slice, not the module identifier. */
     const char *diagnostic_source;
@@ -1301,6 +1313,10 @@ typedef struct kiln_symbol {
     size_t key_len;
     const char *description;
     size_t description_len;
+    /* Runtime descriptions are canonical strings so UTF-16 units, including lone surrogates,
+     * survive Symbol(description) and reflection. The byte pair remains only for immortal
+     * built-in symbols whose descriptions are compiled ASCII. */
+    kiln_value description_value;
     /* Non-zero only for a symbol from the cross-realm registry. It lived in the value's payload
      * word until that word was shared with the pointer; a registered symbol is the one value that
      * wanted both, and the id belongs with the symbol rather than beside it. */
@@ -1607,6 +1623,14 @@ typedef struct kiln_text {
 } kiln_text;
 
 static int kiln_c99_text_append_grow(kiln_text *text, const char *bytes, size_t len);
+
+/* Explicit host codec for APIs whose wire contract is UTF-8.  JavaScript strings can contain
+ * lone UTF-16 surrogates, which have no UTF-8 scalar representation; this operation uses the
+ * host's documented replacement semantics for those units and is deliberately named so callers
+ * cannot mistake it for a unit-preserving string operation.  The returned buffer is malloc'd and
+ * belongs to the caller. */
+static int kiln_c99_string_to_utf8_lossy(kiln_value value, uint8_t **out, size_t *out_len);
+static int kiln_c99_text_append_string(kiln_text *text, kiln_value value);
 
 /* Append `len` bytes. A piece that fits is copied here, with a byte loop for the short ones a
  * JSON writer appends by the thousand -- a quote, a comma, a key -- where a `memmove` call cost
