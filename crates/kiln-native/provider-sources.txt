@@ -1,4 +1,5 @@
 crates/kiln-native/provider-sources.txt
+Cargo.toml
 Cargo.lock
 crates/kiln-artifact-cache/Cargo.toml
 crates/kiln-artifact-cache/src/eviction.rs
@@ -45,6 +46,7 @@ crates/kiln-runtime/src/node_http_agent.rs
 crates/kiln-runtime/src/node_net.rs
 crates/kiln-runtime/src/node_stream.rs
 crates/kiln-runtime/src/scripted_transport.rs
+crates/kiln-runtime/src/worker_pool.rs
 crates/kiln-native-provider-contract/Cargo.toml
 crates/kiln-native-provider-contract/src/lib.rs
 crates/kiln-native-provider-contract/src/main.rs

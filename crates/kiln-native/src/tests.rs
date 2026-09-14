@@ -9807,7 +9807,14 @@ fn number_provider_variant_selection_is_conservative() {
             OxcFrontend,
         )
         .expect("selection graph");
-        NativeBuilder::graph_wants_http_provider(&graph)
+        let demand = kiln_liveness::executable_demand(
+            &graph,
+            &kiln_liveness::SelectionOptions::development(),
+        )
+        .expect("selection demand");
+        let members =
+            kiln_backend_c::facts::analyze_demanded_members(&graph, &demand.live, &demand.slots);
+        NativeBuilder::graph_wants_full_provider(&graph, &members)
     }
 
     assert!(
@@ -9883,6 +9890,23 @@ fn number_provider_variant_selection_is_conservative() {
         ),
         "a CommonJS require selects the full archive"
     );
+    assert!(
+        !selection(
+            "main.mjs",
+            &[("main.mjs", "console.log(JSON.parse('1'));\n")]
+        ),
+        "JSON is carried by the common archive"
+    );
+    for (source, capability) in [
+        ("console.log(typeof Temporal);\n", "Temporal"),
+        ("console.log(typeof Intl);\n", "Intl"),
+        ("console.log([1].parallelMap);\n", "parallelMap"),
+    ] {
+        assert!(
+            selection("main.mjs", &[("main.mjs", source)]),
+            "{capability} selects the full archive"
+        );
+    }
 }
 
 #[test]

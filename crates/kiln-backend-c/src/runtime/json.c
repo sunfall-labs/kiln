@@ -753,7 +753,8 @@ static int kiln_c99_json_define(kiln_value built, const char *ikey, kiln_val mem
             object->slots[slot] = member;
             return KILN_C99_OK;
         }
-        if (kiln_c99_shape_transition(object->shape, ikey, &next)) {
+        int is_double = KILN_VAL_IS_NUMBER(member);
+        if (kiln_c99_shape_transition(object->shape, ikey, is_double, &next)) {
             if ((size_t)next->slot_index >= object->slot_capacity) {
                 int grown = kiln_c99_grow_slots(object, (size_t)next->slot_index + 1);
                 if (grown != KILN_C99_OK) {

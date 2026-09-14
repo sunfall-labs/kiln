@@ -145,7 +145,8 @@ static int kiln_c99_define_named_fast(kiln_val target, kiln_val key, kiln_val va
         *status = KILN_C99_OK;
         return 1;
     }
-    if (kiln_c99_shape_transition(object->shape, ikey, &next)) {
+    int is_double = KILN_VAL_IS_NUMBER(value);
+    if (kiln_c99_shape_transition(object->shape, ikey, is_double, &next)) {
         if ((size_t)next->slot_index >= object->slot_capacity) {
             int grown = kiln_c99_grow_slots(object, (size_t)next->slot_index + 1);
             if (grown != KILN_C99_OK) {
@@ -423,13 +424,16 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
                         break;
                     }
                     dest->slots[slot] = sval;
-                } else if (kiln_c99_shape_transition(dest->shape, ikey, &next)) {
-                    int grown = kiln_c99_grow_slots(dest, (size_t)next->slot_index + 1);
-                    if (grown != KILN_C99_OK) return grown;
-                    dest->slots[next->slot_index] = sval;
-                    dest->shape = next;
                 } else {
-                    break;
+                    int is_double = KILN_VAL_IS_NUMBER(sval);
+                    if (kiln_c99_shape_transition(dest->shape, ikey, is_double, &next)) {
+                        int grown = kiln_c99_grow_slots(dest, (size_t)next->slot_index + 1);
+                        if (grown != KILN_C99_OK) return grown;
+                        dest->slots[next->slot_index] = sval;
+                        dest->shape = next;
+                    } else {
+                        break;
+                    }
                 }
             }
             if (plain && k == scount) {

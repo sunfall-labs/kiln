@@ -6165,6 +6165,192 @@ macro_rules! assert_root_provider_export {
 
 kiln_native_number_abi::provider_abi_registry!(assert_root_provider_export);
 
+// Keep every optional provider variant link-compatible with the one private ABI. Generated C is
+// deliberately program-independent in several places, so even a path removed by the linker can
+// leave an undefined reference that must resolve before section collection runs. These refusals
+// are the same scheme the Realm uses for an archive built without `realm-http`: capability
+// selection proves the path unreachable, while a selector bug fails closed instead of jumping
+// through a missing symbol.
+#[cfg(not(feature = "regexp"))]
+mod regexp_stubs {
+    use super::INVALID_ARGUMENT;
+    use core::ffi::c_void;
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_regexp_compile(
+        _pattern: *const u8,
+        _pattern_len: usize,
+        _flags: *const u8,
+        _flags_len: usize,
+        _out: *mut *mut c_void,
+    ) -> i32 {
+        INVALID_ARGUMENT
+    }
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_regexp_free(_handle: *mut c_void) {}
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_regexp_search(
+        _handle: *mut c_void,
+        _subject: *const u16,
+        _subject_len: usize,
+        _start: usize,
+        _ranges: *mut i64,
+        _capacity: usize,
+    ) -> i32 {
+        INVALID_ARGUMENT
+    }
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_regexp_group_count(_handle: *const c_void) -> usize {
+        0
+    }
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_regexp_group_name(
+        _handle: *const c_void,
+        _index: usize,
+        _buffer: *mut u8,
+        _capacity: usize,
+    ) -> i32 {
+        INVALID_ARGUMENT
+    }
+}
+
+#[cfg(not(feature = "bigint"))]
+mod bigint_stubs {
+    use super::INVALID_ARGUMENT;
+    use core::ffi::c_void;
+
+    macro_rules! invalid {
+        ($name:ident($($arg:ident: $ty:ty),*)) => {
+            #[unsafe(no_mangle)]
+            pub unsafe extern "C" fn $name($($arg: $ty),*) -> i32 {
+                $(let _ = $arg;)*
+                INVALID_ARGUMENT
+            }
+        };
+    }
+    invalid!(kiln_bigint_parse(text: *const u8, len: usize, radix: u32, out: *mut *mut c_void));
+    invalid!(kiln_bigint_from_double(value: f64, out: *mut *mut c_void));
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_bigint_free(_handle: *mut c_void) {}
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_bigint_to_double(_handle: *const c_void) -> f64 {
+        f64::NAN
+    }
+    invalid!(kiln_bigint_to_string(handle: *const c_void, radix: u32, buffer: *mut u8, capacity: usize));
+    invalid!(kiln_bigint_binary(operation: u32, left: *const c_void, right: *const c_void, out: *mut *mut c_void));
+    invalid!(kiln_bigint_negate(handle: *const c_void, out: *mut *mut c_void));
+    invalid!(kiln_bigint_compare(left: *const c_void, right: *const c_void));
+    invalid!(kiln_bigint_is_zero(handle: *const c_void));
+    invalid!(kiln_bigint_to_i128(handle: *const c_void, out_high: *mut i64, out_low: *mut u64));
+}
+
+#[cfg(not(feature = "temporal"))]
+mod temporal_stubs {
+    use super::INVALID_ARGUMENT;
+    use core::ffi::c_void;
+
+    macro_rules! invalid {
+        ($name:ident($($arg:ident: $ty:ty),*)) => {
+            #[unsafe(no_mangle)]
+            pub unsafe extern "C" fn $name($($arg: $ty),*) -> i32 {
+                $(let _ = $arg;)*
+                INVALID_ARGUMENT
+            }
+        };
+    }
+    invalid!(kiln_temporal_from_fields(kind: u32, numbers: *const f64, number_count: usize, texts: *const u8, text_offsets: *const i64, text_count: usize, option_texts: *const u8, option_offsets: *const i64, option_count: usize, out: *mut *mut c_void));
+    invalid!(kiln_temporal_construct(kind: u32, numbers: *const f64, number_count: usize, texts: *const u8, text_offsets: *const i64, text_count: usize, now_high: i64, now_low: u64, out: *mut *mut c_void));
+    invalid!(kiln_temporal_duration_from_fields(numbers: *const f64, count: usize, out: *mut *mut c_void));
+    invalid!(kiln_temporal_parse(kind: u32, bytes: *const u8, len: usize, option_texts: *const u8, option_offsets: *const i64, option_count: usize, out: *mut *mut c_void));
+    invalid!(kiln_temporal_now(kind: u32, high: i64, low: u64, zone: *const u8, zone_len: usize, out: *mut *mut c_void));
+    invalid!(kiln_temporal_instant_from_epoch_milliseconds(value: f64, out: *mut *mut c_void));
+    invalid!(kiln_temporal_instant_from_epoch_nanoseconds(high: i64, low: u64, out: *mut *mut c_void));
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_temporal_free(_handle: *mut c_void) {}
+    invalid!(kiln_temporal_kind(handle: *const c_void));
+    invalid!(kiln_temporal_get(handle: *const c_void, name: *const u8, name_len: usize, out_number: *mut f64, out_text: *mut u8, capacity: usize, out_shape: *mut i32));
+    invalid!(kiln_temporal_to_string(handle: *const c_void, buffer: *mut u8, capacity: usize));
+    invalid!(kiln_temporal_compare(left: *const c_void, right: *const c_void, relative_to: *const c_void, option_texts: *const u8, option_offsets: *const i64, option_count: usize, out: *mut i32));
+    invalid!(kiln_temporal_invoke(call: *const c_void));
+    invalid!(kiln_temporal_to_kind(handle: *const c_void, kind: u32, out: *mut *mut c_void));
+    invalid!(kiln_temporal_last_error(out_kind: *mut i32, buffer: *mut u8, capacity: usize));
+}
+
+#[cfg(not(feature = "json"))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_json_parse(
+    _bytes: *const u8,
+    _len: usize,
+    _out_nodes: *mut *const core::ffi::c_void,
+    _out_count: *mut usize,
+    _out_text: *mut *const u8,
+    _out_text_len: *mut usize,
+) -> i32 {
+    INVALID_ARGUMENT
+}
+
+#[cfg(not(feature = "intl"))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_intl_segment(
+    _bytes: *const u8,
+    _len: usize,
+    _granularity: u32,
+    _out_records: *mut *const u32,
+    _out_count: *mut usize,
+) -> i32 {
+    INVALID_ARGUMENT
+}
+
+#[cfg(not(feature = "parallel"))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_parallel_map(
+    _in: *const core::ffi::c_void,
+    _count: usize,
+    _out: *mut core::ffi::c_void,
+    _chunk: Option<
+        unsafe extern "C" fn(
+            *const core::ffi::c_void,
+            *mut core::ffi::c_void,
+            usize,
+            usize,
+            *mut core::ffi::c_void,
+        ),
+    >,
+    _context: *mut core::ffi::c_void,
+) -> i32 {
+    INVALID_ARGUMENT
+}
+
+#[cfg(not(feature = "ffi"))]
+mod ffi_stubs {
+    use super::INVALID_ARGUMENT;
+    use core::ffi::c_void;
+
+    #[repr(C)]
+    pub struct FfiValue {
+        kind: u32,
+        reserved: u32,
+        bits: u64,
+    }
+    type Dispatch = unsafe extern "C" fn(*mut c_void, *const FfiValue, u64, *mut FfiValue) -> i32;
+    macro_rules! invalid {
+        ($name:ident($($arg:ident: $ty:ty),*)) => {
+            #[unsafe(no_mangle)]
+            pub unsafe extern "C" fn $name($($arg: $ty),*) -> i32 {
+                $(let _ = $arg;)*
+                INVALID_ARGUMENT
+            }
+        };
+    }
+    invalid!(kiln_ffi_open(path: *const u8, path_len: u64, out_library: *mut u64));
+    invalid!(kiln_ffi_close(library: u64));
+    invalid!(kiln_ffi_prepare(library: u64, symbol: *const u8, symbol_len: u64, argument_types: *const u32, argument_count: u64, result_type: u32, out_function: *mut u64));
+    invalid!(kiln_ffi_call(function: u64, arguments: *const FfiValue, argument_count: u64, out_result: *mut FfiValue));
+    invalid!(kiln_ffi_register_callback(argument_types: *const u32, argument_count: u64, result_type: u32, dispatch: Option<Dispatch>, context: *mut c_void, out_pointer: *mut u64));
+    invalid!(kiln_ffi_unregister_callback(pointer: u64));
+    invalid!(kiln_ffi_last_error(out_bytes: *mut *const u8, out_len: *mut u64));
+}
+
 #[cfg(feature = "regexp")]
 mod regexp {
     use super::INVALID_ARGUMENT;

@@ -352,6 +352,11 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
         uint32_t slot;
         if (kiln_c99_shape_find_slot(object->shape, ikey, &slot)) {
             if (slot < object->slot_capacity) {
+                if ((object->shape->double_slots_mask & (1u << slot)) &&
+                    value.tag != KILN_VALUE_NUMBER) {
+                    kiln_c99_ensure_dictionary(object);
+                    return kiln_c99_put_mode_ikey(host, target, key, key_len, ikey, value, strict, depth, thrown);
+                }
                 object->slots[slot] = kiln_val_from_boundary(value);
                 return KILN_C99_OK;
             }
@@ -361,7 +366,8 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
             double index_num = kiln_c99_key_index(key, key_len);
             if (index_num < 0.0) {
                 kiln_shape *next_shape = NULL;
-                if (kiln_c99_shape_transition(object->shape, ikey, &next_shape)) {
+                int is_double = (value.tag == KILN_VALUE_NUMBER);
+                if (kiln_c99_shape_transition(object->shape, ikey, is_double, &next_shape)) {
                     uint32_t new_slot = next_shape->slot_index;
                     if (new_slot >= object->slot_capacity) {
                         size_t new_cap = object->slot_capacity == 0 ? KILN_C99_INLINE_SLOTS : object->slot_capacity * 2;

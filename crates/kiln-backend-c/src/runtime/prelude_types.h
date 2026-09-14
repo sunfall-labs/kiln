@@ -603,6 +603,7 @@ typedef struct kiln_shape {
     /* Whether any key on the path from the root is a symbol (`@@` spelt): the one thing a spread
      * of an object with this shape has to know before copying its slots wholesale. */
     uint32_t has_symbol_key;
+    uint32_t double_slots_mask;
 } kiln_shape;
 
 /* A plain data object: own string-keyed properties, scanned linearly.
@@ -1041,7 +1042,8 @@ static inline int kiln_c99_recv_refused(const kiln_shape *const *refused, const 
 static inline const uint32_t *kiln_c99_recv_claim(const kiln_shape **shapes,
                                                   const kiln_shape **refused, uint32_t *slots,
                                                   size_t columns, const char *const *keys,
-                                                  const kiln_object *obj) {
+                                                  const kiln_object *obj,
+                                                  uint32_t double_mask) {
     const kiln_shape *shape = obj->shape;
     size_t j, c;
     if (shape == NULL) {
@@ -1061,7 +1063,7 @@ static inline const uint32_t *kiln_c99_recv_claim(const kiln_shape **shapes,
                 break;
             }
         }
-        if (found == UINT32_MAX) {
+        if (found == UINT32_MAX || ((double_mask & (1u << c)) && !(shape->double_slots_mask & (1u << found)))) {
             size_t r;
             for (r = 0; r < 4; ++r) {
                 if (refused[r] == NULL) {

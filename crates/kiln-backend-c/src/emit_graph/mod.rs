@@ -9,7 +9,7 @@
 mod body;
 mod clones;
 mod ops;
-mod sites;
+pub(crate) mod sites;
 
 pub use body::{
     emit_async_entry_body, emit_entry_from_graph, emit_entry_from_graph_with_profile,

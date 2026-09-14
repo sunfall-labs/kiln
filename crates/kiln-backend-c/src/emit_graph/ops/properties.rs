@@ -1,5 +1,6 @@
 use super::OpContext;
 use super::status_check;
+use crate::emit_graph::EntryKind;
 use crate::graph::{GraphOp, ValueId, resolve_const_string};
 use kiln_ir::Constant;
 use std::fmt::Write;
@@ -105,17 +106,49 @@ pub(super) fn emit_get_property(
         return;
     }
     let length_check = if key_str == "length" && spec.arrays.contains(object) {
+        let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
+        let box_stmt = if need_box {
+            format!(" v{v} = kiln_c99_val_from_double((double)arr->count);")
+        } else {
+            String::new()
+        };
+        let int_stmt = if typed_int {
+            format!(" i{v} = (int64_t)arr->count;")
+        } else {
+            String::new()
+        };
+        let double_stmt = if typed {
+            format!(" d{v} = (double)arr->count;")
+        } else {
+            String::new()
+        };
         format!(
-            "{{ v{v} = kiln_c99_val_from_double((double)((const kiln_array *)KILN_VAL_PTR(v{o}))->count); handled = 1; }} ",
+            "{{ const kiln_array *arr = (const kiln_array *)KILN_VAL_PTR(v{o});{int_stmt}{double_stmt}{box_stmt} handled = 1; }} ",
             o = object.0
         )
     } else if key_str == "length" {
+        let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
+        let box_stmt = if need_box {
+            format!(" v{v} = kiln_c99_val_from_double((double)((const kiln_array *)ptr)->count);")
+        } else {
+            String::new()
+        };
+        let int_stmt = if typed_int {
+            format!(" i{v} = (int64_t)((const kiln_array *)ptr)->count;")
+        } else {
+            String::new()
+        };
+        let double_stmt = if typed {
+            format!(" d{v} = (double)((const kiln_array *)ptr)->count;")
+        } else {
+            String::new()
+        };
         format!(
             "if (KILN_LIKELY((v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX)) {{ \
                          void *ptr = KILN_VAL_PTR(v{o}); \
                          if (KILN_LIKELY(site.has_cached_method == 1 || kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY)) {{ \
                              site.has_cached_method = 1; \
-                             v{v} = kiln_c99_val_from_double((double)((const kiln_array *)ptr)->count); \
+                             {int_stmt}{double_stmt}{box_stmt} \
                              handled = 1; \
                          }} \
                      }} else if (KILN_VAL_IS_STRING(v{o})) {{ \
@@ -123,8 +156,7 @@ pub(super) fn emit_get_property(
                          v{v} = kiln_c99_val_from_double((double)str->length); \
                          handled = 1; \
                      }} ",
-            o = object.0,
-            v = v
+            o = object.0
         )
     } else {
         String::new()
@@ -152,26 +184,101 @@ pub(super) fn emit_get_property(
     // clone, whose slow path is the one that learns, fills the row afterwards.
     // A read of `this`: the function's receiver-shape cache answers with one indexed
     // load when the receiver's shape has a row, which was filled whole from the shape.
+    let is_typed_entry = matches!(ctx.kind, EntryKind::Typed { .. });
     let (receiver_tier, receiver_learn) = match (this_site, self_index) {
-        (Some(_), Some(_)) if ctx.this_copy.is_some() => (
-            format!(
-                "if (recv_row != NULL) {{ v{v} = v{prev}; handled = 1; }} ",
-                prev = ctx.this_copy.unwrap().0
-            ),
-            String::new(),
-        ),
-        (Some(i), Some(_)) => (
-            format!(
-                "if (recv_row != NULL) {{ v{v} = recv_obj->slots[recv_row[{i}]]; handled = 1; }} "
-            ),
-            String::new(),
-        ),
+        (Some(_), Some(_)) if ctx.this_copy.is_some() => {
+            let prev = ctx.this_copy.unwrap().0;
+            let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
+            if is_typed_entry && typed {
+                let box_stmt = if need_box {
+                    format!(" v{v} = v{prev};")
+                } else {
+                    String::new()
+                };
+                (
+                    format!("if (recv_row != NULL) {{ d{v} = d{prev};{box_stmt} handled = 1; }} "),
+                    String::new(),
+                )
+            } else {
+                (
+                    format!("if (recv_row != NULL) {{ v{v} = v{prev}; handled = 1; }} "),
+                    String::new(),
+                )
+            }
+        }
+        (Some(i), Some(_)) => {
+            let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
+            if is_typed_entry && typed {
+                let box_stmt = if need_box {
+                    format!(" v{v} = recv_obj->slots[recv_row[{i}]];")
+                } else {
+                    String::new()
+                };
+                (
+                    format!(
+                        "if (recv_row != NULL) {{ memcpy(&d{v}, &recv_obj->slots[recv_row[{i}]], sizeof(double));{box_stmt} handled = 1; }} "
+                    ),
+                    String::new(),
+                )
+            } else {
+                (
+                    format!(
+                        "if (recv_row != NULL) {{ v{v} = recv_obj->slots[recv_row[{i}]]; handled = 1; }} "
+                    ),
+                    String::new(),
+                )
+            }
+        }
         _ => (String::new(), String::new()),
     };
+    if is_typed_entry && this_site.is_some() {
+        let prev = ctx.this_copy.map(|c| c.0);
+        let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
+        let int_sync = if typed_int {
+            format!(" i{v} = (int64_t)d{v};")
+        } else {
+            String::new()
+        };
+        match (this_site, prev) {
+            (Some(_), Some(prev_vid)) => {
+                let box_stmt = if need_box {
+                    format!(" v{v} = v{prev_vid};")
+                } else {
+                    String::new()
+                };
+                if typed {
+                    writeln!(output, "    d{v} = d{prev_vid};{box_stmt}{int_sync}").unwrap();
+                } else {
+                    writeln!(output, "    v{v} = v{prev_vid};{int_sync}").unwrap();
+                }
+            }
+            (Some(col_idx), None) => {
+                let box_stmt = if need_box {
+                    format!(" v{v} = recv_obj->slots[recv_row[{col_idx}]];")
+                } else {
+                    String::new()
+                };
+                if typed {
+                    writeln!(
+                        output,
+                        "    memcpy(&d{v}, &recv_obj->slots[recv_row[{col_idx}]], sizeof(double));{box_stmt}{int_sync}"
+                    )
+                    .unwrap();
+                } else {
+                    writeln!(
+                        output,
+                        "    v{v} = recv_obj->slots[recv_row[{col_idx}]];{int_sync}"
+                    )
+                    .unwrap();
+                }
+            }
+            _ => unreachable!(),
+        }
+        return;
+    }
     writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{0}}; \
-                int handled = 0; \
+                "    {{ int handled = 0; {{ static kiln_c99_site site = {{0}}; \
                 {receiver_tier}{length_check}{size_check}\
                 if (!handled && KILN_VAL_IS_OBJECT(v{o})) {{ \
                     const kiln_object *obj = (const kiln_object *)KILN_VAL_PTR(v{o}); \
@@ -193,16 +300,23 @@ pub(super) fn emit_get_property(
                     if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(v{o})); \
                     {check} \
                 }}{receiver_learn} }}\
-                {typed_sync}",
+                {typed_sync} }}",
                 o = object.0,
                 typed_sync = {
                     // Guessed a number because it feeds arithmetic: checked here, and the guess
                     // withdrawn by leaving for the generic clone, which reads it boxed as always.
+                    let is_length = key_str == "length";
+                    let skip_fast = (is_typed_entry && typed && this_site.is_some()) || is_length;
                     let restart_checked = if ctx.kind.restarts() && (typed || ctx.ints.contains(&vid)) {
                         let invariant =
                             crate::prelude::lookup_speculation_invariant("property_number");
+                        let handled_cond = if skip_fast {
+                            "!handled && "
+                        } else {
+                            ""
+                        };
                         format!(
-                            "\n    /* Speculation exit [{}]: {} */ if (KILN_UNLIKELY(!KILN_VAL_IS_NUMBER(v{v}))) {{ {} }}",
+                            "\n    /* Speculation exit [{}]: {} */ if ({handled_cond}KILN_UNLIKELY(!KILN_VAL_IS_NUMBER(v{v}))) {{ {} }}",
                             invariant.name, invariant.language_rule, super::super::clones::RESTART
                         )
                     } else {
@@ -211,8 +325,13 @@ pub(super) fn emit_get_property(
                     let checked = if spec.exits && spec.fields.contains(&vid) {
                         let invariant =
                             crate::prelude::lookup_speculation_invariant("property_number");
+                        let handled_cond = if skip_fast {
+                            "!handled && "
+                        } else {
+                            ""
+                        };
                         format!(
-                            "\n    /* Speculation exit [{}]: {} */ if (KILN_UNLIKELY(!KILN_VAL_IS_NUMBER(v{v}))) {{ {} goto kiln_generic_resume_{v}; }}",
+                            "\n    /* Speculation exit [{}]: {} */ if ({handled_cond}KILN_UNLIKELY(!KILN_VAL_IS_NUMBER(v{v}))) {{ {} goto kiln_generic_resume_{v}; }}",
                             invariant.name,
                             invariant.language_rule,
                             super::materialize_all_sunk(graph, symbol, ctx.defs, ctx.array_slots)
@@ -220,15 +339,25 @@ pub(super) fn emit_get_property(
                     } else {
                         String::new()
                     };
+                    let memcpy_load = if skip_fast {
+                        format!("if (!handled) memcpy(&d{v}, &v{v}, sizeof(d{v}));")
+                    } else {
+                        format!("memcpy(&d{v}, &v{v}, sizeof(d{v}));")
+                    };
                     if ctx.ints.contains(&vid) {
+                        let int_load = if is_length {
+                            format!("if (!handled) i{v} = (int64_t)d{v};")
+                        } else {
+                            format!("i{v} = (int64_t)d{v};")
+                        };
                         // An array's length, proven an integer: exact below 2^53, so the cast is the value.
-                        format!("{checked}{restart_checked}\n    memcpy(&d{v}, &v{v}, sizeof(d{v})); i{v} = (int64_t)d{v};")
+                        format!("{checked}{restart_checked}\n    {memcpy_load} {int_load}")
                     } else if typed {
-                        format!("{checked}{restart_checked}\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));")
+                        format!("{checked}{restart_checked}\n    {memcpy_load}")
                     } else {
                         checked
                     }
-                }
+                },
             )
             .unwrap();
 }
@@ -425,16 +554,27 @@ pub(super) fn emit_get_computed(
     } else {
         String::new()
     };
+    let (vk_decl, vk) = if spec.arrays.contains(object) && ints.contains(key) {
+        (
+            format!(
+                "kiln_val vk = !handled ? kiln_c99_val_from_double((double)i{}) : 0; ",
+                key.0
+            ),
+            "vk".to_string(),
+        )
+    } else {
+        (String::new(), format!("v{}", key.0))
+    };
     writeln!(
                 output,
                 "    {{ static kiln_c99_site site = {{0}}; \
-                int handled = 0; {array_tier}\
-                if (!handled && KILN_LIKELY((v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_NUMBER(v{k}))) {{ \
+                int handled = 0; {array_tier}{vk_decl}\
+                if (!handled && KILN_LIKELY((v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_NUMBER({vk}))) {{ \
                     void *ptr = KILN_VAL_PTR(v{o}); \
                     if (site.has_cached_method == 1 || kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
                         site.has_cached_method = 1; \
                         double idx; \
-                        memcpy(&idx, &v{k}, sizeof(idx)); \
+                        memcpy(&idx, &{vk}, sizeof(idx)); \
                         size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; \
                         const kiln_array *arr = (const kiln_array *)ptr; \
                         if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < arr->count && arr->elements[slot] != KILN_VAL_HOLE)) {{ \
@@ -442,9 +582,9 @@ pub(super) fn emit_get_computed(
                             handled = 1; \
                         }} \
                     }} \
-                }} else if (KILN_VAL_IS_STRING(v{o}) && KILN_VAL_IS_NUMBER(v{k})) {{ \
+                }} else if (!handled && KILN_VAL_IS_STRING(v{o}) && KILN_VAL_IS_NUMBER({vk})) {{ \
                     double idx; \
-                    memcpy(&idx, &v{k}, sizeof(idx)); \
+                    memcpy(&idx, &{vk}, sizeof(idx)); \
                     size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; \
                     const kiln_string *str = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                     if (KILN_LIKELY(str != NULL && idx >= 0.0 && idx == (double)slot && slot < str->length && str->length == str->byte_len)) {{ \
@@ -453,13 +593,13 @@ pub(super) fn emit_get_computed(
                     }} \
                 }} \
                 if (!handled) {{ \
-                    int status = kiln_c99_val_read_element(host, v{o}, v{k}, depth, thrown, &v{v}); \
-                    if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(kiln_val_to_boundary(v{o}), kiln_val_to_boundary(v{k})); \
+                    int status = kiln_c99_val_read_element(host, v{o}, {vk}, depth, thrown, &v{v}); \
+                    if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(kiln_val_to_boundary(v{o}), kiln_val_to_boundary({vk})); \
                     {check} \
                 }} }}\
                 {typed_sync}",
                 o = object.0,
-                k = key.0,
+                vk = vk,
                 typed_sync = if typed { format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));") } else { String::new() }
             )
             .unwrap();

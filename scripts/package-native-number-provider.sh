@@ -27,10 +27,10 @@ KILN_PROVIDER_NAME=$(kiln_provider_contract_field provider)
 KILN_PROVIDER_FORMAT=$(kiln_provider_contract_field format_version)
 KILN_PROVIDER_PARSE=$(kiln_provider_contract_field parse_version)
 
-# The slim variant builds the same crate without `realm-http`: same schema, provider ABI
-# and export list, but no Hyper-backed HTTP engines. Both variants publish into one
-# directory under distinct archive/manifest names; the `http` manifest field tells them
-# apart.
+# The slim-named schema-2 variant is the common engine set: Realm, RegExp, BigInt, and JSON.
+# It keeps the same provider ABI and export list as full; omitted engines are refusal stubs.
+# Both variants publish into one directory under distinct archive/manifest names; the legacy
+# `http` manifest field distinguishes full from common.
 KILN_PROVIDER_HTTP=1
 if [[ ${1:-} == "--slim" ]]; then
 	KILN_PROVIDER_HTTP=0
@@ -102,7 +102,7 @@ kiln_provider_sha256_stream() {
 # Rust panics before returning across the private C ABI.
 
 # Without `default-features = false` on the `kiln-runtime` edge in
-# `crates/kiln-native-number-ffi/Cargo.toml`, the slim `--no-default-features` selection
+# `crates/kiln-native-number-ffi/Cargo.toml`, the common `--no-default-features` selection
 # below would still unify `kiln-runtime/http` back on through that dependency's defaults
 # and ship a full archive under a slim manifest.
 if [[ $KILN_PROVIDER_HTTP -eq 1 ]]; then
