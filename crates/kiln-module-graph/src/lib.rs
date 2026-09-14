@@ -1888,7 +1888,7 @@ impl ModuleGraph {
                     })?;
                 values.insert(
                     module_node.path.clone(),
-                    HashMap::from([("default".to_owned(), Value::String(path.to_owned()))]),
+                    HashMap::from([("default".to_owned(), Value::String(path.to_owned().into()))]),
                 );
                 continue;
             }
@@ -2413,12 +2413,12 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
             initial_exports,
             Value::CommonJsRequire(std::rc::Rc::new(CommonJsRequire::new(targets))),
             module_object.clone(),
-            Value::String(path.to_string_lossy().into_owned()),
+            Value::String(path.to_string_lossy().into_owned().into()),
             Value::String(
                 path.parent()
                     .unwrap_or_else(|| Path::new(""))
                     .to_string_lossy()
-                    .into_owned(),
+                    .into_owned().into(),
             ),
         ];
         let total_steps = unsafe { *self.total_steps };
@@ -3434,7 +3434,7 @@ fn json_module_program() -> ModuleProgram {
 fn asset_module_program(path: &str) -> Program {
     Program {
         version: BYTECODE_VERSION,
-        constants: vec![kiln_ir::Constant::String(path.to_owned())],
+        constants: vec![kiln_ir::Constant::String(path.to_owned().into())],
         code: vec![
             Instruction::Const(0),
             Instruction::NewArray { count: 1 },
