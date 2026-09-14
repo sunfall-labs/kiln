@@ -1,4 +1,7 @@
 
+/* Materialize a borrowed byte span directly as a Buffer. The caller owns the span only for the
+ * current callback, so the copy into GC-managed typed-array storage completes before returning.
+ * This avoids the old string intermediate and its per-byte conversion. */
 static int kiln_c99_buffer_from_bytes(kiln_value *out, const uint8_t *bytes, uint64_t length) {
     size_t size;
     int status;
