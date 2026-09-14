@@ -31,12 +31,17 @@ pub(crate) struct ZlibState {
     pub(crate) accumulated: RefCell<Vec<u8>>,
 }
 
-pub(crate) fn zlib_buffer_arg(value: Option<&Value>) -> Vec<u8> {
+pub(crate) fn zlib_buffer_arg(value: Option<&Value>) -> Result<Vec<u8>, ExecutionError> {
     match value {
-        Some(Value::TypedArray(view)) => view.bytes(),
-        Some(Value::ArrayBuffer(ab)) => ab.bytes.borrow().clone(),
-        Some(Value::String(s)) => s.as_bytes().to_vec(),
-        _ => Vec::new(),
+        Some(Value::TypedArray(view)) => Ok(view.bytes()),
+        Some(Value::ArrayBuffer(ab)) => Ok(ab.bytes.borrow().clone()),
+        Some(Value::String(s)) => s
+            .to_scalar_string()
+            .map(|text| text.into_bytes())
+            .map_err(|_| ExecutionError::TypeErrorMessage {
+                message: "zlib string input contains a lone surrogate".to_owned(),
+            }),
+        _ => Ok(Vec::new()),
     }
 }
 
@@ -237,7 +242,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(node_zlib_create_transform(ZlibTransformKind::Gunzip))
             }
             Native::NodeZlibGzipSync => {
-                let bytes = zlib_buffer_arg(arguments.first());
+                let bytes = zlib_buffer_arg(arguments.first())?;
                 let res = transform_zlib(ZlibTransformKind::Gzip, &bytes).map_err(|err| {
                     ExecutionError::TypeErrorMessage {
                         message: err.to_string(),
@@ -246,7 +251,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(node_bytes_value(res))
             }
             Native::NodeZlibGunzipSync => {
-                let bytes = zlib_buffer_arg(arguments.first());
+                let bytes = zlib_buffer_arg(arguments.first())?;
                 let res = transform_zlib(ZlibTransformKind::Gunzip, &bytes).map_err(|err| {
                     ExecutionError::TypeErrorMessage {
                         message: err.to_string(),
@@ -255,7 +260,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(node_bytes_value(res))
             }
             Native::NodeZlibDeflateSync => {
-                let bytes = zlib_buffer_arg(arguments.first());
+                let bytes = zlib_buffer_arg(arguments.first())?;
                 let res = transform_zlib(ZlibTransformKind::Deflate, &bytes).map_err(|err| {
                     ExecutionError::TypeErrorMessage {
                         message: err.to_string(),
@@ -264,7 +269,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(node_bytes_value(res))
             }
             Native::NodeZlibInflateSync => {
-                let bytes = zlib_buffer_arg(arguments.first());
+                let bytes = zlib_buffer_arg(arguments.first())?;
                 let res = transform_zlib(ZlibTransformKind::Inflate, &bytes).map_err(|err| {
                     ExecutionError::TypeErrorMessage {
                         message: err.to_string(),
@@ -273,7 +278,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(node_bytes_value(res))
             }
             Native::NodeZlibUnzipSync => {
-                let bytes = zlib_buffer_arg(arguments.first());
+                let bytes = zlib_buffer_arg(arguments.first())?;
                 let res = transform_zlib(ZlibTransformKind::Unzip, &bytes).map_err(|err| {
                     ExecutionError::TypeErrorMessage {
                         message: err.to_string(),

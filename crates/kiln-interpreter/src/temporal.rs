@@ -404,7 +404,7 @@ pub fn static_property(op: Op, name: &str) -> Option<Value> {
         // The tag lives on the prototype, which is where an instance reads it from and where a
         // program that borrows `Object.prototype.toString` finds it.
         (Op::Prototype(kind), name) if name == crate::WellKnown::ToStringTag.property_key() => {
-            Value::String(kind.tag().to_owned())
+            Value::String(kind.tag().to_owned().into())
         }
         (Op::Prototype(kind), _) => Value::Native(
             Native::Temporal(Op::Method(kind, prototype_method(kind, name)?)),
@@ -423,7 +423,7 @@ pub fn instance_property(value: &engine::TemporalValue, name: &str) -> Option<Va
     // The tag every `Temporal` type carries, which is how `Object.prototype.toString` tells one
     // from an ordinary object: `[object Temporal.PlainDate]` rather than `[object Object]`.
     if name == crate::WellKnown::ToStringTag.property_key() {
-        return Some(Value::String(value.kind().tag().to_owned()));
+        return Some(Value::String(value.kind().tag().to_owned().into()));
     }
     if let Some(field) = value.get(name) {
         return Some(match field {
@@ -431,7 +431,7 @@ pub fn instance_property(value: &engine::TemporalValue, name: &str) -> Option<Va
             engine::Field::Integer128(integer) => {
                 Value::BigInt(Rc::new(num_bigint::BigInt::from(integer)))
             }
-            engine::Field::Text(text) => Value::String(text),
+            engine::Field::Text(text) => Value::String(text.into()),
             engine::Field::Flag(flag) => Value::Boolean(flag),
             engine::Field::Undefined => Value::Undefined,
         });
@@ -525,7 +525,7 @@ const fn takes_arithmetic_options(kind: engine::Kind) -> bool {
 fn calendar_argument(value: Option<&Value>) -> Result<Option<String>, ExecutionError> {
     match value {
         None | Some(Value::Undefined) => Ok(None),
-        Some(Value::String(text)) => Ok(Some(text.clone())),
+        Some(Value::String(text)) => Ok(Some(text.to_scalar_string().map_err(|_| type_error("calendar contains a lone surrogate"))?)),
         Some(Value::Temporal(built)) => match built.value().calendar_id() {
             Some(calendar) => Ok(Some(calendar.to_owned())),
             // A `PlainTime`, a `Duration` and an `Instant` carry no calendar, so none of the
@@ -551,7 +551,7 @@ fn calendar_argument(value: Option<&Value>) -> Result<Option<String>, ExecutionE
 fn zone_argument(value: Option<&Value>) -> Result<Option<String>, ExecutionError> {
     match value {
         None | Some(Value::Undefined) => Ok(None),
-        Some(Value::String(text)) => Ok(Some(text.clone())),
+        Some(Value::String(text)) => Ok(Some(text.to_scalar_string().map_err(|_| type_error("time zone contains a lone surrogate"))?)),
         Some(Value::Temporal(built)) if built.kind() == engine::Kind::ZonedDateTime => {
             Ok(built.value().time_zone_id())
         }
@@ -818,7 +818,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 "Temporal.{} requires new",
                 short_name(kind)
             ))),
-            Op::NowTimeZoneId => Ok(Value::String(engine::now::time_zone_id().to_owned())),
+            Op::NowTimeZoneId => Ok(Value::String(engine::now::time_zone_id().to_owned().into())),
             Op::NowRead(kind) => {
                 let zone = zone_argument(arguments.first())?;
                 // The realm's clock, not the host's: the same virtual instant `Date.now()` reads,
@@ -933,7 +933,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 };
                 value
                     .to_temporal_string(&options)
-                    .map(Value::String)
+                    .map(|text| Value::String(text.into()))
                     .map_err(thrown)
             }
             Method::With => {
@@ -1000,9 +1000,9 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     Some(Value::String(unit)) => {
                         let mut options = engine::Options::default();
                         if matches!(method, Method::Total) {
-                            options.unit = Some(unit.clone());
+                            options.unit = Some(unit.to_scalar_string().map_err(|_| type_error("unit contains a lone surrogate"))?);
                         } else {
-                            options.smallest_unit = Some(unit.clone());
+                            options.smallest_unit = Some(unit.to_scalar_string().map_err(|_| type_error("unit contains a lone surrogate"))?);
                         }
                         options
                     }
@@ -1064,7 +1064,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             }
             Method::ToZonedDateTime => {
                 let (zone, time) = match arguments.first() {
-                    Some(Value::String(zone)) => (Some(zone.clone()), None),
+                    Some(Value::String(zone)) => (Some(zone.to_scalar_string().map_err(|_| type_error("time zone contains a lone surrogate"))?), None),
                     Some(item) if crate::is_an_object(item) => {
                         let zone = match self.read_property(item, "timeZone", instruction)? {
                             Value::Undefined => None,
@@ -1170,9 +1170,9 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             Value::Temporal(existing) => existing.value().to_kind(kind, None).map_err(thrown),
             Value::String(text) => {
                 if kind == engine::Kind::ZonedDateTime {
-                    engine::parse_zoned_date_time(text, options).map_err(thrown)
+                    engine::parse_zoned_date_time(&text.to_scalar_string().map_err(|_| type_error("temporal string contains a lone surrogate"))?, options).map_err(thrown)
                 } else {
-                    engine::parse(kind, text).map_err(thrown)
+                    engine::parse(kind, &text.to_scalar_string().map_err(|_| type_error("temporal string contains a lone surrogate"))?).map_err(thrown)
                 }
             }
             // A property bag is anything the language calls an object, which is the question
