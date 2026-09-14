@@ -1075,6 +1075,12 @@ static void kiln_c99_note_get_computed_refusal(kiln_value target, kiln_value key
     if (kiln_c99_diagnostic_function == NULL && kiln_c99_diagnostic_detail != kiln_c99_diagnostic_compose) {
         const char *named = target.tag == KILN_VALUE_BUILTIN ? kiln_c99_builtin_name(target.bits) : NULL;
         if (key.tag == KILN_VALUE_STRING && key.ptr != NULL) {
+            uint8_t *key_owned = NULL;
+            size_t key_bytes_len = 0;
+            if (kiln_c99_string_to_utf8_lossy(key, &key_owned, &key_bytes_len) != KILN_C99_OK) {
+                key_owned = NULL;
+                key_bytes_len = 0;
+            }
             size_t pos = 0;
             if (named != NULL) {
                 size_t nlen = strlen(named);
@@ -1084,15 +1090,16 @@ static void kiln_c99_note_get_computed_refusal(kiln_value target, kiln_value key
                     kiln_c99_diagnostic_compose[pos++] = '.';
                 }
             }
-            size_t klen = key.len;
+            size_t klen = key_bytes_len;
             if (pos + klen >= sizeof kiln_c99_diagnostic_compose) {
                 klen = sizeof kiln_c99_diagnostic_compose - 1 - pos;
             }
-            memcpy(kiln_c99_diagnostic_compose + pos, key.ptr, klen);
+            if (klen != 0) memcpy(kiln_c99_diagnostic_compose + pos, key_owned, klen);
             pos += klen;
             kiln_c99_diagnostic_compose[pos] = '\0';
             kiln_c99_diagnostic_function = kiln_c99_diagnostic_compose;
             kiln_c99_diagnostic_function_len = pos;
+            free(key_owned);
         } else if (named != NULL) {
             kiln_c99_diagnostic_function = named;
             kiln_c99_diagnostic_function_len = strlen(named);
