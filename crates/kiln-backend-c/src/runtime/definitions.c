@@ -929,9 +929,11 @@ static int kiln_c99_set_function_name(kiln_value function, kiln_value key, const
     }
     if (key.tag == KILN_VALUE_SYMBOL) {
         kiln_symbol *symbol = kiln_c99_symbol_of(key);
-        if (symbol->description_len != 0) {
+        if (symbol->description_value.tag == KILN_VALUE_STRING || symbol->description_len != 0) {
             if (kiln_c99_text_append(&text, "[", 1) != KILN_C99_OK
-                || kiln_c99_text_append(&text, symbol->description, symbol->description_len)
+                || (symbol->description_value.tag == KILN_VALUE_STRING
+                        ? kiln_c99_text_append_string(&text, symbol->description_value)
+                        : kiln_c99_text_append(&text, symbol->description, symbol->description_len))
                        != KILN_C99_OK
                 || kiln_c99_text_append(&text, "]", 1) != KILN_C99_OK) {
                 return KILN_C99_OUT_OF_MEMORY;

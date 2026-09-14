@@ -1313,6 +1313,10 @@ typedef struct kiln_symbol {
     size_t key_len;
     const char *description;
     size_t description_len;
+    /* Runtime descriptions are canonical strings so UTF-16 units, including lone surrogates,
+     * survive Symbol(description) and reflection. The byte pair remains only for immortal
+     * built-in symbols whose descriptions are compiled ASCII. */
+    kiln_value description_value;
     /* Non-zero only for a symbol from the cross-realm registry. It lived in the value's payload
      * word until that word was shared with the pointer; a registered symbol is the one value that
      * wanted both, and the id belongs with the symbol rather than beside it. */

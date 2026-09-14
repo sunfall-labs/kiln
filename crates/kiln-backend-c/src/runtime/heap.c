@@ -2566,6 +2566,7 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
         kiln_symbol *symbol = (kiln_symbol *)payload;
         kiln_c99_gc_mark_block(heap, symbol->key);
         kiln_c99_gc_mark_block(heap, symbol->description);
+        kiln_c99_gc_mark_value(heap, &symbol->description_value);
         break;
     }
     case KILN_GC_STRING:

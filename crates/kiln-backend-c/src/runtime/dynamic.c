@@ -828,8 +828,7 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
 
         status = kiln_c99_make_closure(out, kiln_c99_dynamic_body_trampoline,
                                        fn_name, fn_name_len,
-                                       (upvals[1].tag == KILN_VALUE_STRING) ? upvals[1].ptr : "",
-                                       (upvals[1].tag == KILN_VALUE_STRING) ? upvals[1].len : 0,
+                                       "", 0,
                                        "eval", 0, 0, 0, 0, 0, 0, 0, 0,
                                        KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED,
                                        0, 16, 0, 0, val_upvals, 3);

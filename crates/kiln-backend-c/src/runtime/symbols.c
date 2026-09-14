@@ -113,6 +113,9 @@ static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
     if (symbol == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
+    symbol->description = NULL;
+    symbol->description_len = 0;
+    symbol->description_value = kiln_c99_undefined();
     next_serial += 1;
     written = kiln_c99_double_to_js((double)next_serial, digits);
     if (kiln_c99_text_append_c(&key, "@@symbol:") != KILN_C99_OK ||
@@ -147,6 +150,7 @@ static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
          * `Symbol(undefined)`. */
         symbol->description = NULL;
         symbol->description_len = 0;
+        symbol->description_value = kiln_c99_undefined();
     } else {
         kiln_value text = kiln_c99_text(description);
         if (text.tag != KILN_VALUE_STRING) {
@@ -154,8 +158,9 @@ static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
             kiln_c99_gc_release(symbol);
             return KILN_C99_OUT_OF_MEMORY;
         }
-        symbol->description = text.ptr;
-        symbol->description_len = text.len;
+        symbol->description = NULL;
+        symbol->description_len = 0;
+        symbol->description_value = text;
     }
     symbol->registry_id = 0;
     *out = kiln_c99_value(KILN_VALUE_SYMBOL, 0, (const char *)(uintptr_t)symbol, 0);
@@ -164,6 +169,8 @@ static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
 
 static int kiln_c99_symbol_for(kiln_value *out, kiln_value key) {
     kiln_value text = kiln_c99_text(key);
+    uint8_t *encoded = NULL;
+    size_t encoded_len = 0;
     kiln_symbol *symbol;
     const uint8_t *registered_key;
     uint64_t registered_key_len;
@@ -171,13 +178,22 @@ static int kiln_c99_symbol_for(kiln_value *out, kiln_value key) {
     static const char property_prefix[] = "@@symbol-for:";
     uint64_t id;
     if (text.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
-    if (kiln_realm_symbol_for((const uint8_t *)text.ptr, (uint64_t)text.len, &id) != KILN_C99_OK)
+    if (kiln_c99_string_to_utf8_lossy(text, &encoded, &encoded_len) != KILN_C99_OK) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    if (kiln_realm_symbol_for(encoded, (uint64_t)encoded_len, &id) != KILN_C99_OK) {
+        free(encoded);
         KILN_C99_REFUSE("the realm would not register this symbol key");
+    }
+    free(encoded);
     if (kiln_realm_symbol_key_for(id, &registered_key, &registered_key_len) != KILN_C99_OK ||
         registered_key_len > SIZE_MAX)
         KILN_C99_REFUSE("the realm would not answer with the symbol key it registered");
     symbol = (kiln_symbol *)kiln_c99_gc_alloc(KILN_GC_SYMBOL, sizeof *symbol);
     if (symbol == NULL) return KILN_C99_OUT_OF_MEMORY;
+    symbol->description = NULL;
+    symbol->description_len = 0;
+    symbol->description_value = kiln_c99_undefined();
     /* Registry key bytes, like `Symbol()`'s, stay malloc-backed and outlive the realm's heap:
      * the symbol they belong to is rooted for the realm's whole life. */
     property_key = (char *)malloc((sizeof property_prefix - 1) + sizeof id);
@@ -202,8 +218,14 @@ static int kiln_c99_symbol_for(kiln_value *out, kiln_value key) {
         }
         symbol->key = canonical;
     }
-    symbol->description = (const char *)registered_key;
-    symbol->description_len = (size_t)registered_key_len;
+    symbol->description = NULL;
+    symbol->description_len = 0;
+    symbol->description_value = kiln_c99_copy_text((const char *)registered_key,
+                                                   (size_t)registered_key_len);
+    if (symbol->description_value.tag != KILN_VALUE_STRING) {
+        kiln_c99_gc_release(symbol);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
     symbol->registry_id = id;
     *out = kiln_c99_value(KILN_VALUE_SYMBOL, 0, (const char *)(uintptr_t)symbol, 0);
     return kiln_c99_remember_symbol(*out);

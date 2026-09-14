@@ -750,7 +750,9 @@ static kiln_value kiln_c99_text(kiln_value value) {
         kiln_symbol *symbol = kiln_c99_symbol_of(value);
         kiln_text built = {NULL, 0, 0};
         if (kiln_c99_text_append_c(&built, "Symbol(") != KILN_C99_OK ||
-            kiln_c99_text_append(&built, symbol->description, symbol->description_len) !=
+            (symbol->description_value.tag == KILN_VALUE_STRING
+                 ? kiln_c99_text_append_string(&built, symbol->description_value)
+                 : kiln_c99_text_append(&built, symbol->description, symbol->description_len)) !=
                 KILN_C99_OK ||
             kiln_c99_text_append_c(&built, ")") != KILN_C99_OK) {
             free(built.bytes);
