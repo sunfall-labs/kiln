@@ -5853,14 +5853,17 @@ passed. The prelude ABI snapshot intentionally gains the shared pressure helper 
 
 ## Consolidation paired performance record (2026-09-13)
 
-The retained report is `.scratch/perf-consolidation/report.md`; raw HTTP metadata and microtasks
-JSON remain under `.scratch/perf-consolidation/`. The HTTP pair used baseline `b9bbb589` and
-candidate `100c7c7b`, native-release, one worker, four clients of sixteen connections, three
-interleaved five-second passes, with per-client percentile aggregation rather than pooled
-percentiles. All 36 aggregates had zero errors and zero wrong responses. Microtasks ran three
-interleaved passes across baseline, candidate, and Node; all checksums were `20000`, with both
-native binaries at `0.5078125 ms` internal warm median and Node at `0.4375 ms`.
+The retained report is `.scratch/perf-consolidation/report.md`; compact machine-readable evidence is
+`.scratch/perf-consolidation/results.json`, with raw HTTP metadata and microtasks JSON beside it.
+The HTTP pair used baseline `b9bbb589` and candidate `100c7c7b`, native-release, one worker, four
+clients of sixteen connections, and three interleaved five-second passes. Rates are sums across
+clients and the table uses the median of the three pass-level sums. All 36 aggregates had zero
+errors and zero wrong responses. The HTTP rows start a fresh server, wait for readiness, then
+measure five seconds; process startup is excluded, but there is no separate HTTP warmup phase.
+Microtasks explicitly warms before its internal median; all checksums were `20000`, with both native
+binaries at `0.5078125 ms` and Node at `0.4375 ms`.
 
-The record is warmed execution only: it excludes launch/cold-JIT comparison, and native method
-metadata generation should not be read as unified interpreter dispatch semantics. Shape and
-multi-worker scaling remain unmeasured.
+The binaries were measured before the final integration rebase; later upstream compiler/provider/
+linker changes, including `440a4336`, are unmeasured. Native method metadata generation should not
+be read as unified interpreter dispatch semantics. Shape and multi-worker scaling remain unmeasured.
+Focused validation passed; the final full gate remains pending.

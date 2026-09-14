@@ -1,0 +1,1167 @@
+{
+  "schema": 1,
+  "measurement": {
+    "baseline_source": "b9bbb58923e00329b029b35b3d9adecf5217203e",
+    "candidate_source": "100c7c7b",
+    "http_metadata": {
+      "git_commit": "100c7c7b4f150bcc885d55e2fd9f67c500e4199e",
+      "baseline_source": "b9bbb58923e00329b029b35b3d9adecf5217203e",
+      "candidate_source": "100c7c7b",
+      "serve_source_sha256": "f3fbbc158aa62818f4b4e6478b87feac8e08d3427770d0b0f43201863aedd852",
+      "app_source_sha256": "d7bf422d0b4e7d4b4e8e20999815b85f1db1a1d3c1ba3f3feaf031139c673396",
+      "transformed_serve_source_sha256": "f3fbbc158aa62818f4b4e6478b87feac8e08d3427770d0b0f43201863aedd852",
+      "transformed_app_source_sha256": "d7bf422d0b4e7d4b4e8e20999815b85f1db1a1d3c1ba3f3feaf031139c673396",
+      "driver_source_sha256": "eaeee503926740f3eb5e3f68fb7be5a376723b6ce7063a1493de01df3447d22c",
+      "drive_mix_source_sha256": "2e8b088576635775c662f5e77706a29877bd0664faa09b3fbf8f8d1d1b195502",
+      "variants": {
+        "baseline": {
+          "hello": "6adb0fc8df3a5840108a83a6279986c82832617565e8a9489fd251954b960eb7",
+          "app": "b7eb07819593f721083577f04053674190fc1ce352583962655753168c8e88a0"
+        },
+        "candidate": {
+          "hello": "06c3bb37b3e94a284be90c0343b38a941f956d15c4ddfcad9eeaa95a6f38e67e",
+          "app": "49e4f1d48552ce31653376668b926074606bb65bf5dc57d6f6cd8aee3f9ecc61"
+        }
+      },
+      "runtime_versions": {
+        "kiln": "not-probed (server binary)",
+        "node": "v25.9.0"
+      },
+      "passes": 3,
+      "processes": 4,
+      "connections": 16,
+      "duration_ms": 5000,
+      "port": 18088,
+      "runtimes": [
+        "kiln",
+        "node"
+      ],
+      "workloads": [
+        "hello",
+        "mixed",
+        "json-echo-64k",
+        "large-upload"
+      ]
+    },
+    "http_aggregate_count": 36,
+    "http_aggregates": [
+      {
+        "pass": 1,
+        "label": "baseline",
+        "runtime": "kiln",
+        "workload": "hello",
+        "rps": 183329,
+        "client_count": 4,
+        "requests": 916643,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          0.294,
+          0.294,
+          0.294,
+          0.294
+        ],
+        "p99_ms": [
+          0.764,
+          0.771,
+          0.771,
+          0.765
+        ]
+      },
+      {
+        "pass": 1,
+        "label": "baseline",
+        "runtime": "kiln",
+        "workload": "json-echo-64k",
+        "rps": 5064,
+        "client_count": 4,
+        "requests": 25376,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          12.494,
+          12.492,
+          12.495,
+          12.5
+        ],
+        "p99_ms": [
+          14.177,
+          14.125,
+          14.222,
+          14.336
+        ]
+      },
+      {
+        "pass": 1,
+        "label": "baseline",
+        "runtime": "kiln",
+        "workload": "large-upload",
+        "rps": 2016,
+        "client_count": 4,
+        "requests": 10144,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          31.524,
+          31.525,
+          31.546,
+          31.533
+        ],
+        "p99_ms": [
+          34.916,
+          35.031,
+          35.771,
+          35.194
+        ]
+      },
+      {
+        "pass": 1,
+        "label": "baseline",
+        "runtime": "kiln",
+        "workload": "mixed",
+        "rps": 115244,
+        "client_count": 4,
+        "requests": 576221,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          0.46,
+          0.461,
+          0.459,
+          0.459
+        ],
+        "p99_ms": [
+          1.498,
+          1.487,
+          1.502,
+          1.488
+        ]
+      },
+      {
+        "pass": 1,
+        "label": "candidate",
+        "runtime": "kiln",
+        "workload": "hello",
+        "rps": 183616,
+        "client_count": 4,
+        "requests": 918081,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          0.293,
+          0.293,
+          0.293,
+          0.293
+        ],
+        "p99_ms": [
+          0.774,
+          0.778,
+          0.778,
+          0.782
+        ]
+      },
+      {
+        "pass": 1,
+        "label": "candidate",
+        "runtime": "kiln",
+        "workload": "json-echo-64k",
+        "rps": 12116,
+        "client_count": 4,
+        "requests": 60626,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          5.201,
+          5.199,
+          5.201,
+          5.204
+        ],
+        "p99_ms": [
+          6.412,
+          6.447,
+          6.485,
+          6.48
+        ]
+      },
+      {
+        "pass": 1,
+        "label": "candidate",
+        "runtime": "kiln",
+        "workload": "large-upload",
+        "rps": 22476,
+        "client_count": 4,
+        "requests": 112404,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          2.636,
+          2.626,
+          2.626,
+          2.624
+        ],
+        "p99_ms": [
+          5.714,
+          5.815,
+          5.687,
+          5.777
+        ]
+      },
+      {
+        "pass": 1,
+        "label": "candidate",
+        "runtime": "kiln",
+        "workload": "mixed",
+        "rps": 110197,
+        "client_count": 4,
+        "requests": 551046,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          0.475,
+          0.476,
+          0.478,
+          0.476
+        ],
+        "p99_ms": [
+          1.599,
+          1.595,
+          1.595,
+          1.609
+        ]
+      },
+      {
+        "pass": 1,
+        "label": "candidate",
+        "runtime": "node",
+        "workload": "hello",
+        "rps": 128667,
+        "client_count": 4,
+        "requests": 643336,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          0.439,
+          0.435,
+          0.432,
+          0.444
+        ],
+        "p99_ms": [
+          1.095,
+          1.04,
+          0.944,
+          1.161
+        ]
+      },
+      {
+        "pass": 1,
+        "label": "candidate",
+        "runtime": "node",
+        "workload": "json-echo-64k",
+        "rps": 19026,
+        "client_count": 4,
+        "requests": 95176,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          3.056,
+          3.058,
+          3.06,
+          3.277
+        ],
+        "p99_ms": [
+          4.379,
+          5.084,
+          6.227,
+          7.693
+        ]
+      },
+      {
+        "pass": 1,
+        "label": "candidate",
+        "runtime": "node",
+        "workload": "large-upload",
+        "rps": 22530,
+        "client_count": 4,
+        "requests": 112674,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          2.652,
+          2.611,
+          2.581,
+          2.804
+        ],
+        "p99_ms": [
+          5.87,
+          5.621,
+          5.573,
+          6.756
+        ]
+      },
+      {
+        "pass": 1,
+        "label": "candidate",
+        "runtime": "node",
+        "workload": "mixed",
+        "rps": 102538,
+        "client_count": 4,
+        "requests": 512742,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          0.507,
+          0.507,
+          0.507,
+          0.507
+        ],
+        "p99_ms": [
+          1.688,
+          1.698,
+          1.692,
+          1.693
+        ]
+      },
+      {
+        "pass": 2,
+        "label": "baseline",
+        "runtime": "kiln",
+        "workload": "hello",
+        "rps": 175826,
+        "client_count": 4,
+        "requests": 879132,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          0.309,
+          0.308,
+          0.308,
+          0.308
+        ],
+        "p99_ms": [
+          0.811,
+          0.81,
+          0.808,
+          0.809
+        ]
+      },
+      {
+        "pass": 2,
+        "label": "baseline",
+        "runtime": "kiln",
+        "workload": "json-echo-64k",
+        "rps": 4876,
+        "client_count": 4,
+        "requests": 24441,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          12.986,
+          12.968,
+          12.969,
+          12.969
+        ],
+        "p99_ms": [
+          14.801,
+          14.796,
+          14.861,
+          14.851
+        ]
+      },
+      {
+        "pass": 2,
+        "label": "baseline",
+        "runtime": "kiln",
+        "workload": "large-upload",
+        "rps": 1973,
+        "client_count": 4,
+        "requests": 9926,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          31.832,
+          31.828,
+          31.834,
+          31.829
+        ],
+        "p99_ms": [
+          36.684,
+          36.137,
+          36.164,
+          35.976
+        ]
+      },
+      {
+        "pass": 2,
+        "label": "baseline",
+        "runtime": "kiln",
+        "workload": "mixed",
+        "rps": 114299,
+        "client_count": 4,
+        "requests": 571497,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          0.464,
+          0.463,
+          0.464,
+          0.463
+        ],
+        "p99_ms": [
+          1.476,
+          1.478,
+          1.478,
+          1.481
+        ]
+      },
+      {
+        "pass": 2,
+        "label": "candidate",
+        "runtime": "kiln",
+        "workload": "hello",
+        "rps": 172192,
+        "client_count": 4,
+        "requests": 860957,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          0.314,
+          0.314,
+          0.314,
+          0.314
+        ],
+        "p99_ms": [
+          0.833,
+          0.837,
+          0.835,
+          0.835
+        ]
+      },
+      {
+        "pass": 2,
+        "label": "candidate",
+        "runtime": "kiln",
+        "workload": "json-echo-64k",
+        "rps": 12266,
+        "client_count": 4,
+        "requests": 61376,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          5.151,
+          5.152,
+          5.149,
+          5.152
+        ],
+        "p99_ms": [
+          6.171,
+          6.16,
+          6.173,
+          6.153
+        ]
+      },
+      {
+        "pass": 2,
+        "label": "candidate",
+        "runtime": "kiln",
+        "workload": "large-upload",
+        "rps": 20864,
+        "client_count": 4,
+        "requests": 104345,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          2.815,
+          2.823,
+          2.836,
+          2.824
+        ],
+        "p99_ms": [
+          6.181,
+          6.114,
+          6.203,
+          6.266
+        ]
+      },
+      {
+        "pass": 2,
+        "label": "candidate",
+        "runtime": "kiln",
+        "workload": "mixed",
+        "rps": 112924,
+        "client_count": 4,
+        "requests": 564619,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          0.468,
+          0.469,
+          0.467,
+          0.468
+        ],
+        "p99_ms": [
+          1.522,
+          1.538,
+          1.527,
+          1.526
+        ]
+      },
+      {
+        "pass": 2,
+        "label": "candidate",
+        "runtime": "node",
+        "workload": "hello",
+        "rps": 123150,
+        "client_count": 4,
+        "requests": 615748,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          0.459,
+          0.459,
+          0.468,
+          0.464
+        ],
+        "p99_ms": [
+          1.005,
+          1.024,
+          1.184,
+          1.14
+        ]
+      },
+      {
+        "pass": 2,
+        "label": "candidate",
+        "runtime": "node",
+        "workload": "json-echo-64k",
+        "rps": 19105,
+        "client_count": 4,
+        "requests": 95558,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          3.063,
+          3.059,
+          3.214,
+          3.074
+        ],
+        "p99_ms": [
+          4.401,
+          4.239,
+          7.235,
+          6.164
+        ]
+      },
+      {
+        "pass": 2,
+        "label": "candidate",
+        "runtime": "node",
+        "workload": "large-upload",
+        "rps": 22639,
+        "client_count": 4,
+        "requests": 113244,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          2.595,
+          2.604,
+          2.817,
+          2.578
+        ],
+        "p99_ms": [
+          5.668,
+          5.664,
+          6.729,
+          5.563
+        ]
+      },
+      {
+        "pass": 2,
+        "label": "candidate",
+        "runtime": "node",
+        "workload": "mixed",
+        "rps": 101614,
+        "client_count": 4,
+        "requests": 508119,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          0.512,
+          0.511,
+          0.512,
+          0.512
+        ],
+        "p99_ms": [
+          1.738,
+          1.733,
+          1.743,
+          1.732
+        ]
+      },
+      {
+        "pass": 3,
+        "label": "baseline",
+        "runtime": "kiln",
+        "workload": "hello",
+        "rps": 178887,
+        "client_count": 4,
+        "requests": 894436,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          0.303,
+          0.303,
+          0.302,
+          0.303
+        ],
+        "p99_ms": [
+          0.802,
+          0.802,
+          0.792,
+          0.799
+        ]
+      },
+      {
+        "pass": 3,
+        "label": "baseline",
+        "runtime": "kiln",
+        "workload": "json-echo-64k",
+        "rps": 5007,
+        "client_count": 4,
+        "requests": 25092,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          12.621,
+          12.625,
+          12.627,
+          12.64
+        ],
+        "p99_ms": [
+          14.552,
+          14.523,
+          14.671,
+          14.756
+        ]
+      },
+      {
+        "pass": 3,
+        "label": "baseline",
+        "runtime": "kiln",
+        "workload": "large-upload",
+        "rps": 1939,
+        "client_count": 4,
+        "requests": 9755,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          32.698,
+          32.715,
+          32.748,
+          32.709
+        ],
+        "p99_ms": [
+          36.679,
+          36.702,
+          37.122,
+          36.753
+        ]
+      },
+      {
+        "pass": 3,
+        "label": "baseline",
+        "runtime": "kiln",
+        "workload": "mixed",
+        "rps": 114157,
+        "client_count": 4,
+        "requests": 570787,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          0.465,
+          0.463,
+          0.463,
+          0.464
+        ],
+        "p99_ms": [
+          1.478,
+          1.484,
+          1.492,
+          1.484
+        ]
+      },
+      {
+        "pass": 3,
+        "label": "candidate",
+        "runtime": "kiln",
+        "workload": "hello",
+        "rps": 177352,
+        "client_count": 4,
+        "requests": 886757,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          0.304,
+          0.304,
+          0.304,
+          0.304
+        ],
+        "p99_ms": [
+          0.813,
+          0.812,
+          0.811,
+          0.811
+        ]
+      },
+      {
+        "pass": 3,
+        "label": "candidate",
+        "runtime": "kiln",
+        "workload": "json-echo-64k",
+        "rps": 12296,
+        "client_count": 4,
+        "requests": 61530,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          5.139,
+          5.136,
+          5.138,
+          5.137
+        ],
+        "p99_ms": [
+          6.408,
+          6.364,
+          6.418,
+          6.409
+        ]
+      },
+      {
+        "pass": 3,
+        "label": "candidate",
+        "runtime": "kiln",
+        "workload": "large-upload",
+        "rps": 21029,
+        "client_count": 4,
+        "requests": 105177,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          2.832,
+          2.838,
+          2.832,
+          2.826
+        ],
+        "p99_ms": [
+          6.053,
+          6.005,
+          6.012,
+          6.065
+        ]
+      },
+      {
+        "pass": 3,
+        "label": "candidate",
+        "runtime": "kiln",
+        "workload": "mixed",
+        "rps": 113362,
+        "client_count": 4,
+        "requests": 566817,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          0.469,
+          0.472,
+          0.471,
+          0.469
+        ],
+        "p99_ms": [
+          1.479,
+          1.475,
+          1.49,
+          1.479
+        ]
+      },
+      {
+        "pass": 3,
+        "label": "candidate",
+        "runtime": "node",
+        "workload": "hello",
+        "rps": 125809,
+        "client_count": 4,
+        "requests": 629045,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          0.444,
+          0.443,
+          0.453,
+          0.45
+        ],
+        "p99_ms": [
+          1.05,
+          0.948,
+          1.175,
+          1.151
+        ]
+      },
+      {
+        "pass": 3,
+        "label": "candidate",
+        "runtime": "node",
+        "workload": "json-echo-64k",
+        "rps": 18890,
+        "client_count": 4,
+        "requests": 94495,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          3.159,
+          3.182,
+          3.174,
+          3.18
+        ],
+        "p99_ms": [
+          4.925,
+          6.544,
+          6.635,
+          7.116
+        ]
+      },
+      {
+        "pass": 3,
+        "label": "candidate",
+        "runtime": "node",
+        "workload": "large-upload",
+        "rps": 22498,
+        "client_count": 4,
+        "requests": 112516,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          2.656,
+          2.645,
+          2.631,
+          2.778
+        ],
+        "p99_ms": [
+          5.786,
+          5.708,
+          5.702,
+          6.79
+        ]
+      },
+      {
+        "pass": 3,
+        "label": "candidate",
+        "runtime": "node",
+        "workload": "mixed",
+        "rps": 100789,
+        "client_count": 4,
+        "requests": 503971,
+        "errors": 0,
+        "wrong": 0,
+        "p50_ms": [
+          0.518,
+          0.518,
+          0.518,
+          0.517
+        ],
+        "p99_ms": [
+          1.721,
+          1.73,
+          1.726,
+          1.727
+        ]
+      }
+    ],
+    "microtasks": {
+      "schema": 1,
+      "source": {
+        "baseline": "b9bbb589",
+        "candidate": "100c7c7b"
+      },
+      "workload": "bench/io/microtasks.mjs",
+      "workload_sha256": "c044e655aeeb3c164e1cbef2b8efb0de3def3d1bca44abef7a3f4bc03e3476b9",
+      "harness_sha256": "10e0b88d3036e9711a8b0753fe6752f52d572f35b4c4b1faa11eaef3b5488c73",
+      "binaries": {
+        "baseline": {
+          "path": "/Users/alee/Developer/Personal/kiln-perf-consolidation/.scratch/perf-consolidation/base-microtasks.bin",
+          "sha256": "f6347ce45eff7e0d6cf1273a9a4a90c5404253ee6f73fb96ff5a9add87819a4e"
+        },
+        "candidate": {
+          "path": "/Users/alee/Developer/Personal/kiln-perf-consolidation/.scratch/perf-consolidation/candidate-microtasks.bin",
+          "sha256": "5e94cddb3f27f0d06b35a98733c7f84bd3e4bc6ae32f2f435392cd6bfeb85cd8"
+        },
+        "node": null
+      },
+      "node_version": "v25.9.0",
+      "passes": 3,
+      "order": [
+        [
+          "baseline",
+          "candidate",
+          "node"
+        ],
+        [
+          "candidate",
+          "node",
+          "baseline"
+        ],
+        [
+          "node",
+          "baseline",
+          "candidate"
+        ]
+      ],
+      "status": "passed",
+      "checksum": "20000",
+      "warm_medians": {
+        "baseline": [
+          0.5078125,
+          0.5078125,
+          0.5078125
+        ],
+        "candidate": [
+          0.5078125,
+          0.5078125,
+          0.5078125
+        ],
+        "node": [
+          0.4375,
+          0.4375,
+          0.4453125
+        ]
+      }
+    },
+    "microtasks_runs": [
+      {
+        "label": "baseline",
+        "command": [
+          "/Users/alee/Developer/Personal/kiln-perf-consolidation/.scratch/perf-consolidation/base-microtasks.bin"
+        ],
+        "exit_status": 0,
+        "wall_ms": 2392.205166979693,
+        "record": {
+          "name": "microtasks",
+          "mode": "in-process",
+          "cold": 1,
+          "warm_median": 0.5078125,
+          "warm_best": 0.5,
+          "batch": 128,
+          "samples": 31,
+          "checksum": "20000"
+        },
+        "internal_warm_median": 0.5078125,
+        "mode": "in-process",
+        "iterations": null,
+        "checksum": "20000",
+        "stdout": "{\"name\":\"microtasks\",\"mode\":\"in-process\",\"cold\":1,\"warm_median\":0.5078125,\"warm_best\":0.5,\"batch\":128,\"samples\":31,\"checksum\":\"20000\"}\n",
+        "stderr": "",
+        "pass": 1
+      },
+      {
+        "label": "candidate",
+        "command": [
+          "/Users/alee/Developer/Personal/kiln-perf-consolidation/.scratch/perf-consolidation/candidate-microtasks.bin"
+        ],
+        "exit_status": 0,
+        "wall_ms": 2392.160541989142,
+        "record": {
+          "name": "microtasks",
+          "mode": "in-process",
+          "cold": 1,
+          "warm_median": 0.5078125,
+          "warm_best": 0.5,
+          "batch": 128,
+          "samples": 31,
+          "checksum": "20000"
+        },
+        "internal_warm_median": 0.5078125,
+        "mode": "in-process",
+        "iterations": null,
+        "checksum": "20000",
+        "stdout": "{\"name\":\"microtasks\",\"mode\":\"in-process\",\"cold\":1,\"warm_median\":0.5078125,\"warm_best\":0.5,\"batch\":128,\"samples\":31,\"checksum\":\"20000\"}\n",
+        "stderr": "",
+        "pass": 1
+      },
+      {
+        "label": "node",
+        "command": [
+          "node",
+          "/Users/alee/Developer/Personal/kiln-perf-consolidation/bench/io/microtasks.mjs"
+        ],
+        "exit_status": 0,
+        "wall_ms": 2225.5889579828363,
+        "record": {
+          "name": "microtasks",
+          "mode": "in-process",
+          "cold": 1,
+          "warm_median": 0.4375,
+          "warm_best": 0.4296875,
+          "batch": 128,
+          "samples": 36,
+          "checksum": "20000"
+        },
+        "internal_warm_median": 0.4375,
+        "mode": "in-process",
+        "iterations": null,
+        "checksum": "20000",
+        "stdout": "{\"name\":\"microtasks\",\"mode\":\"in-process\",\"cold\":1,\"warm_median\":0.4375,\"warm_best\":0.4296875,\"batch\":128,\"samples\":36,\"checksum\":\"20000\"}\n",
+        "stderr": "",
+        "pass": 1
+      },
+      {
+        "label": "candidate",
+        "command": [
+          "/Users/alee/Developer/Personal/kiln-perf-consolidation/.scratch/perf-consolidation/candidate-microtasks.bin"
+        ],
+        "exit_status": 0,
+        "wall_ms": 2179.1887499857694,
+        "record": {
+          "name": "microtasks",
+          "mode": "in-process",
+          "cold": 1,
+          "warm_median": 0.5078125,
+          "warm_best": 0.5,
+          "batch": 128,
+          "samples": 31,
+          "checksum": "20000"
+        },
+        "internal_warm_median": 0.5078125,
+        "mode": "in-process",
+        "iterations": null,
+        "checksum": "20000",
+        "stdout": "{\"name\":\"microtasks\",\"mode\":\"in-process\",\"cold\":1,\"warm_median\":0.5078125,\"warm_best\":0.5,\"batch\":128,\"samples\":31,\"checksum\":\"20000\"}\n",
+        "stderr": "",
+        "pass": 2
+      },
+      {
+        "label": "node",
+        "command": [
+          "node",
+          "/Users/alee/Developer/Personal/kiln-perf-consolidation/bench/io/microtasks.mjs"
+        ],
+        "exit_status": 0,
+        "wall_ms": 2216.363082989119,
+        "record": {
+          "name": "microtasks",
+          "mode": "in-process",
+          "cold": 1,
+          "warm_median": 0.4375,
+          "warm_best": 0.4296875,
+          "batch": 128,
+          "samples": 36,
+          "checksum": "20000"
+        },
+        "internal_warm_median": 0.4375,
+        "mode": "in-process",
+        "iterations": null,
+        "checksum": "20000",
+        "stdout": "{\"name\":\"microtasks\",\"mode\":\"in-process\",\"cold\":1,\"warm_median\":0.4375,\"warm_best\":0.4296875,\"batch\":128,\"samples\":36,\"checksum\":\"20000\"}\n",
+        "stderr": "",
+        "pass": 2
+      },
+      {
+        "label": "baseline",
+        "command": [
+          "/Users/alee/Developer/Personal/kiln-perf-consolidation/.scratch/perf-consolidation/base-microtasks.bin"
+        ],
+        "exit_status": 0,
+        "wall_ms": 2193.880791979609,
+        "record": {
+          "name": "microtasks",
+          "mode": "in-process",
+          "cold": 0,
+          "warm_median": 0.5078125,
+          "warm_best": 0.5,
+          "batch": 128,
+          "samples": 31,
+          "checksum": "20000"
+        },
+        "internal_warm_median": 0.5078125,
+        "mode": "in-process",
+        "iterations": null,
+        "checksum": "20000",
+        "stdout": "{\"name\":\"microtasks\",\"mode\":\"in-process\",\"cold\":0,\"warm_median\":0.5078125,\"warm_best\":0.5,\"batch\":128,\"samples\":31,\"checksum\":\"20000\"}\n",
+        "stderr": "",
+        "pass": 2
+      },
+      {
+        "label": "node",
+        "command": [
+          "node",
+          "/Users/alee/Developer/Personal/kiln-perf-consolidation/bench/io/microtasks.mjs"
+        ],
+        "exit_status": 0,
+        "wall_ms": 2178.9908340142574,
+        "record": {
+          "name": "microtasks",
+          "mode": "in-process",
+          "cold": 1,
+          "warm_median": 0.4453125,
+          "warm_best": 0.4375,
+          "batch": 128,
+          "samples": 35,
+          "checksum": "20000"
+        },
+        "internal_warm_median": 0.4453125,
+        "mode": "in-process",
+        "iterations": null,
+        "checksum": "20000",
+        "stdout": "{\"name\":\"microtasks\",\"mode\":\"in-process\",\"cold\":1,\"warm_median\":0.4453125,\"warm_best\":0.4375,\"batch\":128,\"samples\":35,\"checksum\":\"20000\"}\n",
+        "stderr": "",
+        "pass": 3
+      },
+      {
+        "label": "baseline",
+        "command": [
+          "/Users/alee/Developer/Personal/kiln-perf-consolidation/.scratch/perf-consolidation/base-microtasks.bin"
+        ],
+        "exit_status": 0,
+        "wall_ms": 2195.974957983708,
+        "record": {
+          "name": "microtasks",
+          "mode": "in-process",
+          "cold": 1,
+          "warm_median": 0.5078125,
+          "warm_best": 0.5,
+          "batch": 128,
+          "samples": 31,
+          "checksum": "20000"
+        },
+        "internal_warm_median": 0.5078125,
+        "mode": "in-process",
+        "iterations": null,
+        "checksum": "20000",
+        "stdout": "{\"name\":\"microtasks\",\"mode\":\"in-process\",\"cold\":1,\"warm_median\":0.5078125,\"warm_best\":0.5,\"batch\":128,\"samples\":31,\"checksum\":\"20000\"}\n",
+        "stderr": "",
+        "pass": 3
+      },
+      {
+        "label": "candidate",
+        "command": [
+          "/Users/alee/Developer/Personal/kiln-perf-consolidation/.scratch/perf-consolidation/candidate-microtasks.bin"
+        ],
+        "exit_status": 0,
+        "wall_ms": 2194.0046660020016,
+        "record": {
+          "name": "microtasks",
+          "mode": "in-process",
+          "cold": 0,
+          "warm_median": 0.5078125,
+          "warm_best": 0.5078125,
+          "batch": 128,
+          "samples": 31,
+          "checksum": "20000"
+        },
+        "internal_warm_median": 0.5078125,
+        "mode": "in-process",
+        "iterations": null,
+        "checksum": "20000",
+        "stdout": "{\"name\":\"microtasks\",\"mode\":\"in-process\",\"cold\":0,\"warm_median\":0.5078125,\"warm_best\":0.5078125,\"batch\":128,\"samples\":31,\"checksum\":\"20000\"}\n",
+        "stderr": "",
+        "pass": 3
+      }
+    ]
+  }
+}
