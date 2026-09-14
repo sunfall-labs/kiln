@@ -29,18 +29,12 @@ fn full_and_common_manifests_round_trip_and_match_source_identity() {
             ProviderCapabilities::from_capabilities(source.capabilities.iter().copied()),
             variant.capabilities()
         );
-        assert_eq!(
-            source.archive,
-            match variant {
-                ProviderVariant::Full => "libkiln_native_number_ffi.a",
-                ProviderVariant::Common => "libkiln_native_number_ffi.slim.a",
-            }
-        );
+        assert_eq!(source.archive, variant.archive());
     }
 }
 
 #[test]
-fn every_identity_field_changes_identity_but_archive_filename_does_not() {
+fn every_producer_identity_field_changes_identity_but_artifact_metadata_does_not() {
     let base = sample(ProviderVariant::Full);
     let fields = [
         ("schema", Value::from(base.schema + 1)),
@@ -56,10 +50,6 @@ fn every_identity_field_changes_identity_but_archive_filename_does_not() {
         (
             "source_sha256",
             Value::from("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"),
-        ),
-        (
-            "archive_sha256",
-            Value::from("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"),
         ),
         ("linkage", Value::from("dynamic")),
         ("pic", Value::from(false)),
@@ -88,6 +78,14 @@ fn every_identity_field_changes_identity_but_archive_filename_does_not() {
         renamed.identity(),
         "archive filename is packaging metadata"
     );
+    let mut rebuilt = base.clone();
+    rebuilt.archive_sha256 =
+        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_owned();
+    assert_eq!(
+        baseline,
+        rebuilt.identity(),
+        "archive content is an artifact input, not producer identity"
+    );
 }
 
 #[test]
@@ -113,9 +111,7 @@ fn manifest_cli_rejects_invalid_variant_and_argument_counts() {
         .output()
         .expect("run manifest CLI");
     assert_eq!(invalid_variant.status.code(), Some(2));
-    assert!(
-        String::from_utf8_lossy(&invalid_variant.stderr).contains("variant must be full or common")
-    );
+    assert!(String::from_utf8_lossy(&invalid_variant.stderr).contains("variant must be one of"));
 
     let wrong_count = Command::new(binary)
         .args(["manifest", "target"])

@@ -550,6 +550,7 @@ impl<T> DuplexState<T> {
 
     /// Writes the consumer has not taken yet. A submitted write is already in its hands, so a
     /// stream with none of these left has produced everything it ever will.
+    #[cfg_attr(not(feature = "http"), allow(dead_code))]
     pub(crate) fn unsubmitted_writes(&self) -> usize {
         self.writes
             .iter()
@@ -569,6 +570,7 @@ impl<T> DuplexState<T> {
     /// HTTP response bodies use the same Node-visible accounting as sockets, but Hyper consumes
     /// their frames rather than a host request table. The caller supplies a monotonically unique
     /// identity and completes it when Hyper accepts the frame.
+    #[cfg_attr(not(feature = "http"), allow(dead_code))]
     pub(crate) fn submit_next(&mut self, request: RequestId) -> Option<&T> {
         self.write_started(request).then(|| {
             &self

@@ -2996,6 +2996,52 @@ pub fn retained_module_size(
     (instructions, reachable.len())
 }
 
+/// Instructions retained by the same declaration/function liveness used during C emission.
+/// Consumers planning separately linked runtime engines must inspect this view rather than every
+/// function prototype in the source module, or dead library code keeps unrelated engines alive.
+pub fn retained_module_instructions<'a>(
+    module: &'a ModuleProgram,
+    demanded: Option<&BTreeSet<u32>>,
+) -> Vec<&'a Instruction> {
+    let program = &module.program;
+    let Some(demanded) = demanded else {
+        return program
+            .code
+            .iter()
+            .chain(
+                program
+                    .functions
+                    .iter()
+                    .flat_map(|function| function.code.iter()),
+            )
+            .collect();
+    };
+    let (reachable, dead_pcs, _) = closed_world_function_liveness(
+        program,
+        demanded,
+        module.link_facts.direct_eval,
+        &module.link_facts.removable_declarations,
+    );
+    let mut retained = program
+        .code
+        .iter()
+        .enumerate()
+        .filter(|(pc, _)| !dead_pcs[0].contains(&(*pc as u32)))
+        .map(|(_, instruction)| instruction)
+        .collect::<Vec<_>>();
+    for index in reachable {
+        retained.extend(
+            program.functions[index]
+                .code
+                .iter()
+                .enumerate()
+                .filter(|(pc, _)| !dead_pcs[index + 1].contains(&(*pc as u32)))
+                .map(|(_, instruction)| instruction),
+        );
+    }
+    retained
+}
+
 /// Statically named members read from one module namespace slot, or `None` when the namespace
 /// escapes and therefore needs its complete export surface.
 ///

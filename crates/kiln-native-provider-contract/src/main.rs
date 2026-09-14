@@ -31,20 +31,37 @@ fn main() {
             "{}",
             kiln_native_provider_contract::contract().exports.join(" ")
         ),
+        Some("variant") => {
+            let values: Vec<_> = args.collect();
+            let Some(variant) = values
+                .first()
+                .filter(|_| values.len() == 1)
+                .and_then(|value| kiln_native_provider_contract::ProviderVariant::parse(value))
+            else {
+                eprintln!("variant requires one valid provider variant name");
+                std::process::exit(2);
+            };
+            println!(
+                "{}",
+                serde_json::to_string(&kiln_native_provider_contract::package(variant)).unwrap()
+            );
+        }
         Some("manifest") => {
             let values: Vec<_> = args.collect();
             if values.len() != 7 {
                 eprintln!("manifest requires 7 arguments");
                 std::process::exit(2);
             }
-            let variant = match values[6].as_str() {
-                "full" => kiln_native_provider_contract::ProviderVariant::Full,
-                "common" => kiln_native_provider_contract::ProviderVariant::Common,
-                _ => {
-                    eprintln!("manifest variant must be full or common");
+            let variant = kiln_native_provider_contract::ProviderVariant::parse(&values[6])
+                .unwrap_or_else(|| {
+                    eprintln!(
+                        "manifest variant must be one of: {}",
+                        kiln_native_provider_contract::ProviderVariant::ALL
+                            .map(kiln_native_provider_contract::ProviderVariant::as_str)
+                            .join(", ")
+                    );
                     std::process::exit(2);
-                }
-            };
+                });
             let m = kiln_native_provider_contract::manifest(
                 values[0].clone(),
                 values[1].clone(),
@@ -58,7 +75,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: kiln-native-provider-contract <contract|abi|exports|source-digest ROOT>"
+                "usage: kiln-native-provider-contract <contract|variant NAME|abi|exports|source-digest ROOT>"
             );
             std::process::exit(2);
         }

@@ -1290,11 +1290,18 @@ fn live_cache_identity_catalogue_covers_every_stage_and_profile_family() {
     // The ordinary shared-library object and its final link share one toolchain identity by
     // design; identity digests intentionally omit artifact kind and link inputs. Every other
     // catalogued family/profile contributes a distinct identity.
-    assert_eq!(identities.len(), 53);
+    assert_eq!(identities.len(), 62);
 
     let tool = builder.toolchain().identity();
     let target = target_identity(tool);
     let compiler = compiler_identity(tool);
+    let provider_identities = number_provider::producer_identities(tool)
+        .expect("provider identities without archive builds");
+    let full_provider_identity = provider_identities
+        .iter()
+        .find(|(variant, _)| matches!(variant, ProviderVariant::Full))
+        .map(|(_, identity)| identity.clone())
+        .expect("full provider identity");
     for family in NativeArtifactFamily::SOURCES {
         let (backend, abi) = family.backend_abi(
             &module_abi_identity(),
@@ -1302,10 +1309,7 @@ fn live_cache_identity_catalogue_covers_every_stage_and_profile_family() {
             &shared_embedding_abi_identity(),
         );
         let compiler_version = if matches!(family, NativeArtifactFamily::NumberProvider) {
-            builder
-                .number_provider()
-                .expect("provider identity")
-                .identity
+            full_provider_identity.clone()
         } else {
             family.compiler_version()
         };
@@ -1321,12 +1325,9 @@ fn live_cache_identity_catalogue_covers_every_stage_and_profile_family() {
             },
         )));
     }
-    for variant in ProviderVariant::ALL {
-        let provider = builder
-            .number_provider_variant(variant)
-            .expect("provider variant identity");
+    for (_variant, provider_identity) in provider_identities {
         assert!(identities.contains(&cache_identity(
-            provider.identity,
+            provider_identity,
             Backend::Custom("rust-native-number-provider".to_owned()),
             &native_number_abi_identity(),
             &target,
@@ -9819,8 +9820,8 @@ fn provider_capability_demand_is_typed_and_conservative() {
 
     assert!(
         selection("main.mjs", &[("main.mjs", "console.log(1 + 2);\n")])
-            == ProviderCapabilities::COMMON,
-        "a plain ESM entry needs only common capabilities"
+            == ProviderCapabilities::REALM,
+        "a plain ESM entry needs only Realm"
     );
     assert!(
         selection(
@@ -9832,8 +9833,8 @@ fn provider_capability_demand_is_typed_and_conservative() {
                 ),
                 ("dep.mjs", "export const a = 1;\n"),
             ]
-        ) == ProviderCapabilities::COMMON,
-        "an HTTP-free static graph needs only common capabilities"
+        ) == ProviderCapabilities::REALM,
+        "an engine-free static graph needs only Realm"
     );
     assert_eq!(
         selection(
@@ -9847,8 +9848,25 @@ fn provider_capability_demand_is_typed_and_conservative() {
                 ("dead.mjs", "export const unused = typeof Temporal;\n",),
             ],
         ),
-        ProviderCapabilities::COMMON,
+        ProviderCapabilities::REALM,
         "a dead module does not enlarge provider requirements"
+    );
+    assert_eq!(
+        selection(
+            "main.mjs",
+            &[
+                (
+                    "main.mjs",
+                    "import { used } from './dep.mjs';\nconsole.log(used);\n",
+                ),
+                (
+                    "dep.mjs",
+                    "export const used = 1;\nexport function dead() { return [/x/, 1n, JSON.parse('1')]; }\n",
+                ),
+            ],
+        ),
+        ProviderCapabilities::REALM,
+        "an unreachable function in a live module does not enlarge provider requirements"
     );
     assert!(
         selection(
@@ -9857,7 +9875,7 @@ fn provider_capability_demand_is_typed_and_conservative() {
                 "main.mjs",
                 "import http from 'node:http';\nconsole.log(typeof http.createServer);\n",
             )]
-        ) == ProviderCapabilities::COMMON.with(ProviderCapability::Http),
+        ) == ProviderCapabilities::REALM.with(ProviderCapability::Http),
         "node:http declares HTTP demand"
     );
     assert!(
@@ -9867,7 +9885,7 @@ fn provider_capability_demand_is_typed_and_conservative() {
                 "main.mjs",
                 "import https from 'node:https';\nconsole.log(typeof https);\n",
             )]
-        ) == ProviderCapabilities::COMMON.with(ProviderCapability::Http),
+        ) == ProviderCapabilities::REALM.with(ProviderCapability::Http),
         "node:https declares HTTP demand"
     );
     assert!(
@@ -9877,7 +9895,7 @@ fn provider_capability_demand_is_typed_and_conservative() {
                 "main.mjs",
                 "import { dlopen } from 'node:ffi';\nconsole.log(typeof dlopen);\n",
             )]
-        ) == ProviderCapabilities::COMMON.with(ProviderCapability::Ffi),
+        ) == ProviderCapabilities::REALM.with(ProviderCapability::Ffi),
         "node:ffi declares FFI demand"
     );
     assert!(
@@ -9910,10 +9928,12 @@ fn provider_capability_demand_is_typed_and_conservative() {
         selection(
             "main.mjs",
             &[("main.mjs", "console.log(JSON.parse('1'));\n")]
-        ) == ProviderCapabilities::COMMON,
-        "JSON is carried by the common archive"
+        ) == ProviderCapabilities::REALM.with(ProviderCapability::Json),
+        "JSON is independently demandable"
     );
     for (source, capability) in [
+        ("console.log(/a/.test('a'));\n", ProviderCapability::RegExp),
+        ("console.log(1n + 2n);\n", ProviderCapability::BigInt),
         (
             "console.log(typeof Temporal);\n",
             ProviderCapability::Temporal,
@@ -9926,7 +9946,7 @@ fn provider_capability_demand_is_typed_and_conservative() {
     ] {
         assert_eq!(
             selection("main.mjs", &[("main.mjs", source)]),
-            ProviderCapabilities::COMMON.with(capability),
+            ProviderCapabilities::REALM.with(capability),
             "{} is represented as its own capability",
             capability.as_str()
         );
