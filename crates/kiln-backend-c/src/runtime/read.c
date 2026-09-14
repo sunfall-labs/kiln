@@ -1591,7 +1591,9 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         }
         if (kiln_c99_same_name(key, key_len, "description")) {
             kiln_symbol *symbol = kiln_c99_symbol_of(target);
-            if (symbol != NULL && symbol->description != NULL) {
+            if (symbol != NULL && symbol->description_value.tag == KILN_VALUE_STRING) {
+                *out = symbol->description_value;
+            } else if (symbol != NULL && symbol->description != NULL) {
                 *out = kiln_c99_copy_text(symbol->description, symbol->description_len);
             } else {
                 *out = kiln_c99_undefined();
