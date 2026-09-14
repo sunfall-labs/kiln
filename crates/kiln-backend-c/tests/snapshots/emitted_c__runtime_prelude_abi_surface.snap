@@ -715,6 +715,7 @@ KILN_VALUE_RETURN_SIGNAL = 28
 static uint32_t kiln_c99_method_groups(uint64_t code) {
 static int kiln_c99_method_in_group(uint64_t code, uint32_t group) {
 typedef struct kiln_value {
+#define KILN_VALUE_FLAG_OWNED_STRING UINT16_C(1)
 typedef uint64_t kiln_val;
 #define KILN_QNAN_BASE          UINT64_C(0x7FF8000000000000)
 #define KILN_TAG_MASK           UINT64_C(0xFFFF000000000000)
