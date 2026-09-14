@@ -4414,7 +4414,10 @@ impl Value {
             Self::Null => "null".to_owned(),
             Self::Boolean(value) => value.to_string(),
             Self::Number(value) => number_string(*value),
-            Self::String(value) => value.clone(),
+            // This method is explicitly the host/diagnostic rendering API. Language string
+            // coercion uses `to_string_units` below, so a lone unit is only replaced here at the
+            // final display boundary where Rust's scalar `String` is required.
+            Self::String(value) => value.to_lossy_string(),
             // `Function.prototype.toString`: the text the program wrote. The span and the source
             // both travel on the program the closure already carries, so this is a slice rather
             // than a reconstruction -- there is no spelling to invent and none to get wrong.
@@ -4494,6 +4497,15 @@ impl Value {
             // `array.join()` itself, which can return a result, raises the RangeError.
             Self::Array(items) => join(&items.borrow(), ",").unwrap_or_default(),
             Self::Cell(_) => unreachable!("a cell is never used as a value"),
+        }
+    }
+
+    /// Lossless JavaScript `ToString` result. Consumers that remain in the language must keep
+    /// this owner rather than routing through the scalar display formatter above.
+    pub fn to_string_units(&self) -> StringUnits {
+        match self {
+            Self::String(value) => value.clone(),
+            _ => StringUnits::from(self.to_display_string()),
         }
     }
 }
