@@ -84,7 +84,7 @@ def run_clients(driver: Path, duration: int, connections: int, port: int, worklo
     try:
         for _ in range(processes):
             clients.append(subprocess.Popen(client_command(node_bin, driver, duration, connections, port, workload),
-                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE))
+                                            cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE))
         for index, client in enumerate(clients, 1):
             try:
                 stdout, stderr = client.communicate(timeout=timeout)
@@ -181,8 +181,8 @@ def main() -> int:
                         if not port_free(port): raise RuntimeError(f"port {port} is already occupied before {label}")
                         run_dir = result_root / f"pass-{pass_number}-{label}-{runtime}-{workload}"; run_dir.mkdir()
                         stdout_file, stderr_file = (run_dir / "server.stdout").open("wb"), (run_dir / "server.stderr").open("wb")
-                        process = subprocess.Popen(runtime_command(runtime, variant, workload, sources), stdout=stdout_file,
-                                                   stderr=stderr_file, start_new_session=True)
+                        process = subprocess.Popen(runtime_command(runtime, variant, workload, sources), cwd=ROOT,
+                                                   stdout=stdout_file, stderr=stderr_file, start_new_session=True)
                         try:
                             wait_ready(port, process)
                             reports = run_clients(driver, duration, connections, port, workload, processes,
