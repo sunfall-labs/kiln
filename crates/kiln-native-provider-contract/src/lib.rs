@@ -4,10 +4,9 @@ use kiln_digest::Digest;
 use serde::{Deserialize, Serialize};
 
 pub const SOURCE_LIST: &str = include_str!("../../kiln-native/provider-sources.txt");
-// Schema 2 changes `http: false` from "all semantic engines except HTTP" to the common
-// Realm/RegExp/BigInt/JSON set. Old compilers must reject the smaller archive rather than assuming
-// Temporal, JSON, Intl, parallel, and FFI are present.
-pub const SCHEMA_VERSION: u16 = 2;
+// Schema 3 replaces the overloaded `http` variant bit with an explicit, canonical capability
+// list. Old compilers must reject it rather than guessing which engines an archive contains.
+pub const SCHEMA_VERSION: u16 = 3;
 pub const PROVIDER_NAME: &str = "kiln-native-number-ffi";
 pub const PROFILE: &str = "provider";
 pub const RUSTFLAGS: &str =
@@ -18,6 +17,138 @@ pub const FULL_ARCHIVE: &str = "libkiln_native_number_ffi.a";
 pub const SLIM_ARCHIVE: &str = "libkiln_native_number_ffi.slim.a";
 pub const FULL_MANIFEST: &str = "kiln-native-number-provider.json";
 pub const SLIM_MANIFEST: &str = "kiln-native-number-provider.slim.json";
+
+/// One independently demandable engine behind the private provider ABI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProviderCapability {
+    Realm,
+    RegExp,
+    BigInt,
+    Json,
+    Temporal,
+    Intl,
+    Parallel,
+    Http,
+    Ffi,
+}
+
+impl ProviderCapability {
+    pub const ALL: [Self; 9] = [
+        Self::Realm,
+        Self::RegExp,
+        Self::BigInt,
+        Self::Json,
+        Self::Temporal,
+        Self::Intl,
+        Self::Parallel,
+        Self::Http,
+        Self::Ffi,
+    ];
+
+    const fn bit(self) -> u16 {
+        1 << self as u16
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Realm => "realm",
+            Self::RegExp => "reg-exp",
+            Self::BigInt => "big-int",
+            Self::Json => "json",
+            Self::Temporal => "temporal",
+            Self::Intl => "intl",
+            Self::Parallel => "parallel",
+            Self::Http => "http",
+            Self::Ffi => "ffi",
+        }
+    }
+}
+
+/// A canonical set of provider engines required by a retained program or supplied by an archive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct ProviderCapabilities(u16);
+
+impl ProviderCapabilities {
+    pub const NONE: Self = Self(0);
+    pub const COMMON: Self = Self(
+        ProviderCapability::Realm.bit()
+            | ProviderCapability::RegExp.bit()
+            | ProviderCapability::BigInt.bit()
+            | ProviderCapability::Json.bit(),
+    );
+    pub const FULL: Self = Self(
+        Self::COMMON.0
+            | ProviderCapability::Temporal.bit()
+            | ProviderCapability::Intl.bit()
+            | ProviderCapability::Parallel.bit()
+            | ProviderCapability::Http.bit()
+            | ProviderCapability::Ffi.bit(),
+    );
+
+    pub const fn with(self, capability: ProviderCapability) -> Self {
+        Self(self.0 | capability.bit())
+    }
+
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    pub const fn contains(self, capability: ProviderCapability) -> bool {
+        self.0 & capability.bit() != 0
+    }
+
+    pub const fn contains_all(self, required: Self) -> bool {
+        self.0 & required.0 == required.0
+    }
+
+    pub fn iter(self) -> impl Iterator<Item = ProviderCapability> {
+        ProviderCapability::ALL
+            .into_iter()
+            .filter(move |capability| self.contains(*capability))
+    }
+
+    pub fn from_capabilities(capabilities: impl IntoIterator<Item = ProviderCapability>) -> Self {
+        capabilities.into_iter().fold(Self::NONE, Self::with)
+    }
+
+    pub fn names(self) -> Vec<&'static str> {
+        self.iter().map(ProviderCapability::as_str).collect()
+    }
+}
+
+/// The two provider packages currently shipped. Selection is by capability coverage, so adding
+/// finer-grained variants later does not change the planner or manifest semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProviderVariant {
+    Common,
+    Full,
+}
+
+impl ProviderVariant {
+    pub const ALL: [Self; 2] = [Self::Common, Self::Full];
+
+    pub const fn capabilities(self) -> ProviderCapabilities {
+        match self {
+            Self::Common => ProviderCapabilities::COMMON,
+            Self::Full => ProviderCapabilities::FULL,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Common => "common",
+            Self::Full => "full",
+        }
+    }
+
+    pub fn smallest_covering(required: ProviderCapabilities) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|variant| variant.capabilities().contains_all(required))
+    }
+}
 
 #[derive(Debug, Serialize)]
 pub struct Contract {
@@ -34,8 +165,8 @@ pub struct Contract {
     pub slim_archive: &'static str,
     pub full_manifest: &'static str,
     pub slim_manifest: &'static str,
-    pub full_http: bool,
-    pub slim_http: bool,
+    pub full_capabilities: Vec<ProviderCapability>,
+    pub common_capabilities: Vec<ProviderCapability>,
     pub exports: Vec<&'static str>,
 }
 
@@ -59,7 +190,8 @@ pub struct ProviderManifest {
     pub deployment: String,
     pub libc_baseline: String,
     pub exports: Vec<String>,
-    pub http: bool,
+    pub variant: ProviderVariant,
+    pub capabilities: Vec<ProviderCapability>,
 }
 
 impl ProviderManifest {
@@ -79,7 +211,8 @@ impl ProviderManifest {
             pic: bool,
             profile: &'a str,
             cpu: &'a str,
-            http: bool,
+            variant: ProviderVariant,
+            capabilities: &'a [ProviderCapability],
             deployment: &'a str,
             libc: &'a str,
             exports: &'a [String],
@@ -98,7 +231,8 @@ impl ProviderManifest {
             pic: self.pic,
             profile: &self.profile,
             cpu: &self.cpu_features,
-            http: self.http,
+            variant: self.variant,
+            capabilities: &self.capabilities,
             deployment: &self.deployment,
             libc: &self.libc_baseline,
             exports: &self.exports,
@@ -114,7 +248,7 @@ pub fn manifest(
     archive: String,
     deployment: String,
     libc: String,
-    http: bool,
+    variant: ProviderVariant,
 ) -> ProviderManifest {
     let c = contract();
     ProviderManifest {
@@ -127,7 +261,11 @@ pub fn manifest(
         rustc_identity: rustc,
         source_sha256: source,
         archive_sha256: archive,
-        archive: if http { c.full_archive } else { c.slim_archive }.to_owned(),
+        archive: match variant {
+            ProviderVariant::Full => c.full_archive,
+            ProviderVariant::Common => c.slim_archive,
+        }
+        .to_owned(),
         linkage: "static".to_owned(),
         pic: true,
         profile: c.profile.to_owned(),
@@ -135,7 +273,8 @@ pub fn manifest(
         deployment,
         libc_baseline: libc,
         exports: c.exports.into_iter().map(str::to_owned).collect(),
-        http,
+        variant,
+        capabilities: variant.capabilities().iter().collect(),
     }
 }
 
@@ -162,8 +301,8 @@ pub fn contract() -> Contract {
         slim_archive: SLIM_ARCHIVE,
         full_manifest: FULL_MANIFEST,
         slim_manifest: SLIM_MANIFEST,
-        full_http: true,
-        slim_http: false,
+        full_capabilities: ProviderCapabilities::FULL.iter().collect(),
+        common_capabilities: ProviderCapabilities::COMMON.iter().collect(),
         exports: exports(),
     }
 }
@@ -220,14 +359,41 @@ mod tests {
     }
 
     #[test]
-    fn contract_keeps_full_and_slim_fields_distinct() {
+    fn contract_keeps_full_and_common_variants_distinct() {
         let value = contract();
         assert_ne!(value.full_archive, value.slim_archive);
         assert_ne!(value.full_manifest, value.slim_manifest);
         assert_ne!(value.full_features, value.slim_features);
-        assert!(value.full_http);
-        assert!(!value.slim_http);
+        assert!(
+            ProviderCapabilities::from_capabilities(value.full_capabilities)
+                .contains_all(ProviderCapabilities::FULL)
+        );
+        assert_eq!(
+            ProviderCapabilities::from_capabilities(value.common_capabilities),
+            ProviderCapabilities::COMMON
+        );
         assert!(!value.exports.is_empty());
+    }
+
+    #[test]
+    fn capability_sets_have_stable_canonical_order_and_coverage() {
+        assert_eq!(
+            ProviderCapabilities::COMMON.names(),
+            ["realm", "reg-exp", "big-int", "json"]
+        );
+        assert!(ProviderCapabilities::FULL.contains_all(ProviderCapabilities::COMMON));
+        assert!(!ProviderCapabilities::COMMON.contains(ProviderCapability::Http));
+        assert!(ProviderCapabilities::FULL.contains(ProviderCapability::Http));
+        assert_eq!(
+            ProviderVariant::smallest_covering(ProviderCapabilities::COMMON),
+            Some(ProviderVariant::Common)
+        );
+        assert_eq!(
+            ProviderVariant::smallest_covering(
+                ProviderCapabilities::COMMON.with(ProviderCapability::Intl)
+            ),
+            Some(ProviderVariant::Full)
+        );
     }
 
     #[test]
@@ -239,15 +405,18 @@ mod tests {
             "archive".into(),
             "deployment".into(),
             "libc".into(),
-            true,
+            ProviderVariant::Full,
         );
         let base = m.identity();
         m.profile.push('x');
         assert_ne!(base, m.identity());
         m.profile.pop();
-        m.http = false;
+        m.variant = ProviderVariant::Common;
         assert_ne!(base, m.identity());
-        m.http = true;
+        m.variant = ProviderVariant::Full;
+        m.capabilities = ProviderCapabilities::COMMON.iter().collect();
+        assert_ne!(base, m.identity());
+        m.capabilities = ProviderCapabilities::FULL.iter().collect();
         m.exports.push("extra".into());
         assert_ne!(base, m.identity());
         m.exports.pop();

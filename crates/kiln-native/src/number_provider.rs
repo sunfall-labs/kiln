@@ -5,12 +5,14 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use kiln_artifact_cache::Digest;
 use kiln_native_number::{NUMBER_FORMAT_VERSION, NUMBER_PARSE_VERSION};
 pub(crate) use kiln_native_number_abi::PROVIDER_ABI_VERSION;
 use kiln_native_number_abi::PROVIDER_EXPORTS;
 use kiln_native_provider_contract as provider_contract;
+use kiln_native_provider_contract::{ProviderCapabilities, ProviderVariant};
 use kiln_native_toolchain::ToolIdentity;
 
 pub(crate) const PROVIDER_SCHEMA_VERSION: u16 = provider_contract::SCHEMA_VERSION;
@@ -26,6 +28,15 @@ const MANIFEST_FILE: &str = provider_contract::FULL_MANIFEST;
 /// Manifest for the common provider archive: same schema, provider ABI, and export list as
 /// the full manifest, but containing only Realm, RegExp, BigInt, and JSON engines.
 const MANIFEST_SLIM_FILE: &str = provider_contract::SLIM_MANIFEST;
+static PROVIDER_STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn provider_staging_path(build_root: &Path) -> PathBuf {
+    build_root.join(format!(
+        ".libkiln_native_number_ffi.a.{}.{}",
+        std::process::id(),
+        PROVIDER_STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+    ))
+}
 // `kiln-native-number-abi` owns the ordered export registry and ABI version. Keep the imported
 // contract private to this resolver module so manifest validation and source-build identities
 // cannot drift from the provider's compile-time signature assertions.
@@ -36,9 +47,8 @@ pub(crate) struct NumberProvider {
     pub(crate) archive_digest: Digest,
     pub(crate) identity: String,
     pub(crate) rust_target: String,
-    /// Whether this is the full archive. Kept as `http` in schema 2 because HTTP was the first
-    /// split capability; false now identifies the common Realm/RegExp/BigInt/JSON variant.
-    pub(crate) http: bool,
+    pub(crate) variant: ProviderVariant,
+    pub(crate) capabilities: ProviderCapabilities,
 }
 
 #[derive(Debug)]
@@ -139,34 +149,32 @@ impl std::error::Error for NumberProviderError {
 type ArchiveManifest = provider_contract::ProviderManifest;
 
 pub(crate) fn discover(identity: &ToolIdentity) -> Result<NumberProvider, NumberProviderError> {
-    discover_with_http(identity, true)
+    discover_for(identity, ProviderCapabilities::FULL)
 }
 
-/// Resolve the provider archive for a program that needs the full semantic-engine set.
-/// A full archive satisfies either request; a common archive only satisfies a graph whose
-/// retained provider demand is Realm, RegExp, BigInt, and JSON.
-pub(crate) fn discover_with_http(
+/// Resolve the smallest shipped provider variant that covers every retained engine requirement.
+pub(crate) fn discover_for(
     identity: &ToolIdentity,
-    want_http: bool,
+    required: ProviderCapabilities,
 ) -> Result<NumberProvider, NumberProviderError> {
     if let Some(path) = env::var_os(MANIFEST_ENV) {
-        return load_manifest(&PathBuf::from(path), identity, want_http);
+        return load_manifest(&PathBuf::from(path), identity, required);
     }
 
-    if !want_http {
+    if ProviderCapabilities::COMMON.contains_all(required) {
         for manifest in installed_slim_manifest_candidates() {
             if manifest.is_file() {
-                return load_manifest(&manifest, identity, want_http);
+                return load_manifest(&manifest, identity, required);
             }
         }
     }
     for manifest in installed_manifest_candidates() {
         if manifest.is_file() {
-            return load_manifest(&manifest, identity, want_http);
+            return load_manifest(&manifest, identity, required);
         }
     }
 
-    build_from_source(identity, want_http)
+    build_from_source(identity, required)
 }
 
 fn installed_manifest_candidates() -> Vec<PathBuf> {
@@ -202,7 +210,7 @@ fn installed_manifest_candidates_for(executable: &Path) -> Vec<PathBuf> {
 fn load_manifest(
     manifest_path: &Path,
     identity: &ToolIdentity,
-    want_http: bool,
+    required: ProviderCapabilities,
 ) -> Result<NumberProvider, NumberProviderError> {
     require_regular_package_file(manifest_path, manifest_path, "manifest")?;
     let bytes = read(manifest_path, "read number-provider manifest")?;
@@ -211,7 +219,7 @@ fn load_manifest(
             path: manifest_path.to_path_buf(),
             message: source.to_string(),
         })?;
-    validate_manifest(manifest_path, &manifest, identity, want_http)?;
+    validate_manifest(manifest_path, &manifest, identity, required)?;
 
     let archive_name = Path::new(&manifest.archive);
     if archive_name.components().count() != 1
@@ -249,7 +257,8 @@ fn load_manifest(
         archive_digest: actual_digest,
         identity: manifest_identity(&manifest),
         rust_target: manifest.rust_target,
-        http: manifest.http,
+        variant: manifest.variant,
+        capabilities: ProviderCapabilities::from_capabilities(manifest.capabilities),
     })
 }
 
@@ -277,8 +286,10 @@ fn validate_manifest(
     path: &Path,
     manifest: &ArchiveManifest,
     identity: &ToolIdentity,
-    want_http: bool,
+    required: ProviderCapabilities,
 ) -> Result<(), NumberProviderError> {
+    let declared = ProviderCapabilities::from_capabilities(manifest.capabilities.iter().copied());
+    let canonical = manifest.variant.capabilities().iter().collect::<Vec<_>>();
     let invalid = if manifest.schema != PROVIDER_SCHEMA_VERSION {
         Some(format!(
             "schema {} does not match {PROVIDER_SCHEMA_VERSION}",
@@ -319,12 +330,18 @@ fn validate_manifest(
         Some("`rustc_identity` must be `sha256:` followed by 64 lowercase hex digits".to_owned())
     } else if Digest::from_hex(&manifest.source_sha256).is_err() {
         Some("`source_sha256` is not a SHA-256 digest".to_owned())
-    } else if want_http && !manifest.http {
-        Some(
-            "the provider archive was built without HTTP support (`http` is false) \
-             but this build needs the HTTP engines"
-                .to_owned(),
-        )
+    } else if manifest.capabilities != canonical {
+        Some(format!(
+            "the {} provider variant must declare capabilities {:?}",
+            manifest.variant.as_str(),
+            manifest.variant.capabilities().names()
+        ))
+    } else if !declared.contains_all(required) {
+        Some(format!(
+            "the provider supplies {:?} but this build requires {:?}",
+            declared.names(),
+            required.names()
+        ))
     } else {
         None
     };
@@ -339,8 +356,9 @@ fn validate_manifest(
 
 fn build_from_source(
     identity: &ToolIdentity,
-    want_http: bool,
+    required: ProviderCapabilities,
 ) -> Result<NumberProvider, NumberProviderError> {
+    let variant = ProviderVariant::smallest_covering(required).unwrap_or(ProviderVariant::Full);
     let source_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
@@ -377,7 +395,7 @@ fn build_from_source(
     let build_root = env::temp_dir()
         .join("kiln-native-number-provider")
         .join(source_digest.to_hex())
-        .join(if want_http { "http" } else { "slim" });
+        .join(variant.as_str());
     fs::create_dir_all(&build_root).map_err(|source| NumberProviderError::Read {
         operation: "create number-provider build directory",
         path: build_root.clone(),
@@ -412,12 +430,12 @@ fn build_from_source(
             OsString::from("-p"),
             OsString::from(PROVIDER_NAME),
         ];
-        if !want_http {
+        if matches!(variant, ProviderVariant::Common) {
             arguments.push(OsString::from("--no-default-features"));
         }
         arguments.extend([
             OsString::from("--features"),
-            OsString::from(if want_http {
+            OsString::from(if matches!(variant, ProviderVariant::Full) {
                 provider_contract::FULL_FEATURES
             } else {
                 provider_contract::SLIM_FEATURES
@@ -464,12 +482,10 @@ fn build_from_source(
             });
         }
 
-        // Named for this process, so two publishers cannot share a staging file, and created in
-        // the destination's own directory so the rename stays within one filesystem.
-        let staging = build_root.join(format!(
-            ".libkiln_native_number_ffi.a.{}",
-            std::process::id()
-        ));
+        // Named for this process and publication attempt. A PID alone is not unique when several
+        // NativeBuilder instances cold-build in parallel test threads: one thread can rename the
+        // other's staging file and leave it reporting ENOENT. Keep the rename on this filesystem.
+        let staging = provider_staging_path(&build_root);
         fs::copy(&built_path, &staging).map_err(|source| NumberProviderError::Read {
             operation: "stage source-built number-provider archive",
             path: built_path.clone(),
@@ -493,7 +509,7 @@ fn build_from_source(
         archive_digest.to_hex(),
         env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_default(),
         env::var("KILN_LIBC_BASELINE").unwrap_or_default(),
-        want_http,
+        variant,
     )
     .identity();
     Ok(NumberProvider {
@@ -501,7 +517,8 @@ fn build_from_source(
         archive_digest,
         identity,
         rust_target,
-        http: want_http,
+        variant,
+        capabilities: variant.capabilities(),
     })
 }
 
@@ -653,6 +670,16 @@ fn read(path: &Path, operation: &'static str) -> Result<Vec<u8>, NumberProviderE
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_source_builds_get_distinct_staging_paths() {
+        let root = Path::new("provider-build");
+        let first = provider_staging_path(root);
+        let second = provider_staging_path(root);
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), Some(root));
+        assert_eq!(second.parent(), Some(root));
+    }
     use kiln_native_toolchain::CompilerKind;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -827,7 +854,8 @@ mod tests {
             "deployment": "",
             "libc_baseline": "",
             "exports": PROVIDER_EXPORTS,
-            "http": true,
+            "variant": ProviderVariant::Full,
+            "capabilities": ProviderCapabilities::FULL.iter().collect::<Vec<_>>(),
         });
         let manifest_path = root.0.join(MANIFEST_FILE);
         fs::write(
@@ -836,17 +864,25 @@ mod tests {
         )
         .expect("write manifest fixture");
 
-        let provider = load_manifest(&manifest_path, &identity("arm64-apple-darwin25.6.0"), true)
-            .expect("valid manifest loads");
+        let provider = load_manifest(
+            &manifest_path,
+            &identity("arm64-apple-darwin25.6.0"),
+            ProviderCapabilities::FULL,
+        )
+        .expect("valid manifest loads");
         assert_eq!(&*provider.archive, archive);
         assert_eq!(provider.archive_digest, Digest::hash(archive));
-        // A manifest predating the slim variant names no variant: it is the full archive.
-        assert!(provider.http);
-        assert!(provider.identity.contains("\"http\":true"));
+        assert_eq!(provider.variant, ProviderVariant::Full);
+        assert_eq!(provider.capabilities, ProviderCapabilities::FULL);
+        assert!(provider.identity.contains("\"variant\":\"full\""));
 
         fs::write(root.0.join("provider.a"), b"corrupt").expect("corrupt archive fixture");
-        let error = load_manifest(&manifest_path, &identity("arm64-apple-darwin25.6.0"), true)
-            .expect_err("digest mismatch is rejected");
+        let error = load_manifest(
+            &manifest_path,
+            &identity("arm64-apple-darwin25.6.0"),
+            ProviderCapabilities::FULL,
+        )
+        .expect_err("digest mismatch is rejected");
         assert!(error.to_string().contains("digest mismatch"));
 
         #[cfg(unix)]
@@ -857,8 +893,12 @@ mod tests {
             fs::remove_file(root.0.join("provider.a")).expect("remove corrupt archive fixture");
             std::os::unix::fs::symlink(outside_archive, root.0.join("provider.a"))
                 .expect("create escaping archive symlink");
-            let error = load_manifest(&manifest_path, &identity("arm64-apple-darwin25.6.0"), true)
-                .expect_err("archive symlink is rejected even when its bytes match");
+            let error = load_manifest(
+                &manifest_path,
+                &identity("arm64-apple-darwin25.6.0"),
+                ProviderCapabilities::FULL,
+            )
+            .expect_err("archive symlink is rejected even when its bytes match");
             assert!(
                 error.to_string().contains("regular package file"),
                 "{error}"
@@ -889,7 +929,8 @@ mod tests {
             "deployment": "",
             "libc_baseline": "",
             "exports": PROVIDER_EXPORTS,
-            "http": true,
+            "variant": ProviderVariant::Full,
+            "capabilities": ProviderCapabilities::FULL.iter().collect::<Vec<_>>(),
         });
         let manifest_path = root.0.join(MANIFEST_FILE);
         fs::write(
@@ -898,10 +939,14 @@ mod tests {
         )
         .expect("write traversal fixture");
         assert!(
-            load_manifest(&manifest_path, &identity("aarch64-apple-darwin"), true)
-                .expect_err("archive traversal is rejected")
-                .to_string()
-                .contains("one file name")
+            load_manifest(
+                &manifest_path,
+                &identity("aarch64-apple-darwin"),
+                ProviderCapabilities::FULL,
+            )
+            .expect_err("archive traversal is rejected")
+            .to_string()
+            .contains("one file name")
         );
 
         manifest["archive"] = serde_json::Value::String("provider.a".to_owned());
@@ -912,10 +957,14 @@ mod tests {
         )
         .expect("write native CPU fixture");
         assert!(
-            load_manifest(&manifest_path, &identity("aarch64-apple-darwin"), true)
-                .expect_err("host-specific provider CPU policy is rejected")
-                .to_string()
-                .contains("`generic` CPU policy")
+            load_manifest(
+                &manifest_path,
+                &identity("aarch64-apple-darwin"),
+                ProviderCapabilities::FULL,
+            )
+            .expect_err("host-specific provider CPU policy is rejected")
+            .to_string()
+            .contains("`generic` CPU policy")
         );
 
         manifest["cpu_features"] = serde_json::Value::String("generic".to_owned());
@@ -926,10 +975,14 @@ mod tests {
         )
         .expect("write noncanonical rustc fixture");
         assert!(
-            load_manifest(&manifest_path, &identity("aarch64-apple-darwin"), true)
-                .expect_err("noncanonical rustc identity is rejected")
-                .to_string()
-                .contains("`rustc_identity`")
+            load_manifest(
+                &manifest_path,
+                &identity("aarch64-apple-darwin"),
+                ProviderCapabilities::FULL,
+            )
+            .expect_err("noncanonical rustc identity is rejected")
+            .to_string()
+            .contains("`rustc_identity`")
         );
 
         manifest["rustc_identity"] = serde_json::Value::String(sha256_identity(b"rustc fixture"));
@@ -940,15 +993,19 @@ mod tests {
         )
         .expect("write unknown field fixture");
         assert!(
-            load_manifest(&manifest_path, &identity("aarch64-apple-darwin"), true)
-                .expect_err("unknown manifest fields are rejected")
-                .to_string()
-                .contains("unknown field")
+            load_manifest(
+                &manifest_path,
+                &identity("aarch64-apple-darwin"),
+                ProviderCapabilities::FULL,
+            )
+            .expect_err("unknown manifest fields are rejected")
+            .to_string()
+            .contains("unknown field")
         );
     }
 
     #[test]
-    fn slim_manifest_loads_only_for_http_free_builds() {
+    fn common_manifest_loads_only_when_it_covers_requirements() {
         let root = TestDirectory::new();
         let archive = b"slim archive fixture";
         fs::write(root.0.join("provider-slim.a"), archive).expect("write slim fixture");
@@ -970,7 +1027,8 @@ mod tests {
             "deployment": "",
             "libc_baseline": "",
             "exports": PROVIDER_EXPORTS,
-            "http": false,
+            "variant": ProviderVariant::Common,
+            "capabilities": ProviderCapabilities::COMMON.iter().collect::<Vec<_>>(),
         });
         let manifest_path = root.0.join(MANIFEST_SLIM_FILE);
         fs::write(
@@ -979,15 +1037,24 @@ mod tests {
         )
         .expect("write slim fixture");
 
-        let provider = load_manifest(&manifest_path, &identity("aarch64-apple-darwin"), false)
-            .expect("slim manifest loads for an HTTP-free build");
-        assert!(!provider.http);
-        assert!(provider.identity.contains("\"http\":false"));
+        let provider = load_manifest(
+            &manifest_path,
+            &identity("aarch64-apple-darwin"),
+            ProviderCapabilities::COMMON,
+        )
+        .expect("common manifest loads for common requirements");
+        assert_eq!(provider.variant, ProviderVariant::Common);
+        assert_eq!(provider.capabilities, ProviderCapabilities::COMMON);
+        assert!(provider.identity.contains("\"variant\":\"common\""));
 
-        let error = load_manifest(&manifest_path, &identity("aarch64-apple-darwin"), true)
-            .expect_err("slim manifest is rejected when HTTP is needed");
+        let error = load_manifest(
+            &manifest_path,
+            &identity("aarch64-apple-darwin"),
+            ProviderCapabilities::COMMON.with(provider_contract::ProviderCapability::Http),
+        )
+        .expect_err("common manifest is rejected when HTTP is needed");
         assert!(
-            error.to_string().contains("without HTTP support"),
+            error.to_string().contains("but this build requires"),
             "{error}"
         );
     }

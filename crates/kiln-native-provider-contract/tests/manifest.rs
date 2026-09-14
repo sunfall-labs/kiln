@@ -1,8 +1,10 @@
-use kiln_native_provider_contract::{ProviderManifest, manifest};
+use kiln_native_provider_contract::{
+    ProviderCapabilities, ProviderCapability, ProviderManifest, ProviderVariant, manifest,
+};
 use serde_json::Value;
 use std::process::Command;
 
-fn sample(http: bool) -> ProviderManifest {
+fn sample(variant: ProviderVariant) -> ProviderManifest {
     manifest(
         "aarch64-apple-darwin".to_owned(),
         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
@@ -10,25 +12,28 @@ fn sample(http: bool) -> ProviderManifest {
         "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned(),
         "deployment".to_owned(),
         "libc".to_owned(),
-        http,
+        variant,
     )
 }
 
 #[test]
-fn full_and_slim_manifests_round_trip_and_match_source_identity() {
-    for http in [true, false] {
-        let source = sample(http);
+fn full_and_common_manifests_round_trip_and_match_source_identity() {
+    for variant in ProviderVariant::ALL {
+        let source = sample(variant);
         let encoded = serde_json::to_string(&source).expect("serialize manifest");
         let installed: ProviderManifest =
             serde_json::from_str(&encoded).expect("deserialize installed manifest");
         assert_eq!(source.identity(), installed.identity());
-        assert_eq!(source.http, http);
+        assert_eq!(source.variant, variant);
+        assert_eq!(
+            ProviderCapabilities::from_capabilities(source.capabilities.iter().copied()),
+            variant.capabilities()
+        );
         assert_eq!(
             source.archive,
-            if http {
-                "libkiln_native_number_ffi.a"
-            } else {
-                "libkiln_native_number_ffi.slim.a"
+            match variant {
+                ProviderVariant::Full => "libkiln_native_number_ffi.a",
+                ProviderVariant::Common => "libkiln_native_number_ffi.slim.a",
             }
         );
     }
@@ -36,7 +41,7 @@ fn full_and_slim_manifests_round_trip_and_match_source_identity() {
 
 #[test]
 fn every_identity_field_changes_identity_but_archive_filename_does_not() {
-    let base = sample(true);
+    let base = sample(ProviderVariant::Full);
     let fields = [
         ("schema", Value::from(base.schema + 1)),
         ("provider", Value::from("other")),
@@ -62,7 +67,11 @@ fn every_identity_field_changes_identity_but_archive_filename_does_not() {
         ("cpu_features", Value::from("native")),
         ("deployment", Value::from("other")),
         ("libc_baseline", Value::from("other")),
-        ("http", Value::from(false)),
+        ("variant", Value::from("common")),
+        (
+            "capabilities",
+            serde_json::to_value(ProviderCapabilities::COMMON.iter().collect::<Vec<_>>()).unwrap(),
+        ),
     ];
     let baseline = base.identity();
     for (field, value) in fields {
@@ -82,29 +91,31 @@ fn every_identity_field_changes_identity_but_archive_filename_does_not() {
 }
 
 #[test]
-fn export_delimiters_cannot_collide_and_http_is_required() {
-    let mut comma = sample(true);
+fn export_delimiters_cannot_collide_and_capabilities_are_required() {
+    let mut comma = sample(ProviderVariant::Full);
     comma.exports = vec!["a,b".to_owned()];
-    let mut split = sample(true);
+    let mut split = sample(ProviderVariant::Full);
     split.exports = vec!["a".to_owned(), "b".to_owned()];
     assert_ne!(comma.identity(), split.identity());
 
-    let mut json = serde_json::to_value(sample(true)).expect("manifest value");
-    json.as_object_mut().unwrap().remove("http");
+    let mut json = serde_json::to_value(sample(ProviderVariant::Full)).expect("manifest value");
+    json.as_object_mut().unwrap().remove("capabilities");
     assert!(serde_json::from_value::<ProviderManifest>(json).is_err());
 }
 
 #[test]
-fn manifest_cli_rejects_invalid_http_and_argument_counts() {
+fn manifest_cli_rejects_invalid_variant_and_argument_counts() {
     let binary = env!("CARGO_BIN_EXE_kiln-native-provider-contract");
-    let valid = ["target", "rustc", "source", "archive", "", "", "true"];
-    let invalid_http = Command::new(binary)
+    let valid = ["target", "rustc", "source", "archive", "", "", "full"];
+    let invalid_variant = Command::new(binary)
         .arg("manifest")
         .args(valid.iter().take(6).chain(std::iter::once(&"maybe")))
         .output()
         .expect("run manifest CLI");
-    assert_eq!(invalid_http.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&invalid_http.stderr).contains("http must be true or false"));
+    assert_eq!(invalid_variant.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&invalid_variant.stderr).contains("variant must be full or common")
+    );
 
     let wrong_count = Command::new(binary)
         .args(["manifest", "target"])
@@ -112,4 +123,16 @@ fn manifest_cli_rejects_invalid_http_and_argument_counts() {
         .expect("run manifest CLI");
     assert_eq!(wrong_count.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&wrong_count.stderr).contains("requires 7 arguments"));
+}
+
+#[test]
+fn capability_spelling_is_stable_json() {
+    assert_eq!(
+        serde_json::to_string(&ProviderCapability::RegExp).unwrap(),
+        "\"reg-exp\""
+    );
+    assert_eq!(
+        serde_json::to_string(&ProviderCapability::BigInt).unwrap(),
+        "\"big-int\""
+    );
 }

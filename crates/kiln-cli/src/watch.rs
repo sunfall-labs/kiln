@@ -1368,6 +1368,8 @@ mod tests {
             runtime_object_bytes: 1,
             launcher_object_bytes: 1,
             executable_bytes: 1,
+            provider_required: Vec::new(),
+            provider_supplied: Vec::new(),
             emit_millis: 1,
             compile_millis: 1,
             link_millis: 1,

@@ -27,13 +27,14 @@ KILN_PROVIDER_NAME=$(kiln_provider_contract_field provider)
 KILN_PROVIDER_FORMAT=$(kiln_provider_contract_field format_version)
 KILN_PROVIDER_PARSE=$(kiln_provider_contract_field parse_version)
 
-# The slim-named schema-2 variant is the common engine set: Realm, RegExp, BigInt, and JSON.
+# The slim-named schema-3 variant is the common engine set: Realm, RegExp, BigInt, and JSON.
 # It keeps the same provider ABI and export list as full; omitted engines are refusal stubs.
-# Both variants publish into one directory under distinct archive/manifest names; the legacy
-# `http` manifest field distinguishes full from common.
-KILN_PROVIDER_HTTP=1
+# Both variants publish into one directory under distinct archive/manifest names. The manifest
+# declares the variant and its complete capability set; selection never infers either from a
+# historical feature bit.
+KILN_PROVIDER_VARIANT=full
 if [[ ${1:-} == "--slim" ]]; then
-	KILN_PROVIDER_HTTP=0
+	KILN_PROVIDER_VARIANT=common
 	shift
 fi
 if [[ $# -ne 1 ]]; then
@@ -105,7 +106,7 @@ kiln_provider_sha256_stream() {
 # `crates/kiln-native-number-ffi/Cargo.toml`, the common `--no-default-features` selection
 # below would still unify `kiln-runtime/http` back on through that dependency's defaults
 # and ship a full archive under a slim manifest.
-if [[ $KILN_PROVIDER_HTTP -eq 1 ]]; then
+if [[ $KILN_PROVIDER_VARIANT == full ]]; then
 	KILN_PROVIDER_FEATURES="$KILN_PROVIDER_FULL_FEATURES"
 	KILN_PROVIDER_DEFAULT_FEATURES=()
 else
@@ -134,14 +135,12 @@ if [[ ! -f $KILN_PROVIDER_BUILT_ARCHIVE ]]; then
 fi
 
 mkdir -p "$KILN_PROVIDER_OUTPUT"
-if [[ $KILN_PROVIDER_HTTP -eq 1 ]]; then
+if [[ $KILN_PROVIDER_VARIANT == full ]]; then
 	KILN_PROVIDER_ARCHIVE_NAME="$KILN_PROVIDER_FULL_ARCHIVE"
 	KILN_PROVIDER_MANIFEST_NAME="$KILN_PROVIDER_FULL_MANIFEST"
-	KILN_PROVIDER_HTTP_JSON=true
 else
 	KILN_PROVIDER_ARCHIVE_NAME="$KILN_PROVIDER_SLIM_ARCHIVE"
 	KILN_PROVIDER_MANIFEST_NAME="$KILN_PROVIDER_SLIM_MANIFEST"
-	KILN_PROVIDER_HTTP_JSON=false
 fi
 KILN_PROVIDER_ARCHIVE="$KILN_PROVIDER_OUTPUT/$KILN_PROVIDER_ARCHIVE_NAME"
 KILN_PROVIDER_MANIFEST="$KILN_PROVIDER_OUTPUT/$KILN_PROVIDER_MANIFEST_NAME"
@@ -292,7 +291,7 @@ done
 "$KILN_PROVIDER_CONTRACT_BIN" manifest \
 	"$KILN_PROVIDER_TARGET" "sha256:$KILN_PROVIDER_RUSTC_DIGEST" \
 	"$KILN_PROVIDER_SOURCE_DIGEST" "$KILN_PROVIDER_ARCHIVE_DIGEST" \
-	"$KILN_PROVIDER_DEPLOYMENT" "$KILN_PROVIDER_LIBC" "$KILN_PROVIDER_HTTP_JSON" \
+	"$KILN_PROVIDER_DEPLOYMENT" "$KILN_PROVIDER_LIBC" "$KILN_PROVIDER_VARIANT" \
 	>"$KILN_PROVIDER_MANIFEST_TEMP"
 
 mv -f "$KILN_PROVIDER_ARCHIVE_TEMP" "$KILN_PROVIDER_ARCHIVE"

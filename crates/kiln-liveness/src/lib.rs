@@ -634,6 +634,113 @@ pub fn retained_method_groups(
     mask
 }
 
+/// Provider engines reachable from the retained executable graph.
+///
+/// This is a liveness result, not a packaging choice. It reports individual capabilities even
+/// while releases ship only common and full archives; the provider resolver chooses the smallest
+/// available variant whose declared set covers this one. Open-world code requests the full set.
+pub fn retained_provider_capabilities(
+    graph: &ModuleGraph,
+    demand: &LiveDemand,
+    members: &kiln_backend_c::facts::DemandedMembers,
+) -> kiln_native_provider_contract::ProviderCapabilities {
+    use kiln_ir::{Constant, Instruction, Program};
+    use kiln_module_resolver::NodeBuiltin;
+    use kiln_native_provider_contract::{ProviderCapabilities, ProviderCapability};
+
+    let mut required = ProviderCapabilities::COMMON;
+    if members.globals.iter().any(|name| name == "Temporal") {
+        required = required.with(ProviderCapability::Temporal);
+    }
+    if members.globals.iter().any(|name| name == "Intl") {
+        required = required.with(ProviderCapability::Intl);
+    }
+    if members.names.contains("parallelMap") {
+        required = required.with(ProviderCapability::Parallel);
+    }
+
+    // A conservative backstop for aliases that have not yet reached the demanded-member facts.
+    // It is scoped to live modules; dead dependencies no longer inflate the provider plan.
+    fn program_capabilities(program: &Program) -> ProviderCapabilities {
+        let mut required = ProviderCapabilities::NONE;
+        let mut inspect = |instruction: &Instruction| {
+            let index = match instruction {
+                Instruction::LoadGlobal(name)
+                | Instruction::LoadGlobalBindingOrUndefined(name)
+                | Instruction::RequireGlobalBinding(name)
+                | Instruction::GetProperty(name)
+                | Instruction::CallMethod { name, .. } => *name,
+                _ => return,
+            };
+            let Some(Constant::String(name)) = program.constants.get(index as usize) else {
+                return;
+            };
+            required = match name.as_str() {
+                "Temporal" => required.with(ProviderCapability::Temporal),
+                "Intl" => required.with(ProviderCapability::Intl),
+                "parallelMap" => required.with(ProviderCapability::Parallel),
+                _ => required,
+            };
+        };
+        for instruction in &program.code {
+            inspect(instruction);
+        }
+        for function in &program.functions {
+            for instruction in &function.code {
+                inspect(instruction);
+            }
+        }
+        required
+    }
+
+    let specifier_capability = |specifier: &str| match NodeBuiltin::parse(specifier) {
+        Some(NodeBuiltin::Http | NodeBuiltin::Https | NodeBuiltin::Http2) => {
+            Some(ProviderCapability::Http)
+        }
+        Some(NodeBuiltin::Ffi) => Some(ProviderCapability::Ffi),
+        _ => None,
+    };
+
+    for node in graph.modules() {
+        if !demand.live.contains(&node.path) {
+            continue;
+        }
+        if members.has_open_world
+            || matches!(node.source, ModuleSource::CommonJs)
+            || !node.program.link_facts.dynamic_imports.is_empty()
+            || node.program.program.has_dynamic_import()
+        {
+            return ProviderCapabilities::FULL;
+        }
+        required = required.union(program_capabilities(&node.program.program));
+        if let ModuleSource::NodeBuiltin(builtin) = &node.source {
+            required = match builtin {
+                NodeBuiltin::Http | NodeBuiltin::Https | NodeBuiltin::Http2 => {
+                    required.with(ProviderCapability::Http)
+                }
+                NodeBuiltin::Ffi => required.with(ProviderCapability::Ffi),
+                _ => required,
+            };
+        }
+        for specifier in node
+            .program
+            .imports
+            .iter()
+            .map(|import| import.source.as_str())
+            .chain(
+                node.dependencies
+                    .iter()
+                    .map(|dependency| dependency.specifier.as_str()),
+            )
+        {
+            if let Some(capability) = specifier_capability(specifier) {
+                required = required.with(capability);
+            }
+        }
+    }
+    required
+}
+
 /// Per-module retained-size attribution for an executable graph.
 ///
 /// Runs the same closed-world selection as emission

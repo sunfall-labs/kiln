@@ -37,11 +37,11 @@ fn main() {
                 eprintln!("manifest requires 7 arguments");
                 std::process::exit(2);
             }
-            let http = match values[6].as_str() {
-                "true" => true,
-                "false" => false,
+            let variant = match values[6].as_str() {
+                "full" => kiln_native_provider_contract::ProviderVariant::Full,
+                "common" => kiln_native_provider_contract::ProviderVariant::Common,
                 _ => {
-                    eprintln!("manifest http must be true or false");
+                    eprintln!("manifest variant must be full or common");
                     std::process::exit(2);
                 }
             };
@@ -52,7 +52,7 @@ fn main() {
                 values[3].clone(),
                 values[4].clone(),
                 values[5].clone(),
-                http,
+                variant,
             );
             println!("{}", serde_json::to_string_pretty(&m).unwrap());
         }
