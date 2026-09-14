@@ -24,9 +24,115 @@
 #[cfg(any(feature = "regexp", feature = "bigint", feature = "json"))]
 extern crate alloc;
 
+#[cfg(any(feature = "realm", feature = "regexp", feature = "json"))]
+use kiln_string::StringView;
+
 const INVALID_ARGUMENT: i32 = -1;
 #[cfg(feature = "realm")]
 const RUNTIME_ERROR: i32 = -8;
+
+/// Canonical borrowed JavaScript string view shared with generated C.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct KilnString {
+    pub unit_len: u32,
+    pub flags: u32,
+    pub data: *const core::ffi::c_void,
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<KilnString>() == 16);
+    assert!(core::mem::offset_of!(KilnString, unit_len) == 0);
+    assert!(core::mem::offset_of!(KilnString, flags) == 4);
+    assert!(core::mem::offset_of!(KilnString, data) == 8);
+};
+
+/// Validate a canonical string header and borrow its code units for one provider call.
+#[cfg(any(feature = "realm", feature = "regexp", feature = "json"))]
+unsafe fn validate_string<'a>(view: *const KilnString) -> Option<StringView<'a>> {
+    if view.is_null() {
+        return None;
+    }
+    // SAFETY: null was rejected; the C caller owns this header for the call.
+    let view = unsafe { &*view };
+    let len = view.unit_len as usize;
+    match view.flags {
+        0 => {
+            if len == 0 {
+                return Some(StringView::Latin1(&[]));
+            }
+            if view.data.is_null() || len > isize::MAX as usize {
+                return None;
+            }
+            // SAFETY: the header contract validated the non-null byte span.
+            Some(StringView::Latin1(unsafe {
+                core::slice::from_raw_parts(view.data.cast(), len)
+            }))
+        }
+        1 => {
+            if len == 0 {
+                return Some(StringView::Utf16(&[]));
+            }
+            if view.data.is_null() || (view.data as usize & 1) != 0 || len > isize::MAX as usize / 2
+            {
+                return None;
+            }
+            // SAFETY: the header contract validated the non-null aligned UTF-16 span.
+            Some(StringView::Utf16(unsafe {
+                core::slice::from_raw_parts(view.data.cast(), len)
+            }))
+        }
+        _ => None,
+    }
+}
+
+#[cfg(all(test, any(feature = "realm", feature = "regexp", feature = "json")))]
+mod string_view_tests {
+    use super::{KilnString, StringView, validate_string};
+    use core::ffi::c_void;
+
+    #[test]
+    fn validates_flags_nulls_alignment_and_empty_headers() {
+        let bytes = [b'x'];
+        let unknown_flags = KilnString {
+            unit_len: 1,
+            flags: 2,
+            data: bytes.as_ptr().cast(),
+        };
+        assert!(unsafe { validate_string(&unknown_flags) }.is_none());
+        let null_nonempty = KilnString {
+            unit_len: 1,
+            flags: 0,
+            data: core::ptr::null(),
+        };
+        assert!(unsafe { validate_string(&null_nonempty) }.is_none());
+        let units = [0x61_u16];
+        let misaligned = KilnString {
+            unit_len: 1,
+            flags: 1,
+            data: units.as_ptr().cast::<u8>().wrapping_add(1).cast::<c_void>(),
+        };
+        assert!(unsafe { validate_string(&misaligned) }.is_none());
+        let empty_latin1 = KilnString {
+            unit_len: 0,
+            flags: 0,
+            data: core::ptr::null(),
+        };
+        assert_eq!(
+            unsafe { validate_string(&empty_latin1) },
+            Some(StringView::Latin1(&[]))
+        );
+        let empty_utf16 = KilnString {
+            unit_len: 0,
+            flags: 1,
+            data: core::ptr::null(),
+        };
+        assert_eq!(
+            unsafe { validate_string(&empty_utf16) },
+            Some(StringView::Utf16(&[]))
+        );
+    }
+}
 
 #[cfg(feature = "ffi")]
 mod ffi;
@@ -51,8 +157,10 @@ mod realm {
     use kiln_runtime::{
         Realm, RealmRuntime, RuntimeTurn, TimerId, WorkItem, duration_from_milliseconds,
     };
+    use kiln_string::StringUnits;
     use std::cell::{Cell, RefCell};
     use std::collections::{HashMap, HashSet};
+    use std::hash::{Hash, Hasher};
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::ptr;
     use std::rc::Rc;
@@ -692,8 +800,11 @@ mod realm {
         next_http_client_request_id: Cell<u64>,
         cancelled: Rc<RefCell<HashSet<RequestId>>>,
         queued: Rc<RefCell<HashSet<RequestId>>>,
-        symbols: RefCell<HashMap<Vec<u8>, u64>>,
-        symbol_keys: RefCell<HashMap<u64, Vec<u8>>>,
+        /// A borrowed-view hash points at the registered IDs sharing that hash. The owned unit
+        /// spelling stays in `symbol_keys`; this keeps Symbol.for's common lookup allocation-free
+        /// while still checking the full code-unit value on a hash collision.
+        symbols: RefCell<HashMap<u64, Vec<u64>>>,
+        symbol_keys: RefCell<HashMap<u64, StringUnits>>,
         callable_stores: RefCell<HashMap<(u32, u64), CallableStore>>,
         value_slots: RefCell<HashMap<u32, Box<[u64; 4]>>>,
         /// The command line this realm's launcher was started with, copied out of `main`'s
@@ -1809,51 +1920,66 @@ mod realm {
         0
     }
 
-    /// Interns a registered-symbol key in the active Realm. The returned identity is stable for
-    /// that Realm and deliberately meaningless outside it; generated modules never own registry
+    /// Interns a registered-symbol key in the active Realm. The input is the canonical
+    /// code-unit header, not a UTF-8 byte spelling; the returned identity is stable for that
+    /// Realm and deliberately meaningless outside it. Generated modules never own registry
     /// state independently.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_realm_symbol_for(
-        key: *const u8,
-        key_len: u64,
+        key: *const super::KilnString,
         out_id: *mut u64,
     ) -> i32 {
         ffi(|| {
             if out_id.is_null() {
                 return INVALID_ARGUMENT;
             }
-            let Some(key) = (unsafe { borrowed_bytes(key, key_len) }) else {
+            let Some(key) = (unsafe { super::validate_string(key) }) else {
                 return INVALID_ARGUMENT;
             };
             let Some(realm) = active_realm() else {
                 return INVALID_ARGUMENT;
             };
-            if let Some(id) = realm.symbols.borrow().get(key).copied() {
-                unsafe { out_id.write(id) };
-                return 0;
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            key.hash(&mut hasher);
+            let hash = hasher.finish();
+            {
+                let candidates = realm.symbols.borrow();
+                let keys = realm.symbol_keys.borrow();
+                if let Some(ids) = candidates.get(&hash) {
+                    if let Some(&id) = ids
+                        .iter()
+                        .find(|&&id| keys.get(&id).is_some_and(|owned| owned.as_view() == key))
+                    {
+                        unsafe { out_id.write(id) };
+                        return 0;
+                    }
+                }
             }
             let Ok(id) = NEXT_SYMBOL.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
                 next.checked_add(1)
             }) else {
                 return RUNTIME_ERROR;
             };
-            let owned = key.to_vec();
-            realm.symbols.borrow_mut().insert(owned.clone(), id);
-            realm.symbol_keys.borrow_mut().insert(id, owned);
+            realm.symbols.borrow_mut().entry(hash).or_default().push(id);
+            realm
+                .symbol_keys
+                .borrow_mut()
+                .insert(id, StringUnits::from_view(key));
             unsafe { out_id.write(id) };
             0
         })
     }
 
-    /// Borrows a registered-symbol key from the active Realm for the duration of this call.
+    /// Writes a canonical header borrowing a registered-symbol key from the active Realm. The
+    /// header and its data remain valid until the active Realm is torn down; C callers copy code
+    /// units before leaving that lifetime.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_realm_symbol_key_for(
         id: u64,
-        out_key: *mut *const u8,
-        out_key_len: *mut u64,
+        out_key: *mut super::KilnString,
     ) -> i32 {
         ffi(|| {
-            if out_key.is_null() || out_key_len.is_null() {
+            if out_key.is_null() {
                 return INVALID_ARGUMENT;
             }
             let Some(realm) = active_realm() else {
@@ -1863,9 +1989,30 @@ mod realm {
             let Some(key) = keys.get(&id) else {
                 return INVALID_ARGUMENT;
             };
+            let (flags, data) = match key.as_view() {
+                kiln_string::StringView::Latin1(bytes) => (
+                    0,
+                    if bytes.is_empty() {
+                        core::ptr::null()
+                    } else {
+                        bytes.as_ptr().cast()
+                    },
+                ),
+                kiln_string::StringView::Utf16(units) => (
+                    1,
+                    if units.is_empty() {
+                        core::ptr::null()
+                    } else {
+                        units.as_ptr().cast()
+                    },
+                ),
+            };
             unsafe {
-                out_key.write(key.as_ptr());
-                out_key_len.write(key.len() as u64);
+                out_key.write(super::KilnString {
+                    unit_len: key.unit_len() as u32,
+                    flags,
+                    data,
+                });
             }
             0
         })
@@ -3751,23 +3898,80 @@ mod realm {
         unsafe extern "C" fn exercises_symbol_registry(context: *mut c_void) -> i32 {
             let output = unsafe { &mut *context.cast::<[u64; 3]>() };
             let key = b"fastify-error-generic";
+            let view = crate::KilnString {
+                unit_len: key.len() as u32,
+                flags: 0,
+                data: key.as_ptr().cast(),
+            };
             let mut first = 0;
             let mut second = 0;
-            let mut borrowed = std::ptr::null();
-            let mut borrowed_len = 0;
-            if unsafe { kiln_realm_symbol_for(key.as_ptr(), key.len() as u64, &raw mut first) } != 0
-                || unsafe { kiln_realm_symbol_for(key.as_ptr(), key.len() as u64, &raw mut second) }
-                    != 0
+            let mut borrowed = crate::KilnString {
+                unit_len: 0,
+                flags: 0,
+                data: std::ptr::null(),
+            };
+            if unsafe { kiln_realm_symbol_for(&view, &raw mut first) } != 0
+                || unsafe { kiln_realm_symbol_for(&view, &raw mut second) } != 0
                 || first != second
-                || unsafe {
-                    kiln_realm_symbol_key_for(first, &raw mut borrowed, &raw mut borrowed_len)
-                } != 0
+                || unsafe { kiln_realm_symbol_key_for(first, &raw mut borrowed) } != 0
             {
                 return RUNTIME_ERROR;
             }
             output[0] = first;
             output[1] = second;
-            output[2] = borrowed_len;
+            output[2] = borrowed.unit_len as u64;
+            0
+        }
+
+        unsafe extern "C" fn exercises_lossless_symbol_registry(context: *mut c_void) -> i32 {
+            let _ = context;
+            let high = [0xd800_u16];
+            let replacement = [0xfffd_u16];
+            let ascii = b"same";
+            let ascii_wide = [b's' as u16, b'a' as u16, b'm' as u16, b'e' as u16];
+            let high_view = crate::KilnString {
+                unit_len: 1,
+                flags: 1,
+                data: high.as_ptr().cast(),
+            };
+            let replacement_view = crate::KilnString {
+                unit_len: 1,
+                flags: 1,
+                data: replacement.as_ptr().cast(),
+            };
+            let ascii_view = crate::KilnString {
+                unit_len: ascii.len() as u32,
+                flags: 0,
+                data: ascii.as_ptr().cast(),
+            };
+            let ascii_wide_view = crate::KilnString {
+                unit_len: ascii_wide.len() as u32,
+                flags: 1,
+                data: ascii_wide.as_ptr().cast(),
+            };
+            let mut high_id = 0;
+            let mut replacement_id = 0;
+            let mut ascii_id = 0;
+            let mut ascii_wide_id = 0;
+            let mut returned = crate::KilnString {
+                unit_len: 0,
+                flags: 0,
+                data: std::ptr::null(),
+            };
+            if unsafe { kiln_realm_symbol_for(&high_view, &raw mut high_id) } != 0
+                || unsafe { kiln_realm_symbol_for(&replacement_view, &raw mut replacement_id) } != 0
+                || unsafe { kiln_realm_symbol_for(&ascii_view, &raw mut ascii_id) } != 0
+                || unsafe { kiln_realm_symbol_for(&ascii_wide_view, &raw mut ascii_wide_id) } != 0
+                || high_id == replacement_id
+                || ascii_id != ascii_wide_id
+                || unsafe { kiln_realm_symbol_key_for(high_id, &raw mut returned) } != 0
+                || returned.data.is_null()
+                || returned.unit_len != 1
+                || returned.flags != 1
+                || unsafe { returned.data.cast::<u16>().read() } != 0xd800
+            {
+                return RUNTIME_ERROR;
+            }
             0
         }
 
@@ -3806,6 +4010,23 @@ mod realm {
             assert_eq!(second[2], b"fastify-error-generic".len() as u64);
             assert_eq!(kiln_realm_destroy(first_realm), 0);
             assert_eq!(kiln_realm_destroy(second_realm), 0);
+        }
+
+        #[test]
+        fn registered_symbols_preserve_units_and_compare_widths_by_value() {
+            let mut realm = 0;
+            assert_eq!(unsafe { kiln_realm_create(&raw mut realm) }, 0);
+            assert_eq!(
+                unsafe {
+                    kiln_realm_enter(
+                        realm,
+                        Some(exercises_lossless_symbol_registry),
+                        std::ptr::null_mut(),
+                    )
+                },
+                0
+            );
+            assert_eq!(kiln_realm_destroy(realm), 0);
         }
 
         unsafe extern "C" fn exercises_callable_store_registry(context: *mut c_void) -> i32 {
@@ -5890,10 +6111,12 @@ mod realm {
             const _: unsafe extern "C" fn(*const u8, u64, *const u8, u64, *mut u8, u64, *mut u64) -> i32 = kiln_node_path_relative;
         };
         (realm, kiln_realm_symbol_for, realm_symbol_for) => {
-            const _: unsafe extern "C" fn(*const u8, u64, *mut u64) -> i32 = kiln_realm_symbol_for;
+            const _: unsafe extern "C" fn(*const super::KilnString, *mut u64) -> i32 =
+                kiln_realm_symbol_for;
         };
         (realm, kiln_realm_symbol_key_for, realm_symbol_key_for) => {
-            const _: unsafe extern "C" fn(u64, *mut *const u8, *mut u64) -> i32 = kiln_realm_symbol_key_for;
+            const _: unsafe extern "C" fn(u64, *mut super::KilnString) -> i32 =
+                kiln_realm_symbol_key_for;
         };
         (realm, kiln_realm_callable_store, realm_callable_store) => {
             const _: unsafe extern "C" fn(u32, u64, *mut c_void, Option<DropWork>, *mut *mut c_void) -> i32 = kiln_realm_callable_store;
