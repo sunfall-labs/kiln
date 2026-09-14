@@ -1211,7 +1211,7 @@ impl Native {
                     Value::Native(Native::IteratorSelf, RealmId::PRIMARY)
                 }
                 key if key == WellKnown::ToStringTag.property_key() => {
-                    Value::String("AsyncIterator".to_owned())
+                    Value::String("AsyncIterator".to_owned().into())
                 }
                 _ => Value::Undefined,
             },
@@ -1393,7 +1393,7 @@ impl Native {
             (Self::Intl(op), name) => intl::static_property(op, name),
             // `e.constructor.name` reaches this: the instance finds its constructor through the
             // prototype, and the constructor knows which kind it is.
-            (Self::Error(kind), "name") => Some(Value::String(kind.name().to_owned())),
+            (Self::Error(kind), "name") => Some(Value::String(kind.name().to_owned().into())),
             (Self::RegExpConstructor, "escape") => {
                 Some(Value::Native(Self::RegExpEscape, RealmId::PRIMARY))
             }
@@ -1658,26 +1658,26 @@ impl Native {
                 RealmId::PRIMARY,
             )),
             (Self::AsyncGeneratorFunctionConstructor, "name") => {
-                Some(Value::String("AsyncGeneratorFunction".to_owned()))
+                Some(Value::String("AsyncGeneratorFunction".to_owned().into()))
             }
             (Self::AsyncGeneratorFunctionConstructor, "length") => Some(Value::Number(1.0)),
             (Self::AsyncGeneratorFunctionPrototype, key)
                 if key == WellKnown::ToStringTag.property_key() =>
             {
-                Some(Value::String("AsyncGeneratorFunction".to_owned()))
+                Some(Value::String("AsyncGeneratorFunction".to_owned().into()))
             }
             (Self::GeneratorFunctionConstructor, "prototype") => Some(Value::Native(
                 Self::GeneratorFunctionPrototype,
                 RealmId::PRIMARY,
             )),
             (Self::GeneratorFunctionConstructor, "name") => {
-                Some(Value::String("GeneratorFunction".to_owned()))
+                Some(Value::String("GeneratorFunction".to_owned().into()))
             }
             (Self::GeneratorFunctionConstructor, "length") => Some(Value::Number(1.0)),
             (Self::GeneratorFunctionPrototype, key)
                 if key == WellKnown::ToStringTag.property_key() =>
             {
-                Some(Value::String("GeneratorFunction".to_owned()))
+                Some(Value::String("GeneratorFunction".to_owned().into()))
             }
             // A method table's `constructor` is the built-in it belongs to, which is what
             // `Object.prototype.constructor` has to answer for a plain-object check to work.
@@ -1900,13 +1900,14 @@ impl Native {
                         Self::Reflect => "Reflect",
                         _ => "JSON",
                     }
-                    .to_owned(),
+                    .to_owned()
+                    .into(),
                 ))
             }
             // The tag `Object.prototype.toString` reads, and the operations themselves. Like
             // `Math`, the namespace *is* the object: there is no prototype to hang either on.
             (Self::Atomics, key) if key == WellKnown::ToStringTag.property_key() => {
-                Some(Value::String("Atomics".to_owned()))
+                Some(Value::String("Atomics".to_owned().into()))
             }
             (Self::Atomics, _) => AtomicsOp::ALL
                 .into_iter()

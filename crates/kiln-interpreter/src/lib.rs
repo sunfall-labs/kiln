@@ -55,6 +55,7 @@ mod url;
 pub(crate) use url::UrlState;
 // `string_decoder` houses node:string_decoder implementation.
 mod string_decoder;
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fmt;
@@ -116,6 +117,7 @@ mod buffer;
 pub(crate) use buffer::node_bytes_value;
 // `console` houses console methods and node:console.
 mod console;
+pub use kiln_string::{StringUnits, StringView};
 
 /// The built-ins the runtime provides natively.
 ///
@@ -310,9 +312,62 @@ impl Attributes {
 /// One own property: its key, what it holds, and how it behaves.
 #[derive(Clone, Debug)]
 struct Slot {
-    key: String,
+    key: StringUnits,
     property: Property,
     attributes: Attributes,
+}
+
+#[derive(Clone, Copy)]
+enum PropertyKeyRef<'a> {
+    Utf8(&'a str),
+    Units(&'a StringUnits),
+}
+
+impl<'a> PropertyKeyRef<'a> {
+    /// Compare a language key with an ASCII spelling without materialising a scalar `String`.
+    ///
+    /// The units representation is authoritative.  In particular, a lone surrogate is never
+    /// passed through Rust's replacement-character conversion merely to ask whether it names a
+    /// built-in member.
+    fn matches_ascii(self, key: &str) -> bool {
+        match self {
+            Self::Utf8(stored) => stored == key,
+            Self::Units(stored) => stored == key,
+        }
+    }
+
+    /// Borrow an ASCII spelling at the scalar intrinsic-table seam. Latin1 storage is the hot
+    /// path and can be checked with `from_utf8` without allocation; UTF-16 storage deliberately
+    /// yields no scalar spelling, so a lone surrogate can never enter a scalar table arm.
+    fn known_ascii(self) -> Option<Cow<'a, str>> {
+        match self {
+            Self::Utf8(key) => Some(Cow::Borrowed(key)),
+            Self::Units(key) => match key.as_view() {
+                StringView::Latin1(bytes) => {
+                    let key = std::str::from_utf8(bytes).ok()?;
+                    key.is_ascii().then_some(Cow::Borrowed(key))
+                }
+                StringView::Utf16(units) => {
+                    let key = String::from_utf16(units).ok()?;
+                    key.is_ascii().then_some(Cow::Owned(key))
+                }
+            },
+        }
+    }
+
+    fn matches(self, stored: &StringUnits) -> bool {
+        match self {
+            Self::Utf8(key) => stored == key,
+            Self::Units(key) => stored == key,
+        }
+    }
+
+    fn owned(self) -> StringUnits {
+        match self {
+            Self::Utf8(key) => StringUnits::from(key),
+            Self::Units(key) => key.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -436,17 +491,34 @@ const MAX_BIGINT_SHIFT: u64 = 1 << 24;
 impl ObjectData {
     /// An own property slot, ignoring the prototype chain.
     pub fn get_own_property(&self, key: &str) -> Option<&Property> {
+        self.get_own_property_key(PropertyKeyRef::Utf8(key))
+    }
+
+    /// Exact-unit counterpart of [`ObjectData::get_own_property`].
+    pub fn get_own_property_units(&self, key: &StringUnits) -> Option<&Property> {
+        self.get_own_property_key(PropertyKeyRef::Units(key))
+    }
+
+    fn get_own_property_key(&self, key: PropertyKeyRef<'_>) -> Option<&Property> {
         self.properties
             .iter()
-            .find(|slot| slot.key == key)
+            .find(|slot| key.matches(&slot.key))
             .map(|slot| &slot.property)
+    }
+
+    pub fn get_own_attributes_units(&self, key: &StringUnits) -> Option<Attributes> {
+        self.get_own_attributes_key(PropertyKeyRef::Units(key))
     }
 
     /// The three flags an own property carries, or `None` when there is no such property.
     pub fn get_own_attributes(&self, key: &str) -> Option<Attributes> {
+        self.get_own_attributes_key(PropertyKeyRef::Utf8(key))
+    }
+
+    fn get_own_attributes_key(&self, key: PropertyKeyRef<'_>) -> Option<Attributes> {
         self.properties
             .iter()
-            .find(|slot| slot.key == key)
+            .find(|slot| key.matches(&slot.key))
             .map(|slot| slot.attributes)
     }
 
@@ -506,8 +578,16 @@ impl ObjectData {
     /// running out is an abort rather than an error, and a chain long enough to do that is
     /// reachable from ordinary code.
     pub fn lookup(&self, key: &str) -> Option<Property> {
-        if let Some(own) = self.get_own_property(key) {
-            return Some(own.clone());
+        self.lookup_key(PropertyKeyRef::Utf8(key))
+    }
+
+    pub fn lookup_units(&self, key: &StringUnits) -> Option<Property> {
+        self.lookup_key(PropertyKeyRef::Units(key))
+    }
+
+    fn lookup_key(&self, key: PropertyKeyRef<'_>) -> Option<Property> {
+        if let Some(own) = self.properties.iter().find(|slot| key.matches(&slot.key)) {
+            return Some(own.property.clone());
         }
         let mut current = self.prototype.clone();
         for _ in 0..MAX_PROTOTYPE_DEPTH {
@@ -517,28 +597,31 @@ impl ObjectData {
                 // corpus subclasses an array, and without this the instance inherits neither
                 // the element nor the length -- so every generic method reached through it
                 // walked an object that looked empty.
-                Some(Value::Array(items)) => match array_own_property(items, key) {
-                    Some(found) => Ok(found),
-                    None => {
-                        let store = items.properties.borrow();
-                        store
-                            .get_own_property(key)
-                            .cloned()
-                            .ok_or_else(|| store.prototype.clone())
-                    }
-                },
+                Some(Value::Array(items)) => {
+                    let store = items.properties.borrow();
+                    store
+                        .properties
+                        .iter()
+                        .find(|slot| key.matches(&slot.key))
+                        .map(|slot| slot.property.clone())
+                        .ok_or_else(|| store.prototype.clone())
+                }
                 Some(Value::Object(parent)) => {
                     let parent = parent.borrow();
                     parent
-                        .get_own_property(key)
-                        .cloned()
+                        .properties
+                        .iter()
+                        .find(|slot| key.matches(&slot.key))
+                        .map(|slot| slot.property.clone())
                         .ok_or_else(|| parent.prototype.clone())
                 }
                 Some(Value::Function(parent)) => {
                     let parent = parent.properties.borrow();
                     parent
-                        .get_own_property(key)
-                        .cloned()
+                        .properties
+                        .iter()
+                        .find(|slot| key.matches(&slot.key))
+                        .map(|slot| slot.property.clone())
                         .ok_or_else(|| parent.prototype.clone())
                 }
                 _ => return None,
@@ -558,7 +641,19 @@ impl ObjectData {
     /// prototype getter replaces itself with an own value on first read. Routing that through
     /// the prototype's setter calls it again, and again.
     pub fn define_value(&mut self, key: &str, value: Value, attributes: Attributes) {
-        if let Some(slot) = self.properties.iter_mut().find(|slot| slot.key == key) {
+        self.define_value_key(PropertyKeyRef::Utf8(key), value, attributes);
+    }
+
+    pub fn define_value_units(&mut self, key: &StringUnits, value: Value, attributes: Attributes) {
+        self.define_value_key(PropertyKeyRef::Units(key), value, attributes);
+    }
+
+    fn define_value_key(&mut self, key: PropertyKeyRef<'_>, value: Value, attributes: Attributes) {
+        if let Some(slot) = self
+            .properties
+            .iter_mut()
+            .find(|slot| key.matches(&slot.key))
+        {
             if !redefinable(slot, attributes, true) {
                 return;
             }
@@ -569,7 +664,7 @@ impl ObjectData {
         if !self.extensible {
             return;
         }
-        self.insert(key, Property::Value(value), attributes);
+        self.insert_key(key, Property::Value(value), attributes);
     }
 
     /// Change an existing property's flags without touching what it holds.
@@ -597,7 +692,28 @@ impl ObjectData {
         setter: Option<Value>,
         attributes: Attributes,
     ) {
-        let existing = match self.get_own_property(key) {
+        self.define_accessor_key(PropertyKeyRef::Utf8(key), getter, setter, attributes);
+    }
+
+    /// Exact-unit counterpart of [`ObjectData::define_accessor`].
+    pub fn define_accessor_units(
+        &mut self,
+        key: &StringUnits,
+        getter: Option<Value>,
+        setter: Option<Value>,
+        attributes: Attributes,
+    ) {
+        self.define_accessor_key(PropertyKeyRef::Units(key), getter, setter, attributes);
+    }
+
+    fn define_accessor_key(
+        &mut self,
+        key: PropertyKeyRef<'_>,
+        getter: Option<Value>,
+        setter: Option<Value>,
+        attributes: Attributes,
+    ) {
+        let existing = match self.get_own_property_key(key) {
             Some(Property::Accessor { get, set }) => (get.clone(), set.clone()),
             _ => (None, None),
         };
@@ -605,7 +721,11 @@ impl ObjectData {
             get: getter.or(existing.0),
             set: setter.or(existing.1),
         };
-        if let Some(slot) = self.properties.iter_mut().find(|slot| slot.key == key) {
+        if let Some(slot) = self
+            .properties
+            .iter_mut()
+            .find(|slot| key.matches(&slot.key))
+        {
             if !redefinable(slot, attributes, false) {
                 return;
             }
@@ -614,25 +734,23 @@ impl ObjectData {
             return;
         }
         self.properties.push(Slot {
-            key: key.to_owned(),
+            key: key.owned(),
             property,
             attributes,
         });
     }
 
-    /// Write an own property that [`define_own_property`] has already approved.
-    ///
-    /// The gate the other definition methods consult is deliberately absent: the specification's
-    /// check ran against the whole descriptor -- which fields it names, what it holds, what the
-    /// property held before -- and re-deciding that here from a slot and a flag set could only
-    /// disagree with the answer already given to the program.
-    fn install(&mut self, key: &str, property: Property, attributes: Attributes) {
-        if let Some(slot) = self.properties.iter_mut().find(|slot| slot.key == key) {
+    fn install_key(&mut self, key: PropertyKeyRef<'_>, property: Property, attributes: Attributes) {
+        if let Some(slot) = self
+            .properties
+            .iter_mut()
+            .find(|slot| key.matches(&slot.key))
+        {
             slot.property = property;
             slot.attributes = attributes;
             return;
         }
-        self.insert(key, property, attributes);
+        self.insert_key(key, property, attributes);
     }
 
     /// A property, following the prototype chain.
@@ -642,6 +760,13 @@ impl ObjectData {
     pub fn get(&self, key: &str) -> Option<Value> {
         // Same walk as `lookup`, and data-only: this is what the VM's own reads use.
         match self.lookup(key) {
+            Some(Property::Value(value)) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn get_units(&self, key: &StringUnits) -> Option<Value> {
+        match self.lookup_units(key) {
             Some(Property::Value(value)) => Some(value),
             _ => None,
         }
@@ -681,12 +806,24 @@ impl ObjectData {
     /// written. Ordering on insert rather than on read means `Object.keys`, `JSON.stringify`,
     /// spread and `for-in` are all correct without any of them knowing the rule.
     pub fn set(&mut self, key: &str, value: Value) {
+        self.set_key(PropertyKeyRef::Utf8(key), value);
+    }
+
+    pub fn set_units(&mut self, key: &StringUnits, value: Value) {
+        self.set_key(PropertyKeyRef::Units(key), value);
+    }
+
+    fn set_key(&mut self, key: PropertyKeyRef<'_>, value: Value) {
         if self.frozen || self.module_namespace {
             return;
         }
-        if let Some(slot) = self.properties.iter_mut().find(|slot| slot.key == key) {
+        if let Some(slot) = self
+            .properties
+            .iter_mut()
+            .find(|slot| key.matches(&slot.key))
+        {
             // Only a data property can refuse a write. An accessor's setter has already had its
-            // chance -- `inherited_setter` runs ahead of every store -- so a store that reaches
+            // chance -- `inherited_setter_key` runs ahead of every store -- so a store that reaches
             // an accessor slot here is the machine replacing its own bookkeeping.
             if matches!(slot.property, Property::Value(_)) && !slot.attributes.writable {
                 return;
@@ -697,21 +834,16 @@ impl ObjectData {
         if !self.extensible {
             return;
         }
-        self.insert(key, Property::Value(value), Attributes::DEFAULT);
+        self.insert_key(key, Property::Value(value), Attributes::DEFAULT);
     }
 
-    /// Place a *new* slot where enumeration would put it.
-    ///
-    /// An array index comes before every string key, in ascending numeric order, however it was
-    /// written. Ordering on insert rather than on read means `Object.keys`, `JSON.stringify`,
-    /// spread and `for-in` are all correct without any of them knowing the rule.
-    fn insert(&mut self, key: &str, property: Property, attributes: Attributes) {
+    fn insert_key(&mut self, key: PropertyKeyRef<'_>, property: Property, attributes: Attributes) {
         let slot = Slot {
-            key: key.to_owned(),
+            key: key.owned(),
             property,
             attributes,
         };
-        let Some(index) = index_key(key) else {
+        let Some(index) = index_key_units(&slot.key) else {
             self.properties.push(slot);
             return;
         };
@@ -719,7 +851,7 @@ impl ObjectData {
         let position = self
             .properties
             .iter()
-            .position(|other| index_key(&other.key).is_none_or(|other| other > index))
+            .position(|other| index_key_units(&other.key).is_none_or(|other| other > index))
             .unwrap_or(self.properties.len());
         self.properties.insert(position, slot);
     }
@@ -803,7 +935,11 @@ impl ObjectData {
             };
             let value = cell.borrow().clone();
             let key = key.clone();
-            if let Some(slot) = self.properties.iter_mut().find(|slot| slot.key == key) {
+            if let Some(slot) = self
+                .properties
+                .iter_mut()
+                .find(|slot| slot.key == key.as_str())
+            {
                 slot.property = Property::Value(value);
             }
         }
@@ -842,21 +978,38 @@ impl ObjectData {
 
     /// Remove an own property, keeping the order of the rest.
     pub fn remove(&mut self, key: &str) {
-        self.properties
-            .retain(|slot| slot.key != key || !slot.attributes.configurable);
+        self.remove_key(PropertyKeyRef::Utf8(key));
     }
 
-    pub fn keys(&self) -> impl Iterator<Item = &str> {
-        self.properties.iter().map(|slot| slot.key.as_str())
+    pub fn remove_units(&mut self, key: &StringUnits) -> bool {
+        self.remove_key(PropertyKeyRef::Units(key))
+    }
+
+    fn remove_key(&mut self, key: PropertyKeyRef<'_>) -> bool {
+        if self
+            .properties
+            .iter()
+            .find(|slot| key.matches(&slot.key))
+            .is_some_and(|slot| !slot.attributes.configurable)
+        {
+            return false;
+        }
+        self.properties
+            .retain(|slot| !key.matches(&slot.key) || !slot.attributes.configurable);
+        true
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &StringUnits> {
+        self.properties.iter().map(|slot| &slot.key)
     }
 
     /// Own *enumerable* property slots in insertion order, which is the order JavaScript
     /// enumerates them in.
-    pub fn entries(&self) -> impl Iterator<Item = (&str, &Property)> {
+    pub fn entries(&self) -> impl Iterator<Item = (&StringUnits, &Property)> {
         self.properties
             .iter()
             .filter(|slot| slot.attributes.enumerable)
-            .map(|slot| (slot.key.as_str(), &slot.property))
+            .map(|slot| (&slot.key, &slot.property))
     }
 
     /// Define a property that reads by name but is never enumerated, which is what every own
@@ -875,7 +1028,7 @@ impl ObjectData {
 /// happen. The refusal is silent because the callers are the machine's own definitions -- an
 /// object literal, a class body, a built-in laying out its properties -- none of which is a
 /// program asking a question it can be answered. `Object.defineProperty` *is* such a question,
-/// and it does not come through here: [`define_own_property`] runs the specification's
+/// and it does not come through here: [`define_own_property_key`] runs the specification's
 /// `ValidateAndApplyPropertyDescriptor` and reports the refusal, which `DefinePropertyOrThrow`
 /// then raises in both strict and sloppy mode.
 fn redefinable(slot: &Slot, attributes: Attributes, data: bool) -> bool {
@@ -1014,23 +1167,26 @@ fn record_prototype(target: &Value, prototype: Value) -> bool {
 /// and is stored. A regexp claims `lastIndex`, which lives in a slot of its own so that a search
 /// and a read of it cannot disagree about where the next match starts.
 fn exotic_reserved_name(target: &Value, key: &str) -> bool {
+    exotic_reserved_name_key(target, PropertyKeyRef::Utf8(key))
+}
+
+fn exotic_reserved_name_key(target: &Value, key: PropertyKeyRef<'_>) -> bool {
     match target {
-        Value::TypedArray(_) => canonical_numeric_index(key).is_some(),
+        Value::TypedArray(_) => canonical_numeric_index_key(key).is_some(),
         Value::RegExp(_) => false,
         _ => false,
     }
 }
 
-/// Remove a name from an exotic object's property store, answering whether it is gone.
-fn remove_exotic_property(store: &RefCell<ObjectData>, key: &str) -> bool {
+fn remove_exotic_property_key(store: &RefCell<ObjectData>, key: PropertyKeyRef<'_>) -> bool {
     if store
         .borrow()
-        .get_own_attributes(key)
+        .get_own_attributes_key(key)
         .is_some_and(|attributes| !attributes.configurable)
     {
         return false;
     }
-    store.borrow_mut().remove(key);
+    store.borrow_mut().remove_key(key);
     true
 }
 
@@ -1068,73 +1224,84 @@ fn own_property_state(
     target: &Value,
     key: &str,
 ) -> Option<(Property, Attributes)> {
-    let attributes = own_attributes(intrinsics, target, key)?;
+    own_property_state_key(intrinsics, target, PropertyKeyRef::Utf8(key))
+}
+
+fn own_property_state_key(
+    intrinsics: &Intrinsics,
+    target: &Value,
+    key: PropertyKeyRef<'_>,
+) -> Option<(Property, Attributes)> {
+    let attributes = own_attributes_key(intrinsics, target, key)?;
     let property = match target {
         Value::Object(object) => object
             .borrow()
-            .get_own_property(key)
+            .get_own_property_key(key)
             .cloned()
-            .or_else(|| string_exotic(target, key).map(Property::Value)),
-        Value::Function(closure) if key == "prototype" => {
+            .or_else(|| string_exotic_key(target, key).map(Property::Value)),
+        Value::Function(closure) if key.matches_ascii("prototype") => {
             Some(Property::Value(prototype_object(closure)))
         }
-        Value::Function(closure) => closure.properties.borrow().get_own_property(key).cloned(),
-        Value::Array(items) => match key.parse::<usize>() {
-            Ok(index) => match array_exotic_element(items, index) {
+        Value::Function(closure) => closure
+            .properties
+            .borrow()
+            .get_own_property_key(key)
+            .cloned(),
+        Value::Array(items) => match array_index_key(key) {
+            Some(index) => match array_exotic_element(items, index) {
                 Some(entry) => Some(entry.property),
                 None => items.borrow().get(index).cloned().map(Property::Value),
             },
             // `length` is an own property, and derived rather than stored: the elements are the
             // only record of how many there are, so it is read off them here rather than kept
             // beside them where the two could disagree.
-            Err(_) if key == "length" => array_own_property(items, key),
-            Err(_) => items.properties.borrow().get_own_property(key).cloned(),
+            None if key.matches_ascii("length") => array_own_property_key(items, key),
+            None => items.properties.borrow().get_own_property_key(key).cloned(),
         },
         // An element key is the view's own answer and a named one is the store's, and which is
         // which is `CanonicalNumericIndexString` rather than "is it an index": `"1.5"` names no
         // element and is still not a property, while `"01"` is an ordinary name.
-        Value::TypedArray(view) => match canonical_numeric_index(key) {
+        Value::TypedArray(view) => match canonical_numeric_index_key(key) {
             Some(index) => valid_integer_index(view, index)
                 .and_then(|at| view.get(at))
                 .map(Property::Value),
-            None => view.properties.borrow().get_own_property(key).cloned(),
+            None => view.properties.borrow().get_own_property_key(key).cloned(),
         },
         // A buffer, a view and a regexp have no exotic keys at all: everything they publish is
         // an accessor on the prototype, so every own property of one is a stored one.
         other if exotic_properties(other).is_some() => exotic_properties(target)
-            .and_then(|store| store.borrow().get_own_property(key).cloned()),
+            .and_then(|store| store.borrow().get_own_property_key(key).cloned()),
         // A built-in keeps what a program changed in the realm's store and everything else in
         // the tables, so a property it has never touched still reads as the specification built
         // it. `own_attributes` has already decided which of the two is answering.
         Value::Bound(bound) => bound
             .properties
             .borrow()
-            .get_own_property(key)
+            .get_own_property_key(key)
             .cloned()
-            .or_else(|| tabulated_property(intrinsics, target, key)),
+            .or_else(|| tabulated_property_key(intrinsics, target, key)),
         Value::Native(_, _)
         | Value::Callback(_, _)
         | Value::Settler(..)
         | Value::Capability(..)
         | Value::Element(_) => {
-            match intrinsics.overridden(target, key) {
+            match intrinsics.overridden_key(target, key) {
                 Overridden::Held(property, _) => Some(property),
                 // Unreachable: `own_attributes` answered `None` for a removed property, so the
                 // `?` above already returned.
                 Overridden::Absent => None,
-                Overridden::Untouched => tabulated_property(intrinsics, target, key),
+                Overridden::Untouched => tabulated_property_key(intrinsics, target, key),
             }
         }
         // A string's characters, which are own properties of the primitive itself. Reached from
-        // `own_descriptor`; a definition never gets here, because a primitive is refused before
+        // `own_descriptor_key`; a definition never gets here, because a primitive is refused before
         // its key is even converted.
-        Value::String(text) if key == "length" => {
-            Some(Property::Value(Value::Number(text.chars().count() as f64)))
+        Value::String(text) if key.matches_ascii("length") => {
+            Some(Property::Value(Value::Number(text.unit_len() as f64)))
         }
-        Value::String(text) => text
-            .chars()
-            .nth(key.parse::<usize>().ok()?)
-            .map(|character| Property::Value(Value::String(character.to_string()))),
+        Value::String(text) => array_index_key(key)
+            .and_then(|index| text.unit_at(index))
+            .map(|unit| Property::Value(Value::String(StringUnits::from_units(&[unit])))),
         _ => None,
     }?;
     Some((property, attributes))
@@ -1142,6 +1309,16 @@ fn own_property_state(
 
 /// What a built-in's own property held when the realm was built.
 fn tabulated_property(intrinsics: &Intrinsics, target: &Value, key: &str) -> Option<Property> {
+    tabulated_property_key(intrinsics, target, PropertyKeyRef::Utf8(key))
+}
+
+fn tabulated_property_key(
+    intrinsics: &Intrinsics,
+    target: &Value,
+    key: PropertyKeyRef<'_>,
+) -> Option<Property> {
+    let key = key.known_ascii()?;
+    let key = key.as_ref();
     let realm = value_realm(target);
     // `String.prototype` is the empty String exotic object. Its locked own `length` lives in
     // the boxed value rather than Native's method table, but materializing the intrinsic must
@@ -1163,7 +1340,9 @@ fn tabulated_property(intrinsics: &Intrinsics, target: &Value, key: &str) -> Opt
         });
     }
     match key {
-        "name" => intrinsic_identity(target).map(|(name, _)| Property::Value(Value::String(name))),
+        "name" => {
+            intrinsic_identity(target).map(|(name, _)| Property::Value(Value::String(name.into())))
+        }
         "length" => {
             intrinsic_identity(target).map(|(_, length)| Property::Value(Value::Number(length)))
         }
@@ -1226,31 +1405,30 @@ fn descriptor_property(descriptor: &Descriptor, current: Option<Property>) -> Pr
     current.unwrap_or(Property::Value(Value::Undefined))
 }
 
-/// Write a validated property into whichever store the target keeps its own properties in.
-fn install_property(
+fn install_property_key(
     intrinsics: &Intrinsics,
     target: &Value,
-    key: &str,
+    key: PropertyKeyRef<'_>,
     property: Property,
     attributes: Attributes,
 ) -> Result<(), ExecutionError> {
     match target {
-        Value::Object(object) => object.borrow_mut().install(key, property, attributes),
+        Value::Object(object) => object.borrow_mut().install_key(key, property, attributes),
         Value::Function(closure) => closure
             .properties
             .borrow_mut()
-            .install(key, property, attributes),
+            .install_key(key, property, attributes),
         Value::Bound(bound) => bound
             .properties
             .borrow_mut()
-            .install(key, property, attributes),
-        Value::Array(items) => match key.parse::<usize>() {
+            .install_key(key, property, attributes),
+        Value::Array(items) => match array_index_key(key) {
             // Bounded like the ordinary indexed write: `defineProperty` reaches the same dense
             // storage and can name just as distant an index.
-            Ok(index) if index >= MAX_DENSE_ARRAY => {
+            Some(index) if index >= MAX_DENSE_ARRAY => {
                 return Err(ExecutionError::ArrayTooLarge { length: index + 1 });
             }
-            Ok(index) => {
+            Some(index) => {
                 {
                     let mut elements = items.borrow_mut();
                     if index >= elements.len() {
@@ -1281,25 +1459,25 @@ fn install_property(
                     });
                 }
             }
-            Err(_) => items
+            None => items
                 .properties
                 .borrow_mut()
-                .install(key, property, attributes),
+                .install_key(key, property, attributes),
         },
         // A built-in's own properties live in the realm's store, which is the only place a
         // change to one can go: the tables it is otherwise answered from are `match` arms.
         Value::Native(_, _) | Value::Callback(_, _) => {
-            intrinsics.install(target, key, property, attributes);
+            intrinsics.install_key(target, key, property, attributes);
         }
         // An exotic object takes an ordinary named property in the store beside its own state.
-        // An element key never reaches here: `define_own_property` answers those itself, the
+        // An element key never reaches here: `define_own_property_key` answers those itself, the
         // way it answers an array's `length` itself, because their flags are the specification's
         // rather than the store's.
         other if exotic_properties(other).is_some() => {
             if let Some(store) = exotic_properties(target)
-                && !exotic_reserved_name(target, key)
+                && !exotic_reserved_name_key(target, key)
             {
-                store.borrow_mut().install(key, property, attributes);
+                store.borrow_mut().install_key(key, property, attributes);
             }
         }
         // A primitive cannot reach this: the caller rejected it before ToPropertyKey.
@@ -1444,14 +1622,12 @@ enum IndexedDefinition {
     Accepted,
 }
 
-/// `IntegerIndexedDefineOwnProperty` up to the write, or `None` when the name is not an element
-/// key at all and the ordinary definition is the one that should run.
-fn indexed_definition(
+fn indexed_definition_key(
     view: &TypedArrayData,
-    key: &str,
+    key: PropertyKeyRef<'_>,
     descriptor: &Descriptor,
 ) -> Option<IndexedDefinition> {
-    let index = canonical_numeric_index(key)?;
+    let index = canonical_numeric_index_key(key)?;
     let Some(at) = valid_integer_index(view, index) else {
         return Some(IndexedDefinition::Refused);
     };
@@ -1503,27 +1679,27 @@ fn inherited_builtin(closure: &Rc<Closure>) -> Option<Native> {
     None
 }
 
-fn define_own_property(
+fn define_own_property_key(
     intrinsics: &Intrinsics,
     target: &Value,
-    key: &str,
+    key: PropertyKeyRef<'_>,
     descriptor: &Descriptor,
 ) -> Result<bool, ExecutionError> {
     // An array's `length` has a definition of its own, and it has to run *instead of* the
     // ordinary one: the ordinary one has no way to raise a `RangeError`, and no reason to
     // shorten the elements when the length it was handed is smaller than the array.
     if let Value::Array(items) = target
-        && key == "length"
+        && key.matches_ascii("length")
     {
         return array_set_length(items, descriptor);
     }
     // An integer-indexed exotic object answers `[[DefineOwnProperty]]` itself for every element
     // key, and it too has to run *instead of* the ordinary one. The conversion the definition
-    // ends in is the program's own method, so [`Vm::define_own`] is the spelling every machine
+    // ends in is the program's own method, so [`Vm::define_own_key`] is the spelling every machine
     // caller uses; this one writes what it was handed, which is the same answer for every value
     // that is already a number.
     if let Value::TypedArray(view) = target
-        && let Some(outcome) = indexed_definition(view, key, descriptor)
+        && let Some(outcome) = indexed_definition_key(view, key, descriptor)
     {
         return Ok(match outcome {
             IndexedDefinition::Refused => false,
@@ -1536,7 +1712,7 @@ fn define_own_property(
             }
         });
     }
-    let Some((current, attributes)) = own_property_state(intrinsics, target, key) else {
+    let Some((current, attributes)) = own_property_state_key(intrinsics, target, key) else {
         if !is_extensible_target(intrinsics, target) {
             return Ok(false);
         }
@@ -1547,7 +1723,7 @@ fn define_own_property(
             enumerable: descriptor.enumerable.unwrap_or(false),
             configurable: descriptor.configurable.unwrap_or(false),
         };
-        install_property(
+        install_property_key(
             intrinsics,
             target,
             key,
@@ -1620,7 +1796,7 @@ fn define_own_property(
         enumerable: descriptor.enumerable.unwrap_or(attributes.enumerable),
         configurable: descriptor.configurable.unwrap_or(attributes.configurable),
     };
-    install_property(
+    install_property_key(
         intrinsics,
         target,
         key,
@@ -1754,7 +1930,9 @@ impl IteratorKind {
 fn iterator_prototype_method(kind: IteratorKind, name: &str) -> Value {
     match name {
         "next" => kind.next_method(),
-        key if key == WellKnown::ToStringTag.property_key() => Value::String(kind.tag().to_owned()),
+        key if key == WellKnown::ToStringTag.property_key() => {
+            Value::String(kind.tag().to_owned().into())
+        }
         // Everything else is `%IteratorPrototype%`'s, one link up: the helpers, and `@@iterator`
         // itself. The chain walk follows one marker and stops, so the step is taken here -- the
         // same shape `inherit_from_object` gives every other table for `Object.prototype`.
@@ -2786,7 +2964,11 @@ fn coerce_element(kind: TypedKind, value: &Value) -> Result<Value, ExecutionErro
         Value::Boolean(flag) => num_bigint::BigInt::from(u8::from(*flag)),
         // A string that is not an integer literal is a `SyntaxError` rather than a NaN: this
         // type has no NaN to become, which is the same answer `BigInt("x")` gives.
-        Value::String(text) => match text.trim() {
+        Value::String(text) => match text
+            .to_scalar_string()
+            .map_err(|_| ExecutionError::InvalidBigIntString)?
+            .trim()
+        {
             "" => num_bigint::BigInt::from(0),
             trimmed => trimmed
                 .parse::<num_bigint::BigInt>()
@@ -3796,6 +3978,34 @@ fn escaped_source(source: &str) -> String {
     escaped
 }
 
+fn regexp_string_units(regexp: &RegExpData) -> StringUnits {
+    let source = escaped_source_units(&regexp.source);
+    let mut units = Vec::with_capacity(source.unit_len() + regexp.flags.len() + 2);
+    units.extend("/".encode_utf16());
+    units.extend(source.units());
+    units.extend("/".encode_utf16());
+    units.extend(regexp.flags.encode_utf16());
+    StringUnits::from_units(&units)
+}
+
+fn escaped_source_units(source: &StringUnits) -> StringUnits {
+    if let Ok(scalar) = source.to_scalar_string() {
+        return StringUnits::from(escaped_source(&scalar));
+    }
+    let source = {
+        let mut escaped = String::new();
+        for unit in source.units() {
+            if (0xd800..=0xdfff).contains(&unit) {
+                escaped.push_str(&format!("\\u{unit:04x}"));
+            } else if let Some(character) = char::from_u32(u32::from(unit)) {
+                escaped.push_str(&escaped_source(&character.to_string()));
+            }
+        }
+        escaped
+    };
+    StringUnits::from(source)
+}
+
 /// A compiled regular expression, its source, and the cursor `g` and `y` advance.
 ///
 /// The engine is `regress`, which targets ECMAScript semantics rather than the linear-time
@@ -3805,7 +4015,7 @@ fn escaped_source(source: &str) -> String {
 #[derive(Debug)]
 pub struct RegExpData {
     /// The pattern as written, which `source` hands back to the program.
-    source: String,
+    source: StringUnits,
     flags: String,
     compiled: regress::Regex,
     global: bool,
@@ -3911,7 +4121,7 @@ pub enum Value {
     Null,
     Boolean(bool),
     Number(f64),
-    String(String),
+    String(StringUnits),
     /// A shared binding living in a local slot, put there by `NewCell`.
     ///
     /// Never observable from JavaScript: the compiler only emits cell instructions for slots it
@@ -4115,6 +4325,16 @@ impl Value {
         }
     }
 
+    /// Lossless `ToPropertyKey` spelling for ordinary string values. Symbols retain their
+    /// reserved internal name; all other values use the already-computed language string.
+    pub fn property_key_units(&self) -> StringUnits {
+        match self {
+            Self::Symbol(symbol) => StringUnits::from(symbol.property_key()),
+            Self::String(value) => value.clone(),
+            other => other.to_string_units(),
+        }
+    }
+
     /// What `typeof` reports.
     ///
     /// Distinct from [`Value::type_name`], which is for diagnostics: `typeof null` is the string
@@ -4312,7 +4532,7 @@ impl Value {
             Self::Null => 0.0,
             Self::Boolean(value) => f64::from(*value),
             Self::Number(value) => *value,
-            Self::String(value) => parse_number(value),
+            Self::String(value) => parse_number_units(value),
             // `Number(fn)` is NaN in JavaScript: a function has no numeric value, and ToNumber
             // on it goes through ToPrimitive, which cannot produce one.
             Self::Function(_) => f64::NAN,
@@ -4418,7 +4638,10 @@ impl Value {
             Self::Null => "null".to_owned(),
             Self::Boolean(value) => value.to_string(),
             Self::Number(value) => number_string(*value),
-            Self::String(value) => value.clone(),
+            // This method is explicitly the host/diagnostic rendering API. Language string
+            // coercion uses `to_string_units` below, so a lone unit is only replaced here at the
+            // final display boundary where Rust's scalar `String` is required.
+            Self::String(value) => value.to_lossy_string(),
             // `Function.prototype.toString`: the text the program wrote. The span and the source
             // both travel on the program the closure already carries, so this is a slice rather
             // than a reconstruction -- there is no spelling to invent and none to get wrong.
@@ -4449,7 +4672,7 @@ impl Value {
             // `String(/a/g)` is the literal as written, which is what `toString` returns.
             Self::RegExp(regexp) => format!(
                 "/{}/{}",
-                regexp.source,
+                regexp.source.to_lossy_string(),
                 canonical_regexp_flags(&regexp.flags)
             ),
             Self::Date(date) => date_to_string(date.time.get()),
@@ -4488,7 +4711,8 @@ impl Value {
             } else {
                 "[object ArrayBuffer]"
             }
-            .to_owned(),
+            .to_owned()
+            .into(),
             Self::DataView(_) => "[object DataView]".to_owned(),
             Self::Symbol(symbol) => format!("Symbol({})", symbol.description()),
             // `String([1,2])` is "1,2": arrays stringify as a comma join, not as [object Array].
@@ -4498,6 +4722,23 @@ impl Value {
             // `array.join()` itself, which can return a result, raises the RangeError.
             Self::Array(items) => join(&items.borrow(), ",").unwrap_or_default(),
             Self::Cell(_) => unreachable!("a cell is never used as a value"),
+        }
+    }
+
+    /// Lossless JavaScript `ToString` result. Consumers that remain in the language must keep
+    /// this owner rather than routing through the scalar display formatter above.
+    pub fn to_string_units(&self) -> StringUnits {
+        match self {
+            Self::String(value) => value.clone(),
+            Self::Array(items) => join_units(&items.borrow(), &StringUnits::from(",")),
+            Self::TypedArray(view) => join_units(&view.items(), &StringUnits::from(",")),
+            Self::RegExp(regexp) => regexp_string_units(regexp),
+            Self::Proxy(proxy) if !is_callable(&proxy.target) => proxy.target.to_string_units(),
+            Self::Intl(value) => match value.as_ref() {
+                intl::IntlValue::Locale(tag) => StringUnits::from(tag.as_str()),
+                _ => StringUnits::from(self.to_display_string()),
+            },
+            _ => StringUnits::from(self.to_display_string()),
         }
     }
 }
@@ -4534,7 +4775,7 @@ impl From<Value> for HostValue {
             // one `HostOps` has. Everything else is inspected on the way out, so `console.log`
             // shows an object's contents rather than the useless `[object Object]` that
             // `String(value)` produces -- the two really are different questions.
-            other => Self::String(inspect(&other)),
+            other => Self::String(inspect(&other).into()),
         }
     }
 }
@@ -4546,7 +4787,7 @@ impl From<HostValue> for Value {
             HostValue::Null => Self::Null,
             HostValue::Boolean(value) => Self::Boolean(value),
             HostValue::Number(bits) => Self::from_number_bits(bits),
-            HostValue::String(value) => Self::String(value),
+            HostValue::String(value) => Self::String(value.into()),
         }
     }
 }
@@ -5789,7 +6030,7 @@ fn realm_host_string<H: HostOps + ?Sized>(
             instruction: 0,
             message: error.to_string(),
         })? {
-        HostValue::String(value) if !value.is_empty() => Ok(value),
+        HostValue::String(value) if !value.is_empty() => Ok(value.to_lossy_string()),
         _ => Err(ExecutionError::Host {
             instruction: 0,
             message: format!("HostOp::{label} must return a non-empty string"),
@@ -6100,7 +6341,7 @@ pub fn namespace_object(exports: impl IntoIterator<Item = (String, Value)>) -> V
     // "[object Object]", which is how a program tells a namespace from an object of exports.
     data.define_value(
         WellKnown::ToStringTag.property_key(),
-        Value::String("Module".to_owned()),
+        Value::String("Module".to_owned().into()),
         Attributes {
             writable: false,
             enumerable: false,
@@ -6164,7 +6405,7 @@ pub fn namespace_entries(value: &Value) -> Vec<(String, Value)> {
             // re-export expanded through here would otherwise hand `@@toStringTag` on to the
             // importer as a name the provider had exported.
             _ if name == WellKnown::ToStringTag.property_key() => None,
-            Property::Value(value) => Some((name.to_owned(), value.clone())),
+            Property::Value(value) => Some((name.to_lossy_string(), value.clone())),
             Property::Accessor { .. } => None,
         })
         .collect()
@@ -6181,7 +6422,7 @@ pub fn ordinary_object(entries: impl IntoIterator<Item = (String, Value)>) -> Va
 
 fn call_site_object(name: String) -> Value {
     ordinary_object([
-        (CALL_SITE_NAME.to_owned(), Value::String(name)),
+        (CALL_SITE_NAME.to_owned(), Value::String(name.into())),
         (
             "getFileName".to_owned(),
             Value::Native(Native::CallSiteGetFileName, RealmId::PRIMARY),
@@ -8216,7 +8457,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let bytes = match &chunk {
                         Value::TypedArray(view) => view.bytes(),
                         Value::ArrayBuffer(ab) => ab.bytes.borrow().clone(),
-                        Value::String(s) => s.as_bytes().to_vec(),
+                        Value::String(s) => s.to_lossy_string().into_bytes(),
                         _ => Vec::new(),
                     };
                     zlib_state
@@ -8297,7 +8538,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         Err(err) => {
                             let error = self.construct_error(
                                 ErrorKind::Error,
-                                &[Value::String(err.to_string())],
+                                &[Value::String(err.to_string().into())],
                             );
                             self.dispatch_node_event(
                                 Native::NodeEventEmit,
@@ -8478,7 +8719,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     listener
                         .address
                         .clone()
-                        .map(Value::String)
+                        .map(|value| Value::String(value.into()))
                         .unwrap_or(Value::Undefined),
                 );
                 address.set("family", Value::String("IPv4".into()));
@@ -8609,11 +8850,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     }
 
     fn throw_node_invalid_arg_type(&mut self, message: &str) -> Result<Value, ExecutionError> {
-        let error = self.construct_error(ErrorKind::Type, &[Value::String(message.to_owned())]);
+        let error =
+            self.construct_error(ErrorKind::Type, &[Value::String(message.to_owned().into())]);
         if let Value::Object(object) = &error {
-            object
-                .borrow_mut()
-                .set_non_enumerable("code", Value::String("ERR_INVALID_ARG_TYPE".to_owned()));
+            object.borrow_mut().set_non_enumerable(
+                "code",
+                Value::String("ERR_INVALID_ARG_TYPE".to_owned().into()),
+            );
         }
         self.caught = Some(error);
         Err(ExecutionError::ThrownAcrossNative)
@@ -8820,20 +9063,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             .and_then(Weak::upgrade)
             .map(Value::Object)
             .unwrap_or(Value::Undefined);
-        let mut payload = vec![Value::String(event.to_owned())];
+        let mut payload = vec![Value::String(event.to_owned().into())];
         payload.extend(arguments);
         self.dispatch_node_event(Native::NodeEventEmit, &object, &payload, instruction)?;
         Ok(())
     }
 
     fn node_error_value(&mut self, error: kiln_host_abi::AsyncHostError) -> Value {
-        let object = self.construct_error(ErrorKind::Error, &[Value::String(error.message)]);
+        let object = self.construct_error(ErrorKind::Error, &[Value::String(error.message.into())]);
         if let Value::Object(object) = &object {
             let mut object = object.borrow_mut();
-            object.set_non_enumerable("code", Value::String(error.code));
-            object.set_non_enumerable("syscall", Value::String(error.syscall));
+            object.set_non_enumerable("code", Value::String(error.code.into()));
+            object.set_non_enumerable("syscall", Value::String(error.syscall.into()));
             if let Some(path) = error.path {
-                object.set_non_enumerable("path", Value::String(path));
+                object.set_non_enumerable("path", Value::String(path.into()));
             }
         }
         object
@@ -8949,7 +9192,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     })?;
                     let readable = Rc::clone(&node_net_socket_state(&socket)?.borrow().readable);
                     let chunk = match readable.borrow().encoding.as_deref() {
-                        Some("utf8") => Value::String(String::from_utf8_lossy(&bytes).into_owned()),
+                        Some("utf8") => {
+                            Value::String(String::from_utf8_lossy(&bytes).into_owned().into())
+                        }
                         _ => node_bytes_value(bytes),
                     };
                     self.dispatch_node_event(
@@ -9108,7 +9353,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let incoming = self.http_incoming_for_stream(server, resource, instruction)?;
                     let readable = Rc::clone(&node_http_incoming(&incoming)?.borrow().readable);
                     let body = match readable.borrow().encoding.as_deref() {
-                        Some("utf8") => Value::String(String::from_utf8_lossy(&data).into_owned()),
+                        Some("utf8") => {
+                            Value::String(String::from_utf8_lossy(&data).into_owned().into())
+                        }
                         _ => node_bytes_value(data),
                     };
                     self.dispatch_readable_state(
@@ -9168,7 +9415,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                 }
                 RuntimeHttpEvent::Error { id: _, message } => {
-                    let error = self.construct_error(ErrorKind::Error, &[Value::String(message)]);
+                    let error =
+                        self.construct_error(ErrorKind::Error, &[Value::String(message.into())]);
                     self.emit_http_server(server, "clientError", vec![error], instruction)?;
                 }
                 RuntimeHttpEvent::Closed => {
@@ -9319,7 +9567,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             }
                         })
                         .unwrap_or(Value::Undefined);
-                    let error = self.construct_error(ErrorKind::Error, &[Value::String(message)]);
+                    let error =
+                        self.construct_error(ErrorKind::Error, &[Value::String(message.into())]);
                     self.dispatch_node_event(
                         Native::NodeEventEmit,
                         &request,
@@ -9442,7 +9691,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     RealmId::PRIMARY,
                 ));
                 incoming.set("statusCode", Value::Number(f64::from(head.status)));
-                incoming.set("statusMessage", Value::String(head.reason.clone()));
+                incoming.set("statusMessage", Value::String(head.reason.clone().into()));
                 incoming.set("on", Value::Native(Native::NodeEventOn, RealmId::PRIMARY));
                 incoming.set(
                     "once",
@@ -9466,7 +9715,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 );
                 let mut headers = ObjectData::default();
                 for (name, value) in head.headers_object() {
-                    headers.set(&name, Value::String(value));
+                    headers.set(&name, Value::String(value.into()));
                 }
                 incoming.set("headers", Value::Object(Rc::new(RefCell::new(headers))));
                 let incoming = Value::Object(Rc::new(RefCell::new(incoming)));
@@ -9499,7 +9748,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     })?;
                 let readable = Rc::clone(&node_http_incoming(&incoming)?.borrow().readable);
                 let body = match readable.borrow().encoding.as_deref() {
-                    Some("utf8") => Value::String(String::from_utf8_lossy(&bytes).into_owned()),
+                    Some("utf8") => {
+                        Value::String(String::from_utf8_lossy(&bytes).into_owned().into())
+                    }
                     _ => node_bytes_value(bytes),
                 };
                 self.dispatch_readable_state(
@@ -9577,8 +9828,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::PrototypeOf(PrototypeTable::Readable),
             RealmId::PRIMARY,
         ));
-        incoming.set("method", Value::String(request.method.clone()));
-        incoming.set("url", Value::String(request.target.clone()));
+        incoming.set("method", Value::String(request.method.clone().into()));
+        incoming.set("url", Value::String(request.target.clone().into()));
         incoming.set("on", Value::Native(Native::NodeEventOn, RealmId::PRIMARY));
         incoming.set(
             "once",
@@ -9614,7 +9865,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         );
         let mut headers = ObjectData::default();
         for (name, value) in request.headers_object() {
-            headers.set(&name, Value::String(value));
+            headers.set(&name, Value::String(value.into()));
         }
         incoming.set("headers", Value::Object(Rc::new(RefCell::new(headers))));
         let socket = server
@@ -9769,13 +10020,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .headers
                     .iter()
                     .find(|(key, _)| key.eq_ignore_ascii_case(&name))
-                    .map(|(_, value)| Value::String(value.clone()))
+                    .map(|(_, value)| Value::String(value.clone().into()))
                     .unwrap_or(Value::Undefined))
             }
             Native::NodeResponseGetHeaders => {
                 let mut headers = ObjectData::default();
                 for (name, value) in &state.borrow().headers {
-                    headers.set(&name.to_ascii_lowercase(), Value::String(value.clone()));
+                    headers.set(
+                        &name.to_ascii_lowercase(),
+                        Value::String(value.clone().into()),
+                    );
                 }
                 // Node returns a null-prototype dictionary so names such as `constructor` are
                 // headers, never inherited object behavior.
@@ -9820,7 +10074,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         .iter()
                         .filter(|property| property.attributes.enumerable)
                     {
-                        let name = property.key.clone();
+                        let name = property.key.to_lossy_string();
                         let Property::Value(value) = &property.property else {
                             continue;
                         };
@@ -10261,7 +10515,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         self.call_value(
                             &registered.callback,
                             receiver.clone(),
-                            vec![Value::String(event.clone()), listener.clone()],
+                            vec![Value::String(event.clone().into()), listener.clone()],
                             instruction,
                         )?;
                     }
@@ -10378,7 +10632,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .into_iter()
                     .flatten()
                     .filter(|bucket| !bucket.listeners.is_empty())
-                    .map(|bucket| Value::String(bucket.name.clone()))
+                    .map(|bucket| Value::String(bucket.name.clone().into()))
                     .collect(),
             ))),
             Native::NodeEventRemoveListener => {
@@ -10500,10 +10754,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
         };
         let operation = match native {
-            Native::NodeFsReadFile => AsyncHostOp::ReadFile { path: path.clone() },
+            Native::NodeFsReadFile => AsyncHostOp::ReadFile {
+                path: path.to_lossy_string(),
+            },
             Native::NodeFsWriteFile => {
                 let data = match arguments.get(1) {
-                    Some(Value::String(data)) => data.as_bytes().to_vec(),
+                    Some(Value::String(data)) => data.to_lossy_string().into_bytes(),
                     Some(Value::TypedArray(data)) => data.bytes(),
                     value => {
                         return Err(ExecutionError::TypeErrorMessage {
@@ -10514,11 +10770,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         });
                     }
                 };
-                AsyncHostOp::WriteFile { path, data }
+                AsyncHostOp::WriteFile {
+                    path: path.to_lossy_string(),
+                    data,
+                }
             }
             Native::NodeFsAppendFile => {
                 let data = match arguments.get(1) {
-                    Some(Value::String(data)) => data.as_bytes().to_vec(),
+                    Some(Value::String(data)) => data.to_lossy_string().into_bytes(),
                     Some(Value::TypedArray(data)) => data.bytes(),
                     value => {
                         return Err(ExecutionError::TypeErrorMessage {
@@ -10529,9 +10788,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         });
                     }
                 };
-                AsyncHostOp::AppendFile { path, data }
+                AsyncHostOp::AppendFile {
+                    path: path.to_lossy_string(),
+                    data,
+                }
             }
-            Native::NodeFsStat => AsyncHostOp::Stat { path },
+            Native::NodeFsStat => AsyncHostOp::Stat {
+                path: path.to_lossy_string(),
+            },
             Native::NodeFsMkdir => {
                 let recursive = arguments.get(1).map_or(false, |opt| {
                     if let Value::Object(obj) = opt {
@@ -10544,7 +10808,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         false
                     }
                 });
-                AsyncHostOp::Mkdir { path, recursive }
+                AsyncHostOp::Mkdir {
+                    path: path.to_lossy_string(),
+                    recursive,
+                }
             }
             _ => {
                 return Err(ExecutionError::Host {
@@ -10895,7 +11162,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Ok(AsyncHostValue::Bytes(bytes))
                 if matches!(pending.conversion, HostResultConversion::Utf8) =>
             {
-                Settled::Fulfilled(Value::String(String::from_utf8_lossy(&bytes).into_owned()))
+                Settled::Fulfilled(Value::String(
+                    String::from_utf8_lossy(&bytes).into_owned().into(),
+                ))
             }
             Ok(value) => Settled::Fulfilled(node_host_value(value)?),
             Err(error) => Settled::Rejected(self.node_error_value(error)),
@@ -11426,19 +11695,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.stack.push(Value::Function(closure));
                 }
                 Instruction::CallMethod { name, argc } => {
-                    let name = self.string_constant(*name, current)?;
+                    let name = self.string_constant_units(*name, current)?;
                     let arguments = self.take_call_arguments(*argc, current)?;
                     let receiver = self.pop(current)?;
-                    let read = self.read_property(&receiver, &name, current);
+                    let read =
+                        self.read_property_key(&receiver, PropertyKeyRef::Units(&name), current);
                     let Some(method) = self.catchable(read, current)? else {
                         continue;
                     };
                     // Named, because "undefined is not a function" is the least useful message a
                     // runtime produces and the name is right here.
                     if !is_callable(&method) {
+                        let shown = name.to_lossy_string();
                         self.throw_error(
                             ErrorKind::Type,
-                            format!("{}.{name} is not a function", receiver.type_name()),
+                            format!("{}.{shown} is not a function", receiver.type_name()),
                             current,
                         )?;
                         continue;
@@ -11762,10 +12033,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     });
                 }
                 Instruction::WithHas(name) => {
-                    let name = self.string_constant(*name, current)?;
+                    let name = self.string_constant_units(*name, current)?;
                     let object = self.pop(current)?;
                     let present =
-                        has_property(&self.intrinsics, &object, &Value::String(name.clone()));
+                        has_property_key(&self.intrinsics, &object, PropertyKeyRef::Units(&name));
                     if !present {
                         self.stack.push(Value::Boolean(false));
                         continue;
@@ -11783,7 +12054,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let blocked = if matches!(blockers, Value::Undefined | Value::Null) {
                         false
                     } else {
-                        let read = self.read_property(&blockers, &name, current);
+                        let read = self.read_property_key(
+                            &blockers,
+                            PropertyKeyRef::Units(&name),
+                            current,
+                        );
                         let Some(flag) = self.catchable(read, current)? else {
                             continue;
                         };
@@ -11862,7 +12137,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 Instruction::GetProperty(name)
                     if matches!(self.stack.last(), Some(Value::Native(Native::Error(_), _)))
-                        && self.string_constant(*name, current)? == "prototype" =>
+                        && self.string_constant_units(*name, current)?.eq("prototype") =>
                 {
                     // `Error.prototype` has to be the same object instances inherit from, or
                     // `extends Error` would link to something no error descends from.
@@ -11906,7 +12181,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // Entered rather than driven: the interpreter loop runs the eval's frame
                     // next, and its `Return` leaves the completion value where this instruction's
                     // result belongs. Nothing is pushed here.
-                    let entered = self.enter_eval(&source, Some(site), false);
+                    let entered = self.enter_eval(&source.to_lossy_string(), Some(site), false);
                     if self.catchable(entered, current)?.is_none() {
                         continue;
                     }
@@ -11974,7 +12249,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             raised = true;
                             break;
                         };
-                        object.set(&key.property_key(), pair[1].clone());
+                        let key_units = key.property_key_units();
+                        object.set_units(&key_units, pair[1].clone());
                     }
                     if raised {
                         continue;
@@ -11999,12 +12275,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // the store walk below found nothing and produced `{}` in silence.
                     if matches!(source, Value::Proxy(_)) {
                         for (key, value) in self.proxy_own_enumerable(&source, current)? {
-                            object.borrow_mut().set(&key, value);
+                            object.borrow_mut().set_units(&key, value);
                         }
                         self.stack.push(target);
                         continue;
                     }
-                    for (key, property) in own_properties(&self.intrinsics, &source) {
+                    for (key, property) in own_properties_units(&self.intrinsics, &source) {
                         // A spread copies *values*: it reads each property, which for an
                         // accessor means calling its getter, and the result is a plain data
                         // property on the target.
@@ -12023,7 +12299,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                                 None => Value::Undefined,
                             },
                         };
-                        object.borrow_mut().set(&key, value);
+                        object.borrow_mut().set_units(&key, value);
                     }
                     self.stack.push(target);
                 }
@@ -12085,7 +12361,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                 }
                 Instruction::ThrowReference(name) => {
-                    let name = self.string_constant(*name, current)?;
+                    let name = self.string_constant_units(*name, current)?;
                     // A name the compiler could not place may still be a real binding. The
                     // realm's global object is the last place an identifier resolution looks,
                     // and it holds both what a program put there itself with `globalThis.x = 1`
@@ -12099,19 +12375,25 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // and it is what test262's `PutValue` cases are built on.
                     let globals = self.global_object();
                     let present = match &globals {
-                        Value::Object(object) => object.borrow().get_own_property(&name).is_some(),
+                        Value::Object(object) => {
+                            object.borrow().get_own_property_units(&name).is_some()
+                        }
                         _ => false,
                     };
                     if present {
                         // A real read, because an accessor is a call: the getter runs, and it may
                         // throw or -- as those cases do -- delete the very property being read.
-                        let value = self.read_property(&globals, &name, current)?;
+                        let value = self.read_property_key(
+                            &globals,
+                            PropertyKeyRef::Units(&name),
+                            current,
+                        )?;
                         self.stack.push(value);
                         continue;
                     }
                     self.throw_error(
                         ErrorKind::Reference,
-                        format!("{name} is not defined"),
+                        format!("{} is not defined", name.to_lossy_string()),
                         current,
                     )?;
                     continue;
@@ -12120,11 +12402,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // `CreateGlobalVarBinding`: the property is created only when the global
                     // object does not already have it, so `var x;` over an existing `x` keeps the
                     // value it had rather than resetting it to `undefined`.
-                    let name = self.string_constant(*name, current)?;
+                    let name = self.string_constant_units(*name, current)?;
                     if let Value::Object(globals) = self.global_object() {
                         let mut globals = globals.borrow_mut();
-                        if globals.get_own(&name).is_none() {
-                            globals.define_value(
+                        if globals.get_own_property_units(&name).is_none() {
+                            globals.define_value_units(
                                 &name,
                                 Value::Undefined,
                                 Attributes {
@@ -12143,7 +12425,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // the second really does take the property away -- the `ThrowReference`
                     // fallback above then finds nothing, and a later read of `x` throws.
                     // Non-configurable is `false`, which is what `delete NaN` is.
-                    let name = self.string_constant(*name, current)?;
+                    let name = self.string_constant_units(*name, current)?;
                     let globals = self.global_object();
                     let key = Value::String(name);
                     let removed = self.delete(&globals, &key, current)?;
@@ -12153,18 +12435,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // What `typeof` reads for a name no scope bound: the global object's property
                     // if it has one, and `undefined` if it does not -- which is the answer that
                     // makes `typeof maybeMissing === "undefined"` the feature test it is.
-                    let name = self.string_constant(*name, current)?;
+                    let name = self.string_constant_units(*name, current)?;
                     // Accessor-aware for the same reason as identifier resolution above, and it
                     // matters more here: `typeof x === "undefined"` is the feature test, so a
                     // lazily-installed global reported as absent sends the program down the
                     // polyfill branch it did not need.
                     let globals = self.global_object();
                     let present = match &globals {
-                        Value::Object(object) => object.borrow().get_own_property(&name).is_some(),
+                        Value::Object(object) => {
+                            object.borrow().get_own_property_units(&name).is_some()
+                        }
                         _ => false,
                     };
                     let bound = if present {
-                        Some(self.read_property(&globals, &name, current)?)
+                        Some(self.read_property_key(
+                            &globals,
+                            PropertyKeyRef::Units(&name),
+                            current,
+                        )?)
                     } else {
                         None
                     };
@@ -12174,17 +12462,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // `ResolveBinding` in strict code: an assignment target no scope bound is an
                     // unresolvable reference unless the global object has it, and an
                     // unresolvable one is a `ReferenceError` rather than a new global.
-                    let name = self.string_constant(*name, current)?;
+                    let name = self.string_constant_units(*name, current)?;
                     let present = match self.global_object() {
                         Value::Object(globals) => {
-                            globals.borrow().get_own_property(&name).is_some()
+                            globals.borrow().get_own_property_units(&name).is_some()
                         }
                         _ => false,
                     };
                     if !present {
                         self.throw_error(
                             ErrorKind::Reference,
-                            format!("{name} is not defined"),
+                            format!("{} is not defined", name.to_lossy_string()),
                             current,
                         )?;
                         continue;
@@ -12196,19 +12484,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // unresolvable reference strict mode refuses -- decided here rather than at
                     // compile time, because a global installed a line earlier is resolvable and
                     // the compiler cannot see it.
-                    let name = self.string_constant(*name, current)?;
+                    let name = self.string_constant_units(*name, current)?;
                     let value = self.pop(current)?;
                     let globals = self.global_object();
                     let present = match &globals {
                         Value::Object(globals) => {
-                            globals.borrow().get_own_property(&name).is_some()
+                            globals.borrow().get_own_property_units(&name).is_some()
                         }
                         _ => false,
                     };
                     if !present {
                         self.throw_error(
                             ErrorKind::Reference,
-                            format!("{name} is not defined"),
+                            format!("{} is not defined", name.to_lossy_string()),
                             current,
                         )?;
                         continue;
@@ -12217,7 +12505,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.set_or_throw(&globals, &key, value, current)?;
                 }
                 Instruction::StoreGlobalBinding(name) => {
-                    let name = self.string_constant(*name, current)?;
+                    let name = self.string_constant_units(*name, current)?;
                     let value = self.pop(current)?;
                     // The global object environment record's `SetMutableBinding` with `S = false`
                     // is an ordinary `[[Set]]` on the global object: it creates the property when
@@ -12225,15 +12513,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // including the `ThrowReference` fallback that resolves the same name.
                     let globals = self.global_object();
                     if let Value::Object(globals) = globals {
-                        globals.borrow_mut().set(&name, value);
+                        globals.borrow_mut().set_units(&name, value);
                     }
                 }
                 Instruction::PushHole => self
                     .stack
                     .push(Value::Native(Native::Hole, RealmId::PRIMARY)),
                 Instruction::NewRegExp { pattern, flags } => {
-                    let pattern = self.string_constant(*pattern, current)?;
-                    let flags = self.string_constant(*flags, current)?;
+                    // Keep the pattern in its UTF-16 unit representation: regular expressions
+                    // are allowed to carry a lone surrogate, and converting it through a scalar
+                    // `String` would replace the unit before the regexp compiler sees it.
+                    let pattern = self.string_constant_units(*pattern, current)?;
+                    // Flags are an IR spelling, not a language value. The parser only emits
+                    // scalar text here, so reject malformed constants explicitly rather than
+                    // silently replacing a surrogate in an invalid instruction stream.
+                    let flags = self.string_constant_scalar(*flags, current)?;
                     match build_regexp(&pattern, &flags) {
                         Some(regexp) => self.stack.push(regexp),
                         // A pattern oxc parsed but this engine rejects. A SyntaxError is what a
@@ -12241,7 +12535,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         None => {
                             self.throw_error(
                                 ErrorKind::Syntax,
-                                format!("Invalid regular expression: /{pattern}/{flags}"),
+                                format!(
+                                    "Invalid regular expression: /{}/{flags}",
+                                    pattern.to_lossy_string()
+                                ),
                                 current,
                             )?;
                             continue;
@@ -12249,7 +12546,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                 }
                 Instruction::GetPrivate(name) => {
-                    let name = self.string_constant(*name, current)?;
+                    let name = self.string_constant_scalar(*name, current)?;
                     let brand = self.pop(current)?;
                     let target = self.pop(current)?;
                     if !private_brand_matches(&target, &name, &brand) {
@@ -12311,7 +12608,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.stack.push(value);
                 }
                 Instruction::SetPrivate(name) => {
-                    let name = self.string_constant(*name, current)?;
+                    let name = self.string_constant_scalar(*name, current)?;
                     let brand = self.pop(current)?;
                     let value = self.pop(current)?;
                     let target = self.pop(current)?;
@@ -12380,7 +12677,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         Property::Value(_) => {
                             self.set_computed(
                                 &target,
-                                &Value::String(name),
+                                &Value::String(name.into()),
                                 value.clone(),
                                 current,
                             )?;
@@ -12389,12 +12686,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.stack.push(value);
                 }
                 Instruction::DefinePrivate { name, kind } => {
-                    let name = self.string_constant(*name, current)?;
+                    let name = self.string_constant_scalar(*name, current)?;
                     let function = self.pop(current)?;
                     let target = self.pop(current)?;
                     define_function_name(
                         &function,
-                        &Value::String(name.clone()),
+                        &Value::String(name.clone().into()),
                         match kind {
                             PrivateKind::Method => None,
                             PrivateKind::Getter => Some("get"),
@@ -12555,7 +12852,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.stack.push(Value::Boolean(removed));
                 }
                 Instruction::DeleteProperty(name) => {
-                    let name = self.string_constant(*name, current)?;
+                    let name = self.string_constant_units(*name, current)?;
                     let target = self.pop(current)?;
                     let removed = self.remove(&target, &Value::String(name), current);
                     let Some(removed) = self.catchable(removed, current)? else {
@@ -12564,23 +12861,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.stack.push(Value::Boolean(removed));
                 }
                 Instruction::DeletePropertyStrict { name, strict } => {
-                    let name = self.string_constant(*name, current)?;
+                    let name = self.string_constant_units(*name, current)?;
                     let target = self.pop(current)?;
-                    let removed =
-                        self.remove_with_strict(&target, &Value::String(name), current, *strict);
+                    let key = Value::String(name);
+                    let removed = self.remove_with_strict(&target, &key, current, *strict);
                     let Some(removed) = self.catchable(removed, current)? else {
                         continue;
                     };
                     self.stack.push(Value::Boolean(removed));
                 }
                 Instruction::GetProperty(name) => {
-                    let name = self.string_constant(*name, current)?;
+                    let name = self.string_constant_units(*name, current)?;
                     let target = self.pop(current)?;
                     if target.is_nullish() {
+                        let shown = name.to_lossy_string();
                         self.throw_error(
                             ErrorKind::Type,
                             format!(
-                                "Cannot read properties of {} (reading '{name}')",
+                                "Cannot read properties of {} (reading '{shown}')",
                                 target.to_display_string()
                             ),
                             current,
@@ -12589,7 +12887,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                     // Catchable: a proxy trap and a getter are both ordinary code, and what
                     // they throw is the program's to handle.
-                    let read = self.read_property(&target, &name, current);
+                    let read =
+                        self.read_property_key(&target, PropertyKeyRef::Units(&name), current);
                     let Some(value) = self.catchable(read, current)? else {
                         continue;
                     };
@@ -12600,13 +12899,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // ordinary read: a method reaching an inherited accessor through `super` is
                 // asking it about the instance, not about the prototype it was found on.
                 Instruction::LoadSuperProperty(name) => {
-                    let name = self.string_constant(*name, current)?;
+                    let name = self.string_constant_units(*name, current)?;
                     let target = self.pop(current)?;
                     if target.is_nullish() {
+                        let shown = name.to_lossy_string();
                         self.throw_error(
                             ErrorKind::Type,
                             format!(
-                                "Cannot read properties of {} (reading '{name}')",
+                                "Cannot read properties of {} (reading '{shown}')",
                                 target.to_display_string()
                             ),
                             current,
@@ -12648,14 +12948,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.stack.push(value);
                 }
                 Instruction::SetSuperPropertyStrict { name, strict } => {
-                    let name = self.string_constant(*name, current)?;
+                    let name = self.string_constant_units(*name, current)?;
                     let value = self.pop(current)?;
                     let target = self.pop(current)?;
                     if target.is_nullish() {
+                        let shown = name.to_lossy_string();
                         self.throw_error(
                             ErrorKind::Type,
                             format!(
-                                "Cannot set properties of {} (setting '{name}')",
+                                "Cannot set properties of {} (setting '{shown}')",
                                 target.to_display_string()
                             ),
                             current,
@@ -12663,15 +12964,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         continue;
                     }
                     let receiver = self.this_value.clone();
-                    let key = Value::String(name.clone());
+                    let key = Value::String(name);
                     let write = self.set_reflect(&target, &key, value.clone(), &receiver, current);
                     let Some(accepted) = self.catchable(write, current)? else {
                         continue;
                     };
                     if !accepted && *strict {
+                        let shown = key.to_display_string();
                         self.throw_error(
                             ErrorKind::Type,
-                            format!("Cannot set property '{name}'"),
+                            format!("Cannot set property '{shown}'"),
                             current,
                         )?;
                         continue;
@@ -12711,7 +13013,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.stack.push(value);
                 }
                 Instruction::SetProperty(name) => {
-                    let name = self.string_constant(*name, current)?;
+                    let name = self.string_constant_units(*name, current)?;
                     let value = self.pop(current)?;
                     let target = self.pop(current)?;
                     let assigned =
@@ -12722,7 +13024,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.stack.push(value);
                 }
                 Instruction::SetPropertyStrict { name, strict } => {
-                    let name = self.string_constant(*name, current)?;
+                    let name = self.string_constant_units(*name, current)?;
                     let value = self.pop(current)?;
                     let target = self.pop(current)?;
                     let assigned = self.assign_with_strict(
@@ -13249,7 +13551,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.handlers.truncate(installed);
                 match error.as_javascript_error() {
                     Some((kind, msg)) => {
-                        let err = self.construct_error(kind, &[Value::String(msg)]);
+                        let err = self.construct_error(kind, &[Value::String(msg.into())]);
                         Ok(Err(err))
                     }
                     None => Err(error),
@@ -13319,10 +13621,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     generator.borrow_mut().delegate = None;
                     let err = self.construct_error(
                         ErrorKind::Type,
-                        &[Value::String(format!(
-                            "Iterator result {} is not an object",
-                            inner_result.to_display_string()
-                        ))],
+                        &[Value::String(
+                            format!(
+                                "Iterator result {} is not an object",
+                                inner_result.to_display_string()
+                            )
+                            .into(),
+                        )],
                     );
                     return self.resume_generator_with(generator, Resume::Throw(err), instruction);
                 }
@@ -13398,10 +13703,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                                 if !is_object_type(&inner_res) {
                                     let err = self.construct_error(
                                         ErrorKind::Type,
-                                        &[Value::String(format!(
-                                            "Iterator result {} is not an object",
-                                            inner_res.to_display_string()
-                                        ))],
+                                        &[Value::String(
+                                            format!(
+                                                "Iterator result {} is not an object",
+                                                inner_res.to_display_string()
+                                            )
+                                            .into(),
+                                        )],
                                     );
                                     return self.resume_generator_with(
                                         generator,
@@ -13431,7 +13739,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let err = self.construct_error(
                     ErrorKind::Type,
                     &[Value::String(
-                        "Iterator does not have a throw method".to_owned(),
+                        "Iterator does not have a throw method".to_owned().into(),
                     )],
                 );
                 self.resume_generator_with(generator, Resume::Throw(err), instruction)
@@ -13454,10 +13762,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     generator.borrow_mut().delegate = None;
                     let err = self.construct_error(
                         ErrorKind::Type,
-                        &[Value::String(format!(
-                            "Iterator result {} is not an object",
-                            inner_result.to_display_string()
-                        ))],
+                        &[Value::String(
+                            format!(
+                                "Iterator result {} is not an object",
+                                inner_result.to_display_string()
+                            )
+                            .into(),
+                        )],
                     );
                     return self.resume_generator_with(generator, Resume::Throw(err), instruction);
                 }
@@ -13874,7 +14185,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     fn internalize_json_property(
         &mut self,
         holder: &Value,
-        name: &str,
+        name: &StringUnits,
         reviver: &Value,
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
@@ -13883,18 +14194,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 limit: self.limits.max_native_depth,
             });
         }
-        let value = self.read_property(holder, name, instruction)?;
+        let value = self.read_property_key(holder, PropertyKeyRef::Units(name), instruction)?;
         if is_reflect_target(&value) {
             // An array is walked by index up to its own `length`, and anything else by its own
             // enumerable keys. Both readings go through the machine rather than through a store,
             // because either may be a proxy: `length` can be a getter that throws, and the keys
             // come from an `ownKeys` trap.
-            let keys: Vec<String> = if matches!(unwrap_proxy(&value), Value::Array(_)) {
+            let keys: Vec<StringUnits> = if matches!(unwrap_proxy(&value), Value::Array(_)) {
                 let length = self.read_property(&value, "length", instruction)?;
                 let length = to_length(self.as_number_argument(Some(&length), instruction)?);
-                (0..length).map(|index| index.to_string()).collect()
+                (0..length)
+                    .map(|index| StringUnits::from(index.to_string()))
+                    .collect()
             } else {
-                let mut names = Vec::new();
+                let mut names: Vec<StringUnits> = Vec::new();
                 for key in self.own_keys(&value, instruction)? {
                     let descriptor =
                         self.proxy_descriptor(&value, &Value::String(key.clone()), instruction)?;
@@ -13914,7 +14227,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.native_depth -= 1;
                 let revived = revived?;
                 if matches!(revived, Value::Undefined) {
-                    self.delete(&value, &Value::String(key), instruction)?;
+                    self.delete(&value, &Value::String(key.clone()), instruction)?;
                 } else {
                     // `CreateDataProperty`, not a write: a reviver's result is installed as a
                     // plain own property whatever the holder had there, and a holder that
@@ -13942,7 +14255,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.call_value(
             reviver,
             holder.clone(),
-            vec![Value::String(name.to_owned()), value],
+            vec![Value::String(name.clone()), value],
             instruction,
         )
     }
@@ -14010,7 +14323,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             "get",
             "set",
         ] {
-            if !has_property(&self.intrinsics, source, &Value::String(field.to_owned())) {
+            if !has_property(
+                &self.intrinsics,
+                source,
+                &Value::String(field.to_owned().into()),
+            ) {
                 continue;
             }
             let read = self.read_property(source, field, instruction)?;
@@ -14068,31 +14385,33 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // `Object.getOwnPropertyNames`: symbol descriptors participate too. Symbols use the
         // reserved-key representation internally, so ask for the raw own keys here rather than
         // the string-only reflection view.
-        for key in own_property_keys_including_symbols(&self.intrinsics, source) {
-            if !own_attributes(&self.intrinsics, source, &key)
+        for key in own_property_keys_including_symbols_units(&self.intrinsics, source) {
+            let key_ref = PropertyKeyRef::Units(&key);
+            if !own_attributes_key(&self.intrinsics, source, key_ref)
                 .is_some_and(|attributes| attributes.enumerable)
             {
                 continue;
             }
-            let read = self.read_property(source, &key, instruction)?;
+            let read = self.read_property_key(source, key_ref, instruction)?;
             let descriptor = self.read_descriptor(&read, instruction)?;
             descriptors.push((key, read, descriptor));
         }
         for (key, read, descriptor) in descriptors {
+            let key_ref = PropertyKeyRef::Units(&key);
             // A proxy's `defineProperty` trap takes the descriptor object the program wrote, not
             // the fields it was read into, so it keeps the route it already had.
             if matches!(target, Value::Proxy(_)) {
                 self.dispatch_native(
                     Native::ObjectDefineProperty,
                     &Value::Undefined,
-                    &[target.clone(), Value::String(key), read],
+                    &[target.clone(), Value::String(key.clone()), read],
                     instruction,
                 )?;
                 continue;
             }
-            if !self.define_own(target, &key, &descriptor, instruction)? {
+            if !self.define_own_key(target, key_ref, &descriptor, instruction)? {
                 return Err(ExecutionError::TypeErrorMessage {
-                    message: refusal(&self.intrinsics, target, &key),
+                    message: refusal(&self.intrinsics, target, &key.to_lossy_string()),
                 });
             }
         }
@@ -14139,10 +14458,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Some(Value::String(source)) => source.clone(),
                 // Unlike `eval`, which hands a non-string straight back: `evalScript` is given
                 // source text or it is given nothing it can run.
-                Some(value) => self.as_string(value, instruction)?,
-                None => String::new(),
+                Some(value) => self.as_string(value, instruction)?.into(),
+                None => String::new().into(),
             };
-            return self.drive_eval(&source, None, true);
+            return self.drive_eval(&source.to_lossy_string(), None, true);
         }
         // A write through a view onto an immutable buffer is refused before its arguments are
         // converted, and that order is observable: a `valueOf` handed to a setter on such a view
@@ -14253,7 +14572,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     instruction,
                 )?;
                 if let Value::String(tag) = tag {
-                    return Ok(Value::String(format!("[object {tag}]")));
+                    let mut units = StringUnits::from("[object ").to_units().into_vec();
+                    units.extend(tag.units());
+                    units.extend(StringUnits::from("]").units());
+                    return Ok(Value::String(StringUnits::from_units(&units)));
                 }
             }
             // `ToString(text)` may run the program's own `toString`, so the validation cannot
@@ -14406,10 +14728,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     } else {
                         Err(self.construct_error(
                             ErrorKind::Type,
-                            &[Value::String(format!(
-                                "{} is not a function",
-                                callback.to_display_string()
-                            ))],
+                            &[Value::String(
+                                format!("{} is not a function", callback.to_display_string())
+                                    .into(),
+                            )],
                         ))
                     };
                     match settled {
@@ -14429,10 +14751,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if !is_callable(&callback) {
                     let thrown = self.construct_error(
                         ErrorKind::Type,
-                        &[Value::String(format!(
-                            "{} is not a function",
-                            callback.to_display_string()
-                        ))],
+                        &[Value::String(
+                            format!("{} is not a function", callback.to_display_string()).into(),
+                        )],
                     );
                     self.settle(&promise, &Settled::Rejected(thrown));
                     return Ok(Value::Promise(promise));
@@ -14519,7 +14840,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     return self.write_console_output(
                         receiver,
                         true,
-                        &[Value::String(message)],
+                        &[Value::String(message.into())],
                         instruction,
                     );
                 }
@@ -14534,7 +14855,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 return self.write_console_output(
                     receiver,
                     true,
-                    &[Value::String(message)],
+                    &[Value::String(message.into())],
                     instruction,
                 );
             }
@@ -14613,7 +14934,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.dispatch_node_event(
                         Native::NodeEventOnce,
                         &stream,
-                        &[Value::String(event.to_owned()), callback],
+                        &[Value::String(event.to_owned().into()), callback],
                         instruction,
                     )?;
                 } else {
@@ -14671,7 +14992,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .and_then(|options| own_data_property(options, "ignoreBOM"))
                     .is_some_and(|v| v.is_truthy());
                 return Ok(ordinary_object([
-                    ("encoding".to_owned(), Value::String(encoding_name)),
+                    ("encoding".to_owned(), Value::String(encoding_name.into())),
                     ("fatal".to_owned(), Value::Boolean(fatal)),
                     ("ignoreBOM".to_owned(), Value::Boolean(ignore_bom)),
                     (
@@ -14699,12 +15020,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         Value::String(s) => Some(s),
                         _ => None,
                     })
-                    .unwrap_or_else(|| "utf-8".to_owned());
+                    .unwrap_or_else(|| "utf-8".to_owned().into());
                 let fatal = own_data_property(receiver, "fatal").is_some_and(|v| v.is_truthy());
                 let ignore_bom =
                     own_data_property(receiver, "ignoreBOM").is_some_and(|v| v.is_truthy());
-                let encoding = encoding_rs::Encoding::for_label(encoding_label.as_bytes())
-                    .unwrap_or(encoding_rs::UTF_8);
+                let encoding =
+                    encoding_rs::Encoding::for_label(encoding_label.to_lossy_string().as_bytes())
+                        .unwrap_or(encoding_rs::UTF_8);
                 let (decoded, had_errors) = if ignore_bom {
                     encoding.decode_without_bom_handling(&bytes)
                 } else {
@@ -14715,7 +15037,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         message: "The encoded data was not valid for encoding".to_owned(),
                     });
                 }
-                return Ok(Value::String(decoded.into_owned()));
+                return Ok(Value::String(decoded.into_owned().into()));
             }
             Native::NodeHttpsCreateServer => {
                 return Err(ExecutionError::Host {
@@ -14753,8 +15075,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             .as_deref()
                             .map(str::to_owned)
                             .unwrap_or_default()
+                            .into()
                     };
-                    return unsafe { (&mut *loader).create_require(&importer, instruction) };
+                    return unsafe {
+                        (&mut *loader).create_require(&importer.to_lossy_string(), instruction)
+                    };
                 }
                 let require = CommonJsRequire::new([]);
                 return Ok(Value::CommonJsRequire(Rc::new(require)));
@@ -14793,13 +15118,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let reason = self.construct_error(
                     ErrorKind::Error,
                     &[Value::String(
-                        "The operation was aborted due to timeout".to_owned(),
+                        "The operation was aborted due to timeout".to_owned().into(),
                     )],
                 );
                 if let Value::Object(object) = &reason {
-                    object
-                        .borrow_mut()
-                        .set_non_enumerable("name", Value::String("TimeoutError".to_owned()));
+                    object.borrow_mut().set_non_enumerable(
+                        "name",
+                        Value::String("TimeoutError".to_owned().into()),
+                    );
                 }
                 let timer = Timer {
                     callback: Value::Bound(Rc::new(BoundFunction {
@@ -14839,7 +15165,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.dispatch_native(
                         Native::AbortSignalListen { remove: false },
                         &source,
-                        &[Value::String("abort".to_owned()), follower],
+                        &[Value::String("abort".to_owned().into()), follower],
                         instruction,
                     )?;
                 }
@@ -15210,7 +15536,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if matches!(primitive, Value::Symbol(_)) {
                     return Err(ExecutionError::SymbolIsNotAString);
                 }
-                coerced_receiver = Value::String(primitive.to_display_string());
+                coerced_receiver = Value::String(primitive.to_display_string().into());
                 &coerced_receiver
             }
         } else {
@@ -15235,7 +15561,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             if matches!(primitive, Value::Symbol(_)) {
                 return Err(ExecutionError::SymbolIsNotAString);
             }
-            let coerced = Value::String(primitive.to_display_string());
+            let coerced = Value::String(primitive.to_display_string().into());
             return self.dispatch_native(native, &coerced, arguments, instruction);
         }
         // `ToPropertyKey` for every built-in that names a property with an argument. The
@@ -15284,7 +15610,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     continue;
                 }
                 let text = self.as_text(&argument.clone(), instruction)?;
-                converted[index] = Value::String(text);
+                converted[index] = Value::String(text.into());
             }
             return self.dispatch_native(native, receiver, &converted, instruction);
         }
@@ -15324,14 +15650,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         match native {
             Native::ProcessGetBuiltinModule => match arguments.first() {
-                Some(Value::String(name)) if kiln_builtins::is_builtin_specifier(name) => {
+                Some(Value::String(name))
+                    if kiln_builtins::is_builtin_specifier(&name.to_lossy_string()) =>
+                {
                     if let Some(loader) = self.commonjs_loader {
-                        return unsafe { (&mut *loader).get_builtin(name, instruction) }
-                            .map(|value| value.unwrap_or(Value::Undefined));
+                        return unsafe {
+                            (&mut *loader).get_builtin(&name.to_lossy_string(), instruction)
+                        }
+                        .map(|value| value.unwrap_or(Value::Undefined));
                     }
                     Err(ExecutionError::TypeErrorMessage {
                         message: format!(
-                            "node:{name} is graph-materialized; process.getBuiltinModule requires a graph loader"
+                            "node:{} is graph-materialized; process.getBuiltinModule requires a graph loader",
+                            name.to_lossy_string()
                         ),
                     })
                 }
@@ -15726,21 +16057,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // Either half being empty drops the separator with it, so a message-less error
                 // is "Error" rather than "Error: ".
                 Ok(Value::String(if name.is_empty() {
-                    message
+                    message.into()
                 } else if message.is_empty() {
-                    name
+                    name.into()
                 } else {
-                    format!("{name}: {message}")
+                    format!("{name}: {message}").into()
                 }))
             }
             Native::StringConstructor => {
                 let Some(value) = arguments.first() else {
-                    return Ok(Value::String(String::new()));
+                    return Ok(Value::String(String::new().into()));
                 };
                 // A string hint, because that is what `String(x)` asks for -- so an object with
                 // both `valueOf` and `toString` uses the second.
                 let primitive = self.as_primitive(value, PrimitiveHint::String, instruction)?;
-                Ok(Value::String(primitive.to_display_string()))
+                Ok(Value::String(primitive.to_display_string().into()))
             }
             // `JSON.parse(text, reviver)`. The reviver is called on every value the text
             // produced, deepest first, with the holder as its `this` -- which is how a program
@@ -15760,7 +16091,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let mut holder = ObjectData::default();
                 holder.set("", parsed);
                 let root = Value::Object(Rc::new(RefCell::new(holder)));
-                self.internalize_json_property(&root, "", &reviver, instruction)
+                self.internalize_json_property(
+                    &root,
+                    &StringUnits::default(),
+                    &reviver,
+                    instruction,
+                )
             }
             Native::JsonStringify => {
                 let indent = json_indent(arguments.get(2));
@@ -15779,12 +16115,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             // specification says explicitly and which matching the primitive
                             // forms alone missed: `[new String("a")]` selected nothing.
                             let name = match entry {
-                                Value::String(text) => Some(text.clone()),
+                                Value::String(text) => Some(text.to_lossy_string()),
                                 Value::Number(number) => Some(number_string(*number)),
                                 Value::Object(object) => {
                                     let inner = object.borrow().primitive().cloned();
                                     match inner {
-                                        Some(Value::String(text)) => Some(text),
+                                        Some(Value::String(text)) => Some(text.to_lossy_string()),
                                         Some(Value::Number(number)) => Some(number_string(number)),
                                         _ => None,
                                     }
@@ -15812,7 +16148,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         Some(replacer) => self.call_value(
                             replacer,
                             holder.clone(),
-                            Vec::from([Value::String(key.to_owned()), property]),
+                            Vec::from([Value::String(key.to_owned().into()), property]),
                             instruction,
                         ),
                         None => Ok(property),
@@ -15844,7 +16180,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         self.call_value(
                             &method,
                             receiver.clone(),
-                            Vec::from([Value::String(key.to_owned())]),
+                            Vec::from([Value::String(key.to_owned().into())]),
                             instruction,
                         )
                     }
@@ -15865,7 +16201,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         "",
                         &wrapper,
                     )? {
-                        Some(text) => Value::String(text),
+                        Some(text) => Value::String(text.into()),
                         // `JSON.stringify(undefined)` is `undefined`, not the string.
                         None => Value::Undefined,
                     },
@@ -15904,7 +16240,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // The deterministic realm has no ambient working directory. Graph execution may
             // later supply its captured project root as a realm capability; until then `/` is
             // the stable virtual root and never consults the embedding process.
-            Native::ProcessCwd => Ok(Value::String("/".to_owned())),
+            Native::ProcessCwd => Ok(Value::String("/".to_owned().into())),
             Native::ProcessKill => Ok(Value::Boolean(true)),
             Native::ProcessStdinSetRawMode => {
                 let mode = arguments.first().map(Value::is_truthy).unwrap_or(false);
@@ -15932,7 +16268,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     });
                 };
                 for source in arguments.iter().skip(1) {
-                    for (key, property) in own_properties(&self.intrinsics, source) {
+                    for (key, property) in own_properties_units(&self.intrinsics, source) {
                         let value = match property {
                             Property::Value(value) => value,
                             Property::Accessor { get, .. } => match get {
@@ -15965,24 +16301,30 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if matches!(source, Value::Proxy(_)) {
                     let mut items = Vec::new();
                     for key in self.own_keys(&source, instruction)? {
-                        if symbol::is_reserved(&key) {
+                        if is_reserved_units(&key) {
                             continue;
                         }
                         items.push(match native {
-                            Native::ObjectValues => {
-                                self.read_property(&source, &key, instruction)?
-                            }
+                            Native::ObjectValues => self.read_property_key(
+                                &source,
+                                PropertyKeyRef::Units(&key),
+                                instruction,
+                            )?,
                             _ => Value::Array(ArrayData::new(vec![
                                 Value::String(key.clone()),
-                                self.read_property(&source, &key, instruction)?,
+                                self.read_property_key(
+                                    &source,
+                                    PropertyKeyRef::Units(&key),
+                                    instruction,
+                                )?,
                             ])),
                         });
                     }
                     return Ok(Value::Array(ArrayData::new(items)));
                 }
                 let mut items = Vec::new();
-                for (key, property) in own_properties(&self.intrinsics, &source) {
-                    if symbol::is_reserved(&key) {
+                for (key, property) in own_properties_units(&self.intrinsics, &source) {
+                    if is_reserved_units(&key) {
                         continue;
                     }
                     let value = match property {
@@ -16024,7 +16366,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     };
                     match self.from_entries_pair(&entry, instruction) {
                         Ok((key, value)) => {
-                            data.set(&key.property_key(), value);
+                            let key_units = key.property_key_units();
+                            data.set_units(&key_units, value);
                         }
                         Err(error) => {
                             self.close_discarding(&iterator, instruction);
@@ -16084,7 +16427,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         out.push_str(&value.to_display_string());
                     }
                 }
-                Ok(Value::String(out))
+                Ok(Value::String(out.into()))
             }
             // The operations that reach a proxy's remaining traps. Each has an ordinary pure
             // implementation that reads a property store; a proxy has none, and answering from
@@ -16177,7 +16520,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let keys = self.own_keys(&target, instruction)?;
                 Ok(Value::Array(ArrayData::new(
                     keys.into_iter()
-                        .filter(|key| !symbol::is_reserved(key))
+                        .filter(|key| !is_reserved_units(key))
                         .map(Value::String)
                         .collect(),
                 )))
@@ -16249,7 +16592,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let descriptor =
                         self.proxy_descriptor(&target, &Value::String(key.clone()), instruction)?;
                     if !matches!(descriptor, Value::Undefined) {
-                        data.set(&key, descriptor);
+                        data.set_units(&key, descriptor);
                     }
                 }
                 Ok(Value::Object(Rc::new(RefCell::new(data))))
@@ -16305,7 +16648,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let keys = self.own_keys(&target, instruction)?;
                 Ok(Value::Array(ArrayData::new(
                     keys.into_iter()
-                        .filter(|key| !symbol::is_reserved(key))
+                        .filter(|key| !is_reserved_units(key))
                         .map(Value::String)
                         .collect(),
                 )))
@@ -16453,18 +16796,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         ),
                     });
                 }
-                let key = arguments
-                    .get(1)
-                    .map_or_else(String::new, Value::property_key);
+                let key =
+                    self.computed_key(arguments.get(1).unwrap_or(&Value::Undefined), instruction)?;
+                let key_units = key.property_key_units();
                 let source = arguments.get(2).cloned().unwrap_or(Value::Undefined);
                 let descriptor = self.read_descriptor(&source, instruction)?;
-                let defined = self.define_own(&target, &key, &descriptor, instruction)?;
+                let defined = self.define_own_key(
+                    &target,
+                    PropertyKeyRef::Units(&key_units),
+                    &descriptor,
+                    instruction,
+                )?;
                 if matches!(native, Native::ReflectDefineProperty) {
                     return Ok(Value::Boolean(defined));
                 }
                 if !defined {
                     return Err(ExecutionError::TypeErrorMessage {
-                        message: refusal(&self.intrinsics, &target, &key),
+                        message: refusal(&self.intrinsics, &target, &key_units.to_lossy_string()),
                     });
                 }
                 Ok(target)
@@ -16572,13 +16920,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Native::ReflectGetOwnPropertyDescriptor => {
                 let target = self.reflect_target(arguments.first(), "getOwnPropertyDescriptor")?;
-                let key = arguments
-                    .get(1)
-                    .map_or_else(String::new, Value::property_key);
+                let key =
+                    self.computed_key(arguments.get(1).unwrap_or(&Value::Undefined), instruction)?;
                 if matches!(target, Value::Proxy(_)) {
-                    return self.proxy_descriptor(&target, &Value::String(key), instruction);
+                    return self.proxy_descriptor(&target, &key, instruction);
                 }
-                Ok(own_descriptor(&self.intrinsics, &target, &key).unwrap_or(Value::Undefined))
+                let key_units = key.property_key_units();
+                Ok(
+                    own_descriptor_key(
+                        &self.intrinsics,
+                        &target,
+                        PropertyKeyRef::Units(&key_units),
+                    )
+                    .unwrap_or(Value::Undefined),
+                )
             }
             Native::ReflectDeleteProperty => {
                 let target = self.reflect_target(arguments.first(), "deleteProperty")?;
@@ -16678,7 +17033,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         .find(|(_, registered)| {
                             matches!(registered, Value::Symbol(other) if other == symbol)
                         })
-                        .map_or(Value::Undefined, |(key, _)| Value::String(key.clone())));
+                        .map_or(Value::Undefined, |(key, _)| Value::String(key.clone().into())));
                 }
                 // Only a registered symbol has a key; one from `Symbol()` does not, which is how
                 // a program tells the two apart.
@@ -16688,7 +17043,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .find(|(_, registered)| {
                         matches!(registered, Value::Symbol(other) if other == symbol)
                     })
-                    .map_or(Value::Undefined, |(key, _)| Value::String(key.clone())))
+                    .map_or(Value::Undefined, |(key, _)| Value::String(key.clone().into())))
             }
             Native::DateConstructor => {
                 let time = match arguments.len() {
@@ -16696,7 +17051,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     1 => match arguments.first() {
                         // `new Date(otherDate)` copies the instant rather than stringifying it.
                         Some(Value::Date(existing)) => existing.time.get(),
-                        Some(Value::String(text)) => parse_date(text),
+                        Some(Value::String(text)) => parse_date(&text.to_lossy_string()),
                         Some(value) => {
                             // `ToPrimitive(value)` with no preferred type at all, which is the
                             // default hint rather than the number one: `new Date(x)` decides
@@ -16705,7 +17060,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             let primitive =
                                 self.as_primitive(value, PrimitiveHint::Default, instruction)?;
                             match primitive {
-                                Value::String(text) => parse_date(&text),
+                                Value::String(text) => parse_date(&text.to_lossy_string()),
                                 // Anything that is not a string is `ToNumber`d, and the two
                                 // values that refuses are refusals here too rather than the
                                 // plausible instants `as_number` would invent for them.
@@ -16727,8 +17082,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::RegExpConstructor => {
                 let pattern = match arguments.first() {
                     Some(Value::RegExp(existing)) => existing.source.clone(),
-                    None | Some(Value::Undefined) => String::new(),
-                    Some(value) => value.to_display_string(),
+                    None | Some(Value::Undefined) => StringUnits::default(),
+                    Some(value) => value.to_string_units(),
                 };
                 let flags = match arguments.get(1) {
                     None | Some(Value::Undefined) => match arguments.first() {
@@ -16855,7 +17210,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     converted.push(if numeric {
                         Value::Number(self.as_number_argument(Some(argument), instruction)?)
                     } else if convertible && string_coerced_argument(native, index) {
-                        Value::String(self.as_text(argument, instruction)?)
+                        Value::String(self.as_text(argument, instruction)?.into())
                     } else {
                         argument.clone()
                     });
@@ -16876,7 +17231,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // An empty subject is the one case with no trailing piece: a separator that
                     // matches it splits it into nothing, and one that does not leaves it whole.
                     if regexp_search(regexp, &subject, 0).is_none() {
-                        parts.push(Value::String(String::new()));
+                        parts.push(Value::String(String::new().into()));
                     }
                     return Ok(Value::Array(ArrayData::new(parts)));
                 }
@@ -16893,18 +17248,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     if range.start == subject.len() {
                         continue;
                     }
-                    parts.push(Value::String(utf16_slice(&subject, copied..range.start)));
+                    parts.push(Value::String(
+                        utf16_slice(&subject, copied..range.start).into(),
+                    ));
                     // A capturing separator contributes its groups to the result, which is what
                     // makes `"a1b".split(/(\d)/)` three elements rather than two.
                     for group in groups.iter().skip(1) {
                         parts.push(match group {
-                            Some(range) => Value::String(utf16_slice(&subject, range.clone())),
+                            Some(range) => {
+                                Value::String(utf16_slice(&subject, range.clone()).into())
+                            }
                             None => Value::Undefined,
                         });
                     }
                     copied = range.end;
                 }
-                parts.push(Value::String(utf16_slice(&subject, copied..subject.len())));
+                parts.push(Value::String(
+                    utf16_slice(&subject, copied..subject.len()).into(),
+                ));
                 Ok(Value::Array(ArrayData::new(parts)))
             }
             // `%TypedArray%.prototype.fill` converts all three of its arguments, and the
@@ -17101,7 +17462,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         // `matchAll` yields full results; `match` with `g` yields only the text.
                         match_result(&subject, &range, &groups, &names, regexp.has_indices)
                     } else {
-                        Value::String(utf16_slice(&subject, range))
+                        Value::String(utf16_slice(&subject, range).into())
                     });
                 }
                 if results.is_empty() && matches!(native, Native::StringMatch) {
@@ -17388,20 +17749,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 None => f64::NAN,
             }),
             DateMethod::ToIsoString => match iso_string(time) {
-                Some(text) => Value::String(text),
+                Some(text) => Value::String(text.into()),
                 // An instant with no ISO spelling is a RangeError, not a placeholder string.
                 None => return Err(ExecutionError::DateOutOfRange),
             },
             DateMethod::ToString | DateMethod::ToLocaleString => {
-                Value::String(date_to_string(time))
+                Value::String(date_to_string(time).into())
             }
             DateMethod::ToDateString | DateMethod::ToLocaleDateString => {
-                Value::String(date_only_string(time))
+                Value::String(date_only_string(time).into())
             }
             DateMethod::ToTimeString | DateMethod::ToLocaleTimeString => {
-                Value::String(time_only_string(time))
+                Value::String(time_only_string(time).into())
             }
-            DateMethod::ToUtcString => Value::String(utc_string(time)),
+            DateMethod::ToUtcString => Value::String(utc_string(time).into()),
             _ => unreachable!("readers, writers and the generic pair are handled above"),
         })
     }
@@ -17436,7 +17797,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     );
                 }
             }
-            return Ok(Value::String(flags));
+            return Ok(Value::String(flags.into()));
         }
         let Value::RegExp(regexp) = receiver else {
             // The prototype is the one non-regexp the specification lets through, because it is
@@ -17446,7 +17807,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Value::Native(Native::PrototypeOf(PrototypeTable::RegExp), _)
             ) {
                 return Ok(match accessor {
-                    RegExpAccessor::Source => Value::String("(?:)".to_owned()),
+                    RegExpAccessor::Source => Value::String("(?:)".to_owned().into()),
                     _ => Value::Undefined,
                 });
             }
@@ -17458,7 +17819,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             });
         };
         Ok(match accessor {
-            RegExpAccessor::Source => Value::String(escaped_source(&regexp.source)),
+            RegExpAccessor::Source => Value::String(escaped_source_units(&regexp.source)),
             RegExpAccessor::Flags => unreachable!("handled above"),
             other => Value::Boolean(
                 other
@@ -17504,7 +17865,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             let key = if into_map {
                 canonical_key(produced)
             } else {
-                Value::String(self.property_key_of(Some(&produced), instruction)?)
+                Value::String(self.property_key_of(Some(&produced), instruction)?.into())
             };
             match groups
                 .iter_mut()
@@ -17598,7 +17959,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 receiver,
                 &[
                     receiver.clone(),
-                    Value::String(key),
+                    Value::String(key.into()),
                     Value::Object(Rc::new(RefCell::new(described))),
                 ],
                 instruction,
@@ -17610,7 +17971,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // `[[GetOwnProperty]]` and `[[GetPrototypeOf]]` -- so both go through the paths that run
         // a proxy's handler. Reading the property store directly answered for the proxy's target
         // instead, which is a different object than the one the program named.
-        let name = Value::String(key);
+        let name = Value::String(key.into());
         let mut current = receiver.clone();
         for _ in 0..MAX_PROTOTYPE_DEPTH {
             if let Some(descriptor) = self.own_descriptor_value(&current, &name, instruction)? {
@@ -18207,7 +18568,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Boolean(flag) => Ok(num_bigint::BigInt::from(u8::from(flag))),
             // A string that is not an integer literal is a `SyntaxError` rather than a NaN,
             // which is the same answer `BigInt("x")` gives: this type has no NaN to become.
-            Value::String(text) => match text.trim() {
+            Value::String(text) => match text.to_lossy_string().trim() {
                 "" => Ok(num_bigint::BigInt::from(0)),
                 trimmed => trimmed
                     .parse::<num_bigint::BigInt>()
@@ -19215,7 +19576,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             match self.iterator_flattenable_pair(&value, instruction) {
                 Ok((iterator, next)) => {
-                    keys.push(Value::String(key));
+                    keys.push(Value::String(key.into()));
                     iterators.push(iterator);
                     nexts.push(next);
                 }
@@ -19737,7 +20098,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let mut first = true;
         loop {
             let Some(value) = self.iterator_step(receiver, &next, instruction)? else {
-                return Ok(Value::String(joined));
+                return Ok(Value::String(joined.into()));
             };
             if !first {
                 joined.push_str(&separator);
@@ -20161,7 +20522,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             &Value::Undefined,
             &[
                 state.target.clone(),
-                Value::String(index.to_string()),
+                Value::String(index.to_string().into()),
                 Value::Object(Rc::new(RefCell::new(descriptor))),
             ],
             instruction,
@@ -20188,7 +20549,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         self.set_computed(
             &state.target,
-            &Value::String("length".to_owned()),
+            &Value::String("length".to_owned().into()),
             Value::Number(state.index.get() as f64),
             instruction,
         )?;
@@ -21017,9 +21378,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
     ) -> Result<f64, ExecutionError> {
         if comparator.is_nullish() {
-            let (left, right) = (left.to_display_string(), right.to_display_string());
+            let (left, right) = (left.to_string_units(), right.to_string_units());
             // UTF-16 code units, which is the order the language compares strings in.
-            return Ok(match left.encode_utf16().cmp(right.encode_utf16()) {
+            return Ok(match left.cmp(&right) {
                 std::cmp::Ordering::Less => -1.0,
                 std::cmp::Ordering::Equal => 0.0,
                 std::cmp::Ordering::Greater => 1.0,
@@ -21066,10 +21427,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Err(self.caught.take().unwrap_or(Value::Undefined))
             }
             Err(error) => match error.as_javascript_error() {
-                Some((kind, message)) => Err(self.construct_error(kind, &[Value::String(message)])),
+                Some((kind, message)) => {
+                    Err(self.construct_error(kind, &[Value::String(message.into())]))
+                }
                 // A limit this realm imposes rather than a language error. Nothing was written
                 // to receive it as a value, so it becomes the plain refusal it is.
-                None => Err(Value::String(error.to_string())),
+                None => Err(Value::String(error.to_string().into())),
             },
         }
     }
@@ -21161,7 +21524,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             {
                 match error.as_javascript_error() {
                     Some((kind, message)) => {
-                        let thrown = self.construct_error(kind, &[Value::String(message)]);
+                        let thrown = self.construct_error(kind, &[Value::String(message.into())]);
                         self.caught = Some(thrown);
                         Err(ExecutionError::ThrownAcrossNative)
                     }
@@ -21416,10 +21779,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .map(Value::to_display_string)
                     .unwrap_or_default();
                 if let Some(target) = require.resolve(&specifier) {
-                    return Ok(Value::String(target));
+                    return Ok(Value::String(target.into()));
                 }
                 if kiln_builtins::is_builtin_specifier(&specifier) {
-                    return Ok(Value::String(specifier));
+                    return Ok(Value::String(specifier.into()));
                 }
                 self.throw_error(
                     ErrorKind::Error,
@@ -21620,7 +21983,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let prototype = match constructor {
             Value::Proxy(_) => self.read_computed(
                 constructor,
-                &Value::String("prototype".to_owned()),
+                &Value::String("prototype".to_owned().into()),
                 instruction,
             )?,
             Value::Function(closure) => match closure.prototype.borrow().clone() {
@@ -21721,7 +22084,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         target: &Value,
         current: usize,
     ) -> Result<Vec<Value>, ExecutionError> {
-        let mut seen: HashSet<String> = HashSet::new();
+        let mut seen: HashSet<StringUnits> = HashSet::new();
         let mut keys = Vec::new();
         let mut level = target.clone();
         // Bounded like every other prototype walk here: the chain is the program's business, but
@@ -21730,10 +22093,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             let own = if matches!(level, Value::Proxy(_)) {
                 self.own_keys(&level, current)?
                     .into_iter()
-                    .filter(|key| !symbol::is_reserved(key))
+                    .filter(|key| !is_reserved_units(key))
                     .collect()
             } else {
-                own_property_keys(&self.intrinsics, &level)
+                own_property_keys_units(&self.intrinsics, &level)
             };
             for key in own {
                 if !seen.insert(key.clone()) {
@@ -21749,7 +22112,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             .read_property(&described, "enumerable", current)?
                             .is_truthy()
                 } else {
-                    own_attributes(&self.intrinsics, &level, &key)
+                    own_attributes_key(&self.intrinsics, &level, PropertyKeyRef::Units(&key))
                         .is_none_or(|attributes| attributes.enumerable)
                 };
                 if enumerable {
@@ -22230,7 +22593,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         let err = self.construct_error(
                             ErrorKind::Type,
                             &[Value::String(
-                                "Iterator does not have a throw method".to_owned(),
+                                "Iterator does not have a throw method".to_owned().into(),
                             )],
                         );
                         self.drive_async_generator(generator, step, Resume::Throw(err))
@@ -22558,7 +22921,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             let error = self.construct_error(
                 ErrorKind::Type,
                 &[Value::String(
-                    "Chaining cycle detected for promise".to_owned(),
+                    "Chaining cycle detected for promise".to_owned().into(),
                 )],
             );
             self.settle(promise, &Settled::Rejected(error));
@@ -22663,17 +23026,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         if !is_object_type(&close_res) {
                             let err = self.construct_error(
                                 ErrorKind::Type,
-                                &[Value::String(format!(
-                                    "Iterator result {} is not an object",
-                                    close_res.to_display_string()
-                                ))],
+                                &[Value::String(
+                                    format!(
+                                        "Iterator result {} is not an object",
+                                        close_res.to_display_string()
+                                    )
+                                    .into(),
+                                )],
                             );
                             self.drive_async_generator(&generator, &step, Resume::Throw(err))
                         } else {
                             let err = self.construct_error(
                                 ErrorKind::Type,
                                 &[Value::String(
-                                    "Iterator does not have a throw method".to_owned(),
+                                    "Iterator does not have a throw method".to_owned().into(),
                                 )],
                             );
                             self.drive_async_generator(&generator, &step, Resume::Throw(err))
@@ -22697,10 +23063,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             generator.borrow_mut().delegate = None;
                             let err = self.construct_error(
                                 ErrorKind::Type,
-                                &[Value::String(format!(
-                                    "Iterator result {} is not an object",
-                                    inner_res.to_display_string()
-                                ))],
+                                &[Value::String(
+                                    format!(
+                                        "Iterator result {} is not an object",
+                                        inner_res.to_display_string()
+                                    )
+                                    .into(),
+                                )],
                             );
                             return self.drive_async_generator(
                                 &generator,
@@ -22790,10 +23159,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             generator.borrow_mut().delegate = None;
                             let err = self.construct_error(
                                 ErrorKind::Type,
-                                &[Value::String(format!(
-                                    "Iterator result {} is not an object",
-                                    inner_res.to_display_string()
-                                ))],
+                                &[Value::String(
+                                    format!(
+                                        "Iterator result {} is not an object",
+                                        inner_res.to_display_string()
+                                    )
+                                    .into(),
+                                )],
                             );
                             return self.drive_async_generator(
                                 &generator,
@@ -23199,7 +23571,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let descriptor = if matches!(target, Value::Proxy(_)) {
             self.proxy_descriptor(target, key, instruction)?
         } else {
-            own_descriptor(&self.intrinsics, target, &Value::property_key(key))
+            let key_units = key.property_key_units();
+            own_descriptor_key(&self.intrinsics, target, PropertyKeyRef::Units(&key_units))
                 .unwrap_or(Value::Undefined)
         };
         Ok((!matches!(descriptor, Value::Undefined)).then_some(descriptor))
@@ -23309,13 +23682,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let collected = match (walk.native, element.rejects) {
             (Native::PromiseAllSettled | Native::PromiseAllSettledKeyed, false) => {
                 let mut data = ObjectData::default();
-                data.set("status", Value::String("fulfilled".to_owned()));
+                data.set("status", Value::String("fulfilled".to_owned().into()));
                 data.set("value", argument);
                 Value::Object(Rc::new(RefCell::new(data)))
             }
             (Native::PromiseAllSettled | Native::PromiseAllSettledKeyed, true) => {
                 let mut data = ObjectData::default();
-                data.set("status", Value::String("rejected".to_owned()));
+                data.set("status", Value::String("rejected".to_owned().into()));
                 data.set("reason", argument);
                 Value::Object(Rc::new(RefCell::new(data)))
             }
@@ -23458,7 +23831,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             ErrorKind::Aggregate,
             &[
                 Value::Array(ArrayData::new(reasons)),
-                Value::String("All promises were rejected".to_owned()),
+                Value::String("All promises were rejected".to_owned().into()),
             ],
         )
     }
@@ -23895,7 +24268,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let length = length as f64;
         self.set_or_throw(
             target,
-            &Value::String("length".to_owned()),
+            &Value::String("length".to_owned().into()),
             Value::Number(length),
             instruction,
         )
@@ -23935,8 +24308,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 None => self.set_or_throw(&inner, key, value, instruction),
             };
         }
-        let name = key.property_key();
-        if !self.write_accepted(target, &name) {
+        let units = key.property_key_units();
+        if !self.write_accepted_key(target, PropertyKeyRef::Units(&units)) {
             return Err(Self::write_refused(key));
         }
         self.set_computed(target, key, value, instruction)
@@ -23950,22 +24323,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// data property on a prototype forbids shadowing it, and a getter-only accessor there
     /// swallows the write rather than creating anything. Only when the chain has nothing to say
     /// does it come down to whether the receiver will take a new property at all.
-    fn write_accepted(&self, target: &Value, name: &str) -> bool {
+    fn write_accepted_key(&self, target: &Value, key: PropertyKeyRef<'_>) -> bool {
         if refuses_every_write(target) {
             return false;
         }
         if let Value::Function(closure) = target
-            && name == "prototype"
+            && key.matches_ascii("prototype")
         {
             return !closure.properties.borrow().is_frozen();
         }
         // `__proto__` is an accessor on `Object.prototype` with a setter, and the setter is what
         // decides -- it refuses a cycle and a non-extensible target by throwing, in sloppy mode
         // as well as strict. So the write is always "accepted" here and `set_computed` answers.
-        if name == "__proto__" && is_reflect_target(target) {
+        if key.matches_ascii("__proto__") && is_reflect_target(target) {
             return true;
         }
-        match own_property_state(&self.intrinsics, target, name) {
+        match own_property_state_key(&self.intrinsics, target, key) {
             Some((Property::Value(_), attributes)) => return attributes.writable,
             // A setter-less accessor discards the write, which the throwing spelling reports.
             Some((Property::Accessor { set, .. }, _)) => return set.is_some(),
@@ -23994,9 +24367,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             if let Value::Native(native, _) = &current {
                 // An accessor on a table is not this refusal's business: it is answered by
                 // whether it has a setter, which the table reports separately.
-                let is_accessor = matches!(native, Native::PrototypeOf(table)
-                    if intrinsic_members::is_accessor(*table, name));
-                if !is_accessor && let Some(attributes) = intrinsic_own_attributes(&current, name) {
+                let is_accessor = key.known_ascii().is_some_and(|name| {
+                    matches!(native, Native::PrototypeOf(table)
+                        if intrinsic_members::is_accessor(*table, name.as_ref()))
+                });
+                if !is_accessor
+                    && let Some(name) = key.known_ascii()
+                    && let Some(attributes) = intrinsic_own_attributes(&current, name.as_ref())
+                {
                     if !attributes.writable {
                         return false;
                     }
@@ -24005,7 +24383,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 current = prototype_of(&current);
                 continue;
             }
-            match own_property_state(&self.intrinsics, &current, name) {
+            match own_property_state_key(&self.intrinsics, &current, key) {
                 // A non-writable data property on a prototype cannot be shadowed by an
                 // assignment: `Object.create(Object.freeze({x: 1})).x = 2` is refused.
                 Some((Property::Value(_), attributes)) if !attributes.writable => return false,
@@ -24242,7 +24620,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             &Value::Undefined,
             &[
                 target.clone(),
-                Value::String(key),
+                Value::String(key.into()),
                 Value::Object(Rc::new(RefCell::new(data))),
             ],
             instruction,
@@ -24604,7 +24982,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         push_bounded(&mut out, &text)?;
                     }
                 }
-                Ok(Value::String(out))
+                Ok(Value::String(out.into()))
             }
             // `Array.prototype.toString` is defined as *calling* the receiver's own `join`, and
             // falling back to `Object.prototype.toString` when that is not callable. Joining
@@ -24768,7 +25146,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let text = self.as_text(&rendered, instruction)?;
                     push_bounded(&mut out, &text)?;
                 }
-                Ok(Value::String(out))
+                Ok(Value::String(out.into()))
             }
             // The three iterators keep the receiver rather than a copy of it, which is the whole
             // point of an iterator: a write between `entries()` and the `next()` that reaches it
@@ -25203,7 +25581,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .as_number(),
                 state
                     .get("@@part")
-                    .unwrap_or(Value::String("value".to_owned()))
+                    .unwrap_or(Value::String("value".to_owned().into()))
                     .to_display_string(),
             )
         };
@@ -25416,8 +25794,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // work too, and this skips the round trip.
             Value::TypedArray(view) => view.items(),
             Value::String(text) => text
-                .chars()
-                .map(|character| Value::String(character.to_string()))
+                .units()
+                .map(|unit| Value::String(StringUnits::from_units(&[unit])))
                 .collect(),
             Value::Object(_) | Value::Function(_) => {
                 // `LengthOfArrayLike` is `ToLength(Get(obj, "length"))`, and the conversion is
@@ -25604,7 +25982,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             configurable: true,
         };
         properties.define_value("length", Value::Number(length), own);
-        properties.define_value("name", Value::String(name), own);
+        properties.define_value("name", Value::String(name.into()), own);
         Ok(Value::Wrapped(Rc::new(WrappedFunction {
             target: target.clone(),
             realm,
@@ -25625,7 +26003,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // and copy 0 onto the wrapper.
             Value::Proxy(_) => {
                 let described =
-                    self.proxy_descriptor(target, &Value::String("length".to_owned()), 0)?;
+                    self.proxy_descriptor(target, &Value::String("length".to_owned().into()), 0)?;
                 !matches!(described, Value::Undefined | Value::Null)
             }
             _ => own_attributes(&self.intrinsics, target, "length").is_some(),
@@ -25666,7 +26044,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             });
         };
         let source = source.clone();
-        let produced = self.shadow_realm_run(&source, evaluated)?;
+        let produced = self.shadow_realm_run(&source.to_lossy_string(), evaluated)?;
         match produced {
             Ok(value) => self.wrap_for_realm(&value, caller),
             // Every abrupt completion becomes *this* realm's TypeError, whatever it was: a
@@ -25711,7 +26089,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let scheduled = self.scheduled(Job::ShadowImport {
             promise: Rc::clone(&promise),
             specifier,
-            export,
+            export: export.to_lossy_string(),
             evaluated,
             caller,
         });
@@ -25751,7 +26129,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if !has_property(
             &self.intrinsics,
             &namespace,
-            &Value::String(export.to_owned()),
+            &Value::String(export.to_owned().into()),
         ) {
             return Ok(self.shadow_import_rejection(caller));
         }
@@ -25778,7 +26156,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let thrown = self.entering(caller, |vm| {
             Ok(vm.construct_error(
                 ErrorKind::Type,
-                &[Value::String("ShadowRealm import failed".to_owned())],
+                &[Value::String("ShadowRealm import failed".to_owned().into())],
             ))
         });
         // `entering` cannot fail here: the body is infallible.
@@ -25884,7 +26262,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// including a symbol, becomes the empty string rather than being coerced.
     fn wrapped_name(&mut self, target: &Value) -> Result<String, ExecutionError> {
         match self.read_property(target, "name", 0)? {
-            Value::String(text) => Ok(text),
+            Value::String(text) => Ok(text.to_lossy_string()),
             _ => Ok(String::new()),
         }
     }
@@ -26216,19 +26594,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         process.set(
             "argv",
             Value::Array(ArrayData::new(
-                self.argv.iter().cloned().map(Value::String).collect(),
+                self.argv
+                    .iter()
+                    .cloned()
+                    .map(|value| Value::String(value.into()))
+                    .collect(),
             )),
         );
         if let Some(executable) = self.argv.first() {
-            process.set("execPath", Value::String(executable.clone()));
+            process.set("execPath", Value::String(executable.clone().into()));
         }
         // Not "darwin" or "linux": this realm is not either of them, and claiming to be one
         // invites a program to take a path nothing here implements.
-        process.set("platform", Value::String("kiln".to_owned()));
-        process.set("version", Value::String("kiln".to_owned()));
+        process.set("platform", Value::String("kiln".to_owned().into()));
+        process.set("version", Value::String("kiln".to_owned().into()));
         process.set(
             "versions",
-            ordinary_object([("node".to_owned(), Value::String("22.0.0".to_owned()))]),
+            ordinary_object([("node".to_owned(), Value::String("22.0.0".to_owned().into()))]),
         );
         // These identify the realm's captured standard streams; they do not expose ambient file
         // descriptors or make them terminals. `node:tty.isatty` consequently remains false.
@@ -26453,7 +26835,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 instruction,
             )?
         } else {
-            Value::String("Error".to_owned())
+            Value::String("Error".to_owned().into())
         };
         target_object
             .borrow_mut()
@@ -26467,7 +26849,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         message: String,
         instruction: usize,
     ) -> Result<(), ExecutionError> {
-        let error = self.construct_error(kind, &[Value::String(message)]);
+        let error = self.construct_error(kind, &[Value::String(message.into())]);
         self.unwind(error, instruction)
     }
 
@@ -27634,7 +28016,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(self.caught.take().unwrap_or(Value::Undefined))
             }
             other => match other.as_javascript_error() {
-                Some((kind, message)) => Ok(self.construct_error(kind, &[Value::String(message)])),
+                Some((kind, message)) => {
+                    Ok(self.construct_error(kind, &[Value::String(message.into())]))
+                }
                 None => Err(other),
             },
         }
@@ -27803,7 +28187,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             self.call_value(
                 &write_fn,
                 stream.clone(),
-                vec![Value::String(formatted)],
+                vec![Value::String(formatted.into())],
                 instruction,
             )?;
             return Ok(Value::Undefined);
@@ -27995,7 +28379,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             object.set(
                 ERROR_TRACE,
                 Value::Array(ArrayData::new(
-                    self.trace().into_iter().map(Value::String).collect(),
+                    self.trace()
+                        .into_iter()
+                        .map(|value| Value::String(value.into()))
+                        .collect(),
                 )),
             );
         }
@@ -28120,7 +28507,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             );
             properties.define_value(
                 "name",
-                Value::String(closure.name.as_deref().unwrap_or_default().to_owned()),
+                Value::String(
+                    closure
+                        .name
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_owned()
+                        .into(),
+                ),
                 FUNCTION_IDENTITY,
             );
         }
@@ -28175,7 +28569,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             let result = self.call_value(
                 &exec,
                 target.clone(),
-                vec![Value::String(subject.to_owned())],
+                vec![Value::String(subject.to_owned().into())],
                 instruction,
             )?;
             // Null or an object and nothing else: a program whose `exec` answers a number has
@@ -28198,7 +28592,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.dispatch_native(
             Native::RegExpExec,
             target,
-            &[Value::String(subject.to_owned())],
+            &[Value::String(subject.to_owned().into())],
             instruction,
         )
     }
@@ -28237,7 +28631,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // leaves a `g` cursor where it was, and the loop that advances it never terminates.
         self.assign_with_strict(
             target,
-            &Value::String("lastIndex".to_owned()),
+            &Value::String("lastIndex".to_owned().into()),
             Value::Number(index),
             instruction,
             true,
@@ -28310,7 +28704,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             let matched = self.read_text(&result, "0", instruction)?;
             let empty = matched.is_empty();
-            found.push(Value::String(matched));
+            found.push(Value::String(matched.into()));
             // An empty match would leave the cursor where it is and match again forever, so the
             // walk moves it on by hand -- by a whole code point when the pattern is Unicode-aware.
             if empty {
@@ -28343,7 +28737,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if !same_value(&current, &previous) {
             self.set_computed(
                 target,
-                &Value::String("lastIndex".to_owned()),
+                &Value::String("lastIndex".to_owned().into()),
                 previous,
                 instruction,
             )?;
@@ -28371,7 +28765,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.set_last_index(&matcher, index as f64, instruction)?;
         let mut iterator = ObjectData::default();
         iterator.set_non_enumerable(MATCH_ALL_REGEXP, matcher);
-        iterator.set_non_enumerable(MATCH_ALL_SUBJECT, Value::String(subject.to_owned()));
+        iterator.set_non_enumerable(MATCH_ALL_SUBJECT, Value::String(subject.to_owned().into()));
         iterator.set_non_enumerable(MATCH_ALL_GLOBAL, Value::Boolean(flags.contains('g')));
         iterator.set_non_enumerable(
             MATCH_ALL_UNICODE,
@@ -28472,7 +28866,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 value: species.type_name(),
             });
         }
-        let arguments = vec![target.clone(), Value::String(flags.to_owned())];
+        let arguments = vec![target.clone(), Value::String(flags.to_owned().into())];
         self.construct_value(species.clone(), arguments, species, instruction)
     }
 
@@ -28537,16 +28931,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let capture = self.read_property(&result, &slot.to_string(), instruction)?;
                 captures.push(match capture {
                     Value::Undefined => Value::Undefined,
-                    other => Value::String(self.as_text(&other, instruction)?),
+                    other => Value::String(self.as_text(&other, instruction)?.into()),
                 });
             }
             let named = self.read_property(&result, "groups", instruction)?;
             let produced = if functional {
                 let mut call_arguments = Vec::with_capacity(count + 4);
-                call_arguments.push(Value::String(matched.clone()));
+                call_arguments.push(Value::String(matched.clone().into()));
                 call_arguments.extend(captures.iter().cloned());
                 call_arguments.push(Value::Number(position as f64));
-                call_arguments.push(Value::String(subject.to_owned()));
+                call_arguments.push(Value::String(subject.to_owned().into()));
                 // The groups object is passed only when there is one, which is what keeps the
                 // replacer's argument count stable for a pattern with no named groups.
                 if !matches!(named, Value::Undefined) {
@@ -28576,7 +28970,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
         }
         push_bounded(&mut built, &utf16_slice(&units, copied..units.len()))?;
-        Ok(Value::String(built))
+        Ok(Value::String(built.into()))
     }
 
     /// `GetSubstitution`: expand `$&`, `$1`, `` $` ``, `$'` and `$<name>` in a replacement.
@@ -28661,7 +29055,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         }
                     };
                     if let Value::String(text) = &captures[index - 1] {
-                        push_bounded(&mut out, text)?;
+                        push_bounded(&mut out, &text.to_lossy_string())?;
                     }
                     at += width;
                 }
@@ -28712,7 +29106,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             if !matches!(result, Value::Null) {
                 return Ok(Value::Array(ArrayData::new(parts)));
             }
-            parts.push(Value::String(subject.to_owned()));
+            parts.push(Value::String(subject.to_owned().into()));
             return Ok(Value::Array(ArrayData::new(parts)));
         }
         let mut piece_start = 0usize;
@@ -28733,7 +29127,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 at = advance_string_index(&units, at, unicode_matching);
                 continue;
             }
-            parts.push(Value::String(utf16_slice(&units, piece_start..at)));
+            parts.push(Value::String(utf16_slice(&units, piece_start..at).into()));
             if parts.len() == cap {
                 return Ok(Value::Array(ArrayData::new(parts)));
             }
@@ -28750,7 +29144,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             at = piece_start;
         }
-        parts.push(Value::String(utf16_slice(&units, piece_start..units.len())));
+        parts.push(Value::String(
+            utf16_slice(&units, piece_start..units.len()).into(),
+        ));
         Ok(Value::Array(ArrayData::new(parts)))
     }
 
@@ -28808,20 +29204,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             if callable {
                 // The handler receives the match, then each group, then where it was found and
                 // the whole subject -- the same arguments the specification passes.
-                let mut call_arguments = vec![Value::String(matched.clone())];
+                let mut call_arguments = vec![Value::String(matched.clone().into())];
                 for group in groups.iter().skip(1) {
                     call_arguments.push(match group {
-                        Some(range) => Value::String(utf16_slice(&subject, range.clone())),
+                        Some(range) => Value::String(utf16_slice(&subject, range.clone()).into()),
                         None => Value::Undefined,
                     });
                 }
                 call_arguments.push(Value::Number(range.start as f64));
-                call_arguments.push(Value::String(text.clone()));
+                call_arguments.push(Value::String(text.clone().into()));
                 // The groups object is last, and only for a pattern that has names -- which is
                 // what keeps the replacer's argument count what it has always been otherwise.
                 if !names.is_empty() {
                     call_arguments.push(named_group_object(&names, |group| match group {
-                        Some(range) => Value::String(utf16_slice(&subject, range.clone())),
+                        Some(range) => Value::String(utf16_slice(&subject, range.clone()).into()),
                         None => Value::Undefined,
                     }));
                 }
@@ -28843,7 +29239,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             copied = range.end;
         }
         push_bounded(&mut out, &utf16_slice(&subject, copied..subject.len()))?;
-        Ok(Value::String(out))
+        Ok(Value::String(out.into()))
     }
 
     /// The pattern argument of a string method, promoted to a regexp when it is a plain string.
@@ -28860,7 +29256,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Some(value @ Value::RegExp(_)) => Ok(Some(value.clone())),
             // `"abc".match()` is `RegExpCreate(undefined, undefined)`: the empty pattern, which
             // matches at position zero. Answering `null` instead skipped the match entirely.
-            None | Some(Value::Undefined) => match build_regexp("", flags) {
+            None | Some(Value::Undefined) => match build_regexp(&StringUnits::default(), flags) {
                 Some(regexp) => Ok(Some(regexp)),
                 None => Ok(None),
             },
@@ -28870,7 +29266,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // "[object Object]" against the subject rather than what the program said.
                 let text = self.as_text(value, instruction)?;
                 let escaped = regress::escape(&text);
-                match build_regexp(&escaped, flags) {
+                match build_regexp(&StringUnits::from(escaped), flags) {
                     Some(regexp) => Ok(Some(regexp)),
                     None => {
                         self.throw_error(
@@ -28938,7 +29334,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             });
         }
         if is_callable(&exotic) {
-            let hint = Value::String(hint.spelling().to_owned());
+            let hint = Value::String(hint.spelling().to_owned().into());
             let produced =
                 self.call_value(&exotic, value.clone(), Vec::from([hint]), instruction)?;
             // An `@@toPrimitive` that answers with another object ends the conversion rather
@@ -29000,7 +29396,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         ) && let Ok(Value::String(text)) =
             self.as_primitive(thrown, PrimitiveHint::String, instruction)
         {
-            return text;
+            return text.to_lossy_string();
         }
         describe_thrown(thrown)
     }
@@ -29181,8 +29577,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
         let length = bounded_length(
-            self.proxy_get(target, &Value::String("length".to_owned()), instruction)?
-                .as_number(),
+            self.proxy_get(
+                target,
+                &Value::String("length".to_owned().into()),
+                instruction,
+            )?
+            .as_number(),
         )?;
         let mut items = Vec::with_capacity(length);
         for index in 0..length {
@@ -29205,7 +29605,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // The length last, so a handler watching it sees a consistent array when it fires.
         self.set_computed(
             target,
-            &Value::String("length".to_owned()),
+            &Value::String("length".to_owned().into()),
             Value::Number(updated.len() as f64),
             instruction,
         )?;
@@ -29457,7 +29857,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// numeric index arrives as `"0"`.
     fn trap_key(&self, key: &Value) -> Value {
         match key {
-            Value::Symbol(_) => key.clone(),
+            Value::Symbol(_) | Value::String(_) => key.clone(),
             other => {
                 // A symbol that reached here as its reserved spelling is turned back into the
                 // symbol. The interpreter stores a symbol key as a string, and handing that
@@ -29468,7 +29868,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let spelling = other.property_key();
                 match self.symbol_of_key(&spelling) {
                     Some(symbol) => Value::Symbol(symbol),
-                    None => Value::String(spelling),
+                    None => Value::String(spelling.into()),
                 }
             }
         }
@@ -29497,8 +29897,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         key: &Value,
         instruction: usize,
     ) -> Result<Option<(Property, Attributes)>, ExecutionError> {
+        let units = key.property_key_units();
+        self.own_state_key(target, key, PropertyKeyRef::Units(&units), instruction)
+    }
+
+    fn own_state_key(
+        &mut self,
+        target: &Value,
+        key_value: &Value,
+        key: PropertyKeyRef<'_>,
+        instruction: usize,
+    ) -> Result<Option<(Property, Attributes)>, ExecutionError> {
         if matches!(target, Value::Proxy(_)) {
-            let described = self.proxy_descriptor(target, key, instruction)?;
+            let described = self.proxy_descriptor(target, key_value, instruction)?;
             if !is_an_object(&described) {
                 return Ok(None);
             }
@@ -29522,11 +29933,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             };
             return Ok(Some((property, attributes)));
         }
-        Ok(own_property_state(
-            &self.intrinsics,
-            target,
-            &key.property_key(),
-        ))
+        Ok(own_property_state_key(&self.intrinsics, target, key))
     }
 
     /// `target.[[IsExtensible]]()`, which is a trap when the target is itself a proxy.
@@ -29798,7 +30205,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         &mut self,
         source: &Value,
         instruction: usize,
-        mut visit: impl FnMut(&mut Self, String, Value) -> Result<(), ExecutionError>,
+        mut visit: impl FnMut(&mut Self, StringUnits, Value) -> Result<(), ExecutionError>,
     ) -> Result<(), ExecutionError> {
         for key in self.own_keys(source, instruction)? {
             let descriptor =
@@ -29813,7 +30220,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // The read is the `get` trap, not the descriptor's `value`: a proxy is free to
             // answer a read with something its descriptor did not mention, and a spread copies
             // what a read produces.
-            let value = self.read_property(source, &key, instruction)?;
+            let value = self.read_property_key(source, PropertyKeyRef::Units(&key), instruction)?;
             visit(self, key, value)?;
         }
         Ok(())
@@ -29825,7 +30232,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         &mut self,
         source: &Value,
         instruction: usize,
-    ) -> Result<Vec<(String, Value)>, ExecutionError> {
+    ) -> Result<Vec<(StringUnits, Value)>, ExecutionError> {
         let mut copied = Vec::new();
         self.for_each_proxy_own_enumerable(source, instruction, |_, key, value| {
             copied.push((key, value));
@@ -29858,7 +30265,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         .map(|_| ())
                 })?;
             } else {
-                for (key, property) in own_properties(&self.intrinsics, source) {
+                for (key, property) in own_properties_units(&self.intrinsics, source) {
                     let value = match property {
                         Property::Value(value) => value,
                         Property::Accessor { get, .. } => match get {
@@ -30112,13 +30519,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// read path and the write path have to ask before either falls back to one of those
     /// accessors, or they would disagree about which shadows which.
     fn stored_property(&self, target: &Value, name: &str) -> Option<Property> {
+        self.stored_property_key(target, PropertyKeyRef::Utf8(name))
+    }
+
+    fn stored_property_key(&self, target: &Value, key: PropertyKeyRef<'_>) -> Option<Property> {
         // Every arm below finds what the value *stores*, and then the same walk finds what a
         // built-in prototype on its chain carries. Splitting that second half across the arms is
         // what left it on objects alone: an accessor defined on `Object.prototype` was reachable
         // through a plain object and through nothing else, though every value in the language
         // inherits from it.
-        self.own_stored_property(target, name)
-            .or_else(|| self.inherited_accessor(target, name))
+        self.own_stored_property_key(target, key)
+            .or_else(|| self.inherited_accessor_key(target, key))
     }
 
     /// An accessor a built-in prototype above `target` carries.
@@ -30139,11 +30550,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// Without it, a getter on `Object.prototype` answered for a character of a string and an
     /// element of a view. That is not an exotic shape: installing one is precisely how test262
     /// detects a lookup that should never have reached the prototype at all.
-    fn inherited_accessor(&self, target: &Value, name: &str) -> Option<Property> {
+    fn inherited_accessor_key(&self, target: &Value, key: PropertyKeyRef<'_>) -> Option<Property> {
         if !self.intrinsics.any_accessor() {
             return None;
         }
-        if own_property_state(&self.intrinsics, target, name).is_some() {
+        if own_property_state_key(&self.intrinsics, target, key).is_some() {
             return None;
         }
         // An exotic `[[Get]]` answers some names itself whether or not it *has* one: a view's
@@ -30152,24 +30563,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // `own_property_state` above answers `None` for them and would let the walk run --
         // which is exactly what `internals/Get/key-is-not-integer.js` installs a getter on
         // `%TypedArray%.prototype` named `"1.1"` to catch.
-        if exotic_reserved_name(target, name) {
+        if exotic_reserved_name_key(target, key) {
             return None;
         }
-        inherited_intrinsic_accessor(&self.intrinsics, target, name)
+        inherited_intrinsic_accessor_key(&self.intrinsics, target, key)
     }
 
     /// What `target` itself stores under `name` -- its own store and any chain of stores linked
     /// from it, but not the built-in prototype that chain ends at.
-    fn own_stored_property(&self, target: &Value, name: &str) -> Option<Property> {
+    fn own_stored_property_key(&self, target: &Value, key: PropertyKeyRef<'_>) -> Option<Property> {
         match target {
-            Value::Object(object) => object.borrow().lookup(name),
-            Value::Function(closure) if name != "prototype" => {
-                closure.properties.borrow().lookup(name)
+            Value::Object(object) => object.borrow().lookup_key(key),
+            Value::Function(closure) if !key.matches_ascii("prototype") => {
+                closure.properties.borrow().lookup_key(key)
             }
             // An array's non-element properties live in an ordinary store with an ordinary
             // chain, so a subclass's accessor is reachable the same way. An *index* may hold an
             // accessor too, either its own or one the chain carries where the array has a hole.
-            Value::Array(items) => match canonical_index(name) {
+            Value::Array(items) => match array_index_key(key) {
                 Some(index) => match array_exotic_element(items, index) {
                     Some(entry) => Some(entry.property),
                     // A dense element answers, and it is in no store: `inherited_accessor` is
@@ -30181,16 +30592,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     {
                         None
                     }
-                    None => array_inherited_index(&self.intrinsics, items, name),
+                    None => array_inherited_index_key(&self.intrinsics, items, key),
                 },
-                None => items.properties.borrow().lookup(name),
+                None => items.properties.borrow().lookup_key(key),
             },
             // A built-in keeps what a program defined on it in the realm's store, accessors
             // included: `Object.defineProperty(Math, "x", { get })` has to run its getter here
             // rather than read as undefined.
-            Value::Bound(bound) => bound.properties.borrow().lookup(name),
+            Value::Bound(bound) => bound.properties.borrow().lookup_key(key),
             Value::Native(_, _) | Value::Callback(_, _) => {
-                match self.intrinsics.overridden(target, name) {
+                match self.intrinsics.overridden_key(target, key) {
                     Overridden::Held(property, _) => Some(property),
                     // Deleted, or never touched: either way the chain above may still answer.
                     Overridden::Absent | Overridden::Untouched => None,
@@ -30200,8 +30611,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // accessors included: `Object.defineProperty(sample, "x", { get })` has to run its
             // getter here rather than read as undefined.
             _ => exotic_properties(target)
-                .filter(|_| !exotic_reserved_name(target, name))
-                .and_then(|store| store.borrow().lookup(name)),
+                .filter(|_| !exotic_reserved_name_key(target, key))
+                .and_then(|store| store.borrow().lookup_key(key)),
         }
     }
 
@@ -30218,21 +30629,31 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         name: &str,
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
-        let value = self.read_property_inner(target, name, instruction)?;
+        self.read_property_key(target, PropertyKeyRef::Utf8(name), instruction)
+    }
+
+    fn read_property_key(
+        &mut self,
+        target: &Value,
+        key: PropertyKeyRef<'_>,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let value = self.read_property_inner_key(target, key, instruction)?;
         if matches!(value, Value::Native(Native::Uninitialized, _)) {
-            return Err(uninitialized_export_error(name));
+            let name = key.owned().to_lossy_string();
+            return Err(uninitialized_export_error(&name));
         }
         Ok(value)
     }
 
-    fn read_property_inner(
+    fn read_property_inner_key(
         &mut self,
         target: &Value,
-        name: &str,
+        key: PropertyKeyRef<'_>,
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
         if matches!(target, Value::Proxy(_)) {
-            return self.proxy_get(target, &Value::String(name.to_owned()), instruction);
+            return self.proxy_get(target, &Value::String(key.owned()), instruction);
         }
         // A namespace names the exporting module's bindings, so it is caught up before it is
         // read: the module may have assigned to an export since the link ran. The shared borrow
@@ -30247,17 +30668,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // measurements: the specification checks the view is still in bounds before it reports
         // either, and a zero here would read as a view that is legitimately empty.
         if let Value::DataView(view) = target
-            && matches!(name, "byteLength" | "byteOffset")
+            && (key.matches_ascii("byteLength") || key.matches_ascii("byteOffset"))
             && view.out_of_bounds()
         {
             return Err(ExecutionError::DataViewOutOfBounds);
         }
-        let accessor = self.stored_property(target, name);
+        let accessor = self.stored_property_key(target, key);
         // `Object.prototype.__proto__` is an accessor and the tables have no room for one, so
         // the read reaches it here. An own or inherited property of that name shadows it exactly
         // as it would shadow any accessor further up the chain, which is why this runs only when
         // the walk above found nothing.
-        if name == "__proto__" && accessor.is_none() && is_reflect_target(target) {
+        if key.matches_ascii("__proto__") && accessor.is_none() && is_reflect_target(target) {
             // `[[GetPrototypeOf]]`, which a proxy answers with a handler rather than a stored
             // link -- so reading `p.__proto__` reports the proxy's prototype, not its target's.
             return self.proxy_get_prototype_of(target, instruction);
@@ -30267,14 +30688,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // `%Function.prototype%`, both halves are `%ThrowTypeError%`, and so a read of either
         // name through anything callable throws -- unless the program gave that function an own
         // property of the name, which shadows the accessor exactly as it would any other.
-        if accessor.is_none() && is_restricted_function_property(target, name) {
+        if accessor.is_none()
+            && key
+                .known_ascii()
+                .is_some_and(|name| is_restricted_function_property(target, name.as_ref()))
+        {
             return Err(restricted_property_error());
         }
         // The same shape once more: an accessor a built-in *prototype* owns is a call, and the
         // tables have no room for one. `Map.prototype.size` is a `TypeError` for exactly this
         // reason -- the prototype is not a Map -- where the table answered `undefined`.
         if accessor.is_none()
-            && let Some(builtin) = machine_accessor(target, name)
+            && let Some(builtin) = key
+                .known_ascii()
+                .and_then(|name| machine_accessor(target, name.as_ref()))
         {
             return self.builtin_accessor(builtin, target, instruction);
         }
@@ -30283,7 +30710,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // duration -- where the table answered `undefined`.
         if accessor.is_none()
             && let Value::Native(Native::Temporal(temporal::Op::Prototype(kind)), _) = target
-            && let Some(field) = temporal::prototype_accessor(*kind, name)
+            && let Some(field) = key
+                .known_ascii()
+                .and_then(|name| temporal::prototype_accessor(*kind, name.as_ref()))
         {
             return self.temporal_dispatch(
                 temporal::Op::Accessor(*kind, field),
@@ -30299,7 +30728,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 None => Ok(Value::Undefined),
             },
             _ => {
-                let found = self.property(target, name);
+                let found = self.property_key(target, key);
                 // Nothing in any store, so a proxy further up the chain is the one thing that
                 // could still answer. `OrdinaryGet` keeps the *original* receiver as it walks,
                 // which is what the trap's third argument is for.
@@ -30308,7 +30737,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 {
                     return self.proxy_get_with_receiver(
                         &proxy,
-                        &Value::String(name.to_owned()),
+                        &Value::String(key.owned()),
                         target,
                         instruction,
                     );
@@ -30325,17 +30754,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// accessor swallows it. A store that skips this check silently *shadows* the accessor
     /// instead -- which is how `chalk.level = 3` became an ordinary property on the chalk
     /// function and never reached the generator sitting behind the accessor.
-    fn inherited_setter(
+    fn inherited_setter_key(
         &mut self,
         store: &RefCell<ObjectData>,
         target: &Value,
-        name: &str,
+        key: PropertyKeyRef<'_>,
         value: &Value,
         instruction: usize,
     ) -> Result<bool, ExecutionError> {
         // Bound out of the `if let`: the borrow would otherwise still be alive at the setter
         // call, which is ordinary code that may touch this very object.
-        let existing = store.borrow().lookup(name);
+        let existing = store.borrow().lookup_key(key);
         let Some(Property::Accessor { set, .. }) = existing else {
             return Ok(false);
         };
@@ -30351,16 +30780,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// Route a write up the prototype chain a value's *kind* gives it, answering whether the
     /// chain consumed it.
     ///
-    /// [`Vm::inherited_setter`] walks a store, and an exotic object's chain is not one: it ends
+    /// [`Vm::inherited_setter_key`] walks a store, and an exotic object's chain is not one: it ends
     /// at an intrinsic prototype whose accessors are match arms rather than slots. Every
     /// measurement such a prototype publishes -- a view's `length`, a buffer's `byteLength`, a
     /// regexp's `source` -- is getter-only, so a write to one is swallowed there. Without this
     /// the write would shadow the accessor with an own property, and `sample.length = 9` would
     /// answer 9 for a view of four elements.
-    fn chain_setter(
+    fn chain_setter_key(
         &mut self,
         target: &Value,
-        name: &str,
+        key: PropertyKeyRef<'_>,
         value: &Value,
         instruction: usize,
     ) -> Result<bool, ExecutionError> {
@@ -30369,7 +30798,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             if matches!(current, Value::Null | Value::Undefined) {
                 return Ok(false);
             }
-            match own_property_state(&self.intrinsics, &current, name) {
+            match own_property_state_key(&self.intrinsics, &current, key) {
                 Some((Property::Accessor { set, .. }, _)) => {
                     // The receiver is the exotic object the program wrote to, not the prototype
                     // the setter was found on.
@@ -30385,6 +30814,25 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
         }
         Ok(false)
+    }
+
+    fn property_key(&self, target: &Value, key: PropertyKeyRef<'_>) -> Value {
+        if let Some(name) = key.known_ascii() {
+            return self.property(target, name.as_ref());
+        }
+        // Numeric and string-indexed exotics still have an exact answer for an unknown units
+        // spelling. A non-ASCII/lone-surrogate name otherwise cannot name one of the scalar
+        // intrinsic tables, and its exact own store has already been checked by the caller.
+        if matches!(target, Value::Array(_)) && array_index_key(key).is_some() {
+            return self.computed_key_ref(target, key);
+        }
+        if matches!(target, Value::TypedArray(_)) && canonical_numeric_index_key(key).is_some() {
+            return self.computed_key_ref(target, key);
+        }
+        if matches!(target, Value::String(_)) && array_index_key(key).is_some() {
+            return self.computed_key_ref(target, key);
+        }
+        Value::Undefined
     }
 
     fn property(&self, target: &Value, name: &str) -> Value {
@@ -30414,7 +30862,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Array(_) | Value::TypedArray(_) | Value::String(_)
         ) && canonical_index(name).is_some()
         {
-            return self.computed(target, &Value::String(name.to_owned()));
+            return self.computed(target, &Value::String(name.to_owned().into()));
         }
         // An exotic object is an ordinary object for every name its own behaviour does not
         // claim, and an own property shadows the prototype's exactly as it does anywhere else:
@@ -30871,7 +31319,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Value::Native(Native::TypedArrayConstructor(view.kind), RealmId::PRIMARY)
                 }
                 key if key == WellKnown::ToStringTag.property_key() => {
-                    Value::String(view.kind.name().to_owned())
+                    Value::String(view.kind.name().to_owned().into())
                 }
                 "toString" if view.kind == TypedKind::Uint8 => {
                     Value::Native(Native::NodeBufferToString, RealmId::PRIMARY)
@@ -30989,12 +31437,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // Escaped, exactly as the accessor on the prototype escapes it: the two must
                 // not disagree about what `re.source` is, and the raw pattern would not survive
                 // being written back between slashes.
-                "source" => Value::String(escaped_source(&regexp.source)),
+                "source" => Value::String(escaped_source_units(&regexp.source)),
                 // The specification's order -- `dgimsuvy` -- not the order the program wrote
                 // them: `new RegExp("a", "yigm").flags` is "gimy". Answering the stored spelling
                 // made the getter disagree with the generic one on `RegExp.prototype`, which
                 // builds the string from the eight flag accessors in exactly this order.
-                "flags" => Value::String(canonical_regexp_flags(&regexp.flags)),
+                "flags" => Value::String(canonical_regexp_flags(&regexp.flags).into()),
                 "global" => Value::Boolean(regexp.global),
                 "sticky" => Value::Boolean(regexp.sticky),
                 "ignoreCase" => Value::Boolean(regexp.flags.contains('i')),
@@ -31419,8 +31867,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     }
 
     fn computed(&self, target: &Value, key: &Value) -> Value {
+        let units = key.property_key_units();
+        self.computed_key_ref(target, PropertyKeyRef::Units(&units))
+    }
+
+    fn computed_key_ref(&self, target: &Value, key: PropertyKeyRef<'_>) -> Value {
         if let Value::Array(items) = target
-            && let Some(index) = array_index(key)
+            && let Some(index) = array_index_key(key)
         {
             // A hole *reads* as undefined even though it is not one, which is why the marker
             // never escapes into an expression -- but only after the chain has been asked, since
@@ -31428,7 +31881,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             let element = items.borrow().get(index).cloned();
             return match element {
                 Some(value) if !Self::is_hole(&value) => value,
-                _ => match array_inherited_index(&self.intrinsics, items, &key.property_key()) {
+                _ => match array_inherited_index_key(&self.intrinsics, items, key) {
                     Some(Property::Value(value)) => value,
                     // An inherited accessor is a call, which this pure read cannot make. The
                     // computed read above it consults the same chain and does.
@@ -31437,7 +31890,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             };
         }
         if let Value::TypedArray(view) = target
-            && let Some(index) = canonical_numeric_index(&key.property_key())
+            && let Some(index) = canonical_numeric_index_key(key)
         {
             // Every element key is the view's own answer, and `undefined` when it reaches no
             // slot. Never an ordinary property and never a question for the chain: that is what
@@ -31450,17 +31903,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // `s[0]` is the character at that index, as a one-character string. Indices are UTF-16
         // code units, which is the unit `length` counts in, so the two agree on what is in range.
         if let Value::String(text) = target
-            && let Some(index) = array_index(key)
+            && let Some(index) = array_index_key(key)
         {
             let units: Vec<u16> = text.encode_utf16().collect();
             return match units.get(index) {
                 // One unit, not one character: indexing a surrogate pair gives half of it, which
                 // is the language's answer and the reason `for-of` over a string differs.
-                Some(unit) => Value::String(String::from_utf16_lossy(&[*unit])),
+                Some(unit) => Value::String(StringUnits::from_units(&[*unit])),
                 None => Value::Undefined,
             };
         }
-        self.property(target, &key.property_key())
+        self.property_key(target, key)
     }
 
     /// `delete target[key]`, running a proxy's `deleteProperty` trap when there is one.
@@ -31472,7 +31925,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<bool, ExecutionError> {
         let key = &self.computed_key(key, instruction)?;
         let Value::Proxy(proxy) = target else {
-            return Ok(delete_property(&self.intrinsics, target, key));
+            let units = key.property_key_units();
+            return Ok(delete_property_key(
+                &self.intrinsics,
+                target,
+                PropertyKeyRef::Units(&units),
+            ));
         };
         let proxy = Rc::clone(proxy);
         let inner = proxy.target.clone();
@@ -31505,13 +31963,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         &mut self,
         target: &Value,
         instruction: usize,
-    ) -> Result<Vec<String>, ExecutionError> {
+    ) -> Result<Vec<StringUnits>, ExecutionError> {
         let Value::Proxy(proxy) = target else {
             // Symbol keys included: `Reflect.ownKeys`, `Object.assign` and `Object.freeze` all
             // reach a proxy's target through here, and all three are defined over both kinds.
             // Internal slots stay out -- copying a collection's `@@entries` would be copying the
             // machine rather than the object.
-            return Ok(own_property_keys_with_symbols(&self.intrinsics, target));
+            return Ok(own_property_keys_with_symbols_units(
+                &self.intrinsics,
+                target,
+            ));
         };
         let proxy = Rc::clone(proxy);
         let inner = proxy.target.clone();
@@ -31531,7 +31992,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             self.read_property(&listed, "length", instruction)?
                 .as_number(),
         )?;
-        let mut keys: Vec<String> = Vec::new();
+        let mut keys: Vec<StringUnits> = Vec::new();
         for index in 0..length {
             let entry = self.read_property(&listed, &index.to_string(), instruction)?;
             if !matches!(entry, Value::String(_) | Value::Symbol(_)) {
@@ -31539,7 +32000,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     "ownKeys must report strings and symbols only",
                 ));
             }
-            let key = entry.property_key();
+            let key = entry.property_key_units();
             if keys.contains(&key) {
                 return Err(Self::proxy_invariant("ownKeys must not repeat a key"));
             }
@@ -31551,7 +32012,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let held = if matches!(inner, Value::Proxy(_)) {
             self.own_keys(&inner, instruction)?
         } else {
-            own_property_keys_including_symbols(&self.intrinsics, &inner)
+            own_property_keys_including_symbols_units(&self.intrinsics, &inner)
         };
         let extensible = self.target_extensible(&inner, instruction)?;
         for key in &held {
@@ -31683,11 +32144,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if matches!(target, Value::Proxy(_)) {
             return self.proxy_get_with_receiver(target, key, receiver, instruction);
         }
-        let property_key = key.property_key();
+        let property_key_units = key.property_key_units();
+        let property_key = PropertyKeyRef::Units(&property_key_units);
         // The same accessors the named read consults, for the computed spelling: a symbol key
         // reaches `Symbol.species` only through here.
-        if let Some(builtin) = machine_accessor(target, &property_key)
-            && self.stored_property(target, &property_key).is_none()
+        if let Some(builtin) = property_key
+            .known_ascii()
+            .and_then(|name| machine_accessor(target, name.as_ref()))
+            && self.stored_property_key(target, property_key).is_none()
         {
             return self.builtin_accessor(builtin, receiver, instruction);
         }
@@ -31696,12 +32160,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // two spellings came to disagree: `Object.defineProperty(sample, key, { get })` with a
         // variable `key` was answered by the prototype the getter was shadowing. One walk cannot
         // drift from itself.
-        match self.stored_property(target, &property_key) {
+        match self.stored_property_key(target, property_key) {
             Some(Property::Accessor { get, .. }) => match get {
                 Some(getter) => self.call_value(&getter, receiver.clone(), Vec::new(), instruction),
                 None => Ok(Value::Undefined),
             },
-            _ => Ok(self.computed(target, key)),
+            Some(Property::Value(value)) => Ok(value),
+            _ => Ok(self.computed_key_ref(target, property_key)),
         }
     }
 
@@ -31785,6 +32250,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if !strict {
             return self.set_computed(target, key, value, instruction);
         }
+        // `PutValue` performs `ToPropertyKey` once, before `[[Set]]` decides whether the
+        // write is accepted. Keep the converted value for both the descriptor probe and the
+        // write so a key object's `toString` cannot run twice on a strict assignment.
+        let computed_key = self.computed_key(key, instruction)?;
         // A primitive has no property store, so an ordinary assignment onto one creates
         // nothing -- which sloppy code cannot tell from a write and strict code must.
         // An inherited setter is the exception: it is a call, and the primitive is its receiver.
@@ -31792,8 +32261,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             target,
             Value::String(_) | Value::Number(_) | Value::Boolean(_) | Value::BigInt(_)
         ) {
-            let name = self.computed_key(key, instruction)?.property_key();
-            let setter = match own_property_state(&self.intrinsics, &prototype_of(target), &name) {
+            let units = computed_key.property_key_units();
+            let setter = match own_property_state_key(
+                &self.intrinsics,
+                &prototype_of(target),
+                PropertyKeyRef::Units(&units),
+            ) {
                 Some((Property::Accessor { set, .. }, _)) => set,
                 _ => None,
             };
@@ -31801,10 +32274,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Some(setter) => self
                     .call_value(&setter, target.clone(), vec![value], instruction)
                     .map(|_| ()),
-                None => Err(Self::write_refused(key)),
+                None => Err(Self::write_refused(&computed_key)),
             };
         }
-        self.set_or_throw(target, key, value, instruction)
+        self.set_or_throw(target, &computed_key, value, instruction)
     }
 
     /// `DeletePropertyOrThrow` where the program wrote `delete` in strict code, and the plain
@@ -31826,12 +32299,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
         strict: bool,
     ) -> Result<bool, ExecutionError> {
-        let removed = self.delete(target, key, instruction)?;
+        // `DeletePropertyOrThrow` converts its key once. The plain delete below receives the
+        // primitive result so a side-effecting key object is not coerced a second time while
+        // formatting a strict-mode refusal.
+        let computed_key = self.computed_key(key, instruction)?;
+        let removed = self.delete(target, &computed_key, instruction)?;
         if !removed && strict {
             return Err(ExecutionError::TypeErrorMessage {
                 message: format!(
                     "Cannot delete property '{}' of an object",
-                    self.computed_key(key, instruction)?.property_key()
+                    computed_key.property_key()
                 ),
             });
         }
@@ -31870,8 +32347,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 None => self.set_computed(&inner, key, value, instruction),
             };
         }
+        let key_units = key.property_key_units();
+        let property_key = PropertyKeyRef::Units(&key_units);
         if let Value::TypedArray(view) = target
-            && let Some(index) = canonical_numeric_index(&key.property_key())
+            && let Some(index) = canonical_numeric_index_key(property_key)
         {
             let view = Rc::clone(view);
             // Coerced before the bounds check, and by the machine, because the coercion is what
@@ -31888,7 +32367,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // The other half of `Object.prototype.__proto__`. A value that is neither an object nor
         // null is *ignored* rather than refused -- the setter has no error to raise for one --
         // and either way nothing is stored under the name.
-        if matches!(key, Value::String(name) if name == "__proto__") && is_reflect_target(target) {
+        if property_key.matches_ascii("__proto__") && is_reflect_target(target) {
             match (&value, target) {
                 (Value::Object(_) | Value::Function(_) | Value::Array(_) | Value::Null, _) => {}
                 _ => return Ok(()),
@@ -31906,9 +32385,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // The other half of the restricted pair. Its setter is `%ThrowTypeError%` too, so a
         // write throws rather than shadowing the accessor with an own property -- which is what
         // `f.caller = {}` does in every engine, in sloppy mode as well as strict.
-        if let Value::String(name) = key
-            && is_restricted_function_property(target, name)
-            && self.stored_property(target, name).is_none()
+        if property_key
+            .known_ascii()
+            .is_some_and(|name| is_restricted_function_property(target, name.as_ref()))
+            && self.stored_property_key(target, property_key).is_none()
         {
             return Err(restricted_property_error());
         }
@@ -31917,7 +32397,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // property write. Sloppy mode discards it and strict mode throws; the machine does
             // not know which it is in, and discarding is the one that cannot invent an error.
             Value::Array(items) if items.properties.borrow().is_frozen() => Ok(()),
-            Value::Array(items) => match array_index(key) {
+            Value::Array(items) => match array_index_key(property_key) {
                 Some(index) => {
                     // An element the program defined answers for itself: a setter is a call, and
                     // a data property that is not writable discards the write the same way a
@@ -31972,7 +32452,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // element that will not go. A refusal is discarded rather than raised, for the
                 // same reason a frozen object's write is: the machine does not know whether the
                 // code that wrote it was strict.
-                None if key.property_key() == "length" => {
+                None if property_key.matches_ascii("length") => {
                     // `ToUint32` of whatever the program supplied, and for an object that
                     // conversion *calls* its `valueOf` or `toString`. The pure `as_number`
                     // inside `array_set_length` answered NaN for one, which the range check
@@ -31995,17 +32475,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 // Not an index, so it is an ordinary named property of the array.
                 None => {
-                    let name = key.property_key();
-                    if self.inherited_setter(
+                    if self.inherited_setter_key(
                         &items.properties,
                         target,
-                        &name,
+                        property_key,
                         &value,
                         instruction,
                     )? {
                         return Ok(());
                     }
-                    items.properties.borrow_mut().set(&name, value);
+                    items.properties.borrow_mut().set_key(property_key, value);
                     Ok(())
                 }
             },
@@ -32016,22 +32495,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // outright made `sample.constructor = C` look like it worked and read back as the
             // view's own kind.
             other if exotic_properties(other).is_some() => {
-                let name = key.property_key();
                 let Some(store) = exotic_properties(target) else {
                     return Ok(());
                 };
-                if self.inherited_setter(store, target, &name, &value, instruction)? {
+                if self.inherited_setter_key(store, target, property_key, &value, instruction)? {
                     return Ok(());
                 }
-                if self.chain_setter(target, &name, &value, instruction)? {
+                if self.chain_setter_key(target, property_key, &value, instruction)? {
                     return Ok(());
                 }
-                store.borrow_mut().set(&name, value);
+                store.borrow_mut().set_key(property_key, value);
                 Ok(())
             }
             Value::Object(object) => {
-                let name = key.property_key();
-                if name == "statusCode"
+                if property_key.matches_ascii("statusCode")
                     && let Some(NodeObject::HttpResponse(state)) = &object.borrow().node_object
                 {
                     let status = value.as_number();
@@ -32041,46 +32518,56 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     state.borrow_mut().status = status as u16;
                     return Ok(());
                 }
-                if self.inherited_setter(object, target, &name, &value, instruction)? {
+                if self.inherited_setter_key(object, target, property_key, &value, instruction)? {
                     return Ok(());
                 }
                 // No own property and no inherited setter, so a proxy further up the chain is
                 // what `OrdinarySetWithOwnDescriptor` reaches next -- its `set` trap decides,
                 // and creating an own property here instead would shadow it silently.
-                if object.borrow().lookup(&name).is_none()
+                if object.borrow().lookup_key(property_key).is_none()
                     && let Some(proxy) = self.proxy_on_chain(target)
                 {
                     self.set_computed(&proxy, key, value, instruction)?;
                     return Ok(());
                 }
-                object.borrow_mut().set(&name, value);
+                object.borrow_mut().set_key(property_key, value);
                 Ok(())
             }
             Value::Function(closure) => {
-                let name = key.property_key();
                 // `f.prototype = {...}` replaces the object `new f()` will link instances to,
                 // which is a slot on the closure rather than an ordinary property -- so a write
                 // that landed in the property store would be read back by `f.prototype` and
                 // ignored by `new`.
-                if name == "prototype" {
+                if property_key.matches_ascii("prototype") {
                     if closure.properties.borrow().is_frozen() {
                         return Ok(());
                     }
                     *closure.prototype.borrow_mut() = Some(value);
                     return Ok(());
                 }
-                if self.inherited_setter(&closure.properties, target, &name, &value, instruction)? {
+                if self.inherited_setter_key(
+                    &closure.properties,
+                    target,
+                    property_key,
+                    &value,
+                    instruction,
+                )? {
                     return Ok(());
                 }
-                closure.properties.borrow_mut().set(&name, value);
+                closure.properties.borrow_mut().set_key(property_key, value);
                 Ok(())
             }
             Value::Bound(bound) => {
-                let name = key.property_key();
-                if self.inherited_setter(&bound.properties, target, &name, &value, instruction)? {
+                if self.inherited_setter_key(
+                    &bound.properties,
+                    target,
+                    property_key,
+                    &value,
+                    instruction,
+                )? {
                     return Ok(());
                 }
-                bound.properties.borrow_mut().set(&name, value);
+                bound.properties.borrow_mut().set_key(property_key, value);
                 Ok(())
             }
             // A built-in is an object, and the specification makes almost every own property of
@@ -32088,10 +32575,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // assignments. Refusing them as "not an object" was this engine reporting that it
             // had nowhere to put the answer, not that the language forbade the write.
             Value::Native(_, _) | Value::Callback(_, _) => {
-                let name = key.property_key();
                 // Bound out of the `if let`, because the setter is ordinary code that may write
                 // to this very built-in.
-                let existing = own_property_state(&self.intrinsics, target, &name);
+                let existing = own_property_state_key(&self.intrinsics, target, property_key);
                 if let Some((Property::Accessor { set, .. }, _)) = existing {
                     // Getter-only swallows the write, exactly as it does on an ordinary object.
                     if let Some(setter) = set {
@@ -32099,7 +32585,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                     return Ok(());
                 }
-                let attributes = own_attributes(&self.intrinsics, target, &name);
+                let attributes = own_attributes_key(&self.intrinsics, target, property_key);
                 // A property that promised not to change does not. Sloppy mode discards the
                 // write and strict mode throws; the machine does not know which it is in, and
                 // discarding is the one that cannot invent an error.
@@ -32108,9 +32594,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 // An assignment keeps the flags the property already had and gives a new one the
                 // ordinary three, which is what it does on every other kind of object.
-                self.intrinsics.install(
+                self.intrinsics.install_key(
                     target,
-                    &name,
+                    property_key,
                     Property::Value(value),
                     attributes.unwrap_or(Attributes::DEFAULT),
                 );
@@ -32428,13 +32914,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Some(answer) => answer.to_owned(),
                 None => self.atomics_block(&view, index, timeout)?,
             };
-            return Ok(Value::String(settled));
+            return Ok(Value::String(settled.into()));
         }
         // `waitAsync` reports whether it had to wait at all, beside either the answer itself or
         // the promise that will carry it.
         let (asynchronous, value) = match answer {
-            Some(answer) => (false, Value::String(answer.to_owned())),
-            None if timeout == 0.0 => (false, Value::String("timed-out".to_owned())),
+            Some(answer) => (false, Value::String(answer.to_owned().into())),
+            None if timeout == 0.0 => (false, Value::String("timed-out".to_owned().into())),
             None => {
                 let promise = PromiseState::pending();
                 let store = view.buffer.bytes.store().map(Arc::clone);
@@ -32459,7 +32945,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             // The resolve half of the promise's own pair, called with the answer:
                             // a timer carries its state in its arguments rather than in a closure.
                             callback: Value::Settler(Rc::clone(&promise), false),
-                            arguments: vec![Value::String("timed-out".to_owned())],
+                            arguments: vec![Value::String("timed-out".to_owned().into())],
                             context: Rc::clone(&self.async_context),
                         };
                         let delay = duration_from_milliseconds(if timeout.is_finite() {
@@ -32535,7 +33021,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             self.call_value(
                 &settler,
                 Value::Undefined,
-                vec![Value::String(outcome.as_str().to_owned())],
+                vec![Value::String(outcome.as_str().to_owned().into())],
                 self.instruction,
             )?;
             settled = true;
@@ -32658,7 +33144,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // `null` rather than `undefined` when there is nothing: Test262's own wrapper loops
             // `while ((r = getReport()) == null)`, and an agent that reported the empty string
             // has still reported.
-            AgentOp::GetReport => Ok(group.take_report().map_or(Value::Null, Value::String)),
+            AgentOp::GetReport => Ok(group
+                .take_report()
+                .map_or(Value::Null, |value| Value::String(value.into()))),
             AgentOp::Sleep => {
                 let milliseconds = self.as_number_argument(Some(&first), instruction)?;
                 group
@@ -32763,15 +33251,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // A proxy answers with a trap rather than a store, and the trap already reports
             // both kinds -- reduced to reserved strings on the way in, and restored here.
             Value::Proxy(_) => self.own_keys(target, instruction)?,
-            _ => own_property_keys_with_symbols(&self.intrinsics, target),
+            _ => own_property_keys_with_symbols_units(&self.intrinsics, target),
         };
-        let (reserved, named): (Vec<String>, Vec<String>) =
-            keys.into_iter().partition(|key| symbol::is_reserved(key));
-        let mut reflected: Vec<Value> = named.into_iter().map(Value::String).collect();
+        let (reserved, named): (Vec<StringUnits>, Vec<StringUnits>) =
+            keys.into_iter().partition(is_reserved_units);
+        let mut reflected: Vec<Value> = named
+            .into_iter()
+            .map(|value| Value::String(value.into()))
+            .collect();
         reflected.extend(
             reserved
                 .into_iter()
-                .filter_map(|key| self.symbol_of_key(&key))
+                .filter_map(|key| {
+                    PropertyKeyRef::Units(&key)
+                        .known_ascii()
+                        .and_then(|name| self.symbol_of_key(name.as_ref()))
+                })
                 .map(Value::Symbol),
         );
         Ok(reflected)
@@ -32805,12 +33300,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             _ => {
                 let error = self.construct_error(
                     ErrorKind::Error,
-                    &[Value::String("This operation was aborted".to_owned())],
+                    &[Value::String(
+                        "This operation was aborted".to_owned().into(),
+                    )],
                 );
                 if let Value::Object(error) = &error {
                     error
                         .borrow_mut()
-                        .set_non_enumerable("name", Value::String("AbortError".to_owned()));
+                        .set_non_enumerable("name", Value::String("AbortError".to_owned().into()));
                 }
                 error
             }
@@ -32832,7 +33329,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
         // One event object, shared by every listener, as a real dispatch would be.
         let event = ordinary_object([
-            ("type".to_owned(), Value::String("abort".to_owned())),
+            ("type".to_owned(), Value::String("abort".to_owned().into())),
             ("target".to_owned(), signal.clone()),
         ]);
         for listener in listeners {
@@ -32876,13 +33373,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 None => self.set_reflect(&inner, key, value, receiver, instruction),
             };
         }
-        let name = key.property_key();
+        let units = key.property_key_units();
+        let property_key = PropertyKeyRef::Units(&units);
         // An integer-indexed exotic object answers `[[Set]]` for every *canonical numeric* name
         // itself, whether or not the view has such an element, so the prototype chain is never
         // consulted for one: a setter installed on `%TypedArray%.prototype["0"]` stays
         // unreachable, and `ta["1.5"] = v` is discarded rather than stored under that name.
         if let Value::TypedArray(view) = target
-            && let Some(index) = canonical_numeric_index(&name)
+            && let Some(index) = canonical_numeric_index_key(property_key)
         {
             let view = Rc::clone(view);
             if same_value(target, receiver) {
@@ -32900,15 +33398,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 return Ok(true);
             }
         }
-        self.ordinary_set_reflect(target, &name, value, receiver, instruction)
+        self.ordinary_set_reflect_key(target, property_key, value, receiver, instruction)
     }
 
     /// The ordinary half of `Reflect.set(target, key, value, receiver)`.  The receiver is where
     /// a writable data property is created or updated; it is not silently replaced by target.
-    fn ordinary_set_reflect(
+    fn ordinary_set_reflect_key(
         &mut self,
         target: &Value,
-        name: &str,
+        key: PropertyKeyRef<'_>,
         value: Value,
         receiver: &Value,
         instruction: usize,
@@ -32916,7 +33414,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if refuses_every_write(target) {
             return Ok(false);
         }
-        let own = own_property_state(&self.intrinsics, target, name);
+        let own = own_property_state_key(&self.intrinsics, target, key);
         if let Some((property, attributes)) = own {
             match property {
                 Property::Accessor {
@@ -32932,16 +33430,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             if !is_reflect_target(receiver) {
                 return Ok(false);
             }
-            return self.define_on_receiver(receiver, name, value, instruction);
+            return self.define_on_receiver_key(receiver, key, value, instruction);
         }
         let parent = self.prototype_for(target, instruction)?;
         if !matches!(parent, Value::Null | Value::Undefined) {
-            return self.ordinary_set_reflect(&parent, name, value, receiver, instruction);
+            return self.ordinary_set_reflect_key(&parent, key, value, receiver, instruction);
         }
         if !is_reflect_target(receiver) {
             return Ok(false);
         }
-        self.define_on_receiver(receiver, name, value, instruction)
+        self.define_on_receiver_key(receiver, key, value, instruction)
     }
 
     /// The tail of `OrdinarySetWithOwnDescriptor`: the write lands on the *receiver*, and what
@@ -32955,14 +33453,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// fields with their `false` defaults -- turns the first write through a proxy into a
     /// freeze, and every write after it is refused. That is one write per property, which is
     /// what a reactive store looks like when it stops working.
-    fn define_on_receiver(
+    fn define_on_receiver_key(
         &mut self,
         receiver: &Value,
-        name: &str,
+        key: PropertyKeyRef<'_>,
         value: Value,
         instruction: usize,
     ) -> Result<bool, ExecutionError> {
-        let held = self.own_state(receiver, &Value::String(name.to_owned()), instruction)?;
+        let held = self.own_state(receiver, &Value::String(key.owned()), instruction)?;
         let descriptor = match held {
             // An accessor on the receiver is refused outright, whichever half it has: the
             // target's data property is what decided this is a data write, and the receiver
@@ -32981,28 +33479,33 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 ..Descriptor::default()
             },
         };
-        self.define_own_operation(receiver, name, &descriptor, instruction)
+        self.define_own_operation_key(receiver, key, &descriptor, instruction)
     }
 
     /// `target.[[DefineOwnProperty]](name, descriptor)`, asked as an operation rather than of a
     /// store, so a proxy answers with its trap and keeps the descriptor *partial* while it does.
-    fn define_own_operation(
+    fn define_own_operation_key(
         &mut self,
         target: &Value,
-        name: &str,
+        key: PropertyKeyRef<'_>,
         descriptor: &Descriptor,
         instruction: usize,
     ) -> Result<bool, ExecutionError> {
         let Value::Proxy(proxy) = target else {
-            return self.define_own(target, name, descriptor, instruction);
+            return self.define_own_key(target, key, descriptor, instruction);
         };
         let proxy = Rc::clone(proxy);
         let inner = proxy.target.clone();
-        let key = Value::String(name.to_owned());
+        let key = Value::String(key.owned());
         let Some(trap) = self.proxy_trap(&proxy, "defineProperty", instruction)? else {
             // No trap: the definition forwards to the target as the record it is. Round-tripping
             // it through a descriptor object here is what used to complete it.
-            return self.define_own_operation(&inner, name, descriptor, instruction);
+            return self.define_own_operation_key(
+                &inner,
+                PropertyKeyRef::Units(&key.property_key_units()),
+                descriptor,
+                instruction,
+            );
         };
         // `FromPropertyDescriptor`, which spells out only the fields the record actually has --
         // a handler that reads `"writable" in descriptor` can see the difference.
@@ -33138,17 +33641,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             ByteText::ToBase64 | ByteText::ToHex => {
                 let bytes = view.map(|view| view.bytes()).unwrap_or_default();
                 Ok(Value::String(if base64 {
-                    to_base64_text(&bytes, url, omit_padding)
+                    to_base64_text(&bytes, url, omit_padding).into()
                 } else {
-                    to_hex_text(&bytes)
+                    to_hex_text(&bytes).into()
                 }))
             }
             ByteText::FromBase64 | ByteText::FromHex => {
                 let text = text.unwrap_or_default();
                 let decoded = if base64 {
-                    from_base64(&text, url, handling, usize::MAX)
+                    from_base64(&text.to_lossy_string(), url, handling, usize::MAX)
                 } else {
-                    from_hex(&text, usize::MAX)
+                    from_hex(&text.to_lossy_string(), usize::MAX)
                 };
                 if decoded.refused {
                     return Err(byte_text_refused(base64));
@@ -33169,9 +33672,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // observable, because a chunk that would not fit is left *unread* and reported
                 // as such rather than partly written.
                 let decoded = if base64 {
-                    from_base64(&text, url, handling, view.len())
+                    from_base64(&text.to_lossy_string(), url, handling, view.len())
                 } else {
-                    from_hex(&text, view.len())
+                    from_hex(&text.to_lossy_string(), view.len())
                 };
                 let written = decoded.bytes.len();
                 for (index, byte) in decoded.bytes.into_iter().enumerate() {
@@ -33198,15 +33701,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// method: it can throw, and it can detach the buffer the write was aimed at, which is why
     /// the write asks again rather than trusting the index the decision handed it. Every other
     /// definition is the free function's, unchanged.
-    fn define_own(
+    fn define_own_key(
         &mut self,
         target: &Value,
-        key: &str,
+        key: PropertyKeyRef<'_>,
         descriptor: &Descriptor,
         instruction: usize,
     ) -> Result<bool, ExecutionError> {
         if let Value::TypedArray(view) = target
-            && let Some(outcome) = indexed_definition(view, key, descriptor)
+            && let Some(outcome) = indexed_definition_key(view, key, descriptor)
         {
             let view = Rc::clone(view);
             return match outcome {
@@ -33223,7 +33726,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // Same conversion for the definition form, and for the same reason: the descriptor's
         // value arrives as the program wrote it, and an object reduces by calling its own code.
         if matches!(target, Value::Array(_))
-            && key == "length"
+            && key.matches_ascii("length")
             && let Some(value) = descriptor.value.clone()
             && !matches!(value, Value::Number(_))
         {
@@ -33232,12 +33735,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 value: Some(Value::Number(number)),
                 ..descriptor.clone()
             };
-            return define_own_property(&self.intrinsics, target, key, &descriptor);
+            return define_own_property_key(&self.intrinsics, target, key, &descriptor);
         }
-        define_own_property(&self.intrinsics, target, key, descriptor)
+        define_own_property_key(&self.intrinsics, target, key, descriptor)
     }
 
-    fn string_constant(&self, index: u32, instruction: usize) -> Result<String, ExecutionError> {
+    fn string_constant_units(
+        &self,
+        index: u32,
+        instruction: usize,
+    ) -> Result<StringUnits, ExecutionError> {
         match self.program.constants.get(index as usize) {
             Some(Constant::String(name)) => Ok(name.clone()),
             Some(_) => Err(ExecutionError::InvalidPropertyKey {
@@ -33248,6 +33755,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 index: index as usize,
             }),
         }
+    }
+
+    fn string_constant_scalar(
+        &self,
+        index: u32,
+        instruction: usize,
+    ) -> Result<String, ExecutionError> {
+        let name = self.string_constant_units(index, instruction)?;
+        name.to_scalar_string()
+            .map_err(|_| ExecutionError::InvalidPropertyKey {
+                instruction,
+                value: "ill-formed string constant",
+            })
     }
 
     /// The cell at this closure's upvalue index.
@@ -33270,7 +33790,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Upvalue::ParentLocal(_) | Upvalue::ParentUpvalue(_) => return None,
         };
         match closure.program.constants.get(name as usize) {
-            Some(Constant::String(name)) => Some(name.clone()),
+            Some(Constant::String(name)) => Some(name.to_lossy_string()),
             _ => None,
         }
     }
@@ -33635,7 +34155,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             let error = self.construct_error(
                 ErrorKind::Type,
                 &[Value::String(
-                    "Cannot convert a Symbol value to a string".to_owned(),
+                    "Cannot convert a Symbol value to a string"
+                        .to_owned()
+                        .into(),
                 )],
             );
             return Ok(Err(error));
@@ -33654,7 +34176,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let error = self.construct_error(
                     ErrorKind::Type,
                     &[Value::String(
-                        "Cannot convert a Symbol value to a string".to_owned(),
+                        "Cannot convert a Symbol value to a string"
+                            .to_owned()
+                            .into(),
                     )],
                 );
                 Ok(Err(error))
@@ -33703,14 +34227,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let mut entries = Vec::new();
                     for key in self.own_keys(&with, instruction)? {
                         let Some((_, attributes)) =
-                            self.own_state(&with, &Value::String(key.clone()), instruction)?
+                            self.own_state(&with, &Value::String(key.clone().into()), instruction)?
                         else {
                             continue;
                         };
                         if !attributes.enumerable {
                             continue;
                         }
-                        let value = self.read_property(&with, &key, instruction)?;
+                        let value = self.read_property_key(
+                            &with,
+                            PropertyKeyRef::Units(&key),
+                            instruction,
+                        )?;
                         entries.push((key, value));
                     }
                     for (key, value) in entries {
@@ -33727,9 +34255,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         return Ok(Ok(Some(ImportAttributes { type_: None })));
                     };
                     match value {
-                        Value::String(value) if value == "file" => {
-                            Ok(Ok(Some(ImportAttributes { type_: Some(value) })))
-                        }
+                        Value::String(value) if value == "file" => Ok(Ok(Some(ImportAttributes {
+                            type_: Some(value.to_lossy_string()),
+                        }))),
                         Value::String(_) => Ok(Err(self.construct_error(
                             ErrorKind::Type,
                             &[Value::String("unsupported import attribute `type`".into())],
@@ -33771,7 +34299,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             };
             return Ok(Err(self.construct_error(
                 ErrorKind::Type,
-                &[Value::String(message.to_owned())],
+                &[Value::String(message.to_owned().into())],
             )));
         };
         let plan_result = loader.load(ModuleLoadRequest {
@@ -33782,15 +34310,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let plan = match plan_result {
             Ok(plan) => plan,
             Err(ModuleLoadError::Unsupported(message)) => {
-                let error = self.construct_error(ErrorKind::Type, &[Value::String(message)]);
+                let error = self.construct_error(ErrorKind::Type, &[Value::String(message.into())]);
                 return Ok(Err(error));
             }
             Err(ModuleLoadError::NotFound(message)) => {
-                let error = self.construct_error(ErrorKind::Type, &[Value::String(message)]);
+                let error = self.construct_error(ErrorKind::Type, &[Value::String(message.into())]);
                 return Ok(Err(error));
             }
             Err(ModuleLoadError::Syntax(message)) => {
-                let error = self.construct_error(ErrorKind::Syntax, &[Value::String(message)]);
+                let error =
+                    self.construct_error(ErrorKind::Syntax, &[Value::String(message.into())]);
                 return Ok(Err(error));
             }
         };
@@ -33838,10 +34367,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let Value::Array(exported) = returned else {
                         let error = self.construct_error(
                             ErrorKind::Type,
-                            &[Value::String(format!(
-                                "module `{}` did not hand back its exports",
-                                planned.key
-                            ))],
+                            &[Value::String(
+                                format!("module `{}` did not hand back its exports", planned.key)
+                                    .into(),
+                            )],
                         );
                         self.dynamic_modules.insert(
                             (realm, planned.key.clone()),
@@ -33983,7 +34512,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         match arguments.first() {
             Some(Value::String(source)) => {
                 let source = source.clone();
-                self.drive_eval(&source, None, false)
+                self.drive_eval(&source.to_lossy_string(), None, false)
             }
             Some(value) => Ok(value.clone()),
             None => Ok(Value::Undefined),
@@ -34040,7 +34569,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// propagating what it threw.
     fn as_string(&mut self, value: &Value, instruction: usize) -> Result<String, ExecutionError> {
         if let Value::String(text) = value {
-            return Ok(text.clone());
+            return Ok(text.to_lossy_string());
         }
         let primitive = self.as_primitive(value, PrimitiveHint::String, instruction)?;
         // A symbol is the one primitive `ToString` refuses: it has a description, not a
@@ -34221,7 +34750,7 @@ fn abort_controller() -> Value {
 /// `new TextEncoder()`. UTF-8 and nothing else, which is all the encoder half is defined to do.
 fn text_encoder() -> Value {
     let mut data = ObjectData::default();
-    data.set_non_enumerable("encoding", Value::String("utf-8".to_owned()));
+    data.set_non_enumerable("encoding", Value::String("utf-8".to_owned().into()));
     data.set_non_enumerable(
         "encode",
         Value::Native(Native::TextEncoderEncode, RealmId::PRIMARY),
@@ -34275,7 +34804,7 @@ fn unary_of_number(operator: UnaryOp, value: &Value) -> Value {
         UnaryOp::Decrement => Value::Number(value.as_number() - 1.0),
         UnaryOp::Not => Value::Boolean(!value.is_truthy()),
         // `typeof` never coerces and never throws; it reports the type tag directly.
-        UnaryOp::TypeOf => Value::String(value.type_of().to_owned()),
+        UnaryOp::TypeOf => Value::String(value.type_of().to_owned().into()),
         // `~x` is `-(ToInt32(x) + 1)`: a numeric operator, despite reading as a logical one.
         UnaryOp::BitwiseNot => Value::Number(f64::from(!to_int32(value.as_number()))),
         // `void x` evaluates its operand -- which already happened -- and discards it.
@@ -34520,17 +35049,17 @@ fn binary(
             if matches!(left, Value::String(_)) || matches!(right, Value::String(_)) {
                 // A loop that concatenates is the ordinary way a program builds a large string,
                 // and the ordinary way it asks for one no engine will give it.
-                let (left, right) = (left.to_display_string(), right.to_display_string());
+                let (left, right) = (left.to_string_units(), right.to_string_units());
                 let total = left.len().saturating_add(right.len());
                 bounded_string(total)?;
                 // Sized exactly. `push_str` onto an empty string reserves what it is given and
                 // then doubles for the second half, so the growth path holds twice the result
                 // while copying it -- which is the difference between a bound this can reach and
                 // one the host is killed before it reaches.
-                let mut joined = String::with_capacity(total);
-                joined.push_str(&left);
-                joined.push_str(&right);
-                Value::String(joined)
+                let mut joined = Vec::with_capacity(total);
+                joined.extend(left.units());
+                joined.extend(right.units());
+                Value::String(StringUnits::from_units(&joined))
             } else {
                 Value::Number(left.as_number() + right.as_number())
             }
@@ -34640,13 +35169,13 @@ fn build_error(kind: ErrorKind, arguments: &[Value]) -> Value {
     data.set_non_enumerable(
         "stack",
         Value::String(if message.is_empty() {
-            name.to_owned()
+            name.to_owned().into()
         } else {
-            format!("{name}: {message}")
+            format!("{name}: {message}").into()
         }),
     );
     if let Some(message) = given {
-        data.set_non_enumerable("message", Value::String(message));
+        data.set_non_enumerable("message", Value::String(message.into()));
     }
     for (index, field) in kind.carried_fields().iter().enumerate() {
         data.set_non_enumerable(
@@ -34675,7 +35204,11 @@ fn json_indent(space: Option<&Value>) -> String {
     let space = unwrapped.as_ref().or(space);
     match space {
         Some(Value::Number(count)) if *count >= 1.0 => " ".repeat((*count as usize).min(MAX)),
-        Some(Value::String(text)) => text.chars().take(MAX).collect(),
+        Some(Value::String(text)) => text
+            .units()
+            .take(MAX)
+            .map(|unit| char::from_u32(unit as u32).unwrap_or('\u{fffd}'))
+            .collect(),
         _ => String::new(),
     }
 }
@@ -34775,7 +35308,7 @@ fn json_stringify(
         // NaN and both infinities have no JSON spelling, so they serialise as null.
         Value::Number(number) if number.is_finite() => Some(number_string(*number)),
         Value::Number(_) => Some("null".to_owned()),
-        Value::String(text) => Some(json_quote(text)),
+        Value::String(text) => Some(json_quote(&text.to_lossy_string())),
         Value::Array(items) => {
             let guard = CycleGuard::enter(seen, Rc::as_ptr(items).cast::<()>())?;
             // An accessor at an index leaves a hole in the dense storage, and serialising that
@@ -34845,7 +35378,7 @@ fn json_stringify(
         }
         Value::Object(object) if object.borrow().get_own(RAW_JSON_MARK).is_some() => {
             Some(match object.borrow().get_own(RAW_JSON_TEXT) {
-                Some(Value::String(text)) => text.clone(),
+                Some(Value::String(text)) => text.to_lossy_string(),
                 _ => "null".to_owned(),
             })
         }
@@ -35104,7 +35637,11 @@ fn call_native(
             };
             match value {
                 Value::BigInt(_) => value.clone(),
-                Value::String(text) => match string_to_big_int(text) {
+                Value::String(text) => match text
+                    .to_scalar_string()
+                    .ok()
+                    .and_then(|text| string_to_big_int(&text))
+                {
                     Some(parsed) => Value::BigInt(Rc::new(parsed)),
                     // A string that is not an integer is a SyntaxError, unlike `Number("x")`
                     // which is NaN -- a BigInt has no NaN to be.
@@ -35149,9 +35686,9 @@ fn call_native(
                 },
             };
             match arguments.first().map(Value::as_number) {
-                None | Some(10.0) => Value::String(value.to_string()),
+                None | Some(10.0) => Value::String(value.to_string().into()),
                 Some(radix) if (2.0..=36.0).contains(&radix) => {
-                    Value::String(value.to_str_radix(radix as u32))
+                    Value::String(value.to_str_radix(radix as u32).into())
                 }
                 _ => return Err(ExecutionError::RadixOutOfRange),
             }
@@ -35192,13 +35729,12 @@ fn call_native(
             // and `has_property` is the wrong question for any of them: it follows the chain,
             // and `Array.prototype[1] = 2` would make every array claim an own `1`.
             | Value::Array(_)
-            | Value::TypedArray(_) => own_attributes(intrinsics,
-                receiver,
-                &arguments
+            | Value::TypedArray(_) => {
+                let key = arguments
                     .first()
-                    .map_or_else(String::new, |key| key.clone().property_key()),
-            )
-            .is_some(),
+                    .map_or_else(StringUnits::default, Value::property_key_units);
+                own_attributes_key(intrinsics, receiver, PropertyKeyRef::Units(&key)).is_some()
+            }
             other => has_property(intrinsics, other, arguments.first().unwrap_or(&Value::Undefined)),
         }),
         // Walked with [`prototype_of`], the same function `Object.getPrototypeOf` and
@@ -35222,17 +35758,15 @@ fn call_native(
         }
         // Own *and* enumerable, which is the pair that separates this from `hasOwnProperty`:
         // `new Error("x").propertyIsEnumerable("message")` is false and `hasOwnProperty` is true.
-        Native::ObjectPropertyIsEnumerable => Value::Boolean(
-            own_attributes(intrinsics,
-                receiver,
-                &arguments
-                    .first()
-                    .cloned()
-                    .unwrap_or(Value::Undefined)
-                    .property_key(),
+        Native::ObjectPropertyIsEnumerable => {
+            let key = arguments
+                .first()
+                .map_or_else(StringUnits::default, Value::property_key_units);
+            Value::Boolean(
+                own_attributes_key(intrinsics, receiver, PropertyKeyRef::Units(&key))
+                    .is_some_and(|attributes| attributes.enumerable),
             )
-            .is_some_and(|attributes| attributes.enumerable),
-        ),
+        }
         // `Object.prototype.toString.call(x)`, the oldest type test there is.
         // The tag reports the *box*, not what is in it, which is why this is one of the few
         // built-ins `receiver_for` deliberately leaves a wrapper closed for.
@@ -35243,7 +35777,7 @@ fn call_native(
         Native::TypedArrayToStringTag => match wrapped_primitive(receiver)
             .unwrap_or_else(|| receiver.clone())
         {
-            Value::TypedArray(view) => Value::String(view.kind.name().to_owned()),
+            Value::TypedArray(view) => Value::String(view.kind.name().to_owned().into()),
             _ => Value::Undefined,
         },
         Native::ObjectToStringTag => Value::String(format!(
@@ -35303,7 +35837,7 @@ fn call_native(
                 other if matches!(unwrap_proxy(other), Value::Array(_)) => "Array",
                 _ => "Object",
             }
-        )),
+        ).into()),
         // `Object.prototype.valueOf` is `ToObject(this)`, which for an object is the identity
         // that makes `ToPrimitive` fall through to `toString`, and for a primitive is the box.
         // A wrapper reaches here closed, which is what makes `valueOf` on one answer the object
@@ -35335,7 +35869,7 @@ fn call_native(
                     }
                 },
             };
-            Value::String(symbol.to_display_string())
+            Value::String(symbol.to_display_string().into())
         }
         // `Function.prototype.toString` is one of the few built-ins that checks what it was
         // called on: the specification throws for a receiver that is not callable rather than
@@ -35350,7 +35884,7 @@ fn call_native(
                     ),
                 });
             }
-            Value::String(receiver.to_display_string())
+            Value::String(receiver.to_display_string().into())
         }
         // Both build a program from source, which needs the machine: a compilation has to be
         // entered as a frame and run. `Vm::dispatch_native` intercepts them before this, and
@@ -35423,7 +35957,7 @@ fn call_native(
             _ => Value::Undefined,
         },
         Native::ArrayOf => Value::Array(ArrayData::new(arguments.to_vec())),
-        Native::StringFromCharCode => Value::String(String::from_utf16_lossy(
+        Native::StringFromCharCode => Value::String(StringUnits::from_units(
             &arguments
                 .iter()
                 .map(|value| value.as_number() as u16)
@@ -35453,7 +35987,7 @@ fn call_native(
                     units.push(0xDC00 + (offset & 0x3FF) as u16);
                 }
             }
-            Value::String(String::from_utf16_lossy(&units))
+            Value::String(StringUnits::from_units(&units))
         }
         // `SetIntegrityLevel` defines every own property afresh, and an integer-indexed one
         // refuses every flag it would ask for: an element cannot be made non-writable or
@@ -35516,14 +36050,12 @@ fn call_native(
             _ => true,
         }),
         Native::ObjectHasOwn => Value::Boolean(match arguments.first() {
-            Some(target) => own_attributes(
-                intrinsics,
-                target,
-                &arguments
+            Some(target) => {
+                let key = arguments
                     .get(1)
-                    .map_or_else(String::new, Value::property_key),
-            )
-            .is_some(),
+                    .map_or_else(StringUnits::default, Value::property_key_units);
+                own_attributes_key(intrinsics, target, PropertyKeyRef::Units(&key)).is_some()
+            }
             None => false,
         }),
         Native::ObjectCreate => {
@@ -35651,8 +36183,9 @@ fn call_native(
             let target = arguments.first().unwrap_or(&Value::Undefined);
             let key = arguments
                 .get(1)
-                .map_or_else(String::new, Value::property_key);
-            own_descriptor(intrinsics, target, &key).unwrap_or(Value::Undefined)
+                .map_or_else(StringUnits::default, Value::property_key_units);
+            own_descriptor_key(intrinsics, target, PropertyKeyRef::Units(&key))
+                .unwrap_or(Value::Undefined)
         }
         Native::ObjectGetOwnPropertyDescriptors => {
             let target = arguments.first().unwrap_or(&Value::Undefined);
@@ -35660,9 +36193,11 @@ fn call_native(
             // Symbol keys too: this is how a faithful copy is made, and one that quietly leaves
             // them out is the bug this whole family had. The result object holds them under the
             // same reserved key the source did, so it needs no registry to build.
-            for key in own_property_keys_with_symbols(intrinsics, target) {
-                if let Some(descriptor) = own_descriptor(intrinsics, target, &key) {
-                    data.set(&key, descriptor);
+            for key in own_property_keys_with_symbols_units(intrinsics, target) {
+                if let Some(descriptor) =
+                    own_descriptor_key(intrinsics, target, PropertyKeyRef::Units(&key))
+                {
+                    data.set_units(&key, descriptor);
                 }
             }
             Value::Object(Rc::new(RefCell::new(data)))
@@ -35674,7 +36209,7 @@ fn call_native(
             // copies a module's exports with this, and a module whose exports *are* a function
             // -- lodash, and most of the older ecosystem -- copied nothing without it.
             Value::Array(ArrayData::new(
-                own_property_keys(intrinsics, arguments.first().unwrap_or(&Value::Undefined))
+                own_property_names_units(intrinsics, arguments.first().unwrap_or(&Value::Undefined))
                     .into_iter()
                     .map(Value::String)
                     .collect(),
@@ -35695,21 +36230,21 @@ fn call_native(
                     .borrow()
                     .entries()
                     .map(|(key, _)| key)
-                    .filter(|key| !symbol::is_reserved(key))
-                    .map(|key| Value::String(key.to_owned()))
+                    .filter(|key| !is_reserved_units(key))
+                    .map(|key| Value::String(key.clone()))
                     .collect(),
                 Some(Value::Bound(bound)) => bound
                     .properties
                     .borrow()
                     .entries()
                     .map(|(key, _)| key)
-                    .filter(|key| !symbol::is_reserved(key))
-                    .map(|key| Value::String(key.to_owned()))
+                    .filter(|key| !is_reserved_units(key))
+                    .map(|key| Value::String(key.clone()))
                     .collect(),
                 // `entries` rather than `keys`: this reports what is *enumerated*, where
                 // `getOwnPropertyNames` reports everything. An error's own properties are the
                 // case where the two differ.
-                Some(target @ Value::Object(object)) => string_wrapper_entries(target)
+                Some(target @ Value::Object(object)) => string_wrapper_entries_units(target)
                     .into_iter()
                     .map(|(key, _)| Value::String(key))
                     .chain(
@@ -35717,8 +36252,8 @@ fn call_native(
                             .borrow()
                             .entries()
                             .map(|(key, _)| key)
-                            .filter(|key| !symbol::is_reserved(key))
-                            .map(|key| Value::String(key.to_owned())),
+                            .filter(|key| !is_reserved_units(key))
+                            .map(|key| Value::String(key.clone())),
                     )
                     .collect(),
                 // A built-in's own enumerated properties are the ones a program added -- the
@@ -35728,7 +36263,7 @@ fn call_native(
                 // store directly, so `Object.keys`, `Object.entries` and a spread cannot give
                 // three different answers about the same namespace.
                 Some(target @ (Value::Native(_, _) | Value::Callback(_, _))) => {
-                    own_properties(intrinsics, target)
+                    own_properties_units(intrinsics, target)
                         .into_iter()
                         .map(|(key, _)| Value::String(key))
                         .collect()
@@ -35744,28 +36279,28 @@ fn call_native(
                     .iter()
                     .enumerate()
                     .filter(|(_, item)| !matches!(item, Value::Native(Native::Hole, _)))
-                    .map(|(index, _)| Value::String(index.to_string()))
+                    .map(|(index, _)| Value::String(index.to_string().into()))
                     .chain(
                         items
                             .properties
                             .borrow()
                             .entries()
                             .map(|(key, _)| key)
-                            .filter(|key| !symbol::is_reserved(key))
-                            .map(|key| Value::String(key.to_owned())),
+                            .filter(|key| !is_reserved_units(key))
+                            .map(|key| Value::String(key.clone())),
                     )
                     .collect(),
                 // The elements, and then whatever the program hung on the view by name: an
                 // exotic object enumerates both, in the order its own-key walk lists them.
                 Some(Value::TypedArray(view)) => (0..view.len())
-                    .map(|index| Value::String(index.to_string()))
+                    .map(|index| Value::String(index.to_string().into()))
                     .chain(
                         view.properties
                             .borrow()
                             .entries()
                             .map(|(key, _)| key)
-                            .filter(|key| !symbol::is_reserved(key))
-                            .map(|key| Value::String(key.to_owned())),
+                            .filter(|key| !is_reserved_units(key))
+                            .map(|key| Value::String(key.clone())),
                     )
                     .collect(),
                 Some(target) if exotic_properties(target).is_some() => exotic_properties(target)
@@ -35774,8 +36309,8 @@ fn call_native(
                             .borrow()
                             .entries()
                             .map(|(key, _)| key)
-                            .filter(|key| !symbol::is_reserved(key))
-                            .map(|key| Value::String(key.to_owned()))
+                            .filter(|key| !is_reserved_units(key))
+                            .map(|key| Value::String(key.clone()))
                             .collect()
                     })
                     .unwrap_or_default(),
@@ -35787,8 +36322,8 @@ fn call_native(
         Native::StringConstructor => {
             unreachable!("`String` is dispatched by the interpreter")
         }
-        Native::ErrorToString => Value::String(error_to_string(receiver)),
-        Native::RegExpToString => Value::String(receiver.to_display_string()),
+        Native::ErrorToString => Value::String(error_to_string(receiver).into()),
+        Native::RegExpToString => Value::String(receiver.to_string_units()),
         // Reading `{ maxByteLength }` off the options bag is an ordinary property read, which
         // may run a getter, so the machine has to be the one to do it.
         Native::ArrayBufferConstructor | Native::SharedArrayBufferConstructor => {
@@ -36074,7 +36609,7 @@ fn call_native(
                     _ => out.push_str(&format!("%u{unit:04X}")),
                 }
             }
-            Value::String(out)
+            Value::String(out.into())
         }
         Native::Unescape => {
             let text = arguments
@@ -36114,7 +36649,7 @@ fn call_native(
                 out.push(units[index]);
                 index += 1;
             }
-            Value::String(String::from_utf16_lossy(&out))
+            Value::String(String::from_utf16_lossy(&out).into())
         }
         // The four URI functions differ only in which characters they leave alone. `encodeURI`
         // keeps the ones that structure a URI -- `:/?#[]@!$&'()*+,;=` -- because it is encoding a
@@ -36142,7 +36677,7 @@ fn call_native(
                     out.push_str(&format!("%{byte:02X}"));
                 }
             }
-            Value::String(out)
+            Value::String(out.into())
         }
         Native::DecodeUri | Native::DecodeUriComponent => {
             let text = arguments
@@ -36179,7 +36714,7 @@ fn call_native(
                 index += 3;
             }
             match String::from_utf8(out) {
-                Ok(decoded) => Value::String(decoded),
+                Ok(decoded) => Value::String(decoded.into()),
                 Err(_) => return Err(ExecutionError::MalformedUri),
             }
         }
@@ -36550,8 +37085,8 @@ fn call_native(
             _ => Value::Undefined,
         },
         Native::ArrayJoinDefault => match receiver {
-            Value::Array(items) => Value::String(join(&items.borrow(), ",")?),
-            _ => Value::String(String::new()),
+            Value::Array(items) => Value::String(join_units(&items.borrow(), &StringUnits::from(","))),
+            _ => Value::String(String::new().into()),
         },
         Native::ArraySplice => match receiver {
             Value::Array(items) => {
@@ -36652,12 +37187,12 @@ fn call_native(
         }
         Native::ArrayJoin => {
             let separator = match arguments.first() {
-                None | Some(Value::Undefined) => ",".to_owned(),
-                Some(value) => value.to_display_string(),
+                None | Some(Value::Undefined) => StringUnits::from(","),
+                Some(value) => value.to_string_units(),
             };
             match receiver {
-                Value::Array(items) => Value::String(join(&items.borrow(), &separator)?),
-                _ => Value::String(String::new()),
+                Value::Array(items) => Value::String(join_units(&items.borrow(), &separator)),
+                _ => Value::String(String::new().into()),
             }
         }
         // Every one of these is a plain transformation of its arguments, which is what keeps
@@ -36786,16 +37321,16 @@ fn call_native(
                 });
             }
         },
-        Native::BooleanToString => Value::String(branded_boolean(receiver)?.to_string()),
+        Native::BooleanToString => Value::String(branded_boolean(receiver)?.to_string().into()),
         Native::BooleanValueOf => Value::Boolean(branded_boolean(receiver)?),
         Native::NumberValueOf => Value::Number(branded_number(receiver)?),
         Native::NumberToString => {
             let value = branded_number(receiver)?;
             match arguments.first().map(Value::as_number) {
                 // Radix 10 is the default and is exactly `String(n)`, exponent rules included.
-                None | Some(10.0) => Value::String(number_string(value)),
+                None | Some(10.0) => Value::String(number_string(value).into()),
                 Some(radix) if (2.0..=36.0).contains(&radix) => {
-                    Value::String(number_in_radix(value, radix as u32))
+                    Value::String(number_in_radix(value, radix as u32).into())
                 }
                 // A radix outside 2..=36 is a RangeError; returning NaN would look like a result.
                 _ => return Err(ExecutionError::RadixOutOfRange),
@@ -36812,7 +37347,7 @@ fn call_native(
             let attribute = arguments
                 .first()
                 .map_or_else(String::new, Value::to_display_string);
-            Value::String(html_wrapper(wrapper, text, &attribute))
+            Value::String(html_wrapper(wrapper, &text.to_lossy_string(), &attribute).into())
         }
         Native::NumberToExponential => {
             let value = branded_number(receiver)?;
@@ -36829,24 +37364,24 @@ fn call_native(
                     Some(digits.trunc().clamp(0.0, 100.0) as usize)
                 }
             };
-            Value::String(number_to_exponential(value, requested))
+            Value::String(number_to_exponential(value, requested).into())
         }
         Native::NumberToPrecision => {
             let value = branded_number(receiver)?;
             match arguments.first() {
                 // With no argument at all this is `toString`, not a one-digit rendering.
                 None | Some(Value::Undefined) => {
-                    Value::String(number_string(value))
+                    Value::String(number_string(value).into())
                 }
                 Some(other) => {
                     let digits = to_integer_or_infinity(other.as_number());
                     if !value.is_finite() {
-                        return Ok(Value::String(number_string(value)));
+                        return Ok(Value::String(number_string(value).into()));
                     }
                     if !(1.0..=100.0).contains(&digits) {
                         return Err(ExecutionError::RadixOutOfRange);
                     }
-                    Value::String(number_to_precision(value, digits.trunc() as usize))
+                    Value::String(number_to_precision(value, digits.trunc() as usize).into())
                 }
             }
         }
@@ -36879,7 +37414,7 @@ fn call_native(
                 return Err(ExecutionError::RadixOutOfRange);
             }
             #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            Value::String(number_to_fixed(value, digits as u32))
+            Value::String(number_to_fixed(value, digits as u32).into())
         }
         Native::NumberConstructor => Value::Number(match arguments.first() {
             None => 0.0,
@@ -36925,19 +37460,19 @@ fn call_native(
         // Present so `typeof` reports "function", which is what the corpus checks. Calling it
         // returns undefined rather than inventing a stack this VM does not record.
         Native::ErrorCaptureStackTrace => Value::Undefined,
-        Native::CallSiteGetFileName => Value::String("<kiln>".to_owned()),
+        Native::CallSiteGetFileName => Value::String("<kiln>".to_owned().into()),
         Native::CallSiteGetLineNumber | Native::CallSiteGetColumnNumber => Value::Number(0.0),
         Native::CallSiteGetFunctionName | Native::CallSiteGetMethodName => {
             own_data_property(receiver, CALL_SITE_NAME).unwrap_or(Value::Null)
         }
-        Native::CallSiteGetTypeName => Value::String("Function".to_owned()),
+        Native::CallSiteGetTypeName => Value::String("Function".to_owned().into()),
         Native::CallSiteGetThis => Value::Undefined,
         Native::CallSiteGetEvalOrigin => Value::Undefined,
         Native::CallSiteIsEval => Value::Boolean(false),
         Native::CallSiteToString => {
             let name = own_data_property(receiver, CALL_SITE_NAME)
                 .map_or_else(|| "<anonymous>".to_owned(), |value| value.to_display_string());
-            Value::String(format!("{name} (<kiln>:0:0)"))
+            Value::String(format!("{name} (<kiln>:0:0)").into())
         }
         // Array and typed-array iterators retain their receiver rather than snapshotting it.
         // State lives in reserved properties on the iterator itself, so `next` can observe a
@@ -37006,11 +37541,9 @@ fn call_native(
                     .map_or_else(String::new, Value::to_display_string)
             };
             match native {
-                Native::StringToUpperCase => Value::String(text.to_uppercase()),
-                Native::StringToLowerCase => Value::String(text.to_lowercase()),
-                Native::StringTrim => {
-                    Value::String(text.trim_matches(is_js_whitespace).to_owned())
-                }
+                Native::StringToUpperCase => Value::String(string_case_map(text, true)),
+                Native::StringToLowerCase => Value::String(string_case_map(text, false)),
+                Native::StringTrim => Value::String(string_trim_units(text, true, true)),
                 // All three take a position, and all three ignored it: `"hello".startsWith("ell", 1)`
                 // is true and read as false, which is a wrong answer rather than a missing
                 // feature. Counted in UTF-16 units, like every other position the language
@@ -37083,7 +37616,7 @@ fn call_native(
                 Native::StringRepeat => {
                     let count = arguments.first().map_or(0.0, Value::as_number);
                     if count < 0.0 || !count.is_finite() {
-                        Value::String(String::new())
+                        Value::String(String::new().into())
                     } else {
                         // Checked before the allocation rather than after: `repeat` is handed a
                         // count straight from the program, and `"x".repeat(2 ** 40)` is a
@@ -37091,7 +37624,12 @@ fn call_native(
                         bounded_string(
                             (text.len() as f64 * count).min(f64::from(u32::MAX) * 4.0) as usize,
                         )?;
-                        Value::String(text.repeat(count as usize))
+                        let units: Vec<u16> = text.units().collect();
+                        let mut repeated = Vec::with_capacity(units.len().saturating_mul(count as usize));
+                        for _ in 0..count as usize {
+                            repeated.extend_from_slice(&units);
+                        }
+                        Value::String(StringUnits::from_units(&repeated))
                     }
                 }
                 Native::StringSplit => {
@@ -37102,25 +37640,38 @@ fn call_native(
                         None | Some(Value::Undefined) => u32::MAX as usize,
                         Some(value) => to_uint32(value.as_number()) as usize,
                     };
-                    let separator = argument(0);
+                    let separator = arguments
+                        .first()
+                        .map(value_to_string_units)
+                        .unwrap_or_default();
                     let parts: Vec<Value> = if limit == 0 {
                         Vec::new()
                     } else if matches!(arguments.first(), None | Some(Value::Undefined)) {
                         // An absent separator does not cut at all: the whole string is the one
                         // piece. `undefined` means absent here, which is why this asks the value
                         // rather than the argument count -- `"a".split(undefined)` is `["a"]`.
-                        vec![Value::String(text.clone())]
+                        vec![Value::String(text.clone().into())]
                     } else if separator.is_empty() {
                         // An empty separator splits into characters, not into nothing.
-                        text.chars()
+                        text.units()
                             .take(limit)
-                            .map(|c| Value::String(c.to_string()))
+                            .map(|unit| Value::String(StringUnits::from_units(&[unit])))
                             .collect()
                     } else {
-                        text.split(&separator)
-                            .take(limit)
-                            .map(|part| Value::String(part.to_owned()))
-                            .collect()
+                        let source: Vec<u16> = text.units().collect();
+                        let mut parts = Vec::new();
+                        let mut start = 0;
+                        while parts.len() + 1 < limit {
+                            let Some(offset) = source[start..]
+                                .windows(separator.len())
+                                .position(|window| window == separator.as_slice())
+                            else { break; };
+                            let end = start + offset;
+                            parts.push(Value::String(StringUnits::from_units(&source[start..end])));
+                            start = end + separator.len();
+                        }
+                        parts.push(Value::String(StringUnits::from_units(&source[start..])));
+                        parts
                     };
                     Value::Array(ArrayData::new(parts))
                 }
@@ -37144,7 +37695,7 @@ fn call_native(
                         Value::Undefined
                     } else {
                         let index = index as usize;
-                        Value::String(utf16_slice(&units, index..index + 1))
+                        Value::String(StringUnits::from_units(&units[index..index + 1]))
                     }
                 }
                 Native::StringCharAt => {
@@ -37156,9 +37707,9 @@ fn call_native(
                     );
                     // Out of range is the empty string, not undefined.
                     if index < 0.0 || index >= units.len() as f64 {
-                        Value::String(String::new())
+                        Value::String(String::new().into())
                     } else {
-                        Value::String(String::from_utf16_lossy(&units[index as usize..=index as usize]))
+                        Value::String(StringUnits::from_units(&units[index as usize..=index as usize]))
                     }
                 }
                 Native::StringCharCodeAt => {
@@ -37175,9 +37726,10 @@ fn call_native(
                 }
                 Native::StringPadStart | Native::StringPadEnd => {
                     let target = arguments.first().map_or(0.0, Value::as_number);
-                    let padding = match arguments.get(1) {
-                        None | Some(Value::Undefined) => " ".to_owned(),
-                        Some(value) => value.to_display_string(),
+                    let padding: Vec<u16> = match arguments.get(1) {
+                        None | Some(Value::Undefined) => vec![u16::from(b' ')],
+                        Some(Value::String(value)) => value.units().collect(),
+                        Some(value) => value.to_string_units().units().collect(),
                     };
                     let current = text.encode_utf16().count();
                     let target = if target.is_finite() && target > 0.0 {
@@ -37189,28 +37741,24 @@ fn call_native(
                     // Padding with the empty string cannot make progress, so it is left alone
                     // rather than looping forever.
                     if target <= current || padding.is_empty() {
-                        Value::String(text.clone())
+                        Value::String(text.clone().into())
                     } else {
-                        let mut filler = String::new();
-                        while filler.encode_utf16().count() < target - current {
-                            filler.push_str(&padding);
+                        let mut filler = Vec::new();
+                        while filler.len() < target - current {
+                            filler.extend_from_slice(&padding);
                         }
-                        // The last repetition is cut to length rather than overshooting.
-                        let filler: String = filler
-                            .chars()
-                            .scan(0usize, |units, character| {
-                                if *units >= target - current {
-                                    return None;
-                                }
-                                *units += character.len_utf16();
-                                Some(character)
-                            })
-                            .collect();
-                        Value::String(if matches!(native, Native::StringPadStart) {
-                            format!("{filler}{text}")
+                        filler.truncate(target - current);
+                        let mut units = if matches!(native, Native::StringPadStart) {
+                            filler.clone()
                         } else {
-                            format!("{text}{filler}")
-                        })
+                            text.units().collect::<Vec<_>>()
+                        };
+                        if matches!(native, Native::StringPadStart) {
+                            units.extend(text.units());
+                        } else {
+                            units.extend(filler);
+                        }
+                        Value::String(StringUnits::from_units(&units))
                     }
                 }
                 // String patterns only. A regular expression is a different search and a
@@ -37279,7 +37827,7 @@ fn call_native(
                     if at <= subject.len() {
                         push_bounded(&mut out, &utf16_slice(&subject, at..subject.len()))?;
                     }
-                    Value::String(out)
+                    Value::String(out.into())
                 }
                 Native::StringLastIndexOf => {
                     let needle = arguments
@@ -37331,7 +37879,7 @@ fn call_native(
                         Some(value) => clamp(value.as_number()),
                     };
                     let (start, end) = (first.min(second), first.max(second));
-                    Value::String(String::from_utf16_lossy(&units[start..end]))
+                    Value::String(StringUnits::from_units(&units[start..end]))
                 }
                 Native::StringSubstr => {
                     let units: Vec<u16> = text.encode_utf16().collect();
@@ -37354,7 +37902,7 @@ fn call_native(
                             }
                         }
                     };
-                    Value::String(String::from_utf16_lossy(&units[start..start + count]))
+                    Value::String(StringUnits::from_units(&units[start..start + count]))
                 }
                 Native::StringCodePointAt => {
                     let index = arguments.first().map_or(0.0, Value::as_number);
@@ -37412,20 +37960,23 @@ fn call_native(
                     if !matches!(form.as_str(), "NFC" | "NFD" | "NFKC" | "NFKD") {
                         return Err(ExecutionError::RadixOutOfRange);
                     }
-                    Value::String(text.clone())
+                    Value::String(text.clone().into())
                 }
                 Native::StringTrimStart => {
-                    Value::String(text.trim_start_matches(is_js_whitespace).to_owned())
+                    Value::String(string_trim_units(text, true, false))
                 }
                 Native::StringTrimEnd => {
-                    Value::String(text.trim_end_matches(is_js_whitespace).to_owned())
+                    Value::String(string_trim_units(text, false, true))
                 }
                 Native::StringConcat => {
-                    let mut joined = text.clone();
+                    let mut joined = text.to_units().into_vec();
                     for argument in arguments {
-                        joined.push_str(&argument.to_display_string());
+                        match argument {
+                            Value::String(argument) => joined.extend(argument.units()),
+                            _ => joined.extend(argument.to_string_units().units()),
+                        }
                     }
-                    Value::String(joined)
+                    Value::String(StringUnits::from_units(&joined))
                 }
                 Native::StringSlice => {
                     // Code units, because `length` reports code units and a program that slices
@@ -37446,7 +37997,7 @@ fn call_native(
                         None | Some(Value::Undefined) => units.len(),
                         Some(value) => resolve(value.as_number()),
                     };
-                    Value::String(utf16_slice(&units, start.min(end)..end))
+                    Value::String(StringUnits::from_units(&units[start.min(end)..end]))
                 }
                 _ => unreachable!("matched by the arm above"),
             }
@@ -37457,9 +38008,9 @@ fn call_native(
             };
             // A string iterator walks code points, not UTF-16 units: an astral character is one
             // step, which is the difference between iterating a string and indexing it.
-            let characters = text
-                .chars()
-                .map(|character| Value::String(character.to_string()))
+            let characters = string_code_point_units(text)
+                .into_iter()
+                .map(Value::String)
                 .collect::<Vec<_>>();
             let mut iterator = ObjectData::default();
             iterator.set_prototype(Value::Native(
@@ -37488,7 +38039,7 @@ fn call_native(
                     message: "RegExp.escape requires a string".to_owned(),
                 });
             };
-            Value::String(escape_regexp_source(text))
+            Value::String(escape_regexp_source(&text.to_lossy_string()).into())
         }
         Native::SetAdd | Native::MapSet | Native::WeakSetAdd | Native::WeakMapSet => {
             let (entries, is_map) = require_collection(receiver, native)?;
@@ -37589,7 +38140,7 @@ fn call_native(
                         (false, Native::CollectionEntries(_)) => "self-pair",
                         _ => "whole",
                     }
-                    .to_owned(),
+                    .to_owned().into(),
                 ),
             );
 
@@ -37665,7 +38216,7 @@ fn call_native(
                         .as_number(),
                     state
                         .get("@@part")
-                        .unwrap_or(Value::String("value".to_owned()))
+                        .unwrap_or(Value::String("value".to_owned().into()))
                         .to_display_string(),
                 )
             };
@@ -38114,7 +38665,7 @@ fn error_to_string(value: &Value) -> String {
 fn constructor_name(value: &Value) -> Option<String> {
     match value {
         Value::Function(closure) => match closure.properties.borrow().get_own("name") {
-            Some(Value::String(name)) => Some(name.clone()),
+            Some(Value::String(name)) => Some(name.to_lossy_string()),
             _ => None,
         },
         Value::Native(Native::Error(kind), _) => Some(kind.name().to_owned()),
@@ -38455,10 +39006,57 @@ fn is_object_type(value: &Value) -> bool {
 
 /// `key in target`.
 fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
+    let units = key.property_key_units();
+    has_property_key(intrinsics, target, PropertyKeyRef::Units(&units))
+}
+
+fn has_property_key(intrinsics: &Intrinsics, target: &Value, key: PropertyKeyRef<'_>) -> bool {
+    if let Value::Array(items) = target
+        && let Some(index) = array_index_key(key)
+    {
+        if array_exotic_element(items, index).is_some()
+            || items
+                .borrow()
+                .get(index)
+                .is_some_and(|value| !matches!(value, Value::Native(Native::Hole, _)))
+        {
+            return true;
+        }
+        return array_inherited_index_key(intrinsics, items, key).is_some();
+    }
+    if let Value::TypedArray(view) = target
+        && let Some(index) = canonical_numeric_index_key(key)
+    {
+        return valid_integer_index(view, index).is_some();
+    }
+    if let Value::String(text) = target
+        && (key.matches_ascii("length")
+            || array_index_key(key).is_some_and(|index| index < text.unit_len()))
+    {
+        return true;
+    }
+    let Some(name) = key.known_ascii() else {
+        return match target {
+            Value::Object(object) => object.borrow().lookup_key(key).is_some(),
+            Value::Function(closure) => closure.properties.borrow().lookup_key(key).is_some(),
+            Value::Array(items) => items.properties.borrow().lookup_key(key).is_some(),
+            Value::Bound(bound) => bound.properties.borrow().lookup_key(key).is_some(),
+            Value::Native(_, _) | Value::Callback(_, _) => {
+                matches!(intrinsics.overridden_key(target, key), Overridden::Held(..))
+            }
+            other => exotic_properties(other)
+                .is_some_and(|store| store.borrow().lookup_key(key).is_some()),
+        };
+    };
+    has_property_ascii(intrinsics, target, name.as_ref())
+}
+
+fn has_property_ascii(intrinsics: &Intrinsics, target: &Value, name: &str) -> bool {
+    let key = Value::String(name.to_owned().into());
     // `1 in [1, , 3]` is false and `1 in [1, undefined, 3]` is true: the one place the difference
     // between a hole and an undefined element is directly observable.
     if let Value::Array(items) = target
-        && let Some(index) = array_index(key)
+        && let Some(index) = array_index(&key)
     {
         if array_exotic_element(items, index).is_some() {
             return true;
@@ -38480,7 +39078,6 @@ fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
     {
         return valid_integer_index(view, index).is_some();
     }
-    let name = key.property_key();
     // Every intrinsic kind answers `constructor` with the built-in that makes it, so `in` has to
     // agree with the read rather than only with the property store.
     if name == "constructor"
@@ -38533,7 +39130,7 @@ fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
                 )
         }
         Value::Array(items) => {
-            if let Some(index) = array_index(key) {
+            if let Some(index) = array_index(&key) {
                 return index < items.borrow().len();
             }
             // An array carries a property store beside its elements -- `arr.value = 1` goes
@@ -38563,7 +39160,7 @@ fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
         Value::TypedArray(view) => {
             view.properties.borrow().lookup(&name).is_some()
                 || matches!(
-                    name.as_str(),
+                    name,
                     "length" | "byteLength" | "byteOffset" | "BYTES_PER_ELEMENT" | "buffer"
                 )
                 // The same two links the read walks, so `in` and the read cannot disagree about
@@ -38647,7 +39244,7 @@ fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
         // what a read would produce, or a feature-detect and the call after it disagree.
         Value::Function(closure) => {
             closure.properties.borrow().lookup(&name).is_some()
-                || matches!(name.as_str(), "name" | "length")
+                || matches!(name, "name" | "length")
                 || (name == "prototype" && has_prototype_property(closure))
                 || !matches!(
                     function_property(intrinsics, &name, value_realm(target)),
@@ -38990,7 +39587,8 @@ fn collection_property(is_map: bool, weak: bool, name: &str) -> Value {
                 (true, true) => "WeakMap",
                 (false, true) => "WeakSet",
             }
-            .to_owned(),
+            .to_owned()
+            .into(),
         ),
         _ => Value::Undefined,
     }
@@ -39019,7 +39617,7 @@ fn build_raw_json(text: &str) -> Result<Value, ExecutionError> {
         return Err(ExecutionError::InvalidJson);
     }
     let mut object = ObjectData::default();
-    object.set(RAW_JSON_TEXT, Value::String(text.to_owned()));
+    object.set(RAW_JSON_TEXT, Value::String(text.to_owned().into()));
     object.set_non_enumerable(RAW_JSON_MARK, Value::Boolean(true));
     // A null prototype, so the object cannot answer to `toJSON`, `toString` or anything else a
     // program might have put on `Object.prototype` -- it is a carrier, not a participant.
@@ -39133,7 +39731,7 @@ fn disposable_stack_method(name: &str) -> Value {
             Value::Native(Native::DisposableStackDispose, RealmId::PRIMARY)
         }
         key if key == WellKnown::ToStringTag.property_key() => {
-            Value::String("DisposableStack".to_owned())
+            Value::String("DisposableStack".to_owned().into())
         }
         _ => Value::Undefined,
     }
@@ -39155,7 +39753,7 @@ fn async_disposable_stack_method(name: &str) -> Value {
             Value::Native(Native::AsyncDisposableStackDisposeAsync, RealmId::PRIMARY)
         }
         key if key == WellKnown::ToStringTag.property_key() => {
-            Value::String("AsyncDisposableStack".to_owned())
+            Value::String("AsyncDisposableStack".to_owned().into())
         }
         _ => Value::Undefined,
     }
@@ -39164,7 +39762,9 @@ fn async_disposable_stack_method(name: &str) -> Value {
 fn weak_ref_method(name: &str) -> Value {
     match name {
         "deref" => Value::Native(Native::WeakRefDeref, RealmId::PRIMARY),
-        key if key == WellKnown::ToStringTag.property_key() => Value::String("WeakRef".to_owned()),
+        key if key == WellKnown::ToStringTag.property_key() => {
+            Value::String("WeakRef".to_owned().into())
+        }
         _ => Value::Undefined,
     }
 }
@@ -39179,7 +39779,7 @@ fn shadow_realm_method(name: &str) -> Value {
         "evaluate" => Value::Native(Native::ShadowRealmEvaluate, RealmId::PRIMARY),
         "importValue" => Value::Native(Native::ShadowRealmImportValue, RealmId::PRIMARY),
         key if key == WellKnown::ToStringTag.property_key() => {
-            Value::String("ShadowRealm".to_owned())
+            Value::String("ShadowRealm".to_owned().into())
         }
         _ => Value::Undefined,
     }
@@ -39195,7 +39795,7 @@ fn finalization_registry_method(name: &str) -> Value {
         "register" => Value::Native(Native::FinalizationRegistryRegister, RealmId::PRIMARY),
         "unregister" => Value::Native(Native::FinalizationRegistryUnregister, RealmId::PRIMARY),
         key if key == WellKnown::ToStringTag.property_key() => {
-            Value::String("FinalizationRegistry".to_owned())
+            Value::String("FinalizationRegistry".to_owned().into())
         }
         _ => Value::Undefined,
     }
@@ -39580,7 +40180,8 @@ fn array_iterator_over(native: Native, iterated: &Value) -> Value {
                 Native::ArrayKeys => "key",
                 _ => "value",
             }
-            .to_owned(),
+            .to_owned()
+            .into(),
         ),
     );
 
@@ -39837,13 +40438,21 @@ fn array_index(key: &Value) -> Option<usize> {
         // A string reaches an element only in the one spelling that names it. `"01"`, `"1.0"`,
         // `" 1"`, `"1e2"` and `"-0"` are ordinary named properties in JavaScript, and parsing
         // them as numbers handed back an element the program never asked for.
-        Value::String(text) => return canonical_index(text),
+        Value::String(text) => return index_key_units(text),
         _ => return None,
     };
     if number < 0.0 || number.fract() != 0.0 || !number.is_finite() {
         return None;
     }
     Some(number as usize)
+}
+
+/// `array_index`, with a property key already converted exactly once.
+fn array_index_key(key: PropertyKeyRef<'_>) -> Option<usize> {
+    match key {
+        PropertyKeyRef::Utf8(name) => canonical_index(name),
+        PropertyKeyRef::Units(name) => index_key_units(name),
+    }
 }
 
 /// The element a property name reaches, if it is the canonical spelling of an index.
@@ -39853,6 +40462,26 @@ fn array_index(key: &Value) -> Option<usize> {
 fn canonical_index(name: &str) -> Option<usize> {
     let index: usize = name.parse().ok()?;
     (index.to_string() == name).then_some(index)
+}
+
+/// The same array-index test over the language's UTF-16 key units. This avoids constructing a
+/// lossy scalar spelling merely to order a property during insertion.
+fn index_key_units(name: &StringUnits) -> Option<usize> {
+    let mut value = 0usize;
+    let mut digits = 0usize;
+    for unit in name.units() {
+        if !(b'0' as u16..=b'9' as u16).contains(&unit) {
+            return None;
+        }
+        if digits == 0 && unit == b'0' as u16 && name.unit_len() != 1 {
+            return None;
+        }
+        value = value
+            .checked_mul(10)?
+            .checked_add(usize::from(unit - b'0' as u16))?;
+        digits += 1;
+    }
+    (digits > 0 && value <= u32::MAX as usize - 1).then_some(value)
 }
 
 /// How long a wait with no limit is allowed to last before it reports a timeout.
@@ -39995,6 +40624,35 @@ fn canonical_numeric_index(name: &str) -> Option<f64> {
     (number_string(number) == name).then_some(number)
 }
 
+/// `CanonicalNumericIndexString` over exact UTF-16 units.  Numeric spellings are ASCII by
+/// definition, so matching the units directly is sufficient and keeps lone-surrogate keys out of
+/// the scalar conversion path.
+fn canonical_numeric_index_key(key: PropertyKeyRef<'_>) -> Option<f64> {
+    match key {
+        PropertyKeyRef::Utf8(name) => canonical_numeric_index(name),
+        PropertyKeyRef::Units(name) => {
+            let name = name;
+            if name.is_empty() {
+                return None;
+            }
+            if name == "-0" {
+                return Some(-0.0);
+            }
+            let number = parse_number_units(name);
+            let printed = number_string(number);
+            units_match_str(name, &printed).then_some(number)
+        }
+    }
+}
+
+fn units_match_str(units: &StringUnits, text: &str) -> bool {
+    units.unit_len() == text.encode_utf16().count()
+        && units
+            .units()
+            .zip(text.encode_utf16())
+            .all(|(left, right)| left == right)
+}
+
 /// `IsValidIntegerIndex(O, index)`: the element this number reaches in a live view, if any.
 ///
 /// Negative zero is refused along with the negatives it sorts with, and a view whose buffer was
@@ -40027,6 +40685,20 @@ fn join(items: &[Value], separator: &str) -> Result<String, ExecutionError> {
     Ok(out)
 }
 
+fn join_units(items: &[Value], separator: &StringUnits) -> StringUnits {
+    let mut units = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        if index > 0 {
+            units.extend(separator.units());
+        }
+        match item {
+            Value::Undefined | Value::Null | Value::Native(Native::Hole, _) => {}
+            other => units.extend(other.to_string_units().units()),
+        }
+    }
+    StringUnits::from_units(&units)
+}
+
 /// Remove an own property, reporting whether it is gone afterwards.
 ///
 /// Which is why deleting something that was never there is still true, and why deleting a
@@ -40043,34 +40715,37 @@ fn parse_json_text(text: &str) -> Result<Value, ExecutionError> {
 }
 
 fn delete_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
+    let units = key.property_key_units();
+    delete_property_key(intrinsics, target, PropertyKeyRef::Units(&units))
+}
+
+fn delete_property_key(intrinsics: &Intrinsics, target: &Value, key: PropertyKeyRef<'_>) -> bool {
     match target {
         Value::Object(object) => {
             // `delete` reports whether the property is gone, and a non-configurable one never
             // is. `remove` already declines to do the work; the answer has to agree with it.
-            let key = key.property_key();
             let removable = object
                 .borrow()
-                .get_own_attributes(&key)
+                .get_own_attributes_key(key)
                 .is_none_or(|attributes| attributes.configurable);
             if !removable {
                 return false;
             }
-            object.borrow_mut().remove(&key);
+            object.borrow_mut().remove_key(key);
             true
         }
         // A function owns properties too -- a class's statics live in a store of its own -- and
         // `delete C.of` has to reach that store rather than silently succeeding against nothing.
         Value::Function(closure) => {
-            let key = key.property_key();
             let removable = closure
                 .properties
                 .borrow()
-                .get_own_attributes(&key)
+                .get_own_attributes_key(key)
                 .is_none_or(|attributes| attributes.configurable);
             if !removable {
                 return false;
             }
-            closure.properties.borrow_mut().remove(&key);
+            closure.properties.borrow_mut().remove_key(key);
             true
         }
         // Removing an element leaves a *hole* rather than shortening the array: the slot reads
@@ -40079,19 +40754,19 @@ fn delete_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool
         // one place the difference between the two is directly observable.
         Value::Array(items) => {
             // `length` is non-configurable, so `delete a.length` is false and the array keeps it.
-            if key.property_key() == "length" {
+            if key.matches_ascii("length") {
                 return false;
             }
             if items.properties.borrow().is_frozen() {
                 return false;
             }
-            let Some(index) = array_index(key) else {
+            let Some(index) = array_index_key(key) else {
                 // Not an index, so it is an ordinary named property of the array and it lives in
                 // the store beside the elements. Reporting `true` without reaching that store
                 // said the property was gone while it was still there -- which every
                 // descriptor test in the corpus notices, because `verifyProperty` deletes a
                 // property and restores it and had been restoring one that never left.
-                return remove_exotic_property(&items.properties, &key.property_key());
+                return remove_exotic_property_key(&items.properties, key);
             };
             // An element a program locked down will not go, and `delete` reports that
             // rather than leaving `length` describing an array that no longer matches it.
@@ -40110,38 +40785,32 @@ fn delete_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool
             }
             true
         }
-        Value::TypedArray(view) => match canonical_numeric_index(&key.property_key()) {
+        Value::TypedArray(view) => match canonical_numeric_index_key(key) {
             // An element that is really there will not go -- the specification gives an
             // integer-indexed property no way to be configured away -- and an element key that
             // reaches no slot was never there to remove, so `delete` reports it gone.
             Some(index) => valid_integer_index(view, index).is_none(),
-            None => remove_exotic_property(&view.properties, &key.property_key()),
+            None => remove_exotic_property_key(&view.properties, key),
         },
-        other if exotic_properties(other).is_some() => {
-            let key = key.property_key();
-            match exotic_properties(target) {
-                Some(store) if !exotic_reserved_name(target, &key) => {
-                    remove_exotic_property(store, &key)
-                }
-                _ => true,
+        other if exotic_properties(other).is_some() => match exotic_properties(target) {
+            Some(store) if !exotic_reserved_name_key(target, key) => {
+                remove_exotic_property_key(store, key)
             }
-        }
+            _ => true,
+        },
         Value::String(text) => {
-            let key = key.property_key();
-            let indexed =
-                index_key(&key).is_some_and(|index| (index as usize) < text.encode_utf16().count());
-            !(key == "length" || indexed)
+            let indexed = array_index_key(key).is_some_and(|index| index < text.unit_len());
+            !(key.matches_ascii("length") || indexed)
         }
         // A built-in's own properties are tabulated rather than stored, so removing one is
         // recording the removal in the realm's store -- which is what makes the specification's
         // `configurable: true` on almost all of them mean something.
         Value::Native(_, _) | Value::Callback(_, _) => {
-            let key = key.property_key();
-            match own_attributes(intrinsics, target, &key) {
+            match own_attributes_key(intrinsics, target, key) {
                 // Never there, so it is gone: `delete Math.nonesuch` is true.
                 None => true,
                 Some(attributes) if attributes.configurable => {
-                    intrinsics.remove(target, &key);
+                    intrinsics.remove_key(target, key);
                     true
                 }
                 Some(_) => false,
@@ -40159,13 +40828,20 @@ fn delete_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool
 /// its indices, which is what makes `{ ...[1, 2] }` an object with keys "0" and "1"; a primitive
 /// with nothing of its own contributes nothing, and so does `null` or `undefined`.
 fn own_properties(intrinsics: &Intrinsics, value: &Value) -> Vec<(String, Property)> {
+    own_properties_units(intrinsics, value)
+        .into_iter()
+        .map(|(key, property)| (key.to_lossy_string(), property))
+        .collect()
+}
+
+fn own_properties_units(intrinsics: &Intrinsics, value: &Value) -> Vec<(StringUnits, Property)> {
     match value {
         // A built-in's tabulated properties are all non-enumerable, so what a spread or an
         // `Object.assign` copies off one is exactly what a program put there -- with one
         // exception, and it is the exception every bundler's output depends on. A Node builtin
         // module's exports *are* enumerable, which is what makes `{ ...require("path") }` and
         // `export * from "path"` copy anything at all.
-        Value::Native(_, _) | Value::Callback(_, _) => intrinsics.enumerable_entries(value),
+        Value::Native(_, _) | Value::Callback(_, _) => intrinsics.enumerable_entries_units(value),
         // A function is an object, and a static a program hung on one is an own enumerable
         // property like any other -- which is the whole reason `{ ...postcss }` copies anything
         // at all when `postcss` is a function carrying its plugins. `length` and `name` are
@@ -40176,7 +40852,7 @@ fn own_properties(intrinsics: &Intrinsics, value: &Value) -> Vec<(String, Proper
             .properties
             .borrow()
             .entries()
-            .map(|(key, property)| (key.to_owned(), property.clone()))
+            .map(|(key, property)| (key.clone(), property.clone()))
             .collect(),
         // A bound function keeps its own store, and `length` and `name` are not in it -- the
         // own-key walk supplies those two literally -- so what is here is exactly what a holder
@@ -40185,15 +40861,15 @@ fn own_properties(intrinsics: &Intrinsics, value: &Value) -> Vec<(String, Proper
             .properties
             .borrow()
             .entries()
-            .map(|(key, property)| (key.to_owned(), property.clone()))
+            .map(|(key, property)| (key.clone(), property.clone()))
             .collect(),
-        Value::Object(object) => string_wrapper_entries(value)
+        Value::Object(object) => string_wrapper_entries_units(value)
             .into_iter()
             .chain(
                 object
                     .borrow()
                     .entries()
-                    .map(|(key, property)| (key.to_owned(), property.clone())),
+                    .map(|(key, property)| (key.clone(), property.clone())),
             )
             .collect(),
         // The indices first and then whatever the program hung on the array by name, which is
@@ -40207,30 +40883,35 @@ fn own_properties(intrinsics: &Intrinsics, value: &Value) -> Vec<(String, Proper
             .enumerate()
             // A hole has no key, so it is absent from `Object.keys`, `for-in` and a spread.
             .filter(|(_, item)| !matches!(item, Value::Native(Native::Hole, _)))
-            .map(|(index, item)| (index.to_string(), Property::Value(item.clone())))
+            .map(|(index, item)| {
+                (
+                    StringUnits::from(index.to_string()),
+                    Property::Value(item.clone()),
+                )
+            })
             .chain(
                 items
                     .properties
                     .borrow()
                     .entries()
-                    .map(|(key, property)| (key.to_owned(), property.clone()))
+                    .map(|(key, property)| (key.clone(), property.clone()))
                     .collect::<Vec<_>>(),
             )
             .collect(),
         // The elements, and then whatever the program hung on the view: a spread copies both,
         // in the order the own-key walk lists them.
         Value::TypedArray(view) => {
-            let mut entries: Vec<(String, Property)> = (0..view.len())
+            let mut entries: Vec<(StringUnits, Property)> = (0..view.len())
                 .filter_map(|index| {
                     view.get(index)
-                        .map(|value| (index.to_string(), Property::Value(value)))
+                        .map(|value| (StringUnits::from(index.to_string()), Property::Value(value)))
                 })
                 .collect();
             entries.extend(
                 view.properties
                     .borrow()
                     .entries()
-                    .map(|(key, property)| (key.to_owned(), property.clone())),
+                    .map(|(key, property)| (key.clone(), property.clone())),
             );
             entries
         }
@@ -40239,17 +40920,17 @@ fn own_properties(intrinsics: &Intrinsics, value: &Value) -> Vec<(String, Proper
                 store
                     .borrow()
                     .entries()
-                    .map(|(key, property)| (key.to_owned(), property.clone()))
+                    .map(|(key, property)| (key.clone(), property.clone()))
                     .collect()
             })
             .unwrap_or_default(),
         Value::String(text) => text
-            .chars()
+            .units()
             .enumerate()
-            .map(|(index, character)| {
+            .map(|(index, unit)| {
                 (
-                    index.to_string(),
-                    Property::Value(Value::String(character.to_string())),
+                    StringUnits::from(index.to_string()),
+                    Property::Value(Value::String(StringUnits::from_units(&[unit]))),
                 )
             })
             .collect(),
@@ -40672,7 +41353,8 @@ fn json_value_from_tape(document: &kiln_json::Tape<'_>) -> Result<Value, Executi
                 document
                     .string(node)
                     .ok_or(ExecutionError::InvalidJson)?
-                    .to_owned(),
+                    .to_owned()
+                    .into(),
             ),
             kiln_json::TAG_ARRAY => {
                 if count != 0 {
@@ -40721,7 +41403,7 @@ fn json_value_from_tape(document: &kiln_json::Tape<'_>) -> Result<Value, Executi
                         let Value::String(name) = value else {
                             return Err(ExecutionError::InvalidJson);
                         };
-                        *key = Some(name);
+                        *key = Some(name.to_lossy_string());
                         break;
                     }
                     Some(name) => {
@@ -40757,7 +41439,7 @@ fn json_value_from_tape(document: &kiln_json::Tape<'_>) -> Result<Value, Executi
 pub(crate) fn inspect(value: &Value) -> String {
     match value {
         // A top-level string prints as itself; only a nested one is quoted.
-        Value::String(text) => text.clone(),
+        Value::String(text) => text.to_lossy_string(),
         other => inspect_nested(other, 0, &mut Vec::new()),
     }
 }
@@ -40767,7 +41449,7 @@ const INSPECT_DEPTH: usize = 2;
 
 fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String {
     match value {
-        Value::String(text) => quote_for_console(text),
+        Value::String(text) => quote_for_console(&text.to_lossy_string()),
         Value::Undefined | Value::Null | Value::Boolean(_) | Value::Number(_) => {
             // `-0` prints as itself here, where `String(-0)` is "0": the console is showing the
             // value, not converting it.
@@ -40832,7 +41514,7 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
         ),
         Value::RegExp(regexp) => format!(
             "/{}/{}",
-            regexp.source,
+            regexp.source.to_lossy_string(),
             canonical_regexp_flags(&regexp.flags)
         ),
         Value::Date(date) => {
@@ -40868,13 +41550,13 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
                 .properties
                 .borrow()
                 .entries()
-                .filter(|(key, _)| !symbol::is_reserved(key))
+                .filter(|(key, _)| !symbol::is_reserved(&key.to_lossy_string()))
                 .map(|(key, property)| {
                     let shown = match property {
                         Property::Value(value) => inspect_nested(value, depth + 1, guard.seen),
                         Property::Accessor { .. } => "[Getter/Setter]".to_owned(),
                     };
-                    format!("{}: {}", inspect_key(key), shown)
+                    format!("{}: {}", inspect_key(&key.to_lossy_string()), shown)
                 })
                 .collect();
             let items = items.borrow();
@@ -40962,7 +41644,7 @@ fn inspect_object(object: &ObjectData, depth: usize, seen: &mut Vec<usize>) -> S
         .entries()
         // Reserved keys are the VM's own and symbol-keyed properties; node shows the latter as
         // `[Symbol(x)]: v`, which needs a key-to-symbol map this VM does not keep.
-        .filter(|(key, _)| !symbol::is_reserved(key))
+        .filter(|(key, _)| !symbol::is_reserved(&key.to_lossy_string()))
         .map(|(key, property)| {
             let shown = match property {
                 Property::Value(value) => inspect_nested(value, depth + 1, seen),
@@ -40974,7 +41656,7 @@ fn inspect_object(object: &ObjectData, depth: usize, seen: &mut Vec<usize>) -> S
                     _ => "[Setter]".to_owned(),
                 },
             };
-            format!("{}: {}", inspect_key(key), shown)
+            format!("{}: {}", inspect_key(&key.to_lossy_string()), shown)
         })
         .collect::<Vec<_>>();
     // Node names the class an instance came from, so a printed object says what it is. A plain
@@ -41005,10 +41687,29 @@ fn constructor_label(object: &ObjectData) -> Option<String> {
 }
 
 /// Compile a regular expression, or `None` when the engine rejects the pattern.
-fn build_regexp(pattern: &str, flags: &str) -> Option<Value> {
-    let compiled = regress::Regex::with_flags(pattern, flags).ok()?;
+fn build_regexp(pattern: &StringUnits, flags: &str) -> Option<Value> {
+    let units = pattern.to_units();
+    let mut codepoints = Vec::with_capacity(units.len());
+    let mut index = 0;
+    while index < units.len() {
+        let unit = units[index];
+        if (0xd800..=0xdbff).contains(&unit)
+            && units
+                .get(index + 1)
+                .is_some_and(|next| (0xdc00..=0xdfff).contains(next))
+        {
+            let low = units[index + 1];
+            codepoints
+                .push(0x1_0000 + ((u32::from(unit) - 0xd800) << 10) + u32::from(low) - 0xdc00);
+            index += 2;
+        } else {
+            codepoints.push(u32::from(unit));
+            index += 1;
+        }
+    }
+    let compiled = regress::Regex::from_unicode(codepoints.iter().copied(), flags).ok()?;
     Some(Value::RegExp(Rc::new(RegExpData {
-        source: pattern.to_owned(),
+        source: pattern.clone(),
         flags: flags.to_owned(),
         compiled,
         global: flags.contains('g'),
@@ -42209,11 +42910,11 @@ fn match_result(
     names: &[(String, Option<std::ops::Range<usize>>)],
     has_indices: bool,
 ) -> Value {
-    let mut items = vec![Value::String(utf16_slice(subject, range.clone()))];
+    let mut items = vec![Value::String(utf16_slice(subject, range.clone()).into())];
     // The first group `regress` reports is the whole match, which is already element zero.
     for group in groups.iter().skip(1) {
         items.push(match group {
-            Some(range) => Value::String(utf16_slice(subject, range.clone())),
+            Some(range) => Value::String(utf16_slice(subject, range.clone()).into()),
             // A group that did not participate is undefined rather than empty.
             None => Value::Undefined,
         });
@@ -42227,7 +42928,7 @@ fn match_result(
         .set("index", Value::Number(range.start as f64));
     result.properties.borrow_mut().set(
         "input",
-        Value::String(utf16_slice(subject, 0..subject.len())),
+        Value::String(utf16_slice(subject, 0..subject.len()).into()),
     );
     // Present and undefined rather than absent when the pattern has no named groups: a program
     // reads `m.groups?.name`, and node shows the key. With names, it is a real object -- reading
@@ -42236,7 +42937,7 @@ fn match_result(
         Value::Undefined
     } else {
         named_group_object(names, |group| match group {
-            Some(range) => Value::String(utf16_slice(subject, range.clone())),
+            Some(range) => Value::String(utf16_slice(subject, range.clone()).into()),
             None => Value::Undefined,
         })
     };
@@ -42268,6 +42969,101 @@ fn utf16_slice(subject: &[u16], range: std::ops::Range<usize>) -> String {
     String::from_utf16_lossy(&subject[range])
 }
 
+/// Iterates code points while retaining an unpaired surrogate as its original one-unit string.
+fn string_code_point_units(text: &StringUnits) -> Vec<StringUnits> {
+    let units: Vec<u16> = text.units().collect();
+    let mut out = Vec::with_capacity(units.len());
+    let mut at = 0;
+    while at < units.len() {
+        let end = if (0xd800..=0xdbff).contains(&units[at])
+            && units
+                .get(at + 1)
+                .is_some_and(|unit| (0xdc00..=0xdfff).contains(unit))
+        {
+            at + 2
+        } else {
+            at + 1
+        };
+        out.push(StringUnits::from_units(&units[at..end]));
+        at = end;
+    }
+    out
+}
+
+fn value_to_string_units(value: &Value) -> Vec<u16> {
+    match value {
+        Value::String(text) => text.units().collect(),
+        other => other.to_string_units().units().collect(),
+    }
+}
+
+fn string_case_map(text: &StringUnits, upper: bool) -> StringUnits {
+    let units: Vec<u16> = text.units().collect();
+    if let Ok(scalar) = String::from_utf16(&units) {
+        return StringUnits::from(if upper {
+            scalar.to_uppercase()
+        } else {
+            scalar.to_lowercase()
+        });
+    }
+    let mut out = Vec::with_capacity(units.len());
+    let mut segment = String::new();
+    for decoded in char::decode_utf16(units.iter().copied()) {
+        match decoded {
+            Ok(character) => segment.push(character),
+            Err(error) => {
+                let mapped = if upper {
+                    segment.to_uppercase()
+                } else {
+                    segment.to_lowercase()
+                };
+                out.extend(mapped.encode_utf16());
+                segment.clear();
+                out.push(error.unpaired_surrogate());
+            }
+        }
+    }
+    let mapped = if upper {
+        segment.to_uppercase()
+    } else {
+        segment.to_lowercase()
+    };
+    out.extend(mapped.encode_utf16());
+    StringUnits::from_units(&out)
+}
+
+fn string_trim_units(text: &StringUnits, trim_start: bool, trim_end: bool) -> StringUnits {
+    let units: Vec<u16> = text.units().collect();
+    let mut start = 0;
+    let mut end = units.len();
+    if trim_start {
+        let mut offset = 0;
+        for decoded in char::decode_utf16(units.iter().copied()) {
+            match decoded {
+                Ok(character) if is_js_whitespace(character) => offset += character.len_utf16(),
+                _ => break,
+            }
+        }
+        start = offset;
+    }
+    if trim_end {
+        let mut offset = 0;
+        for decoded in char::decode_utf16(units.iter().copied()) {
+            let length = match &decoded {
+                Ok(character) => character.len_utf16(),
+                Err(_) => 1,
+            };
+            match decoded {
+                Ok(character) if is_js_whitespace(character) => {}
+                Ok(character) => end = offset + character.len_utf16(),
+                Err(_) => end = offset + 1,
+            }
+            offset += length;
+        }
+    }
+    StringUnits::from_units(&units[start.min(end)..end])
+}
+
 /// The methods on `RegExp.prototype`, without the per-instance data a regexp also answers to.
 ///
 /// A program reaches for these to call one against a receiver of its own -- `RegExp.prototype
@@ -42280,8 +43076,8 @@ fn regexp_method(name: &str) -> Value {
         // What the accessors answer *for the table itself*. `RegExp.prototype` has no pattern
         // and no flags, and the specification gives these two an answer anyway rather than
         // throwing: the empty flag set, and the pattern that matches the empty string.
-        "source" => Value::String("(?:)".to_owned()),
-        "flags" => Value::String(String::new()),
+        "source" => Value::String("(?:)".to_owned().into()),
+        "flags" => Value::String(String::new().into()),
         key => match RegExpSymbol::named(key) {
             Some(method) => Value::Native(Native::RegExpSymbol(method), RealmId::PRIMARY),
             None => Value::Undefined,
@@ -42497,7 +43293,8 @@ fn array_buffer_method(shared: bool, name: &str) -> Value {
             } else {
                 "ArrayBuffer"
             }
-            .to_owned(),
+            .to_owned()
+            .into(),
         ),
         _ => Value::Undefined,
     }
@@ -42599,7 +43396,9 @@ fn data_view_method(name: &str) -> Value {
         "getBigUint64" => Value::Native(Native::DataViewGetBig { signed: false }, RealmId::PRIMARY),
         "setBigInt64" => Value::Native(Native::DataViewSetBig { signed: true }, RealmId::PRIMARY),
         "setBigUint64" => Value::Native(Native::DataViewSetBig { signed: false }, RealmId::PRIMARY),
-        key if key == WellKnown::ToStringTag.property_key() => Value::String("DataView".to_owned()),
+        key if key == WellKnown::ToStringTag.property_key() => {
+            Value::String("DataView".to_owned().into())
+        }
         _ => Value::Undefined,
     }
 }
@@ -42777,7 +43576,9 @@ fn symbol_method(name: &str) -> Value {
         // Not `toLocaleString`: a symbol inherits `Object.prototype`'s.
         "toString" => Value::Native(Native::PrimitiveToString, RealmId::PRIMARY),
         "valueOf" => Value::Native(Native::PrimitiveValueOf, RealmId::PRIMARY),
-        key if key == WellKnown::ToStringTag.property_key() => Value::String("Symbol".to_owned()),
+        key if key == WellKnown::ToStringTag.property_key() => {
+            Value::String("Symbol".to_owned().into())
+        }
         // `thisSymbolValue`, which answers the symbol itself for every hint. It is what makes
         // `` `${sym}` `` a TypeError rather than a description: the reduction reaches a symbol,
         // and a symbol has no string.
@@ -42795,7 +43596,9 @@ fn bigint_method(name: &str) -> Value {
         // The receiver, not a number: narrowing to a double would make `(5n).valueOf() === 5n`
         // false, which is the one thing this type exists to prevent.
         "valueOf" => Value::Native(Native::PrimitiveValueOf, RealmId::PRIMARY),
-        key if key == WellKnown::ToStringTag.property_key() => Value::String("BigInt".to_owned()),
+        key if key == WellKnown::ToStringTag.property_key() => {
+            Value::String("BigInt".to_owned().into())
+        }
         _ => Value::Undefined,
     }
 }
@@ -42806,7 +43609,9 @@ fn promise_method(name: &str) -> Value {
         "then" => Value::Native(Native::PromiseThen, RealmId::PRIMARY),
         "catch" => Value::Native(Native::PromiseCatch, RealmId::PRIMARY),
         "finally" => Value::Native(Native::PromiseFinally, RealmId::PRIMARY),
-        key if key == WellKnown::ToStringTag.property_key() => Value::String("Promise".to_owned()),
+        key if key == WellKnown::ToStringTag.property_key() => {
+            Value::String("Promise".to_owned().into())
+        }
         _ => Value::Undefined,
     }
 }
@@ -42845,7 +43650,8 @@ fn generator_prototype_method(asynchronous: bool, name: &str) -> Value {
             } else {
                 "Generator"
             }
-            .to_owned(),
+            .to_owned()
+            .into(),
         ),
         _ => Value::Undefined,
     }
@@ -43311,11 +44117,13 @@ fn builtin_accessor_slot(accessor: BuiltinAccessor, receiver: &Value) -> Value {
         },
         BuiltinAccessor::SymbolDescription => match receiver {
             Value::Symbol(symbol) => match symbol {
-                Symbol::WellKnown(well_known) => Value::String(well_known.description().to_owned()),
+                Symbol::WellKnown(well_known) => {
+                    Value::String(well_known.description().to_owned().into())
+                }
                 Symbol::Unique(unique) => unique
                     .description
                     .as_ref()
-                    .map_or(Value::Undefined, |text| Value::String(text.clone())),
+                    .map_or(Value::Undefined, |text| Value::String(text.clone().into())),
             },
             _ => unreachable!("Symbol accessor passed a non-symbol receiver"),
         },
@@ -43734,16 +44542,19 @@ fn branded_boolean(receiver: &Value) -> Result<bool, ExecutionError> {
 /// character plus a `length`, which is what makes `Object.keys(new String("ab"))` `["0", "1"]`
 /// and `delete new String("a")[0]` fail. Every other wrapper owns nothing.
 fn string_exotic(target: &Value, key: &str) -> Option<Value> {
+    string_exotic_key(target, PropertyKeyRef::Utf8(key))
+}
+
+fn string_exotic_key(target: &Value, key: PropertyKeyRef<'_>) -> Option<Value> {
     let Some(Value::String(text)) = wrapped_primitive(target) else {
         return None;
     };
-    if key == "length" {
+    if key.matches_ascii("length") {
         return Some(Value::Number(text.encode_utf16().count() as f64));
     }
-    let index = key.parse::<usize>().ok()?;
-    text.chars()
-        .nth(index)
-        .map(|character| Value::String(character.to_string()))
+    let index = array_index_key(key)?;
+    text.unit_at(index)
+        .map(|unit| Value::String(StringUnits::from_units(&[unit])))
 }
 
 /// Whether this array still behaves ordinarily enough for the dense fast paths to answer for it.
@@ -43782,7 +44593,15 @@ fn array_inherited_index(
     items: &ArrayData,
     name: &str,
 ) -> Option<Property> {
-    if let Some(found) = items.properties.borrow().lookup(name) {
+    array_inherited_index_key(intrinsics, items, PropertyKeyRef::Utf8(name))
+}
+
+fn array_inherited_index_key(
+    intrinsics: &Intrinsics,
+    items: &ArrayData,
+    key: PropertyKeyRef<'_>,
+) -> Option<Property> {
+    if let Some(found) = items.properties.borrow().lookup_key(key) {
         return Some(found);
     }
     // A chain the program moved has already been walked by `lookup`; only an array still linked
@@ -43791,9 +44610,9 @@ fn array_inherited_index(
         return None;
     }
     for table in [PrototypeTable::Array, PrototypeTable::Object] {
-        if let Overridden::Held(property, _) = intrinsics.overridden(
+        if let Overridden::Held(property, _) = intrinsics.overridden_key(
             &Value::Native(Native::PrototypeOf(table), RealmId::PRIMARY),
-            name,
+            key,
         ) {
             return Some(property);
         }
@@ -43853,10 +44672,10 @@ fn read_chain_start(target: &Value) -> Value {
 /// property, or a table publishing the name itself -- because carrying on past it would let an
 /// accessor further up shadow the thing that actually answers, which is the direction a prototype
 /// chain does not run in.
-fn inherited_intrinsic_accessor(
+fn inherited_intrinsic_accessor_key(
     intrinsics: &Intrinsics,
     target: &Value,
-    name: &str,
+    key: PropertyKeyRef<'_>,
 ) -> Option<Property> {
     // The common case by an enormous margin: no program has defined an accessor on any built-in,
     // so there is nothing up there to find and every read that misses its own store pays one
@@ -43865,6 +44684,12 @@ fn inherited_intrinsic_accessor(
         return None;
     }
     let mut link = read_chain_start(target);
+    // Table accessors are named with ASCII spellings. An unknown units key cannot name one, and
+    // must remain on the exact store path rather than being converted through replacement chars.
+    let Some(table_name) = key.known_ascii() else {
+        return None;
+    };
+    let table_name = table_name.as_ref();
     // Bounded rather than trusted. `Object.setPrototypeOf` refuses to build a cycle, but this
     // walks the chain a value *kind* gives as well as the stored one, and a bounded walk cannot
     // hang whatever the two combine into. Real chains are a handful of links deep.
@@ -43879,7 +44704,7 @@ fn inherited_intrinsic_accessor(
             link = prototype_of(&link);
             continue;
         };
-        match intrinsics.overridden(&link, name) {
+        match intrinsics.overridden_key(&link, key) {
             Overridden::Held(property @ Property::Accessor { .. }, _) => return Some(property),
             // A data property answers here, and the ordinary read is what finds it.
             Overridden::Held(Property::Value(_), _) => return None,
@@ -43887,9 +44712,9 @@ fn inherited_intrinsic_accessor(
             // tombstone.
             Overridden::Absent => {}
             Overridden::Untouched => {
-                if intrinsic_owns(native, name).is_some()
-                    || intrinsic_accessor(&link, name).is_some()
-                    || machine_accessor(&link, name).is_some()
+                if intrinsic_owns(native, &table_name).is_some()
+                    || intrinsic_accessor(&link, &table_name).is_some()
+                    || machine_accessor(&link, &table_name).is_some()
                 {
                     return None;
                 }
@@ -43900,13 +44725,13 @@ fn inherited_intrinsic_accessor(
     None
 }
 
-fn array_own_property(items: &ArrayData, key: &str) -> Option<Property> {
-    if key == "length" {
+fn array_own_property_key(items: &ArrayData, key: PropertyKeyRef<'_>) -> Option<Property> {
+    if key.matches_ascii("length") {
         #[expect(clippy::cast_precision_loss)]
         let length = items.length() as f64;
         return Some(Property::Value(Value::Number(length)));
     }
-    let index = canonical_index(key)?;
+    let index = array_index_key(key)?;
     items
         .borrow()
         .get(index)
@@ -43955,7 +44780,7 @@ fn wrapped_primitive(value: &Value) -> Option<Value> {
         Value::Object(object) => object.borrow().primitive().cloned(),
         Value::Native(Native::PrototypeOf(PrototypeTable::Number), _) => Some(Value::Number(0.0)),
         Value::Native(Native::PrototypeOf(PrototypeTable::String), _) => {
-            Some(Value::String(String::new()))
+            Some(Value::String(String::new().into()))
         }
         Value::Native(Native::PrototypeOf(PrototypeTable::Boolean), _) => {
             Some(Value::Boolean(false))
@@ -43989,16 +44814,16 @@ fn to_object(value: &Value) -> Option<Value> {
 /// properties has to ask for them separately. `Object.keys(Object("abc"))` was `[]` while
 /// `Object.getOwnPropertyNames` of the same object listed all three, which is the two walks
 /// disagreeing about one object.
-fn string_wrapper_entries(value: &Value) -> Vec<(String, Property)> {
+fn string_wrapper_entries_units(value: &Value) -> Vec<(StringUnits, Property)> {
     let Some(Value::String(text)) = wrapped_primitive(value) else {
         return Vec::new();
     };
-    text.chars()
+    text.units()
         .enumerate()
-        .map(|(index, character)| {
+        .map(|(index, unit)| {
             (
-                index.to_string(),
-                Property::Value(Value::String(character.to_string())),
+                StringUnits::from(index.to_string()),
+                Property::Value(Value::String(StringUnits::from_units(&[unit]))),
             )
         })
         .collect()
@@ -44058,7 +44883,7 @@ fn receiver_for(native: Native, receiver: &Value) -> Option<Value> {
 fn identity_property(target: &Value, key: &str) -> Option<Value> {
     let (name, length) = intrinsic_identity(target)?;
     match key {
-        "name" => Some(Value::String(name)),
+        "name" => Some(Value::String(name.into())),
         "length" => Some(Value::Number(length)),
         _ => None,
     }
@@ -44157,10 +44982,11 @@ fn define_function_name(function: &Value, key: &Value, prefix: Option<&str>) {
         Some(prefix) => format!("{prefix} {name}"),
         None => name,
     };
-    closure
-        .properties
-        .borrow_mut()
-        .define_value("name", Value::String(name), FUNCTION_IDENTITY);
+    closure.properties.borrow_mut().define_value(
+        "name",
+        Value::String(name.into()),
+        FUNCTION_IDENTITY,
+    );
 }
 
 const FUNCTION_IDENTITY: Attributes = Attributes {
@@ -44243,7 +45069,7 @@ fn function_identity(value: &Value) -> Option<(String, f64)> {
             let properties = closure.properties.borrow();
             Some((
                 match properties.get_own("name") {
-                    Some(Value::String(name)) => name.clone(),
+                    Some(Value::String(name)) => name.to_scalar_string().unwrap_or_default(),
                     _ => String::new(),
                 },
                 match properties.get_own("length") {
@@ -44560,7 +45386,7 @@ struct Intrinsics {
     entries: RefCell<Vec<(IntrinsicKey, ObjectData)>>,
     /// Whether any program has defined an *accessor* on any built-in.
     ///
-    /// A guard for [`inherited_intrinsic_accessor`], which is asked on every read that misses a
+    /// A guard for [`inherited_intrinsic_accessor_key`], which is asked on every read that misses a
     /// value's own store -- which is every method call on an array, a string or a map. False
     /// until a program does it and never cleared afterwards: `delete` removing the last one is
     /// rare enough that re-scanning to clear the flag would cost more than the walk it saves,
@@ -44612,8 +45438,8 @@ impl Intrinsics {
         let mut data = ObjectData::default();
         // None of these is enumerated: they are the realm's furniture, not something a program
         // put on the prototype, and `for (const k in e)` must not walk over them.
-        data.set_non_enumerable("name", Value::String(kind.name().to_owned()));
-        data.set_non_enumerable("message", Value::String(String::new()));
+        data.set_non_enumerable("name", Value::String(kind.name().to_owned().into()));
+        data.set_non_enumerable("message", Value::String(String::new().into()));
         // `e.constructor.name` is how a program asks which kind it caught, and this is the link
         // that answers it.
         data.set_non_enumerable("constructor", Value::Native(Native::Error(kind), realm));
@@ -44704,6 +45530,10 @@ impl Intrinsics {
 
     /// What the materialized store says about `key` on this built-in.
     fn overridden(&self, target: &Value, key: &str) -> Overridden {
+        self.overridden_key(target, PropertyKeyRef::Utf8(key))
+    }
+
+    fn overridden_key(&self, target: &Value, key: PropertyKeyRef<'_>) -> Overridden {
         let Some(identity) = intrinsic_key(target) else {
             return Overridden::Untouched;
         };
@@ -44712,10 +45542,11 @@ impl Intrinsics {
             return Overridden::Untouched;
         };
         let data = slots;
-        if let Some(property) = data.get_own_property(key) {
+        if let Some(property) = data.get_own_property_key(key) {
             return Overridden::Held(
                 property.clone(),
-                data.get_own_attributes(key).unwrap_or(Attributes::DEFAULT),
+                data.get_own_attributes_key(key)
+                    .unwrap_or(Attributes::DEFAULT),
             );
         }
         Overridden::Absent
@@ -44776,8 +45607,13 @@ impl Intrinsics {
         }
     }
 
-    /// Write an own property an assignment or [`define_own_property`] has already approved.
-    fn install(&self, target: &Value, key: &str, property: Property, attributes: Attributes) {
+    fn install_key(
+        &self,
+        target: &Value,
+        key: PropertyKeyRef<'_>,
+        property: Property,
+        attributes: Attributes,
+    ) {
         let Some(identity) = intrinsic_key(target) else {
             return;
         };
@@ -44787,18 +45623,17 @@ impl Intrinsics {
         self.materialize(target);
         let mut entries = self.entries.borrow_mut();
         let data = Self::data(&mut entries, identity);
-        data.install(key, property, attributes);
+        data.install_key(key, property, attributes);
     }
 
-    /// Remove an own property the caller has already found configurable.
-    fn remove(&self, target: &Value, key: &str) {
+    fn remove_key(&self, target: &Value, key: PropertyKeyRef<'_>) {
         let Some(identity) = intrinsic_key(target) else {
             return;
         };
         self.materialize(target);
         let mut entries = self.entries.borrow_mut();
         let data = Self::data(&mut entries, identity);
-        data.remove(key);
+        data.remove_key(key);
     }
 
     /// Complete materialized own keys in ordinary ObjectData insertion order.
@@ -44811,24 +45646,19 @@ impl Intrinsics {
         })
     }
 
-    fn own_keys(&self, target: &Value) -> Option<Vec<String>> {
+    fn own_keys_units(&self, target: &Value) -> Option<Vec<StringUnits>> {
         let identity = intrinsic_key(target)?;
         let entries = self.entries.borrow();
         let data = &entries.iter().find(|(key, _)| *key == identity)?.1;
         Some(
             data.keys()
-                .filter(|key| !symbol::is_reserved(key))
-                .map(str::to_owned)
+                .filter(|key| !is_reserved_units(key))
+                .cloned()
                 .collect(),
         )
     }
 
-    /// The own properties of this built-in that enumeration sees.
-    ///
-    /// Only the ones a program added: everything the tables answer for is non-enumerable, which
-    /// is the specification's rule for built-ins and the reason `Object.keys(Math)` is empty in
-    /// a realm nothing has touched.
-    fn enumerable_entries(&self, target: &Value) -> Vec<(String, Property)> {
+    fn enumerable_entries_units(&self, target: &Value) -> Vec<(StringUnits, Property)> {
         let Some(identity) = intrinsic_key(target) else {
             return Vec::new();
         };
@@ -44838,8 +45668,8 @@ impl Intrinsics {
             return Vec::new();
         };
         data.entries()
-            .filter(|(key, _)| !symbol::is_reserved(key))
-            .map(|(key, property)| (key.to_owned(), property.clone()))
+            .filter(|(key, _)| !is_reserved_units(key))
+            .map(|(key, property)| (key.clone(), property.clone()))
             .collect()
     }
 
@@ -44904,7 +45734,11 @@ impl Intrinsics {
             if let Some(attributes) = tabulated_attributes(self, target, &key)
                 && let Some(property) = tabulated_property(self, target, &key)
             {
-                data.install(&key, retag_intrinsic_property(property, realm), attributes);
+                data.install_key(
+                    PropertyKeyRef::Utf8(&key),
+                    retag_intrinsic_property(property, realm),
+                    attributes,
+                );
             }
         }
         data.set_prototype(prototype_of(target));
@@ -45511,14 +46345,83 @@ fn intrinsic_accessor(target: &Value, key: &str) -> Option<Property> {
 }
 
 /// The own, program-visible keys of a value, in insertion order.
+fn own_property_names_units(intrinsics: &Intrinsics, target: &Value) -> Vec<StringUnits> {
+    let from_store = |data: &ObjectData| {
+        data.keys()
+            .filter(|key| !is_reserved_units(key))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    match target {
+        Value::Object(object) => {
+            let mut keys = match wrapped_primitive(target) {
+                Some(Value::String(text)) => (0..text.unit_len())
+                    .map(|index| StringUnits::from(index.to_string()))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            keys.extend(from_store(&object.borrow()));
+            if matches!(wrapped_primitive(target), Some(Value::String(_))) {
+                keys.push(StringUnits::from("length"));
+            }
+            keys
+        }
+        Value::Function(closure) => {
+            let mut keys = from_store(&closure.properties.borrow());
+            if has_prototype_property(closure) {
+                let statics = keys.split_off(2.min(keys.len()));
+                keys.push(StringUnits::from("prototype"));
+                keys.extend(statics);
+            }
+            keys
+        }
+        Value::Bound(bound) => [StringUnits::from("length"), StringUnits::from("name")]
+            .into_iter()
+            .chain(from_store(&bound.properties.borrow()))
+            .collect(),
+        Value::Array(items) => {
+            let mut keys = items
+                .borrow()
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| !matches!(item, Value::Native(Native::Hole, _)))
+                .map(|(index, _)| StringUnits::from(index.to_string()))
+                .collect::<Vec<_>>();
+            keys.push(StringUnits::from("length"));
+            keys.extend(from_store(&items.properties.borrow()));
+            keys
+        }
+        Value::TypedArray(view) => (0..view.len())
+            .map(|index| StringUnits::from(index.to_string()))
+            .chain(from_store(&view.properties.borrow()))
+            .collect(),
+        other if exotic_properties(other).is_some() => exotic_properties(target)
+            .map(|store| from_store(&store.borrow()))
+            .unwrap_or_default(),
+        _ => own_property_keys_units(intrinsics, target),
+    }
+}
+
 fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
+    own_property_keys_units(intrinsics, target)
+        .into_iter()
+        .map(|key| key.to_lossy_string())
+        .collect()
+}
+
+/// `[[OwnPropertyKeys]]` in the exact UTF-16 key representation.
+///
+/// The scalar wrapper above exists only for display-oriented helpers. VM reflection, proxy
+/// invariants, and descriptor walks use this function so a lone surrogate remains the same
+/// property from the store through the trap and back into the operation.
+fn own_property_keys_units(intrinsics: &Intrinsics, target: &Value) -> Vec<StringUnits> {
     if matches!(target, Value::Native(_, _) | Value::Callback(_, _)) {
         intrinsics.materialize(target);
     }
-    let from_object = |data: &ObjectData| -> Vec<String> {
+    let from_object = |data: &ObjectData| -> Vec<StringUnits> {
         data.keys()
-            .filter(|key| !symbol::is_reserved(key))
-            .map(str::to_owned)
+            .filter(|key| !is_reserved_units(key))
+            .cloned()
             .collect()
     };
     match target {
@@ -45529,15 +46432,15 @@ fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
             let Some(Value::String(text)) = wrapped_primitive(target) else {
                 unreachable!("checked by the guard");
             };
-            let mut keys: Vec<String> = (0..text.chars().count())
-                .map(|index| index.to_string())
+            let mut keys: Vec<StringUnits> = (0..text.unit_len())
+                .map(|index| StringUnits::from(index.to_string()))
                 .collect();
             keys.extend(from_object(&object.borrow()));
-            keys.push("length".to_owned());
+            keys.push(StringUnits::from("length"));
             keys
         }
         Value::Bound(bound) => {
-            let mut keys = vec!["length".to_owned(), "name".to_owned()];
+            let mut keys = vec![StringUnits::from("length"), StringUnits::from("name")];
             keys.extend(from_object(&bound.properties.borrow()));
             keys
         }
@@ -45548,20 +46451,20 @@ fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
             // program hung on the function itself -- the order the specification lists them in.
             if has_prototype_property(closure) {
                 let statics = keys.split_off(2.min(keys.len()));
-                keys.push("prototype".to_owned());
+                keys.push(StringUnits::from("prototype"));
                 keys.extend(statics);
             }
             keys
         }
         Value::Native(Native::PrototypeOf(_table), _) => {
-            intrinsics.own_keys(target).unwrap_or_default()
+            intrinsics.own_keys_units(target).unwrap_or_default()
         }
         Value::Native(_, _)
         | Value::Callback(_, _)
         | Value::Settler(..)
         | Value::Capability(..)
         | Value::Element(_) => {
-            let mut keys = intrinsics.own_keys(target).unwrap_or_default();
+            let mut keys = intrinsics.own_keys_units(target).unwrap_or_default();
             // Promise combinators and capability machinery create these runtime callables rather
             // than intrinsics, so they have no materialized store. Their identity slots are still
             // own properties, and CreateBuiltinFunction installs them in length/name order. Keep
@@ -45571,7 +46474,10 @@ fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
                 Value::Settler(..) | Value::Capability(..) | Value::Element(_)
             ) && intrinsic_identity(target).is_some()
             {
-                keys.splice(0..0, ["length".to_owned(), "name".to_owned()]);
+                keys.splice(
+                    0..0,
+                    [StringUnits::from("length"), StringUnits::from("name")],
+                );
             }
             keys
         }
@@ -45598,11 +46504,14 @@ fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
                 }
             }
             indices.sort_unstable();
-            let mut keys: Vec<String> = indices.iter().map(usize::to_string).collect();
+            let mut keys: Vec<StringUnits> = indices
+                .iter()
+                .map(|index| StringUnits::from(index.to_string()))
+                .collect();
             // After the indices and before whatever the program hung on the array: `length` is
             // an own property created with the array, and the specification lists integer
             // indices first and everything else in creation order.
-            keys.push("length".to_owned());
+            keys.push(StringUnits::from("length"));
             keys.extend(from_object(&items.properties.borrow()));
             keys
         }
@@ -45610,7 +46519,9 @@ fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
         // the order `OrdinaryOwnPropertyKeys` gives, where integer indices always precede the
         // rest.
         Value::TypedArray(view) => {
-            let mut keys: Vec<String> = (0..view.len()).map(|index| index.to_string()).collect();
+            let mut keys: Vec<StringUnits> = (0..view.len())
+                .map(|index| StringUnits::from(index.to_string()))
+                .collect();
             keys.extend(from_object(&view.properties.borrow()));
             keys
         }
@@ -45807,44 +46718,71 @@ fn is_symbol_key(key: &str) -> bool {
     WellKnown::from_property_key(key).is_some() || Symbol::serial_in_key(key).is_some()
 }
 
+/// The exact-key counterpart to [`symbol::is_reserved`]. Internal slots and symbol keys are
+/// ASCII by construction, so a malformed UTF-16 key cannot become one through replacement.
+fn is_reserved_units(key: &StringUnits) -> bool {
+    if key.unit_len() < 2
+        || key.unit_at(0) != Some(b'@' as u16)
+        || key.unit_at(1) != Some(b'@' as u16)
+    {
+        return false;
+    }
+    PropertyKeyRef::Units(key)
+        .known_ascii()
+        .is_some_and(|name| symbol::is_reserved(name.as_ref()))
+}
+
+fn is_symbol_key_units(key: &StringUnits) -> bool {
+    PropertyKeyRef::Units(key)
+        .known_ascii()
+        .is_some_and(|name| is_symbol_key(name.as_ref()))
+}
+
 /// `OrdinaryOwnPropertyKeys`: the string keys, then the symbol keys, each in insertion order.
 ///
 /// Distinct from [`own_property_keys_including_symbols`], which hands back every reserved slot
 /// and is what an internal algorithm wants; this is the list a *program* is allowed to see.
+#[cfg(test)]
 fn own_property_keys_with_symbols(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
-    own_property_keys_including_symbols(intrinsics, target)
+    own_property_keys_with_symbols_units(intrinsics, target)
         .into_iter()
-        .filter(|key| !symbol::is_reserved(key) || is_symbol_key(key))
+        .map(|key| key.to_lossy_string())
         .collect()
 }
 
+#[cfg(test)]
 fn own_property_keys_including_symbols(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
-    let mut keys = own_property_keys(intrinsics, target);
+    own_property_keys_including_symbols_units(intrinsics, target)
+        .into_iter()
+        .map(|key| key.to_lossy_string())
+        .collect()
+}
+
+fn own_property_keys_with_symbols_units(
+    intrinsics: &Intrinsics,
+    target: &Value,
+) -> Vec<StringUnits> {
+    own_property_keys_including_symbols_units(intrinsics, target)
+        .into_iter()
+        .filter(|key| !is_reserved_units(key) || is_symbol_key_units(key))
+        .collect()
+}
+
+fn own_property_keys_including_symbols_units(
+    intrinsics: &Intrinsics,
+    target: &Value,
+) -> Vec<StringUnits> {
+    let mut keys = own_property_keys_units(intrinsics, target);
     // Ordinary reflection intentionally hides symbol slots, but internal operations such as
     // proxy invariants and `Object.defineProperties` consume the full own-key list. Append the
     // reserved slots after the ordinary names, preserving each store's insertion order.
     let stored = match target {
-        Value::Object(object) => object.borrow().keys().map(str::to_owned).collect(),
-        Value::Function(closure) => closure
-            .properties
-            .borrow()
-            .keys()
-            .map(str::to_owned)
-            .collect(),
-        Value::Bound(bound) => bound
-            .properties
-            .borrow()
-            .keys()
-            .map(str::to_owned)
-            .collect(),
-        Value::Array(items) => items
-            .properties
-            .borrow()
-            .keys()
-            .map(str::to_owned)
-            .collect(),
+        Value::Object(object) => object.borrow().keys().cloned().collect(),
+        Value::Function(closure) => closure.properties.borrow().keys().cloned().collect(),
+        Value::Bound(bound) => bound.properties.borrow().keys().cloned().collect(),
+        Value::Array(items) => items.properties.borrow().keys().cloned().collect(),
         other if exotic_properties(other).is_some() => exotic_properties(target)
-            .map(|store| store.borrow().keys().map(str::to_owned).collect())
+            .map(|store| store.borrow().keys().cloned().collect())
             .unwrap_or_default(),
         Value::Native(_, _)
         | Value::Callback(_, _)
@@ -45853,7 +46791,7 @@ fn own_property_keys_including_symbols(intrinsics: &Intrinsics, target: &Value) 
         | Value::Element(_) => intrinsic_key(target)
             .and_then(|identity| {
                 intrinsics.entries.borrow().iter().find_map(|(held, data)| {
-                    (*held == identity).then(|| data.keys().map(str::to_owned).collect())
+                    (*held == identity).then(|| data.keys().cloned().collect())
                 })
             })
             .unwrap_or_default(),
@@ -45886,7 +46824,7 @@ fn own_property_keys_including_symbols(intrinsics: &Intrinsics, target: &Value) 
                 || (matches!(native, Native::PrototypeOf(PrototypeTable::Array))
                     && key == WellKnown::Unscopables.property_key());
             if published {
-                keys.push(key.to_owned());
+                keys.push(StringUnits::from(key));
             }
         }
     }
@@ -45908,12 +46846,20 @@ fn own_property_keys_including_symbols(intrinsics: &Intrinsics, target: &Value) 
 /// which has room for a value and nothing else, so the only thing that can lock one down is
 /// freezing the array it belongs to.
 fn own_attributes(intrinsics: &Intrinsics, target: &Value, key: &str) -> Option<Attributes> {
+    own_attributes_key(intrinsics, target, PropertyKeyRef::Utf8(key))
+}
+
+fn own_attributes_key(
+    intrinsics: &Intrinsics,
+    target: &Value,
+    key: PropertyKeyRef<'_>,
+) -> Option<Attributes> {
     match target {
-        Value::Object(object) => object.borrow().get_own_attributes(key).or_else(|| {
+        Value::Object(object) => object.borrow().get_own_attributes_key(key).or_else(|| {
             // A String wrapper's own characters, which no store holds: they are derived from the
             // boxed string and are locked, exactly as a string primitive's are.
-            string_exotic(target, key).is_some().then(|| {
-                if key == "length" {
+            string_exotic_key(target, key).is_some().then(|| {
+                if key.matches_ascii("length") {
                     Attributes::NONE
                 } else {
                     Attributes {
@@ -45927,30 +46873,32 @@ fn own_attributes(intrinsics: &Intrinsics, target: &Value, key: &str) -> Option<
         Value::Function(closure) => closure
             .properties
             .borrow()
-            .get_own_attributes(key)
+            .get_own_attributes_key(key)
             // `prototype` is the one own property a function keeps outside its property store:
             // it lives in a slot of its own so that `new` and a read of `f.prototype` cannot
             // disagree about which object instances link to. It is still an own property, and a
             // locked one -- a program may replace the object, never remove the slot.
             .or_else(|| {
-                (key == "prototype" && has_prototype_property(closure)).then_some(Attributes {
-                    writable: true,
-                    enumerable: false,
-                    configurable: false,
-                })
+                (key.matches_ascii("prototype") && has_prototype_property(closure)).then_some(
+                    Attributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: false,
+                    },
+                )
             }),
         Value::Bound(bound) => bound
             .properties
             .borrow()
-            .get_own_attributes(key)
-            .or_else(|| tabulated_attributes(intrinsics, target, key)),
-        Value::Array(items) if key == "length" => Some(Attributes {
+            .get_own_attributes_key(key)
+            .or_else(|| tabulated_attributes_key(intrinsics, target, key)),
+        Value::Array(items) if key.matches_ascii("length") => Some(Attributes {
             writable: items.length_writable.get(),
             enumerable: false,
             configurable: false,
         }),
-        Value::Array(items) => match key.parse::<usize>() {
-            Ok(index) => {
+        Value::Array(items) => match array_index_key(key) {
+            Some(index) => {
                 let frozen = items.properties.borrow().is_frozen();
                 // A definition the program made wins over the ordinary flags, and freezing wins
                 // over both: a frozen array's elements are locked whatever they were defined as.
@@ -45982,21 +46930,21 @@ fn own_attributes(intrinsics: &Intrinsics, target: &Value, key: &str) -> Option<
                     Attributes::DEFAULT
                 })
             }
-            Err(_) => items.properties.borrow().get_own_attributes(key),
+            None => items.properties.borrow().get_own_attributes_key(key),
         },
         // An integer-indexed property's flags are fixed by the specification rather than
         // stored: every live element is writable, enumerable and configurable, and every other
         // element key is simply absent.
-        Value::TypedArray(view) => match canonical_numeric_index(key) {
+        Value::TypedArray(view) => match canonical_numeric_index_key(key) {
             Some(index) => valid_integer_index(view, index).map(|_| Attributes::DEFAULT),
-            None => view.properties.borrow().get_own_attributes(key),
+            None => view.properties.borrow().get_own_attributes_key(key),
         },
         other if exotic_properties(other).is_some() => exotic_properties(target)
-            .filter(|_| !exotic_reserved_name(target, key))
-            .and_then(|store| store.borrow().get_own_attributes(key)),
+            .filter(|_| !exotic_reserved_name_key(target, key))
+            .and_then(|store| store.borrow().get_own_attributes_key(key)),
         // A string's characters are own properties, and immovable ones: nothing can rewrite or
         // delete `"abc"[1]`, which is why they are the one shape here with no writable slot.
-        Value::String(text) => string_index_attributes(text, key),
+        Value::String(text) => string_index_attributes_key(text, key),
         // A built-in owns its `name` and `length` the same way a compiled function does, and a
         // namespace or a method table owns whatever the tables answer for. None of it is stored
         // per value -- two reads of `Array.prototype.push` produce the same `Copy` marker, so
@@ -46010,10 +46958,10 @@ fn own_attributes(intrinsics: &Intrinsics, target: &Value, key: &str) -> Option<
             if matches!(target, Value::Native(_, _) | Value::Callback(_, _)) {
                 intrinsics.materialize(target);
             }
-            match intrinsics.overridden(target, key) {
+            match intrinsics.overridden_key(target, key) {
                 Overridden::Held(_, attributes) => Some(attributes),
                 Overridden::Absent => None,
-                Overridden::Untouched => tabulated_attributes(intrinsics, target, key),
+                Overridden::Untouched => tabulated_attributes_key(intrinsics, target, key),
             }
         }
         _ => None,
@@ -46022,6 +46970,16 @@ fn own_attributes(intrinsics: &Intrinsics, target: &Value, key: &str) -> Option<
 
 /// The flags a built-in's own property was *created* with, before any program touched it.
 fn tabulated_attributes(intrinsics: &Intrinsics, target: &Value, key: &str) -> Option<Attributes> {
+    tabulated_attributes_key(intrinsics, target, PropertyKeyRef::Utf8(key))
+}
+
+fn tabulated_attributes_key(
+    intrinsics: &Intrinsics,
+    target: &Value,
+    key: PropertyKeyRef<'_>,
+) -> Option<Attributes> {
+    let key = key.known_ascii()?;
+    let key = key.as_ref();
     match key {
         "name" | "length" if intrinsic_identity(target).is_some() => Some(FUNCTION_IDENTITY),
         // A built-in constructor's `prototype` is locked on every axis: the realm's intrinsics
@@ -46185,13 +47143,12 @@ fn intrinsic_prototype_in(intrinsics: &Intrinsics, target: &Value) -> Option<Val
     intrinsic_prototype(target)
 }
 
-/// The flags a string's own index or `length` carries, or `None` for anything else.
-fn string_index_attributes(text: &str, key: &str) -> Option<Attributes> {
-    if key == "length" {
+fn string_index_attributes_key(text: &StringUnits, key: PropertyKeyRef<'_>) -> Option<Attributes> {
+    if key.matches_ascii("length") {
         return Some(Attributes::NONE);
     }
-    let index = key.parse::<usize>().ok()?;
-    (index < text.chars().count()).then_some(Attributes {
+    let index = array_index_key(key)?;
+    (index < text.unit_len()).then_some(Attributes {
         writable: false,
         enumerable: true,
         configurable: false,
@@ -46204,8 +47161,12 @@ fn string_index_attributes(text: &str, key: &str) -> Option<Attributes> {
 /// `Object.defineProperty` validates against: a descriptor a program reads and a definition it
 /// then makes have to be talking about the same property, and two walks of the same shapes would
 /// be two chances to disagree.
-fn own_descriptor(intrinsics: &Intrinsics, target: &Value, key: &str) -> Option<Value> {
-    let (property, attributes) = own_property_state(intrinsics, target, key)?;
+fn own_descriptor_key(
+    intrinsics: &Intrinsics,
+    target: &Value,
+    key: PropertyKeyRef<'_>,
+) -> Option<Value> {
+    let (property, attributes) = own_property_state_key(intrinsics, target, key)?;
     let mut data = ObjectData::default();
     match property {
         Property::Value(value) => {
@@ -46712,6 +47673,7 @@ impl Drop for InspectGuard<'_> {
 /// An index is a canonical decimal in `0 ..= 2^32 - 2`; `"01"`, `"1.0"`, `"-1"` and `"4294967295"`
 /// are ordinary string keys. Checking the round trip rather than just parsing is what draws that
 /// line, and the line is observable: only an index enumerates early.
+#[cfg(test)]
 fn index_key(key: &str) -> Option<u32> {
     let index: u32 = key.parse().ok()?;
     (index != u32::MAX && index.to_string() == key).then_some(index)
@@ -46815,7 +47777,11 @@ fn loose_equal(left: &Value, right: &Value) -> bool {
                     .is_some_and(|other| other == **big)
         }
         (Value::BigInt(big), Value::String(text)) | (Value::String(text), Value::BigInt(big)) => {
-            text.trim()
+            text.to_scalar_string()
+                .ok()
+                .as_deref()
+                .unwrap_or("")
+                .trim()
                 .parse::<num_bigint::BigInt>()
                 .is_ok_and(|other| other == **big)
         }
@@ -46844,7 +47810,7 @@ fn loose_equal(left: &Value, right: &Value) -> bool {
 /// primitive from it; when a user-defined `valueOf` can exist, this needs the interpreter and
 /// moves onto it.
 fn to_primitive(value: &Value) -> Value {
-    Value::String(value.to_display_string())
+    Value::String(value.to_string_units())
 }
 
 fn compare(left: &Value, right: &Value, predicate: OrderingPredicate) -> bool {
@@ -46876,6 +47842,12 @@ enum OrderingPredicate {
 
 fn parse_number(value: &str) -> f64 {
     kiln_host_abi::string_to_number(value)
+}
+
+fn parse_number_units(value: &StringUnits) -> f64 {
+    value
+        .to_scalar_string()
+        .map_or(f64::NAN, |text| parse_number(&text))
 }
 
 /// A number as `String(value)` renders it.

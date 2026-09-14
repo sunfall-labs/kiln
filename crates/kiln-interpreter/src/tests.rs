@@ -1,14 +1,326 @@
 use super::*;
 
+#[test]
+fn object_data_property_keys_preserve_lone_surrogates() {
+    let key = StringUnits::from_units(&[0xd800]);
+    let mut object = ObjectData::default();
+    object.set_units(&key, Value::Number(7.0));
+    assert_eq!(object.get_units(&key), Some(Value::Number(7.0)));
+    assert_eq!(object.keys().next(), Some(&key));
+    assert!(object.lookup_units(&key).is_some());
+    assert!(object.remove_units(&key));
+    assert!(object.get_units(&key).is_none());
+}
+
+#[test]
+fn regexp_patterns_keep_lone_units_and_utf16_offsets() {
+    let lone = StringUnits::from_units(&[0xd800]);
+    let Value::RegExp(regexp) = build_regexp(&lone, "").expect("lone pattern compiles") else {
+        panic!("regexp constructor returned a non-regexp");
+    };
+    assert_eq!(regexp.source, lone);
+    assert_eq!(
+        regexp_string_units(&regexp).to_units().as_ref(),
+        &[
+            b'/' as u16,
+            b'\\' as u16,
+            b'u' as u16,
+            b'd' as u16,
+            b'8' as u16,
+            b'0' as u16,
+            b'0' as u16,
+            b'/' as u16
+        ]
+    );
+    let matched = regexp_search(&regexp, &[0xd800], 0).expect("lone unit matches");
+    assert_eq!(matched.0, 0..1);
+
+    let astral = StringUnits::from_units(&[0xd83d, 0xde00]);
+    let Value::RegExp(regexp) = build_regexp(&astral, "u").expect("astral pattern compiles") else {
+        panic!("regexp constructor returned a non-regexp");
+    };
+    let matched = regexp_search(&regexp, &[0x61, 0xd83d, 0xde00], 1).expect("astral unit matches");
+    assert_eq!(matched.0, 1..3);
+}
+
+#[test]
+fn computed_lone_surrogate_reads_share_ordinary_and_proxy_paths() {
+    let program = no_program();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: std::collections::VecDeque::new(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+    let key = StringUnits::from_units(&[0xd800]);
+    let key_value = Value::String(key.clone());
+
+    // A prototype accessor is found by the same lookup as an own value. Its getter is omitted
+    // deliberately: the result is `undefined`, but reaching the accessor still matters because
+    // a setter-only property is present for `in` and for proxy invariants.
+    let prototype = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    if let Value::Object(prototype) = &prototype {
+        prototype
+            .borrow_mut()
+            .define_accessor_units(&key, None, None, Attributes::DEFAULT);
+    }
+    let inherited = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    if let Value::Object(inherited_data) = &inherited {
+        inherited_data.borrow_mut().set_prototype(prototype.clone());
+    }
+    assert_eq!(
+        vm.read_computed(&inherited, &key_value, 0),
+        Ok(Value::Undefined)
+    );
+    assert!(
+        vm.has(&inherited, &key_value, 0)
+            .expect("inherited accessor is present")
+    );
+
+    let object = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    if let Value::Object(object_data) = &object {
+        object_data.borrow_mut().set_prototype(prototype);
+        object_data.borrow_mut().set_units(&key, Value::Number(7.0));
+    }
+    assert_eq!(
+        vm.read_computed(&object, &key_value, 0),
+        Ok(Value::Number(7.0))
+    );
+
+    // Reflect.get is a real callable trap. Passing the exact key through it exercises the proxy
+    // route before the target's unit-preserving lookup, including the UTF-16 key identity.
+    let target = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    if let Value::Object(target_data) = &target {
+        target_data.borrow_mut().set_units(&key, Value::Number(9.0));
+    }
+    let handler = ordinary_object([(
+        "get".to_owned(),
+        Value::Native(Native::ReflectGet, RealmId::PRIMARY),
+    )]);
+    let proxy = Value::Proxy(Rc::new(ProxyData {
+        target,
+        handler,
+        revoked: std::cell::Cell::new(false),
+    }));
+    assert_eq!(
+        vm.read_computed(&proxy, &key_value, 0),
+        Ok(Value::Number(9.0))
+    );
+}
+
+#[test]
+fn property_key_units_cover_mutation_descriptors_inherited_accessors_and_proxy_invariants() {
+    let program = no_program();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: Some(1.0),
+        entropy: std::collections::VecDeque::new(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+    let key = StringUnits::from_units(&[0xd800]);
+    let key_value = Value::String(key.clone());
+
+    let target = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    let descriptor = ordinary_object([
+        ("value".to_owned(), Value::Number(7.0)),
+        ("writable".to_owned(), Value::Boolean(true)),
+        ("enumerable".to_owned(), Value::Boolean(true)),
+        ("configurable".to_owned(), Value::Boolean(true)),
+    ]);
+    assert_eq!(
+        vm.dispatch_native(
+            Native::ReflectDefineProperty,
+            &Value::Undefined,
+            &[target.clone(), key_value.clone(), descriptor],
+            0,
+        ),
+        Ok(Value::Boolean(true))
+    );
+    assert_eq!(
+        vm.read_computed(&target, &key_value, 0),
+        Ok(Value::Number(7.0))
+    );
+    assert!(has_property_key(
+        &vm.intrinsics,
+        &target,
+        PropertyKeyRef::Units(&key)
+    ));
+    let described = own_descriptor_key(&vm.intrinsics, &target, PropertyKeyRef::Units(&key))
+        .expect("exact key descriptor");
+    let Value::Object(described) = described else {
+        panic!("descriptor must be an object");
+    };
+    assert_eq!(described.borrow().get("value"), Some(Value::Number(7.0)));
+    assert!(vm.delete(&target, &key_value, 0).expect("delete exact key"));
+    assert!(!has_property_key(
+        &vm.intrinsics,
+        &target,
+        PropertyKeyRef::Units(&key)
+    ));
+
+    // A setter inherited under the exact key is reached by the same walk as an own value. The
+    // native callable is intentionally side-effect free; the absence of an own slot proves the
+    // write was handed to the setter instead of creating a lossy replacement key.
+    let prototype = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    if let Value::Object(prototype) = &prototype {
+        prototype.borrow_mut().define_accessor_units(
+            &key,
+            None,
+            Some(Value::Native(Native::ObjectToStringTag, RealmId::PRIMARY)),
+            Attributes::DEFAULT,
+        );
+    }
+    let inherited = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    if let Value::Object(inherited) = &inherited {
+        inherited.borrow_mut().set_prototype(prototype);
+    }
+    vm.set_computed(&inherited, &key_value, Value::Number(3.0), 0)
+        .expect("inherited setter accepts exact key");
+    if let Value::Object(inherited) = &inherited {
+        assert!(inherited.borrow().get_own_property_units(&key).is_none());
+    }
+
+    // Reflect.get receives and returns the exact UTF-16 key. The target is locked so the get
+    // invariant check has to consult the same unit-preserving descriptor.
+    let locked_target = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    if let Value::Object(locked_target) = &locked_target {
+        locked_target.borrow_mut().define_value_units(
+            &key,
+            Value::Number(9.0),
+            Attributes {
+                writable: false,
+                enumerable: true,
+                configurable: false,
+            },
+        );
+    }
+    let handler = ordinary_object([(
+        "get".to_owned(),
+        Value::Native(Native::ReflectGet, RealmId::PRIMARY),
+    )]);
+    let proxy = Value::Proxy(Rc::new(ProxyData {
+        target: locked_target,
+        handler,
+        revoked: std::cell::Cell::new(false),
+    }));
+    assert_eq!(
+        vm.read_computed(&proxy, &key_value, 0),
+        Ok(Value::Number(9.0))
+    );
+
+    // ToPropertyKey is performed once before strict [[Set]]. The closure records its conversion
+    // through the host call; a second conversion would leave two calls in the host log.
+    let coercion_program = Rc::new(Program {
+        source: "".into(),
+        template_sites: Vec::new(),
+        version: kiln_ir::BYTECODE_VERSION,
+        constants: vec![Constant::String(key.clone())],
+        code: Vec::new(),
+        local_count: 0,
+        functions: vec![kiln_ir::FunctionProto {
+            span: kiln_ir::Span::default(),
+            prologue_end: 0,
+            asynchronous: false,
+            name: Some("toString".to_owned()),
+            arrow: false,
+            generator: false,
+            async_generator: false,
+            is_method: false,
+            parameter_count: 0,
+            declared_length: 0,
+            mapped_arguments: false,
+            local_count: 0,
+            code: vec![
+                Instruction::HostCall {
+                    op: HostOp::ClockNow,
+                    argc: 0,
+                },
+                Instruction::Pop,
+                Instruction::Const(0),
+                Instruction::Return,
+            ],
+            upvalues: Vec::new(),
+            type_annotations: None,
+        }],
+    });
+    let coercion = Value::Function(Rc::new(Closure {
+        program: coercion_program.clone(),
+        function: 0,
+        strictness: Rc::new(Strictness::default()),
+        module_path: None,
+        name: Some("toString".into()),
+        upvalues: Vec::new(),
+        realm: RealmId::PRIMARY,
+        captured_arguments: None,
+        captured_new_target: None,
+        captured_this: None,
+        prototype: RefCell::new(None),
+        properties: RefCell::new(ObjectData::default()),
+    }));
+    let coercion_object = ordinary_object([("toString".to_owned(), coercion)]);
+    let strict_target = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    vm.assign_with_strict(
+        &strict_target,
+        &coercion_object,
+        Value::Number(11.0),
+        0,
+        true,
+    )
+    .expect("strict assignment with object key");
+    assert_eq!(host.calls.len(), 1, "ToPropertyKey must run once");
+    if let Value::Object(strict_target) = &strict_target {
+        assert_eq!(
+            strict_target.borrow().get_own_property_units(&key).cloned(),
+            Some(Property::Value(Value::Number(11.0)))
+        );
+    }
+}
+
+#[test]
+fn wide_backed_ascii_intrinsic_keys_follow_narrow_lookup() {
+    let program = no_program();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: std::collections::VecDeque::new(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+    let narrow = StringUnits::from("length");
+    let wide = StringUnits::from_view(StringView::Utf16(&[
+        b'l' as u16,
+        b'e' as u16,
+        b'n' as u16,
+        b'g' as u16,
+        b't' as u16,
+        b'h' as u16,
+    ]));
+    assert!(matches!(wide.as_view(), StringView::Utf16(_)));
+    let target = Value::Native(Native::ArrayConstructor, RealmId::PRIMARY);
+    assert_eq!(
+        vm.read_property_key(&target, PropertyKeyRef::Units(&narrow), 0),
+        vm.read_property_key(&target, PropertyKeyRef::Units(&wide), 0)
+    );
+    assert_eq!(
+        own_attributes_key(&vm.intrinsics, &target, PropertyKeyRef::Units(&narrow)),
+        own_attributes_key(&vm.intrinsics, &target, PropertyKeyRef::Units(&wide))
+    );
+}
+
 fn string_index_of(text: &str, needle: &str, start: Option<f64>) -> f64 {
-    let mut arguments = vec![Value::String(needle.to_owned())];
+    let mut arguments = vec![Value::String(needle.to_owned().into())];
     if let Some(start) = start {
         arguments.push(Value::Number(start));
     }
     let Value::Number(index) = call_native(
         &Intrinsics::default(),
         Native::StringIndexOf,
-        &Value::String(text.to_owned()),
+        &Value::String(text.to_owned().into()),
         &arguments,
     )
     .expect("String.prototype.indexOf returns a number") else {
@@ -104,14 +416,14 @@ fn materialized_intrinsic_store_makes_absence_and_symbol_order_authoritative() {
     assert!(delete_property(
         &intrinsics,
         &target,
-        &Value::String("max".to_owned())
+        &Value::String("max".to_owned().into())
     ));
     assert!(!own_property_keys_with_symbols(&intrinsics, &target).contains(&"max".to_owned()));
     assert!(own_attributes(&intrinsics, &target, "max").is_none());
 
-    intrinsics.install(
+    intrinsics.install_key(
         &target,
-        "max",
+        PropertyKeyRef::Utf8("max"),
         Property::Value(Value::Number(7.0)),
         Attributes::DEFAULT,
     );
@@ -130,7 +442,7 @@ fn materialized_intrinsic_store_makes_absence_and_symbol_order_authoritative() {
     assert!(delete_property(
         &intrinsics,
         &array_prototype,
-        &Value::String(iterator_key.clone()),
+        &Value::String(iterator_key.clone().into()),
     ));
     assert!(!own_property_keys_with_symbols(&intrinsics, &array_prototype).contains(&iterator_key));
     assert!(own_attributes(&intrinsics, &array_prototype, &iterator_key).is_none());
@@ -156,9 +468,9 @@ fn intrinsic_store_readd_keeps_order_and_retags_cross_realm_markers() {
         &target,
         &Value::String("max".into())
     ));
-    intrinsics.install(
+    intrinsics.install_key(
         &target,
-        "max",
+        PropertyKeyRef::Utf8("max"),
         Property::Value(Value::Number(7.0)),
         Attributes::DEFAULT,
     );
@@ -343,7 +655,7 @@ fn native_spread_uses_materialized_enumerability_and_honors_deletion() {
     assert!(delete_property(
         &intrinsics,
         &path,
-        &Value::String("join".to_owned()),
+        &Value::String("join".to_owned().into()),
     ));
     assert!(
         !own_properties(&intrinsics, &path)
@@ -369,7 +681,7 @@ fn proxy_own_key_invariant_source_includes_exotic_and_native_keys() {
     );
 
     let boxed_data = ObjectData {
-        primitive: Some(Value::String("ab".to_owned())),
+        primitive: Some(Value::String("ab".to_owned().into())),
         ..ObjectData::default()
     };
     let boxed = Value::Object(Rc::new(RefCell::new(boxed_data)));
@@ -441,7 +753,7 @@ fn node_readable_is_a_transport_independent_buffered_event_source() {
     assert!(delete_property(
         &intrinsics,
         &readable_prototype,
-        &Value::String("unpipe".to_owned())
+        &Value::String("unpipe".to_owned().into())
     ));
     assert!(
         !own_property_keys_with_symbols(&intrinsics, &readable_prototype)
@@ -647,12 +959,12 @@ impl HostOps for TestHost {
             HostOp::TimeZone => self
                 .timezone
                 .clone()
-                .map(HostValue::String)
+                .map(|value| HostValue::String(value.into()))
                 .ok_or_else(|| HostError::new("no scripted timezone")),
             HostOp::Locale => self
                 .locale
                 .clone()
-                .map(HostValue::String)
+                .map(|value| HostValue::String(value.into()))
                 .ok_or_else(|| HostError::new("no scripted locale")),
             _ => Ok(HostValue::Undefined),
         }
@@ -996,7 +1308,7 @@ fn host_entropy_is_one_explicit_word_per_draw() {
     assert_eq!(
         vm.dispatch_native(Native::NodeCryptoRandomUuid, &Value::Undefined, &[], 2),
         Ok(Value::String(
-            "00112233-4455-4677-8899-aabbccddeeff".to_owned()
+            "00112233-4455-4677-8899-aabbccddeeff".to_owned().into()
         ))
     );
     drop(vm);
@@ -1079,7 +1391,7 @@ fn date_methods_stay_on_the_machine_dispatch_path() {
 
     assert_eq!(
         vm.dispatch_native(Native::Date(DateMethod::ToIsoString), &date, &[], 0),
-        Ok(Value::String("1970-01-01T00:00:00.000Z".to_owned()))
+        Ok(Value::String("1970-01-01T00:00:00.000Z".to_owned().into()))
     );
 }
 
@@ -1194,7 +1506,7 @@ fn process_private_native_modules_are_separate_from_public_ts_projection() {
         vm.dispatch_native(
             Native::ProcessGetBuiltinModule,
             &Value::Undefined,
-            &[Value::String("node:fs".to_owned())],
+            &[Value::String("node:fs".to_owned().into())],
             0,
         ),
         Err(ExecutionError::TypeErrorMessage { message })
@@ -1226,7 +1538,7 @@ fn node_events_builtin_exposes_event_emitter() {
             vm.dispatch_native(
                 Native::ProcessGetBuiltinModule,
                 &Value::Undefined,
-                &[Value::String(specifier.to_owned())],
+                &[Value::String(specifier.to_owned().into())],
                 0,
             ),
             Err(ExecutionError::TypeErrorMessage { message })
@@ -1325,7 +1637,7 @@ fn node_http_exports_a_server_constructor_with_coded_option_errors() {
     let result = vm.dispatch_node_http(
         Native::NodeHttpServer,
         &Value::Undefined,
-        &[Value::String("invalid".to_owned())],
+        &[Value::String("invalid".to_owned().into())],
         0,
     );
     assert_eq!(result, Err(ExecutionError::ThrownAcrossNative));
@@ -1334,11 +1646,11 @@ fn node_http_exports_a_server_constructor_with_coded_option_errors() {
     };
     assert_eq!(
         error.borrow().get("code"),
-        Some(Value::String("ERR_INVALID_ARG_TYPE".to_owned()))
+        Some(Value::String("ERR_INVALID_ARG_TYPE".to_owned().into()))
     );
     assert_eq!(
         error.borrow().get("name"),
-        Some(Value::String("TypeError".to_owned()))
+        Some(Value::String("TypeError".to_owned().into()))
     );
 }
 
@@ -1368,7 +1680,7 @@ fn node_event_emitter_stores_listeners_and_methods_are_chainable() {
         &vm.dispatch_node_event(
             Native::NodeEventOn,
             &emitter,
-            &[Value::String("data".to_owned()), listener.clone()],
+            &[Value::String("data".to_owned().into()), listener.clone()],
             0,
         )
         .unwrap(),
@@ -1378,7 +1690,7 @@ fn node_event_emitter_stores_listeners_and_methods_are_chainable() {
         .dispatch_node_event(
             Native::NodeEventListeners,
             &emitter,
-            &[Value::String("data".to_owned())],
+            &[Value::String("data".to_owned().into())],
             0,
         )
         .unwrap();
@@ -1390,7 +1702,7 @@ fn node_event_emitter_stores_listeners_and_methods_are_chainable() {
         vm.dispatch_node_event(
             Native::NodeEventEmit,
             &emitter,
-            &[Value::String("missing".to_owned())],
+            &[Value::String("missing".to_owned().into())],
             0,
         ),
         Ok(Value::Boolean(false))
@@ -1421,7 +1733,7 @@ fn node_event_once_is_removed_before_reentrant_emit() {
     vm.dispatch_node_event(
         Native::NodeEventOnce,
         &emitter,
-        &[Value::String("ready".to_owned()), listener],
+        &[Value::String("ready".to_owned().into()), listener],
         0,
     )
     .unwrap();
@@ -1430,7 +1742,7 @@ fn node_event_once_is_removed_before_reentrant_emit() {
         vm.dispatch_node_event(
             Native::NodeEventEmit,
             &emitter,
-            &[Value::String("ready".to_owned())],
+            &[Value::String("ready".to_owned().into())],
             0,
         ),
         Ok(Value::Boolean(true))
@@ -1439,7 +1751,7 @@ fn node_event_once_is_removed_before_reentrant_emit() {
         vm.dispatch_node_event(
             Native::NodeEventEmit,
             &emitter,
-            &[Value::String("ready".to_owned())],
+            &[Value::String("ready".to_owned().into())],
             0,
         ),
         Ok(Value::Boolean(false))
@@ -1471,14 +1783,14 @@ fn node_event_new_listener_runs_before_registration() {
     vm.dispatch_node_event(
         Native::NodeEventOn,
         &emitter,
-        &[Value::String("newListener".to_owned()), observer],
+        &[Value::String("newListener".to_owned().into()), observer],
         0,
     )
     .unwrap();
     vm.dispatch_node_event(
         Native::NodeEventOn,
         &emitter,
-        &[Value::String("data".to_owned()), listener.clone()],
+        &[Value::String("data".to_owned().into()), listener.clone()],
         0,
     )
     .unwrap();
@@ -1549,7 +1861,7 @@ fn a_direct_eval_writes_through_to_the_callers_binding() {
     let mut program = program(
         vec![
             Constant::Number(1.0f64.to_bits()),
-            Constant::String("x = 2; x".to_owned()),
+            Constant::String("x = 2; x".to_owned().into()),
         ],
         vec![
             Instruction::NewCell(0),
@@ -1612,7 +1924,7 @@ fn source_compiler_authority_is_scoped_to_one_execution() {
     }
 
     let invoking_eval = program(
-        vec![Constant::String("ignored".to_owned())],
+        vec![Constant::String("ignored".to_owned().into())],
         vec![
             Instruction::LoadBuiltin(kiln_ir::Builtin::Eval),
             Instruction::Const(0),
@@ -1678,11 +1990,11 @@ fn object(pairs: &[(&str, Value)]) -> Value {
 #[test]
 fn only_integer_like_keys_are_array_indices() {
     assert_eq!(array_index(&Value::Number(0.0)), Some(0));
-    assert_eq!(array_index(&Value::String("2".to_owned())), Some(2));
+    assert_eq!(array_index(&Value::String("2".to_owned().into())), Some(2));
     assert_eq!(array_index(&Value::Number(-1.0)), None);
     assert_eq!(array_index(&Value::Number(1.5)), None);
     assert_eq!(array_index(&Value::Number(f64::INFINITY)), None);
-    assert_eq!(array_index(&Value::String("x".to_owned())), None);
+    assert_eq!(array_index(&Value::String("x".to_owned().into())), None);
 }
 
 /// `in` asks about presence, which is not the same question as reading and comparing to
@@ -1693,12 +2005,12 @@ fn in_tests_presence_rather_than_value() {
     assert!(has_property(
         &Intrinsics::default(),
         &object,
-        &Value::String("set_to_undefined".to_owned())
+        &Value::String("set_to_undefined".to_owned().into())
     ));
     assert!(!has_property(
         &Intrinsics::default(),
         &object,
-        &Value::String("absent".to_owned())
+        &Value::String("absent".to_owned().into())
     ));
 }
 
@@ -1712,7 +2024,7 @@ fn arrays_expose_the_same_properties_to_reads_and_to_in() {
             has_property(
                 &Intrinsics::default(),
                 &items,
-                &Value::String(key.to_owned())
+                &Value::String(key.to_owned().into())
             ),
             "`{key} in array` must be true"
         );
@@ -1763,7 +2075,7 @@ fn join_renders_nullish_elements_as_empty() {
         Value::Number(1.0),
         Value::Undefined,
         Value::Null,
-        Value::String("x".to_owned()),
+        Value::String("x".to_owned().into()),
     ];
     assert_eq!(join(&items, ",").unwrap(), "1,,,x");
 }
@@ -1773,7 +2085,7 @@ fn error_cause_is_installed_by_presence_not_by_value() {
     let with_cause = build_error(
         ErrorKind::Error,
         &[
-            Value::String("m".to_owned()),
+            Value::String("m".to_owned().into()),
             object(&[("cause", Value::Undefined)]),
         ],
     );
@@ -1782,7 +2094,7 @@ fn error_cause_is_installed_by_presence_not_by_value() {
     };
     assert_eq!(data.borrow().get("cause"), Some(Value::Undefined));
 
-    let without = build_error(ErrorKind::Error, &[Value::String("m".to_owned())]);
+    let without = build_error(ErrorKind::Error, &[Value::String("m".to_owned().into())]);
     let Value::Object(data) = &without else {
         panic!("construct_error returns an object");
     };
@@ -1796,7 +2108,7 @@ fn error_cause_keeps_the_identity_of_the_value_given() {
     let outer = build_error(
         ErrorKind::Error,
         &[
-            Value::String("outer".to_owned()),
+            Value::String("outer".to_owned().into()),
             object(&[("cause", inner.clone())]),
         ],
     );
@@ -1809,7 +2121,7 @@ fn error_cause_keeps_the_identity_of_the_value_given() {
 
 #[test]
 fn error_brand_is_not_the_reserved_trace_property() {
-    let error = build_error(ErrorKind::Error, &[Value::String("x".to_owned())]);
+    let error = build_error(ErrorKind::Error, &[Value::String("x".to_owned().into())]);
     let Value::Object(error) = &error else {
         panic!("build_error returns an object");
     };
@@ -1819,11 +2131,11 @@ fn error_brand_is_not_the_reserved_trace_property() {
     // deletes must not change the internal Error brand.
     error
         .borrow_mut()
-        .set(ERROR_TRACE, Value::String("spoofed".to_owned()));
+        .set(ERROR_TRACE, Value::String("spoofed".to_owned().into()));
     error.borrow_mut().remove(ERROR_TRACE);
     assert!(error.borrow().error_brand);
 
-    let fake = object(&[(ERROR_TRACE, Value::String("spoofed".to_owned()))]);
+    let fake = object(&[(ERROR_TRACE, Value::String("spoofed".to_owned().into()))]);
     let Value::Object(fake) = fake else {
         unreachable!();
     };
@@ -1861,7 +2173,7 @@ fn an_empty_message_produces_a_bare_stack_header() {
         };
         assert_eq!(
             data.borrow().get("stack"),
-            Some(Value::String("Error".to_owned()))
+            Some(Value::String("Error".to_owned().into()))
         );
         assert_eq!(data.borrow().get_own("message"), None);
     }
@@ -1874,14 +2186,15 @@ fn an_empty_message_produces_a_bare_stack_header() {
 /// program had explicitly named, and `if (e.name === "TimeoutError")` took the wrong branch.
 #[test]
 fn an_error_instance_has_no_own_name() {
-    let Value::Object(data) = build_error(ErrorKind::Type, &[Value::String("m".to_owned())]) else {
+    let Value::Object(data) = build_error(ErrorKind::Type, &[Value::String("m".to_owned().into())])
+    else {
         panic!("construct_error returns an object");
     };
     let data = data.borrow();
     assert_eq!(data.get_own("name"), None);
     assert_eq!(
         data.get_own("message"),
-        Some(&Value::String("m".to_owned())),
+        Some(&Value::String("m".to_owned().into())),
         "a message that was passed is still the instance's own"
     );
 }
@@ -2064,14 +2377,14 @@ fn instanceof_walks_the_chain_by_identity() {
 #[test]
 fn error_to_string_is_keyed_on_the_inherited_method() {
     let plain = object(&[
-        ("name", Value::String("NotAnError".to_owned())),
-        ("message", Value::String("m".to_owned())),
+        ("name", Value::String("NotAnError".to_owned().into())),
+        ("message", Value::String("m".to_owned().into())),
     ]);
     assert!(!has_error_to_string(&plain));
 
     let erroneous = object(&[
-        ("name", Value::String("E".to_owned())),
-        ("message", Value::String("boom".to_owned())),
+        ("name", Value::String("E".to_owned().into())),
+        ("message", Value::String("boom".to_owned().into())),
         (
             "toString",
             Value::Native(Native::ErrorToString, RealmId::PRIMARY),
@@ -2085,8 +2398,8 @@ fn error_to_string_is_keyed_on_the_inherited_method() {
 #[test]
 fn error_to_string_omits_an_empty_message() {
     let bare = object(&[
-        ("name", Value::String("Error".to_owned())),
-        ("message", Value::String(String::new())),
+        ("name", Value::String("Error".to_owned().into())),
+        ("message", Value::String(String::new().into())),
     ]);
     assert_eq!(error_to_string(&bare), "Error");
 }
@@ -2126,7 +2439,7 @@ fn collections_key_on_same_value_zero() {
     assert!(same_value_zero(&Value::Number(0.0), &Value::Number(-0.0)));
     assert!(!same_value_zero(
         &Value::Number(1.0),
-        &Value::String("1".to_owned())
+        &Value::String("1".to_owned().into())
     ));
 }
 
@@ -2137,7 +2450,7 @@ fn map_keys_are_matched_by_identity() {
     let twin = object(&[("id", Value::Number(1.0))]);
     let entries = vec![Value::Array(ArrayData::new(vec![
         key.clone(),
-        Value::String("found".to_owned()),
+        Value::String("found".to_owned().into()),
     ]))];
 
     assert_eq!(find_entry(&entries, &key, true), Some(0));
@@ -2156,7 +2469,7 @@ fn an_uncaught_throw_names_what_was_thrown() {
         source: "".into(),
         template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
-        constants: vec![Constant::String("boom".to_owned())],
+        constants: vec![Constant::String("boom".to_owned().into())],
         code: vec![Instruction::Const(0), Instruction::Throw],
         local_count: 0,
         functions: Vec::new(),
@@ -2175,7 +2488,11 @@ fn unwinding_restores_the_stack_the_handler_expected() {
         source: "".into(),
         template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
-        constants: vec![number(1.0), number(2.0), Constant::String("x".to_owned())],
+        constants: vec![
+            number(1.0),
+            number(2.0),
+            Constant::String("x".to_owned().into()),
+        ],
         code: vec![
             Instruction::Const(0), // a value the handler must still see
             Instruction::PushHandler(6),
@@ -2202,8 +2519,8 @@ fn unwinding_restores_the_stack_the_handler_expected() {
 #[test]
 fn a_thrown_value_is_described_by_what_it_is() {
     let error = object(&[
-        ("name", Value::String("E".to_owned())),
-        ("message", Value::String("boom".to_owned())),
+        ("name", Value::String("E".to_owned().into())),
+        ("message", Value::String("boom".to_owned().into())),
         (
             "toString",
             Value::Native(Native::ErrorToString, RealmId::PRIMARY),
@@ -2342,7 +2659,7 @@ fn setting_a_property_on_a_primitive_is_rejected() {
         source: "".into(),
         template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
-        constants: vec![Constant::String("x".to_owned()), number(1.0)],
+        constants: vec![Constant::String("x".to_owned().into()), number(1.0)],
         code: vec![
             Instruction::Const(1),
             Instruction::Const(1),
@@ -2811,8 +3128,8 @@ fn symbol_with_throwing_right_value_of(operator: BinaryOp) -> Program {
         template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: vec![
-            Constant::String("valueOf".to_owned()),
-            Constant::String("called".to_owned()),
+            Constant::String("valueOf".to_owned().into()),
+            Constant::String("called".to_owned().into()),
         ],
         code: vec![
             Instruction::LoadBuiltin(Builtin::Symbol),
@@ -2949,7 +3266,7 @@ fn a_captured_dead_zone_read_names_its_source_binding() {
         source: "".into(),
         template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
-        constants: vec![Constant::String("later".to_owned())],
+        constants: vec![Constant::String("later".to_owned().into())],
         code: vec![
             Instruction::NewCell(0),
             Instruction::MarkUninitialized(0),
@@ -3212,7 +3529,7 @@ fn json_scalars_serialise_as_themselves() {
     assert_eq!(json(&Value::Boolean(true)).as_deref(), Some("true"));
     assert_eq!(json(&Value::Number(1.5)).as_deref(), Some("1.5"));
     assert_eq!(
-        json(&Value::String("hi".to_owned())).as_deref(),
+        json(&Value::String("hi".to_owned().into())).as_deref(),
         Some(r#""hi""#)
     );
 }
@@ -3266,7 +3583,7 @@ fn json_skips_internal_properties() {
 
 #[test]
 fn json_escapes_strings() {
-    let value = Value::String("a\"b\\c\nd\u{1}".to_owned());
+    let value = Value::String("a\"b\\c\nd\u{1}".to_owned().into());
     assert_eq!(json(&value).as_deref(), Some(r#""a\"b\\c\nd\u0001""#));
 }
 
@@ -3307,7 +3624,10 @@ fn json_allows_the_same_value_twice_in_different_places() {
 fn json_indent_argument_is_capped() {
     assert_eq!(json_indent(Some(&Value::Number(2.0))), "  ");
     assert_eq!(json_indent(Some(&Value::Number(50.0))).len(), 10);
-    assert_eq!(json_indent(Some(&Value::String("ab".to_owned()))), "ab");
+    assert_eq!(
+        json_indent(Some(&Value::String("ab".to_owned().into()))),
+        "ab"
+    );
     // A fractional or zero count means no indent at all, same as omitting the argument.
     assert_eq!(json_indent(Some(&Value::Number(0.0))), "");
     assert_eq!(json_indent(None), "");
@@ -3379,7 +3699,10 @@ fn an_array_and_a_string_spread_as_their_indices() {
     );
     assert_eq!(items[0].0, "0");
     assert_eq!(items[1].0, "1");
-    let characters = own_properties(&Intrinsics::default(), &Value::String("hi".to_owned()));
+    let characters = own_properties(
+        &Intrinsics::default(),
+        &Value::String("hi".to_owned().into()),
+    );
     assert_eq!(characters.len(), 2);
     assert_eq!(characters[1].0, "1");
 }
@@ -3536,7 +3859,7 @@ fn a_console_shows_contents_where_string_shows_a_tag() {
     // The whole point of `inspect`: `String({a: 1})` is "[object Object]" and always will be.
     let value = object(&[
         ("a", Value::Number(1.0)),
-        ("b", Value::String("x".to_owned())),
+        ("b", Value::String("x".to_owned().into())),
         ("c", Value::Null),
     ]);
     assert_eq!(inspect(&value), "{ a: 1, b: 'x', c: null }");
@@ -3546,9 +3869,9 @@ fn a_console_shows_contents_where_string_shows_a_tag() {
 #[test]
 fn a_top_level_string_is_bare_and_a_nested_one_is_quoted() {
     // `console.log("hi")` prints hi; `{ a: "hi" }` has to show that `a` holds a string.
-    assert_eq!(inspect(&Value::String("hi".to_owned())), "hi");
+    assert_eq!(inspect(&Value::String("hi".to_owned().into())), "hi");
     assert_eq!(
-        inspect(&array(&[Value::String("hi".to_owned())])),
+        inspect(&array(&[Value::String("hi".to_owned().into())])),
         "[ 'hi' ]"
     );
 }
@@ -3636,7 +3959,7 @@ fn loose_equality_is_not_strict_equality_with_a_conversion() {
     assert!(loose_equal(&array(&[]), &Value::Boolean(false)));
     assert!(loose_equal(
         &Value::Number(1.0),
-        &Value::String("1".to_owned())
+        &Value::String("1".to_owned().into())
     ));
     assert!(loose_equal(
         &array(&[Value::Number(1.0)]),
@@ -3674,7 +3997,7 @@ fn math_round_goes_toward_positive_infinity() {
 fn parse_int_reads_as_far_as_it_can() {
     // The whole difference from `Number(text)`, which is NaN for every one of these.
     let parsed = |text: &str, radix: Option<f64>| {
-        let mut arguments = vec![Value::String(text.to_owned())];
+        let mut arguments = vec![Value::String(text.to_owned().into())];
         if let Some(radix) = radix {
             arguments.push(Value::Number(radix));
         }
@@ -3766,7 +4089,7 @@ fn timer_program(schedule: &[(&str, f64)]) -> Program {
     let mut functions = Vec::new();
     for (tag, delay) in schedule {
         let tag_index = constants.len() as u32;
-        constants.push(Constant::String((*tag).to_owned()));
+        constants.push(Constant::String((*tag).to_owned().into()));
         let delay_index = constants.len() as u32;
         constants.push(number(*delay));
 
@@ -3816,11 +4139,11 @@ fn timer_program(schedule: &[(&str, f64)]) -> Program {
 /// compiled by hand, printed.
 fn generator_receiver_program() -> Program {
     let constants = vec![
-        Constant::String("mark".to_owned()),
-        Constant::String("receiver".to_owned()),
-        Constant::String("step".to_owned()),
-        Constant::String("next".to_owned()),
-        Constant::String("value".to_owned()),
+        Constant::String("mark".to_owned().into()),
+        Constant::String("receiver".to_owned().into()),
+        Constant::String("step".to_owned().into()),
+        Constant::String("next".to_owned().into()),
+        Constant::String("value".to_owned().into()),
     ];
     Program {
         source: "".into(),
@@ -4504,7 +4827,9 @@ fn every_surface_member_is_named_for_its_key() {
         .expect("the private createRequire host hook is published");
     assert_eq!(
         vm.read_property(&host_create_require, "name", 0),
-        Ok(Value::String("__kilnHostModuleCreateRequire".to_owned()))
+        Ok(Value::String(
+            "__kilnHostModuleCreateRequire".to_owned().into()
+        ))
     );
 }
 
@@ -4959,8 +5284,8 @@ fn process_object_is_event_emitter() {
         template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: vec![
-            Constant::String("on".to_owned()),
-            Constant::String("exit".to_owned()),
+            Constant::String("on".to_owned().into()),
+            Constant::String("exit".to_owned().into()),
         ],
         code: vec![
             Instruction::LoadBuiltin(Builtin::Process),
@@ -5018,14 +5343,14 @@ fn text_decoder_and_buffer_support_whatwg_encodings() {
     let decoded_utf8 = vm
         .dispatch_native(Native::TextDecoderDecode, &decoder_utf8, &[buf_utf8], 0)
         .expect("TextDecoder decode succeeds");
-    assert_eq!(decoded_utf8, Value::String("Hello 🌍".to_owned()));
+    assert_eq!(decoded_utf8, Value::String("Hello 🌍".to_owned().into()));
 
     // 2. TextDecoder windows-1252
     let decoder_1252 = vm
         .dispatch_native(
             Native::TextDecoderConstructor,
             &Value::Undefined,
-            &[Value::String("windows-1252".to_owned())],
+            &[Value::String("windows-1252".to_owned().into())],
             0,
         )
         .expect("TextDecoder windows-1252 constructor succeeds");
@@ -5038,14 +5363,14 @@ fn text_decoder_and_buffer_support_whatwg_encodings() {
     let decoded_1252 = vm
         .dispatch_native(Native::TextDecoderDecode, &decoder_1252, &[buf_1252], 0)
         .expect("TextDecoder decode succeeds");
-    assert_eq!(decoded_1252, Value::String("Hello £é".to_owned()));
+    assert_eq!(decoded_1252, Value::String("Hello £é".to_owned().into()));
 
     // 3. TextDecoder utf-16le
     let decoder_utf16le = vm
         .dispatch_native(
             Native::TextDecoderConstructor,
             &Value::Undefined,
-            &[Value::String("utf-16le".to_owned())],
+            &[Value::String("utf-16le".to_owned().into())],
             0,
         )
         .expect("TextDecoder utf-16le constructor succeeds");
@@ -5059,13 +5384,13 @@ fn text_decoder_and_buffer_support_whatwg_encodings() {
             0,
         )
         .expect("TextDecoder decode succeeds");
-    assert_eq!(decoded_utf16le, Value::String("Hi".to_owned()));
+    assert_eq!(decoded_utf16le, Value::String("Hi".to_owned().into()));
 
     // 4. TextDecoder invalid label throws RangeError
     let invalid = vm.dispatch_native(
         Native::TextDecoderConstructor,
         &Value::Undefined,
-        &[Value::String("unsupported-encoding-xyz".to_owned())],
+        &[Value::String("unsupported-encoding-xyz".to_owned().into())],
         0,
     );
     assert!(matches!(
@@ -5079,7 +5404,7 @@ fn text_decoder_and_buffer_support_whatwg_encodings() {
         .dispatch_native(
             Native::TextDecoderConstructor,
             &Value::Undefined,
-            &[Value::String("utf-8".to_owned()), options],
+            &[Value::String("utf-8".to_owned().into()), options],
             0,
         )
         .expect("fatal TextDecoder succeeds");
@@ -5104,11 +5429,11 @@ fn text_decoder_and_buffer_support_whatwg_encodings() {
         .dispatch_native(
             Native::NodeBufferToString,
             &uint8_view,
-            &[Value::String("hex".to_owned())],
+            &[Value::String("hex".to_owned().into())],
             0,
         )
         .expect("Buffer.toString hex");
-    assert_eq!(hex_res, Value::String("48656c6c6f21".to_owned()));
+    assert_eq!(hex_res, Value::String("48656c6c6f21".to_owned().into()));
 
     let latin1_bytes = test_buffer(&[0xa3, 0xe9], None, false);
     let latin1_view =
@@ -5117,11 +5442,11 @@ fn text_decoder_and_buffer_support_whatwg_encodings() {
         .dispatch_native(
             Native::NodeBufferToString,
             &latin1_view,
-            &[Value::String("latin1".to_owned())],
+            &[Value::String("latin1".to_owned().into())],
             0,
         )
         .expect("Buffer.toString latin1");
-    assert_eq!(latin1_res, Value::String("£é".to_owned()));
+    assert_eq!(latin1_res, Value::String("£é".to_owned().into()));
 
     let utf16_bytes = test_buffer(&[0x48, 0x00, 0x69, 0x00], None, false);
     let utf16_view =
@@ -5130,11 +5455,11 @@ fn text_decoder_and_buffer_support_whatwg_encodings() {
         .dispatch_native(
             Native::NodeBufferToString,
             &utf16_view,
-            &[Value::String("utf16le".to_owned())],
+            &[Value::String("utf16le".to_owned().into())],
             0,
         )
         .expect("Buffer.toString utf16le");
-    assert_eq!(utf16_res, Value::String("Hi".to_owned()));
+    assert_eq!(utf16_res, Value::String("Hi".to_owned().into()));
 }
 
 #[test]
@@ -5156,7 +5481,8 @@ fn whatwg_url_and_search_params_support() {
             &Value::Undefined,
             &[Value::String(
                 "https://user:pass@example.com:8080/path/to/file?q=1&filter=true#section"
-                    .to_owned(),
+                    .to_owned()
+                    .into(),
             )],
             0,
         )
@@ -5165,48 +5491,50 @@ fn whatwg_url_and_search_params_support() {
     assert_eq!(
         vm.property(&url_val, "href"),
         Value::String(
-            "https://user:pass@example.com:8080/path/to/file?q=1&filter=true#section".to_owned()
+            "https://user:pass@example.com:8080/path/to/file?q=1&filter=true#section"
+                .to_owned()
+                .into()
         )
     );
     assert_eq!(
         vm.property(&url_val, "origin"),
-        Value::String("https://example.com:8080".to_owned())
+        Value::String("https://example.com:8080".to_owned().into())
     );
     assert_eq!(
         vm.property(&url_val, "protocol"),
-        Value::String("https:".to_owned())
+        Value::String("https:".to_owned().into())
     );
     assert_eq!(
         vm.property(&url_val, "host"),
-        Value::String("example.com:8080".to_owned())
+        Value::String("example.com:8080".to_owned().into())
     );
     assert_eq!(
         vm.property(&url_val, "hostname"),
-        Value::String("example.com".to_owned())
+        Value::String("example.com".to_owned().into())
     );
     assert_eq!(
         vm.property(&url_val, "port"),
-        Value::String("8080".to_owned())
+        Value::String("8080".to_owned().into())
     );
     assert_eq!(
         vm.property(&url_val, "pathname"),
-        Value::String("/path/to/file".to_owned())
+        Value::String("/path/to/file".to_owned().into())
     );
     assert_eq!(
         vm.property(&url_val, "search"),
-        Value::String("?q=1&filter=true".to_owned())
+        Value::String("?q=1&filter=true".to_owned().into())
     );
     assert_eq!(
         vm.property(&url_val, "hash"),
-        Value::String("#section".to_owned())
+        Value::String("#section".to_owned().into())
     );
     assert_eq!(
         vm.property(&url_val, "username"),
-        Value::String("user".to_owned())
+        Value::String("user".to_owned().into())
     );
     assert_eq!(
         vm.property(&url_val, "password"),
-        Value::String("pass".to_owned())
+        Value::String("pass".to_owned().into())
     );
 
     // toString / toJSON method
@@ -5216,7 +5544,9 @@ fn whatwg_url_and_search_params_support() {
     assert_eq!(
         to_str,
         Value::String(
-            "https://user:pass@example.com:8080/path/to/file?q=1&filter=true#section".to_owned()
+            "https://user:pass@example.com:8080/path/to/file?q=1&filter=true#section"
+                .to_owned()
+                .into()
         )
     );
 
@@ -5226,7 +5556,7 @@ fn whatwg_url_and_search_params_support() {
             Native::UrlConstructor,
             &Value::Undefined,
             &[Value::String(
-                "https://example.com/dir/index.html".to_owned(),
+                "https://example.com/dir/index.html".to_owned().into(),
             )],
             0,
         )
@@ -5235,13 +5565,13 @@ fn whatwg_url_and_search_params_support() {
         .dispatch_native(
             Native::UrlConstructor,
             &Value::Undefined,
-            &[Value::String("sub/page.html".to_owned()), base_val],
+            &[Value::String("sub/page.html".to_owned().into()), base_val],
             0,
         )
         .expect("Relative child URL succeeds");
     assert_eq!(
         vm.property(&relative_child, "href"),
-        Value::String("https://example.com/dir/sub/page.html".to_owned())
+        Value::String("https://example.com/dir/sub/page.html".to_owned().into())
     );
 
     // 3. searchParams methods (get, has, getAll, toString)
@@ -5250,17 +5580,17 @@ fn whatwg_url_and_search_params_support() {
         .dispatch_native(
             Native::UrlSearchParamsGet,
             &search_params,
-            &[Value::String("q".to_owned())],
+            &[Value::String("q".to_owned().into())],
             0,
         )
         .expect("searchParams.get(q)");
-    assert_eq!(get_q, Value::String("1".to_owned()));
+    assert_eq!(get_q, Value::String("1".to_owned().into()));
 
     let get_missing = vm
         .dispatch_native(
             Native::UrlSearchParamsGet,
             &search_params,
-            &[Value::String("missing".to_owned())],
+            &[Value::String("missing".to_owned().into())],
             0,
         )
         .expect("searchParams.get(missing)");
@@ -5270,7 +5600,7 @@ fn whatwg_url_and_search_params_support() {
         .dispatch_native(
             Native::UrlSearchParamsHas,
             &search_params,
-            &[Value::String("filter".to_owned())],
+            &[Value::String("filter".to_owned().into())],
             0,
         )
         .expect("searchParams.has(filter)");
@@ -5280,7 +5610,7 @@ fn whatwg_url_and_search_params_support() {
         .dispatch_native(
             Native::UrlSearchParamsHas,
             &search_params,
-            &[Value::String("missing".to_owned())],
+            &[Value::String("missing".to_owned().into())],
             0,
         )
         .expect("searchParams.has(missing)");
@@ -5290,32 +5620,38 @@ fn whatwg_url_and_search_params_support() {
         .dispatch_native(
             Native::UrlSearchParamsGetAll,
             &search_params,
-            &[Value::String("q".to_owned())],
+            &[Value::String("q".to_owned().into())],
             0,
         )
         .expect("searchParams.getAll(q)");
     let Value::Array(get_all_items) = get_all_q else {
         panic!("searchParams.getAll must return an array");
     };
-    assert_eq!(&*get_all_items.borrow(), &[Value::String("1".to_owned())]);
+    assert_eq!(
+        &*get_all_items.borrow(),
+        &[Value::String("1".to_owned().into())]
+    );
 
     let sp_to_str = vm
         .dispatch_native(Native::UrlSearchParamsToString, &search_params, &[], 0)
         .expect("searchParams.toString");
-    assert_eq!(sp_to_str, Value::String("q=1&filter=true".to_owned()));
+    assert_eq!(
+        sp_to_str,
+        Value::String("q=1&filter=true".to_owned().into())
+    );
 
     // 4. fileURLToPath and pathToFileURL
     let file_url_res = vm
         .dispatch_native(
             Native::NodeUrlPathToFileUrl,
             &Value::Undefined,
-            &[Value::String("/foo/bar baz.txt".to_owned())],
+            &[Value::String("/foo/bar baz.txt".to_owned().into())],
             0,
         )
         .expect("pathToFileURL succeeds");
     assert_eq!(
         vm.property(&file_url_res, "href"),
-        Value::String("file:///foo/bar%20baz.txt".to_owned())
+        Value::String("file:///foo/bar%20baz.txt".to_owned().into())
     );
 
     // fileURLToPath with string
@@ -5323,11 +5659,14 @@ fn whatwg_url_and_search_params_support() {
         .dispatch_native(
             Native::NodeUrlFileUrlToPath,
             &Value::Undefined,
-            &[Value::String("file:///foo/bar%20baz.txt".to_owned())],
+            &[Value::String("file:///foo/bar%20baz.txt".to_owned().into())],
             0,
         )
         .expect("fileURLToPath from string succeeds");
-    assert_eq!(path_from_str, Value::String("/foo/bar baz.txt".to_owned()));
+    assert_eq!(
+        path_from_str,
+        Value::String("/foo/bar baz.txt".to_owned().into())
+    );
 
     // fileURLToPath with URL object
     let path_from_obj = vm
@@ -5338,13 +5677,16 @@ fn whatwg_url_and_search_params_support() {
             0,
         )
         .expect("fileURLToPath from URL object succeeds");
-    assert_eq!(path_from_obj, Value::String("/foo/bar baz.txt".to_owned()));
+    assert_eq!(
+        path_from_obj,
+        Value::String("/foo/bar baz.txt".to_owned().into())
+    );
 
     // 5. Invalid URL throws TypeError
     let invalid = vm.dispatch_native(
         Native::UrlConstructor,
         &Value::Undefined,
-        &[Value::String("not an absolute url".to_owned())],
+        &[Value::String("not an absolute url".to_owned().into())],
         0,
     );
     assert!(matches!(
@@ -5705,10 +6047,10 @@ fn node_crypto_random_bytes_fill_hashes_and_hmac() {
         panic!("randomUUID must return string");
     };
     assert_eq!(uuid_str.len(), 36);
-    assert_eq!(&uuid_str[8..9], "-");
-    assert_eq!(&uuid_str[13..14], "-");
-    assert_eq!(&uuid_str[18..19], "-");
-    assert_eq!(&uuid_str[23..24], "-");
+    assert_eq!(uuid_str.unit_at(8), Some(b'-' as u16));
+    assert_eq!(uuid_str.unit_at(13), Some(b'-' as u16));
+    assert_eq!(uuid_str.unit_at(18), Some(b'-' as u16));
+    assert_eq!(uuid_str.unit_at(23), Some(b'-' as u16));
 
     // 6. Test crypto.timingSafeEqual
     let a = node_bytes_value(vec![1, 2, 3, 4]);

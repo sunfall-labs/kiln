@@ -34,20 +34,20 @@ pub(crate) fn prepare_lookup(
     let addresses = match host.as_str() {
         "localhost" => vec![
             ordinary_object([
-                ("address".to_owned(), Value::String("127.0.0.1".to_owned())),
+                ("address".to_owned(), Value::String("127.0.0.1".to_owned().into())),
                 ("family".to_owned(), Value::Number(4.0)),
             ]),
             ordinary_object([
-                ("address".to_owned(), Value::String("::1".to_owned())),
+                ("address".to_owned(), Value::String("::1".to_owned().into())),
                 ("family".to_owned(), Value::Number(6.0)),
             ]),
         ],
         "127.0.0.1" => vec![ordinary_object([
-            ("address".to_owned(), Value::String(host)),
+            ("address".to_owned(), Value::String(host.into())),
             ("family".to_owned(), Value::Number(4.0)),
         ])],
         "::1" => vec![ordinary_object([
-            ("address".to_owned(), Value::String(host)),
+            ("address".to_owned(), Value::String(host.into())),
             ("family".to_owned(), Value::Number(6.0)),
         ])],
         _ => Vec::new(),
@@ -57,7 +57,7 @@ pub(crate) fn prepare_lookup(
     });
     let callback_arguments = if addresses.is_empty() {
         vec![
-            Value::String("ENOTFOUND".to_owned()),
+            Value::String("ENOTFOUND".to_owned().into()),
             Value::Array(ArrayData::new(Vec::new())),
         ]
     } else if options_all {

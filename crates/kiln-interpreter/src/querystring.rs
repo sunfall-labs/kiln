@@ -41,7 +41,7 @@ pub(crate) fn parse(input: &str) -> Value {
     for part in input.split('&').filter(|part| !part.is_empty()) {
         let (name, value) = part.split_once('=').unwrap_or((part, ""));
         let name = decode_form_component(name);
-        let value = Value::String(decode_form_component(value));
+        let value = Value::String(decode_form_component(value).into());
         match object.get_own(&name).cloned() {
             None => object.set(&name, value),
             Some(Value::Array(values)) => values.borrow_mut().push(value),

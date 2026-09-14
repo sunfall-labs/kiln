@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 pub use kiln_hir::{Span, TypeAnnotation, VariableKind};
 pub use kiln_host_abi::HostOp;
+pub use kiln_string::StringUnits;
 
 /// Version of the bytecode contract produced by this crate.
 pub const BYTECODE_VERSION: u16 = 5;
@@ -20,7 +21,7 @@ pub enum Constant {
     Boolean(bool),
     /// IEEE-754 `f64` bits; preserving bits makes program equality total (including NaN/-0).
     Number(u64),
-    String(String),
+    String(StringUnits),
     /// A BigInt literal's decimal digits, with no sign: `-1n` is a negation of `1n`.
     ///
     /// Held as text because the value has no bound. Two programs are equal when their digits
@@ -544,8 +545,8 @@ pub enum Instruction {
 /// A template literal site for canonical template object caching (ECMA-262 §13.2.8.5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TemplateSite {
-    pub cooked: Vec<Option<String>>,
-    pub raw: Vec<String>,
+    pub cooked: Vec<Option<StringUnits>>,
+    pub raw: Vec<StringUnits>,
 }
 
 /// A compiled module body.
