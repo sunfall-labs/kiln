@@ -466,7 +466,7 @@ enum kiln_value_tag {
 
 /* This layout is the complete boundary value.  `bits` and `ptr` share one word because a value
  * is a payload or a pointer and never both: `bits` stores booleans and IEEE-754 numbers, `ptr`
- * with `len` stores UTF-8 string bytes and is not required to be NUL terminated.
+ * points at a canonical kiln_string header and `len` mirrors its UTF-16 code-unit count.
  *
  * Sixteen bytes is a threshold rather than a size. AAPCS64 passes a composite of sixteen bytes or
  * fewer in registers and anything larger indirectly, by reference to a copy -- so at the previous
@@ -605,6 +605,22 @@ static int kiln_cli_write_result_u64(FILE *file, uint64_t value) {
         : KILN_C99_HOST_ERROR;
 }
 
+static int kiln_cli_write_result_string(FILE *file, const kiln_string *string) {
+    size_t index;
+    if (string == NULL || string->unit_len == 0) return KILN_C99_OK;
+    for (index = 0; index < string->unit_len; ++index) {
+        uint16_t unit = kiln_string_is_utf16(string)
+                            ? ((const uint16_t *)string->data)[index]
+                            : ((const uint8_t *)string->data)[index];
+        unsigned char bytes[2] = {
+            (unsigned char)(unit & 0xffu),
+            (unsigned char)((unit >> 8) & 0xffu),
+        };
+        if (fwrite(bytes, 1, sizeof bytes, file) != sizeof bytes) return KILN_C99_HOST_ERROR;
+    }
+    return KILN_C99_OK;
+}
+
 /* Private KILNRES1 scalar-result writer. The explicit-path form is used by focused C tests;
  * the environment wrapper below is the only launcher-facing entry point. */
 int kiln_cli_write_result_file(const char *path, kiln_value value) {
@@ -637,20 +653,22 @@ int kiln_cli_write_result_file(const char *path, kiln_value value) {
         length = 8;
         break;
     case KILN_VALUE_STRING:
-        if (value.len != 0 && value.ptr == NULL) {
+        if (value.ptr == NULL) {
             return KILN_C99_INVALID_ARGUMENT;
+        }
+        {
+            const kiln_string *string = (const kiln_string *)value.ptr;
+            if (string->unit_len > UINT32_MAX / 2) return KILN_C99_INVALID_ARGUMENT;
+            length = (uint64_t)string->unit_len * 2;
         }
 #if SIZE_MAX > UINT64_MAX
         /* `length` is a uint64_t on the wire. Where `size_t` cannot exceed it -- which is every
          * target this ships to -- the check is a tautology, and gcc says so under `-Wtype-limits`,
          * which `-Werror` here turns into a build failure. Kept behind the condition that makes it
          * meaningful rather than deleted, so a 128-bit `size_t` still gets the refusal. */
-        if ((uintmax_t)value.len > UINT64_MAX) {
-            return KILN_C99_INVALID_ARGUMENT;
-        }
+        (void)length;
 #endif
         tag = (uint8_t)value.tag;
-        length = (uint64_t)value.len;
         break;
     default:
         return KILN_C99_INVALID_ARGUMENT;
@@ -670,9 +688,8 @@ int kiln_cli_write_result_file(const char *path, kiln_value value) {
         }
     } else if (value.tag == KILN_VALUE_NUMBER) {
         status = kiln_cli_write_result_u64(file, value.bits);
-    } else if (value.tag == KILN_VALUE_STRING && value.len != 0
-               && fwrite(value.ptr, 1, value.len, file) != value.len) {
-        status = KILN_C99_HOST_ERROR;
+    } else if (value.tag == KILN_VALUE_STRING) {
+        status = kiln_cli_write_result_string(file, (const kiln_string *)value.ptr);
     }
     if (fclose(file) != 0) {
         status = KILN_C99_HOST_ERROR;
@@ -1247,7 +1264,8 @@ mod tests {
 
         let mut invalid_utf8 =
             encode_native_result(&kiln_host_abi::HostValue::String("ok".to_owned().into()));
-        invalid_utf8[NATIVE_RESULT_HEADER_LEN] = 0xff;
+        invalid_utf8.truncate(invalid_utf8.len() - 1);
+        invalid_utf8[9..17].copy_from_slice(&3_u64.to_le_bytes());
         assert_eq!(
             decode_native_result(&invalid_utf8),
             Err(NativeResultError::InvalidStringPayload)
@@ -1869,8 +1887,9 @@ int main(int argc, char **argv) {
     /* This is the internal owned-string provenance bit.  The public result writer must
      * consume the ordinary ptr/len span without serializing that provenance. */
     value.flags = KILN_VALUE_FLAG_OWNED_STRING;
-    value.ptr = text;
-    value.len = sizeof(text);
+    static const kiln_string string = {3, KILN_STRING_LATIN1, text};
+    value.ptr = (const char *)&string;
+    value.len = string.unit_len;
     return kiln_cli_write_result_file(argv[5], value) == KILN_C99_OK ? 0 : 1;
 }
 "#;
