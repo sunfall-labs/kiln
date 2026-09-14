@@ -5246,6 +5246,67 @@ fn speculation_disabled_emits_generic_clone_alone() {
 }
 
 #[test]
+fn loop_induction_and_string_length_emit_assigned_twins() {
+    let proto = FunctionProto {
+        span: kiln_ir::Span::default(),
+        prologue_end: 0,
+        declared_length: 1,
+        name: Some("test_loop_and_len".into()),
+        parameter_count: 1,
+        local_count: 3,
+        code: vec![
+            Instruction::Const(0),
+            Instruction::StoreLocal(1),
+            Instruction::Const(0),
+            Instruction::StoreLocal(2),
+            Instruction::LoadLocal(2),
+            Instruction::LoadLocal(0),
+            Instruction::Binary(BinaryOp::LessThan),
+            Instruction::JumpIfFalse(21),
+            Instruction::LoadLocal(1),
+            Instruction::LoadLocal(2),
+            Instruction::Binary(BinaryOp::Add),
+            Instruction::StoreLocal(1),
+            Instruction::Const(2),
+            Instruction::GetProperty(3),
+            Instruction::LoadLocal(1),
+            Instruction::Binary(BinaryOp::Add),
+            Instruction::StoreLocal(1),
+            Instruction::LoadLocal(2),
+            Instruction::Unary(UnaryOp::Increment),
+            Instruction::StoreLocal(2),
+            Instruction::Jump(4),
+            Instruction::LoadLocal(1),
+            Instruction::Return,
+        ],
+        arrow: false,
+        generator: false,
+        asynchronous: false,
+        async_generator: false,
+        is_method: false,
+        mapped_arguments: false,
+        upvalues: Vec::new(),
+        type_annotations: None,
+    };
+    let prog = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants: vec![
+            Constant::Number(0),
+            Constant::Number(1),
+            Constant::String("hello".into()),
+            Constant::String("length".into()),
+        ],
+        code: vec![Instruction::Return],
+        local_count: 0,
+        functions: vec![proto],
+        template_sites: Vec::new(),
+    };
+    let generated = emit(&prog).expect("emits");
+    assert!(generated.source.contains("str->length"));
+}
+
+#[test]
 fn value_graph_merges_locals_at_a_loop_header_with_phis() {
     // let sum = 0; let i = 0; while (i < 10) { sum += i; i++; } return sum;
     //
