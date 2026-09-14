@@ -9,8 +9,13 @@ tmp="$(mktemp -d)"
 pids=()
 results_dir="${DRIVE_RESULTS_DIR:-}"
 if [[ -n $results_dir ]]; then mkdir -p "$results_dir"; fi
-cleanup() { rm -rf "$tmp"; }
-trap cleanup EXIT
+cleanup() {
+  local pid
+  for pid in "${pids[@]:-}"; do kill -TERM "$pid" 2>/dev/null || true; done
+  for pid in "${pids[@]:-}"; do wait "$pid" 2>/dev/null || true; done
+  rm -rf "$tmp"
+}
+trap cleanup EXIT INT TERM
 for i in $(seq 1 "$procs"); do
 	if [[ $workload == mixed ]]; then
 		node "$HERE/drive-mix.mjs" "$duration" "$conns" "$port" > "$tmp/$i.json" &
