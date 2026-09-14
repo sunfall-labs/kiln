@@ -202,7 +202,9 @@ static kiln_value kiln_c99_copy_text(const char *text, size_t len) {
     s->length = is_ascii ? len : kiln_c99_utf8_to_utf16_len(copy, len);
     s->byte_len = len;
     s->bytes = copy;
-    return kiln_c99_value(KILN_VALUE_STRING, 0, copy, len);
+    kiln_value result = kiln_c99_value(KILN_VALUE_STRING, 0, copy, len);
+    result.flags = KILN_VALUE_FLAG_OWNED_STRING;
+    return result;
 }
 
 static kiln_value kiln_c99_control_diagnostic(void) {

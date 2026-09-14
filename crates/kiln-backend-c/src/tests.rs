@@ -406,6 +406,51 @@ int main(void) {{
 }
 
 #[test]
+fn owned_boundary_strings_preserve_identity_and_borrowed_strings_copy() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    uint64_t realm;
+    const char bytes[] = {(char)0xc3, (char)0xa9, 0, (char)0xff};
+    kiln_value owned = kiln_c99_copy_text(bytes, sizeof bytes);
+    kiln_value borrowed;
+    kiln_val owned_value;
+    kiln_val copied_value;
+    const kiln_string *header;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
+    kiln_test_realm_active = 1;
+    if (owned.tag != KILN_VALUE_STRING || owned.flags != KILN_VALUE_FLAG_OWNED_STRING ||
+        owned.len != sizeof bytes || owned.ptr == NULL) return 2;
+    header = (const kiln_string *)owned.ptr - 1;
+    if (header->bytes != owned.ptr || header->byte_len != sizeof bytes) return 3;
+    owned_value = kiln_val_from_boundary(owned);
+    if (!KILN_VAL_IS_STRING(owned_value) || (const kiln_string *)KILN_VAL_PTR(owned_value) != header)
+        return 4;
+    borrowed = kiln_val_to_boundary(owned_value);
+    if (borrowed.flags != KILN_VALUE_FLAG_OWNED_STRING || borrowed.ptr != owned.ptr ||
+        borrowed.len != owned.len) return 5;
+    borrowed = kiln_c99_value(KILN_VALUE_STRING, 0, owned.ptr, owned.len);
+    if (borrowed.flags != 0) return 6;
+    copied_value = kiln_val_from_boundary(borrowed);
+    if (!KILN_VAL_IS_STRING(copied_value) || KILN_VAL_PTR(copied_value) == KILN_VAL_PTR(owned_value))
+        return 7;
+    if (memcmp(((const kiln_string *)KILN_VAL_PTR(copied_value))->bytes, bytes, sizeof bytes) != 0)
+        return 8;
+    kiln_test_realm_active = 0;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 9;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "owned-boundary-string");
+    assert!(
+        run.status.success(),
+        "owned boundary string test failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_runtime_event_emitter_preserves_order_once_and_removal() {
     let module = ModuleProgram {
         program: Program {

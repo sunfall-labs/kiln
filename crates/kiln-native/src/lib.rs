@@ -4420,9 +4420,9 @@ import_attributes_valid:
         if (kiln_node_ffi_namespace.tag != KILN_VALUE_UNDEFINED) {
             return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_RESOLVE, kiln_c99_undefined(), &kiln_node_ffi_namespace, 1, depth, thrown);
         }
-        kiln_value dlopen = (kiln_value){ 11, 0, { 495 } };
-        kiln_value get_raw_pointer = (kiln_value){ 11, 0, { 496 } };
-        kiln_value to_array_buffer = (kiln_value){ 11, 0, { 497 } };
+        kiln_value dlopen = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 495 };
+        kiln_value get_raw_pointer = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 496 };
+        kiln_value to_array_buffer = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 497 };
 #if defined(_WIN32)
         kiln_value suffix = kiln_c99_copy_text(".dll", 4);
 #elif defined(__APPLE__)
@@ -4608,9 +4608,9 @@ import_attributes_valid:
         if (kiln_shared_node_ffi_namespace.tag != KILN_VALUE_UNDEFINED) {
             return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_RESOLVE, kiln_c99_undefined(), &kiln_shared_node_ffi_namespace, 1, depth, thrown);
         }
-        kiln_value dlopen = (kiln_value){ 11, 0, { 495 } };
-        kiln_value get_raw_pointer = (kiln_value){ 11, 0, { 496 } };
-        kiln_value to_array_buffer = (kiln_value){ 11, 0, { 497 } };
+        kiln_value dlopen = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 495 };
+        kiln_value get_raw_pointer = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 496 };
+        kiln_value to_array_buffer = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 497 };
 #if defined(_WIN32)
         kiln_value suffix = kiln_c99_copy_text(".dll", 4);
 #elif defined(__APPLE__)
@@ -4943,17 +4943,22 @@ enum kiln_value_tag {
 };
 
 typedef struct kiln_value {
-    uint32_t tag;
+    uint16_t tag;
+    uint16_t flags;
     uint32_t len;
     union { uint64_t bits; const char *ptr; };
 } kiln_value;
+#define KILN_VALUE_FLAG_OWNED_STRING UINT16_C(1)
+_Static_assert(offsetof(kiln_value, flags) == 2, "kiln_value.flags ABI offset");
+_Static_assert(offsetof(kiln_value, len) == 4, "kiln_value.len ABI offset");
+_Static_assert(sizeof(kiln_value) == 16, "kiln_value layout");
 
 /* The prelude owns this realm-local guard. The trusted builtin bootstrap may install methods;
  * the launcher seals those writes before any user module can observe or mutate the realm. */
 extern uint64_t kiln_c99_builtin_store_epoch __attribute__((visibility("hidden")));
 
 static kiln_value kiln_graph_diagnostic(const char *phase, const char *module) {
-    kiln_value value = { KILN_VALUE_STRING, 0, {0} };
+    kiln_value value = { .tag = KILN_VALUE_STRING, .flags = 0, .len = 0, .bits = 0 };
     value.ptr = phase;
     static char text[2048];
     size_t phase_len = strlen(phase);
@@ -5288,7 +5293,7 @@ static kiln_value *kiln_graph_module_result(kiln_graph_context *graph, size_t in
 }
 
 static kiln_value *kiln_graph_module_promise(kiln_graph_context *graph, size_t index) {
-    static kiln_value undefined = { KILN_VALUE_UNDEFINED, 0, {0} };
+    static kiln_value undefined = { .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 };
     return graph->module_states[index].completion_promise.tag == 16 /* KILN_VALUE_PROMISE */
         ? &graph->module_states[index].completion_promise
         : &undefined;
@@ -5452,8 +5457,8 @@ static int kiln_install_native_modules(kiln_host *host) {
     kiln_value net_obj = kiln_c99_undefined();
     status = kiln_c99_new_object(&net_obj);
     if (status != KILN_C99_OK) return status;
-    kiln_value net_connect = (kiln_value){ 11, 0, { 338 /* KILN_C99_METHOD_NODE_NET_CONNECT */ } };
-    kiln_value net_create_server = (kiln_value){ 11, 0, { 268 /* KILN_C99_METHOD_NODE_NET_CREATE_SERVER */ } };
+    kiln_value net_connect = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 338 /* KILN_C99_METHOD_NODE_NET_CONNECT */ };
+    kiln_value net_create_server = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 268 /* KILN_C99_METHOD_NODE_NET_CREATE_SERVER */ };
     status = kiln_c99_put(host, net_obj, "connect", 7, net_connect, 0, NULL);
     if (status != KILN_C99_OK) return status;
     status = kiln_c99_put(host, net_obj, "createConnection", 16, net_connect, 0, NULL);
@@ -5466,11 +5471,11 @@ static int kiln_install_native_modules(kiln_host *host) {
     kiln_value http_obj = kiln_c99_undefined();
     status = kiln_c99_new_object(&http_obj);
     if (status != KILN_C99_OK) return status;
-    kiln_value http_server = (kiln_value){ 11, 0, { 403 /* KILN_C99_METHOD_NODE_HTTP_SERVER */ } };
-    kiln_value http_server_response = (kiln_value){ 11, 0, { 426 /* KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE */ } };
-    kiln_value http_create_server = (kiln_value){ 11, 0, { 275 /* KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER */ } };
-    kiln_value http_get = (kiln_value){ 11, 0, { 280 /* KILN_C99_METHOD_NODE_HTTP_GET */ } };
-    kiln_value http_request = (kiln_value){ 11, 0, { 281 /* KILN_C99_METHOD_NODE_HTTP_REQUEST */ } };
+    kiln_value http_server = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 403 /* KILN_C99_METHOD_NODE_HTTP_SERVER */ };
+    kiln_value http_server_response = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 426 /* KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE */ };
+    kiln_value http_create_server = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 275 /* KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER */ };
+    kiln_value http_get = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 280 /* KILN_C99_METHOD_NODE_HTTP_GET */ };
+    kiln_value http_request = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 281 /* KILN_C99_METHOD_NODE_HTTP_REQUEST */ };
     status = kiln_c99_put(host, http_obj, "Server", 6, http_server, 0, NULL);
     if (status != KILN_C99_OK) return status;
     status = kiln_c99_put(host, http_obj, "ServerResponse", 14, http_server_response, 0, NULL);
@@ -5487,11 +5492,11 @@ static int kiln_install_native_modules(kiln_host *host) {
     kiln_value fsp_obj = kiln_c99_undefined();
     status = kiln_c99_new_object(&fsp_obj);
     if (status != KILN_C99_OK) return status;
-    kiln_value fs_append_file = (kiln_value){ 11, 0, { 482 /* KILN_C99_METHOD_NODE_BUILTIN_UNMATERIALIZED */ } };
-    kiln_value fs_mkdir = (kiln_value){ 11, 0, { 507 /* KILN_C99_METHOD_NODE_FS_MKDIR */ } };
-    kiln_value fs_read_file = (kiln_value){ 11, 0, { 379 /* KILN_C99_METHOD_NODE_FS_READ_FILE */ } };
-    kiln_value fs_stat = (kiln_value){ 11, 0, { 380 /* KILN_C99_METHOD_NODE_FS_STAT */ } };
-    kiln_value fs_write_file = (kiln_value){ 11, 0, { 381 /* KILN_C99_METHOD_NODE_FS_WRITE_FILE */ } };
+    kiln_value fs_append_file = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 482 /* KILN_C99_METHOD_NODE_BUILTIN_UNMATERIALIZED */ };
+    kiln_value fs_mkdir = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 507 /* KILN_C99_METHOD_NODE_FS_MKDIR */ };
+    kiln_value fs_read_file = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 379 /* KILN_C99_METHOD_NODE_FS_READ_FILE */ };
+    kiln_value fs_stat = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 380 /* KILN_C99_METHOD_NODE_FS_STAT */ };
+    kiln_value fs_write_file = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 381 /* KILN_C99_METHOD_NODE_FS_WRITE_FILE */ };
     status = kiln_c99_put(host, fsp_obj, "appendFile", 10, fs_append_file, 0, NULL);
     if (status != KILN_C99_OK) return status;
     status = kiln_c99_put(host, fsp_obj, "mkdir", 5, fs_mkdir, 0, NULL);
@@ -5508,7 +5513,7 @@ static int kiln_install_native_modules(kiln_host *host) {
     kiln_value fs_obj = kiln_c99_undefined();
     status = kiln_c99_new_object(&fs_obj);
     if (status != KILN_C99_OK) return status;
-    kiln_value fs_exists_sync = (kiln_value){ 11, 0, { 378 /* KILN_C99_METHOD_NODE_FS_EXISTS_SYNC */ } };
+    kiln_value fs_exists_sync = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 378 /* KILN_C99_METHOD_NODE_FS_EXISTS_SYNC */ };
     status = kiln_c99_put(host, fs_obj, "existsSync", 10, fs_exists_sync, 0, NULL);
     if (status != KILN_C99_OK) return status;
     status = kiln_c99_put(host, fs_obj, "promises", 8, fsp_obj, 0, NULL);
@@ -5519,9 +5524,9 @@ static int kiln_install_native_modules(kiln_host *host) {
     kiln_value ffi_obj = kiln_c99_undefined();
     status = kiln_c99_new_object(&ffi_obj);
     if (status != KILN_C99_OK) return status;
-    kiln_value ffi_dlopen = (kiln_value){ 11, 0, { 495 /* KILN_C99_METHOD_NODE_FFI_DLOPEN */ } };
-    kiln_value ffi_get_raw_pointer = (kiln_value){ 11, 0, { 496 /* KILN_C99_METHOD_NODE_FFI_GET_RAW_POINTER */ } };
-    kiln_value ffi_to_array_buffer = (kiln_value){ 11, 0, { 497 /* KILN_C99_METHOD_NODE_FFI_TO_ARRAY_BUFFER */ } };
+    kiln_value ffi_dlopen = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 495 /* KILN_C99_METHOD_NODE_FFI_DLOPEN */ };
+    kiln_value ffi_get_raw_pointer = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 496 /* KILN_C99_METHOD_NODE_FFI_GET_RAW_POINTER */ };
+    kiln_value ffi_to_array_buffer = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 497 /* KILN_C99_METHOD_NODE_FFI_TO_ARRAY_BUFFER */ };
 #if defined(_WIN32)
     kiln_value ffi_suffix = kiln_c99_copy_text(".dll", 4);
 #elif defined(__APPLE__)
@@ -6040,7 +6045,7 @@ static int kiln_cli_run_realm(int argc, char **argv, int writes_result) {
     }
     if (status != 0) kiln_cli_report_failure_in(status, graph.result, phase);
     if (writes_result && status == 0 && kiln_cli_write_result(graph.entry_result) != 0) {
-        kiln_cli_report_failure_in(KILN_C99_HOST_ERROR, (kiln_value){ KILN_VALUE_STRING, 17, { .ptr = "filesystem access" } }, "result write");
+        kiln_cli_report_failure_in(KILN_C99_HOST_ERROR, (kiln_value){ .tag = KILN_VALUE_STRING, .flags = 0, .len = 17, .ptr = "filesystem access" }, "result write");
         status = 1;
     }
     destroy_status = kiln_realm_destroy(realm);
@@ -6248,11 +6253,23 @@ static int {stem}_proxy_call(void *context, uint16_t operation, uint16_t argc,
     {proxy} *proxy = ({proxy} *)context;
     kiln_host *upstream;
     char *copy;
+    kiln_value normalized_small[16];
+    kiln_value *normalized = NULL;
     int status;
     if (proxy == NULL || proxy->upstream == NULL || proxy->upstream->call == NULL ||
         result == NULL) return KILN_C99_HOST_ERROR;
     upstream = proxy->upstream;
-    status = upstream->call(upstream->context, operation, argc, arguments, result);
+    if (argc != 0) {{
+        if (arguments == NULL) return KILN_C99_INVALID_ARGUMENT;
+        normalized = argc <= 16 ? normalized_small :
+            (kiln_value *)malloc((size_t)argc * sizeof(*normalized));
+        if (normalized == NULL) return KILN_C99_HOST_ERROR;
+        memcpy(normalized, arguments, (size_t)argc * sizeof(*normalized));
+        for (uint16_t index = 0; index < argc; ++index) normalized[index].flags = 0;
+    }}
+    status = upstream->call(upstream->context, operation, argc, normalized, result);
+    if (normalized != normalized_small) free(normalized);
+    result->flags = 0;
     if (status != KILN_C99_OK) return status;
     if (result->tag > KILN_VALUE_STRING) {{
         proxy->failure_status = KILN_C99_INVALID_ARGUMENT;
@@ -6277,6 +6294,7 @@ static int {stem}_proxy_call(void *context, uint16_t operation, uint16_t argc,
         return KILN_C99_HOST_ERROR;
     }}
     result->ptr = copy;
+    result->flags = 0;
     return KILN_C99_OK;
 }}
 
@@ -6284,7 +6302,7 @@ static int {run}(kiln_host *host, kiln_result_v2 **out) {{
     {arena} arena = {{ NULL, 0, 0 }};
     {proxy} proxy = {{ host, &arena, KILN_C99_OK }};
     kiln_host proxy_host = {{ {stem}_proxy_call, &proxy }};
-    kiln_value value = {{ KILN_VALUE_UNDEFINED, 0, {{0}} }};
+    kiln_value value = {{ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 }};
     kiln_result_v2 *owned = NULL;
     char *copy = NULL;
     int status;
@@ -6317,6 +6335,7 @@ static int {run}(kiln_host *host, kiln_result_v2 **out) {{
         if (value.len != 0) memcpy(copy, value.ptr, value.len);
         copy[value.len] = '\0';
         owned->value.ptr = copy;
+        owned->value.flags = 0;
         copy = NULL;
     }} else {{
         /* `ptr` shares the payload word with `bits`, so clearing it here would erase the number
@@ -6693,6 +6712,8 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
     kiln_host *upstream;
     kiln_proxy_arena *arena;
     char *copy;
+    kiln_value normalized_small[16];
+    kiln_value *normalized_arguments = NULL;
     int status;
     if (proxy == NULL || proxy->upstream == NULL || proxy->upstream->call == NULL ||
         result == NULL) return KILN_C99_INVALID_ARGUMENT;
@@ -6700,7 +6721,23 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
     arena = proxy->arena;
     if (operation == KILN_C99_HOST_MODULE_CREATE_REQUIRE)
         return kiln_shared_create_require(proxy, argc, arguments, result);
-    status = upstream->call(upstream->context, operation, argc, arguments, result);
+    if (argc != 0) {
+        if (arguments == NULL || (size_t)argc > (size_t)-1 / sizeof(*normalized_arguments)) {
+            proxy->failure_status = KILN_C99_INVALID_ARGUMENT;
+            return KILN_C99_INVALID_ARGUMENT;
+        }
+        normalized_arguments = argc <= 16 ? normalized_small :
+            (kiln_value *)malloc((size_t)argc * sizeof(*normalized_arguments));
+        if (normalized_arguments == NULL) {
+            proxy->failure_status = KILN_C99_HOST_ERROR;
+            return KILN_C99_HOST_ERROR;
+        }
+        memcpy(normalized_arguments, arguments, (size_t)argc * sizeof(*normalized_arguments));
+        for (uint16_t index = 0; index < argc; ++index) normalized_arguments[index].flags = 0;
+    }
+    status = upstream->call(upstream->context, operation, argc, normalized_arguments, result);
+    if (normalized_arguments != normalized_small) free(normalized_arguments);
+    result->flags = 0;
     if (status != KILN_C99_OK) return status;
     if (result->tag != KILN_VALUE_STRING) return KILN_C99_OK;
     if (result->len == (size_t)-1 || (result->len != 0 && result->ptr == NULL)) {
@@ -6721,6 +6758,7 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
         return KILN_C99_HOST_ERROR;
     }
     result->ptr = copy;
+    result->flags = 0;
     return KILN_C99_OK;
 }
 
@@ -6874,7 +6912,7 @@ static kiln_commonjs_graph_context *kiln_graph_context_from_host(kiln_host *host
     }
     render_shared_wrapper_roots(&mut output, modules, wrapper_symbol);
     let opentui_init = if has_any_dynamic_import {
-        "\n    kiln_shared_opentui_namespace = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};\n    kiln_shared_node_ffi_namespace = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};"
+        "\n    kiln_shared_opentui_namespace = (kiln_value){ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 };\n    kiln_shared_node_ffi_namespace = (kiln_value){ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 };"
     } else {
         ""
     };
@@ -6903,7 +6941,7 @@ typedef struct {wrapper_symbol}_realm_context {{
     .unwrap();
     writeln!(
         output,
-        "\nstatic int {wrapper_symbol}_body({wrapper_symbol}_realm_context *context) {{\n    kiln_host *proxy_host;\n    kiln_value *result;\n    kiln_value **import_arrays = NULL;\n    kiln_value **export_arrays = NULL;\n    kiln_value *namespaces = NULL;\n    kiln_commonjs_context *commonjs_modules = NULL;\n    kiln_commonjs_graph_context *commonjs_graph;\n    {wrapper_symbol}_gc_context *gc_context;\n    /* All graph storage belongs to the realm context and survives this body until drive and\n     * realm teardown have completed. */\n    #define module_result (context->shared_module_result)\n    int status = KILN_C99_OK;\n    size_t index;\n    if (context == NULL) return KILN_C99_INVALID_ARGUMENT;\n    proxy_host = &context->proxy_host;\n    result = context->result;\n    import_arrays = context->shared_import_arrays;\n    export_arrays = context->shared_export_arrays;\n    namespaces = context->shared_namespaces;\n    commonjs_modules = context->shared_commonjs_modules;\n    commonjs_graph = &context->shared_commonjs_graph;\n    gc_context = &context->shared_gc_context;\n    if (result == NULL || proxy_host == NULL) return KILN_C99_INVALID_ARGUMENT;\n    *commonjs_graph = (kiln_commonjs_graph_context){{ NULL, NULL, (size_t){count} }};\n    *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};\n    if ((size_t){count} > (size_t)-1 / sizeof(*import_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*export_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*namespaces) ||\n        (size_t){count} > (size_t)-1 / sizeof(*commonjs_modules)) {{\n        status = KILN_C99_HOST_ERROR;\n        goto cleanup;\n    }}\n    import_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*import_arrays));\n    context->shared_import_arrays = import_arrays;\n    export_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*export_arrays));\n    context->shared_export_arrays = export_arrays;\n    namespaces = (kiln_value *)calloc((size_t){count}, sizeof(*namespaces));\n    context->shared_namespaces = namespaces;\n    commonjs_modules = (kiln_commonjs_context *)calloc((size_t){count}, sizeof(*commonjs_modules));\n    context->shared_commonjs_modules = commonjs_modules;\n    if (import_arrays == NULL || export_arrays == NULL || namespaces == NULL || commonjs_modules == NULL) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}\n    commonjs_graph->modules = commonjs_modules;\n    commonjs_graph->exports = export_arrays;\n    /* The wrapper host carries the graph context for callbacks, but preserves the embedding\n     * host's function and context verbatim for every host operation. */\n    if (proxy_host->context != NULL && proxy_host->call == kiln_proxy_call)\n        ((kiln_proxy_host *)proxy_host->context)->graph = commonjs_graph;\n    if (kiln_graph_context_from_host(proxy_host) != commonjs_graph) {{ status = KILN_C99_INVALID_ARGUMENT; goto cleanup; }}\n    gc_context->imports = import_arrays;\n    gc_context->exports = export_arrays;\n    gc_context->module_namespaces = namespaces;\n    gc_context->result = &module_result;\n    module_result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};\n    status = kiln_realm_gc_register_roots({wrapper_symbol}_gc_roots, gc_context, KILN_GC_ROOT_SURVIVES_TEARDOWN);\n    if (status != KILN_C99_OK) goto cleanup;\n    context->roots_registered = 1;\n    kiln_shared_namespaces = namespaces;\n    kiln_shared_commonjs = commonjs_modules;{opentui_init}",
+        "\nstatic int {wrapper_symbol}_body({wrapper_symbol}_realm_context *context) {{\n    kiln_host *proxy_host;\n    kiln_value *result;\n    kiln_value **import_arrays = NULL;\n    kiln_value **export_arrays = NULL;\n    kiln_value *namespaces = NULL;\n    kiln_commonjs_context *commonjs_modules = NULL;\n    kiln_commonjs_graph_context *commonjs_graph;\n    {wrapper_symbol}_gc_context *gc_context;\n    /* All graph storage belongs to the realm context and survives this body until drive and\n     * realm teardown have completed. */\n    #define module_result (context->shared_module_result)\n    int status = KILN_C99_OK;\n    size_t index;\n    if (context == NULL) return KILN_C99_INVALID_ARGUMENT;\n    proxy_host = &context->proxy_host;\n    result = context->result;\n    import_arrays = context->shared_import_arrays;\n    export_arrays = context->shared_export_arrays;\n    namespaces = context->shared_namespaces;\n    commonjs_modules = context->shared_commonjs_modules;\n    commonjs_graph = &context->shared_commonjs_graph;\n    gc_context = &context->shared_gc_context;\n    if (result == NULL || proxy_host == NULL) return KILN_C99_INVALID_ARGUMENT;\n    *commonjs_graph = (kiln_commonjs_graph_context){{ NULL, NULL, (size_t){count} }};\n    *result = (kiln_value){{ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 }};\n    if ((size_t){count} > (size_t)-1 / sizeof(*import_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*export_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*namespaces) ||\n        (size_t){count} > (size_t)-1 / sizeof(*commonjs_modules)) {{\n        status = KILN_C99_HOST_ERROR;\n        goto cleanup;\n    }}\n    import_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*import_arrays));\n    context->shared_import_arrays = import_arrays;\n    export_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*export_arrays));\n    context->shared_export_arrays = export_arrays;\n    namespaces = (kiln_value *)calloc((size_t){count}, sizeof(*namespaces));\n    context->shared_namespaces = namespaces;\n    commonjs_modules = (kiln_commonjs_context *)calloc((size_t){count}, sizeof(*commonjs_modules));\n    context->shared_commonjs_modules = commonjs_modules;\n    if (import_arrays == NULL || export_arrays == NULL || namespaces == NULL || commonjs_modules == NULL) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}\n    commonjs_graph->modules = commonjs_modules;\n    commonjs_graph->exports = export_arrays;\n    /* The wrapper host carries the graph context for callbacks, but preserves the embedding\n     * host's function and context verbatim for every host operation. */\n    if (proxy_host->context != NULL && proxy_host->call == kiln_proxy_call)\n        ((kiln_proxy_host *)proxy_host->context)->graph = commonjs_graph;\n    if (kiln_graph_context_from_host(proxy_host) != commonjs_graph) {{ status = KILN_C99_INVALID_ARGUMENT; goto cleanup; }}\n    gc_context->imports = import_arrays;\n    gc_context->exports = export_arrays;\n    gc_context->module_namespaces = namespaces;\n    gc_context->result = &module_result;\n    module_result = (kiln_value){{ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 }};\n    status = kiln_realm_gc_register_roots({wrapper_symbol}_gc_roots, gc_context, KILN_GC_ROOT_SURVIVES_TEARDOWN);\n    if (status != KILN_C99_OK) goto cleanup;\n    context->roots_registered = 1;\n    kiln_shared_namespaces = namespaces;\n    kiln_shared_commonjs = commonjs_modules;{opentui_init}",
         wrapper_symbol = wrapper_symbol,
         count = modules.len(),
     )
@@ -7018,7 +7056,7 @@ typedef struct {wrapper_symbol}_realm_context {{
         }
         writeln!(
             output,
-            "    module_result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};\n    status = {}(proxy_host, &module_result, import_arrays[{index}], (size_t){import_count}, export_arrays[{index}], (size_t){export_count});\n    if (status != KILN_C99_OK) {{ *result = module_result; goto cleanup; }}",
+            "    module_result = (kiln_value){{ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 }};\n    status = {}(proxy_host, &module_result, import_arrays[{index}], (size_t){import_count}, export_arrays[{index}], (size_t){export_count});\n    if (status != KILN_C99_OK) {{ *result = module_result; goto cleanup; }}",
             modules[index].1.symbol
         )
         .unwrap();
@@ -7031,7 +7069,7 @@ typedef struct {wrapper_symbol}_realm_context {{
         }
     }
     let opentui_cleanup = if has_any_dynamic_import {
-        "\n    kiln_shared_opentui_namespace = (kiln_value){ KILN_VALUE_UNDEFINED, 0, {0} };\n    kiln_shared_node_ffi_namespace = (kiln_value){ KILN_VALUE_UNDEFINED, 0, {0} };"
+        "\n    kiln_shared_opentui_namespace = (kiln_value){ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 };\n    kiln_shared_node_ffi_namespace = (kiln_value){ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 };"
     } else {
         ""
     };
@@ -7074,12 +7112,12 @@ static int {impl_symbol}(kiln_host *host, kiln_value *result, int preserve_resul
     /* Public v1 results remain borrowed; private v2 calls preserve strings across cleanup. */
     if (preserve_result != 0 && result->tag == KILN_VALUE_STRING) {{
         if (result->len == (size_t)-1 || (result->len != 0 && result->ptr == NULL)) {{
-            *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};
+            *result = (kiln_value){{ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 }};
             status = KILN_C99_INVALID_ARGUMENT;
         }} else {{
             preserved = (char *)malloc(result->len + 1);
             if (preserved == NULL) {{
-                *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};
+                *result = (kiln_value){{ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 }};
                 status = KILN_C99_HOST_ERROR;
             }} else {{
                 if (result->len != 0) memcpy(preserved, result->ptr, result->len);
@@ -7103,6 +7141,7 @@ static int {impl_symbol}(kiln_host *host, kiln_value *result, int preserve_resul
     free(context.shared_commonjs_modules);
     kiln_proxy_arena_clear(&context.arena);
     if (preserved != NULL) result->ptr = preserved;
+    result->flags = 0;
     return status;
 }}
 
