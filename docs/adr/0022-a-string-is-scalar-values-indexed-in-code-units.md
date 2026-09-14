@@ -6,6 +6,23 @@
 representation change large enough to be its own project; this fixes the inconsistency that made
 the limitation dangerous and names the escape route.
 
+## Amendment: checked dynamic-source boundary (2026-09-14)
+
+The runtime now carries JavaScript text through the shared UTF-16 `StringUnits` representation
+where a value may contain an unpaired surrogate. The scalar Rust boundary remains deliberately
+checked: `eval`, the `Function` family, host script evaluation, and `ShadowRealm` source
+evaluation borrow a scalar `str` when possible and refuse a raw unpaired unit with an explicit
+`EvalUnsupported` error. They never replace it with U+FFFD and never report the refusal as a
+`SyntaxError`. A source containing an escaped surrogate (for example, `"\\ud800"`) is ordinary
+ASCII source and continues through the existing Oxc compiler. A well-formed source that the
+compiler rejects still reports its ordinary `SyntaxError`.
+
+This boundary is intentional rather than a second source parser: Oxc accepts UTF-8 scalar text
+and its spans are byte offsets, so accepting malformed UTF-16 here would require a separate lexer
+or a lossy rewrite. The refusal preserves the source value and makes the capability limit visible
+to the host. Non-string dynamic-source arguments still use their normal `ToString` coercion once
+before this check.
+
 ## Context
 
 A JavaScript string is a sequence of UTF-16 code units, and the specification does not require

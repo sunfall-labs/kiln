@@ -4886,6 +4886,9 @@ pub struct EvalSource<'a> {
     pub blocked_var_names: &'a [String],
 }
 
+const DYNAMIC_SOURCE_UNPAIRED_SURROGATE: &str =
+    "dynamic source contains unpaired UTF-16 surrogate code units";
+
 /// Why a run-time compilation produced no program.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EvalCompileError {
@@ -12198,7 +12201,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // Entered rather than driven: the interpreter loop runs the eval's frame
                     // next, and its `Return` leaves the completion value where this instruction's
                     // result belongs. Nothing is pushed here.
-                    let entered = self.enter_eval(&source.to_lossy_string(), Some(site), false);
+                    let entered = self.enter_eval_units(&source, Some(site), false);
                     if self.catchable(entered, current)?.is_none() {
                         continue;
                     }
@@ -14475,10 +14478,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Some(Value::String(source)) => source.clone(),
                 // Unlike `eval`, which hands a non-string straight back: `evalScript` is given
                 // source text or it is given nothing it can run.
-                Some(value) => self.as_string(value, instruction)?.into(),
-                None => String::new().into(),
+                Some(value) => self.as_text_units(value, instruction)?,
+                None => StringUnits::default(),
             };
-            return self.drive_eval(&source.to_lossy_string(), None, true);
+            return self.drive_eval_units(&source, None, true);
         }
         // A write through a view onto an immutable buffer is refused before its arguments are
         // converted, and that order is observable: a `valueOf` handed to a setter on such a view
@@ -20159,6 +20162,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return Err(ExecutionError::SymbolIsNotAString);
         }
         Ok(primitive.to_string_units())
+    }
+
+    /// Check and expose dynamic source as scalar UTF-8 for the parser boundary.
+    ///
+    /// The source compiler accepts `&str`, so silently widening malformed UTF-16 would change
+    /// the program before the frontend sees it. ASCII source remains borrowed through the shared
+    /// string representation; scalar non-ASCII source allocates once.
+    fn checked_dynamic_source<'a>(
+        &self,
+        source: &'a StringUnits,
+    ) -> Result<Cow<'a, str>, ExecutionError> {
+        source
+            .to_scalar_cow()
+            .map_err(|_| ExecutionError::EvalUnsupported {
+                message: DYNAMIC_SOURCE_UNPAIRED_SURROGATE.to_owned(),
+            })
     }
 
     /// `%IteratorPrototype%.reduce` and the seven other methods that consume an iterator.
@@ -26075,7 +26094,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             });
         };
         let source = source.clone();
-        let produced = self.shadow_realm_run(&source.to_lossy_string(), evaluated)?;
+        let produced = self.shadow_realm_run_units(&source, evaluated)?;
         match produced {
             Ok(value) => self.wrap_for_realm(&value, caller),
             // Every abrupt completion becomes *this* realm's TypeError, whatever it was: a
@@ -26204,6 +26223,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// rather than inspecting the error afterwards, is what draws that line in the right place:
     /// a nested `eval`'s `SyntaxError` has already become a thrown value by the time it reaches
     /// the handler installed here, and so cannot be mistaken for this compile's.
+    fn shadow_realm_run_units(
+        &mut self,
+        source: &StringUnits,
+        realm: RealmId,
+    ) -> Result<Result<Value, ()>, ExecutionError> {
+        let source = self.checked_dynamic_source(source)?;
+        self.shadow_realm_run(source.as_ref(), realm)
+    }
+
     fn shadow_realm_run(
         &mut self,
         source: &str,
@@ -33143,7 +33171,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let first = arguments.first().cloned().unwrap_or(Value::Undefined);
         match op {
             AgentOp::Start => {
-                let source = self.as_string(&first, instruction)?;
+                let source = self.as_text_units(&first, instruction)?;
+                let source = self.checked_dynamic_source(&source)?;
                 // The host's prelude first: a new realm has never heard of `$262`, and the
                 // source it was given assumes it has.
                 let prelude = self.host_agents.unwrap_or_default();
@@ -34018,6 +34047,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// program binds by name, and its `this`, `arguments` and `new.target` are the caller's --
     /// which is the whole of what "evaluates in the caller's scope" means. Without one, this is
     /// an indirect eval: global scope, the global object as `this`, and no arguments.
+    fn enter_eval_units(
+        &mut self,
+        source: &StringUnits,
+        site: Option<&EvalSite>,
+        script: bool,
+    ) -> Result<(), ExecutionError> {
+        let source = self.checked_dynamic_source(source)?;
+        self.enter_eval(source.as_ref(), site, script)
+    }
+
     fn enter_eval(
         &mut self,
         source: &str,
@@ -34148,6 +34187,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// loop carry on. A built-in cannot, because it owes its caller a value now -- so it drives
     /// the machine the way every other built-in that calls back into JavaScript does, and pays
     /// the same Rust frame for it.
+    fn drive_eval_units(
+        &mut self,
+        source: &StringUnits,
+        site: Option<&EvalSite>,
+        script: bool,
+    ) -> Result<Value, ExecutionError> {
+        let source = self.checked_dynamic_source(source)?;
+        self.drive_eval(source.as_ref(), site, script)
+    }
+
     fn drive_eval(
         &mut self,
         source: &str,
@@ -34540,10 +34589,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// `eval(someObject)` harmless.
     fn indirect_eval(&mut self, arguments: &[Value]) -> Result<Value, ExecutionError> {
         match arguments.first() {
-            Some(Value::String(source)) => {
-                let source = source.clone();
-                self.drive_eval(&source.to_lossy_string(), None, false)
-            }
+            Some(Value::String(source)) => self.drive_eval_units(source, None, false),
             Some(value) => Ok(value.clone()),
             None => Ok(Value::Undefined),
         }
@@ -34566,23 +34612,29 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         kind: &str,
     ) -> Result<Value, ExecutionError> {
         let Some((body, parameters)) = arguments.split_last() else {
-            return self.drive_eval(&format!("({kind} anonymous(\n) {{\n\n}})"), None, false);
+            let source = StringUnits::from(format!("({kind} anonymous(\n) {{\n\n}})"));
+            return self.drive_eval_units(&source, None, false);
         };
         // Every parameter first, in order, and only then the body. That order is the
         // specification's and it is observable: when both a parameter's `toString` and the
-        // body's throw, the parameter's throw is the one the program sees.
-        let mut joined = String::new();
-        for parameter in parameters {
-            if !joined.is_empty() {
-                joined.push(',');
+        // body's throw, the parameter's throw is the one the program sees. Keep each result in
+        // UTF-16 units until the one checked parser boundary below.
+        let mut units = format!("({kind} anonymous(")
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        for (index, parameter) in parameters.iter().enumerate() {
+            if index > 0 {
+                units.push(b',' as u16);
             }
-            joined.push_str(&self.as_string(parameter, instruction)?);
+            units.extend(self.as_text_units(parameter, instruction)?.units());
         }
-        let body = self.as_string(body, instruction)?;
         // The newlines are the specification's own: they stop a `//` comment in the parameter
         // list from swallowing the brace, and one in the body from swallowing the close.
-        let source = format!("({kind} anonymous({joined}\n) {{\n{body}\n}})");
-        self.drive_eval(&source, None, false)
+        units.extend("\n) {\n".encode_utf16());
+        units.extend(self.as_text_units(body, instruction)?.units());
+        units.extend("\n})".encode_utf16());
+        let source = StringUnits::from_units(&units);
+        self.drive_eval_units(&source, None, false)
     }
 
     /// `ToString`: the conversion the *program* defines, which runs its code and can throw.
