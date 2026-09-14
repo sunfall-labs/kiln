@@ -4343,11 +4343,11 @@ impl Value {
 
     /// Lossless `ToPropertyKey` spelling for ordinary string values. Symbols retain their
     /// reserved internal name; all other values use the already-computed language string.
-    pub fn property_key_units(&self) -> StringUnits {
+    fn property_key_units_checked(&self) -> Result<StringUnits, ExecutionError> {
         match self {
-            Self::Symbol(symbol) => StringUnits::from(symbol.property_key()),
-            Self::String(value) => value.clone(),
-            other => other.to_string_units(),
+            Self::Symbol(symbol) => Ok(StringUnits::from(symbol.property_key())),
+            Self::String(value) => Ok(value.clone()),
+            other => other.to_string_units_checked(),
         }
     }
 
@@ -4741,20 +4741,23 @@ impl Value {
         }
     }
 
-    /// Lossless JavaScript `ToString` result. Consumers that remain in the language must keep
-    /// this owner rather than routing through the scalar display formatter above.
-    pub fn to_string_units(&self) -> StringUnits {
+    /// Fallible lossless `ToString` used by language operations that can propagate a string-size
+    /// refusal. The conversion itself is already complete by the time this method is called;
+    /// object-to-primitive side effects are owned by `Vm::as_primitive`.
+    fn to_string_units_checked(&self) -> Result<StringUnits, ExecutionError> {
         match self {
-            Self::String(value) => value.clone(),
+            Self::String(value) => Ok(value.clone()),
             Self::Array(items) => join_units(&items.borrow(), &StringUnits::from(",")),
             Self::TypedArray(view) => join_units(&view.items(), &StringUnits::from(",")),
-            Self::RegExp(regexp) => regexp_string_units(regexp),
-            Self::Proxy(proxy) if !is_callable(&proxy.target) => proxy.target.to_string_units(),
+            Self::RegExp(regexp) => Ok(regexp_string_units(regexp)),
+            Self::Proxy(proxy) if !is_callable(&proxy.target) => {
+                proxy.target.to_string_units_checked()
+            }
             Self::Intl(value) => match value.as_ref() {
-                intl::IntlValue::Locale(tag) => StringUnits::from(tag.as_str()),
-                _ => StringUnits::from(self.to_display_string()),
+                intl::IntlValue::Locale(tag) => Ok(StringUnits::from(tag.as_str())),
+                _ => Ok(StringUnits::from(self.to_display_string())),
             },
-            _ => StringUnits::from(self.to_display_string()),
+            _ => Ok(StringUnits::from(self.to_display_string())),
         }
     }
 }
@@ -5554,7 +5557,7 @@ pub enum ExecutionError {
     ArrayTooLarge {
         length: usize,
     },
-    /// A string operation whose result would exceed [`MAX_STRING_BYTES`]. Unlike the two limits
+    /// A string operation whose result would exceed [`MAX_STRING_STORAGE_BYTES`]. Unlike the two limits
     /// above this one *is* in `as_javascript_error`, because it is not only an implementation
     /// limit: the specification bounds a string's length, V8 raises `RangeError: Invalid string
     /// length` at its own bound, and Test262 has tests that build a string toward 2^36 units and
@@ -12269,7 +12272,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             raised = true;
                             break;
                         };
-                        let key_units = key.property_key_units();
+                        let Some(key_units) =
+                            self.catchable(key.property_key_units_checked(), current)?
+                        else {
+                            continue;
+                        };
                         object.set_units(&key_units, pair[1].clone());
                     }
                     if raised {
@@ -12717,7 +12724,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             PrivateKind::Getter => Some("get"),
                             PrivateKind::Setter => Some("set"),
                         },
-                    );
+                    )?;
                     // Not writable, which is how a read of the slot later tells a method from a
                     // field; configurable, so the second half of a `get`/`set` pair may merge
                     // with the first rather than being refused by `redefinable`.
@@ -12761,12 +12768,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let Some(key) = self.catchable(coerced, current)? else {
                         continue;
                     };
-                    let name = key.property_key_units();
-                    define_function_name(
-                        &function,
-                        &key,
-                        Some(if *setter { "set" } else { "get" }),
-                    );
+                    let Some(name) = self.catchable(key.property_key_units_checked(), current)?
+                    else {
+                        continue;
+                    };
+                    if self
+                        .catchable(
+                            define_function_name(
+                                &function,
+                                &key,
+                                Some(if *setter { "set" } else { "get" }),
+                            ),
+                            current,
+                        )?
+                        .is_none()
+                    {
+                        continue;
+                    }
                     let (getter, setter) = if *setter {
                         (None, Some(function))
                     } else {
@@ -12810,8 +12828,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let Some(key) = self.catchable(coerced, current)? else {
                         continue;
                     };
-                    let name = key.property_key_units();
-                    define_function_name(&function, &key, None);
+                    let Some(name) = self.catchable(key.property_key_units_checked(), current)?
+                    else {
+                        continue;
+                    };
+                    if self
+                        .catchable(define_function_name(&function, &key, None), current)?
+                        .is_none()
+                    {
+                        continue;
+                    }
                     let target = self.stack.last().cloned().unwrap_or(Value::Undefined);
                     if let Value::Object(object) = &target {
                         object.borrow_mut().define_value_units(
@@ -12829,8 +12855,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let Some(key) = self.catchable(coerced, current)? else {
                         continue;
                     };
-                    let name = key.property_key_units();
-                    define_function_name(&function, &key, None);
+                    let Some(name) = self.catchable(key.property_key_units_checked(), current)?
+                    else {
+                        continue;
+                    };
+                    if self
+                        .catchable(define_function_name(&function, &key, None), current)?
+                        .is_none()
+                    {
+                        continue;
+                    }
                     match &target {
                         Value::Object(object) => {
                             object.borrow_mut().define_value_units(
@@ -14347,11 +14381,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             "get",
             "set",
         ] {
-            if !has_property(
+            if !has_property_checked(
                 &self.intrinsics,
                 source,
                 &Value::String(field.to_owned().into()),
-            ) {
+            )? {
                 continue;
             }
             let read = self.read_property(source, field, instruction)?;
@@ -16395,7 +16429,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     };
                     match self.from_entries_pair(&entry, instruction) {
                         Ok((key, value)) => {
-                            let key_units = key.property_key_units();
+                            let key_units = key.property_key_units_checked()?;
                             data.set_units(&key_units, value);
                         }
                         Err(error) => {
@@ -16827,7 +16861,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 let key =
                     self.computed_key(arguments.get(1).unwrap_or(&Value::Undefined), instruction)?;
-                let key_units = key.property_key_units();
+                let key_units = key.property_key_units_checked()?;
                 let source = arguments.get(2).cloned().unwrap_or(Value::Undefined);
                 let descriptor = self.read_descriptor(&source, instruction)?;
                 let defined = self.define_own_key(
@@ -16954,7 +16988,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if matches!(target, Value::Proxy(_)) {
                     return self.proxy_descriptor(&target, &key, instruction);
                 }
-                let key_units = key.property_key_units();
+                let key_units = key.property_key_units_checked()?;
                 Ok(
                     own_descriptor_key(
                         &self.intrinsics,
@@ -16970,11 +17004,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if matches!(target, Value::Proxy(_)) {
                     return Ok(Value::Boolean(self.delete(&target, &key, instruction)?));
                 }
-                Ok(Value::Boolean(delete_property(
+                Ok(Value::Boolean(delete_property_checked(
                     &self.intrinsics,
                     &target,
                     &key,
-                )))
+                )?))
             }
             Native::ReflectIsExtensible => {
                 let target = self.reflect_target(arguments.first(), "isExtensible")?;
@@ -17113,7 +17147,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let pattern = match arguments.first() {
                     Some(Value::RegExp(existing)) => existing.source.clone(),
                     None | Some(Value::Undefined) => StringUnits::default(),
-                    Some(value) => value.to_string_units(),
+                    Some(value) => value.to_string_units_checked()?,
                 };
                 let flags = match arguments.get(1) {
                     None | Some(Value::Undefined) => match arguments.first() {
@@ -17929,7 +17963,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let mut result = ObjectData::default();
         result.set_prototype(Value::Null);
         for (key, members) in groups {
-            let key = key.property_key_units();
+            let key = key.property_key_units_checked()?;
             result.set_units(&key, Value::Array(ArrayData::new(members)));
         }
         Ok(Value::Object(Rc::new(RefCell::new(result))))
@@ -18076,10 +18110,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // A symbol is a key already and must not be stringified; everything else reduces first,
         // and the reduction can be the program's code.
         if matches!(key, Value::Symbol(_)) {
-            return Ok(key.property_key_units());
+            return key.property_key_units_checked();
         }
         let primitive = self.as_primitive(&key, PrimitiveHint::String, instruction)?;
-        Ok(primitive.property_key_units())
+        primitive.property_key_units_checked()
     }
 
     /// One of the four copying array methods.
@@ -20172,7 +20206,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if matches!(primitive, Value::Symbol(_)) {
             return Err(ExecutionError::SymbolIsNotAString);
         }
-        Ok(primitive.to_string_units())
+        primitive.to_string_units_checked()
     }
 
     /// Check and expose dynamic source as scalar UTF-8 for the parser boundary.
@@ -21439,7 +21473,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
     ) -> Result<f64, ExecutionError> {
         if comparator.is_nullish() {
-            let (left, right) = (left.to_string_units(), right.to_string_units());
+            let (left, right) = (
+                left.to_string_units_checked()?,
+                right.to_string_units_checked()?,
+            );
             // UTF-16 code units, which is the order the language compares strings in.
             return Ok(match left.cmp(&right) {
                 std::cmp::Ordering::Less => -1.0,
@@ -23631,7 +23668,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let descriptor = if matches!(target, Value::Proxy(_)) {
             self.proxy_descriptor(target, key, instruction)?
         } else {
-            let key_units = key.property_key_units();
+            let key_units = key.property_key_units_checked()?;
             own_descriptor_key(&self.intrinsics, target, PropertyKeyRef::Units(&key_units))
                 .unwrap_or(Value::Undefined)
         };
@@ -23718,7 +23755,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let mut data = ObjectData::default();
                 data.set_prototype(Value::Null);
                 for (key, value) in walk.keys.borrow().iter().zip(collected) {
-                    let key = key.property_key_units();
+                    let key = key.property_key_units_checked()?;
                     data.set_units(&key, value);
                 }
                 let result = Value::Object(Rc::new(RefCell::new(data)));
@@ -24369,7 +24406,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 None => self.set_or_throw(&inner, key, value, instruction),
             };
         }
-        let units = key.property_key_units();
+        let units = key.property_key_units_checked()?;
         if !self.write_accepted_key(target, PropertyKeyRef::Units(&units)) {
             return Err(Self::write_refused(key));
         }
@@ -26187,11 +26224,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // when it is absent, which is what keeps a typo from resolving with nothing.
         // A namespace is an ordinary property store with no chain to walk, so this is a plain
         // lookup rather than a trapped operation: nothing here can run the program's code.
-        if !has_property(
+        if !has_property_checked(
             &self.intrinsics,
             &namespace,
             &Value::String(export.to_owned().into()),
-        ) {
+        )? {
             return Ok(self.shadow_import_rejection(caller));
         }
         let value = match self.entering(evaluated, |vm| vm.read_property(&namespace, export, 0)) {
@@ -29961,7 +29998,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         key: &Value,
         instruction: usize,
     ) -> Result<Option<(Property, Attributes)>, ExecutionError> {
-        let units = key.property_key_units();
+        let units = key.property_key_units_checked()?;
         self.own_state_key(target, key, PropertyKeyRef::Units(&units), instruction)
     }
 
@@ -30926,7 +30963,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Array(_) | Value::TypedArray(_) | Value::String(_)
         ) && canonical_index(name).is_some()
         {
-            return self.computed(target, &Value::String(name.to_owned().into()));
+            return self.computed_key_ref(target, PropertyKeyRef::Utf8(name));
         }
         // An exotic object is an ordinary object for every name its own behaviour does not
         // claim, and an own property shadows the prototype's exactly as it does anywhere else:
@@ -31930,11 +31967,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         matches!(value, Value::Native(Native::Hole, _))
     }
 
-    fn computed(&self, target: &Value, key: &Value) -> Value {
-        let units = key.property_key_units();
-        self.computed_key_ref(target, PropertyKeyRef::Units(&units))
-    }
-
     fn computed_key_ref(&self, target: &Value, key: PropertyKeyRef<'_>) -> Value {
         if let Value::Array(items) = target
             && let Some(index) = array_index_key(key)
@@ -31989,7 +32021,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<bool, ExecutionError> {
         let key = &self.computed_key(key, instruction)?;
         let Value::Proxy(proxy) = target else {
-            let units = key.property_key_units();
+            let units = key.property_key_units_checked()?;
 
             return Ok(delete_property_key(
                 &self.intrinsics,
@@ -32065,7 +32097,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     "ownKeys must report strings and symbols only",
                 ));
             }
-            let key = entry.property_key_units();
+            let key = entry.property_key_units_checked()?;
             if keys.contains(&key) {
                 return Err(Self::proxy_invariant("ownKeys must not repeat a key"));
             }
@@ -32133,7 +32165,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
     ) -> Result<bool, ExecutionError> {
         let Value::Proxy(proxy) = target else {
-            if has_property(&self.intrinsics, target, key) {
+            if has_property_checked(&self.intrinsics, target, key)? {
                 return Ok(true);
             }
             // Nothing found by walking the stores, so a proxy further up is the one thing that
@@ -32209,7 +32241,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if matches!(target, Value::Proxy(_)) {
             return self.proxy_get_with_receiver(target, key, receiver, instruction);
         }
-        let property_key_units = key.property_key_units();
+        let property_key_units = key.property_key_units_checked()?;
 
         let property_key = PropertyKeyRef::Units(&property_key_units);
 
@@ -32328,7 +32360,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             target,
             Value::String(_) | Value::Number(_) | Value::Boolean(_) | Value::BigInt(_)
         ) {
-            let units = computed_key.property_key_units();
+            let units = computed_key.property_key_units_checked()?;
             let setter = match own_property_state_key(
                 &self.intrinsics,
                 &prototype_of(target),
@@ -32414,7 +32446,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 None => self.set_computed(&inner, key, value, instruction),
             };
         }
-        let key_units = key.property_key_units();
+        let key_units = key.property_key_units_checked()?;
 
         let property_key = PropertyKeyRef::Units(&key_units);
 
@@ -33443,7 +33475,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 None => self.set_reflect(&inner, key, value, receiver, instruction),
             };
         }
-        let units = key.property_key_units();
+        let units = key.property_key_units_checked()?;
         let property_key = PropertyKeyRef::Units(&units);
         // An integer-indexed exotic object answers `[[Set]]` for every *canonical numeric* name
         // itself, whether or not the view has such an element, so the prototype chain is never
@@ -33570,9 +33602,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let Some(trap) = self.proxy_trap(&proxy, "defineProperty", instruction)? else {
             // No trap: the definition forwards to the target as the record it is. Round-tripping
             // it through a descriptor object here is what used to complete it.
+            let key_units = key.property_key_units_checked()?;
             return self.define_own_operation_key(
                 &inner,
-                PropertyKeyRef::Units(&key.property_key_units()),
+                PropertyKeyRef::Units(&key_units),
                 descriptor,
                 instruction,
             );
@@ -34622,29 +34655,31 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
         kind: &str,
     ) -> Result<Value, ExecutionError> {
-        let Some((body, parameters)) = arguments.split_last() else {
-            let source = StringUnits::from(format!("({kind} anonymous(\n) {{\n\n}})"));
-            return self.drive_eval_units(&source, None, false);
-        };
         // Every parameter first, in order, and only then the body. That order is the
         // specification's and it is observable: when both a parameter's `toString` and the
         // body's throw, the parameter's throw is the one the program sees. Keep each result in
         // UTF-16 units until the one checked parser boundary below.
-        let mut units = format!("({kind} anonymous(")
-            .encode_utf16()
-            .collect::<Vec<_>>();
-        for (index, parameter) in parameters.iter().enumerate() {
-            if index > 0 {
-                units.push(b',' as u16);
+        let mut source = StringUnitsBuilder::new();
+        source.push_ascii("(")?;
+        source.push_ascii(kind)?;
+        source.push_ascii(" anonymous(")?;
+        if let Some((body, parameters)) = arguments.split_last() {
+            for (index, parameter) in parameters.iter().enumerate() {
+                if index > 0 {
+                    source.push_ascii(",")?;
+                }
+                source.push_units(&self.as_text_units(parameter, instruction)?)?;
             }
-            units.extend(self.as_text_units(parameter, instruction)?.units());
+            // The newlines are the specification's own: they stop a `//` comment in the
+            // parameter list from swallowing the brace, and one in the body from swallowing the
+            // close.
+            source.push_ascii("\n) {\n")?;
+            source.push_units(&self.as_text_units(body, instruction)?)?;
+            source.push_ascii("\n})")?;
+        } else {
+            source.push_ascii("\n) {\n\n})")?;
         }
-        // The newlines are the specification's own: they stop a `//` comment in the parameter
-        // list from swallowing the brace, and one in the body from swallowing the close.
-        units.extend("\n) {\n".encode_utf16());
-        units.extend(self.as_text_units(body, instruction)?.units());
-        units.extend("\n})".encode_utf16());
-        let source = StringUnits::from_units(&units);
+        let source = source.finish();
         self.drive_eval_units(&source, None, false)
     }
 
@@ -35142,7 +35177,10 @@ fn binary(
             if matches!(left, Value::String(_)) || matches!(right, Value::String(_)) {
                 // A loop that concatenates is the ordinary way a program builds a large string,
                 // and the ordinary way it asks for one no engine will give it.
-                let (left, right) = (left.to_string_units(), right.to_string_units());
+                let (left, right) = (
+                    left.to_string_units_checked()?,
+                    right.to_string_units_checked()?,
+                );
                 let total = left.len().saturating_add(right.len());
                 bounded_string(total)?;
                 // Sized exactly. `push_str` onto an empty string reserves what it is given and
@@ -35177,15 +35215,15 @@ fn binary(
                     ),
                 });
             }
-            Value::Boolean(has_property(intrinsics, &right, &left))
+            Value::Boolean(has_property_checked(intrinsics, &right, &left)?)
         }
         // Handled in the interpreter loop, which has the realm's Error.prototype; reaching here
         // would mean the loop stopped special-casing it.
         BinaryOp::InstanceOf => unreachable!("instanceof is evaluated with realm context"),
 
         BinaryOp::StrictNotEqual => Value::Boolean(!strict_equal(&left, &right)),
-        BinaryOp::LooseEqual => Value::Boolean(loose_equal(&left, &right)),
-        BinaryOp::LooseNotEqual => Value::Boolean(!loose_equal(&left, &right)),
+        BinaryOp::LooseEqual => Value::Boolean(loose_equal_checked(&left, &right)?),
+        BinaryOp::LooseNotEqual => Value::Boolean(!loose_equal_checked(&left, &right)?),
         // Every bitwise operator truncates to 32 bits first, so `1 << 31` is negative.
         BinaryOp::BitwiseAnd => Value::Number(f64::from(
             to_int32(left.as_number()) & to_int32(right.as_number()),
@@ -35320,12 +35358,18 @@ enum StringUnitsStorage {
 
 struct StringUnitsBuilder {
     storage: StringUnitsStorage,
+    max_bytes: usize,
 }
 
 impl StringUnitsBuilder {
     fn new() -> Self {
+        Self::with_limit(MAX_STRING_STORAGE_BYTES)
+    }
+
+    fn with_limit(max_bytes: usize) -> Self {
         Self {
             storage: StringUnitsStorage::Latin1(Vec::new()),
+            max_bytes,
         }
     }
 
@@ -35344,7 +35388,10 @@ impl StringUnitsBuilder {
         let bytes = units
             .checked_mul(if wide { 2 } else { 1 })
             .ok_or(ExecutionError::StringTooLong { bytes: usize::MAX })?;
-        bounded_string(bytes)
+        if bytes > self.max_bytes {
+            return Err(ExecutionError::StringTooLong { bytes });
+        }
+        Ok(())
     }
 
     fn push_latin1(&mut self, bytes: &[u8]) -> Result<(), ExecutionError> {
@@ -35975,12 +36022,13 @@ fn call_native(
             // and `Array.prototype[1] = 2` would make every array claim an own `1`.
             | Value::Array(_)
             | Value::TypedArray(_) => {
-                let key = arguments
-                    .first()
-                    .map_or_else(StringUnits::default, Value::property_key_units);
+                let key = match arguments.first() {
+                    Some(value) => value.property_key_units_checked()?,
+                    None => StringUnits::default(),
+                };
                 own_attributes_key(intrinsics, receiver, PropertyKeyRef::Units(&key)).is_some()
             }
-            other => has_property(intrinsics, other, arguments.first().unwrap_or(&Value::Undefined)),
+            other => has_property_checked(intrinsics, other, arguments.first().unwrap_or(&Value::Undefined))?,
         }),
         // Walked with [`prototype_of`], the same function `Object.getPrototypeOf` and
         // `instanceof` use. Reading the stored link directly is not the chain: an intrinsic kind
@@ -36004,9 +36052,10 @@ fn call_native(
         // Own *and* enumerable, which is the pair that separates this from `hasOwnProperty`:
         // `new Error("x").propertyIsEnumerable("message")` is false and `hasOwnProperty` is true.
         Native::ObjectPropertyIsEnumerable => {
-            let key = arguments
-                .first()
-                .map_or_else(StringUnits::default, Value::property_key_units);
+            let key = match arguments.first() {
+                Some(value) => value.property_key_units_checked()?,
+                None => StringUnits::default(),
+            };
             Value::Boolean(
                 own_attributes_key(intrinsics, receiver, PropertyKeyRef::Units(&key))
                     .is_some_and(|attributes| attributes.enumerable),
@@ -36296,9 +36345,10 @@ fn call_native(
         }),
         Native::ObjectHasOwn => Value::Boolean(match arguments.first() {
             Some(target) => {
-                let key = arguments
-                    .get(1)
-                    .map_or_else(StringUnits::default, Value::property_key_units);
+                let key = match arguments.get(1) {
+                    Some(value) => value.property_key_units_checked()?,
+                    None => StringUnits::default(),
+                };
                 own_attributes_key(intrinsics, target, PropertyKeyRef::Units(&key)).is_some()
             }
             None => false,
@@ -36426,9 +36476,10 @@ fn call_native(
         }
         Native::ObjectGetOwnPropertyDescriptor => {
             let target = arguments.first().unwrap_or(&Value::Undefined);
-            let key = arguments
-                .get(1)
-                .map_or_else(StringUnits::default, Value::property_key_units);
+            let key = match arguments.get(1) {
+                Some(value) => value.property_key_units_checked()?,
+                None => StringUnits::default(),
+            };
             own_descriptor_key(intrinsics, target, PropertyKeyRef::Units(&key))
                 .unwrap_or(Value::Undefined)
         }
@@ -36580,7 +36631,7 @@ fn call_native(
             unreachable!("`String` is dispatched by the interpreter")
         }
         Native::ErrorToString => Value::String(error_to_string(receiver).into()),
-        Native::RegExpToString => Value::String(receiver.to_string_units()),
+        Native::RegExpToString => Value::String(receiver.to_string_units_checked()?),
         // Reading `{ maxByteLength }` off the options bag is an ordinary property read, which
         // may run a getter, so the machine has to be the one to do it.
         Native::ArrayBufferConstructor | Native::SharedArrayBufferConstructor => {
@@ -37342,7 +37393,9 @@ fn call_native(
             _ => Value::Undefined,
         },
         Native::ArrayJoinDefault => match receiver {
-            Value::Array(items) => Value::String(join_units(&items.borrow(), &StringUnits::from(","))),
+            Value::Array(items) => {
+                Value::String(join_units(&items.borrow(), &StringUnits::from(","))?)
+            }
             _ => Value::String(String::new().into()),
         },
         Native::ArraySplice => match receiver {
@@ -37445,10 +37498,10 @@ fn call_native(
         Native::ArrayJoin => {
             let separator = match arguments.first() {
                 None | Some(Value::Undefined) => StringUnits::from(","),
-                Some(value) => value.to_string_units(),
+                Some(value) => value.to_string_units_checked()?,
             };
             match receiver {
-                Value::Array(items) => Value::String(join_units(&items.borrow(), &separator)),
+                Value::Array(items) => Value::String(join_units(&items.borrow(), &separator)?),
                 _ => Value::String(String::new().into()),
             }
         }
@@ -37710,7 +37763,7 @@ fn call_native(
         Native::JsonParse => {
             let text = match arguments.first() {
                 None | Some(Value::Undefined) => StringUnits::from("undefined"),
-                Some(value) => value.to_string_units(),
+                Some(value) => value.to_string_units_checked()?,
             };
             parse_json_text(&text)?
         }
@@ -37897,10 +37950,10 @@ fn call_native(
                         None | Some(Value::Undefined) => u32::MAX as usize,
                         Some(value) => to_uint32(value.as_number()) as usize,
                     };
-                    let separator = arguments
-                        .first()
-                        .map(value_to_string_units)
-                        .unwrap_or_default();
+                    let separator = match arguments.first() {
+                        Some(value) => value_to_string_units(value)?,
+                        None => Vec::new(),
+                    };
                     let parts: Vec<Value> = if limit == 0 {
                         Vec::new()
                     } else if matches!(arguments.first(), None | Some(Value::Undefined)) {
@@ -37986,7 +38039,10 @@ fn call_native(
                     let padding: Vec<u16> = match arguments.get(1) {
                         None | Some(Value::Undefined) => vec![u16::from(b' ')],
                         Some(Value::String(value)) => value.units().collect(),
-                        Some(value) => value.to_string_units().units().collect(),
+                        Some(value) => value
+                            .to_string_units_checked()?
+                            .units()
+                            .collect(),
                     };
                     let current = text.encode_utf16().count();
                     let target = if target.is_finite() && target > 0.0 {
@@ -38230,7 +38286,7 @@ fn call_native(
                     for argument in arguments {
                         match argument {
                             Value::String(argument) => joined.extend(argument.units()),
-                            _ => joined.extend(argument.to_string_units().units()),
+                            _ => joined.extend(argument.to_string_units_checked()?.units()),
                         }
                     }
                     Value::String(StringUnits::from_units(&joined))
@@ -39262,9 +39318,18 @@ fn is_object_type(value: &Value) -> bool {
 }
 
 /// `key in target`.
+fn has_property_checked(
+    intrinsics: &Intrinsics,
+    target: &Value,
+    key: &Value,
+) -> Result<bool, ExecutionError> {
+    let units = key.property_key_units_checked()?;
+    Ok(has_property_key(intrinsics, target, PropertyKeyRef::Units(&units)))
+}
+
+#[cfg(test)]
 fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
-    let units = key.property_key_units();
-    has_property_key(intrinsics, target, PropertyKeyRef::Units(&units))
+    has_property_checked(intrinsics, target, key).unwrap_or(false)
 }
 
 fn has_property_key(intrinsics: &Intrinsics, target: &Value, key: PropertyKeyRef<'_>) -> bool {
@@ -40946,18 +41011,18 @@ fn join(items: &[Value], separator: &str) -> Result<String, ExecutionError> {
     Ok(out)
 }
 
-fn join_units(items: &[Value], separator: &StringUnits) -> StringUnits {
-    let mut units = Vec::new();
+fn join_units(items: &[Value], separator: &StringUnits) -> Result<StringUnits, ExecutionError> {
+    let mut out = StringUnitsBuilder::new();
     for (index, item) in items.iter().enumerate() {
         if index > 0 {
-            units.extend(separator.units());
+            out.push_units(separator)?;
         }
         match item {
             Value::Undefined | Value::Null | Value::Native(Native::Hole, _) => {}
-            other => units.extend(other.to_string_units().units()),
+            other => out.push_units(&other.to_string_units_checked()?)?,
         }
     }
-    StringUnits::from_units(&units)
+    Ok(out.finish())
 }
 
 /// Remove an own property, reporting whether it is gone afterwards.
@@ -40978,9 +41043,18 @@ fn is_json_whitespace(unit: u16) -> bool {
     matches!(unit, 0x20 | 0x09 | 0x0a | 0x0d)
 }
 
+fn delete_property_checked(
+    intrinsics: &Intrinsics,
+    target: &Value,
+    key: &Value,
+) -> Result<bool, ExecutionError> {
+    let units = key.property_key_units_checked()?;
+    Ok(delete_property_key(intrinsics, target, PropertyKeyRef::Units(&units)))
+}
+
+#[cfg(test)]
 fn delete_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
-    let units = key.property_key_units();
-    delete_property_key(intrinsics, target, PropertyKeyRef::Units(&units))
+    delete_property_checked(intrinsics, target, key).unwrap_or(false)
 }
 
 fn delete_property_key(intrinsics: &Intrinsics, target: &Value, key: PropertyKeyRef<'_>) -> bool {
@@ -42027,35 +42101,34 @@ fn regexp_search(regexp: &RegExpData, subject: &[u16], start: usize) -> Option<R
 /// would buy, and nothing else here needs to change for it.
 const MAX_DENSE_ARRAY: usize = 1 << 24;
 
-/// The longest string this implementation will build, in UTF-8 bytes.
+/// The largest backing storage this implementation will allocate for one language string.
 ///
 /// Every engine bounds a string's length -- V8 refuses above 2^29-24 units with `RangeError:
 /// Invalid string length` -- and a program can observe only that some bound exists, not where it
 /// is. So this one is set where the memory is, not where V8's is: 64 MiB, a quarter of
 /// [`MAX_BUFFER_BYTES`], because a string that grows by concatenation holds the old bytes and
 /// the new ones at once, and every intermediate on the way to the bound is a separate
-/// allocation the host keeps -- a bound of V8's size peaks in the gigabytes before refusing. It is measured in UTF-8 bytes rather than the UTF-16 units the language reports,
-/// because that is the length already to hand: a UTF-8 length is never smaller, so nothing this
-/// refuses is a string V8 would have built either.
+/// allocation the host keeps -- a bound of V8's size peaks in the gigabytes before refusing.
+/// The budget is backing storage: one byte per Latin1 unit and two bytes per UTF-16 unit.
 ///
 /// Without a bound, `"1".repeat(1 << 20).replace(/(.+)/g, "$1".repeat(1 << 16))` -- which is a
 /// real test, and one that accepts the throw as its answer -- expands toward 2^36 characters and
 /// takes the process with it, reporting nothing for any other test in the same run.
-const MAX_STRING_BYTES: usize = 1 << 26;
+const MAX_STRING_STORAGE_BYTES: usize = 1 << 26;
 
-/// Refuse a string that would exceed [`MAX_STRING_BYTES`].
+/// Refuse a string that would exceed [`MAX_STRING_STORAGE_BYTES`].
 ///
 /// Checked before the bytes are written rather than after, so the refusal costs one allocation
 /// of the bound rather than the allocation the program asked for.
 fn bounded_string(bytes: usize) -> Result<(), ExecutionError> {
-    if bytes > MAX_STRING_BYTES {
+    if bytes > MAX_STRING_STORAGE_BYTES {
         return Err(ExecutionError::StringTooLong { bytes });
     }
     Ok(())
 }
 
-/// Append to a string under [`MAX_STRING_BYTES`], refusing rather than growing past it.
-/// Append one character, refusing past [`MAX_STRING_BYTES`].
+/// Append to a string under [`MAX_STRING_STORAGE_BYTES`], refusing rather than growing past it.
+/// Append one character, refusing past [`MAX_STRING_STORAGE_BYTES`].
 ///
 /// A replacement template is expanded character by character, and `$1` against a megabyte-long
 /// match appends a megabyte every time it appears -- so the refusal has to be checked as the
@@ -43246,10 +43319,10 @@ fn string_code_point_units(text: &StringUnits) -> Vec<StringUnits> {
     out
 }
 
-fn value_to_string_units(value: &Value) -> Vec<u16> {
+fn value_to_string_units(value: &Value) -> Result<Vec<u16>, ExecutionError> {
     match value {
-        Value::String(text) => text.units().collect(),
-        other => other.to_string_units().units().collect(),
+        Value::String(text) => Ok(text.units().collect()),
+        other => Ok(other.to_string_units_checked()?.units().collect()),
     }
 }
 
@@ -45205,34 +45278,40 @@ fn private_display_name(key: &str) -> &str {
 /// language says `"get x"`, and a symbol-keyed method reported nothing at all. That name is not
 /// decoration: a decorator reads it, a stack trace prints it, and Test262 asserts it on almost
 /// every method it defines.
-fn define_function_name(function: &Value, key: &Value, prefix: Option<&str>) {
+fn define_function_name(
+    function: &Value,
+    key: &Value,
+    prefix: Option<&str>,
+) -> Result<(), ExecutionError> {
     let Value::Function(closure) = function else {
-        return;
+        return Ok(());
     };
     let name = match key {
         // A symbol names the property after its description, in brackets; one with no description
         // names it nothing, and a prefix is still applied to that nothing.
         Value::Symbol(symbol) => {
-            symbol
-                .description_units()
-                .map_or_else(StringUnits::default, |description| {
-                    let mut units = StringUnits::from("[").to_units().into_vec();
-                    units.extend(description.units());
-                    units.extend(StringUnits::from("]").units());
-                    StringUnits::from_units(&units)
-                })
+            let mut builder = StringUnitsBuilder::new();
+            builder.push_ascii("[")?;
+            if let Some(description) = symbol.description_units() {
+                builder.push_units(&description)?;
+            }
+            builder.push_ascii("]")?;
+            builder.finish()
         }
         other => {
-            let key = other.property_key_units();
+            let key = other.property_key_units_checked()?;
             // A private name is spelled the way the program wrote it rather than the way the
             // store keys it: `#m`, not the scope-numbered reservation standing in for it.
             match key.to_scalar_string() {
-                Ok(key) => match key.strip_prefix(PRIVATE_KEY_PREFIX) {
-                    Some(reserved) => StringUnits::from(format!(
-                        "#{}",
-                        reserved.split_once(':').map_or(reserved, |(_, name)| name)
-                    )),
-                    None => StringUnits::from(key),
+                Ok(scalar_key) => match scalar_key.strip_prefix(PRIVATE_KEY_PREFIX) {
+                    Some(reserved) => {
+                        let display = reserved.split_once(':').map_or(reserved, |(_, name)| name);
+                        let mut builder = StringUnitsBuilder::new();
+                        builder.push_ascii("#")?;
+                        builder.push_units(&StringUnits::from(display))?;
+                        builder.finish()
+                    }
+                    None => key,
                 },
                 // Ordinary property keys can contain lone surrogates. They are already in the
                 // canonical units representation; keep them intact rather than widening through
@@ -45242,17 +45321,18 @@ fn define_function_name(function: &Value, key: &Value, prefix: Option<&str>) {
         }
     };
 
-    let name = prefix.map_or(name.clone(), |prefix| {
-        let mut units = StringUnits::from(format!("{prefix} "))
-            .to_units()
-            .into_vec();
-        units.extend(name.units());
-        StringUnits::from_units(&units)
-    });
+    let name = prefix.map_or(Ok(name.clone()), |prefix| {
+        let mut builder = StringUnitsBuilder::new();
+        builder.push_ascii(prefix)?;
+        builder.push_ascii(" ")?;
+        builder.push_units(&name)?;
+        Ok(builder.finish())
+    })?;
     closure
         .properties
         .borrow_mut()
         .define_value("name", Value::String(name), FUNCTION_IDENTITY);
+    Ok(())
 }
 
 const FUNCTION_IDENTITY: Attributes = Attributes {
@@ -48018,8 +48098,8 @@ fn strict_equal(left: &Value, right: &Value) -> bool {
 /// Not `strict_equal` with a coercion in front of it. The rules are their own algorithm and two
 /// of them are not conversions at all: `null == undefined` is true while neither converts to the
 /// other, and every comparison with NaN is false however it is spelled.
-fn loose_equal(left: &Value, right: &Value) -> bool {
-    match (left, right) {
+fn loose_equal_checked(left: &Value, right: &Value) -> Result<bool, ExecutionError> {
+    Ok(match (left, right) {
         // Same type: `==` is `===`, including NaN being unequal to itself.
         (Value::Undefined | Value::Null, Value::Undefined | Value::Null) => true,
         (Value::Number(_), Value::Number(_))
@@ -48029,8 +48109,10 @@ fn loose_equal(left: &Value, right: &Value) -> bool {
         // Nullish compares equal to itself and to nothing else -- not even to 0 or "".
         (Value::Undefined | Value::Null, _) | (_, Value::Undefined | Value::Null) => false,
         // A boolean converts to a number *first*, so `[] == false` is true by way of "" and 0.
-        (Value::Boolean(value), other) => loose_equal(&Value::Number(f64::from(*value)), other),
-        (other, Value::Boolean(value)) => loose_equal(other, &Value::Number(f64::from(*value))),
+        (Value::Boolean(value), other) => loose_equal_checked(&Value::Number(f64::from(*value)), other)?,
+        (other, Value::Boolean(value)) => {
+            loose_equal_checked(other, &Value::Number(f64::from(*value)))?
+        }
         // A symbol converts to nothing, so it is equal only to itself and that case is above.
         (Value::Symbol(_), _) | (_, Value::Symbol(_)) => false,
         // `==` is the one place the two numeric types meet: it compares mathematical values, so
@@ -48062,13 +48144,18 @@ fn loose_equal(left: &Value, right: &Value) -> bool {
             strict_equal(left, right)
         }
         (object @ (Value::Object(_) | Value::Array(_)), primitive) => {
-            loose_equal(&to_primitive(object), primitive)
+            loose_equal_checked(&to_primitive(object)?, primitive)?
         }
         (primitive, object @ (Value::Object(_) | Value::Array(_))) => {
-            loose_equal(primitive, &to_primitive(object))
+            loose_equal_checked(primitive, &to_primitive(object)?)?
         }
         _ => strict_equal(left, right),
-    }
+    })
+}
+
+#[cfg(test)]
+fn loose_equal(left: &Value, right: &Value) -> bool {
+    loose_equal_checked(left, right).unwrap_or(false)
 }
 
 /// `ToPrimitive` with no hint, which for everything here means `toString`.
@@ -48076,8 +48163,8 @@ fn loose_equal(left: &Value, right: &Value) -> bool {
 /// `valueOf` comes first in the specification and is skipped because nothing yet returns a
 /// primitive from it; when a user-defined `valueOf` can exist, this needs the interpreter and
 /// moves onto it.
-fn to_primitive(value: &Value) -> Value {
-    Value::String(value.to_string_units())
+fn to_primitive(value: &Value) -> Result<Value, ExecutionError> {
+    Ok(Value::String(value.to_string_units_checked()?))
 }
 
 fn compare(left: &Value, right: &Value, predicate: OrderingPredicate) -> bool {
