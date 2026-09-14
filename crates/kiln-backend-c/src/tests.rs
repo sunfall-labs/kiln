@@ -6732,11 +6732,70 @@ int main(void) {
     free(heap_b.large_table.table);
     return 0;
 }
+
 "#;
     let run = run_with_main(&generated, wrapper, "gc-splice-test");
     assert!(
         run.status.success(),
         "executable gc block sublist splice test failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn executable_gc_boundary_defers_partial_nursery_but_forced_collects() {
+    let program = program(vec![], vec![Instruction::Return], 0);
+    let generated = emit(&program).expect("program emits");
+    let wrapper = r#"
+int main(void) {
+    kiln_gc_heap heap;
+    kiln_c99_gc_heap_init(&heap);
+    heap.enabled = 1;
+
+    /* A normal drive boundary must retain a partial chunk until the allocator's pressure
+     * signal says it is due; otherwise every await turn pays a complete root walk. */
+    if (kiln_c99_gc_nursery_bump(&heap, KILN_GC_BYTES, 32) == NULL) return 1;
+    uint64_t before = heap.collections;
+    uint32_t before_epoch = heap.epoch;
+    kiln_c99_gc_collect(&heap, 0);
+    if (heap.collections != before || heap.epoch != before_epoch) return 2;
+    kiln_c99_gc_collect(&heap, 0);
+    if (heap.collections != before || heap.epoch != before_epoch) return 3;
+
+    /* An explicit force still settles a partial chunk, even without stress mode. */
+    kiln_c99_gc_collect(&heap, 1);
+    if (heap.collections != before + 1 || heap.epoch == before_epoch) return 4;
+
+    /* Normal size pressure collects a filled chunk and resets dead nursery allocations. */
+    for (size_t chunk = 0; chunk < 4; ++chunk) {
+        size_t allocations = 0;
+        while (kiln_c99_gc_nursery_bump(&heap, KILN_GC_BYTES, 32) != NULL) {
+            if (++allocations > 10000) return 5;
+        }
+        kiln_c99_nursery_turn_chunk(&heap);
+    }
+    before = heap.collections;
+    before_epoch = heap.epoch;
+    kiln_c99_gc_collect(&heap, 0);
+    if (heap.collections <= before || heap.epoch == before_epoch || heap.nursery.full != NULL) return 6;
+
+    /* Stress remains an independent path for a partial current chunk. */
+    if (kiln_c99_gc_nursery_bump(&heap, KILN_GC_BYTES, 32) == NULL) return 7;
+    before = heap.collections;
+    heap.stress = 1;
+    kiln_c99_gc_collect(&heap, 0);
+    if (heap.collections != before + 1) return 8;
+    kiln_c99_nursery_destroy(&heap.nursery);
+    free(heap.large_table.table);
+    free(heap.slab_table.table);
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "gc-boundary-pressure-test");
+    assert!(
+        run.status.success(),
+        "executable GC boundary pressure test failed ({:?}):\n{}",
         run.status.code(),
         String::from_utf8_lossy(&run.stderr)
     );

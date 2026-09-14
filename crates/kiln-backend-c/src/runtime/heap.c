@@ -1490,6 +1490,15 @@ static void kiln_c99_gc_note_external(size_t size) {
     if (heap != NULL) heap->since_collection += size;
 }
 
+/* A filled-chunk collection is worthwhile while the live heap is small enough that the root
+ * walk it buys is cheaper than retaining another nursery budget. Keep this predicate shared by
+ * allocation and turn-boundary collection so the two entry points cannot drift. */
+static inline int kiln_c99_nursery_pressure_due(const kiln_gc_heap *heap) {
+    return heap->nursery.full != NULL &&
+           heap->nursery.full_bytes >= heap->nursery.budget_now &&
+           heap->survived <= heap->nursery.budget * KILN_NURSERY_SMALL_LIVE_BUDGETS;
+}
+
 /* The collection an allocation may owe before it hands anything out.
  *
  * Its own function because a caller taking a run of blocks at once -- `kiln_c99_gc_alloc_text_run`
@@ -1508,10 +1517,7 @@ static inline void kiln_c99_gc_alloc_due(kiln_gc_heap *heap) {
          * pass over them either resets a chunk, and allocation stays a bump into hot memory, or
          * promotes it alone. A large live heap makes every mark expensive; there the chunks
          * wait for the size-based trigger above. */
-        if (!due && heap->nursery.full_bytes >= heap->nursery.budget_now &&
-            heap->survived <= heap->nursery.budget * KILN_NURSERY_SMALL_LIVE_BUDGETS) {
-            due = 1;
-        }
+        if (!due && kiln_c99_nursery_pressure_due(heap)) due = 1;
         if (heap->stress_every != 0 && --heap->stress_countdown == 0) {
             heap->stress_countdown = heap->stress_every;
             due = 1;
@@ -2872,6 +2878,7 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
     uint64_t before_blocks;
     uint64_t before_bytes;
     int nursery_has_allocs;
+    int nursery_due;
     int tenured_due;
     if (heap == NULL || heap->collecting || heap->fallback) return;
     if (!heap->enabled && !heap->stress) return;
@@ -2881,7 +2888,14 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
     threshold = heap->floor > heap->survived ? heap->floor : heap->survived;
     tenured_due = force || heap->stress || (heap->since_collection >= threshold);
 
-    if (!nursery_has_allocs && !tenured_due) return;
+    /* A partial current chunk is safe to leave in the nursery between turn boundaries.  The
+     * allocator already triggers a mid-turn pass when the configured filled-chunk budget is
+     * reached; the boundary pass should use that same pressure signal rather than collecting
+     * every small allocation made by an await continuation.  Keep `nursery_has_allocs` separate:
+     * forced, stressed, and tenured collections still settle a partial chunk below. */
+    nursery_due = kiln_c99_nursery_pressure_due(heap);
+
+    if (!tenured_due && !nursery_due) return;
 
     heap->collecting = 1;
     before_blocks = heap->freed_blocks;
