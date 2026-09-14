@@ -452,6 +452,15 @@ pub fn prototype_accessor(kind: engine::Kind, name: &str) -> Option<&'static str
     kind.fields().iter().copied().find(|field| *field == name)
 }
 
+/// The complete accessor inventory for a Temporal prototype.
+///
+/// `kiln-temporal` owns these rows through `Kind::fields`; the interpreter exposes the same
+/// inventory to intrinsic materialization so reflection can seed the getters without maintaining
+/// a second list of field names here.
+pub(crate) const fn prototype_accessor_names(kind: engine::Kind) -> &'static [&'static str] {
+    kind.fields()
+}
+
 /// Which methods each of the eight types answers to.
 ///
 /// Spelled out per type rather than shared, because the language keeps them apart on purpose: a
