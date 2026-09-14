@@ -1481,6 +1481,9 @@ dependencies = [
 [[package]]
 name = "kiln-json"
 version = "0.0.0"
+dependencies = [
+ "kiln-string",
+]
 
 [[package]]
 name = "kiln-liveness"
