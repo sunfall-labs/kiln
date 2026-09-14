@@ -7,8 +7,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::{
-    BufferData, ExecutionError, Native, ObjectData, RealmId, TypedArrayData, TypedKind, Value,
-    bounded_buffer, ordinary_object,
+    bounded_buffer, ordinary_object, BufferData, ExecutionError, Native, ObjectData, RealmId,
+    TypedArrayData, TypedKind, Value,
 };
 
 /// Constructs a `Buffer` (`Uint8Array` of `TypedKind::Uint8`) from a raw byte vector.
@@ -144,7 +144,9 @@ pub(crate) fn dispatch(
                 .to_ascii_lowercase();
             let bytes = view.bytes();
             match encoding.as_str() {
-                "utf8" | "utf-8" => Ok(Value::String(String::from_utf8_lossy(&bytes).into_owned())),
+                "utf8" | "utf-8" => Ok(Value::String(
+                    String::from_utf8_lossy(&bytes).into_owned().into(),
+                )),
                 "hex" => {
                     const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
                     let mut hex_str = String::with_capacity(bytes.len() * 2);
@@ -154,8 +156,12 @@ pub(crate) fn dispatch(
                     }
                     Ok(Value::String(hex_str.into()))
                 }
-                "base64" => Ok(Value::String(crate::to_base64_text(&bytes, false, false))),
-                "base64url" => Ok(Value::String(crate::to_base64_text(&bytes, true, true))),
+                "base64" => Ok(Value::String(
+                    crate::to_base64_text(&bytes, false, false).into(),
+                )),
+                "base64url" => Ok(Value::String(
+                    crate::to_base64_text(&bytes, true, true).into(),
+                )),
                 "latin1" | "binary" | "ascii" => {
                     let (decoded, _) =
                         encoding_rs::WINDOWS_1252.decode_without_bom_handling(&bytes);

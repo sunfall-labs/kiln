@@ -981,7 +981,7 @@ fn host_entropy_is_one_explicit_word_per_draw() {
     assert_eq!(
         vm.dispatch_native(Native::NodeCryptoRandomUuid, &Value::Undefined, &[], 2),
         Ok(Value::String(
-            "00112233-4455-4677-8899-aabbccddeeff".to_owned()
+            "00112233-4455-4677-8899-aabbccddeeff".to_owned().into()
         ))
     );
     drop(vm);
@@ -1534,7 +1534,7 @@ fn a_direct_eval_writes_through_to_the_callers_binding() {
     let mut program = program(
         vec![
             Constant::Number(1.0f64.to_bits()),
-            Constant::String("x = 2; x".to_owned()),
+            Constant::String("x = 2; x".to_owned().into()),
         ],
         vec![
             Instruction::NewCell(0),
@@ -1597,7 +1597,7 @@ fn source_compiler_authority_is_scoped_to_one_execution() {
     }
 
     let invoking_eval = program(
-        vec![Constant::String("ignored".to_owned())],
+        vec![Constant::String("ignored".to_owned().into())],
         vec![
             Instruction::LoadBuiltin(kiln_ir::Builtin::Eval),
             Instruction::Const(0),
@@ -1859,7 +1859,7 @@ fn an_empty_message_produces_a_bare_stack_header() {
 /// program had explicitly named, and `if (e.name === "TimeoutError")` took the wrong branch.
 #[test]
 fn an_error_instance_has_no_own_name() {
-    let Value::Object(data) = build_error(ErrorKind::Type, &[Value::String("m".to_owned())]) else {
+    let Value::Object(data) = build_error(ErrorKind::Type, &[Value::String("m".to_owned().into())]) else {
         panic!("construct_error returns an object");
     };
     let data = data.borrow();
@@ -2141,7 +2141,7 @@ fn an_uncaught_throw_names_what_was_thrown() {
         source: "".into(),
         template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
-        constants: vec![Constant::String("boom".to_owned())],
+        constants: vec![Constant::String("boom".to_owned().into())],
         code: vec![Instruction::Const(0), Instruction::Throw],
         local_count: 0,
         functions: Vec::new(),
@@ -2160,7 +2160,7 @@ fn unwinding_restores_the_stack_the_handler_expected() {
         source: "".into(),
         template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
-        constants: vec![number(1.0), number(2.0), Constant::String("x".to_owned())],
+        constants: vec![number(1.0), number(2.0), Constant::String("x".to_owned().into())],
         code: vec![
             Instruction::Const(0), // a value the handler must still see
             Instruction::PushHandler(6),
@@ -2327,7 +2327,7 @@ fn setting_a_property_on_a_primitive_is_rejected() {
         source: "".into(),
         template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
-        constants: vec![Constant::String("x".to_owned()), number(1.0)],
+        constants: vec![Constant::String("x".to_owned().into()), number(1.0)],
         code: vec![
             Instruction::Const(1),
             Instruction::Const(1),
@@ -2796,8 +2796,8 @@ fn symbol_with_throwing_right_value_of(operator: BinaryOp) -> Program {
         template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: vec![
-            Constant::String("valueOf".to_owned()),
-            Constant::String("called".to_owned()),
+            Constant::String("valueOf".to_owned().into()),
+            Constant::String("called".to_owned().into()),
         ],
         code: vec![
             Instruction::LoadBuiltin(Builtin::Symbol),
@@ -2934,7 +2934,7 @@ fn a_captured_dead_zone_read_names_its_source_binding() {
         source: "".into(),
         template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
-        constants: vec![Constant::String("later".to_owned())],
+        constants: vec![Constant::String("later".to_owned().into())],
         code: vec![
             Instruction::NewCell(0),
             Instruction::MarkUninitialized(0),
@@ -3751,7 +3751,7 @@ fn timer_program(schedule: &[(&str, f64)]) -> Program {
     let mut functions = Vec::new();
     for (tag, delay) in schedule {
         let tag_index = constants.len() as u32;
-        constants.push(Constant::String((*tag).to_owned()));
+        constants.push(Constant::String((*tag).to_owned().into()));
         let delay_index = constants.len() as u32;
         constants.push(number(*delay));
 
@@ -3801,11 +3801,11 @@ fn timer_program(schedule: &[(&str, f64)]) -> Program {
 /// compiled by hand, printed.
 fn generator_receiver_program() -> Program {
     let constants = vec![
-        Constant::String("mark".to_owned()),
-        Constant::String("receiver".to_owned()),
-        Constant::String("step".to_owned()),
-        Constant::String("next".to_owned()),
-        Constant::String("value".to_owned()),
+        Constant::String("mark".to_owned().into()),
+        Constant::String("receiver".to_owned().into()),
+        Constant::String("step".to_owned().into()),
+        Constant::String("next".to_owned().into()),
+        Constant::String("value".to_owned().into()),
     ];
     Program {
         source: "".into(),
@@ -4944,8 +4944,8 @@ fn process_object_is_event_emitter() {
         template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         constants: vec![
-            Constant::String("on".to_owned()),
-            Constant::String("exit".to_owned()),
+            Constant::String("on".to_owned().into()),
+            Constant::String("exit".to_owned().into()),
         ],
         code: vec![
             Instruction::LoadBuiltin(Builtin::Process),
@@ -5141,7 +5141,7 @@ fn whatwg_url_and_search_params_support() {
             &Value::Undefined,
             &[Value::String(
                 "https://user:pass@example.com:8080/path/to/file?q=1&filter=true#section"
-                    .to_owned(),
+                    .to_owned().into(),
             )],
             0,
         )
@@ -5150,7 +5150,7 @@ fn whatwg_url_and_search_params_support() {
     assert_eq!(
         vm.property(&url_val, "href"),
         Value::String(
-            "https://user:pass@example.com:8080/path/to/file?q=1&filter=true#section".to_owned()
+            "https://user:pass@example.com:8080/path/to/file?q=1&filter=true#section".to_owned().into()
         )
     );
     assert_eq!(
@@ -5201,7 +5201,7 @@ fn whatwg_url_and_search_params_support() {
     assert_eq!(
         to_str,
         Value::String(
-            "https://user:pass@example.com:8080/path/to/file?q=1&filter=true#section".to_owned()
+            "https://user:pass@example.com:8080/path/to/file?q=1&filter=true#section".to_owned().into()
         )
     );
 
@@ -5211,7 +5211,7 @@ fn whatwg_url_and_search_params_support() {
             Native::UrlConstructor,
             &Value::Undefined,
             &[Value::String(
-                "https://example.com/dir/index.html".to_owned(),
+                "https://example.com/dir/index.html".to_owned().into(),
             )],
             0,
         )
@@ -5690,10 +5690,10 @@ fn node_crypto_random_bytes_fill_hashes_and_hmac() {
         panic!("randomUUID must return string");
     };
     assert_eq!(uuid_str.len(), 36);
-    assert_eq!(&uuid_str[8..9], "-");
-    assert_eq!(&uuid_str[13..14], "-");
-    assert_eq!(&uuid_str[18..19], "-");
-    assert_eq!(&uuid_str[23..24], "-");
+    assert_eq!(uuid_str.unit_at(8), Some(b'-' as u16));
+    assert_eq!(uuid_str.unit_at(13), Some(b'-' as u16));
+    assert_eq!(uuid_str.unit_at(18), Some(b'-' as u16));
+    assert_eq!(uuid_str.unit_at(23), Some(b'-' as u16));
 
     // 6. Test crypto.timingSafeEqual
     let a = node_bytes_value(vec![1, 2, 3, 4]);

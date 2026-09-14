@@ -1393,7 +1393,7 @@ impl Native {
             (Self::Intl(op), name) => intl::static_property(op, name),
             // `e.constructor.name` reaches this: the instance finds its constructor through the
             // prototype, and the constructor knows which kind it is.
-            (Self::Error(kind), "name") => Some(Value::String(kind.name().to_owned())),
+            (Self::Error(kind), "name") => Some(Value::String(kind.name().to_owned().into())),
             (Self::RegExpConstructor, "escape") => {
                 Some(Value::Native(Self::RegExpEscape, RealmId::PRIMARY))
             }
@@ -1900,7 +1900,8 @@ impl Native {
                         Self::Reflect => "Reflect",
                         _ => "JSON",
                     }
-                    .to_owned(),
+                    .to_owned()
+                    .into(),
                 ))
             }
             // The tag `Object.prototype.toString` reads, and the operations themselves. Like
