@@ -1,0 +1,17 @@
+[package]
+name = "kiln-auto-harness"
+version = "0.0.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+frontend-oxc = { path = "../../../crates/frontend-oxc" }
+kiln-hir = { path = "../../../crates/kiln-hir" }
+kiln-ir = { path = "../../../crates/kiln-ir" }
+kiln-interpreter = { path = "../../../crates/kiln-interpreter" }
+kiln-runtime = { path = "../../../crates/kiln-runtime" }
+
+[[bin]]
+name = "dynamic-main"
+path = "dynamic-main.rs"

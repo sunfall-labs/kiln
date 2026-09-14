@@ -1,0 +1,2 @@
+stdout="undefined 22\n101 202\n"
+result=Undefined

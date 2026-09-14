@@ -1,0 +1,13 @@
+eval-raw-string-high 55296
+eval-raw-string-replacement 65533
+eval-escaped-string-high 55296
+eval-raw-template 55296|55296
+eval-raw-regexp 55296
+eval-raw-comment number:42
+eval-invalid-outside-literal THROW SyntaxError Invalid or unexpected token
+function-raw-string-high 55296
+function-escaped-string-high 55296
+function-source-raw-string-high 102,117,110,99,116,105,111,110,32,97,110,111,110,121,109,111,117,115,40,10,41,32,123,10,114,101,116,117,114,110,32,34,55296,34,10,125
+raw-low 56320
+shadow-eval-raw-string-high UNAVAILABLE
+shadow-eval-raw-template UNAVAILABLE

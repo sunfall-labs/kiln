@@ -239,7 +239,10 @@ impl Hash for StringUnits {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use super::{StringUnits, StringView};
+
     #[test]
     fn latin1_index() {
         let s = StringUnits::from("caf\u{e9}");
@@ -276,6 +279,19 @@ mod tests {
         assert!(wide.to_scalar_cow().is_err());
         assert_eq!(wide.to_lossy_string(), "a\u{fffd}");
     }
+    #[test]
+    fn scalar_cow_borrows_ascii_and_rejects_lone_surrogates() {
+        assert!(matches!(
+            StringUnits::from("source").to_scalar_cow(),
+            Ok(Cow::Borrowed("source"))
+        ));
+        assert!(matches!(
+            StringUnits::from("hé").to_scalar_cow(),
+            Ok(Cow::Owned(text)) if text == "hé"
+        ));
+        assert!(StringUnits::from_units(&[0xd800]).to_scalar_cow().is_err());
+    }
+
     #[test]
     fn utf8_decodes_pairs() {
         let s = StringUnits::from_utf8("😀".as_bytes()).unwrap();
