@@ -37127,7 +37127,9 @@ fn call_native(
                     // character there" that differ only at the edges, and a fourth unit would
                     // make them differ in the middle as well.
                     let units: Vec<u16> = text.encode_utf16().collect();
-                    let index = arguments.first().map_or(0.0, Value::as_number);
+                    let index = to_integer_or_infinity(
+                        arguments.first().map_or(0.0, Value::as_number),
+                    );
                     let index = if index < 0.0 {
                         units.len() as f64 + index
                     } else {
@@ -37144,7 +37146,9 @@ fn call_native(
                     // Code units, not characters: `charAt` counts what `length` counts, so half
                     // of a surrogate pair is a position and reads as that half.
                     let units: Vec<u16> = text.encode_utf16().collect();
-                    let index = arguments.first().map_or(0.0, Value::as_number);
+                    let index = to_integer_or_infinity(
+                        arguments.first().map_or(0.0, Value::as_number),
+                    );
                     // Out of range is the empty string, not undefined.
                     if index < 0.0 || index >= units.len() as f64 {
                         Value::String(String::new())
@@ -37154,7 +37158,9 @@ fn call_native(
                 }
                 Native::StringCharCodeAt => {
                     let units: Vec<u16> = text.encode_utf16().collect();
-                    let index = arguments.first().map_or(0.0, Value::as_number);
+                    let index = to_integer_or_infinity(
+                        arguments.first().map_or(0.0, Value::as_number),
+                    );
                     // UTF-16 code units, so an astral character has two and this reads one.
                     if index < 0.0 || index >= units.len() as f64 {
                         Value::Number(f64::NAN)

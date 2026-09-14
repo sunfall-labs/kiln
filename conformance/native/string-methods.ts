@@ -28,3 +28,63 @@ console.log(s.slice(0, s.indexOf(",")).toUpperCase(), s.split(", ").map((w: stri
 const accented = "café";
 console.log(accented.length, accented.slice(0, accented.length) === accented, accented.at(-1));
 console.log(accented.indexOf("é"), accented.slice(accented.indexOf("é")), accented.split("é"));
+
+// Single-unit access must agree on UTF-16 positions without materialising the whole string.
+// The low and high halves of an astral character are observed independently by these APIs.
+const astral = "A😀B";
+console.log(
+  astral.length,
+  astral.charCodeAt(1),
+  astral.charCodeAt(2),
+  astral.charAt(1),
+  astral.charAt(2),
+  astral.at(-2),
+  astral.at(99),
+);
+const lone = String.fromCharCode(0xd800);
+console.log(lone.length, lone.charCodeAt(0), lone.charAt(0), lone.at(0));
+let conversions = 0;
+const index = { valueOf: () => { conversions += 1; return 1; } };
+console.log(astral.charCodeAt(index), conversions);
+console.log(
+  astral.charCodeAt(1.9),
+  astral.charAt(1.9),
+  astral.at(-1),
+  astral.charCodeAt(Infinity),
+  astral.charCodeAt(-Infinity),
+  astral.charCodeAt(NaN),
+  astral.at(-0),
+);
+console.log(astral.charAt(-0.5), astral.charCodeAt(-0.5), astral.at(-0.5), astral.at(-1.5));
+if (astral.charAt(-0.5) !== "A" || astral.charCodeAt(-0.5) !== 65 ||
+    astral.at(-0.5) !== "A" || astral.at(-1.5) !== "B") {
+  throw new Error("negative fractional index normalization");
+}
+const dynamicReceiver = ["A", "😀", "B"].join("");
+let allocations = 0;
+const allocatingIndex = {
+  valueOf: () => {
+    allocations += 1;
+    const filler = new Array(8).fill("allocation");
+    return filler.length - 6 + 1.9;
+  },
+};
+console.log(dynamicReceiver.charCodeAt(allocatingIndex), allocations);
+if (dynamicReceiver.charCodeAt(allocatingIndex) !== 66 || allocations !== 2) {
+  throw new Error("allocating index coercion");
+}
+try {
+  astral.charCodeAt({ valueOf: () => { throw new Error("index coercion"); } });
+} catch (error) {
+  console.log(error.name);
+}
+try {
+  astral.charCodeAt(Symbol("index"));
+} catch (error) {
+  console.log(error.name);
+}
+try {
+  astral.charCodeAt(1n);
+} catch (error) {
+  console.log(error.name);
+}

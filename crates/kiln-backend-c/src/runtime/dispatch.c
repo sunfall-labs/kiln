@@ -5890,7 +5890,8 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         if (receiver.tag != KILN_VALUE_STRING) {
             KILN_C99_REFUSE("a String.prototype method on a receiver that is not a string");
         }
-        return kiln_c99_invoke_string_method(result, code, receiver, args, argc);
+        return kiln_c99_invoke_string_method(host, result, code, receiver, args, argc, depth,
+                                             thrown);
     }
     if (receiver.tag == KILN_VALUE_ARRAY_BUFFER) {
         if (code == KILN_C99_METHOD_SLICE) {
