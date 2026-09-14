@@ -5106,7 +5106,7 @@ struct ModuleRealmShared {
     http_client_requests: std::collections::BTreeMap<u64, Rc<RefCell<HttpClientRequestState>>>,
     next_http_client_request_id: u64,
     symbol_serial: u64,
-    symbol_registry: Vec<(String, Value)>,
+    symbol_registry: Vec<(StringUnits, Value)>,
     symbols: Vec<Rc<UniqueSymbol>>,
     template_objects: std::collections::HashMap<(RealmId, usize, u32), Value>,
     intrinsics: Rc<Intrinsics>,
@@ -7410,7 +7410,7 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// `Symbol.for`'s registry: one symbol per key, for the whole run. Its point is that two
     /// lookups of one key are the *same* symbol, which is what makes it usable across module
     /// boundaries where `Symbol()` would produce two.
-    symbol_registry: Vec<(String, Value)>,
+    symbol_registry: Vec<(StringUnits, Value)>,
     /// Canonical tagged-template literal objects cached by (RealmId, program pointer, site index)
     /// per ECMA-262 §13.2.8.5 (GetTemplateObject).
     template_objects: std::collections::HashMap<(RealmId, usize, u32), Value>,
@@ -16787,9 +16787,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(Value::Boolean(closed))
             }
             Native::SymbolFor => {
-                let key = arguments
-                    .first()
-                    .map_or_else(String::new, Value::to_display_string);
+                let key = self.as_text_units(
+                    arguments.first().unwrap_or(&Value::Undefined),
+                    instruction,
+                )?;
                 let registered = match &self.module_realm {
                     Some(realm) => realm.borrow().symbol_registry.clone(),
                     None => self.symbol_registry.clone(),
@@ -16809,7 +16810,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Native::SymbolKeyFor => {
                 let Some(Value::Symbol(symbol)) = arguments.first() else {
-                    return Ok(Value::Undefined);
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "Symbol.keyFor requires a symbol".to_owned(),
+                    });
                 };
                 if let Some(realm) = &self.module_realm {
                     return Ok(realm
@@ -16819,7 +16822,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         .find(|(_, registered)| {
                             matches!(registered, Value::Symbol(other) if other == symbol)
                         })
-                        .map_or(Value::Undefined, |(key, _)| Value::String(key.clone().into())));
+                        .map_or(Value::Undefined, |(key, _)| Value::String(key.clone())));
                 }
                 // Only a registered symbol has a key; one from `Symbol()` does not, which is how
                 // a program tells the two apart.
@@ -16829,7 +16832,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .find(|(_, registered)| {
                         matches!(registered, Value::Symbol(other) if other == symbol)
                     })
-                    .map_or(Value::Undefined, |(key, _)| Value::String(key.clone().into())))
+                    .map_or(Value::Undefined, |(key, _)| Value::String(key.clone())))
             }
             Native::DateConstructor => {
                 let time = match arguments.len() {
@@ -17279,7 +17282,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::SymbolConstructor => {
                 let description = match arguments.first() {
                     None | Some(Value::Undefined) => None,
-                    Some(value) => Some(value.to_display_string()),
+                    Some(value) => Some(self.as_text_units(value, instruction)?),
                 };
                 Ok(self.new_symbol(description))
             }
@@ -19908,6 +19911,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return Err(ExecutionError::SymbolIsNotAString);
         }
         Ok(primitive.to_display_string())
+    }
+
+    /// The lossless `ToString` result used by symbol descriptions and registry keys.
+    fn as_text_units(
+        &mut self,
+        value: &Value,
+        instruction: usize,
+    ) -> Result<StringUnits, ExecutionError> {
+        let primitive = self.as_primitive(value, PrimitiveHint::String, instruction)?;
+        if matches!(primitive, Value::Symbol(_)) {
+            return Err(ExecutionError::SymbolIsNotAString);
+        }
+        Ok(primitive.to_string_units())
     }
 
     /// `%IteratorPrototype%.reduce` and the seven other methods that consume an iterator.
@@ -32911,7 +32927,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ///
     /// Serials come from the module realm when there is one, so that two modules of the same
     /// program cannot mint the same key for two different symbols.
-    fn new_symbol(&mut self, description: Option<String>) -> Value {
+    fn new_symbol(&mut self, description: Option<StringUnits>) -> Value {
         let allocate = |serial: &mut u64, symbols: &mut Vec<Rc<UniqueSymbol>>| {
             *serial += 1;
             let symbol = Rc::new(UniqueSymbol {
@@ -43658,13 +43674,9 @@ fn builtin_accessor_slot(accessor: BuiltinAccessor, receiver: &Value) -> Value {
             _ => unreachable!("TypedArray accessor passed a non-TypedArray receiver"),
         },
         BuiltinAccessor::SymbolDescription => match receiver {
-            Value::Symbol(symbol) => match symbol {
-                Symbol::WellKnown(well_known) => Value::String(well_known.description().to_owned().into()),
-                Symbol::Unique(unique) => unique
-                    .description
-                    .as_ref()
-                    .map_or(Value::Undefined, |text| Value::String(text.clone().into())),
-            },
+            Value::Symbol(symbol) => symbol
+                .description_units()
+                .map_or(Value::Undefined, Value::String),
             _ => unreachable!("Symbol accessor passed a non-symbol receiver"),
         },
         BuiltinAccessor::Species
@@ -44483,10 +44495,15 @@ fn define_function_name(function: &Value, key: &Value, prefix: Option<&str>) {
     let name = match key {
         // A symbol names the property after its description, in brackets; one with no description
         // names it nothing, and a prefix is still applied to that nothing.
-        Value::Symbol(symbol) => match symbol.description() {
-            "" => StringUnits::default(),
-            description => StringUnits::from(format!("[{description}]")),
-        },
+        Value::Symbol(symbol) => symbol.description_units().map_or_else(
+            StringUnits::default,
+            |description| {
+                let mut units = StringUnits::from("[").to_units().into_vec();
+                units.extend(description.units());
+                units.extend(StringUnits::from("]").units());
+                StringUnits::from_units(&units)
+            },
+        ),
         other => {
             let key = other.property_key_units();
             // A private name is spelled the way the program wrote it rather than the way the

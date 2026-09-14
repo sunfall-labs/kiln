@@ -1,5 +1,7 @@
 use std::rc::Rc;
 
+use kiln_string::StringUnits;
+
 /// The well-known symbols, which are the only symbols that exist so far.
 ///
 /// Symbol-keyed properties are stored under a reserved string key (`@@iterator`), the same
@@ -174,7 +176,7 @@ pub enum Symbol {
 #[derive(Debug)]
 pub struct UniqueSymbol {
     pub(crate) serial: u64,
-    pub(crate) description: Option<String>,
+    pub(crate) description: Option<StringUnits>,
 }
 
 impl Symbol {
@@ -190,11 +192,17 @@ impl Symbol {
         }
     }
 
-    pub(crate) fn description(&self) -> &str {
+    pub(crate) fn description_units(&self) -> Option<StringUnits> {
         match self {
-            Self::WellKnown(symbol) => symbol.description(),
-            Self::Unique(symbol) => symbol.description.as_deref().unwrap_or(""),
+            Self::WellKnown(symbol) => Some(StringUnits::from(symbol.description())),
+            Self::Unique(symbol) => symbol.description.clone(),
         }
+    }
+
+    /// Lossy spelling used only in diagnostics and host display paths.
+    pub(crate) fn description(&self) -> String {
+        self.description_units()
+            .map_or_else(String::new, |description| description.to_lossy_string())
     }
 
     /// The serial in a unique symbol's reserved key, or `None` for any other key.
