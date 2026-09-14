@@ -2025,7 +2025,8 @@ fn render_regex_matchers(output: &mut String, program: &Program, symbol: &str) {
                 &program.constants[*pattern as usize],
                 &program.constants[*flags as usize],
             )
-            && let Some(compiled) = crate::regex::try_compile_regex(source, letters)
+            && let (Ok(source), Ok(letters)) = (source.to_scalar_string(), letters.to_scalar_string())
+            && let Some(compiled) = crate::regex::try_compile_regex(&source, &letters)
         {
             let prefix = format!("{symbol}_re_{pattern}_{flags}");
             crate::regex::emit_regex_matcher(output, &prefix, &compiled);
@@ -3177,7 +3178,10 @@ pub fn closed_world_namespace_members(
                         else {
                             return None;
                         };
-                        members.insert(name.clone());
+                        let Some(name) = name.to_scalar_string().ok() else {
+                            return None;
+                        };
+                        members.insert(name);
                     }
                     GraphOp::CheckTdz { .. } | GraphOp::StoreLocal { .. } | GraphOp::Phi { .. } => {
                     }
@@ -3485,7 +3489,7 @@ pub(crate) fn instruction_diagnostic(instruction: &Instruction, constants: &[Con
     };
     if let Some(Constant::String(name)) = named {
         operation.push('(');
-        operation.push_str(name);
+        operation.push_str(&name.to_scalar_string().unwrap_or_default());
         operation.push(')');
     }
     // `@` survives the filter because a reserved key is spelled `@@iterator` everywhere else in
@@ -3734,8 +3738,8 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             Constant::String(value) => {
                 byte(&mut hash, 4);
                 word(&mut hash, value.len() as u64);
-                for value in value.bytes() {
-                    byte(&mut hash, value);
+                for value in value.units() {
+                    word(&mut hash, u64::from(value));
                 }
             }
             // Tag 5, appended: a persisted key never renumbers.
@@ -4057,8 +4061,8 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
                     Some(text) => {
                         byte(&mut hash, 1);
                         word(&mut hash, text.len() as u64);
-                        for b in text.bytes() {
-                            byte(&mut hash, b);
+                        for unit in text.units() {
+                            word(&mut hash, u64::from(unit));
                         }
                     }
                     None => byte(&mut hash, 0),
@@ -4067,8 +4071,8 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             word(&mut hash, site.raw.len() as u64);
             for segment in &site.raw {
                 word(&mut hash, segment.len() as u64);
-                for b in segment.bytes() {
-                    byte(&mut hash, b);
+                for unit in segment.units() {
+                    word(&mut hash, u64::from(unit));
                 }
             }
         }

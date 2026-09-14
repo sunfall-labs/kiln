@@ -1330,11 +1330,11 @@ fn boxed_uses(
                             Some(GraphOp::LoadBuiltin(kiln_ir::Builtin::Math))
                         );
                     let key = program.constants.get(*name as usize).and_then(|c| match c {
-                        Constant::String(s) => Some(s.as_str()),
+                        Constant::String(s) => s.to_scalar_string().ok(),
                         _ => None,
                     });
                     let is_math_intrinsic = is_math
-                        && match (key, args.len()) {
+                        && match (key.as_deref(), args.len()) {
                             (
                                 Some(
                                     "sqrt" | "abs" | "floor" | "ceil" | "round" | "trunc" | "sign",

@@ -747,8 +747,8 @@ fn executable_numeric_operand_order_matches_symbol_conversion_rules() {
             source: "".into(),
             version: BYTECODE_VERSION,
             constants: vec![
-                Constant::String("valueOf".to_owned()),
-                Constant::String("called".to_owned()),
+                Constant::String("valueOf".to_owned().into()),
+                Constant::String("called".to_owned().into()),
                 Constant::Number(1.0f64.to_bits()),
             ],
             code: vec![
@@ -1544,7 +1544,7 @@ fn compact_literals_use_shared_nan_boxed_builders() {
     let object = emit_with_policy(
         &program(
             vec![
-                Constant::String("answer".to_owned()),
+                Constant::String("answer".to_owned().into()),
                 Constant::Number(42_f64.to_bits()),
             ],
             vec![
@@ -2857,7 +2857,7 @@ fn refuses_to_make_a_realm_by_name_rather_than_answering_from_its_only_one() {
         ],
     ] {
         let refused = emit(&program(
-            vec![Constant::String(HOST_CREATE_REALM.to_owned())],
+            vec![Constant::String(HOST_CREATE_REALM.to_owned().into())],
             code,
             0,
         ));
@@ -2869,7 +2869,7 @@ fn refuses_to_make_a_realm_by_name_rather_than_answering_from_its_only_one() {
             "the refusal must name what it refused, got {feature}"
         );
         let refused_eval = emit(&program(
-            vec![Constant::String(HOST_EVAL_SCRIPT.to_owned())],
+            vec![Constant::String(HOST_EVAL_SCRIPT.to_owned().into())],
             vec![
                 Instruction::LoadGlobalBindingOrUndefined(0),
                 Instruction::Pop,
@@ -2889,7 +2889,7 @@ fn refuses_to_make_a_realm_by_name_rather_than_answering_from_its_only_one() {
         // the interpreter answered "ok", which is the divergence this refusal prevents.
         for hook in HOST_AGENT_HOOKS {
             let refused_agent = emit(&program(
-                vec![Constant::String(hook.to_owned())],
+                vec![Constant::String(hook.to_owned().into())],
                 vec![
                     Instruction::LoadGlobalBindingOrUndefined(0),
                     Instruction::Pop,
@@ -2910,7 +2910,7 @@ fn refuses_to_make_a_realm_by_name_rather_than_answering_from_its_only_one() {
         // backend has one global object. Compiling it would answer `new ShadowRealm()` with
         // a realm whose intrinsics were secretly this one's.
         let refused_shadow = emit(&program(
-            vec![Constant::String(SHADOW_REALM.to_owned())],
+            vec![Constant::String(SHADOW_REALM.to_owned().into())],
             vec![
                 Instruction::LoadGlobalBindingOrUndefined(0),
                 Instruction::Pop,
@@ -2932,7 +2932,7 @@ fn refuses_to_make_a_realm_by_name_rather_than_answering_from_its_only_one() {
         // claim about the *language* rather than about this backend, and the two engines
         // diverged on it.
         let refused_reference = emit(&program(
-            vec![Constant::String(SHADOW_REALM.to_owned())],
+            vec![Constant::String(SHADOW_REALM.to_owned().into())],
             vec![Instruction::ThrowReference(0), Instruction::Return],
             0,
         ));
@@ -2948,7 +2948,7 @@ fn refuses_to_make_a_realm_by_name_rather_than_answering_from_its_only_one() {
     // instruction the backend already supports.
     assert!(
         emit(&program(
-            vec![Constant::String("Array".to_owned())],
+            vec![Constant::String("Array".to_owned().into())],
             vec![
                 Instruction::LoadGlobalBindingOrUndefined(0),
                 Instruction::Pop,
@@ -3428,7 +3428,7 @@ fn executable_scalar_operators_match_javascript() {
         (Constant::Null, Constant::Undefined, true),
         (number(0.0), Constant::Boolean(false), true),
         (Constant::String("42".into()), number(42.0), true),
-        (Constant::String(String::new()), number(0.0), true),
+        (Constant::String(String::new().into()), number(0.0), true),
         (Constant::Null, number(0.0), false),
     ] {
         check_binary(
