@@ -12814,9 +12814,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     define_function_name(&function, &key, None);
                     let target = self.stack.last().cloned().unwrap_or(Value::Undefined);
                     if let Value::Object(object) = &target {
-                        object
-                            .borrow_mut()
-                            .define_value_units(&name, function, Attributes::DEFAULT);
+                        object.borrow_mut().define_value_units(
+                            &name,
+                            function,
+                            Attributes::DEFAULT,
+                        );
                     }
                 }
                 Instruction::DefineMethod => {
@@ -12831,9 +12833,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     define_function_name(&function, &key, None);
                     match &target {
                         Value::Object(object) => {
-                            object
-                                .borrow_mut()
-                                .define_value_units(&name, function, Attributes::BUILT_IN);
+                            object.borrow_mut().define_value_units(
+                                &name,
+                                function,
+                                Attributes::BUILT_IN,
+                            );
                         }
                         // A static method lands on the constructor, whose properties live in its
                         // own store rather than in an object.
@@ -16127,21 +16131,25 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // Two forms: a function, called as `(holder, key, value)`, and an array, which
                 // is a list of the keys to keep.
                 let replacer = arguments.get(1).cloned().unwrap_or(Value::Undefined);
-                let allowed: Option<Vec<String>> = match &replacer {
+                let allowed: Option<Vec<StringUnits>> = match &replacer {
                     Value::Array(items) => {
-                        let mut keys: Vec<String> = Vec::new();
+                        let mut keys: Vec<StringUnits> = Vec::new();
                         for entry in items.borrow().iter() {
                             // A `String` or `Number` *wrapper* counts as its primitive, which the
                             // specification says explicitly and which matching the primitive
                             // forms alone missed: `[new String("a")]` selected nothing.
                             let name = match entry {
-                                Value::String(text) => Some(text.to_lossy_string()),
-                                Value::Number(number) => Some(number_string(*number)),
+                                Value::String(text) => Some(text.clone()),
+                                Value::Number(number) => {
+                                    Some(StringUnits::from(number_string(*number)))
+                                }
                                 Value::Object(object) => {
                                     let inner = object.borrow().primitive().cloned();
                                     match inner {
-                                        Some(Value::String(text)) => Some(text.to_lossy_string()),
-                                        Some(Value::Number(number)) => Some(number_string(number)),
+                                        Some(Value::String(text)) => Some(text),
+                                        Some(Value::Number(number)) => {
+                                            Some(StringUnits::from(number_string(number)))
+                                        }
                                         _ => None,
                                     }
                                 }
@@ -16168,7 +16176,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         Some(replacer) => self.call_value(
                             replacer,
                             holder.clone(),
-                            Vec::from([Value::String(key.to_owned().into()), property]),
+                            Vec::from([Value::String(key.clone()), property]),
                             instruction,
                         ),
                         None => Ok(property),
@@ -16200,7 +16208,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         self.call_value(
                             &method,
                             receiver.clone(),
-                            Vec::from([Value::String(key.to_owned().into())]),
+                            Vec::from([Value::String(key.clone())]),
                             instruction,
                         )
                     }
@@ -16210,18 +16218,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     data.set("", value.clone());
                     Value::Object(Rc::new(RefCell::new(data)))
                 };
+                let empty = StringUnits::default();
                 Ok(
                     match json_stringify(
                         &value,
                         &indent,
-                        "",
+                        &empty,
                         &mut seen,
                         &mut resolve,
                         allowed.as_deref(),
-                        "",
+                        &empty,
                         &wrapper,
                     )? {
-                        Some(text) => Value::String(text.into()),
+                        Some(text) => Value::String(text),
                         // `JSON.stringify(undefined)` is `undefined`, not the string.
                         None => Value::Undefined,
                     },
@@ -35277,45 +35286,139 @@ fn build_error(kind: ErrorKind, arguments: &[Value]) -> Value {
 
 /// The `space` argument of `JSON.stringify`, resolved to the literal indent for one level.
 ///
-/// A number is that many spaces and a string is used as-is, both capped at ten characters, which
-/// is what the specification says and what keeps a hostile argument from blowing up the output.
-fn json_indent(space: Option<&Value>) -> String {
+/// A number is that many spaces and a string is used as-is, both capped at ten UTF-16 units,
+/// which is what the specification says. Keeping the result as units matters for an indent that
+/// contains an unpaired surrogate: converting it through a scalar string would replace the unit
+/// before the serializer had a chance to emit it.
+fn json_indent(space: Option<&Value>) -> StringUnits {
     const MAX: usize = 10;
     // `JSON.stringify(v, null, new Number(2))` indents by two: the specification unwraps a
-    // Number or String object before looking at it, and reading the object itself found neither
-    // arm below and silently produced no indent at all.
+    // Number or String object before looking at it.
     let unwrapped = space.and_then(wrapped_primitive);
     let space = unwrapped.as_ref().or(space);
     match space {
-        Some(Value::Number(count)) if *count >= 1.0 => " ".repeat((*count as usize).min(MAX)),
-        Some(Value::String(text)) => text
-            .units()
-            .take(MAX)
-            .map(|unit| char::from_u32(unit as u32).unwrap_or('\u{fffd}'))
-            .collect(),
-        _ => String::new(),
+        Some(Value::Number(count)) if *count >= 1.0 => {
+            StringUnits::from(" ".repeat((*count as usize).min(MAX)))
+        }
+        Some(Value::String(text)) => {
+            let units = text.units().take(MAX).collect::<Vec<_>>();
+            StringUnits::from_units(&units)
+        }
+        _ => StringUnits::default(),
     }
 }
 
-/// Serialise one value as JSON.
+/// A checked builder for language strings.
 ///
-/// `None` is "not representable" -- `undefined`, a function, a symbol. The distinction matters
-/// because the caller decides what to do with it: an object property is dropped, an array
-/// element becomes `null`, and at the top level the whole call returns `undefined`.
-///
-/// `resolve` calls a getter, because reading a property is a call when the property is an
-/// accessor. It is a callback rather than the interpreter itself so that the serialiser stays a
-/// free function -- the shape of the output is not a machine concern.
-///
-/// Not supported yet: the `replacer` argument and `toJSON` hooks, both of which call back into
-/// the program at points this signature does not reach. Neither appears in the
-/// corpus; when one does, this grows a `&mut Interpreter` and moves onto the type.
-/// The one callback `json_stringify` needs, doing both jobs it can require of the machine.
-///
-/// With a getter it calls that getter; with `None` it performs the `toJSON` step -- look the name
-/// up on the value, call it if it is callable, and hand back what it produced, or the value
-/// unchanged when there is none. One closure rather than two because both borrow the interpreter
-/// mutably and only one of them can.
+/// JSON output is a JavaScript string. Keep the common Latin1 representation until a wide unit
+/// appears, then promote once; the checked budget follows the actual backing storage (one byte
+/// per Latin1 unit or two bytes per UTF-16 unit), rather than routing output through scalar text.
+enum StringUnitsStorage {
+    Latin1(Vec<u8>),
+    Utf16(Vec<u16>),
+}
+
+struct StringUnitsBuilder {
+    storage: StringUnitsStorage,
+}
+
+impl StringUnitsBuilder {
+    fn new() -> Self {
+        Self {
+            storage: StringUnitsStorage::Latin1(Vec::new()),
+        }
+    }
+
+    fn storage_len(&self) -> usize {
+        match &self.storage {
+            StringUnitsStorage::Latin1(bytes) => bytes.len(),
+            StringUnitsStorage::Utf16(units) => units.len(),
+        }
+    }
+
+    fn check_capacity(&self, additional_units: usize, wide: bool) -> Result<(), ExecutionError> {
+        let units = self
+            .storage_len()
+            .checked_add(additional_units)
+            .ok_or(ExecutionError::StringTooLong { bytes: usize::MAX })?;
+        let bytes = units
+            .checked_mul(if wide { 2 } else { 1 })
+            .ok_or(ExecutionError::StringTooLong { bytes: usize::MAX })?;
+        bounded_string(bytes)
+    }
+
+    fn push_latin1(&mut self, bytes: &[u8]) -> Result<(), ExecutionError> {
+        let wide = matches!(self.storage, StringUnitsStorage::Utf16(_));
+        self.check_capacity(bytes.len(), wide)?;
+        match &mut self.storage {
+            StringUnitsStorage::Latin1(storage) => {
+                storage.extend_from_slice(bytes);
+            }
+            StringUnitsStorage::Utf16(storage) => {
+                storage.extend(bytes.iter().copied().map(u16::from));
+            }
+        }
+        Ok(())
+    }
+
+    fn push_ascii(&mut self, text: &str) -> Result<(), ExecutionError> {
+        debug_assert!(text.is_ascii());
+        self.push_latin1(text.as_bytes())
+    }
+
+    fn push_units(&mut self, text: &StringUnits) -> Result<(), ExecutionError> {
+        match text.as_view() {
+            StringView::Latin1(bytes) => self.push_latin1(bytes),
+            StringView::Utf16(units) => self.push_utf16(units),
+        }
+    }
+
+    fn push_utf16(&mut self, units: &[u16]) -> Result<(), ExecutionError> {
+        if matches!(self.storage, StringUnitsStorage::Utf16(_)) {
+            self.check_capacity(units.len(), true)?;
+            if let StringUnitsStorage::Utf16(old) = &mut self.storage {
+                old.extend_from_slice(units);
+            }
+            return Ok(());
+        }
+        if units.iter().all(|&unit| unit <= 0xff) {
+            self.check_capacity(units.len(), false)?;
+            if let StringUnitsStorage::Latin1(old) = &mut self.storage {
+                old.extend(units.iter().copied().map(|unit| unit as u8));
+            }
+            return Ok(());
+        }
+        // Promotion doubles the storage occupied by the existing Latin1 prefix. Check the
+        // complete final representation before mutating it, so a refusal cannot leave a partial
+        // builder behind.
+        self.check_capacity(units.len(), true)?;
+        match &mut self.storage {
+            StringUnitsStorage::Latin1(old) => {
+                let mut wide = Vec::with_capacity(old.len() + units.len());
+                wide.extend(old.iter().copied().map(u16::from));
+                wide.extend_from_slice(units);
+                self.storage = StringUnitsStorage::Utf16(wide);
+            }
+            StringUnitsStorage::Utf16(old) => old.extend_from_slice(units),
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> StringUnits {
+        match self.storage {
+            StringUnitsStorage::Latin1(bytes) => StringUnits::from_view(StringView::Latin1(&bytes)),
+            StringUnitsStorage::Utf16(units) => StringUnits::from_view(StringView::Utf16(&units)),
+        }
+    }
+}
+
+fn units_concat(left: &StringUnits, right: &StringUnits) -> Result<StringUnits, ExecutionError> {
+    let mut out = StringUnitsBuilder::new();
+    out.push_units(left)?;
+    out.push_units(right)?;
+    Ok(out.finish())
+}
+
 /// The three points at which serialising JSON calls back into the program.
 ///
 /// One callback rather than three, because each needs the machine and two closures cannot hold
@@ -35326,57 +35429,43 @@ enum JsonCall<'a> {
     Getter(&'a Value, &'a Value),
     /// `toJSON`, which runs before anything else is decided about a value, and which the
     /// specification hands the key the value is being serialised under.
-    ToJson(&'a Value, &'a str),
+    ToJson(&'a Value, &'a StringUnits),
     /// The `replacer` function, as `(holder, key, value)`.
-    Replace(&'a Value, &'a str, Value),
+    Replace(&'a Value, &'a StringUnits, Value),
 }
 
 type JsonResolver<'a> = &'a mut dyn FnMut(JsonCall<'_>) -> Result<Value, ExecutionError>;
 
 /// Serialise one value, calling back into the interpreter where the specification says to.
 ///
+/// `None` is "not representable" -- `undefined`, a function, a symbol. The distinction matters
+/// because the caller decides what to do with it: an object property is dropped, an array
+/// element becomes `null`, and at the top level the whole call returns `undefined`.
 #[allow(clippy::too_many_arguments)]
 fn json_stringify(
     value: &Value,
-    indent: &str,
-    current: &str,
+    indent: &StringUnits,
+    current: &StringUnits,
     seen: &mut Vec<usize>,
     resolve: JsonResolver<'_>,
-    allowed: Option<&[String]>,
-    key: &str,
+    allowed: Option<&[StringUnits]>,
+    key: &StringUnits,
     holder: &Value,
-) -> Result<Option<String>, ExecutionError> {
+) -> Result<Option<StringUnits>, ExecutionError> {
     // `toJSON` runs before anything else is decided about the value, which is how a `Date`
-    // serialises as its ISO string and how a library controls its own JSON form. It is looked
-    // up on the value, prototype chain included, so a class method counts.
+    // serialises as its ISO string and how a library controls its own JSON form.
     let replaced = resolve(JsonCall::ToJson(value, key))?;
-    // Then the replacer, in that order, on every value including the root: `SerializeJSONProperty`
-    // does both and the replacer sees what `toJSON` produced. Applying it at the call sites
-    // instead put it *before* `toJSON`, skipped array elements entirely, and never reached the
-    // root at all -- so a replacer that rewrites the whole document was never asked about it.
+    // Then the replacer, in that order, on every value including the root.
     let replaced = resolve(JsonCall::Replace(holder, key, replaced))?;
     let value = &replaced;
-    let nested = format!("{current}{indent}");
-    // With no indent every separator is empty, which collapses the pretty form to the compact
-    // one and lets both share this single code path.
-    let (open, separator, close) = if indent.is_empty() {
-        (String::new(), ",".to_owned(), String::new())
-    } else {
-        (
-            format!("\n{nested}"),
-            format!(",\n{nested}"),
-            format!("\n{current}"),
-        )
-    };
-    let colon = if indent.is_empty() { ":" } else { ": " };
+    let nested = units_concat(current, indent)?;
+    let pretty = !indent.is_empty();
 
     Ok(match value {
         // Omitted rather than serialised: JSON has no way to spell any of these. An array
         // element that is omitted becomes null, which is also what a hole serialises as.
-        // A method table serialises as the empty object it stands for; a function serialises as
-        // nothing, which is what drops it from an object and turns it into null in an array.
         Value::Native(Native::PrototypeOf(table), _) if *table != PrototypeTable::Function => {
-            Some("{}".to_owned())
+            Some(StringUnits::from("{}"))
         }
         Value::Undefined
         | Value::Function(_)
@@ -35385,19 +35474,18 @@ fn json_stringify(
         | Value::Element(_)
         | Value::CommonJsRequire(_)
         | Value::CommonJsResolve(_) => None,
-        // A symbol is dropped like a function, unlike `String(symbol)`, which throws.
         Value::Symbol(_) => None,
-        Value::Null => Some("null".to_owned()),
-        Value::Boolean(value) => Some(value.to_string()),
-        // NaN and both infinities have no JSON spelling, so they serialise as null.
-        Value::Number(number) if number.is_finite() => Some(number_string(*number)),
-        Value::Number(_) => Some("null".to_owned()),
-        Value::String(text) => Some(json_quote(&text.to_lossy_string())),
+        Value::Null => Some(StringUnits::from("null")),
+        Value::Boolean(value) => Some(StringUnits::from(value.to_string())),
+        Value::Number(number) if number.is_finite() => {
+            Some(StringUnits::from(number_string(*number)))
+        }
+        Value::Number(_) => Some(StringUnits::from("null")),
+        Value::String(text) => Some(json_quote(text)?),
         Value::Array(items) => {
             let guard = CycleGuard::enter(seen, Rc::as_ptr(items).cast::<()>())?;
-            // An accessor at an index leaves a hole in the dense storage, and serialising that
-            // as null would report as absent an element the program reads perfectly well. The
-            // getter is a call, which is what `resolve` is here for.
+            // An accessor at an index leaves a hole in dense storage, and serialising it as null
+            // would report as absent an element the program reads perfectly well.
             let items = if items.elements.borrow().is_empty() {
                 items.borrow().clone()
             } else {
@@ -35422,32 +35510,37 @@ fn json_stringify(
                 }
                 collected
             };
-            let parts = items
-                .iter()
-                .enumerate()
-                .map(|(index, item)| {
-                    // An element that is not representable becomes null rather than vanishing,
-                    // because dropping it would renumber every element after it.
-                    let at = index.to_string();
-                    json_stringify(
+            let mut out = StringUnitsBuilder::new();
+            out.push_ascii("[")?;
+            if !items.is_empty() {
+                if pretty {
+                    out.push_ascii("\n")?;
+                    out.push_units(&nested)?;
+                }
+                for (index, item) in items.iter().enumerate() {
+                    if index > 0 {
+                        if pretty {
+                            out.push_ascii(",\n")?;
+                            out.push_units(&nested)?;
+                        } else {
+                            out.push_ascii(",")?;
+                        }
+                    }
+                    let at = StringUnits::from(index.to_string());
+                    let part = json_stringify(
                         item, indent, &nested, guard.seen, resolve, allowed, &at, value,
-                    )
-                    .map(|part| part.unwrap_or_else(|| "null".to_owned()))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Some(if parts.is_empty() {
-                "[]".to_owned()
-            } else {
-                format!("[{open}{}{close}]", parts.join(&separator))
-            })
+                    )?;
+                    out.push_units(&part.unwrap_or_else(|| StringUnits::from("null")))?;
+                }
+                if pretty {
+                    out.push_ascii("\n")?;
+                    out.push_units(current)?;
+                }
+            }
+            out.push_ascii("]")?;
+            Some(out.finish())
         }
-        // Emitted exactly as it was given, which is the entire point: the text went through
-        // `JSON.rawJSON`'s validation once, and re-encoding it here is the round trip the raw
-        // form exists to avoid.
-        // `new Number(1)` serialises as `1`, not as an object with no enumerable properties.
-        // `SerializeJSONProperty` unwraps a Number, String, Boolean or BigInt wrapper before it
-        // decides anything else; without it `[new Number(1)]` answered `[{}]`, and a
-        // `new String("s")` answered its own indices.
+        // A primitive wrapper is serialised as its primitive value, not as an empty object.
         Value::Object(object)
             if object.borrow().primitive().is_some()
                 && object.borrow().get_own(RAW_JSON_MARK).is_none() =>
@@ -35460,22 +35553,24 @@ fn json_stringify(
                 None => Ok(None),
             };
         }
+        // Raw JSON has already been validated. Its units must be emitted verbatim, including
+        // unpaired surrogates, because preserving the source text is the purpose of rawJSON.
         Value::Object(object) if object.borrow().get_own(RAW_JSON_MARK).is_some() => {
-            Some(match object.borrow().get_own(RAW_JSON_TEXT) {
-                Some(Value::String(text)) => text.to_lossy_string(),
-                _ => "null".to_owned(),
-            })
+            let raw = object
+                .borrow()
+                .get_own(RAW_JSON_TEXT)
+                .and_then(|value| match value {
+                    Value::String(text) => Some(text.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| StringUnits::from("null"));
+            Some(raw)
         }
         Value::Object(object) => {
             let guard = CycleGuard::enter(seen, Rc::as_ptr(object).cast::<()>())?;
-            // Read out before iterating, so the object is not borrowed while a getter runs --
-            // a getter is ordinary code and may touch the object it belongs to.
-            let entries = own_properties(&Intrinsics::default(), value);
-            // A replacer given as an array decides the order as well as the membership: the
-            // specification walks the *list* and looks each name up, so `["a", "b"]` answers
-            // `a` first however the object was built. Filtering the object's own order instead
-            // kept the object's, which is a different document for the same inputs.
-            let entries = match allowed {
+            // Read out before iterating, so the object is not borrowed while a getter runs.
+            let entries = own_properties_units(&Intrinsics::default(), value);
+            let entries: Vec<(StringUnits, Property)> = match allowed {
                 Some(keys) => keys
                     .iter()
                     .filter_map(|name| {
@@ -35487,74 +35582,72 @@ fn json_stringify(
                     .collect(),
                 None => entries,
             };
-            let mut parts = Vec::new();
+            let mut out = StringUnitsBuilder::new();
+            out.push_ascii("{")?;
+            let mut emitted = 0usize;
             for (key, property) in entries {
-                // Internal bookkeeping -- an iterator's cursor, a well-known symbol -- is not an
-                // own enumerable string property, so it is not part of the object's JSON.
-                // A replacer given as an array is a list of the keys to keep, in its order of
-                // interest rather than the object's -- the filter is here, and the value is
-                // replaced below once it has been read.
-                if allowed.is_some_and(|keys| !keys.contains(&key)) {
-                    continue;
-                }
-                if symbol::is_reserved(&key) {
+                if is_reserved_units(&key) {
                     continue;
                 }
                 let property = match property {
                     Property::Value(value) => value,
-                    // The specification reads the property, which for an accessor is a call.
-                    // Serialising the getter itself would be a different object entirely.
                     Property::Accessor { get, .. } => match get {
                         Some(getter) => resolve(JsonCall::Getter(&getter, value))?,
                         None => continue,
                     },
                 };
-                // The replacer is applied inside the recursive call, where `toJSON` runs first
-                // and the object beneath is the holder it is given.
-                if let Some(part) = json_stringify(
+                let Some(part) = json_stringify(
                     &property, indent, &nested, guard.seen, resolve, allowed, &key, value,
-                )? {
-                    parts.push(format!("{}{colon}{part}", json_quote(&key)));
+                )?
+                else {
+                    continue;
+                };
+                if emitted > 0 {
+                    if pretty {
+                        out.push_ascii(",\n")?;
+                        out.push_units(&nested)?;
+                    } else {
+                        out.push_ascii(",")?;
+                    }
+                } else if pretty {
+                    out.push_ascii("\n")?;
+                    out.push_units(&nested)?;
                 }
+                out.push_units(&json_quote(&key)?)?;
+                out.push_ascii(if pretty { ": " } else { ":" })?;
+                out.push_units(&part)?;
+                emitted += 1;
             }
-            let _ = object;
-            Some(if parts.is_empty() {
-                "{}".to_owned()
-            } else {
-                format!("{{{open}{}{close}}}", parts.join(&separator))
-            })
+            if emitted > 0 && pretty {
+                out.push_ascii("\n")?;
+                out.push_units(current)?;
+            }
+            out.push_ascii("}")?;
+            Some(out.finish())
         }
-        // None of these has own enumerable properties, so all serialise as the empty object --
-        // which is also what a real engine produces for them.
-        // A regexp has no own enumerable properties either, so `JSON.stringify(/a/)` is `{}`.
+        // None of these has own enumerable properties, so all serialise as the empty object.
         Value::Generator(_)
         | Value::Promise(_)
         | Value::RegExp(_)
         | Value::Temporal(_)
-        | Value::Intl(_) => Some("{}".to_owned()),
-        // A date serialises through `toJSON`, which is its ISO form -- or null when it is invalid,
-        // since there is no ISO spelling for that.
+        | Value::Intl(_) => Some(StringUnits::from("{}")),
         Value::Date(date) => Some(match iso_string(date.time.get()) {
-            Some(text) => json_quote(&text),
-            None => "null".to_owned(),
+            Some(text) => json_quote(&StringUnits::from(text))?,
+            None => StringUnits::from("null"),
         }),
-        // A function has no JSON spelling, and a settler is one.
         Value::Settler(..) | Value::Capability(..) | Value::Bound(_) | Value::Wrapped(_) => None,
-        // Serialising a proxy means reading its properties, which means running its traps, which
-        // this pure walk cannot do. Refused rather than silently serialising the target.
         Value::Proxy(_) => return Err(ExecutionError::ProxyNotSerialisable),
-        // A typed array serialises as an *object* keyed by index, not as an array, which is one
-        // of the specification's odder corners and is what node does.
+        // Typed arrays serialise as objects keyed by index.
         Value::TypedArray(view) => {
-            let entries: Vec<(String, Value)> = view
+            let entries: Vec<(StringUnits, Value)> = view
                 .items()
                 .into_iter()
                 .enumerate()
-                .map(|(index, item)| (index.to_string(), item))
+                .map(|(index, item)| (StringUnits::from(index.to_string()), item))
                 .collect();
             let mut data = ObjectData::default();
             for (key, item) in entries {
-                data.set(&key, item);
+                data.set_units(&key, item);
             }
             return json_stringify(
                 &Value::Object(Rc::new(RefCell::new(data))),
@@ -35567,12 +35660,104 @@ fn json_stringify(
                 holder,
             );
         }
-        Value::ArrayBuffer(_) | Value::DataView(_) => Some("{}".to_owned()),
-        // Neither has a BigInt: the specification makes serialising one a TypeError rather than
-        // an omission, and it is catchable here for the same reason a cycle is.
+        Value::ArrayBuffer(_) | Value::DataView(_) => Some(StringUnits::from("{}")),
         Value::BigInt(_) => return Err(ExecutionError::BigIntNotSerialisable),
         Value::Cell(_) => unreachable!("a cell is never used as a value"),
     })
+}
+
+/// A JSON string literal, with the escapes the grammar requires.
+///
+/// Ordinary strings use the well-formed JSON.stringify rule: an unpaired surrogate is escaped
+/// as `\\uXXXX`, while a valid surrogate pair remains two original units. This preserves every
+/// JavaScript string value without routing it through a lossy scalar conversion.
+fn json_quote(text: &StringUnits) -> Result<StringUnits, ExecutionError> {
+    let mut out = StringUnitsBuilder::new();
+    out.push_ascii("\"")?;
+    match text.as_view() {
+        StringView::Latin1(bytes) => quote_latin1(&mut out, bytes)?,
+        StringView::Utf16(units) => quote_utf16(&mut out, units)?,
+    }
+    out.push_ascii("\"")?;
+    Ok(out.finish())
+}
+
+fn push_json_unicode_escape(out: &mut StringUnitsBuilder, unit: u16) -> Result<(), ExecutionError> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let bytes = [
+        b'\\',
+        b'u',
+        HEX[((unit >> 12) & 0xf) as usize],
+        HEX[((unit >> 8) & 0xf) as usize],
+        HEX[((unit >> 4) & 0xf) as usize],
+        HEX[(unit & 0xf) as usize],
+    ];
+    out.push_latin1(&bytes)
+}
+
+fn quote_latin1(out: &mut StringUnitsBuilder, bytes: &[u8]) -> Result<(), ExecutionError> {
+    let mut start = 0;
+    for (index, &byte) in bytes.iter().enumerate() {
+        let escape = match byte {
+            b'"' => Some(b"\\\"".as_slice()),
+            b'\\' => Some(b"\\\\".as_slice()),
+            b'\n' => Some(b"\\n".as_slice()),
+            b'\r' => Some(b"\\r".as_slice()),
+            b'\t' => Some(b"\\t".as_slice()),
+            0x08 => Some(b"\\b".as_slice()),
+            0x0c => Some(b"\\f".as_slice()),
+            byte if byte < 0x20 => None,
+            _ => continue,
+        };
+        out.push_latin1(&bytes[start..index])?;
+        if let Some(escape) = escape {
+            out.push_latin1(escape)?;
+        } else {
+            push_json_unicode_escape(out, u16::from(byte))?;
+        }
+        start = index + 1;
+    }
+    out.push_latin1(&bytes[start..])
+}
+
+fn quote_utf16(out: &mut StringUnitsBuilder, units: &[u16]) -> Result<(), ExecutionError> {
+    let mut start = 0;
+    let mut index = 0;
+    while index < units.len() {
+        let unit = units[index];
+        let raw_pair = (0xd800..=0xdbff).contains(&unit)
+            && units
+                .get(index + 1)
+                .is_some_and(|next| (0xdc00..=0xdfff).contains(next));
+        if raw_pair {
+            index += 2;
+            continue;
+        }
+        let escape = match unit {
+            0x22 => Some(b"\\\"".as_slice()),
+            0x5c => Some(b"\\\\".as_slice()),
+            0x0a => Some(b"\\n".as_slice()),
+            0x0d => Some(b"\\r".as_slice()),
+            0x09 => Some(b"\\t".as_slice()),
+            0x08 => Some(b"\\b".as_slice()),
+            0x0c => Some(b"\\f".as_slice()),
+            unit if unit < 0x20 => None,
+            0xd800..=0xdfff => None,
+            _ => {
+                index += 1;
+                continue;
+            }
+        };
+        out.push_utf16(&units[start..index])?;
+        if let Some(escape) = escape {
+            out.push_latin1(escape)?;
+        } else {
+            push_json_unicode_escape(out, unit)?;
+        }
+        index += 1;
+        start = index;
+    }
+    out.push_utf16(&units[start..])
 }
 
 /// Tracks the containers on the path from the root, so a value containing itself is caught
@@ -35600,30 +35785,6 @@ impl Drop for CycleGuard<'_> {
     fn drop(&mut self) {
         self.seen.pop();
     }
-}
-
-/// A JSON string literal, with the escapes the grammar requires.
-fn json_quote(text: &str) -> String {
-    let mut quoted = String::with_capacity(text.len() + 2);
-    quoted.push('"');
-    for character in text.chars() {
-        match character {
-            '"' => quoted.push_str("\\\""),
-            '\\' => quoted.push_str("\\\\"),
-            '\n' => quoted.push_str("\\n"),
-            '\r' => quoted.push_str("\\r"),
-            '\t' => quoted.push_str("\\t"),
-            '\u{8}' => quoted.push_str("\\b"),
-            '\u{c}' => quoted.push_str("\\f"),
-            // Everything else below space has no short escape and must be spelled numerically.
-            control if control < ' ' => {
-                quoted.push_str(&format!("\\u{:04x}", control as u32));
-            }
-            other => quoted.push(other),
-        }
-    }
-    quoted.push('"');
-    quoted
 }
 
 /// Invoke a native built-in.
@@ -40930,12 +41091,6 @@ fn delete_property_key(intrinsics: &Intrinsics, target: &Value, key: PropertyKey
 /// spread carries symbol keys across and `Object.keys` does not. An array or a string contributes
 /// its indices, which is what makes `{ ...[1, 2] }` an object with keys "0" and "1"; a primitive
 /// with nothing of its own contributes nothing, and so does `null` or `undefined`.
-fn own_properties(intrinsics: &Intrinsics, value: &Value) -> Vec<(String, Property)> {
-    own_properties_units(intrinsics, value)
-        .into_iter()
-        .map(|(key, property)| (key.to_lossy_string(), property))
-        .collect()
-}
 
 fn own_properties_units(intrinsics: &Intrinsics, value: &Value) -> Vec<(StringUnits, Property)> {
     match value {

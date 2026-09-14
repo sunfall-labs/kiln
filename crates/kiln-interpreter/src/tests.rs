@@ -652,7 +652,7 @@ fn materialized_branded_accessors_ignore_receiver_shadow_properties() {
 fn native_spread_uses_materialized_enumerability_and_honors_deletion() {
     let intrinsics = Intrinsics::default();
     let path = Value::Native(Native::NodePath, RealmId::PRIMARY);
-    let before = own_properties(&intrinsics, &path);
+    let before = own_properties_units(&intrinsics, &path);
     assert!(before.iter().any(|(key, _)| key == "join"));
     assert!(delete_property(
         &intrinsics,
@@ -660,14 +660,14 @@ fn native_spread_uses_materialized_enumerability_and_honors_deletion() {
         &Value::String("join".to_owned().into()),
     ));
     assert!(
-        !own_properties(&intrinsics, &path)
+        !own_properties_units(&intrinsics, &path)
             .iter()
             .any(|(key, _)| key == "join")
     );
 
     let math = Value::Native(Native::Math, RealmId::PRIMARY);
     assert!(
-        !own_properties(&intrinsics, &math)
+        !own_properties_units(&intrinsics, &math)
             .iter()
             .any(|(key, _)| key == "max")
     );
@@ -3649,7 +3649,10 @@ fn module_execution_initializes_import_slots_and_publishes_exports() {
 }
 
 /// `json_stringify` for a fixture with no accessors, so it needs no interpreter to read one.
-fn serialize(value: &Value, indent: &str) -> Result<Option<String>, ExecutionError> {
+fn serialize_units(
+    value: &Value,
+    indent: &StringUnits,
+) -> Result<Option<StringUnits>, ExecutionError> {
     let mut unreachable_getter = |call: crate::JsonCall<'_>| match call {
         // No fixture here defines an accessor, carries `toJSON`, or passes a replacer.
         crate::JsonCall::Getter(..) => unreachable!("no fixture here defines an accessor"),
@@ -3658,16 +3661,27 @@ fn serialize(value: &Value, indent: &str) -> Result<Option<String>, ExecutionErr
     };
     // The root's holder is the wrapper `{"": value}` the specification serialises through; no
     // fixture here has a replacer to read it, so the value itself stands in.
+    let empty = StringUnits::default();
     json_stringify(
         value,
         indent,
-        "",
+        &empty,
         &mut Vec::new(),
         &mut unreachable_getter,
         None,
-        "",
+        &empty,
         value,
     )
+}
+
+fn serialize(value: &Value, indent: &str) -> Result<Option<String>, ExecutionError> {
+    let indent = StringUnits::from(indent);
+    serialize_units(value, &indent).map(|result| {
+        result.map(|text| {
+            text.to_scalar_string()
+                .expect("ordinary JSON fixture should be scalar text")
+        })
+    })
 }
 
 fn json(value: &Value) -> Option<String> {
@@ -3786,6 +3800,148 @@ fn json_indent_argument_is_capped() {
     // A fractional or zero count means no indent at all, same as omitting the argument.
     assert_eq!(json_indent(Some(&Value::Number(0.0))), "");
     assert_eq!(json_indent(None), "");
+}
+
+#[test]
+fn json_quotes_and_keys_preserve_utf16_units() {
+    let key = StringUnits::from_units(&[0xd800, 0xfffd, 0xdc00]);
+    let value = Value::String(key.clone());
+    let mut data = ObjectData::default();
+    data.set_units(&key, value);
+    let object = Value::Object(Rc::new(RefCell::new(data)));
+    let text = serialize_units(&object, &StringUnits::default())
+        .expect("serialize")
+        .expect("object result");
+    assert_eq!(
+        text.to_units().as_ref(),
+        &[
+            b'{' as u16,
+            b'"' as u16,
+            b'\\' as u16,
+            b'u' as u16,
+            b'd' as u16,
+            b'8' as u16,
+            b'0' as u16,
+            b'0' as u16,
+            0xfffd,
+            b'\\' as u16,
+            b'u' as u16,
+            b'd' as u16,
+            b'c' as u16,
+            b'0' as u16,
+            b'0' as u16,
+            b'"' as u16,
+            b':' as u16,
+            b'"' as u16,
+            b'\\' as u16,
+            b'u' as u16,
+            b'd' as u16,
+            b'8' as u16,
+            b'0' as u16,
+            b'0' as u16,
+            0xfffd,
+            b'\\' as u16,
+            b'u' as u16,
+            b'd' as u16,
+            b'c' as u16,
+            b'0' as u16,
+            b'0' as u16,
+            b'"' as u16,
+            b'}' as u16,
+        ]
+    );
+}
+
+#[test]
+fn json_replacer_key_matching_uses_exact_units() {
+    let key = StringUnits::from_units(&[0xd800]);
+    let mut data = ObjectData::default();
+    data.set_units(&key, Value::Number(7.0));
+    let replacement = StringUnits::from_units(&[0xfffd]);
+    data.set_units(&replacement, Value::Number(8.0));
+    let object = Value::Object(Rc::new(RefCell::new(data)));
+    let allowed = vec![key.clone()];
+    let mut callback_keys = Vec::new();
+    let mut unreachable_getter = |call: crate::JsonCall<'_>| match call {
+        crate::JsonCall::Getter(..) => unreachable!("no getter"),
+        crate::JsonCall::ToJson(receiver, _) => Ok(receiver.clone()),
+        crate::JsonCall::Replace(_, actual, property) => {
+            callback_keys.push(actual.clone());
+            Ok(property)
+        }
+    };
+    let empty = StringUnits::default();
+    let text = json_stringify(
+        &object,
+        &empty,
+        &empty,
+        &mut Vec::new(),
+        &mut unreachable_getter,
+        Some(&allowed),
+        &empty,
+        &object,
+    )
+    .expect("serialize")
+    .expect("object result");
+    assert_eq!(
+        text.to_units().as_ref(),
+        &[
+            b'{' as u16,
+            b'"' as u16,
+            b'\\' as u16,
+            b'u' as u16,
+            b'd' as u16,
+            b'8' as u16,
+            b'0' as u16,
+            b'0' as u16,
+            b'"' as u16,
+            b':' as u16,
+            b'7' as u16,
+            b'}' as u16
+        ]
+    );
+    assert_eq!(
+        callback_keys,
+        vec![StringUnits::default(), key.clone()],
+        "replacer receives the root key and the exact lone-surrogate property key"
+    );
+    let Value::Object(parsed) = parse_json_text(&text).expect("serialized JSON parses") else {
+        panic!("serialized object did not parse as an object");
+    };
+    assert_eq!(parsed.borrow().get_units(&key), Some(Value::Number(7.0)));
+}
+
+#[test]
+fn json_raw_json_and_indent_keep_units() {
+    let raw_text = StringUnits::from_units(&[b'"' as u16, 0xd800, b'"' as u16]);
+    let raw = build_raw_json(&raw_text).expect("valid raw JSON string");
+    let raw_output = serialize_units(&raw, &StringUnits::default())
+        .expect("serialize")
+        .expect("raw result");
+    assert_eq!(raw_output.to_units().as_ref(), raw_text.to_units().as_ref());
+
+    let indent = StringUnits::from_units(&[0xd800, b' ' as u16]);
+    let object = object(&[("x", Value::Number(1.0))]);
+    let output = serialize_units(&object, &indent)
+        .expect("serialize")
+        .expect("object result");
+    assert_eq!(
+        output.to_units().as_ref(),
+        &[
+            b'{' as u16,
+            b'\n' as u16,
+            0xd800,
+            b' ' as u16,
+            b'"' as u16,
+            b'x' as u16,
+            b'"' as u16,
+            b':' as u16,
+            b' ' as u16,
+            b'1' as u16,
+            b'\n' as u16,
+            b'}' as u16
+        ]
+    );
 }
 
 #[test]
@@ -3933,7 +4089,7 @@ fn spread_reads_every_own_property_including_symbol_keyed_ones() {
         ("plain", Value::Number(1.0)),
         (&symbol.property_key(), Value::Number(2.0)),
     ]);
-    let copied = own_properties(&Intrinsics::default(), &source);
+    let copied = own_properties_units(&Intrinsics::default(), &source);
     assert_eq!(copied.len(), 2, "a spread carries symbol keys across");
     assert_eq!(copied[0].0, "plain");
 }
@@ -3942,20 +4098,20 @@ fn spread_reads_every_own_property_including_symbol_keyed_ones() {
 fn spreading_something_without_own_properties_contributes_nothing() {
     // `{ ...null }` is `{}`, not a throw -- the one place object spread is more forgiving
     // than array spread.
-    assert!(own_properties(&Intrinsics::default(), &Value::Null).is_empty());
-    assert!(own_properties(&Intrinsics::default(), &Value::Undefined).is_empty());
-    assert!(own_properties(&Intrinsics::default(), &Value::Number(1.0)).is_empty());
+    assert!(own_properties_units(&Intrinsics::default(), &Value::Null).is_empty());
+    assert!(own_properties_units(&Intrinsics::default(), &Value::Undefined).is_empty());
+    assert!(own_properties_units(&Intrinsics::default(), &Value::Number(1.0)).is_empty());
 }
 
 #[test]
 fn an_array_and_a_string_spread_as_their_indices() {
-    let items = own_properties(
+    let items = own_properties_units(
         &Intrinsics::default(),
         &array(&[Value::Number(7.0), Value::Number(8.0)]),
     );
     assert_eq!(items[0].0, "0");
     assert_eq!(items[1].0, "1");
-    let characters = own_properties(
+    let characters = own_properties_units(
         &Intrinsics::default(),
         &Value::String("hi".to_owned().into()),
     );
