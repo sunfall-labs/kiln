@@ -3658,7 +3658,7 @@ static int kiln_c99_method_in_group(uint64_t code, uint32_t group) {
 }
 /* KILN_RUNTIME_ONLY_METHOD_GROUPS_END */
 "#,
-            include_str!("runtime/prelude_types.h"),
+            concat!(kiln_native_runtime::kiln_value_abi_declaration!(), include_str!("runtime/prelude_types.h")),
             kiln_native_number_abi::provider_abi_registry!(provider_c_declaration),
         )
     };

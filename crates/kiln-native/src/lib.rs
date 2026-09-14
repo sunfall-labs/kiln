@@ -4942,18 +4942,10 @@ enum kiln_value_tag {
     KILN_VALUE_STRING = 4
 };
 
-typedef struct kiln_value {
-    uint16_t tag;
-    uint16_t flags;
-    uint32_t len;
-    union { uint64_t bits; const char *ptr; };
-} kiln_value;
-#define KILN_VALUE_FLAG_OWNED_STRING UINT16_C(1)
-_Static_assert(offsetof(kiln_value, flags) == 2, "kiln_value.flags ABI offset");
-_Static_assert(offsetof(kiln_value, len) == 4, "kiln_value.len ABI offset");
-_Static_assert(sizeof(kiln_value) == 16, "kiln_value layout");
-
-/* The prelude owns this realm-local guard. The trusted builtin bootstrap may install methods;
+"#,
+    );
+    output.push_str(kiln_native_runtime::kiln_value_abi_declaration!());
+    output.push_str(r#"/* The prelude owns this realm-local guard. The trusted builtin bootstrap may install methods;
  * the launcher seals those writes before any user module can observe or mutate the realm. */
 extern uint64_t kiln_c99_builtin_store_epoch __attribute__((visibility("hidden")));
 

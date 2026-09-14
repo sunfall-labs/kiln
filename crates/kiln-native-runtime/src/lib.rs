@@ -176,6 +176,41 @@ pub const EMBEDDING_HOST_ABI_VERSION: u32 = 3;
 /// The operation implemented by [`runtime_source`].
 pub const WRITE_STDOUT_OPERATION: u16 = 1;
 
+/// The single C declaration of the boundary value ABI.
+///
+/// This macro lets generated C source consume the same literal inside `concat!` without a
+/// build-script filesystem dependency or runtime allocation.
+#[macro_export]
+macro_rules! kiln_value_abi_declaration {
+    () => {
+        r#"typedef struct kiln_value {
+    uint16_t tag;
+    uint16_t flags;
+    uint32_t len;
+    union { uint64_t bits; const char *ptr; };
+} kiln_value;
+#define KILN_VALUE_FLAG_OWNED_STRING UINT16_C(1)
+
+#if defined(__cplusplus)
+static_assert(offsetof(kiln_value, tag) == 0, "kiln_value.tag ABI offset");
+static_assert(offsetof(kiln_value, flags) == 2, "kiln_value.flags ABI offset");
+static_assert(offsetof(kiln_value, len) == 4, "kiln_value.len ABI offset");
+static_assert(offsetof(kiln_value, bits) == 8, "kiln_value.bits ABI offset");
+static_assert(offsetof(kiln_value, ptr) == 8, "kiln_value.ptr shares the payload word");
+static_assert(sizeof(kiln_value) == 16, "kiln_value fits the AAPCS64 register threshold");
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+_Static_assert(offsetof(kiln_value, tag) == 0, "kiln_value.tag ABI offset");
+_Static_assert(offsetof(kiln_value, flags) == 2, "kiln_value.flags ABI offset");
+_Static_assert(offsetof(kiln_value, len) == 4, "kiln_value.len ABI offset");
+_Static_assert(offsetof(kiln_value, bits) == 8, "kiln_value.bits ABI offset");
+_Static_assert(offsetof(kiln_value, ptr) == 8, "kiln_value.ptr shares the payload word");
+_Static_assert(sizeof(kiln_value) == 16, "kiln_value fits the AAPCS64 register threshold");
+#endif
+
+"#
+    };
+}
+
 /// Return the C header shared by embedded modules and the native CLI runtime.
 ///
 /// The header is self-contained, include-guarded, and contains only the stable value/callback
@@ -311,7 +346,8 @@ fn validate_symbol(symbol: &str) -> Result<(), RuntimeSourceError> {
 
 /// Keep this declaration byte-for-byte compatible with kiln-backend-c's generated C99 units.
 /// The runtime is C11, but only uses facilities available in C99 for portability.
-const EMBEDDING_HEADER: &str = r#"/* Kiln native embedding ABI. */
+const EMBEDDING_HEADER: &str = concat!(
+    r#"/* Kiln native embedding ABI. */
 #ifndef KILN_NATIVE_EMBEDDING_H
 #define KILN_NATIVE_EMBEDDING_H
 
@@ -356,32 +392,9 @@ enum kiln_value_tag {
  * fewer in registers and anything larger indirectly, by reference to a copy -- so at the previous
  * thirty-two bytes every argument and every return travelled through memory. Measured at 1.37x on
  * a call-bound benchmark, and at nothing on benchmarks whose values already stayed in registers,
- * which is the shape that says the threshold is what moved rather than the byte count. */
-typedef struct kiln_value {
-    uint16_t tag;
-    uint16_t flags;
-    uint32_t len;
-    union { uint64_t bits; const char *ptr; };
-} kiln_value;
-#define KILN_VALUE_FLAG_OWNED_STRING UINT16_C(1)
-
-#if defined(__cplusplus)
-static_assert(offsetof(kiln_value, tag) == 0, "kiln_value.tag ABI offset");
-static_assert(offsetof(kiln_value, flags) == 2, "kiln_value.flags ABI offset");
-static_assert(offsetof(kiln_value, len) == 4, "kiln_value.len ABI offset");
-static_assert(offsetof(kiln_value, bits) == 8, "kiln_value.bits ABI offset");
-static_assert(offsetof(kiln_value, ptr) == 8, "kiln_value.ptr shares the payload word");
-static_assert(sizeof(kiln_value) == 16, "kiln_value fits the AAPCS64 register threshold");
-#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
-_Static_assert(offsetof(kiln_value, tag) == 0, "kiln_value.tag ABI offset");
-_Static_assert(offsetof(kiln_value, flags) == 2, "kiln_value.flags ABI offset");
-_Static_assert(offsetof(kiln_value, len) == 4, "kiln_value.len ABI offset");
-_Static_assert(offsetof(kiln_value, bits) == 8, "kiln_value.bits ABI offset");
-_Static_assert(offsetof(kiln_value, ptr) == 8, "kiln_value.ptr shares the payload word");
-_Static_assert(sizeof(kiln_value) == 16, "kiln_value fits the AAPCS64 register threshold");
-#endif
-
-/* Argument ptr/len values are borrowed for the callback invocation.  A string stored in *result
+ * which is the shape that says the threshold is what moved rather than the byte count. */"#,
+    kiln_value_abi_declaration!(),
+    r#"/* Argument ptr/len values are borrowed for the callback invocation.  A string stored in *result
  * must remain alive until the module entry point returns.  A nonzero callback return is
  * propagated as KILN_C99_HOST_ERROR. */
 typedef int (*kiln_host_call_fn)(void *context, uint16_t operation, uint16_t argc,
@@ -440,8 +453,8 @@ _Static_assert(offsetof(kiln_module_api_v2, dispose)
 
 extern kiln_value kiln_cli_last_host_error;
 
-#endif /* KILN_NATIVE_EMBEDDING_H */
-"#;
+#endif /* KILN_NATIVE_EMBEDDING_H */"#,
+);
 
 const MODULE_HEADER_PREFIX: &str = r#"
 /* Kiln native module embedding declaration. */
@@ -1171,6 +1184,13 @@ mod tests {
     #[test]
     fn embedding_header_is_deterministic_and_contains_the_stable_contract() {
         assert_eq!(embedding_header(), embedding_header());
+        assert_eq!(
+            embedding_header()
+                .matches("typedef struct kiln_value")
+                .count(),
+            1,
+            "the boundary value declaration must have one owner"
+        );
         assert!(embedding_header().contains("#ifndef KILN_NATIVE_EMBEDDING_H"));
         assert!(embedding_header().contains(&format!(
             "#define KILN_NATIVE_RUNTIME_VERSION {NATIVE_RUNTIME_VERSION}"

@@ -1,17 +1,4 @@
 
-/* This layout is the complete boundary value.  bits stores booleans and IEEE-754 numbers;
- * ptr/len stores UTF-8 string bytes and is not required to be NUL terminated. */
-typedef struct kiln_value {
-    uint16_t tag;
-    uint16_t flags;
-    uint32_t len;
-    union { uint64_t bits; const char *ptr; };
-} kiln_value;
-
-/* Private provenance on an internal string result. Public/foreign boundary strings always have
- * flags == 0; this bit is consumed by kiln_val_from_boundary before any host-facing operation. */
-#define KILN_VALUE_FLAG_OWNED_STRING UINT16_C(1)
-
 /* =========================================================================
  * ADR 0053: 64-Bit Quiet-NaN Boxed Internal Value Representation
  * ========================================================================= */

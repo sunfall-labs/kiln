@@ -1276,6 +1276,7 @@ dependencies = [
  "kiln-module-graph",
  "kiln-native-number",
  "kiln-native-number-abi",
+ "kiln-native-runtime",
  "memchr",
  "regress",
  "serde",
