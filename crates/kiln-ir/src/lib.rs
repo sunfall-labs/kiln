@@ -698,16 +698,22 @@ pub struct TypeAnnotations {
 }
 
 impl FunctionProto {
+    /// The optional name a runtime closure should expose, preserving JavaScript UTF-16 units.
+    /// Written names take precedence because they establish a binding; inferred names are
+    /// display metadata used only when no written name exists.
+    pub fn effective_name_units(&self) -> Option<StringUnits> {
+        self.name
+            .as_deref()
+            .map(StringUnits::from)
+            .or_else(|| self.inferred_name.clone())
+    }
+
     /// The name exposed by function metadata, preserving JavaScript UTF-16 units.
     ///
     /// Written names take precedence because they also establish a binding. Inferred names are
     /// display metadata only and may contain lone surrogates from a property key.
     pub fn display_name_units(&self) -> StringUnits {
-        self.name
-            .as_deref()
-            .map(StringUnits::from)
-            .or_else(|| self.inferred_name.clone())
-            .unwrap_or_default()
+        self.effective_name_units().unwrap_or_default()
     }
 
     /// Return the annotated type for parameter `slot`, if any.

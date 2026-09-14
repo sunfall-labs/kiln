@@ -139,7 +139,8 @@ fn compile_carries_lossless_inferred_function_name_into_proto() {
     )]))
     .expect("the module compiles");
     assert_eq!(program.functions[0].inferred_name, Some(inferred.clone()));
-    assert_eq!(program.functions[0].display_name_units(), inferred);
+    assert_eq!(program.functions[0].display_name_units(), inferred.clone());
+    assert_eq!(program.functions[0].effective_name_units(), Some(inferred));
 }
 
 /// A direct `eval` hands its caller's bindings over as cells, not as slot numbers.

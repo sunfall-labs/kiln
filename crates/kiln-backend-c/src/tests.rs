@@ -2317,6 +2317,24 @@ fn program_hash_covers_function_table_and_proto_contents() {
         assert_ne!(one_hash, hash_program(&with_function(vec![change])));
     }
 
+    let mut inferred_high = function(vec![Instruction::Return]);
+    inferred_high.inferred_name = Some(kiln_ir::StringUnits::from_units(&[0xd800]));
+    let mut inferred_replacement = inferred_high.clone();
+    inferred_replacement.inferred_name = Some(kiln_ir::StringUnits::from_units(&[0xfffd]));
+    assert_ne!(
+        hash_program(&with_function(vec![inferred_high.clone()])),
+        hash_program(&with_function(vec![inferred_replacement.clone()])),
+        "inferred function names retain distinct UTF-16 units in the cache identity"
+    );
+
+    inferred_high.name = Some("written".into());
+    inferred_replacement.name = Some("written".into());
+    assert_eq!(
+        hash_program(&with_function(vec![inferred_high])),
+        hash_program(&with_function(vec![inferred_replacement])),
+        "a written name takes precedence over inferred display metadata"
+    );
+
     // Table order is semantic because MakeFunction stores stable table indices.  Referencing
     // each entry from the other function also exercises cyclic references without recursion.
     let first = function(vec![Instruction::MakeFunction(1), Instruction::Return]);
@@ -2324,6 +2342,37 @@ fn program_hash_covers_function_table_and_proto_contents() {
     let cyclic = hash_program(&with_function(vec![first.clone(), second.clone()]));
     let reordered = hash_program(&with_function(vec![second, first]));
     assert_ne!(cyclic, reordered);
+}
+
+#[test]
+fn emitted_closure_names_use_lossless_effective_function_metadata() {
+    let mut high = function(vec![Instruction::Return]);
+    high.inferred_name = Some(kiln_ir::StringUnits::from_units(&[0xd800]));
+    let mut high_program = program(
+        Vec::new(),
+        vec![Instruction::MakeFunction(0), Instruction::Return],
+        0,
+    );
+    high_program.functions = vec![high];
+    let high_emitted = emit(&high_program).expect("inferred name program emits");
+    assert!(high_emitted.source.contains(&format!(
+        "static const kiln_string {}_function_name_0 = {{ 1, KILN_STRING_UTF16",
+        high_emitted.symbol
+    )));
+    assert!(high_emitted
+        .source
+        .contains(&format!("&{}_function_name_0", high_emitted.symbol)));
+
+    let mut written = function(vec![Instruction::Return]);
+    written.name = Some("written".into());
+    written.inferred_name = Some(kiln_ir::StringUnits::from_units(&[0xd800]));
+    let mut written_program = high_program;
+    written_program.functions = vec![written];
+    let written_emitted = emit(&written_program).expect("written name program emits");
+    assert!(written_emitted.source.contains(&format!(
+        "static const kiln_string {}_function_name_0 = {{ 7, KILN_STRING_LATIN1",
+        written_emitted.symbol
+    )));
 }
 
 #[test]

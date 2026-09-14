@@ -34,6 +34,19 @@ fn string_units_builder_enforces_width_aware_storage_budget() {
         promoted.finish().to_units().as_ref(),
         &[b'a' as u16, b'b' as u16, 0x100]
     );
+
+    let mut blocked_promotion = StringUnitsBuilder::with_limit(4);
+    blocked_promotion
+        .push_latin1(b"ab")
+        .expect("latin1 prefix fits before rejected promotion");
+    assert_eq!(
+        blocked_promotion.push_utf16(&[0x100]),
+        Err(ExecutionError::StringTooLong { bytes: 6 })
+    );
+    assert_eq!(
+        blocked_promotion.finish().to_units().as_ref(),
+        &[b'a' as u16, b'b' as u16]
+    );
 }
 
 #[test]
@@ -4086,14 +4099,68 @@ fn symbol_registry_and_symbol_key_names_preserve_units() {
         serial: 9,
         description: Some(StringUnits::from_units(&[0xd800])),
     }));
-    let _ = define_function_name(
+    define_function_name(
         &Value::Function(function.clone()),
         &Value::Symbol(symbol),
         None,
-    );
+    )
+    .expect("symbol description naming");
     assert_eq!(
         function.properties.borrow().get_own("name"),
         Some(&Value::String(StringUnits::from_units(&[
+            b'[' as u16,
+            0xd800,
+            b']' as u16,
+        ])))
+    );
+
+    let no_description = Symbol::Unique(Rc::new(UniqueSymbol {
+        serial: 10,
+        description: None,
+    }));
+    define_function_name(
+        &Value::Function(function.clone()),
+        &Value::Symbol(no_description),
+        None,
+    )
+    .expect("description-less symbol naming");
+    assert_eq!(
+        function.properties.borrow().get_own("name"),
+        Some(&Value::String(StringUnits::default()))
+    );
+
+    let empty_description = Symbol::Unique(Rc::new(UniqueSymbol {
+        serial: 11,
+        description: Some(StringUnits::default()),
+    }));
+    define_function_name(
+        &Value::Function(function.clone()),
+        &Value::Symbol(empty_description),
+        None,
+    )
+    .expect("empty symbol description naming");
+    assert_eq!(
+        function.properties.borrow().get_own("name"),
+        Some(&Value::String(StringUnits::from("[]")))
+    );
+
+    let lone_accessor = Symbol::Unique(Rc::new(UniqueSymbol {
+        serial: 12,
+        description: Some(StringUnits::from_units(&[0xd800])),
+    }));
+    define_function_name(
+        &Value::Function(function.clone()),
+        &Value::Symbol(lone_accessor),
+        Some("get"),
+    )
+    .expect("accessor symbol description naming");
+    assert_eq!(
+        function.properties.borrow().get_own("name"),
+        Some(&Value::String(StringUnits::from_units(&[
+            b'g' as u16,
+            b'e' as u16,
+            b't' as u16,
+            b' ' as u16,
             b'[' as u16,
             0xd800,
             b']' as u16,

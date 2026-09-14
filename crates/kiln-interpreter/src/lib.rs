@@ -12716,15 +12716,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let name = self.string_constant_scalar(*name, current)?;
                     let function = self.pop(current)?;
                     let target = self.pop(current)?;
-                    define_function_name(
-                        &function,
-                        &Value::String(name.clone().into()),
-                        match kind {
-                            PrivateKind::Method => None,
-                            PrivateKind::Getter => Some("get"),
-                            PrivateKind::Setter => Some("set"),
-                        },
-                    )?;
+                    if self
+                        .catchable(
+                            define_function_name(
+                                &function,
+                                &Value::String(name.clone().into()),
+                                match kind {
+                                    PrivateKind::Method => None,
+                                    PrivateKind::Getter => Some("get"),
+                                    PrivateKind::Setter => Some("set"),
+                                },
+                            ),
+                            current,
+                        )?
+                        .is_none()
+                    {
+                        continue;
+                    }
                     // Not writable, which is how a read of the slot later tells a method from a
                     // field; configurable, so the second half of a `get`/`set` pair may merge
                     // with the first rather than being refused by `redefinable`.
@@ -39329,7 +39337,7 @@ fn has_property_checked(
 
 #[cfg(test)]
 fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
-    has_property_checked(intrinsics, target, key).unwrap_or(false)
+    has_property_checked(intrinsics, target, key).expect("test property-key conversion")
 }
 
 fn has_property_key(intrinsics: &Intrinsics, target: &Value, key: PropertyKeyRef<'_>) -> bool {
@@ -41054,7 +41062,7 @@ fn delete_property_checked(
 
 #[cfg(test)]
 fn delete_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
-    delete_property_checked(intrinsics, target, key).unwrap_or(false)
+    delete_property_checked(intrinsics, target, key).expect("test property-key conversion")
 }
 
 fn delete_property_key(intrinsics: &Intrinsics, target: &Value, key: PropertyKeyRef<'_>) -> bool {
@@ -45290,13 +45298,16 @@ fn define_function_name(
         // A symbol names the property after its description, in brackets; one with no description
         // names it nothing, and a prefix is still applied to that nothing.
         Value::Symbol(symbol) => {
-            let mut builder = StringUnitsBuilder::new();
-            builder.push_ascii("[")?;
-            if let Some(description) = symbol.description_units() {
-                builder.push_units(&description)?;
+            match symbol.description_units() {
+                None => StringUnits::default(),
+                Some(description) => {
+                    let mut builder = StringUnitsBuilder::new();
+                    builder.push_ascii("[")?;
+                    builder.push_units(&description)?;
+                    builder.push_ascii("]")?;
+                    builder.finish()
+                }
             }
-            builder.push_ascii("]")?;
-            builder.finish()
         }
         other => {
             let key = other.property_key_units_checked()?;
@@ -48155,7 +48166,7 @@ fn loose_equal_checked(left: &Value, right: &Value) -> Result<bool, ExecutionErr
 
 #[cfg(test)]
 fn loose_equal(left: &Value, right: &Value) -> bool {
-    loose_equal_checked(left, right).unwrap_or(false)
+    loose_equal_checked(left, right).expect("test string coercion")
 }
 
 /// `ToPrimitive` with no hint, which for everything here means `toString`.
