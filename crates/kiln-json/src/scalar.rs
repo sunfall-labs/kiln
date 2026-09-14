@@ -1,8 +1,8 @@
 //! One JSON grammar over JavaScript UTF-16 units.
 
 use crate::{
-    Node, ParseError, TAG_ARRAY, TAG_FALSE, TAG_NULL, TAG_NUMBER, TAG_OBJECT, TAG_STRING, TAG_TRUE,
-    TextArena, UnitSource,
+    Node, ParseError, TextArena, UnitSource, TAG_ARRAY, TAG_FALSE, TAG_NULL, TAG_NUMBER,
+    TAG_OBJECT, TAG_STRING, TAG_TRUE,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -42,7 +42,11 @@ pub(crate) fn number_from_parts(
             .and_then(|text| text.parse::<f64>().ok())
             .unwrap_or(f64::NAN)
     });
-    if negative { -magnitude } else { magnitude }
+    if negative {
+        -magnitude
+    } else {
+        magnitude
+    }
 }
 
 fn scan_number<S: UnitSource>(
@@ -50,6 +54,9 @@ fn scan_number<S: UnitSource>(
     start: usize,
     token: &mut Vec<u8>,
 ) -> Result<(usize, f64), ParseError> {
+    if let Some(bytes) = source.latin1_slice(0, source.unit_len()) {
+        return scan_number_latin1(bytes, start);
+    }
     let mut at = start;
     let negative = source.unit_at(at) == Some(b'-' as u16);
     if negative {
@@ -149,6 +156,90 @@ fn scan_number<S: UnitSource>(
     ))
 }
 
+// Keep the hot Latin1 provider path on the original byte scanner. This is the same number
+// grammar as the unit reader above, with bounds checks expressed by slice access instead of an
+// Option<u16> conversion on every digit. Wide sources continue through `scan_number` above.
+#[inline]
+fn scan_number_latin1(bytes: &[u8], start: usize) -> Result<(usize, f64), ParseError> {
+    let mut at = start;
+    let negative = bytes.get(at) == Some(&b'-');
+    if negative {
+        at += 1;
+    }
+    let mut mantissa = 0_u64;
+    let mut significant = 0_u32;
+    let mut scale = 0_i32;
+    match bytes.get(at) {
+        Some(b'0') => at += 1,
+        Some(b'1'..=b'9') => {
+            while let Some(&byte @ b'0'..=b'9') = bytes.get(at) {
+                significant += 1;
+                if significant <= 15 {
+                    mantissa = mantissa * 10 + u64::from(byte - b'0');
+                }
+                at += 1;
+            }
+        }
+        _ => return Err(ParseError::Syntax { offset: at }),
+    }
+    if bytes.get(at) == Some(&b'.') {
+        at += 1;
+        let fraction_start = at;
+        while let Some(&byte @ b'0'..=b'9') = bytes.get(at) {
+            if significant > 0 || byte != b'0' {
+                significant += 1;
+                if significant <= 15 {
+                    mantissa = mantissa * 10 + u64::from(byte - b'0');
+                }
+            }
+            scale -= 1;
+            at += 1;
+        }
+        if at == fraction_start {
+            return Err(ParseError::Syntax { offset: at });
+        }
+    }
+    let mut exponent = Some(scale);
+    if matches!(bytes.get(at), Some(b'e' | b'E')) {
+        at += 1;
+        let exponent_negative = match bytes.get(at) {
+            Some(b'-') => {
+                at += 1;
+                true
+            }
+            Some(b'+') => {
+                at += 1;
+                false
+            }
+            _ => false,
+        };
+        let exponent_start = at;
+        let mut explicit = Some(0_i32);
+        while let Some(&byte @ b'0'..=b'9') = bytes.get(at) {
+            explicit = explicit
+                .and_then(|value| value.checked_mul(10)?.checked_add(i32::from(byte - b'0')))
+                .filter(|value| *value <= 400);
+            at += 1;
+        }
+        if at == exponent_start {
+            return Err(ParseError::Syntax { offset: at });
+        }
+        exponent = explicit
+            .and_then(|value| scale.checked_add(if exponent_negative { -value } else { value }));
+    }
+    let fast = (exponent.is_some() && mantissa == 0)
+        || matches!(exponent, Some(value) if significant <= 15 && (-22..=22).contains(&value));
+    let token = if fast {
+        &[][..]
+    } else {
+        &bytes[start + usize::from(negative)..at]
+    };
+    Ok((
+        at,
+        number_from_parts(negative, mantissa, significant, exponent, token),
+    ))
+}
+
 #[inline]
 fn skip_whitespace<S: UnitSource>(source: &S, mut at: usize) -> usize {
     while matches!(source.unit_at(at), Some(0x20 | 0x09 | 0x0a | 0x0d)) {
@@ -179,15 +270,15 @@ fn decode_string<S: UnitSource>(
 ) -> Result<usize, ParseError> {
     let mut at = open + 1;
     let raw_start = at;
-    if source.latin1_slice(raw_start, raw_start).is_some() {
-        while let Some(unit) = source.unit_at(at) {
-            match unit {
+    if let Some(bytes) = source.latin1_slice(raw_start, source.unit_len()) {
+        for (index, &byte) in bytes.iter().enumerate() {
+            match byte {
                 0x22 => {
-                    arena.extend_latin1(source.latin1_slice(raw_start, at).unwrap_or(&[]));
-                    return Ok(at + 1);
+                    arena.extend_latin1(&bytes[..index]);
+                    return Ok(raw_start + index + 1);
                 }
                 0x5c | 0x00..=0x1f => break,
-                _ => at += 1,
+                _ => {}
             }
         }
     }
@@ -294,6 +385,9 @@ pub(crate) fn scan<S: UnitSource>(
     stack: &mut Vec<Frame>,
     token: &mut Vec<u8>,
 ) -> Result<(), ParseError> {
+    if let Some(bytes) = source.latin1_slice(0, source.unit_len()) {
+        return scan_latin1(bytes, nodes, arena, stack);
+    }
     nodes.clear();
     stack.clear();
     arena.clear();
@@ -364,6 +458,214 @@ pub(crate) fn scan<S: UnitSource>(
                 continue 'value;
             }
             let close = if frame.is_object { 0x7d } else { 0x5d };
+            if next != close {
+                return Err(ParseError::Syntax { offset: at });
+            }
+            nodes[frame.node].len = frame.children;
+            stack.pop();
+            at += 1;
+        }
+    }
+}
+
+#[inline]
+fn decode_string_latin1(
+    bytes: &[u8],
+    open: usize,
+    arena: &mut TextArena,
+) -> Result<usize, ParseError> {
+    let mut at = open + 1;
+    let mut raw_start = at;
+    loop {
+        let byte = *bytes.get(at).ok_or(ParseError::Syntax { offset: at })?;
+        match byte {
+            b'"' => {
+                arena.extend_latin1(&bytes[raw_start..at]);
+                return Ok(at + 1);
+            }
+            b'\\' => {
+                arena.extend_latin1(&bytes[raw_start..at]);
+                let kind_at = at + 1;
+                let kind = *bytes
+                    .get(kind_at)
+                    .ok_or(ParseError::Syntax { offset: at })?;
+                at += 2;
+                match kind {
+                    b'"' | b'\\' | b'/' => arena.push_unit(u16::from(kind)),
+                    b'b' => arena.push_unit(0x08),
+                    b'f' => arena.push_unit(0x0c),
+                    b'n' => arena.push_unit(0x0a),
+                    b'r' => arena.push_unit(0x0d),
+                    b't' => arena.push_unit(0x09),
+                    b'u' => {
+                        let unit =
+                            hex4_bytes(bytes, at).ok_or(ParseError::Syntax { offset: at })?;
+                        at += 4;
+                        arena.push_unit(unit);
+                    }
+                    _ => return Err(ParseError::Syntax { offset: kind_at }),
+                }
+                raw_start = at;
+            }
+            0x00..=0x1f => return Err(ParseError::Syntax { offset: at }),
+            _ => at += 1,
+        }
+    }
+}
+
+#[inline]
+fn hex4_bytes(bytes: &[u8], at: usize) -> Option<u16> {
+    let mut unit = 0_u16;
+    for index in 0..4 {
+        let digit = match bytes.get(at + index)? {
+            b'0'..=b'9' => bytes[at + index] - b'0',
+            b'a'..=b'f' => bytes[at + index] - b'a' + 10,
+            b'A'..=b'F' => bytes[at + index] - b'A' + 10,
+            _ => return None,
+        };
+        unit = (unit << 4) | u16::from(digit);
+    }
+    Some(unit)
+}
+
+#[inline]
+fn skip_whitespace_latin1(bytes: &[u8], mut at: usize) -> usize {
+    while matches!(bytes.get(at), Some(b' ' | b'\t' | b'\n' | b'\r')) {
+        at += 1;
+    }
+    at
+}
+
+#[inline]
+fn literal_latin1(
+    bytes: &[u8],
+    at: usize,
+    word: &[u8],
+    tag: u32,
+    nodes: &mut Vec<Node>,
+) -> Result<usize, ParseError> {
+    if bytes.get(at..at + word.len()) != Some(word) {
+        return Err(ParseError::Syntax { offset: at });
+    }
+    nodes.push(Node {
+        tag,
+        len: 0,
+        value: 0,
+    });
+    Ok(at + word.len())
+}
+
+#[inline]
+fn string_node_latin1(
+    bytes: &[u8],
+    at: usize,
+    nodes: &mut Vec<Node>,
+    arena: &mut TextArena,
+) -> Result<usize, ParseError> {
+    let offset = arena.len();
+    let end = decode_string_latin1(bytes, at, arena)?;
+    let len = arena
+        .len()
+        .checked_sub(offset)
+        .ok_or(ParseError::TooLarge)?;
+    nodes.push(Node {
+        tag: TAG_STRING,
+        len: u32::try_from(len).map_err(|_| ParseError::TooLarge)?,
+        value: offset as u64,
+    });
+    Ok(end)
+}
+
+#[inline]
+fn member_key_latin1(
+    bytes: &[u8],
+    at: usize,
+    nodes: &mut Vec<Node>,
+    arena: &mut TextArena,
+) -> Result<usize, ParseError> {
+    if bytes.get(at) != Some(&b'"') {
+        return Err(ParseError::Syntax { offset: at });
+    }
+    let after_key = string_node_latin1(bytes, at, nodes, arena)?;
+    let colon = skip_whitespace_latin1(bytes, after_key);
+    if bytes.get(colon) != Some(&b':') {
+        return Err(ParseError::Syntax { offset: colon });
+    }
+    Ok(skip_whitespace_latin1(bytes, colon + 1))
+}
+
+fn scan_latin1(
+    bytes: &[u8],
+    nodes: &mut Vec<Node>,
+    arena: &mut TextArena,
+    stack: &mut Vec<Frame>,
+) -> Result<(), ParseError> {
+    nodes.clear();
+    stack.clear();
+    arena.clear();
+    let mut at = skip_whitespace_latin1(bytes, 0);
+    'value: loop {
+        let byte = *bytes.get(at).ok_or(ParseError::Syntax { offset: at })?;
+        match byte {
+            b'"' => at = string_node_latin1(bytes, at, nodes, arena)?,
+            b'{' | b'[' => {
+                let is_object = byte == b'{';
+                let node = nodes.len();
+                nodes.push(Node {
+                    tag: if is_object { TAG_OBJECT } else { TAG_ARRAY },
+                    len: 0,
+                    value: 0,
+                });
+                at = skip_whitespace_latin1(bytes, at + 1);
+                let close = if is_object { b'}' } else { b']' };
+                if bytes.get(at) == Some(&close) {
+                    at += 1;
+                } else {
+                    stack.push(Frame {
+                        node,
+                        children: 0,
+                        is_object,
+                    });
+                    if is_object {
+                        at = member_key_latin1(bytes, at, nodes, arena)?;
+                    }
+                    continue 'value;
+                }
+            }
+            b't' => at = literal_latin1(bytes, at, b"true", TAG_TRUE, nodes)?,
+            b'f' => at = literal_latin1(bytes, at, b"false", TAG_FALSE, nodes)?,
+            b'n' => at = literal_latin1(bytes, at, b"null", TAG_NULL, nodes)?,
+            b'-' | b'0'..=b'9' => {
+                let (end, value) = scan_number_latin1(bytes, at)?;
+                nodes.push(Node {
+                    tag: TAG_NUMBER,
+                    len: 0,
+                    value: value.to_bits(),
+                });
+                at = end;
+            }
+            _ => return Err(ParseError::Syntax { offset: at }),
+        }
+        loop {
+            let Some(frame) = stack.last_mut() else {
+                at = skip_whitespace_latin1(bytes, at);
+                return if at == bytes.len() {
+                    Ok(())
+                } else {
+                    Err(ParseError::Syntax { offset: at })
+                };
+            };
+            frame.children = frame.children.checked_add(1).ok_or(ParseError::TooLarge)?;
+            at = skip_whitespace_latin1(bytes, at);
+            let next = *bytes.get(at).ok_or(ParseError::Syntax { offset: at })?;
+            if next == b',' {
+                at = skip_whitespace_latin1(bytes, at + 1);
+                if frame.is_object {
+                    at = member_key_latin1(bytes, at, nodes, arena)?;
+                }
+                continue 'value;
+            }
+            let close = if frame.is_object { b'}' } else { b']' };
             if next != close {
                 return Err(ParseError::Syntax { offset: at });
             }
