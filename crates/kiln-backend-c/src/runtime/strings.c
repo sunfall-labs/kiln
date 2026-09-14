@@ -389,6 +389,9 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
                 size_t swap = start;
                 start = end;
                 end = swap;
+            } else if (relative && start > end) {
+                /* `slice` clamps a reversed range to the start; only `substring` swaps it. */
+                end = start;
             }
             if (start >= end) {
                 *result = kiln_c99_static_text("", 0);
