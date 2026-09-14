@@ -27,6 +27,13 @@ impl StringUnits {
         }
     }
 
+    pub fn from_view(view: StringView<'_>) -> Self {
+        match view {
+            StringView::Latin1(bytes) => Self(Repr::Latin1(Arc::from(bytes))),
+            StringView::Utf16(units) => Self(Repr::Utf16(Arc::from(units))),
+        }
+    }
+
     pub fn unit_len(&self) -> usize {
         match &self.0 {
             Repr::Latin1(bytes) => bytes.len(),

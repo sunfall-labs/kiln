@@ -17,14 +17,23 @@ const EXACT_POW10: [f64; 23] = [
     1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
 ];
 
-pub(crate) fn number_from_parts(
-    negative: bool,
-    mantissa: u64,
-    significant: u32,
-    exponent: Option<i32>,
-    token: &[u8],
-) -> f64 {
-    let fast = match exponent {
+pub(crate) fn number_from_parts(negative: bool, exact: Option<f64>, token: &[u8]) -> f64 {
+    let magnitude = exact.unwrap_or_else(|| {
+        std::str::from_utf8(token)
+            .ok()
+            .and_then(|text| text.parse::<f64>().ok())
+            .unwrap_or(f64::NAN)
+    });
+    if negative {
+        -magnitude
+    } else {
+        magnitude
+    }
+}
+
+#[inline]
+fn exact_number(mantissa: u64, significant: u32, exponent: Option<i32>) -> Option<f64> {
+    match exponent {
         Some(_) if mantissa == 0 => Some(0.0),
         Some(exponent) if significant <= 15 && (-22..=22).contains(&exponent) => {
             let base = mantissa as f64;
@@ -35,17 +44,6 @@ pub(crate) fn number_from_parts(
             })
         }
         _ => None,
-    };
-    let magnitude = fast.unwrap_or_else(|| {
-        std::str::from_utf8(token)
-            .ok()
-            .and_then(|text| text.parse::<f64>().ok())
-            .unwrap_or(f64::NAN)
-    });
-    if negative {
-        -magnitude
-    } else {
-        magnitude
     }
 }
 
@@ -136,20 +134,18 @@ fn scan_number<S: UnitSource>(
         exponent = explicit
             .and_then(|value| scale.checked_add(if exponent_negative { -value } else { value }));
     }
-    let fast = (exponent.is_some() && mantissa == 0)
-        || matches!(exponent, Some(value) if significant <= 15 && (-22..=22).contains(&value));
-    token.clear();
-    if !fast {
+    let exact = exact_number(mantissa, significant, exponent);
+    let magnitude = if exact.is_some() {
+        &[][..]
+    } else {
+        token.clear();
         for index in (start + usize::from(negative))..at {
             push(index)?;
             token.push(source.unit_or_end(index) as u8);
         }
-    }
-    let magnitude = &token[..];
-    Ok((
-        at,
-        number_from_parts(negative, mantissa, significant, exponent, magnitude),
-    ))
+        &token[..]
+    };
+    Ok((at, number_from_parts(negative, exact, magnitude)))
 }
 
 #[inline]
@@ -189,12 +185,37 @@ fn decode_string<S: UnitSource>(
                     arena.extend_latin1(&bytes[..index]);
                     return Ok(raw_start + index + 1);
                 }
-                0x5c | 0x00..=0x1f => break,
+                0x5c | 0x00..=0x1f => {
+                    arena.extend_latin1(&bytes[..index]);
+                    at = raw_start + index;
+                    break;
+                }
                 _ => {}
             }
         }
     }
-    at = raw_start;
+    #[expect(
+        clippy::collapsible_if,
+        reason = "the first condition avoids probing the wide representation for a narrow source"
+    )]
+    if at == raw_start {
+        if let Some(units) = source.utf16_slice(raw_start, source.unit_len()) {
+            for (index, &unit) in units.iter().enumerate() {
+                match unit {
+                    0x22 => {
+                        arena.extend_utf16(&units[..index]);
+                        return Ok(raw_start + index + 1);
+                    }
+                    0x5c | 0x00..=0x1f => {
+                        arena.extend_utf16(&units[..index]);
+                        at = raw_start + index;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
     loop {
         let unit = source.unit_or_end(at);
         if unit == 0x1_0000 {
@@ -302,6 +323,9 @@ pub(crate) fn scan<S: UnitSource>(
     nodes.clear();
     stack.clear();
     arena.clear();
+    if source.utf16_slice(0, 0).is_some() {
+        arena.ensure_utf16();
+    }
     let mut at = skip_whitespace(source, 0);
     'value: loop {
         let unit = source.unit_or_end(at);
