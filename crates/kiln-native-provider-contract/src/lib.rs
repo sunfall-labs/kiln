@@ -4,9 +4,9 @@ use kiln_digest::Digest;
 use serde::{Deserialize, Serialize};
 
 pub const SOURCE_LIST: &str = include_str!("../../kiln-native/provider-sources.txt");
-// Schema 3 replaces the overloaded `http` variant bit with an explicit, canonical capability
-// list. Old compilers must reject it rather than guessing which engines an archive contains.
-pub const SCHEMA_VERSION: u16 = 3;
+// Schema 4 adds independently packaged Realm-plus-one-engine variants. Old compilers know only
+// common/full and must reject a manifest whose package name they cannot select safely.
+pub const SCHEMA_VERSION: u16 = 4;
 pub const PROVIDER_NAME: &str = "kiln-native-number-ffi";
 pub const PROFILE: &str = "provider";
 pub const RUSTFLAGS: &str =
@@ -71,6 +71,7 @@ pub struct ProviderCapabilities(u16);
 
 impl ProviderCapabilities {
     pub const NONE: Self = Self(0);
+    pub const REALM: Self = Self(ProviderCapability::Realm.bit());
     pub const COMMON: Self = Self(
         ProviderCapability::Realm.bit()
             | ProviderCapability::RegExp.bit()
@@ -117,20 +118,52 @@ impl ProviderCapabilities {
     }
 }
 
-/// The two provider packages currently shipped. Selection is by capability coverage, so adding
-/// finer-grained variants later does not change the planner or manifest semantics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Provider packages shipped for useful points in the capability lattice. The singleton variants
+/// contain Realm plus one semantic engine; common and full remain fallbacks for combinations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[repr(u8)]
 pub enum ProviderVariant {
+    Realm,
+    RegExp,
+    BigInt,
+    Json,
+    Temporal,
+    Intl,
+    Parallel,
+    Http,
+    Ffi,
     Common,
     Full,
 }
 
 impl ProviderVariant {
-    pub const ALL: [Self; 2] = [Self::Common, Self::Full];
+    pub const ALL: [Self; 11] = [
+        Self::Realm,
+        Self::RegExp,
+        Self::BigInt,
+        Self::Json,
+        Self::Temporal,
+        Self::Intl,
+        Self::Parallel,
+        Self::Http,
+        Self::Ffi,
+        Self::Common,
+        Self::Full,
+    ];
+    pub const COUNT: usize = Self::ALL.len();
 
     pub const fn capabilities(self) -> ProviderCapabilities {
         match self {
+            Self::Realm => ProviderCapabilities::REALM,
+            Self::RegExp => ProviderCapabilities::REALM.with(ProviderCapability::RegExp),
+            Self::BigInt => ProviderCapabilities::REALM.with(ProviderCapability::BigInt),
+            Self::Json => ProviderCapabilities::REALM.with(ProviderCapability::Json),
+            Self::Temporal => ProviderCapabilities::REALM.with(ProviderCapability::Temporal),
+            Self::Intl => ProviderCapabilities::REALM.with(ProviderCapability::Intl),
+            Self::Parallel => ProviderCapabilities::REALM.with(ProviderCapability::Parallel),
+            Self::Http => ProviderCapabilities::REALM.with(ProviderCapability::Http),
+            Self::Ffi => ProviderCapabilities::REALM.with(ProviderCapability::Ffi),
             Self::Common => ProviderCapabilities::COMMON,
             Self::Full => ProviderCapabilities::FULL,
         }
@@ -138,9 +171,60 @@ impl ProviderVariant {
 
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Realm => "realm",
+            Self::RegExp => "reg-exp",
+            Self::BigInt => "big-int",
+            Self::Json => "json",
+            Self::Temporal => "temporal",
+            Self::Intl => "intl",
+            Self::Parallel => "parallel",
+            Self::Http => "http",
+            Self::Ffi => "ffi",
             Self::Common => "common",
             Self::Full => "full",
         }
+    }
+
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+
+    pub const fn features(self) -> &'static str {
+        match self {
+            Self::Realm => "realm",
+            Self::RegExp => "realm,regexp",
+            Self::BigInt => "realm,bigint",
+            Self::Json => "realm,json",
+            Self::Temporal => "realm,temporal",
+            Self::Intl => "realm,intl",
+            Self::Parallel => "realm,parallel",
+            Self::Http => "realm,realm-http",
+            Self::Ffi => "realm,ffi",
+            Self::Common => SLIM_FEATURES,
+            Self::Full => FULL_FEATURES,
+        }
+    }
+
+    pub fn archive(self) -> String {
+        match self {
+            Self::Full => FULL_ARCHIVE.to_owned(),
+            Self::Common => SLIM_ARCHIVE.to_owned(),
+            _ => format!("libkiln_native_number_ffi.{}.a", self.as_str()),
+        }
+    }
+
+    pub fn manifest(self) -> String {
+        match self {
+            Self::Full => FULL_MANIFEST.to_owned(),
+            Self::Common => SLIM_MANIFEST.to_owned(),
+            _ => format!("kiln-native-number-provider.{}.json", self.as_str()),
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|variant| variant.as_str() == value)
     }
 
     pub fn smallest_covering(required: ProviderCapabilities) -> Option<Self> {
@@ -167,7 +251,27 @@ pub struct Contract {
     pub slim_manifest: &'static str,
     pub full_capabilities: Vec<ProviderCapability>,
     pub common_capabilities: Vec<ProviderCapability>,
+    pub variants: Vec<ProviderPackage>,
     pub exports: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProviderPackage {
+    pub variant: ProviderVariant,
+    pub features: &'static str,
+    pub archive: String,
+    pub manifest: String,
+    pub capabilities: Vec<ProviderCapability>,
+}
+
+pub fn package(variant: ProviderVariant) -> ProviderPackage {
+    ProviderPackage {
+        variant,
+        features: variant.features(),
+        archive: variant.archive(),
+        manifest: variant.manifest(),
+        capabilities: variant.capabilities().iter().collect(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -206,7 +310,6 @@ impl ProviderManifest {
             target: &'a str,
             rustc: &'a str,
             source: &'a str,
-            archive: &'a str,
             linkage: &'a str,
             pic: bool,
             profile: &'a str,
@@ -226,7 +329,6 @@ impl ProviderManifest {
             target: &self.rust_target,
             rustc: &self.rustc_identity,
             source: &self.source_sha256,
-            archive: &self.archive_sha256,
             linkage: &self.linkage,
             pic: self.pic,
             profile: &self.profile,
@@ -261,11 +363,7 @@ pub fn manifest(
         rustc_identity: rustc,
         source_sha256: source,
         archive_sha256: archive,
-        archive: match variant {
-            ProviderVariant::Full => c.full_archive,
-            ProviderVariant::Common => c.slim_archive,
-        }
-        .to_owned(),
+        archive: variant.archive(),
         linkage: "static".to_owned(),
         pic: true,
         profile: c.profile.to_owned(),
@@ -303,6 +401,7 @@ pub fn contract() -> Contract {
         slim_manifest: SLIM_MANIFEST,
         full_capabilities: ProviderCapabilities::FULL.iter().collect(),
         common_capabilities: ProviderCapabilities::COMMON.iter().collect(),
+        variants: ProviderVariant::ALL.into_iter().map(package).collect(),
         exports: exports(),
     }
 }
@@ -394,10 +493,19 @@ mod tests {
             ),
             Some(ProviderVariant::Full)
         );
+        let mut archives = std::collections::BTreeSet::new();
+        let mut manifests = std::collections::BTreeSet::new();
+        for (index, variant) in ProviderVariant::ALL.into_iter().enumerate() {
+            assert_eq!(variant.index(), index);
+            assert!(variant.capabilities().contains(ProviderCapability::Realm));
+            assert!(archives.insert(variant.archive()));
+            assert!(manifests.insert(variant.manifest()));
+            assert_eq!(ProviderVariant::parse(variant.as_str()), Some(variant));
+        }
     }
 
     #[test]
-    fn identity_changes_for_semantic_fields_but_ignores_archive_filename() {
+    fn producer_identity_changes_for_semantics_but_ignores_artifact_metadata() {
         let mut m = manifest(
             "target".into(),
             "rustc".into(),

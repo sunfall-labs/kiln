@@ -802,8 +802,10 @@ pub struct RealmState<H> {
     /// Without `http` there is no engine to own a connection; the field stays so
     /// constructors and destructuring compile unchanged.
     #[cfg(not(feature = "http"))]
+    #[allow(dead_code)]
     http_server: (),
     #[cfg(not(feature = "http"))]
+    #[allow(dead_code)]
     http_client: (),
     /// Protocol events parked by the queued adapter for a loop that drains them at its
     /// checkpoint, and the signal that wakes that loop.
@@ -1567,11 +1569,13 @@ pub struct QueuedHttp {
     signal: Rc<tokio::sync::Notify>,
     /// A permit the signal would otherwise hand to a wait that has not started yet.
     signalled: std::cell::Cell<bool>,
+    #[cfg_attr(not(feature = "http"), allow(dead_code))]
     next_admission: std::cell::Cell<u64>,
     pending_admissions: std::cell::RefCell<BTreeMap<ResourceId, u64>>,
 }
 
 impl QueuedHttp {
+    #[cfg_attr(not(feature = "http"), allow(dead_code))]
     fn admit(&self, resource: ResourceId) -> Option<u64> {
         let mut pending = self.pending_admissions.borrow_mut();
         if pending.contains_key(&resource) {
@@ -1583,12 +1587,14 @@ impl QueuedHttp {
         Some(admission)
     }
 
+    #[cfg_attr(not(feature = "http"), allow(dead_code))]
     fn cancel_admission_token(&self, resource: ResourceId, admission: u64) {
         if self.pending_admissions.borrow().get(&resource) == Some(&admission) {
             self.pending_admissions.borrow_mut().remove(&resource);
         }
     }
 
+    #[cfg_attr(not(feature = "http"), allow(dead_code))]
     fn started(&self, resource: ResourceId, admission: u64) {
         if self.pending_admissions.borrow().get(&resource) == Some(&admission) {
             self.pending_admissions.borrow_mut().remove(&resource);
@@ -1597,6 +1603,7 @@ impl QueuedHttp {
         }
     }
 
+    #[cfg_attr(not(feature = "http"), allow(dead_code))]
     fn push_server(&self, resource: ResourceId, event: RuntimeHttpEvent) {
         self.server
             .borrow_mut()
@@ -1607,6 +1614,7 @@ impl QueuedHttp {
         self.signal.notify_one();
     }
 
+    #[cfg_attr(not(feature = "http"), allow(dead_code))]
     fn push_client(&self, resource: ResourceId, event: RuntimeHttpClientEvent) {
         self.client
             .borrow_mut()
@@ -1644,6 +1652,7 @@ impl QueuedHttp {
         !self.server.borrow().is_empty() || !self.client.borrow().is_empty()
     }
 
+    #[cfg_attr(not(feature = "http"), allow(dead_code))]
     fn has_pending_admissions(&self) -> bool {
         !self.pending_admissions.borrow().is_empty()
     }

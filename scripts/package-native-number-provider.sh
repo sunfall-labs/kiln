@@ -16,31 +16,37 @@ KILN_PROVIDER_ROOT="$(kiln_repo_root)"
 kiln_provider_contract_init "$KILN_PROVIDER_ROOT"
 KILN_PROVIDER_PROFILE=$(kiln_provider_contract_field profile)
 KILN_PROVIDER_RUSTFLAGS=$(kiln_provider_contract_field rustflags)
-KILN_PROVIDER_FULL_FEATURES=$(kiln_provider_contract_field full_features)
-KILN_PROVIDER_SLIM_FEATURES=$(kiln_provider_contract_field slim_features)
-KILN_PROVIDER_FULL_ARCHIVE=$(kiln_provider_contract_field full_archive)
-KILN_PROVIDER_SLIM_ARCHIVE=$(kiln_provider_contract_field slim_archive)
-KILN_PROVIDER_FULL_MANIFEST=$(kiln_provider_contract_field full_manifest)
-KILN_PROVIDER_SLIM_MANIFEST=$(kiln_provider_contract_field slim_manifest)
 KILN_PROVIDER_SCHEMA=$(kiln_provider_contract_field schema)
 KILN_PROVIDER_NAME=$(kiln_provider_contract_field provider)
 KILN_PROVIDER_FORMAT=$(kiln_provider_contract_field format_version)
 KILN_PROVIDER_PARSE=$(kiln_provider_contract_field parse_version)
 
-# The slim-named schema-3 variant is the common engine set: Realm, RegExp, BigInt, and JSON.
-# It keeps the same provider ABI and export list as full; omitted engines are refusal stubs.
-# Both variants publish into one directory under distinct archive/manifest names. The manifest
-# declares the variant and its complete capability set; selection never infers either from a
-# historical feature bit.
+# Every non-full schema-4 variant contains Realm plus either one engine or the historical common
+# set. Omitted engines remain refusal stubs, keeping every package compatible with the fixed ABI.
 KILN_PROVIDER_VARIANT=full
 if [[ ${1:-} == "--slim" ]]; then
 	KILN_PROVIDER_VARIANT=common
 	shift
+elif [[ ${1:-} == "--variant" ]]; then
+	[[ $# -ge 2 ]] || { printf '%s\n' '--variant requires a name' >&2; exit 2; }
+	KILN_PROVIDER_VARIANT=$2
+	shift 2
 fi
 if [[ $# -ne 1 ]]; then
-	printf 'usage: %s [--slim] OUTPUT_DIRECTORY\n' "$0" >&2
+	printf 'usage: %s [--slim|--variant NAME] OUTPUT_DIRECTORY\n' "$0" >&2
 	exit 2
 fi
+
+KILN_PROVIDER_PACKAGE_JSON=$(
+	"$KILN_PROVIDER_CONTRACT_BIN" variant "$KILN_PROVIDER_VARIANT"
+)
+kiln_provider_package_field() {
+	python3 -c 'import json,sys; print(json.load(sys.stdin)[sys.argv[1]])' "$1" \
+		<<<"$KILN_PROVIDER_PACKAGE_JSON"
+}
+KILN_PROVIDER_FEATURES=$(kiln_provider_package_field features)
+KILN_PROVIDER_ARCHIVE_NAME=$(kiln_provider_package_field archive)
+KILN_PROVIDER_MANIFEST_NAME=$(kiln_provider_package_field manifest)
 
 KILN_PROVIDER_OUTPUT=$1
 if [[ $KILN_PROVIDER_OUTPUT != /* ]]; then
@@ -107,10 +113,8 @@ kiln_provider_sha256_stream() {
 # below would still unify `kiln-runtime/http` back on through that dependency's defaults
 # and ship a full archive under a slim manifest.
 if [[ $KILN_PROVIDER_VARIANT == full ]]; then
-	KILN_PROVIDER_FEATURES="$KILN_PROVIDER_FULL_FEATURES"
 	KILN_PROVIDER_DEFAULT_FEATURES=()
 else
-	KILN_PROVIDER_FEATURES="$KILN_PROVIDER_SLIM_FEATURES"
 	KILN_PROVIDER_DEFAULT_FEATURES=(--no-default-features)
 fi
 
@@ -135,13 +139,6 @@ if [[ ! -f $KILN_PROVIDER_BUILT_ARCHIVE ]]; then
 fi
 
 mkdir -p "$KILN_PROVIDER_OUTPUT"
-if [[ $KILN_PROVIDER_VARIANT == full ]]; then
-	KILN_PROVIDER_ARCHIVE_NAME="$KILN_PROVIDER_FULL_ARCHIVE"
-	KILN_PROVIDER_MANIFEST_NAME="$KILN_PROVIDER_FULL_MANIFEST"
-else
-	KILN_PROVIDER_ARCHIVE_NAME="$KILN_PROVIDER_SLIM_ARCHIVE"
-	KILN_PROVIDER_MANIFEST_NAME="$KILN_PROVIDER_SLIM_MANIFEST"
-fi
 KILN_PROVIDER_ARCHIVE="$KILN_PROVIDER_OUTPUT/$KILN_PROVIDER_ARCHIVE_NAME"
 KILN_PROVIDER_MANIFEST="$KILN_PROVIDER_OUTPUT/$KILN_PROVIDER_MANIFEST_NAME"
 KILN_PROVIDER_ARCHIVE_TEMP="$KILN_PROVIDER_OUTPUT/.$KILN_PROVIDER_ARCHIVE_NAME.$$.tmp"
@@ -220,9 +217,9 @@ if command -v "$KILN_PROVIDER_NM" >/dev/null 2>&1; then
 			'Packaging it would ship a manifest promising symbols the archive lacks, and the' \
 			'failure would resurface as "Undefined symbols" from an unrelated native link.' >&2
 		printf '%s\n' \
-			'Most often the archive was built without the optional features. The full variant builds' \
-			'with --features regexp,bigint,temporal,json,intl,parallel,ffi and the slim variant adds' \
-			'--no-default-features with realm but not realm-http; check that those still cover every group in' \
+			'Most often the archive was built without the requested features. Full builds every engine;' \
+			'all other variants use --no-default-features with the exact contract feature set. Check that' \
+			'the refusal stubs still cover every group in' \
 			'provider_abi_registry! in crates/kiln-native-number-abi/src/lib.rs.' >&2
 		exit 1
 	fi

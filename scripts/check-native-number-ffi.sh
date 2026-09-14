@@ -16,6 +16,15 @@ KILN_NUMBER_FULL_ARCHIVE=$(kiln_provider_contract_field full_archive)
 KILN_NUMBER_SLIM_ARCHIVE=$(kiln_provider_contract_field slim_archive)
 KILN_NUMBER_FULL_MANIFEST=$(kiln_provider_contract_field full_manifest)
 KILN_NUMBER_SLIM_MANIFEST=$(kiln_provider_contract_field slim_manifest)
+KILN_NUMBER_REALM_PACKAGE_JSON=$("$KILN_PROVIDER_CONTRACT_BIN" variant realm)
+KILN_NUMBER_REALM_ARCHIVE=$(
+	python3 -c 'import json,sys; print(json.load(sys.stdin)["archive"])' \
+		<<<"$KILN_NUMBER_REALM_PACKAGE_JSON"
+)
+KILN_NUMBER_REALM_MANIFEST=$(
+	python3 -c 'import json,sys; print(json.load(sys.stdin)["manifest"])' \
+		<<<"$KILN_NUMBER_REALM_PACKAGE_JSON"
+)
 
 KILN_NUMBER_CC="${CC:-cc}"
 if ! command -v "$KILN_NUMBER_CC" >/dev/null 2>&1; then
@@ -43,9 +52,22 @@ env RUSTFLAGS='--kiln-provider-must-not-inherit' \
 	CARGO_BUILD_RUSTC_WRAPPER='/kiln/provider/must/not/inherit' \
 	CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER='/kiln/provider/must/not/inherit' \
 	bash scripts/package-native-number-provider.sh "$KILN_NUMBER_TEMP/package" >/dev/null
+env RUSTFLAGS='--kiln-provider-must-not-inherit' \
+	CARGO_ENCODED_RUSTFLAGS='--kiln-provider-must-not-inherit' \
+	CARGO_BUILD_RUSTFLAGS='--kiln-provider-must-not-inherit' \
+	CARGO_BUILD_RUSTC='/kiln/provider/must/not/inherit' \
+	RUSTC_WRAPPER='/kiln/provider/must/not/inherit' \
+	RUSTC_WORKSPACE_WRAPPER='/kiln/provider/must/not/inherit' \
+	CARGO_BUILD_RUSTC_WRAPPER='/kiln/provider/must/not/inherit' \
+	CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER='/kiln/provider/must/not/inherit' \
+	bash scripts/package-native-number-provider.sh --variant realm \
+	"$KILN_NUMBER_TEMP/package" >/dev/null
 KILN_NUMBER_ARCHIVE="$KILN_NUMBER_TEMP/package/$KILN_NUMBER_FULL_ARCHIVE"
 KILN_NUMBER_MANIFEST="$KILN_NUMBER_TEMP/package/$KILN_NUMBER_FULL_MANIFEST"
-if [[ ! -f $KILN_NUMBER_ARCHIVE || ! -f $KILN_NUMBER_MANIFEST ]]; then
+KILN_NUMBER_REALM_ARCHIVE="$KILN_NUMBER_TEMP/package/$KILN_NUMBER_REALM_ARCHIVE"
+KILN_NUMBER_REALM_MANIFEST="$KILN_NUMBER_TEMP/package/$KILN_NUMBER_REALM_MANIFEST"
+if [[ ! -f $KILN_NUMBER_ARCHIVE || ! -f $KILN_NUMBER_MANIFEST || \
+	! -f $KILN_NUMBER_REALM_ARCHIVE || ! -f $KILN_NUMBER_REALM_MANIFEST ]]; then
 	printf 'packaged number provider is incomplete under %s\n' "$KILN_NUMBER_TEMP/package" >&2
 	exit 1
 fi
@@ -83,9 +105,9 @@ import json, pathlib, sys
 manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
 contract = json.loads(pathlib.Path(sys.argv[2]).read_text())
 variant = sys.argv[3]
-full = variant == "full"
-archive = contract["full_archive"] if full else contract["slim_archive"]
-capabilities = contract["full_capabilities"] if full else contract["common_capabilities"]
+package = next((item for item in contract["variants"] if item["variant"] == variant), None)
+if package is None:
+    raise SystemExit(f"provider contract has no {variant!r} package")
 expected = {
     "schema": contract["schema"],
     "provider": contract["provider"],
@@ -95,8 +117,8 @@ expected = {
     "profile": contract["profile"],
     "exports": contract["exports"],
     "variant": variant,
-    "capabilities": capabilities,
-    "archive": archive,
+    "capabilities": package["capabilities"],
+    "archive": package["archive"],
 }
 for key, value in expected.items():
     if manifest.get(key) != value:
@@ -105,6 +127,7 @@ PY
 }
 
 kiln_number_check_manifest_contract "$KILN_NUMBER_MANIFEST" full
+kiln_number_check_manifest_contract "$KILN_NUMBER_REALM_MANIFEST" realm
 
 KILN_NUMBER_RUSTC="${RUSTC:-rustc}"
 KILN_NUMBER_EXPECTED_RUSTC_IDENTITY="sha256:$("$KILN_NUMBER_RUSTC" -vV | kiln_number_sha256_stream)"
@@ -205,7 +228,9 @@ KILN_NUMBER_TOOLS="$KILN_NUMBER_TEMP/tools"
 mkdir -p "$KILN_NUMBER_INSTALL/bin" "$KILN_NUMBER_INSTALL/lib/kiln" \
 	"$KILN_NUMBER_PROJECT" "$KILN_NUMBER_TOOLS"
 cp "$KILN_NUMBER_CLI" "$KILN_NUMBER_INSTALL/bin/kiln"
-cp "$KILN_NUMBER_ARCHIVE" "$KILN_NUMBER_MANIFEST" "$KILN_NUMBER_INSTALL/lib/kiln/"
+cp "$KILN_NUMBER_ARCHIVE" "$KILN_NUMBER_MANIFEST" \
+	"$KILN_NUMBER_REALM_ARCHIVE" "$KILN_NUMBER_REALM_MANIFEST" \
+	"$KILN_NUMBER_INSTALL/lib/kiln/"
 cp examples/hello.ts "$KILN_NUMBER_PROJECT/hello.ts"
 
 KILN_NUMBER_CC_PATH=$(command -v "$KILN_NUMBER_CC")

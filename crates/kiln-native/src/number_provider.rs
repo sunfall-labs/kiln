@@ -25,8 +25,7 @@ const PROVIDER_PROFILE: &str = provider_contract::PROFILE;
 const PROVIDER_RUSTFLAGS: &str = provider_contract::RUSTFLAGS;
 const MANIFEST_ENV: &str = "KILN_NATIVE_NUMBER_PROVIDER_MANIFEST";
 const MANIFEST_FILE: &str = provider_contract::FULL_MANIFEST;
-/// Manifest for the common provider archive: same schema, provider ABI, and export list as
-/// the full manifest, but containing only Realm, RegExp, BigInt, and JSON engines.
+#[cfg(test)]
 const MANIFEST_SLIM_FILE: &str = provider_contract::SLIM_MANIFEST;
 static PROVIDER_STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -148,8 +147,78 @@ impl std::error::Error for NumberProviderError {
 
 type ArchiveManifest = provider_contract::ProviderManifest;
 
-pub(crate) fn discover(identity: &ToolIdentity) -> Result<NumberProvider, NumberProviderError> {
-    discover_for(identity, ProviderCapabilities::FULL)
+/// Producer identity for eviction without compiling the archive. Archive bytes are an artifact
+/// input, not part of the producer identity, so enumerating variants must never trigger fat LTO.
+pub(crate) fn producer_identities(
+    identity: &ToolIdentity,
+) -> Result<Vec<(ProviderVariant, String)>, NumberProviderError> {
+    if let Some(path) = env::var_os(MANIFEST_ENV) {
+        let path = PathBuf::from(path);
+        let manifest = read_manifest(&path)?;
+        validate_manifest(&path, &manifest, identity, manifest.variant.capabilities())?;
+        return Ok(vec![(manifest.variant, manifest.identity())]);
+    }
+    let mut installed = Vec::new();
+    for variant in ProviderVariant::ALL {
+        if let Some(path) = installed_variant_manifest_candidates(variant)
+            .into_iter()
+            .find(|path| path.is_file())
+        {
+            let manifest = read_manifest(&path)?;
+            validate_manifest(&path, &manifest, identity, variant.capabilities())?;
+            installed.push((variant, manifest.identity()));
+        }
+    }
+    if !installed.is_empty() {
+        return Ok(installed);
+    }
+
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    let rustc = rustc_program().ok_or(NumberProviderError::ToolUnavailable { tool: "rustc" })?;
+    let rustc_output = command_output(&rustc, &[OsString::from("-vV")], "rustc probe", None)?;
+    let rustc_text = String::from_utf8_lossy(&rustc_output.stdout);
+    let rust_target = rustc_text
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .ok_or_else(|| NumberProviderError::CommandFailed {
+            stage: "rustc probe",
+            program: rustc,
+            status: rustc_output.status.code(),
+            stderr: "`rustc -vV` did not report a host target".to_owned(),
+        })?;
+    require_compatible_target(&identity.target, rust_target)?;
+    let rustc_identity = sha256_identity(&rustc_output.stdout);
+    let source_identity = source_digest(&source_root)?.to_hex();
+    let deployment = env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_default();
+    let libc = env::var("KILN_LIBC_BASELINE").unwrap_or_default();
+    Ok(ProviderVariant::ALL
+        .into_iter()
+        .map(|variant| {
+            let manifest = provider_contract::manifest(
+                rust_target.to_owned(),
+                rustc_identity.clone(),
+                source_identity.clone(),
+                String::new(),
+                deployment.clone(),
+                libc.clone(),
+                variant,
+            );
+            (variant, manifest.identity())
+        })
+        .collect())
+}
+
+fn read_manifest(path: &Path) -> Result<ArchiveManifest, NumberProviderError> {
+    require_regular_package_file(path, path, "manifest")?;
+    let bytes = read(path, "read number-provider manifest")?;
+    serde_json::from_slice(&bytes).map_err(|source| NumberProviderError::InvalidManifest {
+        path: path.to_path_buf(),
+        message: source.to_string(),
+    })
 }
 
 /// Resolve the smallest shipped provider variant that covers every retained engine requirement.
@@ -161,10 +230,17 @@ pub(crate) fn discover_for(
         return load_manifest(&PathBuf::from(path), identity, required);
     }
 
-    if ProviderCapabilities::COMMON.contains_all(required) {
-        for manifest in installed_slim_manifest_candidates() {
-            if manifest.is_file() {
-                return load_manifest(&manifest, identity, required);
+    if let Some(preferred) = ProviderVariant::smallest_covering(required) {
+        for variant in [preferred, ProviderVariant::Common] {
+            if matches!(variant, ProviderVariant::Full)
+                || !variant.capabilities().contains_all(required)
+            {
+                continue;
+            }
+            for manifest in installed_variant_manifest_candidates(variant) {
+                if manifest.is_file() {
+                    return load_manifest(&manifest, identity, required);
+                }
             }
         }
     }
@@ -184,13 +260,13 @@ fn installed_manifest_candidates() -> Vec<PathBuf> {
     installed_manifest_candidates_for(&executable)
 }
 
-fn installed_slim_manifest_candidates() -> Vec<PathBuf> {
+fn installed_variant_manifest_candidates(variant: ProviderVariant) -> Vec<PathBuf> {
     let Ok(executable) = env::current_exe() else {
         return Vec::new();
     };
     installed_manifest_candidates_for(&executable)
         .into_iter()
-        .map(|path| path.with_file_name(MANIFEST_SLIM_FILE))
+        .map(|path| path.with_file_name(variant.manifest()))
         .collect()
 }
 
@@ -212,13 +288,7 @@ fn load_manifest(
     identity: &ToolIdentity,
     required: ProviderCapabilities,
 ) -> Result<NumberProvider, NumberProviderError> {
-    require_regular_package_file(manifest_path, manifest_path, "manifest")?;
-    let bytes = read(manifest_path, "read number-provider manifest")?;
-    let manifest: ArchiveManifest =
-        serde_json::from_slice(&bytes).map_err(|source| NumberProviderError::InvalidManifest {
-            path: manifest_path.to_path_buf(),
-            message: source.to_string(),
-        })?;
+    let manifest = read_manifest(manifest_path)?;
     validate_manifest(manifest_path, &manifest, identity, required)?;
 
     let archive_name = Path::new(&manifest.archive);
@@ -421,25 +491,20 @@ fn build_from_source(
     let archive_path = build_root.join("libkiln_native_number_ffi.a");
 
     if !archive_path.is_file() {
-        // The semantic cores remain feature-gated. The common variant disables defaults and
-        // enables exactly Realm, RegExp, BigInt, and JSON; all other engines compile as ABI-compatible
-        // refusal stubs.
+        // Every non-full package disables defaults and enables its exact capability feature set;
+        // all omitted engines compile as ABI-compatible refusal stubs.
         let mut arguments = vec![
             OsString::from("rustc"),
             OsString::from("--locked"),
             OsString::from("-p"),
             OsString::from(PROVIDER_NAME),
         ];
-        if matches!(variant, ProviderVariant::Common) {
+        if !matches!(variant, ProviderVariant::Full) {
             arguments.push(OsString::from("--no-default-features"));
         }
         arguments.extend([
             OsString::from("--features"),
-            OsString::from(if matches!(variant, ProviderVariant::Full) {
-                provider_contract::FULL_FEATURES
-            } else {
-                provider_contract::SLIM_FEATURES
-            }),
+            OsString::from(variant.features()),
             OsString::from("--profile"),
             OsString::from(PROVIDER_PROFILE),
             OsString::from("--target"),

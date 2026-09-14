@@ -26,20 +26,20 @@ capability list. Validation rejects noncanonical lists and any archive that does
 program's required set. Cache identities contain the variant and capability list. Build reports
 record required and supplied sets separately.
 
-The two existing packages remain implementation choices: common and full. The resolver selects the
-smallest available variant by set inclusion. Their existence is not exposed to liveness, so a later
-archive containing independently removable capability objects or additional packaged variants does
-not change program analysis.
+Packaging supplies Realm-only and Realm-plus-one-engine variants, plus common and full fallbacks.
+The resolver selects the smallest available variant by set inclusion. Their existence is not
+exposed to liveness, so adding a measured combination does not change program analysis and does not
+require publishing the powerset of capabilities.
 
 ## Consequences
 
 - `http` is no longer provider identity or a proxy for unrelated engines.
-- A program needing only FFI and one needing only Intl have distinct plans even while both resolve
-  to the current full archive.
+- A program needing only FFI and one needing only Intl select distinct minimal packages.
 - Dead modules do not enlarge the plan; capability inference is scoped to live graph nodes.
 - Open-world programs remain safe by requesting all capabilities.
-- Provider schema 3 is intentionally incompatible with earlier manifests.
-- Capability sharding is packaging work behind this contract, not another liveness redesign.
+- Provider schema 4 is intentionally incompatible with earlier manifests.
+- Multiple optional capabilities use the smallest covering common/full fallback; useful
+  combinations can be added from measurements rather than speculatively publishing all subsets.
 
 ## Rejected alternatives
 

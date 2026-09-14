@@ -637,23 +637,28 @@ pub fn retained_method_groups(
 /// Provider engines reachable from the retained executable graph.
 ///
 /// This is a liveness result, not a packaging choice. It reports individual capabilities even
-/// while releases ship only common and full archives; the provider resolver chooses the smallest
-/// available variant whose declared set covers this one. Open-world code requests the full set.
+/// while releases also ship common and full fallback archives; the provider resolver chooses the
+/// smallest available variant whose declared set covers this one. Open-world code requests full.
 pub fn retained_provider_capabilities(
     graph: &ModuleGraph,
     demand: &LiveDemand,
     members: &kiln_backend_c::facts::DemandedMembers,
 ) -> kiln_native_provider_contract::ProviderCapabilities {
-    use kiln_ir::{Constant, Instruction, Program};
+    use kiln_ir::{Builtin, Constant, Instruction, ModuleProgram};
     use kiln_module_resolver::NodeBuiltin;
     use kiln_native_provider_contract::{ProviderCapabilities, ProviderCapability};
 
-    let mut required = ProviderCapabilities::COMMON;
-    if members.globals.iter().any(|name| name == "Temporal") {
-        required = required.with(ProviderCapability::Temporal);
-    }
-    if members.globals.iter().any(|name| name == "Intl") {
-        required = required.with(ProviderCapability::Intl);
+    let mut required = ProviderCapabilities::REALM;
+    for (name, capability) in [
+        ("RegExp", ProviderCapability::RegExp),
+        ("BigInt", ProviderCapability::BigInt),
+        ("JSON", ProviderCapability::Json),
+        ("Temporal", ProviderCapability::Temporal),
+        ("Intl", ProviderCapability::Intl),
+    ] {
+        if members.globals.iter().any(|global| global == name) {
+            required = required.with(capability);
+        }
     }
     if members.names.contains("parallelMap") {
         required = required.with(ProviderCapability::Parallel);
@@ -661,9 +666,32 @@ pub fn retained_provider_capabilities(
 
     // A conservative backstop for aliases that have not yet reached the demanded-member facts.
     // It is scoped to live modules; dead dependencies no longer inflate the provider plan.
-    fn program_capabilities(program: &Program) -> ProviderCapabilities {
+    fn program_capabilities(
+        module: &ModuleProgram,
+        demanded: Option<&BTreeSet<u32>>,
+    ) -> ProviderCapabilities {
+        let program = &module.program;
         let mut required = ProviderCapabilities::NONE;
         let mut inspect = |instruction: &Instruction| {
+            required = match instruction {
+                Instruction::NewRegExp { .. } => required.with(ProviderCapability::RegExp),
+                Instruction::LoadBuiltin(Builtin::RegExp) => {
+                    required.with(ProviderCapability::RegExp)
+                }
+                Instruction::LoadBuiltin(Builtin::BigInt) => {
+                    required.with(ProviderCapability::BigInt)
+                }
+                Instruction::LoadBuiltin(Builtin::Json) => required.with(ProviderCapability::Json),
+                Instruction::Const(index)
+                    if matches!(
+                        program.constants.get(*index as usize),
+                        Some(Constant::BigInt(_))
+                    ) =>
+                {
+                    required.with(ProviderCapability::BigInt)
+                }
+                _ => required,
+            };
             let index = match instruction {
                 Instruction::LoadGlobal(name)
                 | Instruction::LoadGlobalBindingOrUndefined(name)
@@ -676,19 +704,17 @@ pub fn retained_provider_capabilities(
                 return;
             };
             required = match name.as_str() {
+                "RegExp" => required.with(ProviderCapability::RegExp),
+                "BigInt" => required.with(ProviderCapability::BigInt),
+                "JSON" => required.with(ProviderCapability::Json),
                 "Temporal" => required.with(ProviderCapability::Temporal),
                 "Intl" => required.with(ProviderCapability::Intl),
                 "parallelMap" => required.with(ProviderCapability::Parallel),
                 _ => required,
             };
         };
-        for instruction in &program.code {
+        for instruction in kiln_backend_c::retained_module_instructions(module, demanded) {
             inspect(instruction);
-        }
-        for function in &program.functions {
-            for instruction in &function.code {
-                inspect(instruction);
-            }
         }
         required
     }
@@ -712,7 +738,13 @@ pub fn retained_provider_capabilities(
         {
             return ProviderCapabilities::FULL;
         }
-        required = required.union(program_capabilities(&node.program.program));
+        if matches!(node.source, ModuleSource::Json) {
+            required = required.with(ProviderCapability::Json);
+        }
+        required = required.union(program_capabilities(
+            &node.program,
+            demand.slots.get(&node.path),
+        ));
         if let ModuleSource::NodeBuiltin(builtin) = &node.source {
             required = match builtin {
                 NodeBuiltin::Http | NodeBuiltin::Https | NodeBuiltin::Http2 => {

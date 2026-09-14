@@ -611,7 +611,7 @@ const ZIG_COMPILER_ENVIRONMENT: [&str; 1] = ["ZIG_LIB_DIR"];
 const _: () = {
     assert!(EMBEDDING_C_ABI_VERSION == C_ABI_VERSION);
     assert!(EMBEDDING_HOST_ABI_VERSION == HOST_ABI_VERSION);
-    assert!(PROVIDER_SCHEMA_VERSION == 3);
+    assert!(PROVIDER_SCHEMA_VERSION == 4);
 };
 
 mod options;
@@ -633,8 +633,7 @@ pub(crate) use worker::*;
 pub struct NativeBuilder {
     cache: ArtifactCache,
     toolchain: Toolchain,
-    number_provider_full: OnceLock<Result<NumberProvider, String>>,
-    number_provider_common: OnceLock<Result<NumberProvider, String>>,
+    number_providers: [OnceLock<Result<NumberProvider, String>>; ProviderVariant::COUNT],
 }
 
 fn cache_with_optional_shared(cache_root: impl Into<PathBuf>) -> ArtifactCache {
@@ -707,8 +706,7 @@ impl NativeBuilder {
         Self {
             cache,
             toolchain,
-            number_provider_full: OnceLock::new(),
-            number_provider_common: OnceLock::new(),
+            number_providers: [const { OnceLock::new() }; ProviderVariant::COUNT],
         }
     }
 
@@ -773,12 +771,16 @@ impl NativeBuilder {
                 );
             }
         }
-        for variant in ProviderVariant::ALL {
-            let provider = self.number_provider_variant(variant)?;
+        let provider_identities = number_provider::producer_identities(tool).map_err(|error| {
+            NativeError::NumberProvider {
+                message: error.to_string(),
+            }
+        })?;
+        for (_variant, provider_identity) in provider_identities {
             identities.insert(
                 NativeArtifactFamily::NumberProvider
                     .key(
-                        provider.identity,
+                        provider_identity,
                         &target,
                         CacheProfile::Release,
                         Digest::hash(b"identity representative"),
@@ -791,30 +793,14 @@ impl NativeBuilder {
         Ok(identities)
     }
 
-    fn number_provider(&self) -> Result<NumberProvider, NativeError> {
-        self.number_provider_full
-            .get_or_init(|| {
-                number_provider::discover(self.toolchain.identity())
-                    .map_err(|error| error.to_string())
-            })
-            .clone()
-            .map_err(|message| NativeError::NumberProvider { message })
-    }
-
     fn number_provider_variant(
         &self,
         variant: ProviderVariant,
     ) -> Result<NumberProvider, NativeError> {
-        if matches!(variant, ProviderVariant::Full) {
-            return self.number_provider();
-        }
-        self.number_provider_common
+        self.number_providers[variant.index()]
             .get_or_init(|| {
-                number_provider::discover_for(
-                    self.toolchain.identity(),
-                    ProviderCapabilities::COMMON,
-                )
-                .map_err(|error| error.to_string())
+                number_provider::discover_for(self.toolchain.identity(), variant.capabilities())
+                    .map_err(|error| error.to_string())
             })
             .clone()
             .map_err(|message| NativeError::NumberProvider { message })
