@@ -1451,3 +1451,18 @@ promise-not-unwrapped: is-same=true
 return-missing-awaited: val=42 done=true
 throw-missing-closed: closed=true is-type-error=true
 """
+
+[[test]]
+id = "server/s08-binary-http-chunks"
+requires_host = "node"
+group = "server"
+source = "server/s08-binary-http-chunks.mjs"
+status = "runnable"
+features = ["modules", "builtin-modules", "node-http", "streams", "buffer", "event-emitter", "typed-arrays"]
+catches = """
+HTTP request and response data events preserve arbitrary bytes, including embedded NUL and 0xff,
+across multiple chunks without routing through string materialization.\
+"""
+expected_stdout = """
+200 00ff010a
+"""
