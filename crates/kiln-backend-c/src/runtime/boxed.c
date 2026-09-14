@@ -225,7 +225,7 @@ static int kiln_c99_val_regexp_test_fast(kiln_val receiver, kiln_val arg, kiln_v
                     int64_t ranges[64];
                     size_t groups = 0;
                     int matched = 0;
-                    int status = regexp->matcher_ascii((const uint8_t *)sval.ptr, sval.len, start,
+                    int status = regexp->matcher_ascii(kiln_string_latin1((const kiln_string *)sval.ptr), sval.len, start,
                                                        ranges, sizeof ranges / sizeof *ranges, &groups, &matched);
                     if (KILN_UNLIKELY(status != KILN_C99_OK)) return status;
                     if (regexp->global || regexp->sticky) {
@@ -266,14 +266,14 @@ static int kiln_c99_val_regexp_exec_fast(kiln_val receiver, kiln_val arg, kiln_v
                     size_t ranges_capacity = sizeof(stack_ranges) / sizeof(stack_ranges[0]);
                     size_t groups = 0;
                     int matched = 0;
-                    int status = regexp->matcher_ascii((const uint8_t *)sval.ptr, sval.len, start,
+                    int status = regexp->matcher_ascii(kiln_string_latin1((const kiln_string *)sval.ptr), sval.len, start,
                                                        ranges, ranges_capacity, &groups, &matched);
                     if (KILN_UNLIKELY(status != KILN_C99_OK)) return status;
                     if (matched && groups > ranges_capacity / 2) {
                         ranges = (int64_t *)malloc(groups * 2 * sizeof(int64_t));
                         if (ranges == NULL) return KILN_C99_OUT_OF_MEMORY;
                         ranges_capacity = groups * 2;
-                        status = regexp->matcher_ascii((const uint8_t *)sval.ptr, sval.len, start,
+                        status = regexp->matcher_ascii(kiln_string_latin1((const kiln_string *)sval.ptr), sval.len, start,
                                                        ranges, ranges_capacity, &groups, &matched);
                         if (KILN_UNLIKELY(status != KILN_C99_OK)) {
                             free(ranges);
@@ -326,7 +326,9 @@ static int kiln_c99_val_regexp_exec_fast(kiln_val receiver, kiln_val arg, kiln_v
                             if (from < 0) {
                                 val = kiln_c99_undefined();
                             } else {
-                                val = kiln_c99_copy_text(sval.ptr + (size_t)from, (size_t)(to - from));
+                                val = kiln_c99_copy_ascii(
+                                    (const char *)kiln_string_latin1((const kiln_string *)sval.ptr) + from,
+                                    (size_t)(to - from));
                             }
                             kiln_val bval = kiln_val_from_boundary(val);
                             arr->elements[g] = bval;

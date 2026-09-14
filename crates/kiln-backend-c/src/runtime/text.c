@@ -68,7 +68,11 @@ static double kiln_c99_as_number(kiln_value value) {
         memcpy(&number, &value.bits, sizeof(number));
         return number;
     case KILN_VALUE_STRING:
-        return kiln_string_to_number(value.ptr, value.len);
+        {
+            size_t length = 0;
+            const char *bytes = kiln_c99_string_ascii_bytes(value, &length);
+            return bytes == NULL ? NAN : kiln_string_to_number(bytes, length);
+        }
     /* `end - start` on two dates is the difference in milliseconds, which is the whole reason
      * `valueOf` on a Date is its instant. */
     case KILN_VALUE_DATE:
@@ -670,11 +674,16 @@ static kiln_value kiln_c99_text(kiln_value value) {
             }
             {
                 kiln_value shown = kiln_c99_text(kiln_val_to_boundary(element));
+                uint8_t *encoded = NULL;
+                size_t encoded_len = 0;
                 if (shown.tag != KILN_VALUE_STRING ||
-                    kiln_c99_text_append(&joined, shown.ptr, shown.len) != KILN_C99_OK) {
+                    kiln_c99_string_to_utf8_lossy(shown, &encoded, &encoded_len) != KILN_C99_OK ||
+                    kiln_c99_text_append(&joined, (const char *)encoded, encoded_len) != KILN_C99_OK) {
+                    free(encoded);
                     free(joined.bytes);
                     return kiln_c99_undefined();
                 }
+                free(encoded);
             }
         }
         return kiln_c99_text_value(&joined);
@@ -696,7 +705,8 @@ static kiln_value kiln_c99_text(kiln_value value) {
             }
             shown = kiln_c99_text(kiln_c99_number(kiln_c99_typed_get(view, index)));
             if (shown.tag != KILN_VALUE_STRING ||
-                kiln_c99_text_append(&joined, shown.ptr, shown.len) != KILN_C99_OK) {
+                kiln_c99_text_append(&joined, (const char *)kiln_string_latin1((const kiln_string *)shown.ptr),
+                                     ((const kiln_string *)shown.ptr)->unit_len) != KILN_C99_OK) {
                 free(joined.bytes);
                 return kiln_c99_undefined();
             }
@@ -1012,7 +1022,7 @@ static uint32_t kiln_c99_utf8_next(const char *text, size_t length, size_t *offs
 }
 
 typedef struct kiln_c99_utf16_iter {
-    const char *text;
+    const void *text;
     size_t length;
     size_t offset;
     uint16_t pending;
@@ -1020,7 +1030,7 @@ typedef struct kiln_c99_utf16_iter {
 } kiln_c99_utf16_iter;
 
 static int kiln_c99_utf16_next(kiln_c99_utf16_iter *iterator, uint16_t *unit) {
-    uint32_t codepoint;
+    const kiln_string *string;
     if (iterator->has_pending) {
         iterator->has_pending = 0;
         *unit = iterator->pending;
@@ -1029,15 +1039,8 @@ static int kiln_c99_utf16_next(kiln_c99_utf16_iter *iterator, uint16_t *unit) {
     if (iterator->offset >= iterator->length || iterator->text == NULL) {
         return 0;
     }
-    codepoint = kiln_c99_utf8_next(iterator->text, iterator->length, &iterator->offset);
-    if (codepoint > UINT32_C(0xFFFF)) {
-        codepoint -= UINT32_C(0x10000);
-        *unit = (uint16_t)(UINT32_C(0xD800) | (codepoint >> 10));
-        iterator->pending = (uint16_t)(UINT32_C(0xDC00) | (codepoint & UINT32_C(0x3FF)));
-        iterator->has_pending = 1;
-    } else {
-        *unit = (uint16_t)codepoint;
-    }
+    string = (const kiln_string *)iterator->text;
+    *unit = kiln_string_unit_at(string, iterator->offset++);
     return 1;
 }
 

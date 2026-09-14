@@ -754,7 +754,12 @@ static int kiln_c99_delete_computed_or_throw(kiln_host *host, kiln_value target,
     if (text.tag != KILN_VALUE_STRING) {
         KILN_C99_REFUSE("a strict delete of a key with no string spelling");
     }
-    return kiln_c99_throw_cannot_delete(thrown, text.ptr, text.len);
+    {
+        size_t key_len = 0;
+        const char *key_bytes = kiln_c99_string_ascii_bytes(text, &key_len);
+        if (key_bytes == NULL) KILN_C99_REFUSE("a UTF-16 property key in strict delete");
+        return kiln_c99_throw_cannot_delete(thrown, key_bytes, key_len);
+    }
 }
 
 /* An array of a value's own enumerable string keys, in enumeration order: what `for...in` walks
@@ -869,8 +874,10 @@ static int kiln_c99_keys_contain(kiln_value keys, const char *key, size_t key_le
     size_t index;
     for (index = 0; index < list->count; ++index) {
         kiln_value name = kiln_val_to_boundary(list->elements[index]);
-        if (name.tag == KILN_VALUE_STRING && name.len == key_len &&
-            (key_len == 0 || memcmp(name.ptr, key, key_len) == 0)) {
+        size_t name_len = 0;
+        const char *name_bytes = kiln_c99_string_ascii_bytes(name, &name_len);
+        if (name_bytes != NULL && name_len == key_len &&
+            (key_len == 0 || memcmp(name_bytes, key, key_len) == 0)) {
             return 1;
         }
     }
@@ -1058,7 +1065,10 @@ static int kiln_c99_spread_proxy(kiln_host *host, kiln_value target, kiln_value 
         if (name.tag != KILN_VALUE_STRING) {
             return KILN_C99_OUT_OF_MEMORY;
         }
-        status = kiln_c99_put(host, target, name.ptr, name.len, copied, depth, thrown);
+        size_t name_len = 0;
+        const char *name_bytes = kiln_c99_string_ascii_bytes(name, &name_len);
+        if (name_bytes == NULL) KILN_C99_REFUSE("a UTF-16 proxy spread key without unit-key storage");
+        status = kiln_c99_put(host, target, name_bytes, name_len, copied, depth, thrown);
         if (status != KILN_C99_OK) {
             return status;
         }
