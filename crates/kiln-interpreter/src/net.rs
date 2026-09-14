@@ -9,7 +9,7 @@ use kiln_runtime::node_net::TcpServerDriver;
 use kiln_runtime::node_stream::StreamDriver;
 
 use crate::{
-    ExecutionError, Native, NodeObject, ObjectData, RealmId, Value, is_callable, own_data_property,
+    is_callable, own_data_property, ExecutionError, Native, NodeObject, ObjectData, RealmId, Value,
 };
 
 #[derive(Debug)]
@@ -214,18 +214,18 @@ pub(crate) fn node_listen_arguments(
                 Value::String(host) => Some(host),
                 _ => None,
             })
-            .unwrap_or_else(|| "0.0.0.0".to_owned()),
-        _ => "0.0.0.0".to_owned(),
+            .unwrap_or_else(|| "0.0.0.0".into()),
+        _ => "0.0.0.0".into(),
     };
     let mut callback = None;
     for argument in arguments.iter().skip(1) {
         if is_callable(argument) {
             callback = Some(argument.clone());
         } else if let Value::String(value) = argument {
-            host = value.clone();
+            host = value.to_lossy_string().into();
         }
     }
-    Ok((port as u16, host, callback))
+    Ok((port as u16, host.to_lossy_string(), callback))
 }
 
 pub(crate) fn node_connect_arguments(
@@ -241,7 +241,7 @@ pub(crate) fn node_connect_arguments(
         if is_callable(argument) {
             callback = Some(argument.clone());
         } else if let Value::String(value) = argument {
-            host = value.clone();
+            host = value.to_lossy_string();
         }
     }
     Ok((port as u16, host, callback))
