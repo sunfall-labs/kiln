@@ -862,11 +862,6 @@ static int kiln_c99_node_http_byte_span(kiln_value value, kiln_c99_node_byte_spa
     return KILN_C99_OK;
 }
 
-/* Materialize a borrowed HTTP byte span directly as a Buffer. The realm owns the event bytes
- * only for the duration of this callback, so the copy into the GC-managed typed-array storage
- * must finish before dispatch returns. Keeping this representation step here avoids the old
- * copy_text -> Buffer.from path, which allocated an intermediate string and converted it one byte
- * at a time. */
 static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *event,
                                     void *host, void *thrown) {
     kiln_node_socket *socket = (kiln_node_socket *)opaque;
@@ -2328,6 +2323,8 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
                                span.bytes, span.len);
             if (status < KILN_C99_OK) return status;
         } else if (span.len != 0) {
+            if (span.len > SIZE_MAX - request->pending_body_len)
+                return KILN_C99_OUT_OF_MEMORY;
             if (kiln_c99_reserve((void **)&request->pending_body,
                                  &request->pending_body_capacity,
                                  request->pending_body_len + span.len, 1) != KILN_C99_OK)
