@@ -716,6 +716,21 @@ static uint32_t kiln_c99_method_groups(uint64_t code) {
 static int kiln_c99_method_in_group(uint64_t code, uint32_t group) {
 typedef struct kiln_value {
 #define KILN_VALUE_FLAG_OWNED_STRING UINT16_C(1)
+#if defined(__cplusplus)
+static_assert(offsetof(kiln_value, tag) == 0, "kiln_value.tag ABI offset");
+static_assert(offsetof(kiln_value, flags) == 2, "kiln_value.flags ABI offset");
+static_assert(offsetof(kiln_value, len) == 4, "kiln_value.len ABI offset");
+static_assert(offsetof(kiln_value, bits) == 8, "kiln_value.bits ABI offset");
+static_assert(offsetof(kiln_value, ptr) == 8, "kiln_value.ptr shares the payload word");
+static_assert(sizeof(kiln_value) == 16, "kiln_value fits the AAPCS64 register threshold");
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+_Static_assert(offsetof(kiln_value, tag) == 0, "kiln_value.tag ABI offset");
+_Static_assert(offsetof(kiln_value, flags) == 2, "kiln_value.flags ABI offset");
+_Static_assert(offsetof(kiln_value, len) == 4, "kiln_value.len ABI offset");
+_Static_assert(offsetof(kiln_value, bits) == 8, "kiln_value.bits ABI offset");
+_Static_assert(offsetof(kiln_value, ptr) == 8, "kiln_value.ptr shares the payload word");
+_Static_assert(sizeof(kiln_value) == 16, "kiln_value fits the AAPCS64 register threshold");
+#endif
 typedef uint64_t kiln_val;
 #define KILN_QNAN_BASE          UINT64_C(0x7FF8000000000000)
 #define KILN_TAG_MASK           UINT64_C(0xFFFF000000000000)
