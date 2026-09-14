@@ -339,7 +339,7 @@ static int kiln_c99_node_util(kiln_host *host, kiln_value *out, uint64_t code,
                 kiln_value shown = kiln_c99_inspect(args[index]);
                 if ((index != 0 && kiln_c99_text_append_c(&built, " ") != KILN_C99_OK) ||
                     shown.tag != KILN_VALUE_STRING ||
-                    kiln_c99_text_append(&built, shown.ptr, shown.len) != KILN_C99_OK) {
+                    kiln_c99_text_append_string(&built, shown) != KILN_C99_OK) {
                     free(built.bytes);
                     return KILN_C99_OUT_OF_MEMORY;
                 }
@@ -373,7 +373,7 @@ static int kiln_c99_node_util(kiln_host *host, kiln_value *out, uint64_t code,
                             kiln_c99_text_append(&built, &character, 1) != KILN_C99_OK) goto format_oom;
                         next -= 1;
                     } else if (shown.tag != KILN_VALUE_STRING ||
-                               kiln_c99_text_append(&built, shown.ptr, shown.len) != KILN_C99_OK) {
+                               kiln_c99_text_append_string(&built, shown) != KILN_C99_OK) {
                         goto format_oom;
                     }
                 }
@@ -382,7 +382,7 @@ static int kiln_c99_node_util(kiln_host *host, kiln_value *out, uint64_t code,
                 kiln_value shown = kiln_c99_inspect(args[next++]);
                 if (kiln_c99_text_append_c(&built, " ") != KILN_C99_OK ||
                     shown.tag != KILN_VALUE_STRING ||
-                    kiln_c99_text_append(&built, shown.ptr, shown.len) != KILN_C99_OK)
+                    kiln_c99_text_append_string(&built, shown) != KILN_C99_OK)
                     goto format_oom;
             }
         }

@@ -604,6 +604,18 @@ static int kiln_c99_string_to_utf8_lossy(kiln_value value, uint8_t **out, size_t
     return KILN_C99_OK;
 }
 
+/* Text builders store UTF-8 bytes until their final escape into the canonical unit string. Keep
+ * this conversion explicit at the few host-facing builders that combine a value with literal
+ * bytes; treating the canonical header as a byte span would serialize its metadata. */
+static int kiln_c99_text_append_string(kiln_text *text, kiln_value value) {
+    uint8_t *owned = NULL;
+    size_t length = 0;
+    int status = kiln_c99_string_to_utf8_lossy(value, &owned, &length);
+    if (status == KILN_C99_OK) status = kiln_c99_text_append(text, (const char *)owned, length);
+    free(owned);
+    return status;
+}
+
 static kiln_value kiln_c99_text(kiln_value value) {
     static const char undefined_text[] = "undefined";
     static const char null_text[] = "null";
