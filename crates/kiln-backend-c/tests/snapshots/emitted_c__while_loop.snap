@@ -26,12 +26,15 @@ kiln_block_0:;
     v3 = v2;
     d3 = d2;
     i3 = i2;
-        { kiln_val phi_t0 = v2; double phi_td0 = d2; int64_t phi_ti0 = i2; v1 = phi_t0; d1 = phi_td0; i1 = phi_ti0; }
-    goto kiln_block_1;
-kiln_block_1:;
     v4 = UINT64_C(4613937818241073152);
     memcpy(&d4, &v4, sizeof(d4));
     i4 = 3LL;
+    v6 = UINT64_C(4607182418800017408);
+    memcpy(&d6, &v6, sizeof(d6));
+    i6 = 1LL;
+        { kiln_val phi_t0 = v2; double phi_td0 = d2; int64_t phi_ti0 = i2; v1 = phi_t0; d1 = phi_td0; i1 = phi_ti0; }
+    goto kiln_block_1;
+kiln_block_1:;
     v5 = (i1 < i4) ? KILN_VAL_TRUE : KILN_VAL_FALSE;
     b5 = (v5 == KILN_VAL_TRUE);
     if (i1 < i4) {
@@ -40,9 +43,6 @@ kiln_block_1:;
         goto kiln_block_3;
     }
 kiln_block_2:;
-    v6 = UINT64_C(4607182418800017408);
-    memcpy(&d6, &v6, sizeof(d6));
-    i6 = 1LL;
     i7 = i1 + i6; d7 = (double)i7; v7 = kiln_c99_val_from_double(d7);
     v8 = v7;
     d8 = d7;

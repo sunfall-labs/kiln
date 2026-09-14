@@ -318,50 +318,133 @@ impl GraphOp {
         }
     }
 
-    /// Effect classification for this operation.
+    /// Effect classification for this operation (ADR 0061).
     pub fn effects(&self) -> Effects {
         match self {
             Self::Const { .. }
             | Self::LoadLocal(_)
+            | Self::StoreLocal { .. }
             | Self::LoadBuiltin(_)
             | Self::ResumeValue
+            | Self::CaughtValue
+            | Self::IsReturnSignal(_)
             | Self::LoadThis
             | Self::LoadNewTarget
+            | Self::MarkUninitialized(_)
             | Self::Phi { .. } => Effects::PURE,
-            Self::Unary {
-                op:
-                    UnaryOp::Not | UnaryOp::BitwiseNot | UnaryOp::Void | UnaryOp::Plus | UnaryOp::Negate,
-                ..
-            } => Effects::PURE,
-            Self::Binary {
-                op:
-                    BinaryOp::StrictEqual
-                    | BinaryOp::StrictNotEqual
-                    | BinaryOp::BitwiseAnd
-                    | BinaryOp::BitwiseOr
-                    | BinaryOp::BitwiseXor
-                    | BinaryOp::Add
-                    | BinaryOp::Subtract
-                    | BinaryOp::Multiply
-                    | BinaryOp::Divide
-                    | BinaryOp::Remainder
-                    | BinaryOp::LessThan
-                    | BinaryOp::LessThanOrEqual
-                    | BinaryOp::GreaterThan
-                    | BinaryOp::GreaterThanOrEqual
-                    | BinaryOp::ShiftLeft
-                    | BinaryOp::ShiftRight
-                    | BinaryOp::UnsignedShiftRight,
-                ..
-            } => Effects::PURE,
-            _ => Effects::UNKNOWN,
+
+            Self::CheckTdz { .. } => Effects::MAY_THROW,
+
+            Self::LoadCell(_) | Self::LoadUpvalue(_) => Effects::READS_HEAP | Effects::MAY_THROW,
+
+            Self::LoadGlobal(_) => Effects::READS_HEAP,
+
+            Self::StoreCell { .. } | Self::StoreUpvalue { .. } | Self::StoreGlobal { .. } => {
+                Effects::WRITES_HEAP
+            }
+
+            Self::MakeCell(_)
+            | Self::MakeFunction { .. }
+            | Self::NewArray { .. }
+            | Self::NewObject { .. } => Effects::ALLOCATES,
+
+            Self::Unary { op, .. } => match op {
+                UnaryOp::Not | UnaryOp::Void | UnaryOp::TypeOf => Effects::PURE,
+                UnaryOp::BitwiseNot
+                | UnaryOp::Plus
+                | UnaryOp::Negate
+                | UnaryOp::ToNumeric
+                | UnaryOp::Increment
+                | UnaryOp::Decrement => Effects::PURE,
+            },
+
+            Self::Binary { op, .. } => match op {
+                BinaryOp::StrictEqual
+                | BinaryOp::StrictNotEqual
+                | BinaryOp::BitwiseAnd
+                | BinaryOp::BitwiseOr
+                | BinaryOp::BitwiseXor
+                | BinaryOp::Add
+                | BinaryOp::Subtract
+                | BinaryOp::Multiply
+                | BinaryOp::Divide
+                | BinaryOp::Remainder
+                | BinaryOp::Exponentiate
+                | BinaryOp::LessThan
+                | BinaryOp::LessThanOrEqual
+                | BinaryOp::GreaterThan
+                | BinaryOp::GreaterThanOrEqual
+                | BinaryOp::ShiftLeft
+                | BinaryOp::ShiftRight
+                | BinaryOp::UnsignedShiftRight => Effects::PURE,
+                BinaryOp::In
+                | BinaryOp::InstanceOf
+                | BinaryOp::LooseEqual
+                | BinaryOp::LooseNotEqual => {
+                    Effects::MAY_THROW | Effects::CALLS_USER_CODE | Effects::READS_HEAP
+                }
+            },
+
+            Self::GetProperty { .. } => {
+                Effects::READS_HEAP
+                    | Effects::MAY_THROW
+                    | Effects::CALLS_USER_CODE
+                    | Effects::ALLOCATES
+                    | Effects::WRITES_HEAP
+            }
+
+            Self::SetProperty { .. } | Self::SetPropertyStrict { .. } => {
+                Effects::WRITES_HEAP
+                    | Effects::MAY_THROW
+                    | Effects::CALLS_USER_CODE
+                    | Effects::ALLOCATES
+                    | Effects::READS_HEAP
+            }
+
+            Self::GetComputed { .. } => {
+                Effects::READS_HEAP
+                    | Effects::MAY_THROW
+                    | Effects::CALLS_USER_CODE
+                    | Effects::ALLOCATES
+                    | Effects::WRITES_HEAP
+            }
+
+            Self::SetComputed { .. } | Self::SetComputedStrict { .. } => {
+                Effects::WRITES_HEAP
+                    | Effects::MAY_THROW
+                    | Effects::CALLS_USER_CODE
+                    | Effects::ALLOCATES
+                    | Effects::READS_HEAP
+            }
+
+            Self::Call { .. } | Self::CallMethod { .. } | Self::New { .. } => Effects::UNKNOWN,
+
+            Self::Bridge { instruction, .. } => match instruction {
+                Instruction::PushHole => Effects::PURE,
+                Instruction::ThrowReference(_) => Effects::MAY_THROW,
+                Instruction::LoadPrototype => Effects::READS_HEAP | Effects::MAY_THROW,
+                Instruction::SetPrototype => Effects::WRITES_HEAP | Effects::MAY_THROW,
+                Instruction::GetPrivate(_) => Effects::READS_HEAP | Effects::MAY_THROW,
+                Instruction::SetPrivate(_) => Effects::WRITES_HEAP | Effects::MAY_THROW,
+                Instruction::NewRegExp { .. } => Effects::ALLOCATES,
+                Instruction::DeleteProperty(_)
+                | Instruction::DeletePropertyStrict { .. }
+                | Instruction::DeleteComputed
+                | Instruction::DeleteComputedStrict { .. } => {
+                    Effects::WRITES_HEAP | Effects::MAY_THROW | Effects::CALLS_USER_CODE
+                }
+                Instruction::DirectEval(_)
+                | Instruction::DynamicImport
+                | Instruction::DynamicImportWithOptions => Effects::UNKNOWN,
+                _ => Effects::UNKNOWN,
+            },
         }
     }
 }
 
 #[cfg(test)]
 mod effect_tests {
-    use super::Effects;
+    use super::*;
 
     #[test]
     fn unknown_contains_every_declared_effect() {
@@ -373,6 +456,65 @@ mod effect_tests {
     fn untrusted_bits_are_rejected() {
         let unknown_bit = 1 << 15;
         assert!(Effects::from_bits(unknown_bit).is_none());
+    }
+
+    #[test]
+    fn granular_effects_distinguish_pure_and_effectful_ops() {
+        assert_eq!(GraphOp::LoadLocal(0).effects(), Effects::PURE);
+        assert_eq!(
+            GraphOp::StoreLocal {
+                slot: 0,
+                value: ValueId(0)
+            }
+            .effects(),
+            Effects::PURE
+        );
+        assert_eq!(
+            GraphOp::CheckTdz {
+                slot: 0,
+                value: ValueId(0)
+            }
+            .effects(),
+            Effects::MAY_THROW
+        );
+        assert_eq!(
+            GraphOp::LoadCell(0).effects(),
+            Effects::READS_HEAP | Effects::MAY_THROW
+        );
+        assert_eq!(
+            GraphOp::StoreCell {
+                slot: 0,
+                value: ValueId(0)
+            }
+            .effects(),
+            Effects::WRITES_HEAP
+        );
+        assert_eq!(GraphOp::MakeCell(0).effects(), Effects::ALLOCATES);
+        assert_eq!(
+            GraphOp::NewArray {
+                elements: vec![],
+                site: SiteId(0)
+            }
+            .effects(),
+            Effects::ALLOCATES
+        );
+        assert_eq!(
+            GraphOp::Unary {
+                op: UnaryOp::TypeOf,
+                value: ValueId(0)
+            }
+            .effects(),
+            Effects::PURE
+        );
+        assert!(
+            GraphOp::GetProperty {
+                object: ValueId(0),
+                name: 0,
+                site: SiteId(0)
+            }
+            .effects()
+            .contains(Effects::MAY_THROW | Effects::READS_HEAP)
+        );
     }
 }
 
@@ -2552,20 +2694,29 @@ pub fn build_function_graph(
     }
 
     graph.blocks = basic_blocks;
-    remove_dead_phis(&mut graph);
+    eliminate_dead_code(&mut graph);
+    if !proto.generator && !proto.asynchronous && !proto.async_generator {
+        hoist_loop_invariants(&mut graph);
+    }
     simplify_trivial_phis(&mut graph);
+    eliminate_dead_code(&mut graph);
     compact_value_ids(&mut graph);
     graph.mark_non_escaping_objects(program);
     Ok(graph)
 }
 
-/// Remove phi-only dependency chains and cycles with no consumer. Keep every non-phi
-/// operation, even when its result is unused: coercions, TDZ checks and calls can throw or
-/// have effects. This pass deliberately does not use the speculative effect classification.
+/// Alias for dead code elimination preserving existing test entry points.
+pub fn remove_dead_phis(graph: &mut FunctionGraph) {
+    eliminate_dead_code(graph);
+}
+
+/// Remove dead operations and dead phi chains with no consumers (ADR 0061).
 ///
-/// Resume blocks restore phis positionally from the suspended stack and sent value. Keep
-/// all of their phis in order until that frame layout has an explicit value mapping.
-fn remove_dead_phis(graph: &mut FunctionGraph) {
+/// An operation is inherently live if it has observable side-effects (throwing, calling user code,
+/// allocating, or writing heap/host), or if it is a local variable store (`StoreLocal`) whose slot
+/// may be accessed in a frame/array, or a phi in a generator resume block. Pure operations with no
+/// consumers are soundly eliminated.
+pub fn eliminate_dead_code(graph: &mut FunctionGraph) {
     let mut live = HashSet::new();
     let mut resumes = HashSet::new();
     for block in &graph.blocks {
@@ -2598,33 +2749,268 @@ fn remove_dead_phis(graph: &mut FunctionGraph) {
             _ => {}
         }
     }
-    let mut inputs_by_phi = HashMap::new();
+
+    let entry_block = graph.entry_block;
+    let is_inherently_live = |op: &GraphOp, block_id: BlockId| -> bool {
+        if matches!(op, GraphOp::Phi { .. }) {
+            return resumes.contains(&block_id);
+        }
+        if matches!(op, GraphOp::StoreLocal { .. }) {
+            return true;
+        }
+        if matches!(op, GraphOp::LoadLocal(_)) && block_id == entry_block {
+            return true;
+        }
+        let effects = op.effects();
+        effects.intersects(
+            Effects::MAY_THROW
+                | Effects::CALLS_USER_CODE
+                | Effects::ALLOCATES
+                | Effects::WRITES_HEAP
+                | Effects::WRITES_HOST
+                | Effects::MAY_SUSPEND,
+        )
+    };
+
+    let mut def_operands: HashMap<ValueId, Vec<ValueId>> = HashMap::new();
     for block in &graph.blocks {
         for (value, op) in &block.operations {
-            if let GraphOp::Phi { inputs } = op {
-                inputs_by_phi.insert(*value, inputs);
-                if resumes.contains(&block.id) {
-                    live.insert(*value);
-                }
-            } else {
+            if is_inherently_live(op, block.id) {
+                live.insert(*value);
                 live.extend(op.operands());
+            } else {
+                def_operands.insert(*value, op.operands());
             }
         }
     }
-    let mut pending: Vec<_> = live.iter().copied().collect();
+
+    let mut pending: Vec<ValueId> = live.iter().copied().collect();
     while let Some(value) = pending.pop() {
-        if let Some(inputs) = inputs_by_phi.get(&value) {
-            for (_, input) in *inputs {
-                if live.insert(*input) {
-                    pending.push(*input);
+        if let Some(operands) = def_operands.get(&value) {
+            for operand in operands {
+                if live.insert(*operand) {
+                    pending.push(*operand);
                 }
             }
         }
     }
+
     for block in &mut graph.blocks {
         block
             .operations
-            .retain(|(value, op)| !matches!(op, GraphOp::Phi { .. }) || live.contains(value));
+            .retain(|(value, op)| is_inherently_live(op, block.id) || live.contains(value));
+    }
+}
+
+/// Hoist loop-invariant pure operations out of loops into preheaders (LICM, ADR 0061).
+///
+/// An operation can be hoisted if:
+/// 1. Its effects are `Effects::PURE` (cannot throw, allocate, call user code, or touch heap/host).
+/// 2. It is not a Phi, StoreLocal, or generator/handler special op.
+/// 3. All of its operands are loop-invariant (defined outside the loop or already hoisted).
+/// 4. The loop has a well-defined single preheader block that dominates the loop header.
+pub fn hoist_loop_invariants(graph: &mut FunctionGraph) {
+    if graph.blocks.len() < 2 {
+        return;
+    }
+    if graph
+        .blocks
+        .iter()
+        .any(|b| matches!(b.terminator, Terminator::Suspend { .. }))
+    {
+        return;
+    }
+
+    // Step 1: Compute dominators for all blocks.
+    let all_blocks: HashSet<BlockId> = graph.blocks.iter().map(|b| b.id).collect();
+    let mut dominators: HashMap<BlockId, HashSet<BlockId>> = HashMap::new();
+
+    let mut entry_dom = HashSet::new();
+    entry_dom.insert(graph.entry_block);
+    dominators.insert(graph.entry_block, entry_dom);
+
+    for block in &graph.blocks {
+        if block.id != graph.entry_block {
+            dominators.insert(block.id, all_blocks.clone());
+        }
+    }
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for block in &graph.blocks {
+            if block.id == graph.entry_block {
+                continue;
+            }
+            let mut new_dom = all_blocks.clone();
+            for &pred in &block.predecessors {
+                if let Some(pred_dom) = dominators.get(&pred) {
+                    new_dom = new_dom.intersection(pred_dom).copied().collect();
+                }
+            }
+            new_dom.insert(block.id);
+
+            if dominators.get(&block.id) != Some(&new_dom) {
+                dominators.insert(block.id, new_dom);
+                changed = true;
+            }
+        }
+    }
+
+    // Step 2: Find back-edges and natural loops.
+    // A back-edge is an edge B -> H where H dominates B.
+    let mut loops: HashMap<BlockId, HashSet<BlockId>> = HashMap::new();
+    for block in &graph.blocks {
+        let b_id = block.id;
+        for &succ in &block.successors {
+            if dominators
+                .get(&b_id)
+                .is_some_and(|doms| doms.contains(&succ))
+            {
+                // succ is loop header H
+                let h_id = succ;
+                let entry = loops.entry(h_id).or_default();
+                entry.insert(h_id);
+                entry.insert(b_id);
+
+                let mut worklist = vec![b_id];
+                while let Some(node) = worklist.pop() {
+                    if node == h_id {
+                        continue;
+                    }
+                    if let Some(b) = graph.blocks.iter().find(|b| b.id == node) {
+                        for &pred in &b.predecessors {
+                            if entry.insert(pred) {
+                                worklist.push(pred);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if loops.is_empty() {
+        return;
+    }
+
+    // Step 3: For each natural loop, check if a unique preheader exists.
+    for (header_id, loop_blocks) in loops {
+        let header_block = match graph.blocks.iter().find(|b| b.id == header_id) {
+            Some(b) => b,
+            None => continue,
+        };
+
+        // Predecessors not in loop
+        let outside_preds: Vec<BlockId> = header_block
+            .predecessors
+            .iter()
+            .filter(|p| !loop_blocks.contains(p))
+            .copied()
+            .collect();
+
+        if outside_preds.len() != 1 {
+            continue;
+        }
+
+        let preheader_id = outside_preds[0];
+        let preheader_idx = match graph.blocks.iter().position(|b| b.id == preheader_id) {
+            Some(idx) => idx,
+            None => continue,
+        };
+
+        // The preheader must jump to the loop header
+        if !matches!(graph.blocks[preheader_idx].terminator, Terminator::Jump(target) if target == header_id)
+        {
+            continue;
+        }
+
+        // Check that preheader dominates loop header (standard CFG property)
+        if !dominators
+            .get(&header_id)
+            .is_some_and(|d| d.contains(&preheader_id))
+        {
+            continue;
+        }
+
+        // Map definitions to their containing blocks
+        let mut def_block: HashMap<ValueId, BlockId> = HashMap::new();
+        for block in &graph.blocks {
+            for (vid, _) in &block.operations {
+                def_block.insert(*vid, block.id);
+            }
+        }
+
+        // Hoist loop-invariant operations
+        let mut hoisted_vids: HashSet<ValueId> = HashSet::new();
+        let mut progress = true;
+
+        while progress {
+            progress = false;
+            let mut ops_to_hoist: Vec<(BlockId, usize, ValueId, GraphOp)> = Vec::new();
+
+            for block in &graph.blocks {
+                if !loop_blocks.contains(&block.id) || block.id == preheader_id {
+                    continue;
+                }
+
+                // If block is inside a try-catch, do not hoist out of it
+                if block.exception_handler.is_some() {
+                    continue;
+                }
+
+                for (op_idx, (vid, op)) in block.operations.iter().enumerate() {
+                    if hoisted_vids.contains(vid) {
+                        continue;
+                    }
+                    if op.effects() != Effects::PURE {
+                        continue;
+                    }
+                    if matches!(
+                        op,
+                        GraphOp::Phi { .. }
+                            | GraphOp::StoreLocal { .. }
+                            | GraphOp::ResumeValue
+                            | GraphOp::CaughtValue
+                    ) {
+                        continue;
+                    }
+
+                    let operands = op.operands();
+                    let all_operands_invariant = operands.iter().all(|operand| {
+                        match def_block.get(operand) {
+                            Some(&def_b) => {
+                                !loop_blocks.contains(&def_b) || hoisted_vids.contains(operand)
+                            }
+                            None => true, // Function parameter or external
+                        }
+                    });
+
+                    if all_operands_invariant {
+                        ops_to_hoist.push((block.id, op_idx, *vid, op.clone()));
+                        hoisted_vids.insert(*vid);
+                        def_block.insert(*vid, preheader_id);
+                        progress = true;
+                        break; // hoist one per iteration to maintain ordering
+                    }
+                }
+
+                if progress {
+                    break;
+                }
+            }
+
+            for (from_block, op_idx, vid, op) in ops_to_hoist {
+                if let Some(b) = graph.blocks.iter_mut().find(|b| b.id == from_block) {
+                    if op_idx < b.operations.len() && b.operations[op_idx].0 == vid {
+                        b.operations.remove(op_idx);
+                    } else if let Some(pos) = b.operations.iter().position(|(v, _)| *v == vid) {
+                        b.operations.remove(pos);
+                    }
+                }
+                graph.blocks[preheader_idx].operations.push((vid, op));
+            }
+        }
     }
 }
 
@@ -4015,5 +4401,191 @@ mod dead_phi_tests {
         simplify_trivial_phis(&mut graph);
         compact_value_ids(&mut graph);
         assert_eq!(graph, before);
+    }
+
+    #[test]
+    fn eliminate_dead_code_removes_unused_pure_ops_and_keeps_effects() {
+        let mut graph = FunctionGraph::new(None, 0, 0);
+        graph.next_value_id = 10;
+        graph.blocks = vec![BasicBlock {
+            id: BlockId(0),
+            operations: vec![
+                // Dead pure constant
+                (
+                    ValueId(0),
+                    GraphOp::Const {
+                        index: 0,
+                        constant: Constant::Number(10),
+                    },
+                ),
+                // Dead pure binary op using dead constant
+                (
+                    ValueId(1),
+                    GraphOp::Binary {
+                        op: BinaryOp::Add,
+                        left: ValueId(0),
+                        right: ValueId(0),
+                    },
+                ),
+                // Live pure constant (used in return)
+                (
+                    ValueId(2),
+                    GraphOp::Const {
+                        index: 1,
+                        constant: Constant::Number(42),
+                    },
+                ),
+                // Side-effecting op (CheckTdz) with no consumer - must NOT be removed
+                (
+                    ValueId(3),
+                    GraphOp::CheckTdz {
+                        slot: 0,
+                        value: ValueId(2),
+                    },
+                ),
+            ],
+            terminator: Terminator::Return(Some(ValueId(2))),
+            predecessors: vec![],
+            successors: vec![],
+            exception_handler: None,
+        }];
+
+        eliminate_dead_code(&mut graph);
+        let remaining_ops: Vec<ValueId> =
+            graph.blocks[0].operations.iter().map(|(v, _)| *v).collect();
+        // Values 0 and 1 are dead pure operations and must be eliminated
+        assert!(!remaining_ops.contains(&ValueId(0)));
+        assert!(!remaining_ops.contains(&ValueId(1)));
+        // Values 2 (live return) and 3 (side-effecting CheckTdz) must be preserved
+        assert!(remaining_ops.contains(&ValueId(2)));
+        assert!(remaining_ops.contains(&ValueId(3)));
+        crate::verifier::verify_function_graph(&graph).unwrap();
+    }
+
+    #[test]
+    fn hoist_loop_invariants_moves_pure_ops_to_preheader() {
+        let mut graph = FunctionGraph::new(None, 0, 0);
+        graph.next_value_id = 10;
+        graph.blocks = vec![
+            // Preheader: Block 0
+            BasicBlock {
+                id: BlockId(0),
+                operations: vec![
+                    (
+                        ValueId(0),
+                        GraphOp::Const {
+                            index: 0,
+                            constant: Constant::Number(5),
+                        },
+                    ),
+                    (
+                        ValueId(1),
+                        GraphOp::Const {
+                            index: 1,
+                            constant: Constant::Number(10),
+                        },
+                    ),
+                ],
+                terminator: Terminator::Jump(BlockId(1)),
+                predecessors: vec![],
+                successors: vec![BlockId(1)],
+                exception_handler: None,
+            },
+            // Loop Header: Block 1
+            BasicBlock {
+                id: BlockId(1),
+                operations: vec![
+                    (
+                        ValueId(2),
+                        GraphOp::Phi {
+                            inputs: vec![(BlockId(0), ValueId(0)), (BlockId(2), ValueId(6))],
+                        },
+                    ),
+                    (
+                        ValueId(3),
+                        GraphOp::Binary {
+                            op: BinaryOp::LessThan,
+                            left: ValueId(2),
+                            right: ValueId(1),
+                        },
+                    ),
+                ],
+                terminator: Terminator::Branch {
+                    condition: ValueId(3),
+                    true_block: BlockId(2),
+                    false_block: BlockId(3),
+                },
+                predecessors: vec![BlockId(0), BlockId(2)],
+                successors: vec![BlockId(2), BlockId(3)],
+                exception_handler: None,
+            },
+            // Loop Body: Block 2
+            BasicBlock {
+                id: BlockId(2),
+                operations: vec![
+                    // Invariant pure operation inside loop body: 5 * 10
+                    (
+                        ValueId(4),
+                        GraphOp::Binary {
+                            op: BinaryOp::Multiply,
+                            left: ValueId(0),
+                            right: ValueId(1),
+                        },
+                    ),
+                    // Variant operation depending on phi
+                    (
+                        ValueId(5),
+                        GraphOp::Binary {
+                            op: BinaryOp::Add,
+                            left: ValueId(2),
+                            right: ValueId(4),
+                        },
+                    ),
+                    // Step i++
+                    (
+                        ValueId(6),
+                        GraphOp::Binary {
+                            op: BinaryOp::Add,
+                            left: ValueId(2),
+                            right: ValueId(0),
+                        },
+                    ),
+                ],
+                terminator: Terminator::Jump(BlockId(1)),
+                predecessors: vec![BlockId(1)],
+                successors: vec![BlockId(1)],
+                exception_handler: None,
+            },
+            // Exit: Block 3
+            BasicBlock {
+                id: BlockId(3),
+                operations: vec![],
+                terminator: Terminator::Return(Some(ValueId(2))),
+                predecessors: vec![BlockId(1)],
+                successors: vec![],
+                exception_handler: None,
+            },
+        ];
+
+        crate::verifier::verify_function_graph(&graph).unwrap();
+        hoist_loop_invariants(&mut graph);
+
+        // Value 4 (invariant multiply) should now be in Block 0 (preheader)
+        let preheader_ops: Vec<ValueId> =
+            graph.blocks[0].operations.iter().map(|(v, _)| *v).collect();
+        assert!(
+            preheader_ops.contains(&ValueId(4)),
+            "invariant op must be hoisted to preheader"
+        );
+
+        // Value 4 should no longer be in Block 2 (loop body)
+        let body_ops: Vec<ValueId> = graph.blocks[2].operations.iter().map(|(v, _)| *v).collect();
+        assert!(
+            !body_ops.contains(&ValueId(4)),
+            "hoisted op must be removed from loop body"
+        );
+
+        // Dominance and verifier invariants must hold
+        crate::verifier::verify_function_graph(&graph).unwrap();
     }
 }

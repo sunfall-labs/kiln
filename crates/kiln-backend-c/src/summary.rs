@@ -198,7 +198,7 @@ pub fn summarize_graph(graph: &FunctionGraph) -> FunctionSummary {
         }
         if block.exception_handler.is_none() {
             for (_, op) in &block.operations {
-                if op.effects() != Effects::PURE {
+                if op.effects().contains(Effects::MAY_THROW) {
                     can_throw = true;
                     break;
                 }
@@ -220,9 +220,10 @@ pub fn summarize_graph(graph: &FunctionGraph) -> FunctionSummary {
                     | Terminator::Branch { .. }
                     | Terminator::BranchNotNullish { .. }
                     | Terminator::Return(_)
-            ) && b.operations.iter().all(|(_, op)| {
-                op.effects() == Effects::PURE || matches!(op, GraphOp::StoreLocal { .. })
-            })
+            ) && b
+                .operations
+                .iter()
+                .all(|(_, op)| op.effects() == Effects::PURE)
         });
 
     let pure_or_unknown = !can_throw && !reads_arguments && all_pure_ops;
