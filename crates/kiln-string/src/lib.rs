@@ -34,6 +34,17 @@ impl StringUnits {
         }
     }
 
+    /// Alias used by language algorithms where the unit basis is already explicit.
+    pub fn len(&self) -> usize {
+        self.unit_len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.unit_len() == 0
+    }
+    pub fn encode_utf16(&self) -> UnitIter<'_> {
+        self.units()
+    }
+
     pub fn unit_at(&self, index: usize) -> Option<u16> {
         match &self.0 {
             Repr::Latin1(bytes) => bytes.get(index).copied().map(u16::from),
@@ -78,6 +89,11 @@ impl Iterator for UnitIter<'_> {
 
 impl From<&str> for StringUnits {
     fn from(text: &str) -> Self {
+        if text.chars().all(|scalar| scalar as u32 <= 0xff) {
+            return Self(Repr::Latin1(Arc::from(
+                text.chars().map(|scalar| scalar as u8).collect::<Vec<_>>(),
+            )));
+        }
         let mut units = Vec::with_capacity(text.len());
         for scalar in text.chars() {
             let mut encoded = [0; 2];
@@ -97,6 +113,16 @@ impl PartialEq for StringUnits {
     }
 }
 impl Eq for StringUnits {}
+impl PartialEq<str> for StringUnits {
+    fn eq(&self, other: &str) -> bool {
+        self.units().eq(other.encode_utf16())
+    }
+}
+impl PartialEq<&str> for StringUnits {
+    fn eq(&self, other: &&str) -> bool {
+        self == *other
+    }
+}
 impl PartialOrd for StringUnits {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
