@@ -35,7 +35,9 @@ def stop_process(process: subprocess.Popen[bytes], timeout: float = 2.0) -> None
     try: os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError: pass
     deadline = time.monotonic() + timeout
-    while group_exists(process) and time.monotonic() < deadline: time.sleep(0.02)
+    while group_exists(process) and time.monotonic() < deadline:
+        process.poll()  # reap the leader while descendants drain
+        time.sleep(0.02)
     if group_exists(process):
         try: os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError: pass
@@ -74,22 +76,55 @@ def decode_client(process: subprocess.Popen[bytes], stdout: bytes, stderr: bytes
     return report, stderr.decode("utf-8", "replace"), process.returncode
 
 def run_clients(driver: Path, duration: int, connections: int, port: int, workload: str, processes: int,
-                timeout: float, node_bin: str = "node") -> list[tuple[dict, str, int]]:
+                timeout: float, node_bin: str = "node", output_dir: Path | None = None) -> list[tuple[dict, str, int]]:
     if processes <= 0: raise ValueError("processes must be positive")
-    clients = [subprocess.Popen(client_command(node_bin, driver, duration, connections, port, workload),
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE) for _ in range(processes)]
+    clients = []
+    captured = set()
     results = []
-    for client in clients:
-        try: stdout, stderr = client.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            client.kill(); client.communicate(); raise RuntimeError("client timed out")
-        result = decode_client(client, stdout, stderr)
-        if result[0].get("requests", 0) <= 0: raise RuntimeError(f"client completed without requests: {result[0]}")
-        results.append(result)
-    return results
+    try:
+        for _ in range(processes):
+            clients.append(subprocess.Popen(client_command(node_bin, driver, duration, connections, port, workload),
+                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE))
+        for index, client in enumerate(clients, 1):
+            try:
+                stdout, stderr = client.communicate(timeout=timeout)
+                captured.add(index)
+            except subprocess.TimeoutExpired:
+                client.kill()
+                stdout, stderr = client.communicate()
+                captured.add(index)
+                if output_dir is not None:
+                    (output_dir / f"client-{index}.stdout").write_bytes(stdout)
+                    (output_dir / f"client-{index}.stderr").write_bytes(stderr)
+                raise RuntimeError("client timed out")
+            if output_dir is not None:
+                (output_dir / f"client-{index}.stdout").write_bytes(stdout)
+                (output_dir / f"client-{index}.stderr").write_bytes(stderr)
+            result = decode_client(client, stdout, stderr)
+            if result[0].get("requests", 0) <= 0:
+                raise RuntimeError(f"client completed without requests: {result[0]}")
+            results.append(result)
+        return results
+    finally:
+        for index, client in enumerate(clients, 1):
+            if client.poll() is None:
+                client.kill()
+            if index in captured:
+                continue
+            try:
+                stdout, stderr = client.communicate(timeout=1)
+            except subprocess.TimeoutExpired:
+                client.kill()
+                stdout, stderr = client.communicate()
+            if output_dir is not None:
+                (output_dir / f"client-{index}.stdout").write_bytes(stdout)
+                (output_dir / f"client-{index}.stderr").write_bytes(stderr)
+
 
 def runtime_version(runtime: str, variant: dict[str, Path]) -> str:
-    command = [str(variant["hello"])] if runtime == "kiln" else [runtime, "--version"]
+    if runtime == "kiln":
+        return os.environ.get("KILN_VERSION", "not-probed (server binary)")
+    command = [runtime, "--version"]
     try: result = subprocess.run(command, capture_output=True, text=True, timeout=5, check=False)
     except (OSError, subprocess.TimeoutExpired) as error: return f"unavailable: {error}"
     output = (result.stdout or result.stderr).strip().splitlines()
@@ -150,7 +185,8 @@ def main() -> int:
                                                    stderr=stderr_file, start_new_session=True)
                         try:
                             wait_ready(port, process)
-                            reports = run_clients(driver, duration, connections, port, workload, processes, max(10.0, duration / 1000 + 5.0))
+                            reports = run_clients(driver, duration, connections, port, workload, processes,
+                                                  max(10.0, duration / 1000 + 5.0), output_dir=run_dir)
                             for index, (report, stderr, status) in enumerate(reports, 1):
                                 (run_dir / f"client-{index}.json").write_text(json.dumps(report, indent=2) + "\n")
                                 if stderr: (run_dir / f"client-{index}.stderr").write_text(stderr)
