@@ -114,6 +114,14 @@ impl<'a> StringView<'a> {
         }
     }
 
+    pub fn len(self) -> usize {
+        self.unit_len()
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.unit_len() == 0
+    }
+
     pub fn unit_at(self, index: usize) -> Option<u16> {
         match self {
             Self::Latin1(bytes) => bytes.get(index).copied().map(u16::from),
@@ -133,6 +141,10 @@ impl<'a> StringView<'a> {
             Self::Latin1(bytes) => UnitIter::Latin1(bytes.iter()),
             Self::Utf16(units) => UnitIter::Utf16(units.iter()),
         }
+    }
+
+    pub fn to_units(self) -> Box<[u16]> {
+        self.units().collect()
     }
 }
 

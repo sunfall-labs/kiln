@@ -185,50 +185,7 @@ impl TextArena {
 }
 
 /// A decoded string span, addressed in JavaScript units.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TextSlice<'a> {
-    Latin1(&'a [u8]),
-    Utf16(&'a [u16]),
-}
-impl<'a> TextSlice<'a> {
-    pub fn len(&self) -> usize {
-        match self {
-            Self::Latin1(bytes) => bytes.len(),
-            Self::Utf16(units) => units.len(),
-        }
-    }
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-    pub fn unit_at(&self, index: usize) -> Option<u16> {
-        match self {
-            Self::Latin1(bytes) => bytes.get(index).copied().map(u16::from),
-            Self::Utf16(units) => units.get(index).copied(),
-        }
-    }
-    pub fn units(self) -> impl Iterator<Item = u16> + 'a {
-        match self {
-            Self::Latin1(bytes) => EitherUnits::Latin1(bytes.iter()),
-            Self::Utf16(units) => EitherUnits::Utf16(units.iter()),
-        }
-    }
-    pub fn to_units(self) -> Box<[u16]> {
-        self.units().collect()
-    }
-}
-enum EitherUnits<'a> {
-    Latin1(std::slice::Iter<'a, u8>),
-    Utf16(std::slice::Iter<'a, u16>),
-}
-impl Iterator for EitherUnits<'_> {
-    type Item = u16;
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::Latin1(iter) => iter.next().copied().map(u16::from),
-            Self::Utf16(iter) => iter.next().copied(),
-        }
-    }
-}
+pub type TextSlice<'a> = StringView<'a>;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Tape<'a> {
@@ -252,10 +209,7 @@ impl<'a> Tape<'a> {
             .slice(usize::try_from(node.value).ok()?, node.len as usize)
     }
     pub fn string_units(&self, node: &Node) -> Option<StringUnits> {
-        self.string(node).map(|slice| match slice {
-            TextSlice::Latin1(bytes) => StringUnits::from_view(StringView::Latin1(bytes)),
-            TextSlice::Utf16(units) => StringUnits::from_view(StringView::Utf16(units)),
-        })
+        self.string(node).map(StringUnits::from_view)
     }
 }
 
@@ -281,10 +235,7 @@ impl Document {
             .slice(usize::try_from(node.value).ok()?, node.len as usize)
     }
     pub fn string_units(&self, node: &Node) -> Option<StringUnits> {
-        self.string(node).map(|slice| match slice {
-            TextSlice::Latin1(bytes) => StringUnits::from_view(StringView::Latin1(bytes)),
-            TextSlice::Utf16(units) => StringUnits::from_view(StringView::Utf16(units)),
-        })
+        self.string(node).map(StringUnits::from_view)
     }
 }
 
@@ -340,18 +291,20 @@ pub fn parse_units<R>(
     }
 }
 pub fn parse_utf8<R>(source: &[u8], walk: impl FnOnce(&Tape<'_>) -> R) -> Result<R, ParseError> {
-    if source.is_ascii() {
+    if encoding_rs::mem::is_ascii(source) {
         return parse_source(&source, walk);
     }
-    let text = std::str::from_utf8(source).map_err(|_| ParseError::Syntax { offset: 0 })?;
     UTF8_UNITS.with(|units| {
         let mut units = units.borrow_mut();
         units.clear();
-        units.reserve(text.len());
-        for scalar in text.chars() {
-            let mut encoded = [0; 2];
-            units.extend_from_slice(scalar.encode_utf16(&mut encoded));
-        }
+        // `encoding_rs` uses its bulk UTF-8 decoder, including an ASCII prefix fast path, while
+        // validating the bytes in the same pass. Invalid input keeps the adapter's existing
+        // syntax refusal, while valid input preserves every UTF-16 unit in the source scalar.
+        units.resize(source.len(), 0);
+        let written =
+            encoding_rs::mem::convert_utf8_to_utf16_without_replacement(source, &mut units)
+                .ok_or(ParseError::Syntax { offset: 0 })?;
+        units.truncate(written);
         parse_source(&&units[..], walk)
     })
 }
