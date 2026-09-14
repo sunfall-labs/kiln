@@ -7,4 +7,5 @@ repository.workspace = true
 
 [dependencies]
 kiln-hir = { workspace = true }
+kiln-string = { workspace = true }
 kiln-host-abi = { workspace = true }
