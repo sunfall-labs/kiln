@@ -3201,5 +3201,7 @@ static kiln_shape kiln_c99_root_shape = {
     {NULL}, /* keys */
     {NULL, NULL}, /* inline_trans_ikey */
     {NULL, NULL}, /* inline_trans_next */
-    NULL  /* transitions */
+    NULL, /* transitions */
+    0,    /* has_symbol_key */
+    0     /* double_slots_mask */
 };

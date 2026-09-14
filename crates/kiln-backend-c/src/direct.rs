@@ -33,6 +33,7 @@ use std::collections::{HashMap, HashSet};
 use kiln_ir::{Constant, FunctionProto, Instruction, Program, Upvalue};
 
 use crate::emit_graph::method_candidates;
+use crate::emit_graph::sites::this_columns;
 use crate::graph::{
     BlockId, FunctionGraph, GraphOp, Proven, Terminator, ValueId, proven_types_with,
 };
@@ -249,6 +250,10 @@ impl DirectPlan {
                     .take(params[i] as usize)
                     .map(|&v| (v, Proven::Number))
                     .collect();
+                let (this_cols, _) = this_columns(graph);
+                for (vid, _) in this_cols {
+                    seeds.insert(vid, Proven::Number);
+                }
                 seeds.extend(intrinsics[i].iter().map(|(&v, &k)| (v, k)));
                 let (proven, _) = settle(
                     graph,
@@ -363,6 +368,10 @@ impl DirectPlan {
                     .take(params[i] as usize)
                     .map(|&v| (v, Proven::Number))
                     .collect();
+                let (this_cols, _) = this_columns(g);
+                for (vid, _) in this_cols {
+                    seeds.insert(vid, Proven::Number);
+                }
                 seeds.extend(intrinsics[i].iter().map(|(&v, &k)| (v, k)));
                 Some(plan_for(g, &known.functions[i], &function_sites[i], seeds))
             })

@@ -1,6 +1,5 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 803
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -1599,7 +1598,7 @@ static struct kiln_shape *kiln_c99_shape_root(void) {
 static int kiln_c99_shape_find_slot(const kiln_shape *shape, const char *ikey, uint32_t *out_slot) {
 static uint32_t kiln_c99_shape_slot_named(const kiln_shape *shape, const char *bytes, size_t len) {
 static void kiln_c99_pin_interned_key(const char *ikey) {
-static int kiln_c99_shape_transition(kiln_shape *current, const char *ikey, kiln_shape **out_shape) {
+static int kiln_c99_shape_transition(kiln_shape *current, const char *ikey, int is_double, kiln_shape **out_shape) {
 static int kiln_c99_ensure_dictionary(kiln_object *object) {
 static int kiln_c99_new_object(kiln_value *out) {
 static int kiln_c99_new_object_with_capacity(kiln_value *out, size_t capacity) {

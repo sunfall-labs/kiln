@@ -608,7 +608,7 @@ const ZIG_COMPILER_ENVIRONMENT: [&str; 1] = ["ZIG_LIB_DIR"];
 const _: () = {
     assert!(EMBEDDING_C_ABI_VERSION == C_ABI_VERSION);
     assert!(EMBEDDING_HOST_ABI_VERSION == HOST_ABI_VERSION);
-    assert!(PROVIDER_SCHEMA_VERSION == 1);
+    assert!(PROVIDER_SCHEMA_VERSION == 2);
 };
 
 mod options;
@@ -856,22 +856,59 @@ impl NativeBuilder {
         }
     }
 
-    /// Conservative HTTP-engine demand for one module graph: true on any doubt.
+    /// Conservative demand for an engine that is not in the common provider variant.
     ///
-    /// The slim provider archive omits the Hyper-backed HTTP engines (linkable stubs keep
-    /// the export list identical), so any program that can reach them must link the full
-    /// archive. Reachability is undecidable for dynamic `import()` targets and for
-    /// CommonJS `require()` with a non-literal argument (which leaves no graph edge at
-    /// all), so those select the full archive, as does any `node:ffi` usage.
-    fn graph_wants_http_provider(graph: &ModuleGraph) -> bool {
+    /// The common archive carries Realm, RegExp, BigInt, and JSON. Temporal, Intl, parallelMap,
+    /// node:ffi, and HTTP stay in the full archive. Linkable refusal stubs keep the
+    /// ABI identical, but the selector must still retain every engine a graph can reach.
+    /// Dynamic imports and CommonJS are open-world here and therefore choose full.
+    fn graph_wants_full_provider(
+        graph: &ModuleGraph,
+        members: &kiln_backend_c::facts::DemandedMembers,
+    ) -> bool {
         use kiln_module_resolver::NodeBuiltin;
-        fn needs_http_engine(specifier: &str) -> bool {
+        if members
+            .globals
+            .iter()
+            .any(|name| name == "Temporal" || name == "Intl")
+            || members.names.contains("parallelMap")
+        {
+            return true;
+        }
+        fn needs_full_engine(specifier: &str) -> bool {
             matches!(
                 NodeBuiltin::parse(specifier),
                 Some(
                     NodeBuiltin::Http | NodeBuiltin::Https | NodeBuiltin::Http2 | NodeBuiltin::Ffi
                 )
             )
+        }
+        fn program_needs_full_engine(program: &kiln_ir::Program) -> bool {
+            use kiln_ir::{Constant, Instruction};
+
+            let name_is = |index: u32, expected: &str| {
+                matches!(
+                    program.constants.get(index as usize),
+                    Some(Constant::String(name)) if name == expected
+                )
+            };
+            let needs = |instruction: &Instruction| match instruction {
+                Instruction::LoadGlobal(name)
+                | Instruction::LoadGlobalBindingOrUndefined(name)
+                | Instruction::RequireGlobalBinding(name)
+                | Instruction::GetProperty(name)
+                | Instruction::CallMethod { name, .. } => {
+                    name_is(*name, "Temporal")
+                        || name_is(*name, "Intl")
+                        || name_is(*name, "parallelMap")
+                }
+                _ => false,
+            };
+            program.code.iter().any(needs)
+                || program
+                    .functions
+                    .iter()
+                    .any(|function| function.code.iter().any(needs))
         }
         graph.modules().any(|node| {
             if let ModuleSource::NodeBuiltin(builtin) = node.source
@@ -888,11 +925,11 @@ impl NativeBuilder {
                 .program
                 .imports
                 .iter()
-                .any(|import| needs_http_engine(&import.source))
+                .any(|import| needs_full_engine(&import.source))
                 || node
                     .dependencies
                     .iter()
-                    .any(|dependency| needs_http_engine(&dependency.specifier))
+                    .any(|dependency| needs_full_engine(&dependency.specifier))
             {
                 return true;
             }
@@ -902,6 +939,7 @@ impl NativeBuilder {
                 return true;
             }
             matches!(node.source, ModuleSource::CommonJs)
+                || program_needs_full_engine(&node.program.program)
         })
     }
 
@@ -2140,11 +2178,9 @@ impl NativeBuilder {
         // Dispatch-group mask for the prelude: same closed-world selection,
         // so the `-D` flags below only ever remove what nothing retained can
         // reach. Computed once; the explain path recomputes it out-of-band.
-        let group_mask = {
-            let members =
-                kiln_backend_c::facts::analyze_demanded_members(graph, &demand.live, &demand.slots);
-            kiln_liveness::retained_method_groups(graph, &demand, &members)
-        };
+        let members =
+            kiln_backend_c::facts::analyze_demanded_members(graph, &demand.live, &demand.slots);
+        let group_mask = kiln_liveness::retained_method_groups(graph, &demand, &members);
         let nodes: Vec<&kiln_module_graph::ModuleNode> = graph.modules().collect();
         let emitted_modules = emit_indexed(nodes.len(), "graph module emission", |index| {
             let node = nodes[index];
@@ -2217,9 +2253,9 @@ impl NativeBuilder {
         let paths = GraphBuildPaths::new(workspace.path(), &symbol_list);
         let profile = options.profile;
         let compiler = compiler_identity(&identity);
-        let want_http = Self::graph_wants_http_provider(graph);
+        let want_full_provider = Self::graph_wants_full_provider(graph, &members);
         let (number_provider, number_provider_digest, _, number_provider_http) =
-            self.cached_number_provider_with_http(&target, want_http)?;
+            self.cached_number_provider_with_http(&target, want_full_provider)?;
 
         let mut module_sources = modules
             .iter()

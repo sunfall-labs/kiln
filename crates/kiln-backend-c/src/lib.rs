@@ -1281,7 +1281,7 @@ fn render_functions(
         if columns > 0 {
             writeln!(
                 output,
-                "static const kiln_shape *{symbol}_fn_{index}_recv_shape[4];\nstatic uint32_t {symbol}_fn_{index}_recv_slot[4][{columns}];"
+                "static const kiln_shape *{symbol}_fn_{index}_recv_shape[4];\nstatic uint32_t {symbol}_fn_{index}_recv_slot[4][{columns}];\nstatic const kiln_shape *{symbol}_fn_{index}_typed_recv_shape[4];\nstatic uint32_t {symbol}_fn_{index}_typed_recv_slot[4][{columns}];"
             )
             .unwrap();
         }

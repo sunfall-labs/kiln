@@ -1267,6 +1267,7 @@ dependencies = [
 name = "kiln-backend-c"
 version = "0.0.0"
 dependencies = [
+ "bitflags",
  "insta",
  "kiln-builtin-surface",
  "kiln-digest",

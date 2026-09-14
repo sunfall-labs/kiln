@@ -913,6 +913,11 @@ static int kiln_c99_write_property(kiln_host *host, kiln_value target,
                 if (object->shape == site->entries[p].shape) {
                     if (site->entries[p].transition_to == NULL) {
                         if (KILN_LIKELY(site->entries[p].slot < object->slot_capacity && !object->frozen)) {
+                            if ((object->shape->double_slots_mask & (1u << site->entries[p].slot)) &&
+                                value.tag != KILN_VALUE_NUMBER) {
+                                kiln_c99_ensure_dictionary(object);
+                                return kiln_c99_put_site(host, target, key, key_len, value, strict, depth, thrown, site);
+                            }
                             object->slots[site->entries[p].slot] = kiln_val_from_boundary(value);
                             return KILN_C99_OK;
                         }
@@ -920,9 +925,15 @@ static int kiln_c99_write_property(kiln_host *host, kiln_value target,
                                site->entries[p].slot < object->slot_capacity &&
                                (object->prototype.tag == KILN_VALUE_UNDEFINED ||
                                 !kiln_c99_has_inherited_setter_or_readonly(object->prototype))) {
-                        object->slots[site->entries[p].slot] = kiln_val_from_boundary(value);
-                        object->shape = (kiln_shape *)site->entries[p].transition_to;
-                        return KILN_C99_OK;
+                        const kiln_shape *next_shape = site->entries[p].transition_to;
+                        if ((next_shape->double_slots_mask & (1u << site->entries[p].slot)) &&
+                            value.tag != KILN_VALUE_NUMBER) {
+                            /* Non-double written to double slot transition; fall through */
+                        } else {
+                            object->slots[site->entries[p].slot] = kiln_val_from_boundary(value);
+                            object->shape = (kiln_shape *)site->entries[p].transition_to;
+                            return KILN_C99_OK;
+                        }
                     }
                     break;
                 }
@@ -1009,6 +1020,13 @@ static int kiln_c99_val_write_property(kiln_host *host, kiln_val target,
             if (object->shape == site->entries[p].shape) {
                 if (site->entries[p].transition_to == NULL) {
                     if (KILN_LIKELY(site->entries[p].slot < object->slot_capacity && !object->frozen)) {
+                        if ((object->shape->double_slots_mask & (1u << site->entries[p].slot)) &&
+                            !KILN_VAL_IS_NUMBER(value)) {
+                            kiln_c99_ensure_dictionary(object);
+                            kiln_value t = kiln_val_to_boundary(target);
+                            kiln_value v = kiln_val_to_boundary(value);
+                            return kiln_c99_write_property(host, t, key, key_len, v, strict, depth, thrown, site);
+                        }
                         object->slots[site->entries[p].slot] = value;
                         return KILN_C99_OK;
                     }
@@ -1016,9 +1034,15 @@ static int kiln_c99_val_write_property(kiln_host *host, kiln_val target,
                            site->entries[p].slot < object->slot_capacity &&
                            (object->prototype.tag == KILN_VALUE_UNDEFINED ||
                             !kiln_c99_has_inherited_setter_or_readonly(object->prototype))) {
-                    object->slots[site->entries[p].slot] = value;
-                    object->shape = (kiln_shape *)site->entries[p].transition_to;
-                    return KILN_C99_OK;
+                    const kiln_shape *next_shape = site->entries[p].transition_to;
+                    if ((next_shape->double_slots_mask & (1u << site->entries[p].slot)) &&
+                        !KILN_VAL_IS_NUMBER(value)) {
+                        /* Non-double written to double slot transition; fall through */
+                    } else {
+                        object->slots[site->entries[p].slot] = value;
+                        object->shape = (kiln_shape *)site->entries[p].transition_to;
+                        return KILN_C99_OK;
+                    }
                 }
                 break;
             }
