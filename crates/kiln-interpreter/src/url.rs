@@ -167,17 +167,17 @@ pub(crate) fn property(prop: &str) -> Option<Value> {
 
 pub(crate) fn read_property(object: &ObjectData, state: &Rc<UrlState>, name: &str) -> Value {
     match name {
-        "href" => Value::String(state.href.clone()),
-        "origin" => Value::String(state.origin.clone()),
-        "protocol" => Value::String(state.protocol.clone()),
-        "host" => Value::String(state.host.clone()),
-        "hostname" => Value::String(state.hostname.clone()),
-        "port" => Value::String(state.port.clone()),
-        "pathname" => Value::String(state.pathname.clone()),
-        "search" => Value::String(state.search.clone()),
-        "hash" => Value::String(state.hash.clone()),
-        "username" => Value::String(state.username.clone()),
-        "password" => Value::String(state.password.clone()),
+        "href" => Value::String(state.href.clone().into()),
+        "origin" => Value::String(state.origin.clone().into()),
+        "protocol" => Value::String(state.protocol.clone().into()),
+        "host" => Value::String(state.host.clone().into()),
+        "hostname" => Value::String(state.hostname.clone().into()),
+        "port" => Value::String(state.port.clone().into()),
+        "pathname" => Value::String(state.pathname.clone().into()),
+        "search" => Value::String(state.search.clone().into()),
+        "hash" => Value::String(state.hash.clone().into()),
+        "username" => Value::String(state.username.clone().into()),
+        "password" => Value::String(state.password.clone().into()),
         "searchParams" => url_search_params_object(Rc::clone(state)),
         // Both answer `href`. A `URL` is one of the few objects real code hands
         // straight to string concatenation -- `` `imported from ${url}` `` --
@@ -329,7 +329,7 @@ pub(crate) fn dispatch(
                 .query
                 .iter()
                 .find(|(key, _)| key == &name)
-                .map(|(_, value)| Value::String(value.clone()))
+                .map(|(_, value)| Value::String(value.clone().into()))
                 .unwrap_or(Value::Null))
         }
         Native::UrlSearchParamsHas => {
@@ -376,7 +376,7 @@ pub(crate) fn dispatch(
                 .query
                 .iter()
                 .filter(|(key, _)| key == &name)
-                .map(|(_, value)| Value::String(value.clone()))
+                .map(|(_, value)| Value::String(value.clone().into()))
                 .collect();
             Ok(Value::Array(ArrayData::new(values)))
         }
