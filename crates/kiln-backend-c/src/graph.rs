@@ -2695,9 +2695,7 @@ pub fn build_function_graph(
 
     graph.blocks = basic_blocks;
     eliminate_dead_code(&mut graph);
-    if !proto.generator && !proto.asynchronous && !proto.async_generator {
-        hoist_loop_invariants(&mut graph);
-    }
+    hoist_loop_invariants(&mut graph);
     simplify_trivial_phis(&mut graph);
     eliminate_dead_code(&mut graph);
     compact_value_ids(&mut graph);
@@ -2813,13 +2811,6 @@ pub fn hoist_loop_invariants(graph: &mut FunctionGraph) {
     if graph.blocks.len() < 2 {
         return;
     }
-    if graph
-        .blocks
-        .iter()
-        .any(|b| matches!(b.terminator, Terminator::Suspend { .. }))
-    {
-        return;
-    }
 
     // Step 1: Compute dominators for all blocks.
     let all_blocks: HashSet<BlockId> = graph.blocks.iter().map(|b| b.id).collect();
@@ -2901,6 +2892,18 @@ pub fn hoist_loop_invariants(graph: &mut FunctionGraph) {
             None => continue,
         };
 
+        // If any block in the loop can suspend, hoisting to a preheader outside the loop
+        // is unsound because resumption re-enters inside the loop with a fresh C stack frame.
+        if loop_blocks.iter().any(|&b_id| {
+            graph
+                .blocks
+                .iter()
+                .find(|b| b.id == b_id)
+                .is_some_and(|b| matches!(b.terminator, Terminator::Suspend { .. }))
+        }) {
+            continue;
+        }
+
         // Predecessors not in loop
         let outside_preds: Vec<BlockId> = header_block
             .predecessors
@@ -2969,6 +2972,7 @@ pub fn hoist_loop_invariants(graph: &mut FunctionGraph) {
                     if matches!(
                         op,
                         GraphOp::Phi { .. }
+                            | GraphOp::LoadLocal(_)
                             | GraphOp::StoreLocal { .. }
                             | GraphOp::ResumeValue
                             | GraphOp::CaughtValue
@@ -4587,5 +4591,122 @@ mod dead_phi_tests {
 
         // Dominance and verifier invariants must hold
         crate::verifier::verify_function_graph(&graph).unwrap();
+    }
+
+    #[test]
+    fn hoist_loop_invariants_skips_loops_with_suspension() {
+        let mut graph = FunctionGraph::new(None, 0, 0);
+        graph.next_value_id = 10;
+        graph.blocks = vec![
+            // Preheader: Block 0
+            BasicBlock {
+                id: BlockId(0),
+                operations: vec![
+                    (
+                        ValueId(0),
+                        GraphOp::Const {
+                            index: 0,
+                            constant: Constant::Number(5),
+                        },
+                    ),
+                    (
+                        ValueId(1),
+                        GraphOp::Const {
+                            index: 1,
+                            constant: Constant::Number(10),
+                        },
+                    ),
+                ],
+                terminator: Terminator::Jump(BlockId(1)),
+                predecessors: vec![],
+                successors: vec![BlockId(1)],
+                exception_handler: None,
+            },
+            // Loop Header: Block 1
+            BasicBlock {
+                id: BlockId(1),
+                operations: vec![
+                    (
+                        ValueId(2),
+                        GraphOp::Phi {
+                            inputs: vec![(BlockId(0), ValueId(0)), (BlockId(2), ValueId(6))],
+                        },
+                    ),
+                    (
+                        ValueId(3),
+                        GraphOp::Binary {
+                            op: BinaryOp::LessThan,
+                            left: ValueId(2),
+                            right: ValueId(1),
+                        },
+                    ),
+                ],
+                terminator: Terminator::Branch {
+                    condition: ValueId(3),
+                    true_block: BlockId(2),
+                    false_block: BlockId(3),
+                },
+                predecessors: vec![BlockId(0), BlockId(2)],
+                successors: vec![BlockId(2), BlockId(3)],
+                exception_handler: None,
+            },
+            // Loop Body: Block 2 (contains a suspension terminator)
+            BasicBlock {
+                id: BlockId(2),
+                operations: vec![
+                    (
+                        ValueId(4),
+                        GraphOp::Binary {
+                            op: BinaryOp::Multiply,
+                            left: ValueId(0),
+                            right: ValueId(1),
+                        },
+                    ),
+                    (
+                        ValueId(6),
+                        GraphOp::Binary {
+                            op: BinaryOp::Add,
+                            left: ValueId(2),
+                            right: ValueId(0),
+                        },
+                    ),
+                ],
+                terminator: Terminator::Suspend {
+                    value: ValueId(4),
+                    resume: BlockId(1),
+                    spilled: vec![],
+                    pc: 42,
+                    awaiting: false,
+                    delegate: None,
+                },
+                predecessors: vec![BlockId(1)],
+                successors: vec![BlockId(1)],
+                exception_handler: None,
+            },
+            // Exit: Block 3
+            BasicBlock {
+                id: BlockId(3),
+                operations: vec![],
+                terminator: Terminator::Return(Some(ValueId(2))),
+                predecessors: vec![BlockId(1)],
+                successors: vec![],
+                exception_handler: None,
+            },
+        ];
+
+        hoist_loop_invariants(&mut graph);
+
+        // Value 4 should NOT be hoisted to preheader because the loop suspends
+        let preheader_ops: Vec<ValueId> =
+            graph.blocks[0].operations.iter().map(|(v, _)| *v).collect();
+        assert!(
+            !preheader_ops.contains(&ValueId(4)),
+            "suspending loop must not hoist invariants to preheader"
+        );
+        let body_ops: Vec<ValueId> = graph.blocks[2].operations.iter().map(|(v, _)| *v).collect();
+        assert!(
+            body_ops.contains(&ValueId(4)),
+            "invariant op must remain in loop body"
+        );
     }
 }
