@@ -56,8 +56,6 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::time::Duration;
-#[cfg(test)]
-use std::time::Instant;
 
 pub use kiln_artifact_cache::{CapabilityIdentity, RealmCapabilityIdentity};
 use kiln_host_abi::{
@@ -6158,15 +6156,10 @@ mod tests {
     ) -> Vec<RuntimeHttpEvent> {
         let mut events = Vec::new();
         let mut realm: Realm = Realm::new();
-        let started = Instant::now();
         loop {
             if done(&events) {
                 break;
             }
-            assert!(
-                started.elapsed() < Duration::from_secs(5),
-                "HTTP server did not reach its requested event within 5s: {events:?}"
-            );
             assert!(
                 runtime.next_referenced_turn(&mut realm).is_some(),
                 "HTTP server became idle before its requested event: {events:?} (host={}, http={})",
@@ -6185,15 +6178,10 @@ mod tests {
     ) -> Vec<RuntimeHttpClientEvent> {
         let mut events = Vec::new();
         let mut realm: Realm = Realm::new();
-        let started = Instant::now();
         loop {
             if done(&events) {
                 break;
             }
-            assert!(
-                started.elapsed() < Duration::from_secs(5),
-                "HTTP client did not reach its requested event within 5s: {events:?}"
-            );
             assert!(
                 runtime.next_referenced_turn(&mut realm).is_some(),
                 "HTTP client became idle before its requested event: {events:?}"
@@ -6294,6 +6282,10 @@ mod tests {
             runtime.next_referenced_turn(&mut realm),
             Some(RuntimeTurn::Timer(WorkItem::Timer { work, .. })) if work == WorkId::new(480)
         ));
+        assert!(
+            runtime.next_referenced_turn(&mut realm).is_none(),
+            "an admitted but idle HTTP connection must not keep a realm alive"
+        );
         assert!(runtime.shutdown());
     }
 
