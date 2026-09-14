@@ -1,0 +1,175 @@
+Sampling process 58751 for 5 seconds with 1 millisecond of run time between samples
+Sampling completed, processing symbols...
+Sample analysis of process 58751 written to file /tmp/matched_timing-4ef85e16328094f3_2026-09-14_142716_N9bB.sample.txt
+
+Analysis of sampling matched_timing-4ef85e16328094f3 (pid 58751) every 1 millisecond
+Process:         matched_timing-4ef85e16328094f3 [58751]
+Path:            /Users/USER/Library/Caches/*/matched_timing-4ef85e16328094f3
+Load Address:    0x1008cc000
+Identifier:      matched_timing-4ef85e16328094f3
+Version:         0
+Code Type:       ARM64
+Platform:        macOS
+Parent Process:  zsh [58537]
+Target Type:     live task
+
+Date/Time:       2026-09-14 14:27:16.418 -0600
+Launch Time:     2026-09-14 14:27:15.590 -0600
+OS Version:      macOS 26.6.2 (25G83)
+Report Version:  7
+Analysis Tool:   /usr/bin/sample
+----
+
+Call graph:
+    3556 Thread_19952778   DispatchQueue_1: com.apple.main-thread  (serial)
+    + 3556 start  (in dyld) + 6992  [0x185ed44e4]
+    +   3556 main  (in matched_timing-4ef85e16328094f3) + 52  [0x1008ce16c]
+    +     3556 _RNvNtCsa9BKTri5B3M_3std2rt19lang_start_internal  (in matched_timing-4ef85e16328094f3) + 952  [0x100925a64]
+    +       3556 _RNCINvNtCsa9BKTri5B3M_3std2rt10lang_startuE0Cs8PLl0shpplk_14matched_timing  (in matched_timing-4ef85e16328094f3) + 16  [0x1008ccf64]
+    +         3556 _RINvNtNtCsa9BKTri5B3M_3std3sys9backtrace28___rust_begin_short_backtraceFEuuECs8PLl0shpplk_14matched_timing  (in matched_timing-4ef85e16328094f3) + 12  [0x1008cd1b0]
+    +           3556 _RNvCs3O4ZRUMviTO_4test16test_main_static  (in matched_timing-4ef85e16328094f3) + 300  [0x1008df6a4]
+    +             3556 _RNvNtCs3O4ZRUMviTO_4test7console17run_tests_console  (in matched_timing-4ef85e16328094f3) + 5388  [0x1008ef330]
+    +               3556 _RNvMs1_NtNtNtCsa9BKTri5B3M_3std4sync4mpmc4listINtB5_7ChannelNtNtCs3O4ZRUMviTO_4test5event13CompletedTestE4recvB10_  (in matched_timing-4ef85e16328094f3) + 432  [0x1008e55b4]
+    +                 3556 _RNCNvMs1_NtNtNtCsa9BKTri5B3M_3std4sync4mpmc4listINtB7_7ChannelNtNtCs3O4ZRUMviTO_4test5event13CompletedTestE4recvs_0B12_  (in matched_timing-4ef85e16328094f3) + 208  [0x1008dc638]
+    +                   3556 _RNvMs_NtNtCsa9BKTri5B3M_3std6thread6threadNtB4_6Thread12park_timeout  (in matched_timing-4ef85e16328094f3) + 100  [0x10091cacc]
+    +                     3556 _dispatch_semaphore_wait_slow  (in libdispatch.dylib) + 76  [0x1860e5ae8]
+    +                       3556 _dispatch_sema4_timedwait  (in libdispatch.dylib) + 64  [0x186118db8]
+    +                         3556 semaphore_timedwait_trap  (in libsystem_kernel.dylib) + 8  [0x18625bbc8]
+    3556 Thread_19952780: matched
+      3466 thread_start  (in libsystem_pthread.dylib) + 8  [0x18629ac1c]
+      ! 3466 _pthread_start  (in libsystem_pthread.dylib) + 136  [0x18629fc58]
+      !   3466 _RNvNvMs0_NtNtNtCsa9BKTri5B3M_3std3sys6thread4unixNtB7_6Thread3new12thread_start  (in matched_timing-4ef85e16328094f3) + 408  [0x10092c88c]
+      !     3466 _RNSNvYNCINvNtNtCsa9BKTri5B3M_3std6thread9lifecycle15spawn_uncheckedNCNvCs3O4ZRUMviTO_4test8run_tests_0uEs_0INtNtNtCsgtPOCBgevO_4core3ops8function6FnOnceuE9call_once6vtableB17_  (in matched_timing-4ef85e16328094f3) + 64  [0x1008de13c]
+      !       3466 _RINvNtNtCsa9BKTri5B3M_3std3sys9backtrace28___rust_begin_short_backtraceNCNvCs3O4ZRUMviTO_4test8run_tests_0uEB1b_  (in matched_timing-4ef85e16328094f3) + 132  [0x1008d6a6c]
+      !         3466 _RNCNvCs3O4ZRUMviTO_4test8run_test0B3_  (in matched_timing-4ef85e16328094f3) + 908  [0x1008dbbe4]
+      !           3466 _RINvCs3O4ZRUMviTO_4test28___rust_begin_short_backtraceINtNtCsgtPOCBgevO_4core6result6ResultuNtNtCslJsSqIQKwiA_5alloc6string6StringEFEBQ_EB2_  (in matched_timing-4ef85e16328094f3) + 24  [0x1008d079c]
+      !             3412 _RNvYNCNvCs8PLl0shpplk_14matched_timing7matched0INtNtNtCsgtPOCBgevO_4core3ops8function6FnOnceuE9call_onceB6_  (in matched_timing-4ef85e16328094f3) + 1340  [0x1008cdbec]
+      !             : 1198 _RINvCs2bXjfakhbSs_9kiln_json10parse_utf8jNCNvCs8PLl0shpplk_14matched_timing3run0EBH_  (in matched_timing-4ef85e16328094f3) + 660  [0x1008ccb1c]
+      !             : | 815 _RNvNtCsiSpG9ogyvJb_11encoding_rs3mem20convert_str_to_utf16  (in matched_timing-4ef85e16328094f3) + 460,304,...  [0x10090534c,0x1009052b0,...]
+      !             : | 253 _RNvNtCsiSpG9ogyvJb_11encoding_rs3mem20convert_str_to_utf16  (in matched_timing-4ef85e16328094f3) + 264  [0x100905288]
+      !             : | + 253 _RNvNtCsiSpG9ogyvJb_11encoding_rs5ascii18unpack_stride_tail  (in matched_timing-4ef85e16328094f3) + 4,212,...  [0x100905418,0x1009054e8,...]
+      !             : | 130 _RNvNtCsiSpG9ogyvJb_11encoding_rs3mem20convert_str_to_utf16  (in matched_timing-4ef85e16328094f3) + 136  [0x100905208]
+      !             : |   130 _RNvNtCsiSpG9ogyvJb_11encoding_rs5ascii8is_ascii  (in matched_timing-4ef85e16328094f3) + 12,16,...  [0x100905574,0x100905578,...]
+      !             : 1147 _RINvCs2bXjfakhbSs_9kiln_json10parse_utf8jNCNvCs8PLl0shpplk_14matched_timing3run0EBH_  (in matched_timing-4ef85e16328094f3) + 776  [0x1008ccb90]
+      !             : | 867 _RINvNtCs2bXjfakhbSs_9kiln_json6scalar4scanRStECs8PLl0shpplk_14matched_timing  (in matched_timing-4ef85e16328094f3) + 1012  [0x1008cf9a4]
+      !             : | + 557 _RINvNtCs2bXjfakhbSs_9kiln_json6scalar11string_nodeRStECs8PLl0shpplk_14matched_timing  (in matched_timing-4ef85e16328094f3) + 116,128,...  [0x1008ce648,0x1008ce654,...]
+      !             : | + 233 _RINvNtCs2bXjfakhbSs_9kiln_json6scalar11string_nodeRStECs8PLl0shpplk_14matched_timing  (in matched_timing-4ef85e16328094f3) + 932  [0x1008ce978]
+      !             : | + ! 204 _RNvMs3_Cs2bXjfakhbSs_9kiln_jsonNtB5_9TextArena12extend_utf16  (in matched_timing-4ef85e16328094f3) + 80  [0x1008d02cc]
+      !             : | + ! : 195 _platform_memmove  (in libsystem_platform.dylib) + 452,428,...  [0x1862a9524,0x1862a950c,...]
+      !             : | + ! : 9 DYLD-STUB$$memcpy  (in matched_timing-4ef85e16328094f3) + 4  [0x10094b138]
+      !             : | + ! 29 _RNvMs3_Cs2bXjfakhbSs_9kiln_jsonNtB5_9TextArena12extend_utf16  (in matched_timing-4ef85e16328094f3) + 32,12,...  [0x1008d029c,0x1008d0288,...]
+      !             : | + 54 _RINvNtCs2bXjfakhbSs_9kiln_json6scalar4scanRStECs8PLl0shpplk_14matched_timing  (in matched_timing-4ef85e16328094f3) + 2256,2932,...  [0x1008cfe80,0x1008d0124,...]
+      !             : | + 23 _RNvMs3_Cs2bXjfakhbSs_9kiln_jsonNtB5_9TextArena12extend_utf16  (in matched_timing-4ef85e16328094f3) + 100,104  [0x1008d02e0,0x1008d02e4]
+      !             : | 235 _RINvNtCs2bXjfakhbSs_9kiln_json6scalar4scanRStECs8PLl0shpplk_14matched_timing  (in matched_timing-4ef85e16328094f3) + 92  [0x1008cf60c]
+      !             : | + 181 _RINvNtCs2bXjfakhbSs_9kiln_json6scalar4scanRStECs8PLl0shpplk_14matched_timing  (in matched_timing-4ef85e16328094f3) + 216,2548,...  [0x1008cf688,0x1008cffa4,...]
+      !             : | + 54 _RNvMs3_Cs2bXjfakhbSs_9kiln_jsonNtB5_9TextArena12ensure_utf16  (in matched_timing-4ef85e16328094f3) + 32,48,...  [0x1008d0178,0x1008d0188,...]
+      !             : | 42 _RINvNtCs2bXjfakhbSs_9kiln_json6scalar11string_nodeRStECs8PLl0shpplk_14matched_timing  (in matched_timing-4ef85e16328094f3) + 1080,1068  [0x1008cea0c,0x1008cea00]
+      !             : | 3 _RNvMs3_Cs2bXjfakhbSs_9kiln_jsonNtB5_9TextArena12ensure_utf16  (in matched_timing-4ef85e16328094f3) + 280  [0x1008d0270]
+      !             : 810 _RINvCs2bXjfakhbSs_9kiln_json10parse_utf8jNCNvCs8PLl0shpplk_14matched_timing3run0EBH_  (in matched_timing-4ef85e16328094f3) + 248  [0x1008cc980]
+      !             : | 810 _RNvNtNtCsgtPOCBgevO_4core3str8converts9from_utf8  (in matched_timing-4ef85e16328094f3) + 52,120,...  [0x10093eaf0,0x10093eb34,...]
+      !             : 166 _RINvCs2bXjfakhbSs_9kiln_json10parse_utf8jNCNvCs8PLl0shpplk_14matched_timing3run0EBH_  (in matched_timing-4ef85e16328094f3) + 608,296,...  [0x1008ccae8,0x1008cc9b0,...]
+      !             : 38 _RINvCs2bXjfakhbSs_9kiln_json10parse_utf8jNCNvCs8PLl0shpplk_14matched_timing3run0EBH_  (in matched_timing-4ef85e16328094f3) + 608  [0x1008ccae8]
+      !             : | 20 __bzero  (in libsystem_platform.dylib) + 24  [0x1862a9048]
+      !             : | 17 DYLD-STUB$$bzero  (in matched_timing-4ef85e16328094f3) + 4  [0x10094afb8]
+      !             : | 1 _platform_memset  (in libsystem_platform.dylib) + 160  [0x1862a9130]
+      !             : 19 _RINvCs2bXjfakhbSs_9kiln_json10parse_utf8jNCNvCs8PLl0shpplk_14matched_timing3run0EBH_  (in matched_timing-4ef85e16328094f3) + 720  [0x1008ccb58]
+      !             : | 19 _tlv_get_addr  (in libdyld.dylib) + 20  [0x185e9c39c]
+      !             : 18 _RINvCs2bXjfakhbSs_9kiln_json10parse_utf8jNCNvCs8PLl0shpplk_14matched_timing3run0EBH_  (in matched_timing-4ef85e16328094f3) + 304  [0x1008cc9b8]
+      !             : | 18 _tlv_get_addr  (in libdyld.dylib) + 12,20  [0x185e9c394,0x185e9c39c]
+      !             : 16 _RNvNtCsiSpG9ogyvJb_11encoding_rs3mem20convert_str_to_utf16  (in matched_timing-4ef85e16328094f3) + 584,576,...  [0x1009053c8,0x1009053c0,...]
+      !             25 _RINvCs2bXjfakhbSs_9kiln_json10parse_utf8jNCNvCs8PLl0shpplk_14matched_timing3run0EBH_  (in matched_timing-4ef85e16328094f3) + 852,844,...  [0x1008ccbdc,0x1008ccbd4,...]
+      !             18 _RNvYNCNvCs8PLl0shpplk_14matched_timing7matched0INtNtNtCsgtPOCBgevO_4core3ops8function6FnOnceuE9call_onceB6_  (in matched_timing-4ef85e16328094f3) + 1340,1360  [0x1008cdbec,0x1008cdc00]
+      !             7 _RNvYNCNvCs8PLl0shpplk_14matched_timing7matched0INtNtNtCsgtPOCBgevO_4core3ops8function6FnOnceuE9call_onceB6_  (in matched_timing-4ef85e16328094f3) + 1268  [0x1008cdba4]
+      !             : 4 _RNvCs8PLl0shpplk_14matched_timing9budget_ms  (in matched_timing-4ef85e16328094f3) + 424  [0x1008cd56c]
+      !             : | 3 _xzm_free  (in libsystem_malloc.dylib) + 1048  [0x1860bc530]
+      !             : | + 3 mach_absolute_time  (in libsystem_kernel.dylib) + 16,108,...  [0x18625c0b0,0x18625c10c,...]
+      !             : | 1 _xzm_free  (in libsystem_malloc.dylib) + 0  [0x1860bc118]
+      !             : 3 _RNvCs8PLl0shpplk_14matched_timing9budget_ms  (in matched_timing-4ef85e16328094f3) + 36  [0x1008cd3e8]
+      !             :   3 _RNvNtCsa9BKTri5B3M_3std3env4__var  (in matched_timing-4ef85e16328094f3) + 136  [0x100925f44]
+      !             :     3 _RNCNvNtNtNtCsa9BKTri5B3M_3std3sys3env4unix6getenv0B9_  (in matched_timing-4ef85e16328094f3) + 52  [0x100914aa4]
+      !             :       3 getenv  (in libsystem_c.dylib) + 64  [0x18612def8]
+      !             :         3 __findenv_locked  (in libsystem_c.dylib) + 64,96,...  [0x18612df64,0x18612df84,...]
+      !             4 _RNvYNCNvCs8PLl0shpplk_14matched_timing7matched0INtNtNtCsgtPOCBgevO_4core3ops8function6FnOnceuE9call_onceB6_  (in matched_timing-4ef85e16328094f3) + 1256  [0x1008cdb98]
+      !               4 _RNvMNtCsa9BKTri5B3M_3std4timeNtB2_7Instant7elapsed  (in matched_timing-4ef85e16328094f3) + 28  [0x1009157c4]
+      !                 4 _RNvMNtNtNtNtCsa9BKTri5B3M_3std3sys3pal4unix4timeNtB2_8Timespec3now  (in matched_timing-4ef85e16328094f3) + 24  [0x100915c10]
+      !                   4 clock_gettime  (in libsystem_c.dylib) + 60  [0x18613bd60]
+      !                     3 clock_gettime_nsec_np  (in libsystem_c.dylib) + 384  [0x18612e15c]
+      !                     | 2 mach_absolute_time  (in libsystem_kernel.dylib) + 108  [0x18625c10c]
+      !                     | 1 DYLD-STUB$$mach_absolute_time  (in libsystem_c.dylib) + 12  [0x1861a6b8c]
+      !                     1 mach_timebase_info  (in libsystem_kernel.dylib) + 84  [0x18625c020]
+      55 ???  (in <unknown binary>)  [0x16f73a5c0]
+      ! 55 _RINvCs2bXjfakhbSs_9kiln_json10parse_utf8jNCNvCs8PLl0shpplk_14matched_timing3run0EBH_  (in matched_timing-4ef85e16328094f3) + 776  [0x1008ccb90]
+      !   55 _RINvNtCs2bXjfakhbSs_9kiln_json6scalar4scanRStECs8PLl0shpplk_14matched_timing  (in matched_timing-4ef85e16328094f3) + 2772,60,...  [0x1008d0084,0x1008cf5ec,...]
+      35 ???  (in <unknown binary>)  [0x16f73a4e0]
+        35 _RINvCs2bXjfakhbSs_9kiln_json10parse_utf8jNCNvCs8PLl0shpplk_14matched_timing3run0EBH_  (in matched_timing-4ef85e16328094f3) + 660  [0x1008ccb1c]
+          35 _RNvNtCsiSpG9ogyvJb_11encoding_rs3mem20convert_str_to_utf16  (in matched_timing-4ef85e16328094f3) + 24  [0x100905198]
+
+Total number in stack (recursive counted multiple, when >=5):
+
+Sort by top of stack, same collapsed (when >= 5):
+        semaphore_timedwait_trap  (in libsystem_kernel.dylib)        3556
+        _RNvNtCsiSpG9ogyvJb_11encoding_rs3mem20convert_str_to_utf16  (in matched_timing-4ef85e16328094f3)        866
+        _RNvNtNtCsgtPOCBgevO_4core3str8converts9from_utf8  (in matched_timing-4ef85e16328094f3)        810
+        _RINvNtCs2bXjfakhbSs_9kiln_json6scalar11string_nodeRStECs8PLl0shpplk_14matched_timing  (in matched_timing-4ef85e16328094f3)        599
+        _RINvNtCs2bXjfakhbSs_9kiln_json6scalar4scanRStECs8PLl0shpplk_14matched_timing  (in matched_timing-4ef85e16328094f3)        290
+        _RNvNtCsiSpG9ogyvJb_11encoding_rs5ascii18unpack_stride_tail  (in matched_timing-4ef85e16328094f3)        253
+        _platform_memmove  (in libsystem_platform.dylib)        195
+        _RINvCs2bXjfakhbSs_9kiln_json10parse_utf8jNCNvCs8PLl0shpplk_14matched_timing3run0EBH_  (in matched_timing-4ef85e16328094f3)        191
+        _RNvNtCsiSpG9ogyvJb_11encoding_rs5ascii8is_ascii  (in matched_timing-4ef85e16328094f3)        130
+        _RNvMs3_Cs2bXjfakhbSs_9kiln_jsonNtB5_9TextArena12ensure_utf16  (in matched_timing-4ef85e16328094f3)        57
+        _RNvMs3_Cs2bXjfakhbSs_9kiln_jsonNtB5_9TextArena12extend_utf16  (in matched_timing-4ef85e16328094f3)        52
+        _tlv_get_addr  (in libdyld.dylib)        37
+        __bzero  (in libsystem_platform.dylib)        20
+        _RNvYNCNvCs8PLl0shpplk_14matched_timing7matched0INtNtNtCsgtPOCBgevO_4core3ops8function6FnOnceuE9call_onceB6_  (in matched_timing-4ef85e16328094f3)        18
+        DYLD-STUB$$bzero  (in matched_timing-4ef85e16328094f3)        17
+        DYLD-STUB$$memcpy  (in matched_timing-4ef85e16328094f3)        9
+        mach_absolute_time  (in libsystem_kernel.dylib)        5
+
+Binary Images:
+       0x1008cc000 -        0x100971aab +matched_timing-4ef85e16328094f3 (0) <BBECCF3B-FEA8-3E4F-9A33-8CBAF1FFD060> /Users/*/Library/Caches/*/matched_timing-4ef85e16328094f3
+       0x185e2c000 -        0x185e7eb4b  libobjc.A.dylib (951.7) <03BD9E32-CF0A-37B0-898A-3CE8DE06D842> /usr/lib/libobjc.A.dylib
+       0x185e7f000 -        0x185eb3d58  libdyld.dylib (1387) <957F93B3-8805-39C7-9C51-EDD1715F550E> /usr/lib/system/libdyld.dylib
+       0x185eb4000 -        0x185f674ff  dyld (1.0.0 - 1387) <74E52480-C2BD-3C8D-812D-95FE2B74A096> /usr/lib/dyld
+       0x185f68000 -        0x185f6b228  libsystem_blocks.dylib (96) <E0AC1231-27AA-3A13-8FAC-41D5802B1F3C> /usr/lib/system/libsystem_blocks.dylib
+       0x185f6c000 -        0x185fc055f  libxpc.dylib (3102.160.5) <33E44C2D-D65E-37A6-B85F-1A4CF524A050> /usr/lib/system/libxpc.dylib
+       0x185fc1000 -        0x185fe19ff  libsystem_trace.dylib (1861.160.4) <93F1DD8C-6CD9-32B9-B222-D23DA5D161B4> /usr/lib/system/libsystem_trace.dylib
+       0x185fe2000 -        0x1860905f7  libcorecrypto.dylib (1922.160.10) <0642DDAD-4771-3C82-805C-E7C6701C1461> /usr/lib/system/libcorecrypto.dylib
+       0x186091000 -        0x1860e1257  libsystem_malloc.dylib (812.160.5) <D969A907-3E43-3951-9365-8C2DB3812E9D> /usr/lib/system/libsystem_malloc.dylib
+       0x1860e2000 -        0x18612923f  libdispatch.dylib (1542.160.2) <B2000CD5-F580-314A-A141-E036719D854E> /usr/lib/system/libdispatch.dylib
+       0x18612a000 -        0x18612cffb  libsystem_featureflags.dylib (103) <FEE12F9C-344B-33B3-8EDD-283580EF1C67> /usr/lib/system/libsystem_featureflags.dylib
+       0x18612d000 -        0x1861ae1e7  libsystem_c.dylib (1752.160.4) <D77CEB62-AFF6-3CEC-BA9B-4F057FBE2EB5> /usr/lib/system/libsystem_c.dylib
+       0x1861af000 -        0x18623fae7  libc++.1.dylib (2100.43) <F0FD393C-15BC-3C75-A19D-897F7B225C78> /usr/lib/libc++.1.dylib
+       0x186240000 -        0x18625a75f  libc++abi.dylib (2100.43) <F38A9C58-22AB-3798-BBAE-8DCD9CC0CE27> /usr/lib/libc++abi.dylib
+       0x18625b000 -        0x1862982e7  libsystem_kernel.dylib (12377.161.14) <C6A4A4CB-92E6-3BAF-AAE0-E8306259209A> /usr/lib/system/libsystem_kernel.dylib
+       0x186299000 -        0x1862a5b3b  libsystem_pthread.dylib (539.100.4) <A373F0B0-9880-326A-88B4-DD8BE4E33072> /usr/lib/system/libsystem_pthread.dylib
+       0x1862a6000 -        0x1862ae963  libsystem_platform.dylib (375.120.2) <EDB83A19-EC17-32DE-9350-6145970A85D6> /usr/lib/system/libsystem_platform.dylib
+       0x1862af000 -        0x1862de6eb  libsystem_info.dylib (600) <9B5FB84B-31AD-3EA7-8F89-8C700D369DC8> /usr/lib/system/libsystem_info.dylib
+       0x18a27c000 -        0x18a285e5f  libsystem_darwin.dylib (1752.160.4) <8E07D22E-CE5A-38A0-B091-5B0338C326F5> /usr/lib/system/libsystem_darwin.dylib
+       0x18a6e7000 -        0x18a6f91b6  libsystem_notify.dylib (348.160.3) <15799128-6CBD-30D6-A2BB-B9D02B4470C0> /usr/lib/system/libsystem_notify.dylib
+       0x18c9b8000 -        0x18c9d2f7b  libsystem_networkextension.dylib (2226.161.1) <9C7B1EEB-47BE-3791-93A9-CFC693CB9417> /usr/lib/system/libsystem_networkextension.dylib
+       0x18ca55000 -        0x18ca6cfdf  libsystem_asl.dylib (406) <54439739-33EE-3273-839F-CBA67D7F5CB1> /usr/lib/system/libsystem_asl.dylib
+       0x18e60e000 -        0x18e616387  libsystem_symptoms.dylib (2169.160.3) <229122B9-B8B1-3F2F-870E-8650AE3C4FB5> /usr/lib/system/libsystem_symptoms.dylib
+       0x1928b3000 -        0x1928eb5b7  libsystem_containermanager.dylib (725.160.3) <14B2A47F-19C8-392F-8FDB-FE8AE375DD41> /usr/lib/system/libsystem_containermanager.dylib
+       0x193cc5000 -        0x193cc95d7  libsystem_configuration.dylib (1405.160.3) <D8D6280B-783D-3550-BDBA-2861AE40604F> /usr/lib/system/libsystem_configuration.dylib
+       0x193cca000 -        0x193cd099f  libsystem_sandbox.dylib (2680.160.6) <54688162-B50D-3D31-A1E8-7B9766D3530D> /usr/lib/system/libsystem_sandbox.dylib
+       0x195325000 -        0x1953281fb  libquarantine.dylib (196.160.2) <EEE5AADB-52E1-3C4C-881A-70405770B1F1> /usr/lib/system/libquarantine.dylib
+       0x195ac4000 -        0x195acad03  libsystem_coreservices.dylib (191.5.1) <D4ACD2AC-5702-3C45-85A0-300B2C2D19E1> /usr/lib/system/libsystem_coreservices.dylib
+       0x196053000 -        0x196090a77  libsystem_m.dylib (3312.100.1) <B54FBE99-DB0B-32C7-ABDD-C2206DF606A4> /usr/lib/system/libsystem_m.dylib
+       0x196092000 -        0x196095527  libmacho.dylib (1387) <949131E5-BDA2-39BA-AA50-62651BB51802> /usr/lib/system/libmacho.dylib
+       0x1960af000 -        0x1960bc3a7  libcommonCrypto.dylib (600035) <3B110564-5278-3CB0-85F1-2CE8431FF935> /usr/lib/system/libcommonCrypto.dylib
+       0x1960bd000 -        0x1960c6ca3  libunwind.dylib (2100.2) <05FD0014-55B1-3B8A-A6BA-6C7A389C4123> /usr/lib/system/libunwind.dylib
+       0x1960cf000 -        0x1960d9bef  libcopyfile.dylib (240.160.2.0.1) <D0009B8A-8ECC-3D56-9206-7E1839707F93> /usr/lib/system/libcopyfile.dylib
+       0x1960da000 -        0x1960dd987  libcompiler_rt.dylib (103.3) <6FB345CA-7F5C-3263-A23F-143F7539FD8A> /usr/lib/system/libcompiler_rt.dylib
+       0x1960de000 -        0x1960e278b  libsystem_collections.dylib (1752.160.4) <C8160BD2-5941-3DC0-BB40-F8C2B8156EC4> /usr/lib/system/libsystem_collections.dylib
+       0x1960e3000 -        0x1960e64cf  libsystem_secinit.dylib (168.100.7) <ECABC024-8F02-374A-BB7E-29437CEA2ABD> /usr/lib/system/libsystem_secinit.dylib
+       0x1960e7000 -        0x1960e9bf7  libremovefile.dylib (85.100.6) <7460B5AE-469A-36A0-A7EC-6C7D69628E86> /usr/lib/system/libremovefile.dylib
+       0x1960ea000 -        0x1960eaf27  libkeymgr.dylib (31) <7E863FCA-F3FF-32C7-8A8C-F983E946AFC3> /usr/lib/system/libkeymgr.dylib
+       0x1960eb000 -        0x1960f3e37  libsystem_dnssd.dylib (2881.160.4) <305F4398-E688-3384-B351-02D865EC8A04> /usr/lib/system/libsystem_dnssd.dylib
+       0x1960f4000 -        0x1960f909b  libcache.dylib (95) <9CD7B1E1-3E47-339C-A193-2392E3E0ED23> /usr/lib/system/libcache.dylib
+       0x1960fa000 -        0x1960fbce3  libSystem.B.dylib (1356) <4FED5EE2-5D3E-35B1-A170-9859C4B683BB> /usr/lib/libSystem.B.dylib
+       0x28a0bd000 -        0x28a0c4349  libRosetta.dylib (367.9) <0C7397C6-D747-31F2-8BC1-4096213BDE5C> /usr/lib/libRosetta.dylib
+       0x28bcd0000 -        0x28bcd3a4b  libsystem_darwindirectory.dylib (122) <971A4F65-493D-39F3-846D-0D33FA2769FD> /usr/lib/system/libsystem_darwindirectory.dylib
+       0x28bcd4000 -        0x28bcde39b  libsystem_eligibility.dylib (319.160.17) <750CA446-92EA-3A56-9A7B-CC0841686C50> /usr/lib/system/libsystem_eligibility.dylib
+       0x28bcdf000 -        0x28bce688b  libsystem_sanitizers.dylib (26.1) <D88EC709-9AA8-3083-B22B-D3CB39678D71> /usr/lib/system/libsystem_sanitizers.dylib
+       0x28bce7000 -        0x28bce7bb7  libsystem_trial.dylib (474.2.18.2) <7194FF5B-A6C5-3D67-B00A-90209F10D603> /usr/lib/system/libsystem_trial.dylib
+

@@ -54,9 +54,11 @@ impl StringUnits {
     pub fn len(&self) -> usize {
         self.unit_len()
     }
+
     pub fn is_empty(&self) -> bool {
         self.unit_len() == 0
     }
+
     pub fn encode_utf16(&self) -> UnitIter<'_> {
         self.units()
     }
@@ -102,8 +104,8 @@ impl StringUnits {
     }
 }
 
-/// A borrowed JavaScript string view. Latin1 remains byte backed while UTF-16 keeps every code
-/// unit, including lone surrogates, visible to consumers that need an exact key comparison.
+/// A borrowed JavaScript string view. The representation remains visible to consumers that can
+/// specialize Latin1 hot loops, while UTF-16 keeps every code unit including lone surrogates.
 #[derive(Clone, Copy, Debug)]
 pub enum StringView<'a> {
     Latin1(&'a [u8]),
