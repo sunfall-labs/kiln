@@ -2086,12 +2086,27 @@ fn render_key_table(output: &mut String, program: &Program, symbol: &str, keys: 
         let Constant::String(text) = &program.constants[*index as usize] else {
             unreachable!("verification rejects a non-string property name before emission")
         };
-        writeln!(
-            output,
-            "    if (({symbol}_key_{index} = kiln_c99_intern_static({symbol}_constant_{index}, {})) == NULL) return KILN_C99_OUT_OF_MEMORY;",
-            text.len()
-        )
-        .unwrap();
+        if text.units().all(|unit| unit <= 0xff) {
+            // The key table still feeds the legacy `const char * + len` interner.  The
+            // canonical constant is a headed kiln_string, so passing `_constant_{index}` here
+            // would hash the header (the first bytes are the unit length and flags) rather than
+            // the key bytes.  Latin1 is already one byte per JavaScript code unit; take the
+            // payload explicitly at this ABI boundary.
+            writeln!(
+                output,
+                "    if (({symbol}_key_{index} = kiln_c99_intern_static((const char *)kiln_string_latin1(&{symbol}_string_{index}), {})) == NULL) return KILN_C99_OUT_OF_MEMORY;",
+                text.len()
+            )
+            .unwrap();
+        } else {
+            // The old key API has no UTF-16 unit representation.  Do not feed it a header or
+            // silently lossy bytes until the canonical key store is migrated end to end.
+            writeln!(
+                output,
+                "    return kiln_c99_refuse(\"a UTF-16 named property key crossing the legacy key ABI\");"
+            )
+            .unwrap();
+        }
     }
     writeln!(
         output,
