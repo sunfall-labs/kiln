@@ -45466,7 +45466,17 @@ fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
         | Value::Callback(_, _)
         | Value::Settler(..)
         | Value::Capability(..)
-        | Value::Element(_) => intrinsics.own_keys(target).unwrap_or_default(),
+        | Value::Element(_) => {
+            let mut keys = intrinsics.own_keys(target).unwrap_or_default();
+            // Promise combinators create their resolve/reject element functions as runtime
+            // callables rather than intrinsics, so they have no materialized store.  Their
+            // identity slots are still own properties, and CreateBuiltinFunction installs them
+            // in length/name order.  Keep that order visible to OrdinaryOwnPropertyKeys.
+            if matches!(target, Value::Element(_)) {
+                keys.splice(0..0, ["length".to_owned(), "name".to_owned()]);
+            }
+            keys
+        }
         Value::Array(items) => {
             // An accessor leaves a hole in the dense storage, so the indices that are really
             // there are the union of the two: the walk below would otherwise list an array's
@@ -45520,10 +45530,17 @@ fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
 /// `own_attributes`: a name is included only when the same property machinery can describe it.
 fn intrinsic_extra_property_names(target: &Value) -> Vec<String> {
     match target {
-        Value::Native(Native::Temporal(op), _) => temporal::property_names(*op)
-            .iter()
-            .map(|name| (*name).to_owned())
-            .collect(),
+        Value::Native(Native::Temporal(op), _) => match op {
+            temporal::Op::Prototype(kind) => temporal::property_names(*op)
+                .iter()
+                .chain(temporal::prototype_accessor_names(*kind).iter())
+                .map(|name| (*name).to_owned())
+                .collect(),
+            _ => temporal::property_names(*op)
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect(),
+        },
         Value::Native(Native::Intl(op), _) => intl::property_names(*op)
             .iter()
             .map(|name| (*name).to_owned())
