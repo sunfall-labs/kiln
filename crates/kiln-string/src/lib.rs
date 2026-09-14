@@ -1,5 +1,6 @@
 //! Lossless JavaScript string units shared by the frontend, both runtimes, and host boundaries.
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -67,12 +68,26 @@ impl StringUnits {
         self.units().collect()
     }
 
+    /// Return scalar text while borrowing an ASCII Latin1 representation when possible.
+    /// UTF-16 remains checked for lone surrogates at this boundary.
+    pub fn to_scalar_cow(&self) -> Result<Cow<'_, str>, &'static str> {
+        match self.as_view() {
+            StringView::Latin1(bytes) => Ok(encoding_rs::mem::decode_latin1(bytes)),
+            StringView::Utf16(units) => String::from_utf16(units)
+                .map(Cow::Owned)
+                .map_err(|_| "string contains a lone surrogate"),
+        }
+    }
+
     pub fn to_scalar_string(&self) -> Result<String, &'static str> {
-        String::from_utf16(&self.to_units()).map_err(|_| "string contains a lone surrogate")
+        self.to_scalar_cow().map(Cow::into_owned)
     }
 
     pub fn to_lossy_string(&self) -> String {
-        String::from_utf16_lossy(&self.to_units())
+        match self.as_view() {
+            StringView::Latin1(bytes) => encoding_rs::mem::decode_latin1(bytes).into_owned(),
+            StringView::Utf16(units) => String::from_utf16_lossy(units),
+        }
     }
 }
 
@@ -138,6 +153,9 @@ impl Iterator for UnitIter<'_> {
 
 impl From<&str> for StringUnits {
     fn from(text: &str) -> Self {
+        if text.is_ascii() {
+            return Self(Repr::Latin1(Arc::from(text.as_bytes())));
+        }
         let mut units = Vec::with_capacity(text.len());
         for scalar in text.chars() {
             let mut encoded = [0; 2];
@@ -198,6 +216,21 @@ mod tests {
         assert_eq!(wide.as_view().unit_at(1), Some(0xd800));
         assert!(wide.as_view().latin1_slice(0, 2).is_none());
         assert_ne!(StringView::Utf16(&[0xd800]), StringView::Utf16(&[0xfffd]));
+    }
+
+    #[test]
+    fn scalar_conversion_uses_existing_storage() {
+        let ascii = StringUnits::from("abc");
+        assert!(matches!(
+            ascii.to_scalar_cow(),
+            Ok(std::borrow::Cow::Borrowed("abc"))
+        ));
+        let latin = StringUnits::from("caf\u{e9}");
+        assert_eq!(latin.to_scalar_string().unwrap(), "caf\u{e9}");
+        assert_eq!(latin.to_lossy_string(), "caf\u{e9}");
+        let wide = StringUnits::from_units(&[0x61, 0xd800]);
+        assert!(wide.to_scalar_cow().is_err());
+        assert_eq!(wide.to_lossy_string(), "a\u{fffd}");
     }
     #[test]
     fn utf8_decodes_pairs() {

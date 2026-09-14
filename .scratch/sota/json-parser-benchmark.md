@@ -22,3 +22,14 @@ Three alternating baseline/candidate pairs ran after the quiet slot was reserved
 Every row's normalized tape checksum matched: `4`, `1`, `2`, `2`, and `201`. The candidate's additional `existing-units` row prepares `StringUnits` outside timing and parses the same Unicode payload directly as UTF-16: `0.0215`, `0.0221`, and `0.0219` us/parse across the three runs, versus baseline's UTF-8 byte path `0.0190`, `0.0209`, and `0.0196`. Direct UTF-16 raw-span bulk copying closes the representation-path gap. The external UTF-8 adapter row includes required UTF-8 to UTF-16 decoding and is measured separately.
 
 The release test executable was rebuilt by the commands above; its test output is intentionally not checked in because Cargo names it from the build hash. The ignored source is the reproducible artifact.
+
+Follow-up numeric diagnosis retained under `.scratch/sota/json-numeric-profile/`: the out-of-line
+`number_from_parts` call was found in the candidate's optimized assembly and sampled stack. With
+the measured `#[inline(always)]` boundary fix, the final candidate executable was
+`target/release/deps/matched_timing-e32cd39cc86bbf5b`, SHA-256
+`c34a2db9229bba4d0484e593511ee62b9742e997beacfbf6a8c345f3298c5af1`; the baseline executable
+was `/Users/alee/Developer/Personal/kiln-json-baseline/target/release/deps/matched_timing-1dc06dc969ffc946`, SHA-256 `56220229f944794ba43c55094a7ef4a57c17959acb4a8fbb91571c1a484efcba`.
+The final candidate run used the ignored harness command above and reported
+`short-ascii 0.0140`, `long-ascii 1.4671`, `escaped 0.0218`, `unicode 0.0831`,
+`number-heavy 1.3173`, and `existing-units 0.0170` microseconds per parse, with checksums
+`4,1,2,2,201,2`.

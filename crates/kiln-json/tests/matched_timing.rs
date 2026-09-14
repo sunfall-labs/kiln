@@ -1,12 +1,29 @@
 use kiln_string::StringUnits;
+use std::env;
 use std::hint::black_box;
 use std::time::Instant;
 
+fn selected(label: &str) -> bool {
+    env::var("KILN_JSON_BENCH_FILTER")
+        .map(|filter| filter.split(',').any(|candidate| candidate == label))
+        .unwrap_or(true)
+}
+
+fn budget_ms() -> u128 {
+    env::var("KILN_JSON_BENCH_MIN_MS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(700)
+}
+
 fn run(label: &str, source: &[u8]) {
+    if !selected(label) {
+        return;
+    }
     let mut checksum = 0usize;
     let started = Instant::now();
     let mut parses = 0usize;
-    while started.elapsed().as_millis() < 700 || parses < 20_000 {
+    while started.elapsed().as_millis() < budget_ms() || parses < 20_000 {
         for _ in 0..1000 {
             checksum = black_box(checksum.wrapping_add(
                 kiln_json::parse(source, |tape| tape.nodes().len()).expect("parses"),
@@ -22,10 +39,13 @@ fn run(label: &str, source: &[u8]) {
 }
 
 fn run_units(label: &str, source: &StringUnits) {
+    if !selected(label) {
+        return;
+    }
     let mut checksum = 0usize;
     let started = Instant::now();
     let mut parses = 0usize;
-    while started.elapsed().as_millis() < 700 || parses < 20_000 {
+    while started.elapsed().as_millis() < budget_ms() || parses < 20_000 {
         for _ in 0..1000 {
             checksum = black_box(checksum.wrapping_add(
                 kiln_json::parse_units(source, |tape| tape.nodes().len()).expect("parses"),
