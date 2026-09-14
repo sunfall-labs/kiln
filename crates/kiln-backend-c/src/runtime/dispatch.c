@@ -1,96 +1,7 @@
 
-/* Which of a built-in's arguments name a *number*, as a bitmask over argument positions.
- *
- * The C twin of the interpreter's `numeric_arguments`, and deliberately the same list written
- * twice: the two engines run the same bytecode, so a position coerced in one and not in the
- * other is a divergence by construction -- which is exactly how
- * `(5.5).toFixed({valueOf: () => 2})` came to answer `"6"` here and `"5.50"` there, with the
- * program's own `valueOf` never called at all.
- *
- * Only positions that really are numbers are listed. `fill`'s value and `indexOf`'s needle are
- * any value at all, and converting either would be wrong. */
-static uint32_t kiln_c99_numeric_arguments(uint64_t code) {
-    /* `DataView.prototype`, answered by a range test rather than twenty `case`s.
-     *
-     * Every accessor takes its byte offset first, and a numeric setter takes a value second --
-     * both `ToNumber`, and both converted here because this is the pass with a machine to run a
-     * `valueOf` with. The order matters and is observable: the interpreter converts the value
-     * *before* it checks the bounds, so a `valueOf` that throws throws even when the write could
-     * never have landed.
-     *
-     * The two BigInt setters name only the offset. `ToNumber` on a BigInt is a TypeError, which
-     * is the one type those two accept, so their value is `ToBigInt`ed by the handler instead. */
-    if (code >= KILN_C99_METHOD_DATA_VIEW_GET_INT8 &&
-        code <= KILN_C99_METHOD_DATA_VIEW_SET_BIG_UINT64) {
-        if (code >= KILN_C99_METHOD_DATA_VIEW_SET_INT8 &&
-            code <= KILN_C99_METHOD_DATA_VIEW_SET_FLOAT64) {
-            return UINT32_C(0x3);
-        }
-        return UINT32_C(0x1);
-    }
-    switch (code) {
-    /* `(start, end)`. */
-    case KILN_C99_METHOD_SLICE:
-    case KILN_C99_METHOD_ARRAY_SPLICE:
-    case KILN_C99_METHOD_ARRAY_TO_SPLICED:
-    case KILN_C99_METHOD_STRING_SLICE:
-    case KILN_C99_METHOD_SUBSTRING:
-    case KILN_C99_METHOD_STRING_SUBSTR:
-    case KILN_C99_METHOD_TYPED_SUBARRAY:
-        return UINT32_C(0x3);
-    /* `(target, start, end)`. */
-    case KILN_C99_METHOD_ARRAY_COPY_WITHIN:
-        return UINT32_C(0x7);
-    /* `(value, start, end)`: the value is any value at all, the two bounds are numbers. */
-    case KILN_C99_METHOD_ARRAY_FILL:
-        return UINT32_C(0x6);
-    /* `(searched, from)`: the needle is any value at all, the position is a number. */
-    case KILN_C99_METHOD_INDEX_OF:
-    case KILN_C99_METHOD_ARRAY_LAST_INDEX_OF:
-    case KILN_C99_METHOD_INCLUDES:
-    case KILN_C99_METHOD_STRING_INDEX_OF:
-    case KILN_C99_METHOD_LAST_INDEX_OF:
-    case KILN_C99_METHOD_STRING_INCLUDES:
-    case KILN_C99_METHOD_STARTS_WITH:
-    case KILN_C99_METHOD_ENDS_WITH:
-    case KILN_C99_METHOD_TYPED_SET:
-        return UINT32_C(0x2);
-    /* One number, in the first position. */
-    case KILN_C99_METHOD_ARRAY_AT:
-    /* `with`'s index only. Its second argument is stored exactly as it was handed over -- it is
-     * the one argument of the four copying methods that must not be converted to anything. */
-    case KILN_C99_METHOD_ARRAY_WITH:
-    case KILN_C99_METHOD_STRING_AT:
-    case KILN_C99_METHOD_CHAR_AT:
-    case KILN_C99_METHOD_CHAR_CODE_AT:
-    case KILN_C99_METHOD_STRING_CODE_POINT_AT:
-    case KILN_C99_METHOD_PAD_START:
-    case KILN_C99_METHOD_PAD_END:
-    case KILN_C99_METHOD_REPEAT:
-    case KILN_C99_METHOD_NUMBER_TO_FIXED:
-    case KILN_C99_METHOD_NUMBER_TO_EXPONENTIAL:
-    case KILN_C99_METHOD_NUMBER_TO_PRECISION:
-    case KILN_C99_METHOD_NUMBER_TO_STRING:
-        return UINT32_C(0x1);
-    default:
-        return UINT32_C(0);
-    }
-}
-
-/* Which of a built-in's arguments it reads as *text*, on the same terms as the table above.
- *
- * The C twin of the interpreter's `textual_arguments`. The four `CreateHTML` wrappers that take
- * an attribute belong here too and are absent only because this backend does not carry them --
- * it refuses them by name, which is an answer, where a wrong string would not be. */
-static uint32_t kiln_c99_textual_arguments(uint64_t code) {
-    switch (code) {
-    case KILN_C99_METHOD_ESCAPE:
-    case KILN_C99_METHOD_UNESCAPE:
-        return UINT32_C(0x1);
-    default:
-        return UINT32_C(0);
-    }
-}
+/* Argument coercion metadata is generated from the Rust method registry in prelude.rs.
+ * Dispatch reads groups and both coercion masks together so this hot path has one descriptor
+ * lookup and unknown codes retain the all-zero refusal behavior. */
 
 /* Whether a numeric argument still has to go through `ToNumber` to become one.
  *
@@ -237,7 +148,7 @@ static int kiln_c99_data_view_method(kiln_host *host, kiln_value *result, uint64
          * that could never have landed still runs the conversion, so `view.setBigInt64(999, 1)`
          * is the TypeError about the number rather than the RangeError about the offset.
          *
-         * The eight numeric setters arrive already converted -- `kiln_c99_numeric_arguments`
+         * The eight numeric setters arrive already converted -- the generated numeric mask
          * names argument one for them, and that pass is the one with a machine to run a
          * `valueOf` with. Only the BigInt pair is left to do here, because `ToNumber` is a
          * TypeError on the one type those two accept. */
@@ -1055,14 +966,15 @@ KILN_DEF_TIMSORT(typed, double, kiln_c99_typed_sort_context, kiln_c99_sort_compa
 static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
                                   kiln_value receiver, const kiln_value *args, size_t argc,
                                   int depth, kiln_value *thrown) {
-    uint32_t numeric = kiln_c99_numeric_arguments(code);
-    uint32_t textual = kiln_c99_textual_arguments(code);
+    kiln_c99_method_metadata metadata = kiln_c99_method_metadata_for(code);
+    uint32_t numeric = metadata.numeric_arguments;
+    uint32_t textual = metadata.textual_arguments;
     kiln_value inline_storage[KILN_C99_COERCED_INLINE];
     kiln_value *coerced = NULL;
     size_t index;
     int status = KILN_C99_OK;
     if ((numeric | textual) == 0 || argc == 0) {
-        return kiln_c99_invoke_method_dispatch(host, result, code, receiver, args, argc, depth,
+        return kiln_c99_invoke_method_dispatch(host, result, code, metadata, receiver, args, argc, depth,
                                                thrown);
     }
     for (index = 0; index < argc && index < 32; ++index) {
@@ -1099,7 +1011,7 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
         }
     }
     if (status == KILN_C99_OK) {
-        status = kiln_c99_invoke_method_dispatch(host, result, code, receiver,
+        status = kiln_c99_invoke_method_dispatch(host, result, code, metadata, receiver,
                                                  coerced == NULL ? args : coerced, argc, depth,
                                                  thrown);
     }
@@ -1348,6 +1260,7 @@ int kiln_c99_default_require(void *context, kiln_host *host, kiln_value specifie
 }
 
 static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, uint64_t code,
+                                           kiln_c99_method_metadata metadata,
                                            kiln_value receiver, const kiln_value *args,
                                            size_t argc, int depth, kiln_value *thrown) {
     kiln_array *array;
@@ -1367,13 +1280,8 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         code == KILN_C99_METHOD_NODE_FFI_UNREGISTER_CALLBACK ||
         code == KILN_C99_METHOD_NODE_FFI_CLOSE)
         return kiln_c99_node_ffi(host, result, code, receiver, args, argc, depth, thrown);
-    /* `kiln_c99_method_groups` is a generated switch over every method code this backend knows,
-     * and every group test below used to run it again from scratch just to AND one bit out of
-     * its answer -- a code that reaches its group late in this chain (an ordinary node:http
-     * method, behind the event and net tests) paid for the switch three or four times over on
-     * every call. `code` cannot change underneath this function, so its groups cannot either;
-     * one call up front and a mask test everywhere below answers exactly the same questions. */
-    uint32_t groups = kiln_c99_method_groups(code);
+    /* The generated descriptor answers all dispatch groups once. */
+    uint32_t groups = metadata.groups;
     /* The iterator helpers, routed by *range* rather than by group. They are one contiguous block
      * with one handler, and a range test here is a comparison against two constants where a group
      * bit would have cost one of the twenty-one the mask has left. Nothing else may be numbered
