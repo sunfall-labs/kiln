@@ -36,6 +36,10 @@ impl Node {
 pub trait UnitSource {
     fn unit_len(&self) -> usize;
     fn unit_at(&self, index: usize) -> Option<u16>;
+    #[inline]
+    fn unit_or_end(&self, index: usize) -> u32 {
+        self.unit_at(index).map(u32::from).unwrap_or(0x1_0000)
+    }
     fn latin1_slice(&self, _start: usize, _end: usize) -> Option<&[u8]> {
         None
     }
@@ -48,39 +52,29 @@ impl<T: UnitSource + ?Sized> UnitSource for &T {
     fn unit_at(&self, index: usize) -> Option<u16> {
         (*self).unit_at(index)
     }
+    fn unit_or_end(&self, index: usize) -> u32 {
+        (*self).unit_or_end(index)
+    }
     fn latin1_slice(&self, start: usize, end: usize) -> Option<&[u8]> {
         (*self).latin1_slice(start, end)
     }
 }
 
-impl UnitSource for StringUnits {
-    fn unit_len(&self) -> usize {
-        self.unit_len()
-    }
-    fn unit_at(&self, index: usize) -> Option<u16> {
-        self.unit_at(index)
-    }
-    fn latin1_slice(&self, start: usize, end: usize) -> Option<&[u8]> {
-        self.as_view().latin1_slice(start, end)
-    }
-}
-impl UnitSource for StringView<'_> {
-    fn unit_len(&self) -> usize {
-        (*self).unit_len()
-    }
-    fn unit_at(&self, index: usize) -> Option<u16> {
-        (*self).unit_at(index)
-    }
-    fn latin1_slice(&self, start: usize, end: usize) -> Option<&[u8]> {
-        (*self).latin1_slice(start, end)
-    }
-}
 impl UnitSource for [u8] {
     fn unit_len(&self) -> usize {
         self.len()
     }
     fn unit_at(&self, index: usize) -> Option<u16> {
         self.get(index).copied().map(u16::from)
+    }
+    #[inline]
+    fn unit_or_end(&self, index: usize) -> u32 {
+        if index < self.len() {
+            // SAFETY: the explicit length check proves this index is in the slice.
+            unsafe { u32::from(*self.get_unchecked(index)) }
+        } else {
+            0x1_0000
+        }
     }
     fn latin1_slice(&self, start: usize, end: usize) -> Option<&[u8]> {
         self.get(start..end)
@@ -92,6 +86,15 @@ impl UnitSource for [u16] {
     }
     fn unit_at(&self, index: usize) -> Option<u16> {
         self.get(index).copied()
+    }
+    #[inline]
+    fn unit_or_end(&self, index: usize) -> u32 {
+        if index < self.len() {
+            // SAFETY: the explicit length check proves this index is in the slice.
+            unsafe { u32::from(*self.get_unchecked(index)) }
+        } else {
+            0x1_0000
+        }
     }
 }
 
@@ -310,7 +313,10 @@ pub fn parse_units<R>(
     source: &StringUnits,
     walk: impl FnOnce(&Tape<'_>) -> R,
 ) -> Result<R, ParseError> {
-    parse_source(source, walk)
+    match source.as_view() {
+        StringView::Latin1(bytes) => parse_source(&bytes, walk),
+        StringView::Utf16(units) => parse_source(&units, walk),
+    }
 }
 pub fn parse_utf8<R>(source: &[u8], walk: impl FnOnce(&Tape<'_>) -> R) -> Result<R, ParseError> {
     if source.is_ascii() {

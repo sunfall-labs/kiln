@@ -8358,29 +8358,25 @@ mod json {
     /// The reader could not run at all: the text is longer than the tape indexes, or it panicked.
     const READER_FAILED: i32 = -2;
 
-    enum Source<'a> {
-        Latin1(&'a [u8]),
-        Utf16(&'a [u16]),
-    }
-    impl UnitSource for Source<'_> {
-        fn unit_len(&self) -> usize {
-            match self {
-                Self::Latin1(bytes) => bytes.len(),
-                Self::Utf16(units) => units.len(),
-            }
-        }
-        fn unit_at(&self, index: usize) -> Option<u16> {
-            match self {
-                Self::Latin1(bytes) => bytes.get(index).copied().map(u16::from),
-                Self::Utf16(units) => units.get(index).copied(),
-            }
-        }
-        fn latin1_slice(&self, start: usize, end: usize) -> Option<&[u8]> {
-            match self {
-                Self::Latin1(bytes) => bytes.get(start..end),
-                Self::Utf16(_) => None,
-            }
-        }
+    fn parse_tape<S: UnitSource>(
+        source: S,
+    ) -> Result<(*const Node, usize, KilnString), ParseError> {
+        kiln_json::parse_source(&source, |tape| {
+            let nodes = tape.nodes();
+            let view = match tape.text() {
+                TextSlice::Latin1(bytes) => KilnString {
+                    unit_len: bytes.len() as u32,
+                    flags: 0,
+                    data: bytes.as_ptr().cast(),
+                },
+                TextSlice::Utf16(units) => KilnString {
+                    unit_len: units.len() as u32,
+                    flags: 1,
+                    data: units.as_ptr().cast(),
+                },
+            };
+            (nodes.as_ptr(), nodes.len(), view)
+        })
     }
 
     /// Parse `len` bytes of UTF-8 at `bytes`.
@@ -8407,29 +8403,11 @@ mod json {
         let Some(source) = (unsafe { super::validate_string(source) }) else {
             return INVALID_ARGUMENT;
         };
-        let source = match source {
-            ValidatedString::Latin1(bytes) => Source::Latin1(bytes),
-            ValidatedString::Utf16(units) => Source::Utf16(units),
-        };
         // A panic must not cross the C boundary: the archive's unwind policy makes one fatal to
         // the process, and this is `JSON.parse`, which a program wraps in `try`.
-        let parsed = catch_unwind(AssertUnwindSafe(|| {
-            kiln_json::parse_source(&source, |tape| {
-                let nodes = tape.nodes();
-                let view = match tape.text() {
-                    TextSlice::Latin1(bytes) => KilnString {
-                        unit_len: bytes.len() as u32,
-                        flags: 0,
-                        data: bytes.as_ptr().cast(),
-                    },
-                    TextSlice::Utf16(units) => KilnString {
-                        unit_len: units.len() as u32,
-                        flags: 1,
-                        data: units.as_ptr().cast(),
-                    },
-                };
-                (nodes.as_ptr(), nodes.len(), view)
-            })
+        let parsed = catch_unwind(AssertUnwindSafe(|| match source {
+            ValidatedString::Latin1(bytes) => parse_tape(bytes),
+            ValidatedString::Utf16(units) => parse_tape(units),
         }));
         match parsed {
             Ok(Ok((nodes, count, text))) => {
