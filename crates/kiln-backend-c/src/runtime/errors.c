@@ -411,12 +411,17 @@ static int kiln_c99_throw_not_iterable(kiln_value *thrown, kiln_value value) {
          * different subject than the one the program wrote. */
         KILN_C99_REFUSE("a value with no string form to name in the message");
     }
-    if (kiln_c99_text_append(&built, shown.ptr, shown.len) != KILN_C99_OK ||
+    uint8_t *encoded = NULL;
+    size_t encoded_len = 0;
+    if (kiln_c99_string_to_utf8_lossy(shown, &encoded, &encoded_len) != KILN_C99_OK ||
+        kiln_c99_text_append(&built, (const char *)encoded, encoded_len) != KILN_C99_OK ||
         kiln_c99_text_append_c(&built, " is not iterable") != KILN_C99_OK ||
         kiln_c99_text_append(&built, terminator, 1) != KILN_C99_OK) {
+        free(encoded);
         free(built.bytes);
         return KILN_C99_OUT_OF_MEMORY;
     }
+    free(encoded);
     status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, built.bytes);
     free(built.bytes);
     return status;

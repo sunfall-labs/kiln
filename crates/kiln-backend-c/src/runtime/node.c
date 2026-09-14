@@ -1991,6 +1991,8 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
         }
         if (code == KILN_C99_METHOD_NODE_SERVER_LISTEN) {
             kiln_node_completion *work;
+            uint8_t *host_owned = NULL;
+            size_t host_len = 0;
             kiln_value port_value = argc > 0 ? args[0] : kiln_c99_undefined();
             size_t callback_index = argc > 1 && kiln_c99_is_callable(args[1]) ? 1 : 2;
             kiln_value host_value = callback_index == 1
@@ -2016,9 +2018,15 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
             if (work == NULL) return KILN_C99_OUT_OF_MEMORY;
             work->kind = KILN_REALM_OP_TCP_LISTEN;
             work->server = server;
+            status = kiln_c99_string_to_utf8_lossy(host_value, &host_owned, &host_len);
+            if (status != KILN_C99_OK) {
+                kiln_c99_gc_release(work);
+                return status;
+            }
             status = kiln_c99_node_start(KILN_REALM_OP_TCP_LISTEN, 0, (uint64_t)port,
-                                         host_value.ptr, host_value.len, NULL, 0, work,
+                                         (const char *)host_owned, host_len, NULL, 0, work,
                                          &server->listen_request);
+            free(host_owned);
             if (status != KILN_C99_OK) return status;
             *result = receiver;
             return KILN_C99_OK;
