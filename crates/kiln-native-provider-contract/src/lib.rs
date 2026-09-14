@@ -4,13 +4,16 @@ use kiln_digest::Digest;
 use serde::{Deserialize, Serialize};
 
 pub const SOURCE_LIST: &str = include_str!("../../kiln-native/provider-sources.txt");
-pub const SCHEMA_VERSION: u16 = 1;
+// Schema 2 changes `http: false` from "all semantic engines except HTTP" to the common
+// Realm/RegExp/BigInt/JSON set. Old compilers must reject the smaller archive rather than assuming
+// Temporal, JSON, Intl, parallel, and FFI are present.
+pub const SCHEMA_VERSION: u16 = 2;
 pub const PROVIDER_NAME: &str = "kiln-native-number-ffi";
 pub const PROFILE: &str = "provider";
 pub const RUSTFLAGS: &str =
     "-C panic=unwind -C relocation-model=pic -C target-cpu=generic -C debuginfo=0";
 pub const FULL_FEATURES: &str = "regexp,bigint,temporal,json,intl,parallel,ffi";
-pub const SLIM_FEATURES: &str = "realm,regexp,bigint,temporal,json,intl,parallel,ffi";
+pub const SLIM_FEATURES: &str = "realm,regexp,bigint,json";
 pub const FULL_ARCHIVE: &str = "libkiln_native_number_ffi.a";
 pub const SLIM_ARCHIVE: &str = "libkiln_native_number_ffi.slim.a";
 pub const FULL_MANIFEST: &str = "kiln-native-number-provider.json";

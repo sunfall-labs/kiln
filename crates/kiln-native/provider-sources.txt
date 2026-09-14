@@ -1,4 +1,5 @@
 crates/kiln-native/provider-sources.txt
+Cargo.toml
 Cargo.lock
 crates/kiln-artifact-cache/Cargo.toml
 crates/kiln-artifact-cache/src/eviction.rs
