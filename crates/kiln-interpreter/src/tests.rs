@@ -79,6 +79,158 @@ fn every_machine_dispatched_native_has_a_route() {
 }
 
 #[test]
+fn materialized_intrinsic_store_makes_absence_and_symbol_order_authoritative() {
+    let intrinsics = Intrinsics::default();
+    let target = Value::Native(Native::Math, RealmId::PRIMARY);
+    let initial = own_property_keys_with_symbols(&intrinsics, &target);
+    assert!(initial.contains(&"max".to_owned()));
+    assert!(own_attributes(&intrinsics, &target, "max").is_some());
+
+    assert!(delete_property(
+        &intrinsics,
+        &target,
+        &Value::String("max".to_owned())
+    ));
+    assert!(!own_property_keys_with_symbols(&intrinsics, &target).contains(&"max".to_owned()));
+    assert!(own_attributes(&intrinsics, &target, "max").is_none());
+
+    intrinsics.install(
+        &target,
+        "max",
+        Property::Value(Value::Number(7.0)),
+        Attributes::DEFAULT,
+    );
+    assert_eq!(
+        own_attributes(&intrinsics, &target, "max"),
+        Some(Attributes::DEFAULT)
+    );
+    assert_eq!(intrinsics.read(&target, "max"), Some(Value::Number(7.0)));
+
+    let array_prototype =
+        Value::Native(Native::PrototypeOf(PrototypeTable::Array), RealmId::PRIMARY);
+    let keys = own_property_keys_with_symbols(&intrinsics, &array_prototype);
+    let iterator_key = WellKnown::Iterator.property_key().to_owned();
+    assert!(keys.contains(&iterator_key));
+    assert!(own_attributes(&intrinsics, &array_prototype, &iterator_key).is_some());
+    assert!(delete_property(
+        &intrinsics,
+        &array_prototype,
+        &Value::String(iterator_key.clone()),
+    ));
+    assert!(!own_property_keys_with_symbols(&intrinsics, &array_prototype).contains(&iterator_key));
+    assert!(own_attributes(&intrinsics, &array_prototype, &iterator_key).is_none());
+
+    let function_prototype = Value::Native(
+        Native::PrototypeOf(PrototypeTable::Function),
+        RealmId::PRIMARY,
+    );
+    assert!(matches!(
+        own_property_state(&intrinsics, &function_prototype, "caller"),
+        Some((Property::Accessor { .. }, _))
+    ));
+}
+
+#[test]
+fn intrinsic_store_readd_keeps_order_and_retags_cross_realm_markers() {
+    let intrinsics = Intrinsics::default();
+    let target = Value::Native(Native::Math, RealmId::PRIMARY);
+    let before = own_property_keys_with_symbols(&intrinsics, &target);
+    let max_before = before.iter().position(|key| key == "max").unwrap();
+    assert!(delete_property(
+        &intrinsics,
+        &target,
+        &Value::String("max".into())
+    ));
+    intrinsics.install(
+        &target,
+        "max",
+        Property::Value(Value::Number(7.0)),
+        Attributes::DEFAULT,
+    );
+    let after = own_property_keys_with_symbols(&intrinsics, &target);
+    assert!(after.iter().position(|key| key == "max").unwrap() > max_before);
+    assert_eq!(intrinsics.read(&target, "max"), Some(Value::Number(7.0)));
+
+    intrinsics.add_realm();
+    let realm_target = Value::Native(Native::ArrayConstructor, RealmId(1));
+    let _ = own_property_keys_with_symbols(&intrinsics, &realm_target);
+    let prototype = intrinsics
+        .read(&realm_target, "prototype")
+        .expect("materialized Array has a prototype");
+    assert_eq!(
+        prototype,
+        Value::Native(Native::PrototypeOf(PrototypeTable::Array), RealmId(1))
+    );
+}
+
+#[test]
+fn reflection_materialization_preserves_special_native_property_rows() {
+    let intrinsics = Intrinsics::default();
+    let cases = [
+        (
+            Value::Native(Native::AbortSignalConstructor, RealmId::PRIMARY),
+            "abort",
+        ),
+        (
+            Value::Native(Native::Temporal(temporal::Op::Namespace), RealmId::PRIMARY),
+            "PlainDate",
+        ),
+        (
+            Value::Native(
+                Native::Temporal(temporal::Op::Constructor(kiln_temporal::Kind::PlainDate)),
+                RealmId::PRIMARY,
+            ),
+            "from",
+        ),
+        (
+            Value::Native(Native::Intl(intl::Op::Namespace), RealmId::PRIMARY),
+            "DateTimeFormat",
+        ),
+        (
+            Value::Native(
+                Native::Intl(intl::Op::Prototype(intl::Service::Locale)),
+                RealmId::PRIMARY,
+            ),
+            "toString",
+        ),
+    ];
+    for (target, key) in cases {
+        let before = tabulated_property(&intrinsics, &target, key)
+            .unwrap_or_else(|| panic!("missing pre-materialization row {key}"));
+        assert!(own_property_keys_with_symbols(&intrinsics, &target).contains(&key.to_owned()));
+        let after = own_property_state(&intrinsics, &target, key)
+            .expect("materialized row should remain own")
+            .0;
+        assert_eq!(before, after, "reflection changed {key}");
+    }
+}
+
+#[test]
+fn native_spread_uses_materialized_enumerability_and_honors_deletion() {
+    let intrinsics = Intrinsics::default();
+    let path = Value::Native(Native::NodePath, RealmId::PRIMARY);
+    let before = own_properties(&intrinsics, &path);
+    assert!(before.iter().any(|(key, _)| key == "join"));
+    assert!(delete_property(
+        &intrinsics,
+        &path,
+        &Value::String("join".to_owned()),
+    ));
+    assert!(
+        !own_properties(&intrinsics, &path)
+            .iter()
+            .any(|(key, _)| key == "join")
+    );
+
+    let math = Value::Native(Native::Math, RealmId::PRIMARY);
+    assert!(
+        !own_properties(&intrinsics, &math)
+            .iter()
+            .any(|(key, _)| key == "max")
+    );
+}
+
+#[test]
 fn proxy_own_key_invariant_source_includes_exotic_and_native_keys() {
     let intrinsics = Intrinsics::default();
     let array = Value::Array(ArrayData::new(vec![Value::Number(1.0), Value::Number(2.0)]));
@@ -425,6 +577,52 @@ fn test_vm<'a>(program: &'a Program, host: &'a mut TestHost) -> Vm<'a, TestHost>
         ExecutionCapabilities::default(),
     )
     .expect("realm capabilities resolve")
+}
+
+#[test]
+fn builtin_bindings_are_present_on_the_realm_global_and_share_values_with_load_builtin() {
+    let program = no_program();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: std::collections::VecDeque::new(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+    let globals = vm.global_object_in(RealmId::PRIMARY);
+    let Value::Object(globals) = globals else {
+        panic!("global object must be an object");
+    };
+    for &(builtin, name) in kiln_ir::Builtin::GLOBAL_BINDINGS {
+        if matches!(
+            builtin,
+            kiln_ir::Builtin::GlobalThis
+                | kiln_ir::Builtin::Process
+                | kiln_ir::Builtin::NotANumber
+                | kiln_ir::Builtin::Infinity
+        ) {
+            continue;
+        }
+        let global_value = globals
+            .borrow()
+            .get_own(name)
+            .cloned()
+            .unwrap_or_else(|| panic!("global object is missing {name}"));
+        let loaded_value = vm.builtin_value(builtin, RealmId::PRIMARY);
+        assert!(
+            strict_equal(&global_value, &loaded_value),
+            "global {name} disagrees with LoadBuiltin"
+        );
+    }
+    let global_this = globals.borrow().get_own("globalThis").cloned();
+    let global_alias = globals.borrow().get_own("global").cloned();
+    assert!(matches!(global_this, Some(Value::Object(_))));
+    assert!(matches!(global_alias, Some(Value::Object(_))));
+    assert!(strict_equal(
+        global_this.as_ref().unwrap(),
+        global_alias.as_ref().unwrap()
+    ));
 }
 
 #[test]

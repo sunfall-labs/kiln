@@ -2,6 +2,12 @@ use super::*;
 use crate::PrimitiveHint;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FixedOwnValue {
+    Native(Native),
+    Symbol(WellKnown),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Native {
     /// A `Temporal` namespace, constructor, prototype or method; the payload says which.
     ///
@@ -1233,25 +1239,67 @@ impl Native {
         }
     }
 
+    /// Fixed own rows that are not described by the shared surface tables. Names and values are
+    /// one authority; property() converts the selected row to a Value.
+    pub(crate) fn own_property_rows(self) -> &'static [(&'static str, FixedOwnValue)] {
+        match self {
+            Self::AbortSignalConstructor => &[
+                ("abort", FixedOwnValue::Native(Self::AbortSignalAbort)),
+                ("timeout", FixedOwnValue::Native(Self::AbortSignalTimeout)),
+                ("any", FixedOwnValue::Native(Self::AbortSignalAny)),
+            ],
+            Self::AsyncGeneratorFunctionPrototype => &[
+                (
+                    "constructor",
+                    FixedOwnValue::Native(Self::AsyncGeneratorFunctionConstructor),
+                ),
+                (
+                    "prototype",
+                    FixedOwnValue::Native(Self::PrototypeOf(PrototypeTable::AsyncGenerator)),
+                ),
+            ],
+            Self::GeneratorFunctionPrototype => &[
+                (
+                    "constructor",
+                    FixedOwnValue::Native(Self::GeneratorFunctionConstructor),
+                ),
+                (
+                    "prototype",
+                    FixedOwnValue::Native(Self::PrototypeOf(PrototypeTable::Generator)),
+                ),
+            ],
+            Self::NodeFsSync => &[("native", FixedOwnValue::Native(Self::NodeFsSync))],
+            Self::NodeUtilInspect => &[(
+                "custom",
+                FixedOwnValue::Symbol(WellKnown::NodeInspectCustom),
+            )],
+            Self::ProcessHrtime => &[("bigint", FixedOwnValue::Native(Self::ProcessHrtimeBigInt))],
+            Self::Error(_) => &[(
+                "captureStackTrace",
+                FixedOwnValue::Native(Self::ErrorCaptureStackTrace),
+            )],
+            _ => &[],
+        }
+    }
+
     pub(crate) fn property(self, name: &str) -> Option<Value> {
+        if let Some((_, value)) = self
+            .own_property_rows()
+            .iter()
+            .find(|(key, _)| *key == name)
+        {
+            return Some(match value {
+                FixedOwnValue::Native(native) => Value::Native(*native, RealmId::PRIMARY),
+                FixedOwnValue::Symbol(symbol) => Value::Symbol(Symbol::WellKnown(*symbol)),
+            });
+        }
         match (self, name) {
             // `realpathSync.native` is the only member any of these publishes, and it is the
             // same refusal reached one level down.
-            (Self::NodeFsSync, prop) => crate::fs::sync_property(prop),
             (Self::NodeFsPromises, prop) => crate::fs::promises_property(prop),
-            (Self::AbortSignalConstructor, "abort") => {
-                Some(Value::Native(Self::AbortSignalAbort, RealmId::PRIMARY))
-            }
-            (Self::AbortSignalConstructor, "timeout") => {
-                Some(Value::Native(Self::AbortSignalTimeout, RealmId::PRIMARY))
-            }
-            (Self::AbortSignalConstructor, "any") => {
-                Some(Value::Native(Self::AbortSignalAny, RealmId::PRIMARY))
-            }
             (Self::NodeFs, prop) => crate::fs::property(prop),
             (Self::NodeDiagnosticsChannel, prop) => crate::diagnostics_channel::property(prop),
             (Self::NodeUtil, prop) => crate::util::property(prop),
-            (Self::NodeUtilInspect, prop) => crate::util::inspect_property(prop),
             // `default` binds to the module namespace unless an arm below overrides it, and an
             // override is only correct where node's own default is callable. Measured against
             // node v25.9.0, exactly four are: `assert`, `events`, `module` and `stream`.
@@ -1301,9 +1349,6 @@ impl Native {
             (Self::NodeBuffer | Self::NodeBufferGlobal, prop) => {
                 crate::buffer::property(self, prop)
             }
-            (Self::ProcessHrtime, "bigint") => {
-                Some(Value::Native(Self::ProcessHrtimeBigInt, RealmId::PRIMARY))
-            }
             (Self::ConsoleConstructor, prop) => crate::console::constructor_property(prop),
             (Self::PrototypeOf(PrototypeTable::Console), prop) => {
                 crate::console::prototype_property(prop).or_else(|| {
@@ -1339,10 +1384,6 @@ impl Native {
             // The same arrangement for `Intl`: one table for the namespace, the six
             // constructors and their prototypes, so none of them can drift from the others.
             (Self::Intl(op), name) => intl::static_property(op, name),
-            (Self::Error(_), "captureStackTrace") => Some(Value::Native(
-                Self::ErrorCaptureStackTrace,
-                RealmId::PRIMARY,
-            )),
             // `e.constructor.name` reaches this: the instance finds its constructor through the
             // prototype, and the constructor knows which kind it is.
             (Self::Error(kind), "name") => Some(Value::String(kind.name().to_owned())),
@@ -1613,14 +1654,6 @@ impl Native {
                 Some(Value::String("AsyncGeneratorFunction".to_owned()))
             }
             (Self::AsyncGeneratorFunctionConstructor, "length") => Some(Value::Number(1.0)),
-            (Self::AsyncGeneratorFunctionPrototype, "constructor") => Some(Value::Native(
-                Self::AsyncGeneratorFunctionConstructor,
-                RealmId::PRIMARY,
-            )),
-            (Self::AsyncGeneratorFunctionPrototype, "prototype") => Some(Value::Native(
-                Self::PrototypeOf(PrototypeTable::AsyncGenerator),
-                RealmId::PRIMARY,
-            )),
             (Self::AsyncGeneratorFunctionPrototype, key)
                 if key == WellKnown::ToStringTag.property_key() =>
             {
@@ -1634,14 +1667,6 @@ impl Native {
                 Some(Value::String("GeneratorFunction".to_owned()))
             }
             (Self::GeneratorFunctionConstructor, "length") => Some(Value::Number(1.0)),
-            (Self::GeneratorFunctionPrototype, "constructor") => Some(Value::Native(
-                Self::GeneratorFunctionConstructor,
-                RealmId::PRIMARY,
-            )),
-            (Self::GeneratorFunctionPrototype, "prototype") => Some(Value::Native(
-                Self::PrototypeOf(PrototypeTable::Generator),
-                RealmId::PRIMARY,
-            )),
             (Self::GeneratorFunctionPrototype, key)
                 if key == WellKnown::ToStringTag.property_key() =>
             {

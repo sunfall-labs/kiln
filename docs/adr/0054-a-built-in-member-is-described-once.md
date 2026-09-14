@@ -98,10 +98,12 @@ the sweep asserts that resolution rather than the list.
 `name` and `length` remain in their own functions, so that pair can still drift from the rows. The
 rows are the place to put them.
 
-The end state this points at, and deliberately does not attempt here, is materialising the
-intrinsics as real objects at realm setup: build an `ObjectData` per prototype from these rows,
-lazily on first touch, and every question is then answered by the ordinary object path that is
-already correct. That would also delete `IntrinsicSlots`, `IntrinsicKey` and the deletion
-tombstones, since deleting a property would simply be deleting a property. It is a realm-construction
-change with its own performance question -- this repository runs a process per test -- so it is worth
-doing on measurements rather than on principle.
+The lazy materialisation end state is now implemented for marker-backed intrinsics. On the first
+structural operation (reflection, mutation, deletion, or extensibility change), the interpreter
+seeds one complete ordinary `ObjectData` from the typed member inventories, accessor rows, symbol
+rows, and fixed native/Temporal/Intl rows. The store then becomes authoritative: an absent key stays
+absent, deletion needs no tombstone, and ordinary insertion order/descriptors/extensibility apply.
+Untouched reads retain the compact table fast path, while `IntrinsicKey` remains the identity map
+because `Value::Native` and `Value::Callback` markers remain copyable realm-tagged values. Seeded
+marker values are retagged to the owning realm, and the ordinary store uses the existing
+`prototype_of` mapping for its `[[Prototype]]`.

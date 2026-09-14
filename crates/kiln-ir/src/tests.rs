@@ -24,6 +24,20 @@ fn module(body: Vec<Statement>) -> Module {
     }
 }
 
+#[test]
+fn builtin_global_bindings_round_trip_and_keep_global_alias() {
+    let mut names = std::collections::BTreeSet::new();
+    for &(builtin, name) in Builtin::GLOBAL_BINDINGS {
+        assert!(
+            names.insert(name),
+            "duplicate canonical builtin name {name}"
+        );
+        assert_eq!(builtin.name(), name);
+        assert_eq!(Builtin::from_name(name), Some(builtin));
+    }
+    assert_eq!(Builtin::from_name("global"), Some(Builtin::GlobalThis));
+}
+
 fn number(value: f64) -> Expression {
     Expression {
         kind: ExpressionKind::Literal(Literal::Number(value.to_bits())),

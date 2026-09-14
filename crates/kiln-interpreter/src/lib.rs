@@ -1121,7 +1121,7 @@ fn own_property_state(
                 Overridden::Held(property, _) => Some(property),
                 // Unreachable: `own_attributes` answered `None` for a removed property, so the
                 // `?` above already returned.
-                Overridden::Removed => None,
+                Overridden::Absent => None,
                 Overridden::Untouched => tabulated_property(intrinsics, target, key),
             }
         }
@@ -11900,120 +11900,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                 }
                 Instruction::LoadBuiltin(builtin) => {
-                    self.stack.push(Value::Native(
-                        match builtin {
-                            kiln_ir::Builtin::Error => Native::Error(ErrorKind::Error),
-                            kiln_ir::Builtin::TypeError => Native::Error(ErrorKind::Type),
-                            kiln_ir::Builtin::RangeError => Native::Error(ErrorKind::Range),
-                            kiln_ir::Builtin::ReferenceError => Native::Error(ErrorKind::Reference),
-                            kiln_ir::Builtin::SyntaxError => Native::Error(ErrorKind::Syntax),
-                            kiln_ir::Builtin::UriError => Native::Error(ErrorKind::Uri),
-                            kiln_ir::Builtin::EvalError => Native::Error(ErrorKind::Eval),
-                            kiln_ir::Builtin::Symbol => Native::SymbolConstructor,
-                            kiln_ir::Builtin::String => Native::StringConstructor,
-                            kiln_ir::Builtin::Set => Native::SetConstructor,
-                            kiln_ir::Builtin::Map => Native::MapConstructor,
-                            kiln_ir::Builtin::GlobalThis => {
-                                let globals = self.global_object();
-                                self.stack.push(globals);
-                                continue;
-                            }
-                            kiln_ir::Builtin::Process => {
-                                let process = self.process_object();
-                                self.stack.push(process);
-                                continue;
-                            }
-                            kiln_ir::Builtin::Buffer => Native::NodeBufferGlobal,
-                            kiln_ir::Builtin::Url => Native::UrlConstructor,
-                            kiln_ir::Builtin::TextDecoder => Native::TextDecoderConstructor,
-                            kiln_ir::Builtin::Array => Native::ArrayConstructor,
-                            kiln_ir::Builtin::Object => Native::ObjectConstructor,
-                            kiln_ir::Builtin::Json => Native::Json,
-                            kiln_ir::Builtin::Math => Native::Math,
-                            kiln_ir::Builtin::Atomics => Native::Atomics,
-                            kiln_ir::Builtin::Number => Native::NumberConstructor,
-                            kiln_ir::Builtin::Boolean => Native::BooleanConstructor,
-                            kiln_ir::Builtin::ParseInt => Native::ParseInt,
-                            kiln_ir::Builtin::Escape => Native::Escape,
-                            kiln_ir::Builtin::Unescape => Native::Unescape,
-                            kiln_ir::Builtin::EncodeUri => Native::EncodeUri,
-                            kiln_ir::Builtin::EncodeUriComponent => Native::EncodeUriComponent,
-                            kiln_ir::Builtin::DecodeUri => Native::DecodeUri,
-                            kiln_ir::Builtin::DecodeUriComponent => Native::DecodeUriComponent,
-                            kiln_ir::Builtin::ParseFloat => Native::ParseFloat,
-                            kiln_ir::Builtin::IsNaN => Native::IsNaN,
-                            kiln_ir::Builtin::IsFinite => Native::IsFinite,
-                            kiln_ir::Builtin::SetTimeout => Native::SetTimeout,
-                            kiln_ir::Builtin::SetInterval => Native::SetInterval,
-                            kiln_ir::Builtin::ClearTimeout => Native::ClearTimeout,
-                            kiln_ir::Builtin::ClearInterval => Native::ClearInterval,
-                            kiln_ir::Builtin::QueueMicrotask => Native::QueueMicrotask,
-                            kiln_ir::Builtin::SetImmediate => Native::SetImmediate,
-                            kiln_ir::Builtin::ClearImmediate => Native::ClearImmediate,
-                            kiln_ir::Builtin::Promise => Native::PromiseConstructor,
-                            kiln_ir::Builtin::RegExp => Native::RegExpConstructor,
-                            kiln_ir::Builtin::Date => Native::DateConstructor,
-                            kiln_ir::Builtin::WeakMap => Native::WeakMapConstructor,
-                            kiln_ir::Builtin::WeakSet => Native::WeakSetConstructor,
-                            kiln_ir::Builtin::Performance => Native::Performance,
-                            kiln_ir::Builtin::Reflect => Native::Reflect,
-                            kiln_ir::Builtin::BigInt => Native::BigIntConstructor,
-                            kiln_ir::Builtin::Function => Native::FunctionConstructor,
-                            kiln_ir::Builtin::Eval => Native::Eval,
-                            kiln_ir::Builtin::Proxy => Native::ProxyConstructor,
-                            kiln_ir::Builtin::DisposableStack => Native::DisposableStackConstructor,
-                            kiln_ir::Builtin::AsyncDisposableStack => {
-                                Native::AsyncDisposableStackConstructor
-                            }
-                            kiln_ir::Builtin::SuppressedError => {
-                                Native::Error(ErrorKind::Suppressed)
-                            }
-                            kiln_ir::Builtin::AggregateError => Native::Error(ErrorKind::Aggregate),
-                            kiln_ir::Builtin::AbortController => Native::AbortControllerConstructor,
-                            kiln_ir::Builtin::AbortSignal => Native::AbortSignalConstructor,
-                            kiln_ir::Builtin::TextEncoder => Native::TextEncoderConstructor,
-                            kiln_ir::Builtin::ArrayBuffer => Native::ArrayBufferConstructor,
-                            kiln_ir::Builtin::Int8Array => {
-                                Native::TypedArrayConstructor(TypedKind::Int8)
-                            }
-                            kiln_ir::Builtin::Uint8Array => {
-                                Native::TypedArrayConstructor(TypedKind::Uint8)
-                            }
-                            kiln_ir::Builtin::Uint8ClampedArray => {
-                                Native::TypedArrayConstructor(TypedKind::Uint8Clamped)
-                            }
-                            kiln_ir::Builtin::Int16Array => {
-                                Native::TypedArrayConstructor(TypedKind::Int16)
-                            }
-                            kiln_ir::Builtin::Uint16Array => {
-                                Native::TypedArrayConstructor(TypedKind::Uint16)
-                            }
-                            kiln_ir::Builtin::Int32Array => {
-                                Native::TypedArrayConstructor(TypedKind::Int32)
-                            }
-                            kiln_ir::Builtin::Uint32Array => {
-                                Native::TypedArrayConstructor(TypedKind::Uint32)
-                            }
-                            kiln_ir::Builtin::Float32Array => {
-                                Native::TypedArrayConstructor(TypedKind::Float32)
-                            }
-                            kiln_ir::Builtin::Float64Array => {
-                                Native::TypedArrayConstructor(TypedKind::Float64)
-                            }
-
-                            // Values rather than callables, so they leave the loop early like
-                            // `globalThis` does rather than being wrapped in a `Native`.
-                            kiln_ir::Builtin::NotANumber => {
-                                self.stack.push(Value::Number(f64::NAN));
-                                continue;
-                            }
-                            kiln_ir::Builtin::Infinity => {
-                                self.stack.push(Value::Number(f64::INFINITY));
-                                continue;
-                            }
-                        },
-                        RealmId::PRIMARY,
-                    ));
+                    let value = self.builtin_value(*builtin, RealmId::PRIMARY);
+                    self.stack.push(value);
                 }
                 Instruction::New { argc } => {
                     let argc = *argc as usize;
@@ -25979,6 +25867,121 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
     }
 
+    /// Convert one compiler builtin to the value the current realm exposes.
+    ///
+    /// Both bytecode `LoadBuiltin` and global-object assembly use this conversion. Keeping the
+    /// enum-to-native mapping here means adding a builtin cannot update one path while leaving the
+    /// other with a stale constructor or realm tag.
+    fn builtin_value(&mut self, builtin: kiln_ir::Builtin, realm: RealmId) -> Value {
+        match builtin {
+            kiln_ir::Builtin::GlobalThis => self.global_object(),
+            kiln_ir::Builtin::Process => self.process_object(),
+            kiln_ir::Builtin::NotANumber => Value::Number(f64::NAN),
+            kiln_ir::Builtin::Infinity => Value::Number(f64::INFINITY),
+            kiln_ir::Builtin::Error => Value::Native(Native::Error(ErrorKind::Error), realm),
+            kiln_ir::Builtin::TypeError => Value::Native(Native::Error(ErrorKind::Type), realm),
+            kiln_ir::Builtin::RangeError => Value::Native(Native::Error(ErrorKind::Range), realm),
+            kiln_ir::Builtin::ReferenceError => {
+                Value::Native(Native::Error(ErrorKind::Reference), realm)
+            }
+            kiln_ir::Builtin::SyntaxError => Value::Native(Native::Error(ErrorKind::Syntax), realm),
+            kiln_ir::Builtin::UriError => Value::Native(Native::Error(ErrorKind::Uri), realm),
+            kiln_ir::Builtin::EvalError => Value::Native(Native::Error(ErrorKind::Eval), realm),
+            kiln_ir::Builtin::SuppressedError => {
+                Value::Native(Native::Error(ErrorKind::Suppressed), realm)
+            }
+            kiln_ir::Builtin::AggregateError => {
+                Value::Native(Native::Error(ErrorKind::Aggregate), realm)
+            }
+            kiln_ir::Builtin::Symbol => Value::Native(Native::SymbolConstructor, realm),
+            kiln_ir::Builtin::String => Value::Native(Native::StringConstructor, realm),
+            kiln_ir::Builtin::Set => Value::Native(Native::SetConstructor, realm),
+            kiln_ir::Builtin::Map => Value::Native(Native::MapConstructor, realm),
+            kiln_ir::Builtin::Buffer => Value::Native(Native::NodeBufferGlobal, realm),
+            kiln_ir::Builtin::Url => Value::Native(Native::UrlConstructor, realm),
+            kiln_ir::Builtin::TextDecoder => Value::Native(Native::TextDecoderConstructor, realm),
+            kiln_ir::Builtin::Array => Value::Native(Native::ArrayConstructor, realm),
+            kiln_ir::Builtin::Object => Value::Native(Native::ObjectConstructor, realm),
+            kiln_ir::Builtin::Json => Value::Native(Native::Json, realm),
+            kiln_ir::Builtin::Math => Value::Native(Native::Math, realm),
+            kiln_ir::Builtin::Atomics => Value::Native(Native::Atomics, realm),
+            kiln_ir::Builtin::Number => Value::Native(Native::NumberConstructor, realm),
+            kiln_ir::Builtin::Boolean => Value::Native(Native::BooleanConstructor, realm),
+            kiln_ir::Builtin::ParseInt => Value::Native(Native::ParseInt, realm),
+            kiln_ir::Builtin::Escape => Value::Native(Native::Escape, realm),
+            kiln_ir::Builtin::Unescape => Value::Native(Native::Unescape, realm),
+            kiln_ir::Builtin::EncodeUri => Value::Native(Native::EncodeUri, realm),
+            kiln_ir::Builtin::EncodeUriComponent => {
+                Value::Native(Native::EncodeUriComponent, realm)
+            }
+            kiln_ir::Builtin::DecodeUri => Value::Native(Native::DecodeUri, realm),
+            kiln_ir::Builtin::DecodeUriComponent => {
+                Value::Native(Native::DecodeUriComponent, realm)
+            }
+            kiln_ir::Builtin::ParseFloat => Value::Native(Native::ParseFloat, realm),
+            kiln_ir::Builtin::IsNaN => Value::Native(Native::IsNaN, realm),
+            kiln_ir::Builtin::IsFinite => Value::Native(Native::IsFinite, realm),
+            kiln_ir::Builtin::SetTimeout => Value::Native(Native::SetTimeout, realm),
+            kiln_ir::Builtin::SetInterval => Value::Native(Native::SetInterval, realm),
+            kiln_ir::Builtin::ClearTimeout => Value::Native(Native::ClearTimeout, realm),
+            kiln_ir::Builtin::ClearInterval => Value::Native(Native::ClearInterval, realm),
+            kiln_ir::Builtin::QueueMicrotask => Value::Native(Native::QueueMicrotask, realm),
+            kiln_ir::Builtin::SetImmediate => Value::Native(Native::SetImmediate, realm),
+            kiln_ir::Builtin::ClearImmediate => Value::Native(Native::ClearImmediate, realm),
+            kiln_ir::Builtin::Promise => Value::Native(Native::PromiseConstructor, realm),
+            kiln_ir::Builtin::RegExp => Value::Native(Native::RegExpConstructor, realm),
+            kiln_ir::Builtin::Date => Value::Native(Native::DateConstructor, realm),
+            kiln_ir::Builtin::WeakMap => Value::Native(Native::WeakMapConstructor, realm),
+            kiln_ir::Builtin::WeakSet => Value::Native(Native::WeakSetConstructor, realm),
+            kiln_ir::Builtin::Performance => Value::Native(Native::Performance, realm),
+            kiln_ir::Builtin::Reflect => Value::Native(Native::Reflect, realm),
+            kiln_ir::Builtin::BigInt => Value::Native(Native::BigIntConstructor, realm),
+            kiln_ir::Builtin::Function => Value::Native(Native::FunctionConstructor, realm),
+            kiln_ir::Builtin::Eval => Value::Native(Native::Eval, realm),
+            kiln_ir::Builtin::Proxy => Value::Native(Native::ProxyConstructor, realm),
+            kiln_ir::Builtin::DisposableStack => {
+                Value::Native(Native::DisposableStackConstructor, realm)
+            }
+            kiln_ir::Builtin::AsyncDisposableStack => {
+                Value::Native(Native::AsyncDisposableStackConstructor, realm)
+            }
+            kiln_ir::Builtin::AbortController => {
+                Value::Native(Native::AbortControllerConstructor, realm)
+            }
+            kiln_ir::Builtin::AbortSignal => Value::Native(Native::AbortSignalConstructor, realm),
+            kiln_ir::Builtin::TextEncoder => Value::Native(Native::TextEncoderConstructor, realm),
+            kiln_ir::Builtin::ArrayBuffer => Value::Native(Native::ArrayBufferConstructor, realm),
+            kiln_ir::Builtin::Int8Array => {
+                Value::Native(Native::TypedArrayConstructor(TypedKind::Int8), realm)
+            }
+            kiln_ir::Builtin::Uint8Array => {
+                Value::Native(Native::TypedArrayConstructor(TypedKind::Uint8), realm)
+            }
+            kiln_ir::Builtin::Uint8ClampedArray => Value::Native(
+                Native::TypedArrayConstructor(TypedKind::Uint8Clamped),
+                realm,
+            ),
+            kiln_ir::Builtin::Int16Array => {
+                Value::Native(Native::TypedArrayConstructor(TypedKind::Int16), realm)
+            }
+            kiln_ir::Builtin::Uint16Array => {
+                Value::Native(Native::TypedArrayConstructor(TypedKind::Uint16), realm)
+            }
+            kiln_ir::Builtin::Int32Array => {
+                Value::Native(Native::TypedArrayConstructor(TypedKind::Int32), realm)
+            }
+            kiln_ir::Builtin::Uint32Array => {
+                Value::Native(Native::TypedArrayConstructor(TypedKind::Uint32), realm)
+            }
+            kiln_ir::Builtin::Float32Array => {
+                Value::Native(Native::TypedArrayConstructor(TypedKind::Float32), realm)
+            }
+            kiln_ir::Builtin::Float64Array => {
+                Value::Native(Native::TypedArrayConstructor(TypedKind::Float64), realm)
+            }
+        }
+    }
+
     /// `realm`'s global object, built on first use and shared from then on.
     ///
     /// Every binding it publishes is minted *in that realm*, which is the whole of what makes
@@ -25997,43 +26000,40 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         for kind in ErrorKind::ALL {
             globals.set_non_enumerable(kind.name(), Value::Native(Native::Error(kind), realm));
         }
-        globals.set_non_enumerable("Array", Value::Native(Native::ArrayConstructor, realm));
-        globals.set_non_enumerable("Object", Value::Native(Native::ObjectConstructor, realm));
-        globals.set_non_enumerable("JSON", Value::Native(Native::Json, realm));
+        for &(builtin, _) in kiln_ir::Builtin::GLOBAL_BINDINGS {
+            if matches!(
+                builtin,
+                kiln_ir::Builtin::Error
+                    | kiln_ir::Builtin::TypeError
+                    | kiln_ir::Builtin::RangeError
+                    | kiln_ir::Builtin::ReferenceError
+                    | kiln_ir::Builtin::SyntaxError
+                    | kiln_ir::Builtin::UriError
+                    | kiln_ir::Builtin::EvalError
+                    | kiln_ir::Builtin::SuppressedError
+                    | kiln_ir::Builtin::AggregateError
+                    | kiln_ir::Builtin::GlobalThis
+                    | kiln_ir::Builtin::Process
+                    | kiln_ir::Builtin::NotANumber
+                    | kiln_ir::Builtin::Infinity
+            ) {
+                continue;
+            }
+            globals.set_non_enumerable(builtin.name(), self.builtin_value(builtin, realm));
+        }
         globals.set_non_enumerable(
             "Temporal",
             Value::Native(Native::Temporal(temporal::Op::Namespace), realm),
         );
-        globals.set_non_enumerable("Symbol", Value::Native(Native::SymbolConstructor, realm));
-        globals.set_non_enumerable("String", Value::Native(Native::StringConstructor, realm));
-        globals.set_non_enumerable("Math", Value::Native(Native::Math, realm));
-        globals.set_non_enumerable("Atomics", Value::Native(Native::Atomics, realm));
-        globals.set_non_enumerable("Promise", Value::Native(Native::PromiseConstructor, realm));
-        globals.set_non_enumerable("RegExp", Value::Native(Native::RegExpConstructor, realm));
-        globals.set_non_enumerable("Date", Value::Native(Native::DateConstructor, realm));
-        globals.set_non_enumerable("WeakMap", Value::Native(Native::WeakMapConstructor, realm));
-        globals.set_non_enumerable("WeakSet", Value::Native(Native::WeakSetConstructor, realm));
         globals.set_non_enumerable("WeakRef", Value::Native(Native::WeakRefConstructor, realm));
         globals.set_non_enumerable(
             "ShadowRealm",
             Value::Native(Native::ShadowRealmConstructor, realm),
         );
         globals.set_non_enumerable(
-            "DisposableStack",
-            Value::Native(Native::DisposableStackConstructor, realm),
-        );
-        globals.set_non_enumerable(
-            "AsyncDisposableStack",
-            Value::Native(Native::AsyncDisposableStackConstructor, realm),
-        );
-        globals.set_non_enumerable(
             "FinalizationRegistry",
             Value::Native(Native::FinalizationRegistryConstructor, realm),
         );
-        globals.set_non_enumerable("Set", Value::Native(Native::SetConstructor, realm));
-        globals.set_non_enumerable("Map", Value::Native(Native::MapConstructor, realm));
-        globals.set_non_enumerable("performance", Value::Native(Native::Performance, realm));
-        globals.set_non_enumerable("Reflect", Value::Native(Native::Reflect, realm));
         globals.set_non_enumerable(
             "__kilnHostProcessStart",
             Value::Native(Native::ProcessStartRaw, realm),
@@ -26050,56 +26050,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             "Intl",
             Value::Native(Native::Intl(intl::Op::Namespace), realm),
         );
-        globals.set_non_enumerable("BigInt", Value::Native(Native::BigIntConstructor, realm));
-        globals.set_non_enumerable("Number", Value::Native(Native::NumberConstructor, realm));
-        globals.set_non_enumerable("Boolean", Value::Native(Native::BooleanConstructor, realm));
-        globals.set_non_enumerable(
-            "Function",
-            Value::Native(Native::FunctionConstructor, realm),
-        );
-        globals.set_non_enumerable("eval", Value::Native(Native::Eval, realm));
-        globals.set_non_enumerable("escape", Value::Native(Native::Escape, realm));
-        globals.set_non_enumerable("unescape", Value::Native(Native::Unescape, realm));
-        globals.set_non_enumerable("encodeURI", Value::Native(Native::EncodeUri, realm));
-        globals.set_non_enumerable(
-            "encodeURIComponent",
-            Value::Native(Native::EncodeUriComponent, realm),
-        );
-        globals.set_non_enumerable("decodeURI", Value::Native(Native::DecodeUri, realm));
-        globals.set_non_enumerable(
-            "decodeURIComponent",
-            Value::Native(Native::DecodeUriComponent, realm),
-        );
-        globals.set_non_enumerable("Proxy", Value::Native(Native::ProxyConstructor, realm));
-        globals.set_non_enumerable(
-            "ArrayBuffer",
-            Value::Native(Native::ArrayBufferConstructor, realm),
-        );
-        globals.set_non_enumerable("Buffer", Value::Native(Native::NodeBufferGlobal, realm));
-        // Cancellation and the two text codecs. Every one of them already resolved as a bare
-        // name -- `Builtin::AbortController` and its three neighbours are in the compiler's
-        // table -- and none of them was on the global object, so `typeof AbortController` said
-        // "function" while `typeof globalThis.AbortController` said "undefined". That is the
-        // realm holding two lists for one question, and `globalThis.X` is the spelling a bundle's
-        // feature detection uses. The native backend publishes all four; this is the side that
-        // was short.
-        globals.set_non_enumerable(
-            "AbortController",
-            Value::Native(Native::AbortControllerConstructor, realm),
-        );
-        globals.set_non_enumerable(
-            "AbortSignal",
-            Value::Native(Native::AbortSignalConstructor, realm),
-        );
-        globals.set_non_enumerable(
-            "TextEncoder",
-            Value::Native(Native::TextEncoderConstructor, realm),
-        );
-        globals.set_non_enumerable(
-            "TextDecoder",
-            Value::Native(Native::TextDecoderConstructor, realm),
-        );
-        globals.set_non_enumerable("URL", Value::Native(Native::UrlConstructor, realm));
         globals.set_non_enumerable("crypto", Value::Native(Native::NodeCrypto, realm));
         globals.set_non_enumerable(
             "SharedArrayBuffer",
@@ -26114,47 +26064,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Native(Native::IteratorConstructor, realm),
         );
         globals.set_non_enumerable(
-            "Int8Array",
-            Value::Native(Native::TypedArrayConstructor(TypedKind::Int8), realm),
-        );
-        globals.set_non_enumerable(
-            "Uint8Array",
-            Value::Native(Native::TypedArrayConstructor(TypedKind::Uint8), realm),
-        );
-        globals.set_non_enumerable(
-            "Uint8ClampedArray",
-            Value::Native(
-                Native::TypedArrayConstructor(TypedKind::Uint8Clamped),
-                realm,
-            ),
-        );
-        globals.set_non_enumerable(
-            "Int16Array",
-            Value::Native(Native::TypedArrayConstructor(TypedKind::Int16), realm),
-        );
-        globals.set_non_enumerable(
-            "Uint16Array",
-            Value::Native(Native::TypedArrayConstructor(TypedKind::Uint16), realm),
-        );
-        globals.set_non_enumerable(
-            "Int32Array",
-            Value::Native(Native::TypedArrayConstructor(TypedKind::Int32), realm),
-        );
-        globals.set_non_enumerable(
-            "Uint32Array",
-            Value::Native(Native::TypedArrayConstructor(TypedKind::Uint32), realm),
-        );
-        globals.set_non_enumerable(
             "Float16Array",
             Value::Native(Native::TypedArrayConstructor(TypedKind::Float16), realm),
-        );
-        globals.set_non_enumerable(
-            "Float32Array",
-            Value::Native(Native::TypedArrayConstructor(TypedKind::Float32), realm),
-        );
-        globals.set_non_enumerable(
-            "Float64Array",
-            Value::Native(Native::TypedArrayConstructor(TypedKind::Float64), realm),
         );
         globals.set_non_enumerable(
             "BigInt64Array",
@@ -26167,23 +26078,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
         // The global functions, which a program can also reach by their bare names -- and has to
         // find the *same* value both ways: `globalThis.parseInt === parseInt`.
-        globals.set_non_enumerable("parseInt", Value::Native(Native::ParseInt, realm));
-        globals.set_non_enumerable("parseFloat", Value::Native(Native::ParseFloat, realm));
-        globals.set_non_enumerable("isNaN", Value::Native(Native::IsNaN, realm));
-        globals.set_non_enumerable("isFinite", Value::Native(Native::IsFinite, realm));
-        globals.set_non_enumerable(
-            "queueMicrotask",
-            Value::Native(Native::QueueMicrotask, realm),
-        );
-        globals.set_non_enumerable("setTimeout", Value::Native(Native::SetTimeout, realm));
-        globals.set_non_enumerable("setInterval", Value::Native(Native::SetInterval, realm));
-        globals.set_non_enumerable("clearTimeout", Value::Native(Native::ClearTimeout, realm));
-        globals.set_non_enumerable("clearInterval", Value::Native(Native::ClearInterval, realm));
-        globals.set_non_enumerable("setImmediate", Value::Native(Native::SetImmediate, realm));
-        globals.set_non_enumerable(
-            "clearImmediate",
-            Value::Native(Native::ClearImmediate, realm),
-        );
         let mut console = ObjectData::default();
         console.set_prototype(Value::Native(
             Native::PrototypeOf(PrototypeTable::Console),
@@ -30277,7 +30171,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 match self.intrinsics.overridden(target, name) {
                     Overridden::Held(property, _) => Some(property),
                     // Deleted, or never touched: either way the chain above may still answer.
-                    Overridden::Removed | Overridden::Untouched => None,
+                    Overridden::Absent | Overridden::Untouched => None,
                 }
             }
             // An exotic object's named properties live in a store beside its own state,
@@ -30699,7 +30593,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Overridden::Held(Property::Accessor { .. }, _) => Value::Undefined,
                 // Deleted, so the read carries on *up* the chain rather than back into the
                 // table that still has the answer the program removed.
-                Overridden::Removed => native_inherited_property(&self.intrinsics, target, name),
+                Overridden::Absent => native_inherited_property(&self.intrinsics, target, name),
                 // An error constructor's `prototype` is a per-realm object rather than a table
                 // entry, so `native.property` has nothing to answer with and the read used to
                 // walk on up to `Function.prototype` and come back `undefined`. Only the named
@@ -30805,7 +30699,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             | Value::Element(_) => match self.intrinsics.overridden(target, name) {
                 Overridden::Held(Property::Value(value), _) => value,
                 Overridden::Held(Property::Accessor { .. }, _) => Value::Undefined,
-                Overridden::Removed => {
+                Overridden::Absent => {
                     function_property(&self.intrinsics, name, value_realm(target))
                 }
                 Overridden::Untouched => identity_property(target, name).unwrap_or_else(|| {
@@ -38686,7 +38580,7 @@ fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
         Value::Native(native, _) => {
             let own = match intrinsics.overridden(target, &name) {
                 Overridden::Held(..) => true,
-                Overridden::Removed => false,
+                Overridden::Absent => false,
                 Overridden::Untouched => {
                     // `intrinsic_owns` rather than `property`, which is what a *read* finds and
                     // is a different question. A prototype table's `property` carries its last
@@ -38709,7 +38603,7 @@ fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
                                     ),
                                     &name,
                                 ),
-                                Overridden::Removed
+                                Overridden::Absent
                             ))
                 }
             };
@@ -40246,21 +40140,7 @@ fn own_properties(intrinsics: &Intrinsics, value: &Value) -> Vec<(String, Proper
         // exception, and it is the exception every bundler's output depends on. A Node builtin
         // module's exports *are* enumerable, which is what makes `{ ...require("path") }` and
         // `export * from "path"` copy anything at all.
-        Value::Native(native, _) => {
-            let mut entries = intrinsics.enumerable_entries(value);
-            if node_builtin_specifier(*native).is_some() {
-                for name in intrinsic_static_property_names(value) {
-                    if entries.iter().any(|(held, _)| held == name) {
-                        continue;
-                    }
-                    if let Some(found) = native.property(name) {
-                        entries.push(((*name).to_owned(), Property::Value(found)));
-                    }
-                }
-            }
-            entries
-        }
-        Value::Callback(_, _) => intrinsics.enumerable_entries(value),
+        Value::Native(_, _) | Value::Callback(_, _) => intrinsics.enumerable_entries(value),
         // A function is an object, and a static a program hung on one is an own enumerable
         // property like any other -- which is the whole reason `{ ...postcss }` copies anything
         // at all when `postcss` is a function carrying its plugins. `length` and `name` are
@@ -43885,7 +43765,7 @@ fn inherited_intrinsic_accessor(
             Overridden::Held(Property::Value(_), _) => return None,
             // Deleted here, so the chain carries on past it -- which is the whole point of the
             // tombstone.
-            Overridden::Removed => {}
+            Overridden::Absent => {}
             Overridden::Untouched => {
                 if intrinsic_owns(native, name).is_some()
                     || intrinsic_accessor(&link, name).is_some()
@@ -44532,44 +44412,32 @@ fn intrinsic_key(target: &Value) -> Option<IntrinsicKey> {
 enum Overridden {
     /// The store holds the property, and its slot is the whole answer.
     Held(Property, Attributes),
-    /// A program deleted a property the tables still answer, so the built-in no longer has it.
-    Removed,
+    /// The complete materialized store does not contain this key; absence is authoritative.
+    Absent,
     /// The store says nothing about this name, so the tables answer.
     Untouched,
 }
 
-/// What one program has changed about one built-in.
-#[derive(Default)]
-struct IntrinsicSlots {
-    /// Properties added or redefined. An ordinary store, so the flags a definition asked for and
-    /// the flags a descriptor reports are one field rather than two claims about one thing.
-    held: ObjectData,
-    /// Names the tables still answer and the program deleted. A store has no way to spell
-    /// "absent", and without the tombstone `delete Math.max.name` would be a removal the very
-    /// next read undoes.
-    removed: Vec<String>,
+/// Retag a marker returned by a realm-blind intrinsic table before storing it.
+///
+/// Native and Callback values remain Copy markers, but every realm owns a distinct marker identity.
+/// Ordinary stored objects/functions are left untouched because they already carry their own
+/// identity and realm.
+fn retag_intrinsic_property(property: Property, realm: RealmId) -> Property {
+    match property {
+        Property::Value(value) => Property::Value(in_realm(value, realm)),
+        Property::Accessor { get, set } => Property::Accessor {
+            get: get.map(|value| in_realm(value, realm)),
+            set: set.map(|value| in_realm(value, realm)),
+        },
+    }
 }
 
-/// Per-realm storage for the built-ins a program has mutated.
-///
-/// The specification makes almost every own property of a built-in writable, deletable and
-/// redefinable. This engine answered all of them from `match` arms: the right values, with no
-/// storage behind them, so `delete Math.max.name` was a silent no-op and `Math.max.name = "x"`
-/// was a TypeError about setting a property on something that is not an object. This is the
-/// storage those answers were missing, and it belongs to the realm for the same reason
-/// `global_object` does -- one per execution, gone when the execution is.
-///
-/// It holds the *difference* between what a program has done and what the tables say rather
-/// than a materialised copy of the standard library. Two reasons: the tables cannot be
-/// enumerated -- [`Native::property`] answers a name, it does not list them -- and a realm that
-/// copied every property of every built-in on the chance that one is written would pay for the
-/// whole of it on every run. An entry appears only when a program actually touches a built-in,
-/// which for most programs is never.
 struct Intrinsics {
     /// A linear scan rather than a map: this is empty for a program that leaves the built-ins
     /// alone and holds a handful of entries for one that does not, which is well below the size
     /// where hashing every lookup pays for itself.
-    entries: RefCell<Vec<(IntrinsicKey, IntrinsicSlots)>>,
+    entries: RefCell<Vec<(IntrinsicKey, ObjectData)>>,
     /// Whether any program has defined an *accessor* on any built-in.
     ///
     /// A guard for [`inherited_intrinsic_accessor`], which is asked on every read that misses a
@@ -44714,7 +44582,7 @@ impl Intrinsics {
         unscopables
     }
 
-    /// What the store says about `key` on this built-in.
+    /// What the materialized store says about `key` on this built-in.
     fn overridden(&self, target: &Value, key: &str) -> Overridden {
         let Some(identity) = intrinsic_key(target) else {
             return Overridden::Untouched;
@@ -44723,19 +44591,14 @@ impl Intrinsics {
         let Some((_, slots)) = entries.iter().find(|(held, _)| *held == identity) else {
             return Overridden::Untouched;
         };
-        if let Some(property) = slots.held.get_own_property(key) {
+        let data = slots;
+        if let Some(property) = data.get_own_property(key) {
             return Overridden::Held(
                 property.clone(),
-                slots
-                    .held
-                    .get_own_attributes(key)
-                    .unwrap_or(Attributes::DEFAULT),
+                data.get_own_attributes(key).unwrap_or(Attributes::DEFAULT),
             );
         }
-        if slots.removed.iter().any(|name| name == key) {
-            return Overridden::Removed;
-        }
-        Overridden::Untouched
+        Overridden::Absent
     }
 
     /// The value a read finds, or `None` to carry on down the chain the read was walking.
@@ -44745,7 +44608,7 @@ impl Intrinsics {
     fn read(&self, target: &Value, key: &str) -> Option<Value> {
         match self.overridden(target, key) {
             Overridden::Held(Property::Value(value), _) => Some(value),
-            Overridden::Held(Property::Accessor { .. }, _) | Overridden::Removed => {
+            Overridden::Held(Property::Accessor { .. }, _) | Overridden::Absent => {
                 Some(Value::Undefined)
             }
             Overridden::Untouched => None,
@@ -44762,8 +44625,8 @@ impl Intrinsics {
 
     /// Whether this built-in still accepts new properties.
     ///
-    /// Untouched means extensible: the specification builds every one of them that way, and a
-    /// built-in nothing has closed has no entry here at all.
+    /// An unmaterialized intrinsic is extensible by default; a materialized store carries the
+    /// ordinary object extensibility bit.
     fn extensible(&self, target: &Value) -> bool {
         let Some(identity) = intrinsic_key(target) else {
             return true;
@@ -44772,24 +44635,24 @@ impl Intrinsics {
             .borrow()
             .iter()
             .find(|(held, _)| *held == identity)
-            .is_none_or(|(_, slots)| slots.held.is_extensible())
+            .is_none_or(|(_, data)| data.is_extensible())
     }
 
     /// Close a built-in against new properties, sealing what is already there if asked.
     ///
-    /// The flag lives on the difference this store holds rather than on the tables, which is the
-    /// only place it can: the tables are shared `match` arms, and one realm closing `Math` must
-    /// not close it for another.
+    /// The flag lives on the realm-owned ordinary store: the shared tables are immutable, and one
+    /// realm closing `Math` must not close it for another.
     fn close(&self, target: &Value, sealing: bool) {
         let Some(identity) = intrinsic_key(target) else {
             return;
         };
+        self.materialize(target);
         let mut entries = self.entries.borrow_mut();
-        let slots = Self::slots(&mut entries, identity);
+        let data = Self::data(&mut entries, identity);
         if sealing {
-            slots.held.seal();
+            data.seal();
         } else {
-            slots.held.prevent_extensions();
+            data.prevent_extensions();
         }
     }
 
@@ -44801,11 +44664,10 @@ impl Intrinsics {
         if matches!(property, Property::Accessor { .. }) {
             self.accessors.set(true);
         }
+        self.materialize(target);
         let mut entries = self.entries.borrow_mut();
-        let slots = Self::slots(&mut entries, identity);
-        // A definition after a deletion is a property that exists again, so the tombstone goes.
-        slots.removed.retain(|name| name != key);
-        slots.held.install(key, property, attributes);
+        let data = Self::data(&mut entries, identity);
+        data.install(key, property, attributes);
     }
 
     /// Remove an own property the caller has already found configurable.
@@ -44813,32 +44675,32 @@ impl Intrinsics {
         let Some(identity) = intrinsic_key(target) else {
             return;
         };
+        self.materialize(target);
         let mut entries = self.entries.borrow_mut();
-        let slots = Self::slots(&mut entries, identity);
-        slots.held.remove(key);
-        // The tombstone stands even for a name the store had never held: what it hides is the
-        // table's answer, which is still there.
-        if !slots.removed.iter().any(|name| name == key) {
-            slots.removed.push(key.to_owned());
-        }
+        let data = Self::data(&mut entries, identity);
+        data.remove(key);
     }
 
-    /// The tabulated key list with the program's changes applied: names it deleted drop out,
-    /// names it added follow, in the order it added them.
-    fn reshape(&self, target: &Value, keys: &mut Vec<String>) {
-        let Some(identity) = intrinsic_key(target) else {
-            return;
-        };
+    /// Complete materialized own keys in ordinary ObjectData insertion order.
+    fn is_materialized(&self, target: &Value) -> bool {
+        intrinsic_key(target).is_some_and(|identity| {
+            self.entries
+                .borrow()
+                .iter()
+                .any(|(key, _)| *key == identity)
+        })
+    }
+
+    fn own_keys(&self, target: &Value) -> Option<Vec<String>> {
+        let identity = intrinsic_key(target)?;
         let entries = self.entries.borrow();
-        let Some((_, slots)) = entries.iter().find(|(held, _)| *held == identity) else {
-            return;
-        };
-        keys.retain(|key| !slots.removed.iter().any(|name| name == key));
-        for key in slots.held.keys() {
-            if !symbol::is_reserved(key) && !keys.iter().any(|listed| listed == key) {
-                keys.push(key.to_owned());
-            }
-        }
+        let data = &entries.iter().find(|(key, _)| *key == identity)?.1;
+        Some(
+            data.keys()
+                .filter(|key| !symbol::is_reserved(key))
+                .map(str::to_owned)
+                .collect(),
+        )
     }
 
     /// The own properties of this built-in that enumeration sees.
@@ -44850,28 +44712,84 @@ impl Intrinsics {
         let Some(identity) = intrinsic_key(target) else {
             return Vec::new();
         };
+        self.materialize(target);
         let entries = self.entries.borrow();
-        let Some((_, slots)) = entries.iter().find(|(held, _)| *held == identity) else {
+        let Some((_, data)) = entries.iter().find(|(held, _)| *held == identity) else {
             return Vec::new();
         };
-        slots
-            .held
-            .entries()
+        data.entries()
             .filter(|(key, _)| !symbol::is_reserved(key))
             .map(|(key, property)| (key.to_owned(), property.clone()))
             .collect()
     }
 
-    /// The entry for one built-in, created empty the first time a program touches it.
-    fn slots(
-        entries: &mut Vec<(IntrinsicKey, IntrinsicSlots)>,
+    fn data(
+        entries: &mut Vec<(IntrinsicKey, ObjectData)>,
         identity: IntrinsicKey,
-    ) -> &mut IntrinsicSlots {
-        if let Some(position) = entries.iter().position(|(held, _)| *held == identity) {
-            return &mut entries[position].1;
+    ) -> &mut ObjectData {
+        let position = entries.iter().position(|(key, _)| *key == identity);
+        let position = position.unwrap_or_else(|| {
+            entries.push((identity, ObjectData::default()));
+            entries.len() - 1
+        });
+        &mut entries[position].1
+    }
+
+    fn materialize(&self, target: &Value) {
+        let Some(identity) = intrinsic_key(target) else {
+            return;
+        };
+        if self
+            .entries
+            .borrow()
+            .iter()
+            .any(|(key, _)| *key == identity)
+        {
+            return;
         }
-        entries.push((identity, IntrinsicSlots::default()));
-        &mut entries.last_mut().expect("just pushed").1
+        let realm = value_realm(target);
+        let mut keys: Vec<String> = match target {
+            Value::Native(Native::PrototypeOf(table), _) => intrinsic_prototype_entries(*table)
+                .into_iter()
+                .map(|(key, _)| key)
+                .collect(),
+            _ => Vec::new(),
+        };
+        if !matches!(target, Value::Native(Native::PrototypeOf(_), _)) {
+            if intrinsic_identity(target).is_some() {
+                keys.extend(["length".into(), "name".into()]);
+            }
+            if intrinsic_prototype_in(self, target).is_some() {
+                keys.push("prototype".into());
+            }
+            keys.extend(intrinsic_extra_property_names(target));
+            keys.extend(
+                intrinsic_static_property_names(target)
+                    .iter()
+                    .map(|key| (*key).to_owned()),
+            );
+        }
+        for symbol in WellKnown::ALL {
+            let key = symbol.property_key();
+            if !keys.iter().any(|existing| existing == key) {
+                keys.push(key.to_owned());
+            }
+        }
+        let mut data = ObjectData::default();
+        for key in keys {
+            if let Some(attributes) = tabulated_attributes(self, target, &key)
+                && let Some(property) = tabulated_property(self, target, &key)
+            {
+                data.install(&key, retag_intrinsic_property(property, realm), attributes);
+            }
+        }
+        data.set_prototype(prototype_of(target));
+        let mut entries = self.entries.borrow_mut();
+        if let Some((_, slot)) = entries.iter_mut().find(|(key, _)| *key == identity) {
+            *slot = data;
+        } else {
+            entries.push((identity, data));
+        }
     }
 }
 
@@ -44893,7 +44811,7 @@ fn native_inherited_property(intrinsics: &Intrinsics, target: &Value, name: &str
                 name,
             ) {
                 Overridden::Held(Property::Value(value), _) => value,
-                Overridden::Held(Property::Accessor { .. }, _) | Overridden::Removed => {
+                Overridden::Held(Property::Accessor { .. }, _) | Overridden::Absent => {
                     function_property(intrinsics, name, realm)
                 }
                 Overridden::Untouched => Native::Error(ErrorKind::Error)
@@ -45486,6 +45404,9 @@ fn intrinsic_accessor(target: &Value, key: &str) -> Option<Property> {
 
 /// The own, program-visible keys of a value, in insertion order.
 fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
+    if matches!(target, Value::Native(_, _) | Value::Callback(_, _)) {
+        intrinsics.materialize(target);
+    }
     let from_object = |data: &ObjectData| -> Vec<String> {
         data.keys()
             .filter(|key| !symbol::is_reserved(key))
@@ -45524,44 +45445,14 @@ fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
             }
             keys
         }
-        Value::Native(Native::PrototypeOf(table), _) => {
-            let mut keys = intrinsic_prototype_entries(*table)
-                .into_iter()
-                .map(|(key, _)| key)
-                .collect();
-            intrinsics.reshape(target, &mut keys);
-            keys
+        Value::Native(Native::PrototypeOf(_table), _) => {
+            intrinsics.own_keys(target).unwrap_or_default()
         }
         Value::Native(_, _)
         | Value::Callback(_, _)
         | Value::Settler(..)
         | Value::Capability(..)
-        | Value::Element(_) => {
-            let mut keys = Vec::new();
-            if intrinsic_identity(target).is_some() {
-                keys.push("length".to_owned());
-                keys.push("name".to_owned());
-            }
-            if intrinsic_prototype_in(intrinsics, target).is_some() {
-                keys.push("prototype".to_owned());
-            }
-            // The tabulated list is only ever these three: a table answers a name, it cannot
-            // list one, so `Object.getOwnPropertyNames(Math)` does not see `Math`'s methods.
-            // What it does see is everything a program put there and nothing it deleted, which
-            // is the part the realm's store knows.
-            intrinsics.reshape(target, &mut keys);
-            // Native constructors are functions too. Their static methods live in the compact
-            // `Native::property` table rather than a mutable ObjectData, so they need the same
-            // own-key walk as `Array`/`Object` when used as a proxy target.
-            for key in intrinsic_static_property_names(target) {
-                if !keys.iter().any(|listed| listed == key)
-                    && own_attributes(intrinsics, target, key).is_some()
-                {
-                    keys.push((*key).to_owned());
-                }
-            }
-            keys
-        }
+        | Value::Element(_) => intrinsics.own_keys(target).unwrap_or_default(),
         Value::Array(items) => {
             // An accessor leaves a hole in the dense storage, so the indices that are really
             // there are the union of the two: the walk below would otherwise list an array's
@@ -45613,6 +45504,25 @@ fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
 /// Native values do not carry an `ObjectData`, so `own_property_keys` cannot discover these by
 /// walking a store. Keep this candidate list next to the own-key walk and filter it through
 /// `own_attributes`: a name is included only when the same property machinery can describe it.
+fn intrinsic_extra_property_names(target: &Value) -> Vec<String> {
+    match target {
+        Value::Native(Native::Temporal(op), _) => temporal::property_names(*op)
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect(),
+        Value::Native(Native::Intl(op), _) => intl::property_names(*op)
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect(),
+        Value::Native(native, _) => native
+            .own_property_rows()
+            .iter()
+            .map(|(name, _)| (*name).to_owned())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn intrinsic_static_property_names(target: &Value) -> &'static [&'static str] {
     let tabulated = intrinsic_tabulated_property_names(target);
     if !tabulated.is_empty() {
@@ -45813,13 +45723,9 @@ fn own_property_keys_including_symbols(intrinsics: &Intrinsics, target: &Value) 
         | Value::Capability(..)
         | Value::Element(_) => intrinsic_key(target)
             .and_then(|identity| {
-                intrinsics
-                    .entries
-                    .borrow()
-                    .iter()
-                    .find_map(|(held, slots)| {
-                        (*held == identity).then(|| slots.held.keys().map(str::to_owned).collect())
-                    })
+                intrinsics.entries.borrow().iter().find_map(|(held, data)| {
+                    (*held == identity).then(|| data.keys().map(str::to_owned).collect())
+                })
             })
             .unwrap_or_default(),
         _ => Vec::new(),
@@ -45836,7 +45742,7 @@ fn own_property_keys_including_symbols(intrinsics: &Intrinsics, target: &Value) 
     // symbol cannot be missed. This is deliberately *not* in `own_property_keys`, which
     // `Object.getOwnPropertyNames` reads unfiltered -- putting a reserved spelling there is
     // exactly the leak that cost 838 rows.
-    if matches!(target, Value::Native(_, _)) {
+    if matches!(target, Value::Native(_, _)) && !intrinsics.is_materialized(target) {
         let Value::Native(native, _) = target else {
             unreachable!("checked by the guard");
         };
@@ -45971,11 +45877,16 @@ fn own_attributes(intrinsics: &Intrinsics, target: &Value, key: &str) -> Option<
         | Value::Callback(_, _)
         | Value::Settler(..)
         | Value::Capability(..)
-        | Value::Element(_) => match intrinsics.overridden(target, key) {
-            Overridden::Held(_, attributes) => Some(attributes),
-            Overridden::Removed => None,
-            Overridden::Untouched => tabulated_attributes(intrinsics, target, key),
-        },
+        | Value::Element(_) => {
+            if matches!(target, Value::Native(_, _) | Value::Callback(_, _)) {
+                intrinsics.materialize(target);
+            }
+            match intrinsics.overridden(target, key) {
+                Overridden::Held(_, attributes) => Some(attributes),
+                Overridden::Absent => None,
+                Overridden::Untouched => tabulated_attributes(intrinsics, target, key),
+            }
+        }
         _ => None,
     }
 }

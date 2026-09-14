@@ -203,17 +203,22 @@ pub const fn namespace_name(op: Op) -> Option<&'static str> {
     }
 }
 
-const fn short_name(kind: engine::Kind) -> &'static str {
-    match kind {
-        engine::Kind::PlainDate => "PlainDate",
-        engine::Kind::PlainTime => "PlainTime",
-        engine::Kind::PlainDateTime => "PlainDateTime",
-        engine::Kind::PlainYearMonth => "PlainYearMonth",
-        engine::Kind::PlainMonthDay => "PlainMonthDay",
-        engine::Kind::Duration => "Duration",
-        engine::Kind::Instant => "Instant",
-        engine::Kind::ZonedDateTime => "ZonedDateTime",
-    }
+macro_rules! temporal_types {
+    ($( $variant:ident => $name:literal ),+ $(,)?) => {
+        const TYPE_NAMES: &[&str] = &[$($name),+];
+        fn named_kind(name: &str) -> Option<engine::Kind> {
+            match name { $( $name => Some(engine::Kind::$variant), )+ _ => None }
+        }
+        const fn short_name(kind: engine::Kind) -> &'static str {
+            match kind { $( engine::Kind::$variant => $name, )+ }
+        }
+    };
+}
+
+temporal_types! {
+    PlainDate => "PlainDate", PlainTime => "PlainTime", PlainDateTime => "PlainDateTime",
+    PlainYearMonth => "PlainYearMonth", PlainMonthDay => "PlainMonthDay", Duration => "Duration",
+    Instant => "Instant", ZonedDateTime => "ZonedDateTime",
 }
 
 const fn method_name(method: Method) -> &'static str {
@@ -243,6 +248,100 @@ const fn method_name(method: Method) -> &'static str {
         Method::ToPlainMonthDay => "toPlainMonthDay",
         Method::ToZonedDateTime => "toZonedDateTime",
         Method::ToInstant => "toInstant",
+    }
+}
+
+macro_rules! temporal_method_rows {
+    ($( $kinds:pat => $name:literal => $method:ident ),+ $(,)?) => {
+        const PROTOTYPE_NAMES: &[&str] = &[
+            "constructor", "@@toStringTag", $($name),+
+        ];
+        #[allow(unreachable_patterns)]
+        fn method_for_kind(kind: engine::Kind, name: &str) -> Option<Method> {
+            match (kind, name) {
+                $( ($kinds, $name) => Some(Method::$method), )+
+                _ => None,
+            }
+        }
+    };
+}
+
+temporal_method_rows! {
+    engine::Kind::PlainDate | engine::Kind::PlainTime | engine::Kind::PlainDateTime | engine::Kind::PlainYearMonth | engine::Kind::PlainMonthDay | engine::Kind::Duration | engine::Kind::Instant | engine::Kind::ZonedDateTime => "with" => With,
+    engine::Kind::PlainDate | engine::Kind::PlainTime | engine::Kind::PlainDateTime | engine::Kind::PlainYearMonth | engine::Kind::PlainMonthDay | engine::Kind::Duration | engine::Kind::Instant | engine::Kind::ZonedDateTime => "toString" => ToString,
+    engine::Kind::PlainDate | engine::Kind::PlainTime | engine::Kind::PlainDateTime | engine::Kind::PlainYearMonth | engine::Kind::PlainMonthDay | engine::Kind::Duration | engine::Kind::Instant | engine::Kind::ZonedDateTime => "toJSON" => ToJson,
+    engine::Kind::PlainDate | engine::Kind::PlainTime | engine::Kind::PlainDateTime | engine::Kind::PlainYearMonth | engine::Kind::PlainMonthDay | engine::Kind::Duration | engine::Kind::Instant | engine::Kind::ZonedDateTime => "toLocaleString" => ToLocaleString,
+    engine::Kind::PlainDate | engine::Kind::PlainTime | engine::Kind::PlainDateTime | engine::Kind::PlainYearMonth | engine::Kind::PlainMonthDay | engine::Kind::Duration | engine::Kind::Instant | engine::Kind::ZonedDateTime => "valueOf" => ValueOf,
+    engine::Kind::PlainDate | engine::Kind::PlainTime | engine::Kind::PlainDateTime | engine::Kind::PlainYearMonth | engine::Kind::PlainMonthDay | engine::Kind::Instant | engine::Kind::ZonedDateTime => "equals" => Equals,
+    engine::Kind::PlainDate | engine::Kind::PlainTime | engine::Kind::PlainDateTime | engine::Kind::PlainYearMonth | engine::Kind::Duration | engine::Kind::Instant | engine::Kind::ZonedDateTime => "add" => Add,
+    engine::Kind::PlainDate | engine::Kind::PlainTime | engine::Kind::PlainDateTime | engine::Kind::PlainYearMonth | engine::Kind::Duration | engine::Kind::Instant | engine::Kind::ZonedDateTime => "subtract" => Subtract,
+    engine::Kind::PlainDate | engine::Kind::PlainTime | engine::Kind::PlainDateTime | engine::Kind::PlainYearMonth | engine::Kind::Duration | engine::Kind::Instant | engine::Kind::ZonedDateTime => "until" => Until,
+    engine::Kind::PlainDate | engine::Kind::PlainTime | engine::Kind::PlainDateTime | engine::Kind::PlainYearMonth | engine::Kind::Duration | engine::Kind::Instant | engine::Kind::ZonedDateTime => "since" => Since,
+    engine::Kind::PlainDateTime | engine::Kind::Duration | engine::Kind::Instant | engine::Kind::ZonedDateTime => "round" => Round,
+    engine::Kind::PlainDate => "toPlainDateTime" => ToPlainDateTime,
+    engine::Kind::PlainDate => "toPlainYearMonth" => ToPlainYearMonth,
+    engine::Kind::PlainDate => "toPlainMonthDay" => ToPlainMonthDay,
+    engine::Kind::PlainDate => "toZonedDateTime" => ToZonedDateTime,
+    engine::Kind::PlainDate => "withCalendar" => WithCalendar,
+    engine::Kind::PlainTime => "round" => Round,
+    engine::Kind::PlainDateTime => "toPlainDate" => ToPlainDate,
+    engine::Kind::PlainDateTime => "toPlainTime" => ToPlainTime,
+    engine::Kind::PlainDateTime => "toZonedDateTime" => ToZonedDateTime,
+    engine::Kind::PlainDateTime => "withCalendar" => WithCalendar,
+    engine::Kind::PlainDateTime => "withPlainTime" => WithPlainTime,
+    engine::Kind::PlainYearMonth => "toPlainDate" => ToPlainDate,
+    engine::Kind::PlainMonthDay => "toPlainDate" => ToPlainDate,
+    engine::Kind::Duration => "total" => Total,
+    engine::Kind::Duration => "negated" => Negated,
+    engine::Kind::Duration => "abs" => Abs,
+    engine::Kind::Instant => "toZonedDateTimeISO" => ToZonedDateTime,
+    engine::Kind::ZonedDateTime => "startOfDay" => StartOfDay,
+    engine::Kind::ZonedDateTime => "toInstant" => ToInstant,
+    engine::Kind::ZonedDateTime => "toPlainDate" => ToPlainDate,
+    engine::Kind::ZonedDateTime => "toPlainTime" => ToPlainTime,
+    engine::Kind::ZonedDateTime => "toPlainDateTime" => ToPlainDateTime,
+    engine::Kind::ZonedDateTime => "withCalendar" => WithCalendar,
+    engine::Kind::ZonedDateTime => "withTimeZone" => WithTimeZone,
+    engine::Kind::ZonedDateTime => "withPlainTime" => WithPlainTime,
+}
+
+/// Candidate own names for reflection of each Temporal marker.
+///
+/// The materializer uses this list only to discover names; `static_property` and the prototype
+/// lookup below remain the authority for whether a candidate exists for a particular kind.
+pub(crate) fn property_names(op: Op) -> &'static [&'static str] {
+    const NAMESPACE: &[&str] = &[
+        "Now",
+        TYPE_NAMES[0],
+        TYPE_NAMES[1],
+        TYPE_NAMES[2],
+        TYPE_NAMES[3],
+        TYPE_NAMES[4],
+        TYPE_NAMES[5],
+        TYPE_NAMES[6],
+        TYPE_NAMES[7],
+    ];
+    const NOW: &[&str] = &[
+        "instant",
+        "plainDateISO",
+        "plainTimeISO",
+        "plainDateTimeISO",
+        "zonedDateTimeISO",
+        "timeZoneId",
+    ];
+    const CONSTRUCTOR: &[&str] = &[
+        "prototype",
+        "from",
+        "compare",
+        "fromEpochMilliseconds",
+        "fromEpochNanoseconds",
+    ];
+    match op {
+        Op::Namespace => NAMESPACE,
+        Op::Now => NOW,
+        Op::Constructor(_) => CONSTRUCTOR,
+        Op::Prototype(_) => PROTOTYPE_NAMES,
+        _ => &[],
     }
 }
 
@@ -315,20 +414,6 @@ pub fn static_property(op: Op, name: &str) -> Option<Value> {
     })
 }
 
-fn named_kind(name: &str) -> Option<engine::Kind> {
-    Some(match name {
-        "PlainDate" => engine::Kind::PlainDate,
-        "PlainTime" => engine::Kind::PlainTime,
-        "PlainDateTime" => engine::Kind::PlainDateTime,
-        "PlainYearMonth" => engine::Kind::PlainYearMonth,
-        "PlainMonthDay" => engine::Kind::PlainMonthDay,
-        "Duration" => engine::Kind::Duration,
-        "Instant" => engine::Kind::Instant,
-        "ZonedDateTime" => engine::Kind::ZonedDateTime,
-        _ => return None,
-    })
-}
-
 /// Reading a property off a `Temporal` value: a field if it has one, otherwise a method.
 ///
 /// The field table is the engine's, so a name this realm has never heard of cannot answer with a
@@ -373,80 +458,7 @@ pub fn prototype_accessor(kind: engine::Kind, name: &str) -> Option<&'static str
 /// `PlainMonthDay` has no arithmetic, a `Duration` has no `compare` on the instance, and answering
 /// a method the receiver cannot perform would turn a `TypeError` into a wrong answer.
 fn prototype_method(kind: engine::Kind, name: &str) -> Option<Method> {
-    let shared = match name {
-        "toString" => Some(Method::ToString),
-        "toJSON" => Some(Method::ToJson),
-        "toLocaleString" => Some(Method::ToLocaleString),
-        "valueOf" => Some(Method::ValueOf),
-        "equals" if kind != engine::Kind::Duration => Some(Method::Equals),
-        "with" => Some(Method::With),
-        _ => None,
-    };
-    if shared.is_some() {
-        return shared;
-    }
-    let arithmetic = match name {
-        "add" => Some(Method::Add),
-        "subtract" => Some(Method::Subtract),
-        "until" => Some(Method::Until),
-        "since" => Some(Method::Since),
-        _ => None,
-    };
-    match kind {
-        engine::Kind::PlainDate => match name {
-            "toPlainDateTime" => Some(Method::ToPlainDateTime),
-            "toPlainYearMonth" => Some(Method::ToPlainYearMonth),
-            "toPlainMonthDay" => Some(Method::ToPlainMonthDay),
-            "toZonedDateTime" => Some(Method::ToZonedDateTime),
-            "withCalendar" => Some(Method::WithCalendar),
-            _ => arithmetic,
-        },
-        engine::Kind::PlainTime => match name {
-            "round" => Some(Method::Round),
-            _ => arithmetic,
-        },
-        engine::Kind::PlainDateTime => match name {
-            "round" => Some(Method::Round),
-            "toPlainDate" => Some(Method::ToPlainDate),
-            "toPlainTime" => Some(Method::ToPlainTime),
-            "toZonedDateTime" => Some(Method::ToZonedDateTime),
-            "withCalendar" => Some(Method::WithCalendar),
-            "withPlainTime" => Some(Method::WithPlainTime),
-            _ => arithmetic,
-        },
-        engine::Kind::PlainYearMonth => match name {
-            "toPlainDate" => Some(Method::ToPlainDate),
-            _ => arithmetic,
-        },
-        engine::Kind::PlainMonthDay => match name {
-            "toPlainDate" => Some(Method::ToPlainDate),
-            _ => None,
-        },
-        engine::Kind::Duration => match name {
-            "round" => Some(Method::Round),
-            "total" => Some(Method::Total),
-            "negated" => Some(Method::Negated),
-            "abs" => Some(Method::Abs),
-            _ => arithmetic,
-        },
-        engine::Kind::Instant => match name {
-            "round" => Some(Method::Round),
-            "toZonedDateTimeISO" => Some(Method::ToZonedDateTime),
-            _ => arithmetic,
-        },
-        engine::Kind::ZonedDateTime => match name {
-            "round" => Some(Method::Round),
-            "startOfDay" => Some(Method::StartOfDay),
-            "toInstant" => Some(Method::ToInstant),
-            "toPlainDate" => Some(Method::ToPlainDate),
-            "toPlainTime" => Some(Method::ToPlainTime),
-            "toPlainDateTime" => Some(Method::ToPlainDateTime),
-            "withCalendar" => Some(Method::WithCalendar),
-            "withTimeZone" => Some(Method::WithTimeZone),
-            "withPlainTime" => Some(Method::WithPlainTime),
-            _ => arithmetic,
-        },
-    }
+    method_for_kind(kind, name)
 }
 
 /// The keys `from` and `with` read on this type.

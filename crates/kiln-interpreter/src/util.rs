@@ -3,7 +3,7 @@
 //! Provides utility functions including string formatting (`format`), inheritance helpers (`inherits`),
 //! inspection (`inspect`), and debug logging (`debuglog`).
 
-use crate::{ExecutionError, Native, RealmId, Symbol, Value, WellKnown, is_callable};
+use crate::{ExecutionError, Native, RealmId, Value, is_callable};
 
 /// `node:util` property resolution.
 pub(crate) fn property(prop: &str) -> Option<Value> {
@@ -22,16 +22,6 @@ pub(crate) fn property(prop: &str) -> Option<Value> {
             Native::TextDecoderConstructor,
             RealmId::PRIMARY,
         )),
-        _ => None,
-    }
-}
-
-/// Property resolution on `util.inspect`.
-pub(crate) fn inspect_property(prop: &str) -> Option<Value> {
-    match prop {
-        "custom" => Some(Value::Symbol(Symbol::WellKnown(
-            WellKnown::NodeInspectCustom,
-        ))),
         _ => None,
     }
 }

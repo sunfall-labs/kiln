@@ -46,6 +46,68 @@ pub enum Service {
     Segments,
 }
 
+macro_rules! intl_namespace_rows {
+    ($( $name:literal => $op:expr ),+ $(,)?) => {
+        const NAMESPACE_NAMES: &[&str] = &[$($name),+];
+        fn namespace_property(name: &str) -> Option<Value> {
+            match name {
+                $( $name => Some(Value::Native(Native::Intl($op), RealmId::PRIMARY)), )+
+                _ => None,
+            }
+        }
+    };
+}
+
+intl_namespace_rows! {
+    "Collator" => Op::Constructor(Service::Collator),
+    "DateTimeFormat" => Op::Constructor(Service::DateTimeFormat),
+    "DisplayNames" => Op::Constructor(Service::DisplayNames),
+    "DurationFormat" => Op::Constructor(Service::DurationFormat),
+    "ListFormat" => Op::Constructor(Service::ListFormat),
+    "Locale" => Op::Constructor(Service::Locale),
+    "NumberFormat" => Op::Constructor(Service::NumberFormat),
+    "PluralRules" => Op::Constructor(Service::PluralRules),
+    "RelativeTimeFormat" => Op::Constructor(Service::RelativeTimeFormat),
+    "Segmenter" => Op::Constructor(Service::Segmenter),
+    "getCanonicalLocales" => Op::GetCanonicalLocales,
+    "supportedValuesOf" => Op::SupportedValuesOf,
+}
+
+macro_rules! intl_prototype_rows {
+    ($( $services:pat => $name:literal => $method:ident ),+ $(,)?) => {
+        const PROTOTYPE_NAMES: &[&str] = &[
+            "constructor", $($name),+,
+        ];
+        fn method_for_service(service: Service, name: &str) -> Option<Method> {
+            let method = match (service, name) {
+                $( ($services, $name) => Method::$method, )+
+                _ => return None,
+            };
+            Some(method)
+        }
+    };
+}
+
+intl_prototype_rows! {
+    Service::Collator | Service::DateTimeFormat | Service::DisplayNames | Service::DurationFormat | Service::ListFormat | Service::NumberFormat | Service::PluralRules | Service::RelativeTimeFormat | Service::Segmenter => "resolvedOptions" => ResolvedOptions,
+    Service::Collator => "compare" => Compare,
+    Service::DateTimeFormat | Service::DurationFormat | Service::ListFormat | Service::NumberFormat => "format" => Format,
+    Service::DateTimeFormat | Service::DurationFormat | Service::ListFormat | Service::NumberFormat => "formatToParts" => FormatToParts,
+    Service::DateTimeFormat => "formatRange" => FormatRange,
+    Service::DateTimeFormat => "formatRangeToParts" => FormatRangeToParts,
+    Service::DisplayNames => "of" => Of,
+    Service::PluralRules => "select" => Select,
+    Service::PluralRules => "selectRange" => SelectRange,
+    Service::RelativeTimeFormat => "format" => Format,
+    Service::RelativeTimeFormat => "formatToParts" => FormatToParts,
+    Service::Segmenter => "segment" => Segment,
+    Service::Segments => "containing" => Containing,
+    Service::Segments => "@@iterator" => SegmentIterator,
+    Service::Locale => "maximize" => Maximize,
+    Service::Locale => "minimize" => Minimize,
+    Service::Locale => "toString" => LocaleToString,
+}
+
 impl Service {
     /// The name the language spells it with, which is also its `Symbol.toStringTag`.
     pub const fn name(self) -> &'static str {
@@ -296,37 +358,24 @@ pub const fn length(op: Op) -> Option<f64> {
     }
 }
 
+/// Candidate own names for reflection of each Intl marker.
+///
+/// `static_property` and `prototype_method` remain the authority for whether a candidate belongs
+/// to the selected service; this list only gives the materializer the names to ask about.
+pub(crate) fn property_names(op: Op) -> &'static [&'static str] {
+    const CONSTRUCTOR: &[&str] = &["prototype", "supportedLocalesOf"];
+    match op {
+        Op::Namespace => NAMESPACE_NAMES,
+        Op::Constructor(_) => CONSTRUCTOR,
+        Op::Prototype(_) => PROTOTYPE_NAMES,
+        _ => &[],
+    }
+}
+
 /// A static property of the `Intl` namespace, a constructor or a prototype.
 pub fn static_property(op: Op, name: &str) -> Option<Value> {
-    const SERVICES: &[Service] = &[
-        Service::Collator,
-        Service::DateTimeFormat,
-        Service::DisplayNames,
-        Service::DurationFormat,
-        Service::ListFormat,
-        Service::Locale,
-        Service::NumberFormat,
-        Service::PluralRules,
-        Service::RelativeTimeFormat,
-        Service::Segmenter,
-    ];
     match (op, name) {
-        (Op::Namespace, "getCanonicalLocales") => Some(Value::Native(
-            Native::Intl(Op::GetCanonicalLocales),
-            RealmId::PRIMARY,
-        )),
-        (Op::Namespace, "supportedValuesOf") => Some(Value::Native(
-            Native::Intl(Op::SupportedValuesOf),
-            RealmId::PRIMARY,
-        )),
-        (Op::Namespace, _) => {
-            SERVICES
-                .iter()
-                .find(|service| service.name() == name)
-                .map(|service| {
-                    Value::Native(Native::Intl(Op::Constructor(*service)), RealmId::PRIMARY)
-                })
-        }
+        (Op::Namespace, _) => namespace_property(name),
         (Op::Constructor(service), "prototype") => Some(Value::Native(
             Native::Intl(Op::Prototype(service)),
             RealmId::PRIMARY,
@@ -355,46 +404,8 @@ pub fn static_property(op: Op, name: &str) -> Option<Value> {
 /// One table shared by the prototype and by an instance, so the two cannot disagree about what a
 /// service has -- the arrangement `regexp_method` and `date_method` already use.
 pub fn prototype_method(service: Service, name: &str) -> Option<Value> {
-    let method = match (service, name) {
-        (_, "resolvedOptions") if !matches!(service, Service::Locale | Service::Segments) => {
-            Method::ResolvedOptions
-        }
-        (Service::DisplayNames, "of") => Method::Of,
-        (Service::RelativeTimeFormat, "format") => Method::Format,
-        (Service::RelativeTimeFormat, "formatToParts") => Method::FormatToParts,
-        (
-            Service::NumberFormat
-            | Service::ListFormat
-            | Service::DateTimeFormat
-            | Service::DurationFormat,
-            "format",
-        ) => Method::Format,
-        (
-            Service::NumberFormat
-            | Service::ListFormat
-            | Service::DateTimeFormat
-            | Service::DurationFormat,
-            "formatToParts",
-        ) => Method::FormatToParts,
-        (Service::DateTimeFormat, "formatRange") => Method::FormatRange,
-        (Service::DateTimeFormat, "formatRangeToParts") => Method::FormatRangeToParts,
-        (Service::PluralRules, "select") => Method::Select,
-        (Service::PluralRules, "selectRange") => Method::SelectRange,
-        (Service::Collator, "compare") => Method::Compare,
-        (Service::Segmenter, "segment") => Method::Segment,
-        (Service::Segments, "containing") => Method::Containing,
-        (Service::Segments, name) if name == WellKnown::Iterator.property_key() => {
-            Method::SegmentIterator
-        }
-        (Service::Locale, "maximize") => Method::Maximize,
-        (Service::Locale, "minimize") => Method::Minimize,
-        (Service::Locale, "toString") => Method::LocaleToString,
-        _ => return None,
-    };
-    Some(Value::Native(
-        Native::Intl(Op::Method(service, method)),
-        RealmId::PRIMARY,
-    ))
+    method_for_service(service, name)
+        .map(|method| Value::Native(Native::Intl(Op::Method(service, method)), RealmId::PRIMARY))
 }
 
 /// What an instance answers to: its prototype's methods, plus `Intl.Locale`'s data accessors.
