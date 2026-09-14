@@ -336,7 +336,6 @@ impl PropertyKeyRef<'_> {
             Self::Units(key) => key.clone(),
         }
     }
-
 }
 
 #[derive(Clone, Debug)]
@@ -554,11 +553,7 @@ impl ObjectData {
     }
 
     fn lookup_key(&self, key: PropertyKeyRef<'_>) -> Option<Property> {
-        if let Some(own) = self
-            .properties
-            .iter()
-            .find(|slot| key.matches(&slot.key))
-        {
+        if let Some(own) = self.properties.iter().find(|slot| key.matches(&slot.key)) {
             return Some(own.property.clone());
         }
         let mut current = self.prototype.clone();
@@ -621,7 +616,11 @@ impl ObjectData {
     }
 
     fn define_value_key(&mut self, key: PropertyKeyRef<'_>, value: Value, attributes: Attributes) {
-        if let Some(slot) = self.properties.iter_mut().find(|slot| key.matches(&slot.key)) {
+        if let Some(slot) = self
+            .properties
+            .iter_mut()
+            .find(|slot| key.matches(&slot.key))
+        {
             if !redefinable(slot, attributes, true) {
                 return;
             }
@@ -660,7 +659,28 @@ impl ObjectData {
         setter: Option<Value>,
         attributes: Attributes,
     ) {
-        let existing = match self.get_own_property(key) {
+        self.define_accessor_key(PropertyKeyRef::Utf8(key), getter, setter, attributes);
+    }
+
+    /// Exact-unit counterpart of [`ObjectData::define_accessor`].
+    pub fn define_accessor_units(
+        &mut self,
+        key: &StringUnits,
+        getter: Option<Value>,
+        setter: Option<Value>,
+        attributes: Attributes,
+    ) {
+        self.define_accessor_key(PropertyKeyRef::Units(key), getter, setter, attributes);
+    }
+
+    fn define_accessor_key(
+        &mut self,
+        key: PropertyKeyRef<'_>,
+        getter: Option<Value>,
+        setter: Option<Value>,
+        attributes: Attributes,
+    ) {
+        let existing = match self.get_own_property_key(key) {
             Some(Property::Accessor { get, set }) => (get.clone(), set.clone()),
             _ => (None, None),
         };
@@ -668,7 +688,11 @@ impl ObjectData {
             get: getter.or(existing.0),
             set: setter.or(existing.1),
         };
-        if let Some(slot) = self.properties.iter_mut().find(|slot| slot.key == key) {
+        if let Some(slot) = self
+            .properties
+            .iter_mut()
+            .find(|slot| key.matches(&slot.key))
+        {
             if !redefinable(slot, attributes, false) {
                 return;
             }
@@ -677,7 +701,7 @@ impl ObjectData {
             return;
         }
         self.properties.push(Slot {
-            key: StringUnits::from(key),
+            key: key.owned(),
             property,
             attributes,
         });
@@ -762,7 +786,11 @@ impl ObjectData {
         if self.frozen || self.module_namespace {
             return;
         }
-        if let Some(slot) = self.properties.iter_mut().find(|slot| key.matches(&slot.key)) {
+        if let Some(slot) = self
+            .properties
+            .iter_mut()
+            .find(|slot| key.matches(&slot.key))
+        {
             // Only a data property can refuse a write. An accessor's setter has already had its
             // chance -- `inherited_setter` runs ahead of every store -- so a store that reaches
             // an accessor slot here is the machine replacing its own bookkeeping.
@@ -805,7 +833,6 @@ impl ObjectData {
             .unwrap_or(self.properties.len());
         self.properties.insert(position, slot);
     }
-
 
     /// Overwrite what one export of a module namespace holds, leaving its flags alone.
     ///
@@ -886,7 +913,11 @@ impl ObjectData {
             };
             let value = cell.borrow().clone();
             let key = key.clone();
-            if let Some(slot) = self.properties.iter_mut().find(|slot| slot.key == key.as_str()) {
+            if let Some(slot) = self
+                .properties
+                .iter_mut()
+                .find(|slot| slot.key == key.as_str())
+            {
                 slot.property = Property::Value(value);
             }
         }
@@ -1229,7 +1260,8 @@ fn own_property_state(
             Some(Property::Value(Value::Number(text.unit_len() as f64)))
         }
         Value::String(text) => key
-            .parse::<usize>().ok()
+            .parse::<usize>()
+            .ok()
             .and_then(|index| text.unit_at(index))
             .map(|unit| Property::Value(Value::String(StringUnits::from_units(&[unit])))),
         _ => None,
@@ -1260,7 +1292,9 @@ fn tabulated_property(intrinsics: &Intrinsics, target: &Value, key: &str) -> Opt
         });
     }
     match key {
-        "name" => intrinsic_identity(target).map(|(name, _)| Property::Value(Value::String(name.into()))),
+        "name" => {
+            intrinsic_identity(target).map(|(name, _)| Property::Value(Value::String(name.into())))
+        }
         "length" => {
             intrinsic_identity(target).map(|(_, length)| Property::Value(Value::Number(length)))
         }
@@ -1851,7 +1885,9 @@ impl IteratorKind {
 fn iterator_prototype_method(kind: IteratorKind, name: &str) -> Value {
     match name {
         "next" => kind.next_method(),
-        key if key == WellKnown::ToStringTag.property_key() => Value::String(kind.tag().to_owned().into()),
+        key if key == WellKnown::ToStringTag.property_key() => {
+            Value::String(kind.tag().to_owned().into())
+        }
         // Everything else is `%IteratorPrototype%`'s, one link up: the helpers, and `@@iterator`
         // itself. The chain walk follows one marker and stops, so the step is taken here -- the
         // same shape `inherit_from_object` gives every other table for `Object.prototype`.
@@ -4625,7 +4661,8 @@ impl Value {
             } else {
                 "[object ArrayBuffer]"
             }
-            .to_owned().into(),
+            .to_owned()
+            .into(),
             Self::DataView(_) => "[object DataView]".to_owned(),
             Self::Symbol(symbol) => format!("Symbol({})", symbol.description()),
             // `String([1,2])` is "1,2": arrays stringify as a comma join, not as [object Array].
@@ -8763,11 +8800,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     }
 
     fn throw_node_invalid_arg_type(&mut self, message: &str) -> Result<Value, ExecutionError> {
-        let error = self.construct_error(ErrorKind::Type, &[Value::String(message.to_owned().into())]);
+        let error =
+            self.construct_error(ErrorKind::Type, &[Value::String(message.to_owned().into())]);
         if let Value::Object(object) = &error {
-            object
-                .borrow_mut()
-                .set_non_enumerable("code", Value::String("ERR_INVALID_ARG_TYPE".to_owned().into()));
+            object.borrow_mut().set_non_enumerable(
+                "code",
+                Value::String("ERR_INVALID_ARG_TYPE".to_owned().into()),
+            );
         }
         self.caught = Some(error);
         Err(ExecutionError::ThrownAcrossNative)
@@ -9103,7 +9142,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     })?;
                     let readable = Rc::clone(&node_net_socket_state(&socket)?.borrow().readable);
                     let chunk = match readable.borrow().encoding.as_deref() {
-                        Some("utf8") => Value::String(String::from_utf8_lossy(&bytes).into_owned().into()),
+                        Some("utf8") => {
+                            Value::String(String::from_utf8_lossy(&bytes).into_owned().into())
+                        }
                         _ => node_bytes_value(bytes),
                     };
                     self.dispatch_node_event(
@@ -9262,7 +9303,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let incoming = self.http_incoming_for_stream(server, resource, instruction)?;
                     let readable = Rc::clone(&node_http_incoming(&incoming)?.borrow().readable);
                     let body = match readable.borrow().encoding.as_deref() {
-                        Some("utf8") => Value::String(String::from_utf8_lossy(&data).into_owned().into()),
+                        Some("utf8") => {
+                            Value::String(String::from_utf8_lossy(&data).into_owned().into())
+                        }
                         _ => node_bytes_value(data),
                     };
                     self.dispatch_readable_state(
@@ -9322,7 +9365,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                 }
                 RuntimeHttpEvent::Error { id: _, message } => {
-                    let error = self.construct_error(ErrorKind::Error, &[Value::String(message.into())]);
+                    let error =
+                        self.construct_error(ErrorKind::Error, &[Value::String(message.into())]);
                     self.emit_http_server(server, "clientError", vec![error], instruction)?;
                 }
                 RuntimeHttpEvent::Closed => {
@@ -9473,7 +9517,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             }
                         })
                         .unwrap_or(Value::Undefined);
-                    let error = self.construct_error(ErrorKind::Error, &[Value::String(message.into())]);
+                    let error =
+                        self.construct_error(ErrorKind::Error, &[Value::String(message.into())]);
                     self.dispatch_node_event(
                         Native::NodeEventEmit,
                         &request,
@@ -9653,7 +9698,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     })?;
                 let readable = Rc::clone(&node_http_incoming(&incoming)?.borrow().readable);
                 let body = match readable.borrow().encoding.as_deref() {
-                    Some("utf8") => Value::String(String::from_utf8_lossy(&bytes).into_owned().into()),
+                    Some("utf8") => {
+                        Value::String(String::from_utf8_lossy(&bytes).into_owned().into())
+                    }
                     _ => node_bytes_value(bytes),
                 };
                 self.dispatch_readable_state(
@@ -9929,7 +9976,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::NodeResponseGetHeaders => {
                 let mut headers = ObjectData::default();
                 for (name, value) in &state.borrow().headers {
-                    headers.set(&name.to_ascii_lowercase(), Value::String(value.clone().into()));
+                    headers.set(
+                        &name.to_ascii_lowercase(),
+                        Value::String(value.clone().into()),
+                    );
                 }
                 // Node returns a null-prototype dictionary so names such as `constructor` are
                 // headers, never inherited object behavior.
@@ -10654,7 +10704,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
         };
         let operation = match native {
-            Native::NodeFsReadFile => AsyncHostOp::ReadFile { path: path.to_lossy_string() },
+            Native::NodeFsReadFile => AsyncHostOp::ReadFile {
+                path: path.to_lossy_string(),
+            },
             Native::NodeFsWriteFile => {
                 let data = match arguments.get(1) {
                     Some(Value::String(data)) => data.to_lossy_string().into_bytes(),
@@ -10668,7 +10720,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         });
                     }
                 };
-                AsyncHostOp::WriteFile { path: path.to_lossy_string(), data }
+                AsyncHostOp::WriteFile {
+                    path: path.to_lossy_string(),
+                    data,
+                }
             }
             Native::NodeFsAppendFile => {
                 let data = match arguments.get(1) {
@@ -10683,9 +10738,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         });
                     }
                 };
-                AsyncHostOp::AppendFile { path: path.to_lossy_string(), data }
+                AsyncHostOp::AppendFile {
+                    path: path.to_lossy_string(),
+                    data,
+                }
             }
-            Native::NodeFsStat => AsyncHostOp::Stat { path: path.to_lossy_string() },
+            Native::NodeFsStat => AsyncHostOp::Stat {
+                path: path.to_lossy_string(),
+            },
             Native::NodeFsMkdir => {
                 let recursive = arguments.get(1).map_or(false, |opt| {
                     if let Value::Object(obj) = opt {
@@ -10698,7 +10758,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         false
                     }
                 });
-                AsyncHostOp::Mkdir { path: path.to_lossy_string(), recursive }
+                AsyncHostOp::Mkdir {
+                    path: path.to_lossy_string(),
+                    recursive,
+                }
             }
             _ => {
                 return Err(ExecutionError::Host {
@@ -11049,7 +11112,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Ok(AsyncHostValue::Bytes(bytes))
                 if matches!(pending.conversion, HostResultConversion::Utf8) =>
             {
-                Settled::Fulfilled(Value::String(String::from_utf8_lossy(&bytes).into_owned().into()))
+                Settled::Fulfilled(Value::String(
+                    String::from_utf8_lossy(&bytes).into_owned().into(),
+                ))
             }
             Ok(value) => Settled::Fulfilled(node_host_value(value)?),
             Err(error) => Settled::Rejected(self.node_error_value(error)),
@@ -11918,8 +11983,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Instruction::WithHas(name) => {
                     let name = self.string_constant(*name, current)?;
                     let object = self.pop(current)?;
-                    let present =
-                        has_property(&self.intrinsics, &object, &Value::String(name.clone().into()));
+                    let present = has_property(
+                        &self.intrinsics,
+                        &object,
+                        &Value::String(name.clone().into()),
+                    );
                     if !present {
                         self.stack.push(Value::Boolean(false));
                         continue;
@@ -12720,8 +12788,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Instruction::DeletePropertyStrict { name, strict } => {
                     let name = self.string_constant(*name, current)?;
                     let target = self.pop(current)?;
-                    let removed =
-                        self.remove_with_strict(&target, &Value::String(name.into()), current, *strict);
+                    let removed = self.remove_with_strict(
+                        &target,
+                        &Value::String(name.into()),
+                        current,
+                        *strict,
+                    );
                     let Some(removed) = self.catchable(removed, current)? else {
                         continue;
                     };
@@ -13473,10 +13545,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     generator.borrow_mut().delegate = None;
                     let err = self.construct_error(
                         ErrorKind::Type,
-                        &[Value::String(format!(
-                            "Iterator result {} is not an object",
-                            inner_result.to_display_string()
-                        ).into())],
+                        &[Value::String(
+                            format!(
+                                "Iterator result {} is not an object",
+                                inner_result.to_display_string()
+                            )
+                            .into(),
+                        )],
                     );
                     return self.resume_generator_with(generator, Resume::Throw(err), instruction);
                 }
@@ -13552,10 +13627,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                                 if !is_object_type(&inner_res) {
                                     let err = self.construct_error(
                                         ErrorKind::Type,
-                                    &[Value::String(format!(
-                                        "Iterator result {} is not an object",
-                                        inner_res.to_display_string()
-                                    ).into())],
+                                        &[Value::String(
+                                            format!(
+                                                "Iterator result {} is not an object",
+                                                inner_res.to_display_string()
+                                            )
+                                            .into(),
+                                        )],
                                     );
                                     return self.resume_generator_with(
                                         generator,
@@ -13608,10 +13686,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     generator.borrow_mut().delegate = None;
                     let err = self.construct_error(
                         ErrorKind::Type,
-                        &[Value::String(format!(
-                            "Iterator result {} is not an object",
-                            inner_result.to_display_string()
-                        ).into())],
+                        &[Value::String(
+                            format!(
+                                "Iterator result {} is not an object",
+                                inner_result.to_display_string()
+                            )
+                            .into(),
+                        )],
                     );
                     return self.resume_generator_with(generator, Resume::Throw(err), instruction);
                 }
@@ -14050,8 +14131,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             } else {
                 let mut names = Vec::new();
                 for key in self.own_keys(&value, instruction)? {
-                    let descriptor =
-                        self.proxy_descriptor(&value, &Value::String(key.clone().into()), instruction)?;
+                    let descriptor = self.proxy_descriptor(
+                        &value,
+                        &Value::String(key.clone().into()),
+                        instruction,
+                    )?;
                     if is_reflect_target(&descriptor)
                         && self
                             .read_property(&descriptor, "enumerable", instruction)?
@@ -14164,7 +14248,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             "get",
             "set",
         ] {
-            if !has_property(&self.intrinsics, source, &Value::String(field.to_owned().into())) {
+            if !has_property(
+                &self.intrinsics,
+                source,
+                &Value::String(field.to_owned().into()),
+            ) {
                 continue;
             }
             let read = self.read_property(source, field, instruction)?;
@@ -14563,10 +14651,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     } else {
                         Err(self.construct_error(
                             ErrorKind::Type,
-                            &[Value::String(format!(
-                                "{} is not a function",
-                                callback.to_display_string()
-                            ).into())],
+                            &[Value::String(
+                                format!("{} is not a function", callback.to_display_string())
+                                    .into(),
+                            )],
                         ))
                     };
                     match settled {
@@ -14586,10 +14674,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if !is_callable(&callback) {
                     let thrown = self.construct_error(
                         ErrorKind::Type,
-                        &[Value::String(format!(
-                            "{} is not a function",
-                            callback.to_display_string()
-                        ).into())],
+                        &[Value::String(
+                            format!("{} is not a function", callback.to_display_string()).into(),
+                        )],
                     );
                     self.settle(&promise, &Settled::Rejected(thrown));
                     return Ok(Value::Promise(promise));
@@ -14860,8 +14947,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let fatal = own_data_property(receiver, "fatal").is_some_and(|v| v.is_truthy());
                 let ignore_bom =
                     own_data_property(receiver, "ignoreBOM").is_some_and(|v| v.is_truthy());
-                let encoding = encoding_rs::Encoding::for_label(encoding_label.to_lossy_string().as_bytes())
-                    .unwrap_or(encoding_rs::UTF_8);
+                let encoding =
+                    encoding_rs::Encoding::for_label(encoding_label.to_lossy_string().as_bytes())
+                        .unwrap_or(encoding_rs::UTF_8);
                 let (decoded, had_errors) = if ignore_bom {
                     encoding.decode_without_bom_handling(&bytes)
                 } else {
@@ -14909,9 +14997,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         self.module_path
                             .as_deref()
                             .map(str::to_owned)
-                            .unwrap_or_default().into()
+                            .unwrap_or_default()
+                            .into()
                     };
-                    return unsafe { (&mut *loader).create_require(&importer.to_lossy_string(), instruction) };
+                    return unsafe {
+                        (&mut *loader).create_require(&importer.to_lossy_string(), instruction)
+                    };
                 }
                 let require = CommonJsRequire::new([]);
                 return Ok(Value::CommonJsRequire(Rc::new(require)));
@@ -14954,9 +15045,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     )],
                 );
                 if let Value::Object(object) = &reason {
-                    object
-                        .borrow_mut()
-                        .set_non_enumerable("name", Value::String("TimeoutError".to_owned().into()));
+                    object.borrow_mut().set_non_enumerable(
+                        "name",
+                        Value::String("TimeoutError".to_owned().into()),
+                    );
                 }
                 let timer = Timer {
                     callback: Value::Bound(Rc::new(BoundFunction {
@@ -15481,10 +15573,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         match native {
             Native::ProcessGetBuiltinModule => match arguments.first() {
-                Some(Value::String(name)) if kiln_builtins::is_builtin_specifier(&name.to_lossy_string()) => {
+                Some(Value::String(name))
+                    if kiln_builtins::is_builtin_specifier(&name.to_lossy_string()) =>
+                {
                     if let Some(loader) = self.commonjs_loader {
-                        return unsafe { (&mut *loader).get_builtin(&name.to_lossy_string(), instruction) }
-                            .map(|value| value.unwrap_or(Value::Undefined));
+                        return unsafe {
+                            (&mut *loader).get_builtin(&name.to_lossy_string(), instruction)
+                        }
+                        .map(|value| value.unwrap_or(Value::Undefined));
                     }
                     Err(ExecutionError::TypeErrorMessage {
                         message: format!(
@@ -16404,8 +16500,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let target = arguments.first().cloned().unwrap_or(Value::Undefined);
                 let mut data = ObjectData::default();
                 for key in self.own_keys(&target, instruction)? {
-                    let descriptor =
-                        self.proxy_descriptor(&target, &Value::String(key.clone().into()), instruction)?;
+                    let descriptor = self.proxy_descriptor(
+                        &target,
+                        &Value::String(key.clone().into()),
+                        instruction,
+                    )?;
                     if !matches!(descriptor, Value::Undefined) {
                         data.set(&key, descriptor);
                     }
@@ -16863,7 +16962,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             let primitive =
                                 self.as_primitive(value, PrimitiveHint::Default, instruction)?;
                             match primitive {
-                            Value::String(text) => parse_date(&text.to_lossy_string()),
+                                Value::String(text) => parse_date(&text.to_lossy_string()),
                                 // Anything that is not a string is `ToNumber`d, and the two
                                 // values that refuses are refusals here too rather than the
                                 // plausible instants `as_number` would invent for them.
@@ -17051,18 +17150,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     if range.start == subject.len() {
                         continue;
                     }
-                    parts.push(Value::String(utf16_slice(&subject, copied..range.start).into()));
+                    parts.push(Value::String(
+                        utf16_slice(&subject, copied..range.start).into(),
+                    ));
                     // A capturing separator contributes its groups to the result, which is what
                     // makes `"a1b".split(/(\d)/)` three elements rather than two.
                     for group in groups.iter().skip(1) {
                         parts.push(match group {
-                            Some(range) => Value::String(utf16_slice(&subject, range.clone()).into()),
+                            Some(range) => {
+                                Value::String(utf16_slice(&subject, range.clone()).into())
+                            }
                             None => Value::Undefined,
                         });
                     }
                     copied = range.end;
                 }
-                parts.push(Value::String(utf16_slice(&subject, copied..subject.len()).into()));
+                parts.push(Value::String(
+                    utf16_slice(&subject, copied..subject.len()).into(),
+                ));
                 Ok(Value::Array(ArrayData::new(parts)))
             }
             // `%TypedArray%.prototype.fill` converts all three of its arguments, and the
@@ -21224,7 +21329,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Err(self.caught.take().unwrap_or(Value::Undefined))
             }
             Err(error) => match error.as_javascript_error() {
-                Some((kind, message)) => Err(self.construct_error(kind, &[Value::String(message.into())])),
+                Some((kind, message)) => {
+                    Err(self.construct_error(kind, &[Value::String(message.into())]))
+                }
                 // A limit this realm imposes rather than a language error. Nothing was written
                 // to receive it as a value, so it becomes the plain refusal it is.
                 None => Err(Value::String(error.to_string().into())),
@@ -22388,7 +22495,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         let err = self.construct_error(
                             ErrorKind::Type,
                             &[Value::String(
-                    "Iterator does not have a throw method".to_owned().into(),
+                                "Iterator does not have a throw method".to_owned().into(),
                             )],
                         );
                         self.drive_async_generator(generator, step, Resume::Throw(err))
@@ -22821,10 +22928,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         if !is_object_type(&close_res) {
                             let err = self.construct_error(
                                 ErrorKind::Type,
-                                &[Value::String(format!(
-                                    "Iterator result {} is not an object",
-                                    close_res.to_display_string()
-                                ).into())],
+                                &[Value::String(
+                                    format!(
+                                        "Iterator result {} is not an object",
+                                        close_res.to_display_string()
+                                    )
+                                    .into(),
+                                )],
                             );
                             self.drive_async_generator(&generator, &step, Resume::Throw(err))
                         } else {
@@ -22855,10 +22965,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             generator.borrow_mut().delegate = None;
                             let err = self.construct_error(
                                 ErrorKind::Type,
-                                &[Value::String(format!(
-                                    "Iterator result {} is not an object",
-                                    inner_res.to_display_string()
-                                ).into())],
+                                &[Value::String(
+                                    format!(
+                                        "Iterator result {} is not an object",
+                                        inner_res.to_display_string()
+                                    )
+                                    .into(),
+                                )],
                             );
                             return self.drive_async_generator(
                                 &generator,
@@ -22948,10 +23061,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             generator.borrow_mut().delegate = None;
                             let err = self.construct_error(
                                 ErrorKind::Type,
-                                &[Value::String(format!(
-                                    "Iterator result {} is not an object",
-                                    inner_res.to_display_string()
-                                ).into())],
+                                &[Value::String(
+                                    format!(
+                                        "Iterator result {} is not an object",
+                                        inner_res.to_display_string()
+                                    )
+                                    .into(),
+                                )],
                             );
                             return self.drive_async_generator(
                                 &generator,
@@ -26374,7 +26490,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         process.set(
             "argv",
             Value::Array(ArrayData::new(
-                self.argv.iter().cloned().map(|value| Value::String(value.into())).collect(),
+                self.argv
+                    .iter()
+                    .cloned()
+                    .map(|value| Value::String(value.into()))
+                    .collect(),
             )),
         );
         if let Some(executable) = self.argv.first() {
@@ -27792,7 +27912,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(self.caught.take().unwrap_or(Value::Undefined))
             }
             other => match other.as_javascript_error() {
-                Some((kind, message)) => Ok(self.construct_error(kind, &[Value::String(message.into())])),
+                Some((kind, message)) => {
+                    Ok(self.construct_error(kind, &[Value::String(message.into())]))
+                }
                 None => Err(other),
             },
         }
@@ -28153,7 +28275,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             object.set(
                 ERROR_TRACE,
                 Value::Array(ArrayData::new(
-                    self.trace().into_iter().map(|value| Value::String(value.into())).collect(),
+                    self.trace()
+                        .into_iter()
+                        .map(|value| Value::String(value.into()))
+                        .collect(),
                 )),
             );
         }
@@ -28278,7 +28403,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             );
             properties.define_value(
                 "name",
-                Value::String(closure.name.as_deref().unwrap_or_default().to_owned().into()),
+                Value::String(
+                    closure
+                        .name
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_owned()
+                        .into(),
+                ),
                 FUNCTION_IDENTITY,
             );
         }
@@ -28908,7 +29040,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             at = piece_start;
         }
-        parts.push(Value::String(utf16_slice(&units, piece_start..units.len()).into()));
+        parts.push(Value::String(
+            utf16_slice(&units, piece_start..units.len()).into(),
+        ));
         Ok(Value::Array(ArrayData::new(parts)))
     }
 
@@ -29339,8 +29473,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
         let length = bounded_length(
-            self.proxy_get(target, &Value::String("length".to_owned().into()), instruction)?
-                .as_number(),
+            self.proxy_get(
+                target,
+                &Value::String("length".to_owned().into()),
+                instruction,
+            )?
+            .as_number(),
         )?;
         let mut items = Vec::with_capacity(length);
         for index in 0..length {
@@ -29917,7 +30055,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return Ok(Value::Boolean(false));
         }
         for key in self.own_keys(target, instruction)? {
-            let described = self.proxy_descriptor(target, &Value::String(key.into()), instruction)?;
+            let described =
+                self.proxy_descriptor(target, &Value::String(key.into()), instruction)?;
             if matches!(described, Value::Undefined) {
                 continue;
             }
@@ -30282,11 +30421,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// Unit-preserving store lookup. Scalar names use the established path so built-in tables
     /// remain cheap; a name containing a lone surrogate can only be a program-owned slot.
     fn stored_property_units(&self, target: &Value, name: &StringUnits) -> Option<Property> {
-        if is_well_formed_units(name) {
-            let scalar = name.to_scalar_string().expect("well-formed units are scalar");
-            return self.stored_property(target, &scalar);
+        self.stored_property_key(target, PropertyKeyRef::Units(name))
+    }
+
+    fn stored_property_key(&self, target: &Value, key: PropertyKeyRef<'_>) -> Option<Property> {
+        match key {
+            PropertyKeyRef::Utf8(name) => self.stored_property(target, name),
+            PropertyKeyRef::Units(name) => {
+                if is_well_formed_units(name) {
+                    let scalar = name
+                        .to_scalar_string()
+                        .expect("well-formed units are scalar");
+                    self.stored_property(target, &scalar)
+                } else {
+                    self.own_stored_property_units(target, name)
+                }
+            }
         }
-        self.own_stored_property_units(target, name)
     }
 
     /// An accessor a built-in prototype above `target` carries.
@@ -30373,11 +30524,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
     }
 
-    fn own_stored_property_units(
-        &self,
-        target: &Value,
-        name: &StringUnits,
-    ) -> Option<Property> {
+    fn own_stored_property_units(&self, target: &Value, name: &StringUnits) -> Option<Property> {
         match target {
             Value::Object(object) => object.borrow().lookup_units(name),
             Value::Function(closure) if !is_well_formed_units(name) => {
@@ -30386,8 +30533,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Array(items) => items.properties.borrow().lookup_units(name),
             Value::Bound(bound) => bound.properties.borrow().lookup_units(name),
             Value::Native(_, _) | Value::Callback(_, _) => None,
-            _ => exotic_properties(target)
-                .and_then(|store| store.borrow().lookup_units(name)),
+            _ => exotic_properties(target).and_then(|store| store.borrow().lookup_units(name)),
         }
     }
 
@@ -31662,9 +31808,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             if !is_well_formed_units(&units) {
                 match target {
                     Value::Object(object) => return Ok(object.borrow_mut().remove_units(&units)),
-                    Value::Function(closure) => return Ok(closure.properties.borrow_mut().remove_units(&units)),
-                    Value::Array(items) => return Ok(items.properties.borrow_mut().remove_units(&units)),
-                    Value::Bound(bound) => return Ok(bound.properties.borrow_mut().remove_units(&units)),
+                    Value::Function(closure) => {
+                        return Ok(closure.properties.borrow_mut().remove_units(&units));
+                    }
+                    Value::Array(items) => {
+                        return Ok(items.properties.borrow_mut().remove_units(&units));
+                    }
+                    Value::Bound(bound) => {
+                        return Ok(bound.properties.borrow_mut().remove_units(&units));
+                    }
                     _ => {
                         if let Some(store) = exotic_properties(target) {
                             return Ok(store.borrow_mut().remove_units(&units));
@@ -31885,21 +32037,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return self.proxy_get_with_receiver(target, key, receiver, instruction);
         }
         let property_key_units = key.property_key_units();
-        if !is_well_formed_units(&property_key_units) {
-            return match self.stored_property_units(target, &property_key_units) {
-                Some(Property::Accessor { get, .. }) => match get {
-                    Some(getter) => self.call_value(&getter, receiver.clone(), Vec::new(), instruction),
-                    None => Ok(Value::Undefined),
-                },
-                Some(Property::Value(value)) => Ok(value),
-                None => Ok(Value::Undefined),
-            };
-        }
-        let property_key = key.property_key();
+        let scalar_key = property_key_units.to_scalar_string().ok();
         // The same accessors the named read consults, for the computed spelling: a symbol key
         // reaches `Symbol.species` only through here.
-        if let Some(builtin) = machine_accessor(target, &property_key)
-            && self.stored_property(target, &property_key).is_none()
+        if let Some(builtin) = scalar_key
+            .as_deref()
+            .and_then(|name| machine_accessor(target, name))
+            && self
+                .stored_property_key(target, PropertyKeyRef::Units(&property_key_units))
+                .is_none()
         {
             return self.builtin_accessor(builtin, receiver, instruction);
         }
@@ -31908,12 +32054,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // two spellings came to disagree: `Object.defineProperty(sample, key, { get })` with a
         // variable `key` was answered by the prototype the getter was shadowing. One walk cannot
         // drift from itself.
-        match self.stored_property(target, &property_key) {
+        match self.stored_property_key(target, PropertyKeyRef::Units(&property_key_units)) {
             Some(Property::Accessor { get, .. }) => match get {
                 Some(getter) => self.call_value(&getter, receiver.clone(), Vec::new(), instruction),
                 None => Ok(Value::Undefined),
             },
-            _ => Ok(self.computed(target, key)),
+            Some(Property::Value(value)) => Ok(value),
+            _ if scalar_key.is_some() => Ok(self.computed(target, key)),
+            _ => Ok(Value::Undefined),
         }
     }
 
@@ -32084,7 +32232,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         let key_units = key.property_key_units();
         if !is_well_formed_units(&key_units) {
-            if let Some(Property::Accessor { set, .. }) = self.stored_property_units(target, &key_units) {
+            if let Some(Property::Accessor { set, .. }) =
+                self.stored_property_units(target, &key_units)
+            {
                 if let Some(setter) = set {
                     self.call_value(&setter, target.clone(), vec![value], instruction)?;
                 }
@@ -32092,7 +32242,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             match target {
                 Value::Object(object) => object.borrow_mut().set_units(&key_units, value),
-                Value::Function(closure) => closure.properties.borrow_mut().set_units(&key_units, value),
+                Value::Function(closure) => {
+                    closure.properties.borrow_mut().set_units(&key_units, value)
+                }
                 Value::Array(items) => items.properties.borrow_mut().set_units(&key_units, value),
                 Value::Bound(bound) => bound.properties.borrow_mut().set_units(&key_units, value),
                 _ => {
@@ -32141,7 +32293,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // `f.caller = {}` does in every engine, in sloppy mode as well as strict.
         if let Value::String(name) = key
             && is_restricted_function_property(target, &name.to_lossy_string())
-            && self.stored_property(target, &name.to_lossy_string()).is_none()
+            && self
+                .stored_property(target, &name.to_lossy_string())
+                .is_none()
         {
             return Err(restricted_property_error());
         }
@@ -32891,7 +33045,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // `null` rather than `undefined` when there is nothing: Test262's own wrapper loops
             // `while ((r = getReport()) == null)`, and an agent that reported the empty string
             // has still reported.
-            AgentOp::GetReport => Ok(group.take_report().map_or(Value::Null, |value| Value::String(value.into()))),
+            AgentOp::GetReport => Ok(group
+                .take_report()
+                .map_or(Value::Null, |value| Value::String(value.into()))),
             AgentOp::Sleep => {
                 let milliseconds = self.as_number_argument(Some(&first), instruction)?;
                 group
@@ -33000,7 +33156,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
         let (reserved, named): (Vec<String>, Vec<String>) =
             keys.into_iter().partition(|key| symbol::is_reserved(key));
-        let mut reflected: Vec<Value> = named.into_iter().map(|value| Value::String(value.into())).collect();
+        let mut reflected: Vec<Value> = named
+            .into_iter()
+            .map(|value| Value::String(value.into()))
+            .collect();
         reflected.extend(
             reserved
                 .into_iter()
@@ -33038,7 +33197,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             _ => {
                 let error = self.construct_error(
                     ErrorKind::Error,
-                    &[Value::String("This operation was aborted".to_owned().into())],
+                    &[Value::String(
+                        "This operation was aborted".to_owned().into(),
+                    )],
                 );
                 if let Value::Object(error) = &error {
                     error
@@ -33195,7 +33356,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         value: Value,
         instruction: usize,
     ) -> Result<bool, ExecutionError> {
-        let held = self.own_state(receiver, &Value::String(name.to_owned().into()), instruction)?;
+        let held = self.own_state(
+            receiver,
+            &Value::String(name.to_owned().into()),
+            instruction,
+        )?;
         let descriptor = match held {
             // An accessor on the receiver is refused outright, whichever half it has: the
             // target's data property is what decided this is a data write, and the receiver
@@ -33868,7 +34033,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             let error = self.construct_error(
                 ErrorKind::Type,
                 &[Value::String(
-                    "Cannot convert a Symbol value to a string".to_owned().into(),
+                    "Cannot convert a Symbol value to a string"
+                        .to_owned()
+                        .into(),
                 )],
             );
             return Ok(Err(error));
@@ -33887,7 +34054,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let error = self.construct_error(
                     ErrorKind::Type,
                     &[Value::String(
-                        "Cannot convert a Symbol value to a string".to_owned().into(),
+                        "Cannot convert a Symbol value to a string"
+                            .to_owned()
+                            .into(),
                     )],
                 );
                 Ok(Err(error))
@@ -33960,9 +34129,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         return Ok(Ok(Some(ImportAttributes { type_: None })));
                     };
                     match value {
-                        Value::String(value) if value == "file" => {
-                                    Ok(Ok(Some(ImportAttributes { type_: Some(value.to_lossy_string()) })))
-                        }
+                        Value::String(value) if value == "file" => Ok(Ok(Some(ImportAttributes {
+                            type_: Some(value.to_lossy_string()),
+                        }))),
                         Value::String(_) => Ok(Err(self.construct_error(
                             ErrorKind::Type,
                             &[Value::String("unsupported import attribute `type`".into())],
@@ -34023,7 +34192,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 return Ok(Err(error));
             }
             Err(ModuleLoadError::Syntax(message)) => {
-                let error = self.construct_error(ErrorKind::Syntax, &[Value::String(message.into())]);
+                let error =
+                    self.construct_error(ErrorKind::Syntax, &[Value::String(message.into())]);
                 return Ok(Err(error));
             }
         };
@@ -34071,10 +34241,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let Value::Array(exported) = returned else {
                         let error = self.construct_error(
                             ErrorKind::Type,
-                            &[Value::String(format!(
-                                "module `{}` did not hand back its exports",
-                        planned.key
-                    ).into())],
+                            &[Value::String(
+                                format!("module `{}` did not hand back its exports", planned.key)
+                                    .into(),
+                            )],
                         );
                         self.dynamic_modules.insert(
                             (realm, planned.key.clone()),
@@ -34908,7 +35078,11 @@ fn json_indent(space: Option<&Value>) -> String {
     let space = unwrapped.as_ref().or(space);
     match space {
         Some(Value::Number(count)) if *count >= 1.0 => " ".repeat((*count as usize).min(MAX)),
-        Some(Value::String(text)) => text.units().take(MAX).map(|unit| char::from_u32(unit as u32).unwrap_or('\u{fffd}')).collect(),
+        Some(Value::String(text)) => text
+            .units()
+            .take(MAX)
+            .map(|unit| char::from_u32(unit as u32).unwrap_or('\u{fffd}'))
+            .collect(),
         _ => String::new(),
     }
 }
@@ -39254,7 +39428,8 @@ fn collection_property(is_map: bool, weak: bool, name: &str) -> Value {
                 (true, true) => "WeakMap",
                 (false, true) => "WeakSet",
             }
-            .to_owned().into(),
+            .to_owned()
+            .into(),
         ),
         _ => Value::Undefined,
     }
@@ -39428,7 +39603,9 @@ fn async_disposable_stack_method(name: &str) -> Value {
 fn weak_ref_method(name: &str) -> Value {
     match name {
         "deref" => Value::Native(Native::WeakRefDeref, RealmId::PRIMARY),
-        key if key == WellKnown::ToStringTag.property_key() => Value::String("WeakRef".to_owned().into()),
+        key if key == WellKnown::ToStringTag.property_key() => {
+            Value::String("WeakRef".to_owned().into())
+        }
         _ => Value::Undefined,
     }
 }
@@ -39844,7 +40021,8 @@ fn array_iterator_over(native: Native, iterated: &Value) -> Value {
                 Native::ArrayKeys => "key",
                 _ => "value",
             }
-            .to_owned().into(),
+            .to_owned()
+            .into(),
         ),
     );
 
@@ -40131,7 +40309,9 @@ fn index_key_units(name: &StringUnits) -> Option<usize> {
         if digits == 0 && unit == b'0' as u16 && name.unit_len() != 1 {
             return None;
         }
-        value = value.checked_mul(10)?.checked_add(usize::from(unit - b'0' as u16))?;
+        value = value
+            .checked_mul(10)?
+            .checked_add(usize::from(unit - b'0' as u16))?;
         digits += 1;
     }
     (digits > 0 && value <= u32::MAX as usize - 1).then_some(value)
@@ -40982,7 +41162,8 @@ fn json_value_from_tape(document: &kiln_json::Tape<'_>) -> Result<Value, Executi
                 document
                     .string(node)
                     .ok_or(ExecutionError::InvalidJson)?
-                    .to_owned().into(),
+                    .to_owned()
+                    .into(),
             ),
             kiln_json::TAG_ARRAY => {
                 if count != 0 {
@@ -41327,7 +41508,8 @@ fn build_regexp(pattern: &StringUnits, flags: &str) -> Option<Value> {
                 .is_some_and(|next| (0xdc00..=0xdfff).contains(next))
         {
             let low = units[index + 1];
-            codepoints.push(0x1_0000 + ((u32::from(unit) - 0xd800) << 10) + u32::from(low) - 0xdc00);
+            codepoints
+                .push(0x1_0000 + ((u32::from(unit) - 0xd800) << 10) + u32::from(low) - 0xdc00);
             index += 2;
         } else {
             codepoints.push(u32::from(unit));
@@ -42603,7 +42785,9 @@ fn string_code_point_units(text: &StringUnits) -> Vec<StringUnits> {
     let mut at = 0;
     while at < units.len() {
         let end = if (0xd800..=0xdbff).contains(&units[at])
-            && units.get(at + 1).is_some_and(|unit| (0xdc00..=0xdfff).contains(unit))
+            && units
+                .get(at + 1)
+                .is_some_and(|unit| (0xdc00..=0xdfff).contains(unit))
         {
             at + 2
         } else {
@@ -42637,14 +42821,22 @@ fn string_case_map(text: &StringUnits, upper: bool) -> StringUnits {
         match decoded {
             Ok(character) => segment.push(character),
             Err(error) => {
-                let mapped = if upper { segment.to_uppercase() } else { segment.to_lowercase() };
+                let mapped = if upper {
+                    segment.to_uppercase()
+                } else {
+                    segment.to_lowercase()
+                };
                 out.extend(mapped.encode_utf16());
                 segment.clear();
                 out.push(error.unpaired_surrogate());
             }
         }
     }
-    let mapped = if upper { segment.to_uppercase() } else { segment.to_lowercase() };
+    let mapped = if upper {
+        segment.to_uppercase()
+    } else {
+        segment.to_lowercase()
+    };
     out.extend(mapped.encode_utf16());
     StringUnits::from_units(&out)
 }
@@ -42680,7 +42872,6 @@ fn string_trim_units(text: &StringUnits, trim_start: bool, trim_end: bool) -> St
     }
     StringUnits::from_units(&units[start.min(end)..end])
 }
-
 
 /// The methods on `RegExp.prototype`, without the per-instance data a regexp also answers to.
 ///
@@ -42911,7 +43102,8 @@ fn array_buffer_method(shared: bool, name: &str) -> Value {
             } else {
                 "ArrayBuffer"
             }
-            .to_owned().into(),
+            .to_owned()
+            .into(),
         ),
         _ => Value::Undefined,
     }
@@ -43013,7 +43205,9 @@ fn data_view_method(name: &str) -> Value {
         "getBigUint64" => Value::Native(Native::DataViewGetBig { signed: false }, RealmId::PRIMARY),
         "setBigInt64" => Value::Native(Native::DataViewSetBig { signed: true }, RealmId::PRIMARY),
         "setBigUint64" => Value::Native(Native::DataViewSetBig { signed: false }, RealmId::PRIMARY),
-        key if key == WellKnown::ToStringTag.property_key() => Value::String("DataView".to_owned().into()),
+        key if key == WellKnown::ToStringTag.property_key() => {
+            Value::String("DataView".to_owned().into())
+        }
         _ => Value::Undefined,
     }
 }
@@ -43191,7 +43385,9 @@ fn symbol_method(name: &str) -> Value {
         // Not `toLocaleString`: a symbol inherits `Object.prototype`'s.
         "toString" => Value::Native(Native::PrimitiveToString, RealmId::PRIMARY),
         "valueOf" => Value::Native(Native::PrimitiveValueOf, RealmId::PRIMARY),
-        key if key == WellKnown::ToStringTag.property_key() => Value::String("Symbol".to_owned().into()),
+        key if key == WellKnown::ToStringTag.property_key() => {
+            Value::String("Symbol".to_owned().into())
+        }
         // `thisSymbolValue`, which answers the symbol itself for every hint. It is what makes
         // `` `${sym}` `` a TypeError rather than a description: the reduction reaches a symbol,
         // and a symbol has no string.
@@ -43209,7 +43405,9 @@ fn bigint_method(name: &str) -> Value {
         // The receiver, not a number: narrowing to a double would make `(5n).valueOf() === 5n`
         // false, which is the one thing this type exists to prevent.
         "valueOf" => Value::Native(Native::PrimitiveValueOf, RealmId::PRIMARY),
-        key if key == WellKnown::ToStringTag.property_key() => Value::String("BigInt".to_owned().into()),
+        key if key == WellKnown::ToStringTag.property_key() => {
+            Value::String("BigInt".to_owned().into())
+        }
         _ => Value::Undefined,
     }
 }
@@ -43220,7 +43418,9 @@ fn promise_method(name: &str) -> Value {
         "then" => Value::Native(Native::PromiseThen, RealmId::PRIMARY),
         "catch" => Value::Native(Native::PromiseCatch, RealmId::PRIMARY),
         "finally" => Value::Native(Native::PromiseFinally, RealmId::PRIMARY),
-        key if key == WellKnown::ToStringTag.property_key() => Value::String("Promise".to_owned().into()),
+        key if key == WellKnown::ToStringTag.property_key() => {
+            Value::String("Promise".to_owned().into())
+        }
         _ => Value::Undefined,
     }
 }
@@ -43259,7 +43459,8 @@ fn generator_prototype_method(asynchronous: bool, name: &str) -> Value {
             } else {
                 "Generator"
             }
-            .to_owned().into(),
+            .to_owned()
+            .into(),
         ),
         _ => Value::Undefined,
     }
@@ -43725,7 +43926,9 @@ fn builtin_accessor_slot(accessor: BuiltinAccessor, receiver: &Value) -> Value {
         },
         BuiltinAccessor::SymbolDescription => match receiver {
             Value::Symbol(symbol) => match symbol {
-                Symbol::WellKnown(well_known) => Value::String(well_known.description().to_owned().into()),
+                Symbol::WellKnown(well_known) => {
+                    Value::String(well_known.description().to_owned().into())
+                }
                 Symbol::Unique(unique) => unique
                     .description
                     .as_ref()
@@ -44570,10 +44773,11 @@ fn define_function_name(function: &Value, key: &Value, prefix: Option<&str>) {
         Some(prefix) => format!("{prefix} {name}"),
         None => name,
     };
-    closure
-        .properties
-        .borrow_mut()
-        .define_value("name", Value::String(name.into()), FUNCTION_IDENTITY);
+    closure.properties.borrow_mut().define_value(
+        "name",
+        Value::String(name.into()),
+        FUNCTION_IDENTITY,
+    );
 }
 
 const FUNCTION_IDENTITY: Attributes = Attributes {
@@ -46297,7 +46501,11 @@ fn own_property_keys_including_symbols(intrinsics: &Intrinsics, target: &Value) 
     // proxy invariants and `Object.defineProperties` consume the full own-key list. Append the
     // reserved slots after the ordinary names, preserving each store's insertion order.
     let stored = match target {
-        Value::Object(object) => object.borrow().keys().map(StringUnits::to_lossy_string).collect(),
+        Value::Object(object) => object
+            .borrow()
+            .keys()
+            .map(StringUnits::to_lossy_string)
+            .collect(),
         Value::Function(closure) => closure
             .properties
             .borrow()
@@ -46317,7 +46525,13 @@ fn own_property_keys_including_symbols(intrinsics: &Intrinsics, target: &Value) 
             .map(StringUnits::to_lossy_string)
             .collect(),
         other if exotic_properties(other).is_some() => exotic_properties(target)
-            .map(|store| store.borrow().keys().map(StringUnits::to_lossy_string).collect())
+            .map(|store| {
+                store
+                    .borrow()
+                    .keys()
+                    .map(StringUnits::to_lossy_string)
+                    .collect()
+            })
             .unwrap_or_default(),
         Value::Native(_, _)
         | Value::Callback(_, _)
@@ -46326,7 +46540,8 @@ fn own_property_keys_including_symbols(intrinsics: &Intrinsics, target: &Value) 
         | Value::Element(_) => intrinsic_key(target)
             .and_then(|identity| {
                 intrinsics.entries.borrow().iter().find_map(|(held, data)| {
-                    (*held == identity).then(|| data.keys().map(StringUnits::to_lossy_string).collect())
+                    (*held == identity)
+                        .then(|| data.keys().map(StringUnits::to_lossy_string).collect())
                 })
             })
             .unwrap_or_default(),
@@ -47288,7 +47503,11 @@ fn loose_equal(left: &Value, right: &Value) -> bool {
                     .is_some_and(|other| other == **big)
         }
         (Value::BigInt(big), Value::String(text)) | (Value::String(text), Value::BigInt(big)) => {
-            text.to_scalar_string().ok().as_deref().unwrap_or("").trim()
+            text.to_scalar_string()
+                .ok()
+                .as_deref()
+                .unwrap_or("")
+                .trim()
                 .parse::<num_bigint::BigInt>()
                 .is_ok_and(|other| other == **big)
         }
@@ -47352,7 +47571,9 @@ fn parse_number(value: &str) -> f64 {
 }
 
 fn parse_number_units(value: &StringUnits) -> f64 {
-    value.to_scalar_string().map_or(f64::NAN, |text| parse_number(&text))
+    value
+        .to_scalar_string()
+        .map_or(f64::NAN, |text| parse_number(&text))
 }
 
 /// A number as `String(value)` renders it.
