@@ -89,6 +89,9 @@ impl Iterator for UnitIter<'_> {
 
 impl From<&str> for StringUnits {
     fn from(text: &str) -> Self {
+        if text.is_ascii() {
+            return Self(Repr::Latin1(Arc::from(text.as_bytes())));
+        }
         if text.chars().all(|scalar| scalar as u32 <= 0xff) {
             return Self(Repr::Latin1(Arc::from(
                 text.chars().map(|scalar| scalar as u8).collect::<Vec<_>>(),

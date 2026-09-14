@@ -37187,9 +37187,10 @@ fn call_native(
                 }
                 Native::StringPadStart | Native::StringPadEnd => {
                     let target = arguments.first().map_or(0.0, Value::as_number);
-                    let padding = match arguments.get(1) {
-                        None | Some(Value::Undefined) => " ".to_owned(),
-                        Some(value) => value.to_display_string(),
+                    let padding: Vec<u16> = match arguments.get(1) {
+                        None | Some(Value::Undefined) => vec![u16::from(b' ')],
+                        Some(Value::String(value)) => value.units().collect(),
+                        Some(value) => value.to_display_string().encode_utf16().collect(),
                     };
                     let current = text.encode_utf16().count();
                     let target = if target.is_finite() && target > 0.0 {
@@ -37203,30 +37204,20 @@ fn call_native(
                     if target <= current || padding.is_empty() {
                         Value::String(text.clone().into())
                     } else {
-                        let mut filler = String::new();
-                        while filler.encode_utf16().count() < target - current {
-                            filler.push_str(&padding);
+                        let mut filler = Vec::new();
+                        while filler.len() < target - current {
+                            filler.extend_from_slice(&padding);
                         }
-                        // The last repetition is cut to length rather than overshooting.
-                        let filler: String = filler
-                            .chars()
-                            .scan(0usize, |units, character| {
-                                if *units >= target - current {
-                                    return None;
-                                }
-                                *units += character.len_utf16();
-                                Some(character)
-                            })
-                            .collect();
+                        filler.truncate(target - current);
                         let mut units = if matches!(native, Native::StringPadStart) {
-                            filler.encode_utf16().collect::<Vec<_>>()
+                            filler
                         } else {
                             text.units().collect::<Vec<_>>()
                         };
                         if matches!(native, Native::StringPadStart) {
                             units.extend(text.units());
                         } else {
-                            units.extend(filler.encode_utf16());
+                            units.extend(filler);
                         }
                         Value::String(StringUnits::from_units(&units))
                     }
@@ -42317,35 +42308,63 @@ fn value_to_string_units(value: &Value) -> Vec<u16> {
 
 fn string_case_map(text: &StringUnits, upper: bool) -> StringUnits {
     let units: Vec<u16> = text.units().collect();
+    if let Ok(scalar) = String::from_utf16(&units) {
+        return StringUnits::from(if upper {
+            scalar.to_uppercase()
+        } else {
+            scalar.to_lowercase()
+        });
+    }
     let mut out = Vec::with_capacity(units.len());
+    let mut segment = String::new();
     for decoded in char::decode_utf16(units.iter().copied()) {
         match decoded {
-            Ok(character) => {
-                let mapped = if upper {
-                    character.to_uppercase().collect::<String>()
-                } else {
-                    character.to_lowercase().collect::<String>()
-                };
+            Ok(character) => segment.push(character),
+            Err(error) => {
+                let mapped = if upper { segment.to_uppercase() } else { segment.to_lowercase() };
                 out.extend(mapped.encode_utf16());
+                segment.clear();
+                out.push(error.unpaired_surrogate());
             }
-            Err(error) => out.push(error.unpaired_surrogate()),
         }
     }
+    let mapped = if upper { segment.to_uppercase() } else { segment.to_lowercase() };
+    out.extend(mapped.encode_utf16());
     StringUnits::from_units(&out)
 }
 
 fn string_trim_units(text: &StringUnits, trim_start: bool, trim_end: bool) -> StringUnits {
-    let Ok(scalar) = text.to_scalar_string() else {
-        return text.clone();
-    };
-    let trimmed = match (trim_start, trim_end) {
-        (true, true) => scalar.trim_matches(is_js_whitespace),
-        (true, false) => scalar.trim_start_matches(is_js_whitespace),
-        (false, true) => scalar.trim_end_matches(is_js_whitespace),
-        (false, false) => scalar.as_str(),
-    };
-    StringUnits::from(trimmed)
+    let units: Vec<u16> = text.units().collect();
+    let mut start = 0;
+    let mut end = units.len();
+    if trim_start {
+        let mut offset = 0;
+        for decoded in char::decode_utf16(units.iter().copied()) {
+            let length = match &decoded {
+                Ok(character) => character.len_utf16(),
+                Err(_) => 1,
+            };
+            match decoded {
+                Ok(character) if is_js_whitespace(character) => offset += character.len_utf16(),
+                _ => break,
+            }
+        }
+        start = offset;
+    }
+    if trim_end {
+        let mut offset = 0;
+        for decoded in char::decode_utf16(units.iter().copied()) {
+            match decoded {
+                Ok(character) if is_js_whitespace(character) => {}
+                Ok(character) => end = offset + character.len_utf16(),
+                Err(_) => end = offset + 1,
+            }
+            offset += length;
+        }
+    }
+    StringUnits::from_units(&units[start.min(end)..end])
 }
+
 
 /// The methods on `RegExp.prototype`, without the per-instance data a regexp also answers to.
 ///
