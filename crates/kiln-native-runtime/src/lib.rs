@@ -28,7 +28,7 @@ pub enum NativeResultError {
     InvalidLength { tag: u8, expected: u64, actual: u64 },
     InvalidBoolean(u8),
     LengthOverflow(u64),
-    InvalidUtf8,
+    InvalidStringPayload,
     TrailingBytes(usize),
 }
 
@@ -57,7 +57,7 @@ impl std::fmt::Display for NativeResultError {
             Self::LengthOverflow(length) => {
                 write!(formatter, "native result length {length} overflows usize")
             }
-            Self::InvalidUtf8 => formatter.write_str("native result string is not UTF-8"),
+            Self::InvalidStringPayload => formatter.write_str("native result string has invalid UTF-16 payload"),
             Self::TrailingBytes(count) => {
                 write!(formatter, "native result has {count} trailing bytes")
             }
@@ -105,9 +105,17 @@ pub fn decode_native_result(bytes: &[u8]) -> Result<kiln_host_abi::HostValue, Na
             if bytes.len() != payload_end {
                 return Err(NativeResultError::TrailingBytes(bytes.len() - payload_end));
             }
-            let value = String::from_utf8(bytes[NATIVE_RESULT_HEADER_LEN..payload_end].to_vec())
-                .map_err(|_| NativeResultError::InvalidUtf8)?;
-            return Ok(kiln_host_abi::HostValue::String(value));
+            let payload = &bytes[NATIVE_RESULT_HEADER_LEN..payload_end];
+            if payload.len() % 2 != 0 {
+                return Err(NativeResultError::InvalidStringPayload);
+            }
+            let units = payload
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect::<Vec<_>>();
+            return Ok(kiln_host_abi::HostValue::String(
+                kiln_string::StringUnits::from_units(&units),
+            ));
         }
         other => return Err(NativeResultError::UnknownTag(other)),
     };
@@ -154,7 +162,13 @@ pub fn encode_native_result(value: &kiln_host_abi::HostValue) -> Vec<u8> {
         kiln_host_abi::HostValue::Null => (1, Vec::new()),
         kiln_host_abi::HostValue::Boolean(value) => (2, vec![u8::from(*value)]),
         kiln_host_abi::HostValue::Number(bits) => (3, bits.to_le_bytes().to_vec()),
-        kiln_host_abi::HostValue::String(value) => (4, value.as_bytes().to_vec()),
+        kiln_host_abi::HostValue::String(value) => {
+            let mut payload = Vec::with_capacity(value.unit_len() * 2);
+            for unit in value.units() {
+                payload.extend_from_slice(&unit.to_le_bytes());
+            }
+            (4, payload)
+        }
     };
     let mut encoded = Vec::with_capacity(NATIVE_RESULT_HEADER_LEN + payload.len());
     encoded.extend_from_slice(&NATIVE_RESULT_MAGIC);
@@ -171,7 +185,7 @@ pub const EMBEDDING_C_ABI_VERSION: u32 = 1;
 pub const EMBEDDING_MODULE_API_VERSION: u32 = 2;
 
 /// Host callback ABI version declared by [`embedding_header`].
-pub const EMBEDDING_HOST_ABI_VERSION: u32 = 3;
+pub const EMBEDDING_HOST_ABI_VERSION: u32 = 4;
 
 /// The operation implemented by [`runtime_source`].
 pub const WRITE_STDOUT_OPERATION: u16 = 1;
@@ -356,7 +370,7 @@ const EMBEDDING_HEADER: &str = concat!(
 
 #define KILN_NATIVE_RUNTIME_VERSION 11
 #define KILN_C_ABI_VERSION 1
-#define KILN_HOST_ABI_VERSION 3
+#define KILN_HOST_ABI_VERSION 4
 #define KILN_MODULE_API_VERSION 2
 
 #define KILN_C99_OK 0
@@ -1104,7 +1118,7 @@ mod tests {
             kiln_host_abi::HostValue::Boolean(true),
             kiln_host_abi::HostValue::Number((-0.0_f64).to_bits()),
             kiln_host_abi::HostValue::Number(f64::NAN.to_bits()),
-            kiln_host_abi::HostValue::String("a\0b".to_owned()),
+            kiln_host_abi::HostValue::String("a\0b".to_owned().into()),
         ];
         let displays = ["undefined", "null", "false", "true", "0", "NaN", "a\0b"];
         for (value, display) in values.iter().zip(displays) {
@@ -1165,11 +1179,11 @@ mod tests {
         );
 
         let mut invalid_utf8 =
-            encode_native_result(&kiln_host_abi::HostValue::String("ok".to_owned()));
+            encode_native_result(&kiln_host_abi::HostValue::String("ok".to_owned().into()));
         invalid_utf8[NATIVE_RESULT_HEADER_LEN] = 0xff;
         assert_eq!(
             decode_native_result(&invalid_utf8),
-            Err(NativeResultError::InvalidUtf8)
+            Err(NativeResultError::InvalidStringPayload)
         );
 
         let mut huge_string = Vec::from(NATIVE_RESULT_MAGIC);
@@ -1571,7 +1585,7 @@ int main(void) {
             kiln_host_abi::HostValue::Null,
             kiln_host_abi::HostValue::Boolean(true),
             kiln_host_abi::HostValue::Number((-0.0_f64).to_bits()),
-            kiln_host_abi::HostValue::String("a\0b".to_owned()),
+            kiln_host_abi::HostValue::String("a\0b".to_owned().into()),
         ];
         for (path, value) in paths.iter().zip(expected.iter()) {
             assert_eq!(

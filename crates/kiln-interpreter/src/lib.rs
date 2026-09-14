@@ -311,9 +311,32 @@ impl Attributes {
 /// One own property: its key, what it holds, and how it behaves.
 #[derive(Clone, Debug)]
 struct Slot {
-    key: String,
+    key: StringUnits,
     property: Property,
     attributes: Attributes,
+}
+
+#[derive(Clone, Copy)]
+enum PropertyKeyRef<'a> {
+    Utf8(&'a str),
+    Units(&'a StringUnits),
+}
+
+impl PropertyKeyRef<'_> {
+    fn matches(self, stored: &StringUnits) -> bool {
+        match self {
+            Self::Utf8(key) => stored == key,
+            Self::Units(key) => stored == key,
+        }
+    }
+
+    fn owned(self) -> StringUnits {
+        match self {
+            Self::Utf8(key) => StringUnits::from(key),
+            Self::Units(key) => key.clone(),
+        }
+    }
+
 }
 
 #[derive(Clone, Debug)]
@@ -437,10 +460,26 @@ const MAX_BIGINT_SHIFT: u64 = 1 << 24;
 impl ObjectData {
     /// An own property slot, ignoring the prototype chain.
     pub fn get_own_property(&self, key: &str) -> Option<&Property> {
+        self.get_own_property_key(PropertyKeyRef::Utf8(key))
+    }
+
+    /// Exact-unit counterpart of [`ObjectData::get_own_property`].
+    pub fn get_own_property_units(&self, key: &StringUnits) -> Option<&Property> {
+        self.get_own_property_key(PropertyKeyRef::Units(key))
+    }
+
+    fn get_own_property_key(&self, key: PropertyKeyRef<'_>) -> Option<&Property> {
         self.properties
             .iter()
-            .find(|slot| slot.key == key)
+            .find(|slot| key.matches(&slot.key))
             .map(|slot| &slot.property)
+    }
+
+    pub fn get_own_attributes_units(&self, key: &StringUnits) -> Option<Attributes> {
+        self.properties
+            .iter()
+            .find(|slot| slot.key == *key)
+            .map(|slot| slot.attributes)
     }
 
     /// The three flags an own property carries, or `None` when there is no such property.
@@ -507,8 +546,20 @@ impl ObjectData {
     /// running out is an abort rather than an error, and a chain long enough to do that is
     /// reachable from ordinary code.
     pub fn lookup(&self, key: &str) -> Option<Property> {
-        if let Some(own) = self.get_own_property(key) {
-            return Some(own.clone());
+        self.lookup_key(PropertyKeyRef::Utf8(key))
+    }
+
+    pub fn lookup_units(&self, key: &StringUnits) -> Option<Property> {
+        self.lookup_key(PropertyKeyRef::Units(key))
+    }
+
+    fn lookup_key(&self, key: PropertyKeyRef<'_>) -> Option<Property> {
+        if let Some(own) = self
+            .properties
+            .iter()
+            .find(|slot| key.matches(&slot.key))
+        {
+            return Some(own.property.clone());
         }
         let mut current = self.prototype.clone();
         for _ in 0..MAX_PROTOTYPE_DEPTH {
@@ -518,28 +569,31 @@ impl ObjectData {
                 // corpus subclasses an array, and without this the instance inherits neither
                 // the element nor the length -- so every generic method reached through it
                 // walked an object that looked empty.
-                Some(Value::Array(items)) => match array_own_property(items, key) {
-                    Some(found) => Ok(found),
-                    None => {
-                        let store = items.properties.borrow();
-                        store
-                            .get_own_property(key)
-                            .cloned()
-                            .ok_or_else(|| store.prototype.clone())
-                    }
-                },
+                Some(Value::Array(items)) => {
+                    let store = items.properties.borrow();
+                    store
+                        .properties
+                        .iter()
+                        .find(|slot| key.matches(&slot.key))
+                        .map(|slot| slot.property.clone())
+                        .ok_or_else(|| store.prototype.clone())
+                }
                 Some(Value::Object(parent)) => {
                     let parent = parent.borrow();
                     parent
-                        .get_own_property(key)
-                        .cloned()
+                        .properties
+                        .iter()
+                        .find(|slot| key.matches(&slot.key))
+                        .map(|slot| slot.property.clone())
                         .ok_or_else(|| parent.prototype.clone())
                 }
                 Some(Value::Function(parent)) => {
                     let parent = parent.properties.borrow();
                     parent
-                        .get_own_property(key)
-                        .cloned()
+                        .properties
+                        .iter()
+                        .find(|slot| key.matches(&slot.key))
+                        .map(|slot| slot.property.clone())
                         .ok_or_else(|| parent.prototype.clone())
                 }
                 _ => return None,
@@ -559,7 +613,15 @@ impl ObjectData {
     /// prototype getter replaces itself with an own value on first read. Routing that through
     /// the prototype's setter calls it again, and again.
     pub fn define_value(&mut self, key: &str, value: Value, attributes: Attributes) {
-        if let Some(slot) = self.properties.iter_mut().find(|slot| slot.key == key) {
+        self.define_value_key(PropertyKeyRef::Utf8(key), value, attributes);
+    }
+
+    pub fn define_value_units(&mut self, key: &StringUnits, value: Value, attributes: Attributes) {
+        self.define_value_key(PropertyKeyRef::Units(key), value, attributes);
+    }
+
+    fn define_value_key(&mut self, key: PropertyKeyRef<'_>, value: Value, attributes: Attributes) {
+        if let Some(slot) = self.properties.iter_mut().find(|slot| key.matches(&slot.key)) {
             if !redefinable(slot, attributes, true) {
                 return;
             }
@@ -570,7 +632,7 @@ impl ObjectData {
         if !self.extensible {
             return;
         }
-        self.insert(key, Property::Value(value), attributes);
+        self.insert_key(key, Property::Value(value), attributes);
     }
 
     /// Change an existing property's flags without touching what it holds.
@@ -615,7 +677,7 @@ impl ObjectData {
             return;
         }
         self.properties.push(Slot {
-            key: key.to_owned(),
+            key: StringUnits::from(key),
             property,
             attributes,
         });
@@ -643,6 +705,13 @@ impl ObjectData {
     pub fn get(&self, key: &str) -> Option<Value> {
         // Same walk as `lookup`, and data-only: this is what the VM's own reads use.
         match self.lookup(key) {
+            Some(Property::Value(value)) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn get_units(&self, key: &StringUnits) -> Option<Value> {
+        match self.lookup_units(key) {
             Some(Property::Value(value)) => Some(value),
             _ => None,
         }
@@ -682,10 +751,18 @@ impl ObjectData {
     /// written. Ordering on insert rather than on read means `Object.keys`, `JSON.stringify`,
     /// spread and `for-in` are all correct without any of them knowing the rule.
     pub fn set(&mut self, key: &str, value: Value) {
+        self.set_key(PropertyKeyRef::Utf8(key), value);
+    }
+
+    pub fn set_units(&mut self, key: &StringUnits, value: Value) {
+        self.set_key(PropertyKeyRef::Units(key), value);
+    }
+
+    fn set_key(&mut self, key: PropertyKeyRef<'_>, value: Value) {
         if self.frozen || self.module_namespace {
             return;
         }
-        if let Some(slot) = self.properties.iter_mut().find(|slot| slot.key == key) {
+        if let Some(slot) = self.properties.iter_mut().find(|slot| key.matches(&slot.key)) {
             // Only a data property can refuse a write. An accessor's setter has already had its
             // chance -- `inherited_setter` runs ahead of every store -- so a store that reaches
             // an accessor slot here is the machine replacing its own bookkeeping.
@@ -698,7 +775,7 @@ impl ObjectData {
         if !self.extensible {
             return;
         }
-        self.insert(key, Property::Value(value), Attributes::DEFAULT);
+        self.insert_key(key, Property::Value(value), Attributes::DEFAULT);
     }
 
     /// Place a *new* slot where enumeration would put it.
@@ -707,12 +784,16 @@ impl ObjectData {
     /// written. Ordering on insert rather than on read means `Object.keys`, `JSON.stringify`,
     /// spread and `for-in` are all correct without any of them knowing the rule.
     fn insert(&mut self, key: &str, property: Property, attributes: Attributes) {
+        self.insert_key(PropertyKeyRef::Utf8(key), property, attributes);
+    }
+
+    fn insert_key(&mut self, key: PropertyKeyRef<'_>, property: Property, attributes: Attributes) {
         let slot = Slot {
-            key: key.to_owned(),
+            key: key.owned(),
             property,
             attributes,
         };
-        let Some(index) = index_key(key) else {
+        let Some(index) = index_key_units(&slot.key) else {
             self.properties.push(slot);
             return;
         };
@@ -720,10 +801,11 @@ impl ObjectData {
         let position = self
             .properties
             .iter()
-            .position(|other| index_key(&other.key).is_none_or(|other| other > index))
+            .position(|other| index_key_units(&other.key).is_none_or(|other| other > index))
             .unwrap_or(self.properties.len());
         self.properties.insert(position, slot);
     }
+
 
     /// Overwrite what one export of a module namespace holds, leaving its flags alone.
     ///
@@ -804,7 +886,7 @@ impl ObjectData {
             };
             let value = cell.borrow().clone();
             let key = key.clone();
-            if let Some(slot) = self.properties.iter_mut().find(|slot| slot.key == key) {
+            if let Some(slot) = self.properties.iter_mut().find(|slot| slot.key == key.as_str()) {
                 slot.property = Property::Value(value);
             }
         }
@@ -847,17 +929,31 @@ impl ObjectData {
             .retain(|slot| slot.key != key || !slot.attributes.configurable);
     }
 
-    pub fn keys(&self) -> impl Iterator<Item = &str> {
-        self.properties.iter().map(|slot| slot.key.as_str())
+    pub fn remove_units(&mut self, key: &StringUnits) -> bool {
+        if self
+            .properties
+            .iter()
+            .find(|slot| slot.key == *key)
+            .is_some_and(|slot| !slot.attributes.configurable)
+        {
+            return false;
+        }
+        self.properties
+            .retain(|slot| slot.key != *key || !slot.attributes.configurable);
+        true
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &StringUnits> {
+        self.properties.iter().map(|slot| &slot.key)
     }
 
     /// Own *enumerable* property slots in insertion order, which is the order JavaScript
     /// enumerates them in.
-    pub fn entries(&self) -> impl Iterator<Item = (&str, &Property)> {
+    pub fn entries(&self) -> impl Iterator<Item = (&StringUnits, &Property)> {
         self.properties
             .iter()
             .filter(|slot| slot.attributes.enumerable)
-            .map(|slot| (slot.key.as_str(), &slot.property))
+            .map(|slot| (&slot.key, &slot.property))
     }
 
     /// Define a property that reads by name but is never enumerated, which is what every own
@@ -4115,6 +4211,16 @@ impl Value {
         }
     }
 
+    /// Lossless `ToPropertyKey` spelling for ordinary string values. Symbols retain their
+    /// reserved internal name; all other values use the already-computed language string.
+    pub fn property_key_units(&self) -> StringUnits {
+        match self {
+            Self::Symbol(symbol) => StringUnits::from(symbol.property_key()),
+            Self::String(value) => value.clone(),
+            other => other.to_string_units(),
+        }
+    }
+
     /// What `typeof` reports.
     ///
     /// Distinct from [`Value::type_name`], which is for diagnostics: `typeof null` is the string
@@ -4547,13 +4653,13 @@ impl From<Value> for HostValue {
             Value::Null => Self::Null,
             Value::Boolean(value) => Self::Boolean(value),
             Value::Number(value) => Self::Number(value.to_bits()),
-            Value::String(value) => Self::String(value.to_lossy_string()),
+            Value::String(value) => Self::String(value),
             // The ABI is scalars only, deliberately: a host operation that received a callable
             // would need the VM to call back into itself, which is a different contract from the
             // one `HostOps` has. Everything else is inspected on the way out, so `console.log`
             // shows an object's contents rather than the useless `[object Object]` that
             // `String(value)` produces -- the two really are different questions.
-            other => Self::String(inspect(&other)),
+            other => Self::String(inspect(&other).into()),
         }
     }
 }
@@ -5808,7 +5914,7 @@ fn realm_host_string<H: HostOps + ?Sized>(
             instruction: 0,
             message: error.to_string(),
         })? {
-        HostValue::String(value) if !value.is_empty() => Ok(value),
+        HostValue::String(value) if !value.is_empty() => Ok(value.to_lossy_string()),
         _ => Err(ExecutionError::Host {
             instruction: 0,
             message: format!("HostOp::{label} must return a non-empty string"),
@@ -6183,7 +6289,7 @@ pub fn namespace_entries(value: &Value) -> Vec<(String, Value)> {
             // re-export expanded through here would otherwise hand `@@toStringTag` on to the
             // importer as a name the provider had exported.
             _ if name == WellKnown::ToStringTag.property_key() => None,
-            Property::Value(value) => Some((name.to_owned(), value.clone())),
+            Property::Value(value) => Some((name.to_lossy_string(), value.clone())),
             Property::Accessor { .. } => None,
         })
         .collect()
@@ -9839,7 +9945,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         .iter()
                         .filter(|property| property.attributes.enumerable)
                     {
-                        let name = property.key.clone();
+                        let name = property.key.to_lossy_string();
                         let Property::Value(value) = &property.property else {
                             continue;
                         };
@@ -29480,7 +29586,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// numeric index arrives as `"0"`.
     fn trap_key(&self, key: &Value) -> Value {
         match key {
-            Value::Symbol(_) => key.clone(),
+            Value::Symbol(_) | Value::String(_) => key.clone(),
             other => {
                 // A symbol that reached here as its reserved spelling is turned back into the
                 // symbol. The interpreter stores a symbol key as a string, and handing that
@@ -30144,6 +30250,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             .or_else(|| self.inherited_accessor(target, name))
     }
 
+    /// Unit-preserving store lookup. Scalar names use the established path so built-in tables
+    /// remain cheap; a name containing a lone surrogate can only be a program-owned slot.
+    fn stored_property_units(&self, target: &Value, name: &StringUnits) -> Option<Property> {
+        if is_well_formed_units(name) {
+            let scalar = name.to_scalar_string().expect("well-formed units are scalar");
+            return self.stored_property(target, &scalar);
+        }
+        self.own_stored_property_units(target, name)
+    }
+
     /// An accessor a built-in prototype above `target` carries.
     ///
     /// Split from the walk itself so that both guards are asked before any work is done. The
@@ -30225,6 +30341,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             _ => exotic_properties(target)
                 .filter(|_| !exotic_reserved_name(target, name))
                 .and_then(|store| store.borrow().lookup(name)),
+        }
+    }
+
+    fn own_stored_property_units(
+        &self,
+        target: &Value,
+        name: &StringUnits,
+    ) -> Option<Property> {
+        match target {
+            Value::Object(object) => object.borrow().lookup_units(name),
+            Value::Function(closure) if !is_well_formed_units(name) => {
+                closure.properties.borrow().lookup_units(name)
+            }
+            Value::Array(items) => items.properties.borrow().lookup_units(name),
+            Value::Bound(bound) => bound.properties.borrow().lookup_units(name),
+            Value::Native(_, _) | Value::Callback(_, _) => None,
+            _ => exotic_properties(target)
+                .and_then(|store| store.borrow().lookup_units(name)),
         }
     }
 
@@ -31495,6 +31629,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<bool, ExecutionError> {
         let key = &self.computed_key(key, instruction)?;
         let Value::Proxy(proxy) = target else {
+            let units = key.property_key_units();
+            if !is_well_formed_units(&units) {
+                match target {
+                    Value::Object(object) => return Ok(object.borrow_mut().remove_units(&units)),
+                    Value::Function(closure) => return Ok(closure.properties.borrow_mut().remove_units(&units)),
+                    Value::Array(items) => return Ok(items.properties.borrow_mut().remove_units(&units)),
+                    Value::Bound(bound) => return Ok(bound.properties.borrow_mut().remove_units(&units)),
+                    _ => {
+                        if let Some(store) = exotic_properties(target) {
+                            return Ok(store.borrow_mut().remove_units(&units));
+                        }
+                        return Ok(true);
+                    }
+                }
+            }
             return Ok(delete_property(&self.intrinsics, target, key));
         };
         let proxy = Rc::clone(proxy);
@@ -31706,6 +31855,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if matches!(target, Value::Proxy(_)) {
             return self.proxy_get_with_receiver(target, key, receiver, instruction);
         }
+        let property_key_units = key.property_key_units();
+        if !is_well_formed_units(&property_key_units) {
+            return match self.stored_property_units(target, &property_key_units) {
+                Some(Property::Accessor { get, .. }) => match get {
+                    Some(getter) => self.call_value(&getter, receiver.clone(), Vec::new(), instruction),
+                    None => Ok(Value::Undefined),
+                },
+                Some(Property::Value(value)) => Ok(value),
+                None => Ok(Value::Undefined),
+            };
+        }
         let property_key = key.property_key();
         // The same accessors the named read consults, for the computed spelling: a symbol key
         // reaches `Symbol.species` only through here.
@@ -31892,6 +32052,27 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 None => self.set_computed(&inner, key, value, instruction),
             };
+        }
+        let key_units = key.property_key_units();
+        if !is_well_formed_units(&key_units) {
+            if let Some(Property::Accessor { set, .. }) = self.stored_property_units(target, &key_units) {
+                if let Some(setter) = set {
+                    self.call_value(&setter, target.clone(), vec![value], instruction)?;
+                }
+                return Ok(());
+            }
+            match target {
+                Value::Object(object) => object.borrow_mut().set_units(&key_units, value),
+                Value::Function(closure) => closure.properties.borrow_mut().set_units(&key_units, value),
+                Value::Array(items) => items.properties.borrow_mut().set_units(&key_units, value),
+                Value::Bound(bound) => bound.properties.borrow_mut().set_units(&key_units, value),
+                _ => {
+                    if let Some(store) = exotic_properties(target) {
+                        store.borrow_mut().set_units(&key_units, value);
+                    }
+                }
+            }
+            return Ok(());
         }
         if let Value::TypedArray(view) = target
             && let Some(index) = canonical_numeric_index(&key.property_key())
@@ -35701,9 +35882,9 @@ fn call_native(
             // copies a module's exports with this, and a module whose exports *are* a function
             // -- lodash, and most of the older ecosystem -- copied nothing without it.
             Value::Array(ArrayData::new(
-                own_property_keys(intrinsics, arguments.first().unwrap_or(&Value::Undefined))
+                own_property_names_units(intrinsics, arguments.first().unwrap_or(&Value::Undefined))
                     .into_iter()
-                    .map(|value| Value::String(value.into()))
+                    .map(Value::String)
                     .collect(),
             ))
         }
@@ -35722,16 +35903,16 @@ fn call_native(
                     .borrow()
                     .entries()
                     .map(|(key, _)| key)
-                    .filter(|key| !symbol::is_reserved(key))
-                    .map(|key| Value::String(key.to_owned().into()))
+                    .filter(|key| !key.to_lossy_string().starts_with("@@"))
+                    .map(|key| Value::String(key.clone()))
                     .collect(),
                 Some(Value::Bound(bound)) => bound
                     .properties
                     .borrow()
                     .entries()
                     .map(|(key, _)| key)
-                    .filter(|key| !symbol::is_reserved(key))
-                    .map(|key| Value::String(key.to_owned().into()))
+                    .filter(|key| !key.to_lossy_string().starts_with("@@"))
+                    .map(|key| Value::String(key.clone()))
                     .collect(),
                 // `entries` rather than `keys`: this reports what is *enumerated*, where
                 // `getOwnPropertyNames` reports everything. An error's own properties are the
@@ -35744,8 +35925,8 @@ fn call_native(
                             .borrow()
                             .entries()
                             .map(|(key, _)| key)
-                            .filter(|key| !symbol::is_reserved(key))
-                            .map(|key| Value::String(key.to_owned().into())),
+                            .filter(|key| !key.to_lossy_string().starts_with("@@"))
+                            .map(|key| Value::String(key.clone())),
                     )
                     .collect(),
                 // A built-in's own enumerated properties are the ones a program added -- the
@@ -35778,8 +35959,8 @@ fn call_native(
                             .borrow()
                             .entries()
                             .map(|(key, _)| key)
-                            .filter(|key| !symbol::is_reserved(key))
-                            .map(|key| Value::String(key.to_owned().into())),
+                            .filter(|key| !key.to_lossy_string().starts_with("@@"))
+                            .map(|key| Value::String(key.clone())),
                     )
                     .collect(),
                 // The elements, and then whatever the program hung on the view by name: an
@@ -35791,8 +35972,8 @@ fn call_native(
                             .borrow()
                             .entries()
                             .map(|(key, _)| key)
-                            .filter(|key| !symbol::is_reserved(key))
-                            .map(|key| Value::String(key.to_owned().into())),
+                            .filter(|key| !key.to_lossy_string().starts_with("@@"))
+                            .map(|key| Value::String(key.clone())),
                     )
                     .collect(),
                 Some(target) if exotic_properties(target).is_some() => exotic_properties(target)
@@ -35801,8 +35982,8 @@ fn call_native(
                             .borrow()
                             .entries()
                             .map(|(key, _)| key)
-                            .filter(|key| !symbol::is_reserved(key))
-                            .map(|key| Value::String(key.to_owned().into()))
+                            .filter(|key| !key.to_lossy_string().starts_with("@@"))
+                            .map(|key| Value::String(key.clone()))
                             .collect()
                     })
                     .unwrap_or_default(),
@@ -38523,6 +38704,17 @@ fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
     {
         return valid_integer_index(view, index).is_some();
     }
+    let units = key.property_key_units();
+    if !is_well_formed_units(&units) {
+        return match target {
+            Value::Object(object) => object.borrow().lookup_units(&units).is_some(),
+            Value::Function(closure) => closure.properties.borrow().lookup_units(&units).is_some(),
+            Value::Array(items) => items.properties.borrow().lookup_units(&units).is_some(),
+            Value::Bound(bound) => bound.properties.borrow().lookup_units(&units).is_some(),
+            other => exotic_properties(other)
+                .is_some_and(|store| store.borrow().lookup_units(&units).is_some()),
+        };
+    }
     let name = key.property_key();
     // Every intrinsic kind answers `constructor` with the built-in that makes it, so `in` has to
     // agree with the read rather than only with the property store.
@@ -39898,6 +40090,38 @@ fn canonical_index(name: &str) -> Option<usize> {
     (index.to_string() == name).then_some(index)
 }
 
+/// The same array-index test over the language's UTF-16 key units. This avoids constructing a
+/// lossy scalar spelling merely to order a property during insertion.
+fn index_key_units(name: &StringUnits) -> Option<usize> {
+    let mut value = 0usize;
+    let mut digits = 0usize;
+    for unit in name.units() {
+        if !(b'0' as u16..=b'9' as u16).contains(&unit) {
+            return None;
+        }
+        if digits == 0 && unit == b'0' as u16 && name.unit_len() != 1 {
+            return None;
+        }
+        value = value.checked_mul(10)?.checked_add(usize::from(unit - b'0' as u16))?;
+        digits += 1;
+    }
+    (digits > 0 && value <= u32::MAX as usize - 1).then_some(value)
+}
+
+fn is_well_formed_units(name: &StringUnits) -> bool {
+    let mut high = false;
+    for unit in name.units() {
+        match (high, unit) {
+            (true, 0xdc00..=0xdfff) => high = false,
+            (true, _) => return false,
+            (false, 0xd800..=0xdbff) => high = true,
+            (false, 0xdc00..=0xdfff) => return false,
+            _ => {}
+        }
+    }
+    !high
+}
+
 /// How long a wait with no limit is allowed to last before it reports a timeout.
 ///
 /// See [`Vm::atomics_sleep`]: with one agent there is nothing that could ever end such a wait,
@@ -40233,7 +40457,7 @@ fn own_properties(intrinsics: &Intrinsics, value: &Value) -> Vec<(String, Proper
             .properties
             .borrow()
             .entries()
-            .map(|(key, property)| (key.to_owned(), property.clone()))
+            .map(|(key, property)| (key.to_lossy_string(), property.clone()))
             .collect(),
         // A bound function keeps its own store, and `length` and `name` are not in it -- the
         // own-key walk supplies those two literally -- so what is here is exactly what a holder
@@ -40242,7 +40466,7 @@ fn own_properties(intrinsics: &Intrinsics, value: &Value) -> Vec<(String, Proper
             .properties
             .borrow()
             .entries()
-            .map(|(key, property)| (key.to_owned(), property.clone()))
+            .map(|(key, property)| (key.to_lossy_string(), property.clone()))
             .collect(),
         Value::Object(object) => string_wrapper_entries(value)
             .into_iter()
@@ -40250,7 +40474,7 @@ fn own_properties(intrinsics: &Intrinsics, value: &Value) -> Vec<(String, Proper
                 object
                     .borrow()
                     .entries()
-                    .map(|(key, property)| (key.to_owned(), property.clone())),
+                    .map(|(key, property)| (key.to_lossy_string(), property.clone())),
             )
             .collect(),
         // The indices first and then whatever the program hung on the array by name, which is
@@ -40270,7 +40494,7 @@ fn own_properties(intrinsics: &Intrinsics, value: &Value) -> Vec<(String, Proper
                     .properties
                     .borrow()
                     .entries()
-                    .map(|(key, property)| (key.to_owned(), property.clone()))
+                    .map(|(key, property)| (key.to_lossy_string(), property.clone()))
                     .collect::<Vec<_>>(),
             )
             .collect(),
@@ -40287,7 +40511,7 @@ fn own_properties(intrinsics: &Intrinsics, value: &Value) -> Vec<(String, Proper
                 view.properties
                     .borrow()
                     .entries()
-                    .map(|(key, property)| (key.to_owned(), property.clone())),
+                    .map(|(key, property)| (key.to_lossy_string(), property.clone())),
             );
             entries
         }
@@ -40296,7 +40520,7 @@ fn own_properties(intrinsics: &Intrinsics, value: &Value) -> Vec<(String, Proper
                 store
                     .borrow()
                     .entries()
-                    .map(|(key, property)| (key.to_owned(), property.clone()))
+                    .map(|(key, property)| (key.to_lossy_string(), property.clone()))
                     .collect()
             })
             .unwrap_or_default(),
@@ -40925,13 +41149,13 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
                 .properties
                 .borrow()
                 .entries()
-                .filter(|(key, _)| !symbol::is_reserved(key))
+                .filter(|(key, _)| !symbol::is_reserved(&key.to_lossy_string()))
                 .map(|(key, property)| {
                     let shown = match property {
                         Property::Value(value) => inspect_nested(value, depth + 1, guard.seen),
                         Property::Accessor { .. } => "[Getter/Setter]".to_owned(),
                     };
-                    format!("{}: {}", inspect_key(key), shown)
+                    format!("{}: {}", inspect_key(&key.to_lossy_string()), shown)
                 })
                 .collect();
             let items = items.borrow();
@@ -41019,7 +41243,7 @@ fn inspect_object(object: &ObjectData, depth: usize, seen: &mut Vec<usize>) -> S
         .entries()
         // Reserved keys are the VM's own and symbol-keyed properties; node shows the latter as
         // `[Symbol(x)]: v`, which needs a key-to-symbol map this VM does not keep.
-        .filter(|(key, _)| !symbol::is_reserved(key))
+        .filter(|(key, _)| !symbol::is_reserved(&key.to_lossy_string()))
         .map(|(key, property)| {
             let shown = match property {
                 Property::Value(value) => inspect_nested(value, depth + 1, seen),
@@ -41031,7 +41255,7 @@ fn inspect_object(object: &ObjectData, depth: usize, seen: &mut Vec<usize>) -> S
                     _ => "[Setter]".to_owned(),
                 },
             };
-            format!("{}: {}", inspect_key(key), shown)
+            format!("{}: {}", inspect_key(&key.to_lossy_string()), shown)
         })
         .collect::<Vec<_>>();
     // Node names the class an instance came from, so a printed object says what it is. A plain
@@ -44959,8 +45183,8 @@ impl Intrinsics {
         let data = &entries.iter().find(|(key, _)| *key == identity)?.1;
         Some(
             data.keys()
-                .filter(|key| !symbol::is_reserved(key))
-                .map(str::to_owned)
+                .filter(|key| !symbol::is_reserved(&key.to_lossy_string()))
+                .map(StringUnits::to_lossy_string)
                 .collect(),
         )
     }
@@ -44980,8 +45204,8 @@ impl Intrinsics {
             return Vec::new();
         };
         data.entries()
-            .filter(|(key, _)| !symbol::is_reserved(key))
-            .map(|(key, property)| (key.to_owned(), property.clone()))
+            .filter(|(key, _)| !symbol::is_reserved(&key.to_lossy_string()))
+            .map(|(key, property)| (key.to_lossy_string(), property.clone()))
             .collect()
     }
 
@@ -45653,14 +45877,74 @@ fn intrinsic_accessor(target: &Value, key: &str) -> Option<Property> {
 }
 
 /// The own, program-visible keys of a value, in insertion order.
+fn own_property_names_units(intrinsics: &Intrinsics, target: &Value) -> Vec<StringUnits> {
+    let from_store = |data: &ObjectData| {
+        data.keys()
+            .filter(|key| !symbol::is_reserved(&key.to_lossy_string()))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    match target {
+        Value::Object(object) => {
+            let mut keys = match wrapped_primitive(target) {
+                Some(Value::String(text)) => (0..text.unit_len())
+                    .map(|index| StringUnits::from(index.to_string()))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            keys.extend(from_store(&object.borrow()));
+            if matches!(wrapped_primitive(target), Some(Value::String(_))) {
+                keys.push(StringUnits::from("length"));
+            }
+            keys
+        }
+        Value::Function(closure) => {
+            let mut keys = from_store(&closure.properties.borrow());
+            if has_prototype_property(closure) {
+                let statics = keys.split_off(2.min(keys.len()));
+                keys.push(StringUnits::from("prototype"));
+                keys.extend(statics);
+            }
+            keys
+        }
+        Value::Bound(bound) => [StringUnits::from("length"), StringUnits::from("name")]
+            .into_iter()
+            .chain(from_store(&bound.properties.borrow()))
+            .collect(),
+        Value::Array(items) => {
+            let mut keys = items
+                .borrow()
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| !matches!(item, Value::Native(Native::Hole, _)))
+                .map(|(index, _)| StringUnits::from(index.to_string()))
+                .collect::<Vec<_>>();
+            keys.push(StringUnits::from("length"));
+            keys.extend(from_store(&items.properties.borrow()));
+            keys
+        }
+        Value::TypedArray(view) => (0..view.len())
+            .map(|index| StringUnits::from(index.to_string()))
+            .chain(from_store(&view.properties.borrow()))
+            .collect(),
+        other if exotic_properties(other).is_some() => exotic_properties(target)
+            .map(|store| from_store(&store.borrow()))
+            .unwrap_or_default(),
+        _ => own_property_keys(intrinsics, target)
+            .into_iter()
+            .map(StringUnits::from)
+            .collect(),
+    }
+}
+
 fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
     if matches!(target, Value::Native(_, _) | Value::Callback(_, _)) {
         intrinsics.materialize(target);
     }
     let from_object = |data: &ObjectData| -> Vec<String> {
         data.keys()
-            .filter(|key| !symbol::is_reserved(key))
-            .map(str::to_owned)
+            .filter(|key| !symbol::is_reserved(&key.to_lossy_string()))
+            .map(StringUnits::to_lossy_string)
             .collect()
     };
     match target {
@@ -45966,27 +46250,27 @@ fn own_property_keys_including_symbols(intrinsics: &Intrinsics, target: &Value) 
     // proxy invariants and `Object.defineProperties` consume the full own-key list. Append the
     // reserved slots after the ordinary names, preserving each store's insertion order.
     let stored = match target {
-        Value::Object(object) => object.borrow().keys().map(str::to_owned).collect(),
+        Value::Object(object) => object.borrow().keys().map(StringUnits::to_lossy_string).collect(),
         Value::Function(closure) => closure
             .properties
             .borrow()
             .keys()
-            .map(str::to_owned)
+            .map(StringUnits::to_lossy_string)
             .collect(),
         Value::Bound(bound) => bound
             .properties
             .borrow()
             .keys()
-            .map(str::to_owned)
+            .map(StringUnits::to_lossy_string)
             .collect(),
         Value::Array(items) => items
             .properties
             .borrow()
             .keys()
-            .map(str::to_owned)
+            .map(StringUnits::to_lossy_string)
             .collect(),
         other if exotic_properties(other).is_some() => exotic_properties(target)
-            .map(|store| store.borrow().keys().map(str::to_owned).collect())
+            .map(|store| store.borrow().keys().map(StringUnits::to_lossy_string).collect())
             .unwrap_or_default(),
         Value::Native(_, _)
         | Value::Callback(_, _)
@@ -45995,7 +46279,7 @@ fn own_property_keys_including_symbols(intrinsics: &Intrinsics, target: &Value) 
         | Value::Element(_) => intrinsic_key(target)
             .and_then(|identity| {
                 intrinsics.entries.borrow().iter().find_map(|(held, data)| {
-                    (*held == identity).then(|| data.keys().map(str::to_owned).collect())
+                    (*held == identity).then(|| data.keys().map(StringUnits::to_lossy_string).collect())
                 })
             })
             .unwrap_or_default(),
