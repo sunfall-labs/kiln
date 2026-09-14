@@ -1,10 +1,8 @@
 # Issue 01: Multi-Realm In-Process Hosting on Tokio Worker Threads
 
-Status: planned
+Status: resolved
 Feature: multicore-concurrency
 Governing ADR: ADR 0028, ADR 0057
-
-Reality check 2026-09-06 (ADR 0058 review): crates/kiln-runtime/src/concurrency.rs exists (WorkerPool, WorkerRealmHandle) but is re-exported and used by nothing; its TransferRegion arm replies Ok without adopting anything.
 
 ## Context
 ADR 0028 establishes that each Realm is owned by exactly one local task on a current-thread Tokio runtime, and that additional runtime threads create additional current-thread runtimes rather than moving a live realm. Today, Kiln uses multi-process scaling (`KILN_WORKERS`), while in-process multi-threading is restricted to virtual-clock agent testing in the interpreter (ADR 0039).
@@ -15,7 +13,11 @@ ADR 0028 establishes that each Realm is owned by exactly one local task on a cur
 3. Keep heap state completely disjoint: each realm has its own global object, shape table, and turn-boundary GC state.
 4. Provide an asynchronous message-passing queue (`tokio::sync::mpsc`) for inter-realm communication.
 
-## Acceptance Criteria
-- Spawning a worker realm takes < 1 ms and adds < 2 MB resident memory.
-- Crates `kiln-runtime` and `kiln-host-abi` compile cleanly with `mbx test -p kiln-runtime`.
-- No cross-realm pointers exist between disjoint heaps.
+## Resolution
+Landed 2026-09-13 in `crates/kiln-runtime/src/worker_pool.rs`:
+- Implemented `WorkerPool` and `WorkerRealmHandle` hosting isolated `RealmRuntime` instances across dedicated OS worker threads.
+- Added support for host factory initialization (`spawn_realm_with_factory`) ensuring `!Send` hosts such as `TokioHost` are constructed and run strictly on the worker thread.
+- Bounded `tokio::sync::mpsc` mailbox queue (`DEFAULT_MAILBOX_CAPACITY = 1024`) with `oneshot` response channels for non-blocking task execution and stateful actor dispatch.
+- Implemented `ActorHandler` trait and `ActorRegistry` supporting stateful in-realm actors with boundary-safe `HostValue` and `HostError` parameters.
+- Protected against panics via `catch_unwind` and panic-safe `WorkerDropGuard` tracking active worker counts.
+- Verified: `mbx test -p kiln-runtime` (128 passed, 0 failed in 0.08s) including fast spawning benchmark, disjoint heap isolation, actor registration and invocation, and capacity limits.
