@@ -19,7 +19,7 @@ use kiln_interpreter::{
     Cell, CommonJsModuleLoader, CommonJsRequire, ExecutionCapabilities, ExecutionError,
     ExecutionLimits, ExecutionResult, ImportAttributes, ModuleBinding, ModuleLoadError,
     ModuleLoadRequest, ModuleLoaderService, ModulePlan, ModuleRealmSession, ModuleSelfExport,
-    ModuleSelfImport, ModuleValueRef, PlannedModule, Value, execute_module_in_runtime_with_loader,
+    ModuleSelfImport, ModuleValueRef, PlannedModule, Property, Value, execute_module_in_runtime_with_loader,
     execute_node_module_in_session_with_loader, ordinary_object, own_data_property,
     parse_json_module, read_through_cell,
 };
@@ -2486,18 +2486,18 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
                 let object_ref = object.borrow();
                 for key in object_ref.keys() {
                     if key != "default"
-                        && let Some(val) = object_ref.get_own(key)
+                        && let Some(Property::Value(val)) = object_ref.get_own_property_units(key)
                     {
-                        exports_map.insert(key.to_owned(), val.clone());
+                        exports_map.insert(key.to_lossy_string(), val.clone());
                     }
                 }
             } else if let Value::Function(closure) = &final_exports {
                 let properties_ref = closure.properties.borrow();
                 for key in properties_ref.keys() {
                     if key != "default"
-                        && let Some(val) = properties_ref.get_own(key)
+                        && let Some(Property::Value(val)) = properties_ref.get_own_property_units(key)
                     {
-                        exports_map.insert(key.to_owned(), val.clone());
+                        exports_map.insert(key.to_lossy_string(), val.clone());
                     }
                 }
             }

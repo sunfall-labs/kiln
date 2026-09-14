@@ -9,3 +9,4 @@ repository.workspace = true
 # number semantics come from the allocation-free runtime core shared with native artifacts.
 [dependencies]
 kiln-number-core = { workspace = true }
+kiln-string = { workspace = true }
