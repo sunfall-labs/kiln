@@ -116,44 +116,63 @@ static int kiln_c99_url_construct(kiln_value *out, const kiln_value *args, size_
     const char *fragment;
     const char *scheme;
     kiln_value params;
+    uint8_t *input_owned = NULL;
+    uint8_t *base_owned = NULL;
+    static const char empty[] = "";
     int status;
     if (input.tag != KILN_VALUE_STRING || base.tag != KILN_VALUE_STRING) {
         return KILN_C99_OUT_OF_MEMORY;
     }
+    size_t input_len = 0;
+    size_t base_len = 0;
+    if (kiln_c99_string_to_utf8_lossy(input, &input_owned, &input_len) != KILN_C99_OK ||
+        kiln_c99_string_to_utf8_lossy(base, &base_owned, &base_len) != KILN_C99_OK) {
+        free(input_owned);
+        free(base_owned);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    const char *input_bytes = input_len == 0 ? empty : (const char *)input_owned;
+    const char *base_bytes = base_len == 0 ? empty : (const char *)base_owned;
+#define KILN_WEB_RETURN(result) do { \
+        free(input_owned); \
+        free(base_owned); \
+        return (result); \
+    } while (0)
     scheme = NULL;
     {
         size_t index;
-        for (index = 0; index + 2 < input.len; ++index) {
-            if (input.ptr[index] == ':' && input.ptr[index + 1] == '/' &&
-                input.ptr[index + 2] == '/') {
-                scheme = input.ptr + index;
+        for (index = 0; index + 2 < input_len; ++index) {
+            if (input_bytes[index] == ':' && input_bytes[index + 1] == '/' &&
+                input_bytes[index + 2] == '/') {
+                scheme = input_bytes + index;
                 break;
             }
         }
     }
     if (scheme != NULL) {
         start = scheme + 3;
-        end = input.ptr + input.len;
+        end = input_bytes + input_len;
         while (start < end && *start != '/' && *start != '?' && *start != '#') ++start;
         if (start == end || *start != '/') start = "/";
     } else {
         int valid_base = 0;
         size_t index;
-        for (index = 0; index + 2 < base.len; ++index) {
-            if (base.ptr[index] == ':' && base.ptr[index + 1] == '/' &&
-                base.ptr[index + 2] == '/') {
+        for (index = 0; index + 2 < base_len; ++index) {
+            if (base_bytes[index] == ':' && base_bytes[index + 1] == '/' &&
+                base_bytes[index + 2] == '/') {
                 valid_base = 1;
                 break;
             }
         }
         if (!valid_base) {
-            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "Invalid base URL");
+            KILN_WEB_RETURN(kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                                 "Invalid base URL"));
         }
-        start = input.len == 0 ? "/" : input.ptr;
-        end = input.ptr + input.len;
+        start = input_len == 0 ? "/" : input_bytes;
+        end = input_bytes + input_len;
     }
-    if (start == input.ptr || (start >= input.ptr && start <= input.ptr + input.len)) {
-        end = input.ptr + input.len;
+    if (start == input_bytes || (start >= input_bytes && start <= input_bytes + input_len)) {
+        end = input_bytes + input_len;
     } else {
         end = start + 1;
     }
@@ -163,96 +182,68 @@ static int kiln_c99_url_construct(kiln_value *out, const kiln_value *args, size_
 
     if (kiln_c99_active_http_response != NULL && !kiln_c99_active_http_response->url_used) {
         kiln_node_response *resp = kiln_c99_active_http_response;
-        if (resp->target_ptr != NULL && resp->target_len == input.len &&
-            memcmp(resp->target_ptr, input.ptr, input.len) == 0) {
+        if (resp->target_ptr != NULL && resp->target_len == input_len &&
+            memcmp(resp->target_ptr, input_bytes, input_len) == 0) {
             resp->url_used = 1;
             if (resp->url_object.tag != KILN_VALUE_OBJECT) {
                 status = kiln_c99_new_object_with_capacity_tenured(&resp->url_object, 6);
-                if (status != KILN_C99_OK) return status;
+                if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
                 status = kiln_c99_new_object_with_capacity_tenured(&resp->search_params_object, 4);
-                if (status != KILN_C99_OK) return status;
+                if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
                 status = kiln_c99_put_hot_key(NULL, resp->search_params_object, KILN_C99_HOT_KEY_GET,
                                               kiln_c99_method(KILN_C99_METHOD_URL_SEARCH_PARAMS_GET), 0, NULL);
-                if (status != KILN_C99_OK) return status;
+                if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
                 status = kiln_c99_put_hot_key(NULL, resp->url_object, KILN_C99_HOT_KEY_SEARCH_PARAMS,
                                               resp->search_params_object, 0, NULL);
-                if (status != KILN_C99_OK) return status;
+                if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
                 status = kiln_c99_put(NULL, resp->url_object, "@@url", 5, kiln_c99_boolean(1), 0, NULL);
-                if (status != KILN_C99_OK) return status;
+                if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
             }
             size_t path_len = (size_t)((query != NULL ? query :
                                 (fragment != NULL ? fragment : end)) - start);
-            if (resp->pathname_val.tag != KILN_VALUE_STRING || resp->pathname_val.ptr == NULL ||
-                path_len + 1 > resp->pathname_cap) {
-                size_t cap = path_len < 128 ? 128 : path_len + 128;
-                char *buf = kiln_c99_gc_alloc_text_tenured(cap);
-                if (buf == NULL) return KILN_C99_OUT_OF_MEMORY;
-                resp->pathname_val = kiln_c99_value(KILN_VALUE_STRING, 0, buf, (uint32_t)path_len);
-                resp->pathname_cap = cap;
-            }
-            char *pbuf = (char *)resp->pathname_val.ptr;
-            memcpy(pbuf, start, path_len);
-            pbuf[path_len] = '\0';
-            kiln_gc_heap *heap = kiln_c99_gc_heap();
-            kiln_gc_block *block = heap != NULL ? kiln_c99_gc_lookup(heap, pbuf) : NULL;
-            if (block != NULL) {
-                block->size = path_len;
-            }
-            resp->pathname_val.len = (uint32_t)path_len;
-            resp->pathname_val.flags = 0;
+            resp->pathname_val = kiln_c99_copy_text(start, path_len);
+            if (resp->pathname_val.tag != KILN_VALUE_STRING) KILN_WEB_RETURN(KILN_C99_OUT_OF_MEMORY);
+            resp->pathname_cap = path_len + 1;
             status = kiln_c99_put_hot_key(NULL, resp->url_object, KILN_C99_HOT_KEY_PATHNAME,
                                           resp->pathname_val, 0, NULL);
-            if (status != KILN_C99_OK) return status;
+            if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
             size_t q_len = query != NULL ? (size_t)((fragment != NULL ? fragment : end) - query - 1) : 0;
             if (query == NULL || q_len == 0) {
                 status = kiln_c99_put(NULL, resp->search_params_object, "@@url:query", 11,
                                       kiln_c99_static_text("", 0), 0, NULL);
             } else {
-                if (resp->query_val.tag != KILN_VALUE_STRING || resp->query_val.ptr == NULL ||
-                    q_len + 1 > resp->query_cap) {
-                    size_t cap = q_len < 64 ? 64 : q_len + 64;
-                    char *buf = kiln_c99_gc_alloc_text_tenured(cap);
-                    if (buf == NULL) return KILN_C99_OUT_OF_MEMORY;
-                    resp->query_val = kiln_c99_value(KILN_VALUE_STRING, 0, buf, (uint32_t)q_len);
-                    resp->query_cap = cap;
-                }
-                char *qbuf = (char *)resp->query_val.ptr;
-                memcpy(qbuf, query + 1, q_len);
-                qbuf[q_len] = '\0';
-                kiln_gc_block *qblock = heap != NULL ? kiln_c99_gc_lookup(heap, qbuf) : NULL;
-                if (qblock != NULL) {
-                    qblock->size = q_len;
-                }
-                resp->query_val.len = (uint32_t)q_len;
-                resp->query_val.flags = 0;
+                resp->query_val = kiln_c99_copy_text(query + 1, q_len);
+                if (resp->query_val.tag != KILN_VALUE_STRING) KILN_WEB_RETURN(KILN_C99_OUT_OF_MEMORY);
+                resp->query_cap = q_len + 1;
                 status = kiln_c99_put(NULL, resp->search_params_object, "@@url:query", 11,
                                       resp->query_val, 0, NULL);
             }
-            if (status != KILN_C99_OK) return status;
+            if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
             *out = resp->url_object;
-            return KILN_C99_OK;
+            KILN_WEB_RETURN(KILN_C99_OK);
         }
     }
 
     status = kiln_c99_new_object(out);
-    if (status != KILN_C99_OK) return status;
+    if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
     status = kiln_c99_put_hot_key(NULL, *out, KILN_C99_HOT_KEY_PATHNAME,
                           kiln_c99_copy_text(start, (size_t)((query != NULL ? query :
                               (fragment != NULL ? fragment : end)) - start)), 0, NULL);
-    if (status != KILN_C99_OK) return status;
+    if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
     status = kiln_c99_new_object(&params);
-    if (status != KILN_C99_OK) return status;
+    if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
     status = kiln_c99_put(NULL, params, "@@url:query", 11,
                           query == NULL ? kiln_c99_copy_text("", 0) :
                           kiln_c99_copy_text(query + 1, (size_t)((fragment != NULL ? fragment : end) - query - 1)),
                           0, NULL);
-    if (status != KILN_C99_OK) return status;
+    if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
     status = kiln_c99_put_hot_key(NULL, params, KILN_C99_HOT_KEY_GET,
                           kiln_c99_method(KILN_C99_METHOD_URL_SEARCH_PARAMS_GET), 0, NULL);
-    if (status != KILN_C99_OK) return status;
+    if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
     status = kiln_c99_put_hot_key(NULL, *out, KILN_C99_HOT_KEY_SEARCH_PARAMS, params, 0, NULL);
-    if (status != KILN_C99_OK) return status;
-    return kiln_c99_put(NULL, *out, "@@url", 5, kiln_c99_boolean(1), 0, NULL);
+    if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
+    KILN_WEB_RETURN(kiln_c99_put(NULL, *out, "@@url", 5, kiln_c99_boolean(1), 0, NULL));
+#undef KILN_WEB_RETURN
 }
 
 static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,
@@ -260,6 +251,9 @@ static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,
                                           kiln_value *thrown) {
     kiln_value query;
     kiln_value name = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
+    uint8_t *query_owned = NULL;
+    uint8_t *name_owned = NULL;
+    static const char empty[] = "";
     size_t at = 0;
     int status;
     if (receiver.tag != KILN_VALUE_OBJECT || name.tag != KILN_VALUE_STRING) {
@@ -269,55 +263,57 @@ static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,
     status = kiln_c99_get(NULL, receiver, "@@url:query", 11, &query, 0, NULL);
     if (status != KILN_C99_OK || query.tag != KILN_VALUE_STRING)
         KILN_C99_REFUSE("URLSearchParams with no captured query string");
-    while (at <= query.len) {
+    size_t query_len = 0;
+    size_t name_len = 0;
+    if (kiln_c99_string_to_utf8_lossy(query, &query_owned, &query_len) != KILN_C99_OK ||
+        kiln_c99_string_to_utf8_lossy(name, &name_owned, &name_len) != KILN_C99_OK) {
+        free(query_owned);
+        free(name_owned);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    const char *query_bytes = query_len == 0 ? empty : (const char *)query_owned;
+    const char *name_bytes = name_len == 0 ? empty : (const char *)name_owned;
+#define KILN_QUERY_RETURN(result) do { \
+        free(query_owned); \
+        free(name_owned); \
+        return (result); \
+    } while (0)
+    while (at <= query_len) {
         size_t pair_end = at;
         size_t equal;
-        while (pair_end < query.len && query.ptr[pair_end] != '&') ++pair_end;
+        while (pair_end < query_len && query_bytes[pair_end] != '&') ++pair_end;
         equal = at;
-        while (equal < pair_end && query.ptr[equal] != '=') ++equal;
-        if (equal - at == name.len && memcmp(query.ptr + at, name.ptr, name.len) == 0) {
-            const char *val_ptr = equal < pair_end ? query.ptr + equal + 1 : "";
+        while (equal < pair_end && query_bytes[equal] != '=') ++equal;
+        if (equal - at == name_len && memcmp(query_bytes + at, name_bytes, name_len) == 0) {
+            const char *val_ptr = equal < pair_end ? query_bytes + equal + 1 : "";
             size_t val_len = equal < pair_end ? pair_end - equal - 1 : 0;
             if (val_len == 0) {
                 *out = kiln_c99_static_text("", 0);
-                return KILN_C99_OK;
+                KILN_QUERY_RETURN(KILN_C99_OK);
             }
             if (memchr(val_ptr, '%', val_len) == NULL) {
                 kiln_node_response *resp = kiln_c99_active_http_response;
                 if (resp != NULL) {
-                    if (resp->param_val.tag != KILN_VALUE_STRING || resp->param_val.ptr == NULL ||
-                        val_len + 1 > resp->param_cap) {
-                        size_t cap = val_len < 64 ? 64 : val_len + 64;
-                        char *buf = kiln_c99_gc_alloc_text_tenured(cap);
-                        if (buf == NULL) return KILN_C99_OUT_OF_MEMORY;
-                        resp->param_val = kiln_c99_value(KILN_VALUE_STRING, 0, buf, (uint32_t)val_len);
-                        resp->param_cap = cap;
-                    }
-                    char *pbuf = (char *)resp->param_val.ptr;
-                    memcpy(pbuf, val_ptr, val_len);
-                    pbuf[val_len] = '\0';
-                    kiln_gc_heap *heap = kiln_c99_gc_heap();
-                    kiln_gc_block *block = heap != NULL ? kiln_c99_gc_lookup(heap, pbuf) : NULL;
-                    if (block != NULL) {
-                        block->size = val_len;
-                    }
-                    resp->param_val.len = (uint32_t)val_len;
-                    resp->param_val.flags = 0;
+                    resp->param_val = kiln_c99_copy_text(val_ptr, val_len);
+                    if (resp->param_val.tag != KILN_VALUE_STRING)
+                        KILN_QUERY_RETURN(KILN_C99_OUT_OF_MEMORY);
+                    resp->param_cap = val_len + 1;
                     *out = resp->param_val;
-                    return KILN_C99_OK;
+                    KILN_QUERY_RETURN(KILN_C99_OK);
                 }
                 *out = kiln_c99_copy_text(val_ptr, val_len);
-                return KILN_C99_OK;
+                KILN_QUERY_RETURN(KILN_C99_OK);
             }
             kiln_value encoded = kiln_c99_copy_text(val_ptr, val_len);
             const kiln_value decode_args[1] = {encoded};
-            return kiln_c99_invoke_method(NULL, out, KILN_C99_METHOD_DECODE_URI_COMPONENT,
-                                          kiln_c99_undefined(), decode_args, 1, 0, thrown);
+            KILN_QUERY_RETURN(kiln_c99_invoke_method(NULL, out, KILN_C99_METHOD_DECODE_URI_COMPONENT,
+                                                     kiln_c99_undefined(), decode_args, 1, 0, thrown));
         }
-        if (pair_end == query.len) break;
+        if (pair_end == query_len) break;
         at = pair_end + 1;
     }
     *out = kiln_c99_null();
+#undef KILN_QUERY_RETURN
     return KILN_C99_OK;
 }
 
@@ -352,7 +348,7 @@ static int kiln_c99_form_decode(const char *bytes, size_t len, kiln_value *out) 
         return KILN_C99_OK;
     }
     {
-        kiln_value raw = kiln_c99_value(KILN_VALUE_STRING, 0, decoded.bytes, decoded.len);
+        kiln_value raw = kiln_c99_copy_text(decoded.bytes, decoded.len);
         uint16_t *units = NULL;
         size_t count = 0;
         status = kiln_c99_to_units(raw, &units, &count);
@@ -371,12 +367,23 @@ static int kiln_c99_form_decode(const char *bytes, size_t len, kiln_value *out) 
  * insertion is intentional: a decoded `__proto__` is data, not a request to relink the result. */
 static int kiln_c99_node_querystring_parse(kiln_value *out, const kiln_value *args, size_t argc) {
     kiln_value input = argc > 0 ? kiln_c99_text(args[0]) : kiln_c99_copy_text("", 0);
+    uint8_t *input_owned = NULL;
+    static const char empty[] = "";
     size_t at = 0;
     int status;
     if (input.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+    size_t input_len = 0;
+    if (kiln_c99_string_to_utf8_lossy(input, &input_owned, &input_len) != KILN_C99_OK) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    const char *input_bytes = input_len == 0 ? empty : (const char *)input_owned;
+#define KILN_QUERYSTRING_RETURN(result) do { \
+        free(input_owned); \
+        return (result); \
+    } while (0)
     status = kiln_c99_new_object(out);
-    if (status != KILN_C99_OK) return status;
-    while (at < input.len) {
+    if (status != KILN_C99_OK) KILN_QUERYSTRING_RETURN(status);
+    while (at < input_len) {
         size_t pair_end = at;
         size_t equal;
         kiln_value name;
@@ -384,20 +391,20 @@ static int kiln_c99_node_querystring_parse(kiln_value *out, const kiln_value *ar
         kiln_object *object;
         kiln_property *property = NULL;
         size_t index;
-        while (pair_end < input.len && input.ptr[pair_end] != '&') pair_end += 1;
+        while (pair_end < input_len && input_bytes[pair_end] != '&') pair_end += 1;
         if (pair_end == at) {
             at = pair_end + 1;
             continue;
         }
         equal = at;
-        while (equal < pair_end && input.ptr[equal] != '=') equal += 1;
-        status = kiln_c99_form_decode(input.ptr + at, equal - at, &name);
-        if (status != KILN_C99_OK) return status;
-        status = kiln_c99_form_decode(equal < pair_end ? input.ptr + equal + 1 : "",
+        while (equal < pair_end && input_bytes[equal] != '=') equal += 1;
+        status = kiln_c99_form_decode(input_bytes + at, equal - at, &name);
+        if (status != KILN_C99_OK) KILN_QUERYSTRING_RETURN(status);
+        status = kiln_c99_form_decode(equal < pair_end ? input_bytes + equal + 1 : "",
                                       equal < pair_end ? pair_end - equal - 1 : 0, &value);
         if (status != KILN_C99_OK) {
             kiln_c99_gc_release((void *)name.ptr);
-            return status;
+            KILN_QUERYSTRING_RETURN(status);
         }
         object = kiln_c99_object_of(*out);
         if (object->shape != NULL) {
@@ -425,9 +432,10 @@ static int kiln_c99_node_querystring_parse(kiln_value *out, const kiln_value *ar
                 if (status == KILN_C99_OK) property->value = values;
             }
         }
-        if (status != KILN_C99_OK) return status;
+        if (status != KILN_C99_OK) KILN_QUERYSTRING_RETURN(status);
         at = pair_end + 1;
     }
+#undef KILN_QUERYSTRING_RETURN
     return KILN_C99_OK;
 }
 
