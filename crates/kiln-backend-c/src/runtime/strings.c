@@ -716,7 +716,7 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
         } else {
             size_t remaining = (size_t)times;
             while (remaining-- > 0 && status == KILN_C99_OK) {
-                status = kiln_c99_text_append(&repeated, receiver.ptr, receiver.len);
+                status = kiln_c99_text_append_string(&repeated, receiver);
             }
             *result = kiln_c99_text_value(&repeated);
         }
@@ -812,7 +812,7 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
             int64_t ranges[2];
             ranges[0] = (int64_t)at;
             ranges[1] = (int64_t)at + (int64_t)needle_count;
-            if (kiln_c99_text_append(&built, head.ptr, head.len) != KILN_C99_OK ||
+            if (kiln_c99_text_append_string(&built, head) != KILN_C99_OK ||
                 kiln_c99_expand_replacement(&built, replacement, replacement_count, units, count,
                                             ranges, 1) != KILN_C99_OK) {
                 status = KILN_C99_OUT_OF_MEMORY;
@@ -831,7 +831,7 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
                     break;
                 }
                 carried = kiln_c99_from_units(units + from, 1);
-                if (kiln_c99_text_append(&built, carried.ptr, carried.len) != KILN_C99_OK) {
+                if (kiln_c99_text_append_string(&built, carried) != KILN_C99_OK) {
                     status = KILN_C99_OUT_OF_MEMORY;
                     break;
                 }
@@ -840,7 +840,7 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
         }
         if (status == KILN_C99_OK) {
             kiln_value rest = kiln_c99_from_units(units + from, count - from);
-            if (kiln_c99_text_append(&built, rest.ptr, rest.len) != KILN_C99_OK) {
+            if (kiln_c99_text_append_string(&built, rest) != KILN_C99_OK) {
                 status = KILN_C99_OUT_OF_MEMORY;
             } else {
                 *result = kiln_c99_text_value(&built);
@@ -852,13 +852,13 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
     case KILN_C99_METHOD_STRING_CONCAT: {
         kiln_text built = {NULL, 0, 0};
         size_t index;
-        if (kiln_c99_text_append(&built, receiver.ptr, receiver.len) != KILN_C99_OK) {
+        if (kiln_c99_text_append_string(&built, receiver) != KILN_C99_OK) {
             status = KILN_C99_OUT_OF_MEMORY;
         }
         for (index = 0; index < argc && status == KILN_C99_OK; ++index) {
             kiln_value shown = kiln_c99_text(args[index]);
             if (shown.tag != KILN_VALUE_STRING ||
-                kiln_c99_text_append(&built, shown.ptr, shown.len) != KILN_C99_OK) {
+                kiln_c99_text_append_string(&built, shown) != KILN_C99_OK) {
                 status = kiln_c99_refuse("String.prototype.concat was given a value with no "
                                          "text form");
             }
@@ -1081,7 +1081,7 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
             from = (size_t)ranges[1];
         } else {
             kiln_value head = kiln_c99_from_units(units + from, (size_t)ranges[0] - from);
-            if (kiln_c99_text_append(&built, head.ptr, head.len) != KILN_C99_OK) {
+            if (kiln_c99_text_append_string(&built, head) != KILN_C99_OK) {
                 status = KILN_C99_OUT_OF_MEMORY;
             } else if (kiln_c99_is_callable(with)) {
                 /* The callback is handed the match, then each group, then the index and the whole
@@ -1104,7 +1104,7 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
                 if (status == KILN_C99_OK) {
                     kiln_value text = kiln_c99_text(produced);
                     status = text.tag == KILN_VALUE_STRING &&
-                                     kiln_c99_text_append(&built, text.ptr, text.len) ==
+                                     kiln_c99_text_append_string(&built, text) ==
                                          KILN_C99_OK
                                  ? KILN_C99_OK
                                  : KILN_C99_OUT_OF_MEMORY;
@@ -1148,7 +1148,7 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
             break;
         default: {
             kiln_value rest = kiln_c99_from_units(units + from, count - from);
-            if (kiln_c99_text_append(&built, rest.ptr, rest.len) != KILN_C99_OK) {
+            if (kiln_c99_text_append_string(&built, rest) != KILN_C99_OK) {
                 status = KILN_C99_OUT_OF_MEMORY;
             } else {
                 *result = kiln_c99_text_value(&built);

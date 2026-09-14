@@ -233,8 +233,15 @@ static int kiln_c99_inspect_into(kiln_text *text, kiln_value value, int depth) {
      * both what node does by default and the only thing this can do without a host to call. */
     value = kiln_c99_proxy_inner(value);
     switch (value.tag) {
-    case KILN_VALUE_STRING:
-        return kiln_c99_quote(text, value.ptr, value.len);
+    case KILN_VALUE_STRING: {
+        uint8_t *encoded = NULL;
+        size_t encoded_len = 0;
+        int status = kiln_c99_string_to_utf8_lossy(value, &encoded, &encoded_len);
+        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_quote(text, (const char *)encoded, encoded_len);
+        free(encoded);
+        return status;
+    }
     case KILN_VALUE_NUMBER: {
         /* `-0` prints as itself here, where `String(-0)` is "0": a console shows the value
          * rather than converting it. */
@@ -249,7 +256,7 @@ static int kiln_c99_inspect_into(kiln_text *text, kiln_value value, int depth) {
          * `console.log(1n)` is `1n`, and the suffix is the only difference between them. */
         kiln_value digits = kiln_c99_bigint_text(value, 10);
         if (digits.tag != KILN_VALUE_STRING ||
-            kiln_c99_text_append(text, digits.ptr, digits.len) != KILN_C99_OK) {
+            kiln_c99_text_append_string(text, digits) != KILN_C99_OK) {
             return KILN_C99_OUT_OF_MEMORY;
         }
         return kiln_c99_text_append_c(text, "n");
@@ -274,7 +281,7 @@ static int kiln_c99_inspect_into(kiln_text *text, kiln_value value, int depth) {
         if (iso.tag != KILN_VALUE_STRING) {
             return kiln_c99_text_append_c(text, "Invalid Date");
         }
-        return kiln_c99_text_append(text, iso.ptr, iso.len);
+        return kiln_c99_text_append_string(text, iso);
     }
     case KILN_VALUE_COLLECTION: {
         /* A console shows what a collection holds rather than the bookkeeping that makes it
@@ -432,7 +439,7 @@ static int kiln_c99_inspect_into(kiln_text *text, kiln_value value, int depth) {
         if (shown.tag != KILN_VALUE_STRING) {
             KILN_C99_REFUSE("a value with no text form to inspect");
         }
-        return kiln_c99_text_append(text, shown.ptr, shown.len);
+        return kiln_c99_text_append_string(text, shown);
     }
 }
 
