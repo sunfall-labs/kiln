@@ -52,7 +52,7 @@ static int kiln_c99_error_to_string(kiln_host *host, kiln_value *result, kiln_va
                                     int depth, kiln_value *thrown) {
     kiln_value name;
     kiln_value message;
-    kiln_text built = {NULL, 0, 0};
+    kiln_value separator;
     int found = kiln_c99_get(host, receiver, "name", 4, &name, depth, thrown);
     if (found == KILN_C99_THROWN) {
         return found;
@@ -74,13 +74,11 @@ static int kiln_c99_error_to_string(kiln_host *host, kiln_value *result, kiln_va
         *result = name.len == 0 ? message : name;
         return KILN_C99_OK;
     }
-    if (kiln_c99_text_append(&built, name.ptr, name.len) != KILN_C99_OK ||
-        kiln_c99_text_append_c(&built, ": ") != KILN_C99_OK ||
-        kiln_c99_text_append(&built, message.ptr, message.len) != KILN_C99_OK) {
-        free(built.bytes);
+    separator = kiln_c99_static_text(": ", 2);
+    *result = kiln_c99_concat(kiln_c99_concat(name, separator), message);
+    if ((*result).tag != KILN_VALUE_STRING) {
         return KILN_C99_OUT_OF_MEMORY;
     }
-    *result = kiln_c99_text_value(&built);
     return KILN_C99_OK;
 }
 
@@ -98,7 +96,8 @@ static int kiln_c99_error_to_string(kiln_host *host, kiln_value *result, kiln_va
 static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message) {
     const char *name = kiln_c99_error_name(kind);
     kiln_value error;
-    kiln_text stack = {NULL, 0, 0};
+    kiln_value stack;
+    kiln_value prefix;
     kiln_value text = message.tag == KILN_VALUE_UNDEFINED ? kiln_c99_from_units(NULL, 0)
                                                           : kiln_c99_text(message);
     int status;
@@ -112,15 +111,18 @@ static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message
     /* The [[ErrorData]] slot, set at the one place an error is built so that nothing a program
      * does afterwards can add or remove it. */
     kiln_c99_object_of(error)->error_brand = 1;
-    if (kiln_c99_text_append_c(&stack, name) != KILN_C99_OK ||
-        (text.len != 0 && (kiln_c99_text_append_c(&stack, ": ") != KILN_C99_OK ||
-                           kiln_c99_text_append(&stack, text.ptr, text.len) != KILN_C99_OK))) {
-        free(stack.bytes);
+    prefix = kiln_c99_static_text(name, strlen(name));
+    if (text.len != 0) {
+        stack = kiln_c99_concat(kiln_c99_concat(prefix, kiln_c99_static_text(": ", 2)), text);
+    } else {
+        stack = prefix;
+    }
+    if (stack.tag != KILN_VALUE_STRING) {
         return KILN_C99_OUT_OF_MEMORY;
     }
     /* `stack` first, because that is the order the own keys come out in: the header is attached
      * by the constructor before the message is. */
-    status = kiln_c99_put(NULL, error, "stack", 5, kiln_c99_text_value(&stack), 0, NULL);
+    status = kiln_c99_put(NULL, error, "stack", 5, stack, 0, NULL);
     if (status == KILN_C99_OK && message.tag != KILN_VALUE_UNDEFINED) {
         status = kiln_c99_put(NULL, error, "message", 7, text, 0, NULL);
     }

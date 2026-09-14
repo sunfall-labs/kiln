@@ -1617,6 +1617,13 @@ typedef struct kiln_text {
 
 static int kiln_c99_text_append_grow(kiln_text *text, const char *bytes, size_t len);
 
+/* Explicit host codec for APIs whose wire contract is UTF-8.  JavaScript strings can contain
+ * lone UTF-16 surrogates, which have no UTF-8 scalar representation; this operation uses the
+ * host's documented replacement semantics for those units and is deliberately named so callers
+ * cannot mistake it for a unit-preserving string operation.  The returned buffer is malloc'd and
+ * belongs to the caller. */
+static int kiln_c99_string_to_utf8_lossy(kiln_value value, uint8_t **out, size_t *out_len);
+
 /* Append `len` bytes. A piece that fits is copied here, with a byte loop for the short ones a
  * JSON writer appends by the thousand -- a quote, a comma, a key -- where a `memmove` call cost
  * more than the copy; a piece that does not fit takes the growth path out of line. */
