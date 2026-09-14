@@ -1435,6 +1435,7 @@ dependencies = [
  "kiln-json",
  "kiln-node-path",
  "kiln-runtime",
+ "kiln-string",
  "kiln-temporal",
  "lasso",
  "md-5",
@@ -1471,6 +1472,7 @@ version = "0.0.0"
 dependencies = [
  "kiln-hir",
  "kiln-host-abi",
+ "kiln-string",
 ]
 
 [[package]]
@@ -1634,6 +1636,10 @@ dependencies = [
  "tokio-metrics",
  "tokio-util",
 ]
+
+[[package]]
+name = "kiln-string"
+version = "0.0.0"
 
 [[package]]
 name = "kiln-temporal"
