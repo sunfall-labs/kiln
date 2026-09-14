@@ -323,7 +323,6 @@ enum PropertyKeyRef<'a> {
     Units(&'a StringUnits),
 }
 
-
 impl<'a> PropertyKeyRef<'a> {
     /// Compare a language key with an ASCII spelling without materialising a scalar `String`.
     ///
@@ -369,7 +368,6 @@ impl<'a> PropertyKeyRef<'a> {
             Self::Units(key) => key.clone(),
         }
     }
-
 }
 
 #[derive(Clone, Debug)]
@@ -509,9 +507,7 @@ impl ObjectData {
     }
 
     pub fn get_own_attributes_units(&self, key: &StringUnits) -> Option<Attributes> {
-
         self.get_own_attributes_key(PropertyKeyRef::Units(key))
-
     }
 
     /// The three flags an own property carries, or `None` when there is no such property.
@@ -590,9 +586,7 @@ impl ObjectData {
     }
 
     fn lookup_key(&self, key: PropertyKeyRef<'_>) -> Option<Property> {
-
         if let Some(own) = self.properties.iter().find(|slot| key.matches(&slot.key)) {
-
             return Some(own.property.clone());
         }
         let mut current = self.prototype.clone();
@@ -655,13 +649,11 @@ impl ObjectData {
     }
 
     fn define_value_key(&mut self, key: PropertyKeyRef<'_>, value: Value, attributes: Attributes) {
-
         if let Some(slot) = self
             .properties
             .iter_mut()
             .find(|slot| key.matches(&slot.key))
         {
-
             if !redefinable(slot, attributes, true) {
                 return;
             }
@@ -742,7 +734,6 @@ impl ObjectData {
             return;
         }
         self.properties.push(Slot {
-
             key: key.owned(),
 
             property,
@@ -833,7 +824,6 @@ impl ObjectData {
             .iter_mut()
             .find(|slot| key.matches(&slot.key))
         {
-
             // Only a data property can refuse a write. An accessor's setter has already had its
             // chance -- `inherited_setter_key` runs ahead of every store -- so a store that reaches
             // an accessor slot here is the machine replacing its own bookkeeping.
@@ -848,8 +838,6 @@ impl ObjectData {
         }
         self.insert_key(key, Property::Value(value), Attributes::DEFAULT);
     }
-
-
 
     fn insert_key(&mut self, key: PropertyKeyRef<'_>, property: Property, attributes: Attributes) {
         let slot = Slot {
@@ -869,7 +857,6 @@ impl ObjectData {
             .unwrap_or(self.properties.len());
         self.properties.insert(position, slot);
     }
-
 
     /// Overwrite what one export of a module namespace holds, leaving its flags alone.
     ///
@@ -956,7 +943,6 @@ impl ObjectData {
                 .iter_mut()
                 .find(|slot| slot.key == key.as_str())
             {
-
                 slot.property = Property::Value(value);
             }
         }
@@ -999,7 +985,6 @@ impl ObjectData {
     }
 
     pub fn remove_units(&mut self, key: &StringUnits) -> bool {
-
         self.remove_key(PropertyKeyRef::Units(key))
     }
 
@@ -6511,7 +6496,8 @@ pub fn own_data_property(value: &Value, name: &str) -> Option<Value> {
 /// number semantics, insertion order, duplicate-key behavior, and object identity identical to
 /// language-level parsing.
 pub fn parse_json_module(source: &str) -> Result<Value, ExecutionError> {
-    parse_json_text(source)
+    let source = StringUnits::from(source);
+    parse_json_text(&source)
 }
 
 /// Execute one linkage-aware module after its acyclic dependencies have completed.
@@ -14612,8 +14598,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // `ToString(text)` may run the program's own `toString`, so the validation cannot
             // happen in the pure table.
             Native::JsonRawJson => {
-                let text =
-                    self.as_text(arguments.first().unwrap_or(&Value::Undefined), instruction)?;
+                let text = self
+                    .as_text_units(arguments.first().unwrap_or(&Value::Undefined), instruction)?;
                 return build_raw_json(&text);
             }
             Native::JsonIsRawJson => {
@@ -16109,8 +16095,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // turns `{"at":"2020-01-01"}` into an object holding a `Date`. Without it the
             // second argument was read and discarded, and the parse looked like it had worked.
             Native::JsonParse => {
-                let text =
-                    self.as_text(arguments.first().unwrap_or(&Value::Undefined), instruction)?;
+                let text = self
+                    .as_text_units(arguments.first().unwrap_or(&Value::Undefined), instruction)?;
                 let parsed = parse_json_text(&text)?;
                 let reviver = arguments.get(1).cloned().unwrap_or(Value::Undefined);
                 if !is_callable(&reviver) {
@@ -17032,10 +17018,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(Value::Boolean(closed))
             }
             Native::SymbolFor => {
-                let key = self.as_text_units(
-                    arguments.first().unwrap_or(&Value::Undefined),
-                    instruction,
-                )?;
+                let key = self
+                    .as_text_units(arguments.first().unwrap_or(&Value::Undefined), instruction)?;
                 let registered = match &self.module_realm {
                     Some(realm) => realm.borrow().symbol_registry.clone(),
                     None => self.symbol_registry.clone(),
@@ -28555,9 +28539,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             );
             properties.define_value(
                 "name",
-
                 Value::String(closure.display_name_units()),
-
                 FUNCTION_IDENTITY,
             );
         }
@@ -30575,15 +30557,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             .or_else(|| self.inherited_accessor_key(target, key))
     }
 
-    /// Unit-preserving store lookup. Scalar names use the established path so built-in tables
-    /// remain cheap; a name containing a lone surrogate can only be a program-owned slot.
-    fn stored_property_units(&self, target: &Value, name: &StringUnits) -> Option<Property> {
-        if let Ok(scalar) = name.to_scalar_string() {
-            return self.stored_property(target, &scalar);
-        }
-        self.own_stored_property_units(target, name)
-    }
-
     /// An accessor a built-in prototype above `target` carries.
     ///
     /// Split from the walk itself so that both guards are asked before any work is done. The
@@ -30665,24 +30638,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             _ => exotic_properties(target)
                 .filter(|_| !exotic_reserved_name_key(target, key))
                 .and_then(|store| store.borrow().lookup_key(key)),
-        }
-    }
-
-    fn own_stored_property_units(
-        &self,
-        target: &Value,
-        name: &StringUnits,
-    ) -> Option<Property> {
-        match target {
-            Value::Object(object) => object.borrow().lookup_units(name),
-            Value::Function(closure) if name.to_scalar_string().is_err() => {
-                closure.properties.borrow().lookup_units(name)
-            }
-            Value::Array(items) => items.properties.borrow().lookup_units(name),
-            Value::Bound(bound) => bound.properties.borrow().lookup_units(name),
-            Value::Native(_, _) | Value::Callback(_, _) => None,
-            _ => exotic_properties(target)
-                .and_then(|store| store.borrow().lookup_units(name)),
         }
     }
 
@@ -32002,7 +31957,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 target,
                 PropertyKeyRef::Units(&units),
             ));
-
         };
         let proxy = Rc::clone(proxy);
         let inner = proxy.target.clone();
@@ -37540,8 +37494,8 @@ fn call_native(
         // entry points cannot disagree about what the grammar is.
         Native::JsonParse => {
             let text = match arguments.first() {
-                None | Some(Value::Undefined) => "undefined".to_owned(),
-                Some(value) => value.to_display_string(),
+                None | Some(Value::Undefined) => StringUnits::from("undefined"),
+                Some(value) => value.to_string_units(),
             };
             parse_json_text(&text)?
         }
@@ -39688,12 +39642,14 @@ fn collection_property(is_map: bool, weak: bool, name: &str) -> Value {
 /// with the indentation and the replacer the enclosing `stringify` was given, and pasting it in
 /// whole would ignore both -- so the specification refuses the case rather than producing a
 /// document whose shape depends on where the raw value happened to sit.
-fn build_raw_json(text: &str) -> Result<Value, ExecutionError> {
+fn build_raw_json(text: &StringUnits) -> Result<Value, ExecutionError> {
     // Not `trim`: surrounding whitespace is refused rather than removed, because the text is
     // going into a document verbatim and a leading newline would be there too.
     if text.is_empty()
-        || text.starts_with([' ', '\t', '\n', '\r'])
-        || text.ends_with([' ', '\t', '\n', '\r'])
+        || text.unit_at(0).is_some_and(is_json_whitespace)
+        || text
+            .unit_at(text.unit_len().saturating_sub(1))
+            .is_some_and(is_json_whitespace)
     {
         return Err(ExecutionError::InvalidJson);
     }
@@ -39705,7 +39661,7 @@ fn build_raw_json(text: &str) -> Result<Value, ExecutionError> {
         return Err(ExecutionError::InvalidJson);
     }
     let mut object = ObjectData::default();
-    object.set(RAW_JSON_TEXT, Value::String(text.to_owned().into()));
+    object.set(RAW_JSON_TEXT, Value::String(text.clone()));
     object.set_non_enumerable(RAW_JSON_MARK, Value::Boolean(true));
     // A null prototype, so the object cannot answer to `toJSON`, `toString` or anything else a
     // program might have put on `Object.prototype` -- it is a carrier, not a participant.
@@ -40799,9 +40755,12 @@ fn join_units(items: &[Value], separator: &StringUnits) -> StringUnits {
 ///
 /// Separate from either caller because there are two: the pure built-in, and the machine's
 /// route for a call that carries a reviver.
-fn parse_json_text(text: &str) -> Result<Value, ExecutionError> {
-    kiln_json::parse(text.as_bytes(), json_value_from_tape)
-        .map_err(|_| ExecutionError::InvalidJson)?
+fn parse_json_text(text: &StringUnits) -> Result<Value, ExecutionError> {
+    kiln_json::parse_units(text, json_value_from_tape).map_err(|_| ExecutionError::InvalidJson)?
+}
+
+fn is_json_whitespace(unit: u16) -> bool {
+    matches!(unit, 0x20 | 0x09 | 0x0a | 0x0d)
 }
 
 fn delete_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
@@ -40942,9 +40901,7 @@ fn own_properties_units(intrinsics: &Intrinsics, value: &Value) -> Vec<(StringUn
             .properties
             .borrow()
             .entries()
-
             .map(|(key, property)| (key.clone(), property.clone()))
-
             .collect(),
         // A bound function keeps its own store, and `length` and `name` are not in it -- the
         // own-key walk supplies those two literally -- so what is here is exactly what a holder
@@ -40953,9 +40910,7 @@ fn own_properties_units(intrinsics: &Intrinsics, value: &Value) -> Vec<(StringUn
             .properties
             .borrow()
             .entries()
-
             .map(|(key, property)| (key.clone(), property.clone()))
-
             .collect(),
         Value::Object(object) => string_wrapper_entries_units(value)
             .into_iter()
@@ -40963,9 +40918,7 @@ fn own_properties_units(intrinsics: &Intrinsics, value: &Value) -> Vec<(StringUn
                 object
                     .borrow()
                     .entries()
-
                     .map(|(key, property)| (key.clone(), property.clone())),
-
             )
             .collect(),
         // The indices first and then whatever the program hung on the array by name, which is
@@ -40990,9 +40943,7 @@ fn own_properties_units(intrinsics: &Intrinsics, value: &Value) -> Vec<(StringUn
                     .properties
                     .borrow()
                     .entries()
-
                     .map(|(key, property)| (key.clone(), property.clone()))
-
                     .collect::<Vec<_>>(),
             )
             .collect(),
@@ -41009,9 +40960,7 @@ fn own_properties_units(intrinsics: &Intrinsics, value: &Value) -> Vec<(StringUn
                 view.properties
                     .borrow()
                     .entries()
-
                     .map(|(key, property)| (key.clone(), property.clone())),
-
             );
             entries
         }
@@ -41020,9 +40969,7 @@ fn own_properties_units(intrinsics: &Intrinsics, value: &Value) -> Vec<(StringUn
                 store
                     .borrow()
                     .entries()
-
                     .map(|(key, property)| (key.clone(), property.clone()))
-
                     .collect()
             })
             .unwrap_or_default(),
@@ -41436,7 +41383,7 @@ fn json_value_from_tape(document: &kiln_json::Tape<'_>) -> Result<Value, Executi
         Object {
             data: ObjectData,
             remaining: usize,
-            key: Option<String>,
+            key: Option<StringUnits>,
         },
     }
     let mut stack: Vec<Frame> = Vec::new();
@@ -41453,10 +41400,8 @@ fn json_value_from_tape(document: &kiln_json::Tape<'_>) -> Result<Value, Executi
             kiln_json::TAG_NUMBER => Value::Number(node.as_number().unwrap_or(0.0)),
             kiln_json::TAG_STRING => Value::String(
                 document
-                    .string(node)
-                    .ok_or(ExecutionError::InvalidJson)?
-                    .to_owned()
-                    .into(),
+                    .string_units(node)
+                    .ok_or(ExecutionError::InvalidJson)?,
             ),
             kiln_json::TAG_ARRAY => {
                 if count != 0 {
@@ -41505,11 +41450,11 @@ fn json_value_from_tape(document: &kiln_json::Tape<'_>) -> Result<Value, Executi
                         let Value::String(name) = value else {
                             return Err(ExecutionError::InvalidJson);
                         };
-                        *key = Some(name.to_lossy_string());
+                        *key = Some(name);
                         break;
                     }
                     Some(name) => {
-                        data.set(&name, value);
+                        data.set_units(&name, value);
                         *remaining -= 1;
                         if *remaining != 0 {
                             break;
@@ -44218,7 +44163,6 @@ fn builtin_accessor_slot(accessor: BuiltinAccessor, receiver: &Value) -> Value {
             _ => unreachable!("TypedArray accessor passed a non-TypedArray receiver"),
         },
         BuiltinAccessor::SymbolDescription => match receiver {
-
             Value::Symbol(symbol) => symbol
                 .description_units()
                 .map_or(Value::Undefined, Value::String),
@@ -45059,15 +45003,16 @@ fn define_function_name(function: &Value, key: &Value, prefix: Option<&str>) {
     let name = match key {
         // A symbol names the property after its description, in brackets; one with no description
         // names it nothing, and a prefix is still applied to that nothing.
-        Value::Symbol(symbol) => symbol.description_units().map_or_else(
-            StringUnits::default,
-            |description| {
-                let mut units = StringUnits::from("[").to_units().into_vec();
-                units.extend(description.units());
-                units.extend(StringUnits::from("]").units());
-                StringUnits::from_units(&units)
-            },
-        ),
+        Value::Symbol(symbol) => {
+            symbol
+                .description_units()
+                .map_or_else(StringUnits::default, |description| {
+                    let mut units = StringUnits::from("[").to_units().into_vec();
+                    units.extend(description.units());
+                    units.extend(StringUnits::from("]").units());
+                    StringUnits::from_units(&units)
+                })
+        }
         other => {
             let key = other.property_key_units();
             // A private name is spelled the way the program wrote it rather than the way the
@@ -45089,7 +45034,9 @@ fn define_function_name(function: &Value, key: &Value, prefix: Option<&str>) {
     };
 
     let name = prefix.map_or(name.clone(), |prefix| {
-        let mut units = StringUnits::from(format!("{prefix} ")).to_units().into_vec();
+        let mut units = StringUnits::from(format!("{prefix} "))
+            .to_units()
+            .into_vec();
         units.extend(name.units());
         StringUnits::from_units(&units)
     });
@@ -45097,7 +45044,6 @@ fn define_function_name(function: &Value, key: &Value, prefix: Option<&str>) {
         .properties
         .borrow_mut()
         .define_value("name", Value::String(name), FUNCTION_IDENTITY);
-
 }
 
 const FUNCTION_IDENTITY: Attributes = Attributes {
@@ -45763,10 +45709,8 @@ impl Intrinsics {
         let data = &entries.iter().find(|(key, _)| *key == identity)?.1;
         Some(
             data.keys()
-
                 .filter(|key| !is_reserved_units(key))
                 .cloned()
-
                 .collect(),
         )
     }
@@ -45781,10 +45725,8 @@ impl Intrinsics {
             return Vec::new();
         };
         data.entries()
-
             .filter(|(key, _)| !is_reserved_units(key))
             .map(|(key, property)| (key.clone(), property.clone()))
-
             .collect()
     }
 
@@ -46463,7 +46405,6 @@ fn intrinsic_accessor(target: &Value, key: &str) -> Option<Property> {
 fn own_property_names_units(intrinsics: &Intrinsics, target: &Value) -> Vec<StringUnits> {
     let from_store = |data: &ObjectData| {
         data.keys()
-
             .filter(|key| !is_reserved_units(key))
             .cloned()
             .collect::<Vec<_>>()
@@ -46515,7 +46456,6 @@ fn own_property_names_units(intrinsics: &Intrinsics, target: &Value) -> Vec<Stri
             .map(|store| from_store(&store.borrow()))
             .unwrap_or_default(),
         _ => own_property_keys_units(intrinsics, target),
-
     }
 }
 
@@ -46537,10 +46477,8 @@ fn own_property_keys_units(intrinsics: &Intrinsics, target: &Value) -> Vec<Strin
     }
     let from_object = |data: &ObjectData| -> Vec<StringUnits> {
         data.keys()
-
             .filter(|key| !is_reserved_units(key))
             .cloned()
-
             .collect()
     };
     match target {
@@ -46896,16 +46834,13 @@ fn own_property_keys_including_symbols_units(
     // proxy invariants and `Object.defineProperties` consume the full own-key list. Append the
     // reserved slots after the ordinary names, preserving each store's insertion order.
     let stored = match target {
-
         Value::Object(object) => object.borrow().keys().cloned().collect(),
         Value::Function(closure) => closure.properties.borrow().keys().cloned().collect(),
         Value::Bound(bound) => bound.properties.borrow().keys().cloned().collect(),
         Value::Array(items) => items.properties.borrow().keys().cloned().collect(),
 
         other if exotic_properties(other).is_some() => exotic_properties(target)
-
             .map(|store| store.borrow().keys().cloned().collect())
-
             .unwrap_or_default(),
         Value::Native(_, _)
         | Value::Callback(_, _)
@@ -46914,9 +46849,7 @@ fn own_property_keys_including_symbols_units(
         | Value::Element(_) => intrinsic_key(target)
             .and_then(|identity| {
                 intrinsics.entries.borrow().iter().find_map(|(held, data)| {
-
                     (*held == identity).then(|| data.keys().cloned().collect())
-
                 })
             })
             .unwrap_or_default(),

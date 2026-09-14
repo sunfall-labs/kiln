@@ -12,7 +12,6 @@ fn object_data_property_keys_preserve_lone_surrogates() {
     assert!(object.get_units(&key).is_none());
 }
 
-
 #[test]
 fn regexp_patterns_keep_lone_units_and_utf16_offsets() {
     let lone = StringUnits::from_units(&[0xd800]);
@@ -227,6 +226,7 @@ fn property_key_units_cover_mutation_descriptors_inherited_accessors_and_proxy_i
             prologue_end: 0,
             asynchronous: false,
             name: Some("toString".to_owned()),
+            inferred_name: None,
             arrow: false,
             generator: false,
             async_generator: false,
@@ -254,6 +254,7 @@ fn property_key_units_cover_mutation_descriptors_inherited_accessors_and_proxy_i
         strictness: Rc::new(Strictness::default()),
         module_path: None,
         name: Some("toString".into()),
+        inferred_name: None,
         upvalues: Vec::new(),
         realm: RealmId::PRIMARY,
         captured_arguments: None,
@@ -312,7 +313,6 @@ fn wide_backed_ascii_intrinsic_keys_follow_narrow_lookup() {
         own_attributes_key(&vm.intrinsics, &target, PropertyKeyRef::Units(&wide))
     );
 }
-
 
 fn string_index_of(text: &str, needle: &str, start: Option<f64>) -> f64 {
     let mut arguments = vec![Value::String(needle.to_owned().into())];
@@ -3752,14 +3752,15 @@ fn symbol_registry_and_symbol_key_names_preserve_units() {
         .dispatch_native(Native::SymbolKeyFor, &Value::Undefined, &[missing], 0)
         .expect("Symbol.keyFor(undefined-key symbol)");
     assert_eq!(missing_key, Value::String("undefined".into()));
-    assert!(vm
-        .dispatch_native(
+    assert!(
+        vm.dispatch_native(
             Native::SymbolKeyFor,
             &Value::Undefined,
             &[Value::Undefined],
             0,
         )
-        .is_err());
+        .is_err()
+    );
 
     let Value::Function(function) = run(&Program {
         source: "".into(),
@@ -3948,7 +3949,8 @@ fn a_negative_slice_bound_counts_from_the_end() {
 }
 
 fn parse_json(text: &str) -> Result<Value, ExecutionError> {
-    parse_json_text(text)
+    let text = StringUnits::from(text);
+    parse_json_text(&text)
 }
 
 #[test]
@@ -3967,11 +3969,11 @@ fn json_parses_escapes_including_surrogates() {
         panic!("expected a string");
     };
     assert_eq!(text, "a\"b\\cé\n");
-    // A lone surrogate has no scalar value; replacing it beats failing the whole parse.
+    // A lone surrogate is a valid JavaScript string unit and JSON.parse preserves it.
     let Ok(Value::String(lone)) = parse_json(r#""\ud800""#) else {
         panic!("expected a string");
     };
-    assert_eq!(lone, "\u{fffd}");
+    assert_eq!(lone, StringUnits::from_units(&[0xd800]));
 }
 
 #[test]
