@@ -5,8 +5,9 @@ use super::{EntryKind, Site, Speculation, this_site_count, typed_signature};
 use crate::direct::{CallPlan, direct_callable};
 use crate::graph::{
     BasicBlock, BlockId, FunctionGraph, FunctionTypeProfile, GraphOp, InductionVariable, Proven,
-    Terminator, ValueId, array_slots, candidate_number_parameters_with_profile,
-    find_induction_variables, proven_ints_with_assumptions, proven_numbers_with_assumptions,
+    Terminator, ValueId, array_slots, candidate_array_parameters_with_profile,
+    candidate_number_parameters_with_profile, find_induction_variables,
+    proven_ints_with_assumptions, proven_numbers_with_assumptions,
 };
 use crate::prelude::lookup_speculation_invariant;
 use kiln_ir::{BinaryOp, Constant, ExportBinding, FunctionProto, Program, UnaryOp};
@@ -1444,7 +1445,9 @@ fn emit_blocks(
         this_columns(graph).0
     };
     let candidate_params = candidate_number_parameters_with_profile(graph, proto, func_profile);
-    let speculate_enabled = std::env::var("KILN_SPECULATE").as_deref() != Ok("0");
+    let candidate_array_params =
+        candidate_array_parameters_with_profile(graph, proto, func_profile, program);
+    let speculate_enabled = plan.speculate.unwrap_or(true);
     let suspends = graph
         .blocks
         .iter()
@@ -1457,7 +1460,7 @@ fn emit_blocks(
         .iter()
         .flat_map(|b| b.operations.iter().map(|(v, op)| (*v, op)))
         .collect();
-    let spec_arrays: HashSet<ValueId> = ops
+    let mut spec_arrays: HashSet<ValueId> = ops
         .iter()
         .filter_map(|(vid, op)| match op {
             GraphOp::LoadUpvalue(_) if plan.invariant.contains(vid) => Some(*vid),
@@ -1474,6 +1477,19 @@ fn emit_blocks(
             })
         })
         .collect();
+    // Parameter reads are eligible only when candidate selection proved a simple positional
+    // binding. Include every read of that slot so the existing array property tier sees the same
+    // receiver value throughout the body; the entry guard below checks the original argument.
+    for &slot in &candidate_array_params {
+        if let Some(&initial) = graph.initial_locals.get(slot) {
+            spec_arrays.insert(initial);
+        }
+        for (vid, op) in &ops {
+            if matches!(op, GraphOp::LoadLocal(load_slot) if *load_slot as usize == slot) {
+                spec_arrays.insert(*vid);
+            }
+        }
+    }
     let feeds_arithmetic = |vid: &ValueId| {
         ops.iter().any(|(_, op)| match op {
             GraphOp::Binary { op, left, right } => {
@@ -1529,6 +1545,7 @@ fn emit_blocks(
         && !suspends
         && kind == EntryKind::Boxed
         && (!candidate_params.is_empty()
+            || !candidate_array_params.is_empty()
             || !spec_arrays.is_empty()
             || !spec_calls.is_empty()
             || !spec_fields.is_empty()
@@ -1659,6 +1676,18 @@ fn emit_blocks(
         for &slot in &candidate_params {
             conds.push(format!(
                 "(argc > {slot} && KILN_VAL_IS_DOUBLE(args[{slot}]))"
+            ));
+        }
+        for &slot in &candidate_array_params {
+            let invariant = lookup_speculation_invariant("parameter_array");
+            writeln!(
+                output,
+                "    /* Speculation entry guard [{}]: {} */",
+                invariant.name, invariant.language_rule
+            )
+            .unwrap();
+            conds.push(format!(
+                "(argc > {slot} && ((args[{slot}] & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && kiln_c99_gc_kind_of_ptr(KILN_VAL_PTR(args[{slot}])) == KILN_GC_ARRAY))"
             ));
         }
         let mut spec_sorted: Vec<ValueId> = spec_arrays.iter().copied().collect();

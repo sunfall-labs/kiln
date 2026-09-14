@@ -17,6 +17,22 @@ fn default_emission_policy_is_inert_and_host_clock_changes_identity() {
     let legacy = emit(&program).expect("default program emits");
     let explicit_default =
         emit_with_policy(&program, EmissionPolicy::default()).expect("default policy emits");
+    let explicit_enabled = emit_with_policy(
+        &program,
+        EmissionPolicy {
+            speculate: Some(true),
+            ..EmissionPolicy::default()
+        },
+    )
+    .expect("explicitly enabled policy emits");
+    let explicit_disabled = emit_with_policy(
+        &program,
+        EmissionPolicy {
+            speculate: Some(false),
+            ..EmissionPolicy::default()
+        },
+    )
+    .expect("explicitly disabled policy emits");
     let host_clock = emit_with_policy(
         &program,
         EmissionPolicy {
@@ -75,6 +91,10 @@ fn default_emission_policy_is_inert_and_host_clock_changes_identity() {
     .expect("host locale policy emits");
 
     assert_eq!(legacy, explicit_default);
+    assert_eq!(legacy.symbol, explicit_enabled.symbol);
+    assert_eq!(legacy.program_hash, explicit_enabled.program_hash);
+    assert_ne!(legacy.symbol, explicit_disabled.symbol);
+    assert_ne!(legacy.program_hash, explicit_disabled.program_hash);
     assert_ne!(legacy.symbol, host_clock.symbol);
     assert_ne!(legacy.program_hash, host_clock.program_hash);
     assert!(!legacy.source.contains("#define KILN_REALM_HOST_CLOCK"));
@@ -5229,11 +5249,12 @@ fn versioning_emits_two_clones_with_entry_guard_and_loop_exit() {
 
 #[test]
 fn speculation_invariants_table_is_sound_and_complete() {
-    assert_eq!(assert_speculation_invariants(SPECULATION_INVARIANTS), 7);
+    assert_eq!(assert_speculation_invariants(SPECULATION_INVARIANTS), 8);
     for name in [
         "parameter_number",
         "loop_speculation_exit",
         "upvalue_array",
+        "parameter_array",
         "property_number",
         "spread_source_shaped",
         "spread_field_number",
@@ -5292,18 +5313,14 @@ fn speculation_disabled_emits_generic_clone_alone() {
         functions: vec![proto.clone()],
         template_sites: Vec::new(),
     };
-    let orig = std::env::var("KILN_SPECULATE").ok();
-    unsafe {
-        std::env::set_var("KILN_SPECULATE", "0");
-    }
-    let generated = emit(&prog).expect("emits with speculation disabled");
-    unsafe {
-        if let Some(val) = orig {
-            std::env::set_var("KILN_SPECULATE", val);
-        } else {
-            std::env::remove_var("KILN_SPECULATE");
-        }
-    }
+    let generated = emit_with_policy(
+        &prog,
+        EmissionPolicy {
+            speculate: Some(false),
+            ..Default::default()
+        },
+    )
+    .expect("emits with speculation disabled");
     let src = &generated.source;
     assert!(!src.contains("/* Clone A: guarded fast path */"));
     assert!(!src.contains("kiln_fast_block_"));
@@ -6411,6 +6428,148 @@ fn type_profile_serialization_and_deserialization() {
     assert_eq!(profile, parsed);
     assert_eq!(parsed.function(0).unwrap().parameters, vec!["int"]);
     assert_eq!(parsed.site_tag(42), Some("number"));
+}
+
+#[test]
+fn object_profile_selects_only_simple_array_parameter_receivers() {
+    let make_proto = |declared_length, code| FunctionProto {
+        span: kiln_ir::Span::default(),
+        prologue_end: 0,
+        declared_length,
+        name: Some("array_length".into()),
+        parameter_count: 1,
+        local_count: 1,
+        code,
+        arrow: false,
+        generator: false,
+        asynchronous: false,
+        async_generator: false,
+        is_method: false,
+        mapped_arguments: false,
+        upvalues: Vec::new(),
+        type_annotations: None,
+    };
+    let proto = make_proto(
+        1,
+        vec![
+            Instruction::LoadLocal(0),
+            Instruction::Const(0),
+            Instruction::GetComputed,
+            Instruction::LoadLocal(0),
+            Instruction::GetProperty(1),
+            Instruction::Return,
+        ],
+    );
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants: vec![
+            Constant::Number(0.0f64.to_bits()),
+            Constant::String("length".into()),
+        ],
+        code: vec![Instruction::Return],
+        local_count: 0,
+        functions: vec![proto.clone()],
+        template_sites: Vec::new(),
+    };
+    let graph = build_function_graph(&proto, &program).unwrap();
+    let profile = FunctionTypeProfile {
+        index: 0,
+        name: Some("array_length".into()),
+        parameters: vec!["object".into()],
+        return_type: Some("number".into()),
+    };
+    assert_eq!(
+        crate::graph::candidate_array_parameters_with_profile(
+            &graph,
+            &proto,
+            Some(&profile),
+            &program,
+        ),
+        vec![0]
+    );
+    let pure_indexed = make_proto(
+        1,
+        vec![
+            Instruction::LoadLocal(0),
+            Instruction::Const(0),
+            Instruction::GetComputed,
+            Instruction::Return,
+        ],
+    );
+    let pure_indexed_program = Program {
+        functions: vec![pure_indexed.clone()],
+        ..program.clone()
+    };
+    let pure_indexed_graph = build_function_graph(&pure_indexed, &pure_indexed_program).unwrap();
+    assert!(
+        crate::graph::candidate_array_parameters_with_profile(
+            &pure_indexed_graph,
+            &pure_indexed,
+            Some(&profile),
+            &pure_indexed_program,
+        )
+        .is_empty(),
+        "a pure indexed receiver does not pay for the parameter-array clone"
+    );
+    assert!(
+        crate::graph::candidate_array_parameters_with_profile(&graph, &proto, None, &program)
+            .is_empty()
+    );
+
+    let reassigned = make_proto(
+        1,
+        vec![
+            Instruction::LoadLocal(0),
+            Instruction::StoreLocal(0),
+            Instruction::LoadLocal(0),
+            Instruction::GetProperty(1),
+            Instruction::Return,
+        ],
+    );
+    let reassigned_program = Program {
+        functions: vec![reassigned.clone()],
+        ..program.clone()
+    };
+    let reassigned_graph = build_function_graph(&reassigned, &reassigned_program).unwrap();
+    assert!(
+        crate::graph::candidate_array_parameters_with_profile(
+            &reassigned_graph,
+            &reassigned,
+            Some(&profile),
+            &reassigned_program,
+        )
+        .is_empty()
+    );
+
+    let emitted = emit_with_policy(
+        &program,
+        EmissionPolicy {
+            type_profile: Some(std::sync::Arc::new(TypeProfile {
+                version: 1,
+                functions: vec![profile],
+                sites: Vec::new(),
+            })),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        emitted
+            .source
+            .contains("Speculation entry guard [parameter_array]")
+    );
+    assert!(emitted.source.contains("KILN_GC_ARRAY"));
+    let function_start = emitted
+        .source
+        .find("/* function 0: array_length */")
+        .expect("array function emitted");
+    let function_end = emitted.source[function_start..]
+        .find("/* entrypoint */")
+        .map(|offset| function_start + offset)
+        .unwrap_or(emitted.source.len());
+    let function_source = &emitted.source[function_start..function_end];
+    assert!(function_source.contains("arr->elements"));
 }
 
 #[test]

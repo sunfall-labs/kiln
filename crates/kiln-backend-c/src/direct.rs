@@ -77,6 +77,9 @@ pub struct CallPlan {
     /// Emit only the generic body; native-dev uses this to keep the edit/run loop proportional
     /// to the program instead of multiplying it by speculative clones.
     pub generic_only: bool,
+    /// Explicit speculation setting resolved by the native orchestration layer. `None` keeps the
+    /// direct emitter's default for backend-only callers.
+    pub speculate: Option<bool>,
     /// Call results whose callee is the closure of the named proto.
     pub known: HashMap<ValueId, u32>,
     /// Call results emitted against the callee's typed entry: every argument proven a number.
@@ -137,6 +140,7 @@ impl DirectPlan {
         publishes_frame: &[bool],
         compact: bool,
         generic_only: bool,
+        speculate: Option<bool>,
     ) -> Self {
         if generic_only {
             // None of the known-callee, numeric fixpoint, typed-entry, callback, or receiver
@@ -147,6 +151,7 @@ impl DirectPlan {
             let plan = || CallPlan {
                 compact,
                 generic_only: true,
+                speculate,
                 typed_returns: vec![false; function_count],
                 typed_needs: vec![TypedNeeds::default(); function_count],
                 typed_entries: vec![false; function_count],
@@ -309,6 +314,7 @@ impl DirectPlan {
             CallPlan {
                 compact,
                 generic_only,
+                speculate,
                 known: if generic_only {
                     HashMap::new()
                 } else {

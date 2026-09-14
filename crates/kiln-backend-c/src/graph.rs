@@ -1511,6 +1511,76 @@ pub fn candidate_number_parameters(graph: &FunctionGraph, proto: &FunctionProto)
     candidate_number_parameters_with_profile(graph, proto, None)
 }
 
+/// Parameter slots whose profiled object value is used as an array receiver.  The profile format
+/// records arrays under the general `object` tag, so the emitted clone still performs the
+/// authoritative Array-kind guard; this helper only narrows where paying for that clone can help.
+///
+/// Only simple positional parameters are eligible.  Defaults, destructuring, rest parameters,
+/// mapped arguments, captured cells, and assignments to the parameter all change the relationship
+/// between the entry argument and later local reads, so they deliberately stay generic.
+pub fn candidate_array_parameters_with_profile(
+    graph: &FunctionGraph,
+    proto: &FunctionProto,
+    profile: Option<&FunctionTypeProfile>,
+    program: &Program,
+) -> Vec<usize> {
+    if proto.parameter_count == 0
+        || proto.generator
+        || proto.asynchronous
+        || proto.mapped_arguments
+        || proto.declared_length != proto.parameter_count
+        || proto.prologue_end != 0
+        || profile.is_none()
+    {
+        return Vec::new();
+    }
+    let profile = profile.expect("checked above");
+    let mut candidates = Vec::new();
+    for (slot, tag) in profile.parameters.iter().enumerate() {
+        if slot >= proto.parameter_count as usize
+            || tag != "object"
+            || graph.initial_locals.get(slot).is_none()
+        {
+            continue;
+        }
+        let assigned = graph.blocks.iter().any(|block| {
+            block.operations.iter().any(|(_, op)| match op {
+                GraphOp::StoreLocal { slot: written, .. }
+                | GraphOp::StoreCell { slot: written, .. }
+                | GraphOp::MakeCell(written) => *written as usize == slot,
+                _ => false,
+            })
+        });
+        if assigned {
+            continue;
+        }
+        let mut values = HashSet::from([graph.initial_locals[slot]]);
+        for block in &graph.blocks {
+            for (vid, op) in &block.operations {
+                if matches!(op, GraphOp::LoadLocal(load_slot) if *load_slot as usize == slot) {
+                    values.insert(*vid);
+                }
+            }
+        }
+        // The parameter-array clone is only worth paying for when the function also reads the
+        // Array length.  Indexed reads retain their existing generic fast tier inside this clone;
+        // a pure computed read does not justify another entry clone.
+        let uses_array_tier = graph.blocks.iter().any(|block| {
+            block.operations.iter().any(|(_, op)| match op {
+                GraphOp::GetProperty { object, name, .. } => {
+                    values.contains(object)
+                        && matches!(program.constants.get(*name as usize), Some(Constant::String(s)) if s == "length")
+                }
+                _ => false,
+            })
+        });
+        if uses_array_tier {
+            candidates.push(slot);
+        }
+    }
+    candidates
+}
+
 /// Parameter slots (0..proto.parameter_count) that can be speculatively assumed to be numbers,
 /// informed by TypeScript annotations (Step 3.1) and Type Profiles (Step 3.2).
 pub fn candidate_number_parameters_with_profile(
