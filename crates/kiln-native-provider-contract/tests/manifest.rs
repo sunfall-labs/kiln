@@ -38,7 +38,7 @@ fn full_and_slim_manifests_round_trip_and_match_source_identity() {
 fn every_identity_field_changes_identity_but_archive_filename_does_not() {
     let base = sample(true);
     let fields = [
-        ("schema", Value::from(2)),
+        ("schema", Value::from(base.schema + 1)),
         ("provider", Value::from("other")),
         ("provider_abi", Value::from(2)),
         ("format_version", Value::from(2)),

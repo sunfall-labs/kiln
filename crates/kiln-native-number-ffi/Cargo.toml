@@ -18,8 +18,8 @@ crate-type = ["rlib"]
 default = ["realm", "realm-http"]
 realm = ["dep:kiln-runtime"]
 # Hyper-backed HTTP server/client engines inside `kiln-runtime`. On by default so the
-# default build is behavior-identical to before; the slim archive disables default
-# features and enables `realm` without `realm-http`. This works because the
+# default build is behavior-identical to before; the common archive disables default
+# features and enables `realm`, `regexp`, `bigint`, and `json` without `realm-http`. This works because the
 # `kiln-runtime` dependency below sets `default-features = false`: without it, the
 # slim `--no-default-features` selection would still unify `kiln-runtime/http` back
 # on through the dependency's own defaults.

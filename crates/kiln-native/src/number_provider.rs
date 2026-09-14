@@ -23,8 +23,8 @@ const PROVIDER_PROFILE: &str = provider_contract::PROFILE;
 const PROVIDER_RUSTFLAGS: &str = provider_contract::RUSTFLAGS;
 const MANIFEST_ENV: &str = "KILN_NATIVE_NUMBER_PROVIDER_MANIFEST";
 const MANIFEST_FILE: &str = provider_contract::FULL_MANIFEST;
-/// Manifest for the slim provider archive: same schema, provider ABI, and export list as
-/// the full manifest, but the archive was built without the Hyper-backed HTTP engines.
+/// Manifest for the common provider archive: same schema, provider ABI, and export list as
+/// the full manifest, but containing only Realm, RegExp, BigInt, and JSON engines.
 const MANIFEST_SLIM_FILE: &str = provider_contract::SLIM_MANIFEST;
 // `kiln-native-number-abi` owns the ordered export registry and ABI version. Keep the imported
 // contract private to this resolver module so manifest validation and source-build identities
@@ -36,9 +36,8 @@ pub(crate) struct NumberProvider {
     pub(crate) archive_digest: Digest,
     pub(crate) identity: String,
     pub(crate) rust_target: String,
-    /// Whether the archive carries the Hyper-backed HTTP engines. The slim archive omits
-    /// them (linkable stubs keep the export list identical); only an HTTP-free program may
-    /// link it.
+    /// Whether this is the full archive. Kept as `http` in schema 2 because HTTP was the first
+    /// split capability; false now identifies the common Realm/RegExp/BigInt/JSON variant.
     pub(crate) http: bool,
 }
 
@@ -143,9 +142,9 @@ pub(crate) fn discover(identity: &ToolIdentity) -> Result<NumberProvider, Number
     discover_with_http(identity, true)
 }
 
-/// Resolve the provider archive for a program that needs the HTTP engines only when
-/// `want_http` is set. A full archive satisfies either request; a slim archive only
-/// satisfies an HTTP-free one, so slim manifests are consulted (and accepted) only then.
+/// Resolve the provider archive for a program that needs the full semantic-engine set.
+/// A full archive satisfies either request; a common archive only satisfies a graph whose
+/// retained provider demand is Realm, RegExp, BigInt, and JSON.
 pub(crate) fn discover_with_http(
     identity: &ToolIdentity,
     want_http: bool,
@@ -404,10 +403,9 @@ fn build_from_source(
     let archive_path = build_root.join("libkiln_native_number_ffi.a");
 
     if !archive_path.is_file() {
-        // The semantic cores remain feature-gated; the default `realm` feature adds the Tokio
-        // runtime that now owns native entry as well as interpreted entry. The slim variant
-        // additionally disables default features and enables `realm` without `realm-http`, so
-        // the Hyper-backed HTTP engines (and only they) drop out of the archive.
+        // The semantic cores remain feature-gated. The common variant disables defaults and
+        // enables exactly Realm, RegExp, BigInt, and JSON; all other engines compile as ABI-compatible
+        // refusal stubs.
         let mut arguments = vec![
             OsString::from("rustc"),
             OsString::from("--locked"),
