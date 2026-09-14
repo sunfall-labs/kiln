@@ -551,7 +551,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 Ok(Value::String(
                     formatter
                         .format(&engine::number::Numeric::Double(number))
-                        .map_err(failure)?,
+                        .map_err(failure)?.into(),
                 ))
             }
             Adapter::StringLocaleCompare => {
@@ -1007,7 +1007,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             Some(shape) => f.format_shape_range(shape, start, end),
                             None => f.format_range(start, end),
                         }
-                        .map_err(failure)?,
+                        .map_err(failure)?.into(),
                     ));
                 }
                 let parts = match start_shape {
@@ -1091,7 +1091,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     rules
                         .select(&engine::number::Numeric::Double(number))
                         .map_err(failure)?
-                        .to_owned(),
+                        .to_owned().into(),
                 ))
             }
             (Method::SelectRange, IntlValue::PluralRules(rules)) => {
@@ -1117,7 +1117,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             &engine::number::Numeric::Double(end),
                         )
                         .map_err(failure)?
-                        .to_owned(),
+                        .to_owned().into(),
                 ))
             }
             (Method::Compare, IntlValue::Collator(collator)) => {
@@ -1175,7 +1175,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             (Method::Minimize, IntlValue::Locale(tag)) => Ok(Value::Intl(Rc::new(
                 IntlValue::Locale(engine::locale::minimize(tag).map_err(failure)?),
             ))),
-            (Method::LocaleToString, IntlValue::Locale(tag)) => Ok(Value::String(tag.clone())),
+            (Method::LocaleToString, IntlValue::Locale(tag)) => Ok(Value::String(tag.clone().into())),
             // The brand check: `Intl.NumberFormat.prototype.format.call(collator)` is a TypeError
             // rather than a formatted anything.
             (method, value) => Err(type_error(format!(
@@ -1236,7 +1236,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     IntlValue::Locale(tag) => tag.clone(),
                     _ => return Err(type_error("a locale list element is not a string")),
                 },
-                Value::String(text) => text.clone(),
+                Value::String(text) => text.to_scalar_string().map_err(|_| range("locale contains a lone surrogate"))?,
                 Value::Object(_) | Value::Array(_) => {
                     let primitive =
                         self.as_primitive(&element, PrimitiveHint::String, instruction)?;
@@ -1795,7 +1795,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             Some(Value::String(text)) => {
                 // A string keeps every digit it was written with rather than going through a
                 // double, which is the whole reason the specification widened this argument.
-                let trimmed = text.trim();
+                let trimmed = text.to_scalar_string().map_err(|_| type_error("numeric string contains a lone surrogate"))?;
+                let trimmed = trimmed.trim();
                 if trimmed
                     .strip_prefix(['+', '-'])
                     .unwrap_or(trimmed)
@@ -1850,7 +1851,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 // is refused rather than quietly spelled out in whatever locale happens to apply.
                 return Err(type_error("a list element is not a string"));
             };
-            items.push(text);
+            items.push(text.to_scalar_string().map_err(|_| type_error("a list element contains a lone surrogate"))?);
         }
     }
 
