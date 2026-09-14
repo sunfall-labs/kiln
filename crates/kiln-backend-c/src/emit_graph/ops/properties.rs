@@ -143,17 +143,17 @@ pub(super) fn emit_get_property(
             String::new()
         };
         let str_int_stmt = if typed_int {
-            format!(" i{v} = (int64_t)str->length;")
+            format!(" i{v} = (int64_t)str->unit_len;")
         } else {
             String::new()
         };
         let str_double_stmt = if typed {
-            format!(" d{v} = (double)str->length;")
+            format!(" d{v} = (double)str->unit_len;")
         } else {
             String::new()
         };
         let str_box_stmt = if need_box {
-            format!(" v{v} = kiln_c99_val_from_double((double)str->length);")
+            format!(" v{v} = kiln_c99_val_from_double((double)str->unit_len);")
         } else {
             String::new()
         };
@@ -615,8 +615,8 @@ pub(super) fn emit_get_computed(
                     memcpy(&idx, &{vk}, sizeof(idx)); \
                     size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; \
                     const kiln_string *str = (const kiln_string *)KILN_VAL_PTR(v{o}); \
-                    if (KILN_LIKELY(str != NULL && idx >= 0.0 && idx == (double)slot && slot < str->length && str->length == str->byte_len)) {{ \
-                        v{v} = kiln_c99_val_single_char((unsigned char)str->bytes[slot]); \
+                    if (KILN_LIKELY(str != NULL && idx >= 0.0 && idx == (double)slot && slot < str->unit_len)) {{ \
+                        v{v} = kiln_c99_val_from_unit(kiln_string_unit_at(str, slot)); \
                         handled = 1; \
                     }} \
                 }} \

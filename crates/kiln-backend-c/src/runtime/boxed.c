@@ -79,9 +79,9 @@ static kiln_value kiln_val_to_boundary(kiln_val v) {
             if (tag == KILN_TAG_STRING_PREFIX) {
                 const kiln_string *s = (const kiln_string *)ptr;
                 if (s == NULL) {
-                    return kiln_c99_value(KILN_VALUE_STRING, 0, kiln_c99_empty_chars, 0);
+                    return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)&kiln_c99_empty_string, 0);
                 }
-                kiln_value result = kiln_c99_value(KILN_VALUE_STRING, 0, s->data, s->unit_len);
+                kiln_value result = kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)s, s->unit_len);
                 if (s->data == (const char *)(s + 1)) result.flags = KILN_VALUE_FLAG_OWNED_STRING;
                 return result;
             }
@@ -696,7 +696,7 @@ static int kiln_c99_val_compare(uint16_t operation, kiln_val left, kiln_val righ
             const kiln_string *s1 = (const kiln_string *)KILN_VAL_PTR(left);
             const kiln_string *s2 = (const kiln_string *)KILN_VAL_PTR(right);
             if (s1->unit_len != s2->unit_len) { *result = 0; return 1; }
-            *result = (s1->data == s2->data || memcmp(s1->data, s2->data, s1->unit_len) == 0);
+            *result = kiln_string_equal(s1, s2);
             return 1;
         }
     }
@@ -706,7 +706,7 @@ static int kiln_c99_val_compare(uint16_t operation, kiln_val left, kiln_val righ
             const kiln_string *s1 = (const kiln_string *)KILN_VAL_PTR(left);
             const kiln_string *s2 = (const kiln_string *)KILN_VAL_PTR(right);
             if (s1->unit_len != s2->unit_len) { *result = 0; return 1; }
-            *result = (s1->data == s2->data || memcmp(s1->data, s2->data, s1->unit_len) == 0);
+            *result = kiln_string_equal(s1, s2);
             return 1;
         }
     }
@@ -717,7 +717,7 @@ static int kiln_c99_val_compare(uint16_t operation, kiln_val left, kiln_val righ
             const kiln_string *s1 = (const kiln_string *)KILN_VAL_PTR(left);
             const kiln_string *s2 = (const kiln_string *)KILN_VAL_PTR(right);
             if (s1->unit_len != s2->unit_len) { *result = 1; return 1; }
-            *result = !(s1->data == s2->data || memcmp(s1->data, s2->data, s1->unit_len) == 0);
+            *result = !kiln_string_equal(s1, s2);
             return 1;
         }
     }
@@ -727,7 +727,7 @@ static int kiln_c99_val_compare(uint16_t operation, kiln_val left, kiln_val righ
             const kiln_string *s1 = (const kiln_string *)KILN_VAL_PTR(left);
             const kiln_string *s2 = (const kiln_string *)KILN_VAL_PTR(right);
             if (s1->unit_len != s2->unit_len) { *result = 1; return 1; }
-            *result = !(s1->data == s2->data || memcmp(s1->data, s2->data, s1->unit_len) == 0);
+            *result = !kiln_string_equal(s1, s2);
             return 1;
         }
     }
@@ -1186,21 +1186,8 @@ static int kiln_c99_val_read_element(kiln_host *host, kiln_val target, kiln_val 
             size_t slot = (size_t)idx;
             const kiln_string *str = (const kiln_string *)KILN_VAL_PTR(target);
             if (str != NULL && slot < str->unit_len) {
-                if (str->unit_len == str->unit_len) {
-                    *out = kiln_c99_val_single_char((unsigned char)str->data[slot]);
-                    return KILN_C99_OK;
-                }
-                kiln_c99_utf16_iter iterator = {str->data, str->unit_len, 0, 0, 0};
-                size_t position = 0;
-                uint16_t unit;
-                while (kiln_c99_utf16_next(&iterator, &unit)) {
-                    if (position == slot) {
-                        kiln_value s = kiln_c99_from_units(&unit, 1);
-                        *out = kiln_val_from_boundary(s);
-                        return KILN_C99_OK;
-                    }
-                    position += 1;
-                }
+                *out = kiln_c99_val_from_unit(kiln_string_unit_at(str, slot));
+                return KILN_C99_OK;
             } else if (str != NULL && slot >= str->unit_len) {
                 *out = KILN_VAL_UNDEFINED;
                 return KILN_C99_OK;
