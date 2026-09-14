@@ -240,10 +240,10 @@ macro_rules! provider_c_declaration {
         concat!("int ", stringify!($name), "(uint64_t *out_fields, uint64_t capacity, uint64_t *out_count);\n")
     };
     ($group:ident, $name:ident, realm_symbol_for) => {
-        concat!("int ", stringify!($name), "(const uint8_t *key, uint64_t key_len, uint64_t *out_id);\n")
+        concat!("int ", stringify!($name), "(const kiln_string *key, uint64_t *out_id);\n")
     };
     ($group:ident, $name:ident, realm_symbol_key_for) => {
-        concat!("int ", stringify!($name), "(uint64_t id, const uint8_t **out_key, uint64_t *out_key_len);\n")
+        concat!("int ", stringify!($name), "(uint64_t id, kiln_string *out_key);\n")
     };
     ($group:ident, $name:ident, realm_value_slot) => {
         concat!("int ", stringify!($name), "(uint32_t key, void **out_slot);\n")
@@ -910,9 +910,12 @@ pub(crate) fn closure_construction(
     capture_count: usize,
 ) -> String {
     let target = &functions[proto as usize];
-    let (name, name_len) = match &target.name {
-        Some(text) => (format!("{symbol}_name_{proto}"), text.len()),
-        None => ("NULL".to_owned(), 0),
+    // The closure takes a pointer to the headed name static; an anonymous function passes
+    // NULL, which the runtime keeps as the anonymous spelling rather than interning an
+    // empty key.
+    let name = match &target.name {
+        Some(_) => format!("&{symbol}_name_{proto}"),
+        None => "NULL".to_owned(),
     };
     let span = target.span;
     let (source, source_len) =
@@ -950,7 +953,7 @@ pub(crate) fn closure_construction(
     };
     let diagnostic_source = diagnostic_source(diagnostic_site);
     format!(
-        "kiln_c99_make_closure(&built, {symbol}_fn_{proto}, {name}, {name_len}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {is_method}, {arrow}, {strict}, {defining_receiver}, kiln_val_from_boundary(kiln_c99_new_target), UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), {captured}, UINT32_C({capture_count}))"
+        "kiln_c99_make_closure(&built, {symbol}_fn_{proto}, {name}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {is_method}, {arrow}, {strict}, {defining_receiver}, kiln_val_from_boundary(kiln_c99_new_target), UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), {captured}, UINT32_C({capture_count}))"
     )
 }
 
@@ -1328,12 +1331,13 @@ fn render_functions(
             continue;
         }
         if let Some(name) = &proto.name {
-            writeln!(
+            // A headed unit static, like every other string constant: the closure keeps the
+            // pointer, so a C-string literal (which has no header) cannot serve here.
+            render_static_string(
                 output,
-                "static const char {symbol}_name_{index}[] = {};",
-                c_string(name)
-            )
-            .unwrap();
+                &format!("{symbol}_name_{index}"),
+                &kiln_ir::StringUnits::from(name.as_str()),
+            );
         }
     }
     // One copy of the unit's source text, which every closure's `toString` span points into.
@@ -1734,10 +1738,13 @@ fn render_entry(
         writeln!(
             output,
             r#"    kiln_value entry_closure;
+    /* The entry name is a borrowed headed static, like `static_text`: ASCII bytes are
+     * Latin1 units, and the literal outlives the closure that keeps the pointer. */
+    static const kiln_string {unit_symbol}_entry_name = {{ 7, KILN_STRING_LATIN1, "<entry>" }};
     int status = kiln_c99_make_closure(
         &entry_closure,
-        {unit_symbol}_entry_body,
-        "<entry>", 7,
+        {{unit_symbol}}_entry_body,
+        &{unit_symbol}_entry_name,
         "<entry>", 7,
         {diagnostic_source},
         0, 0,
@@ -2025,7 +2032,8 @@ fn render_regex_matchers(output: &mut String, program: &Program, symbol: &str) {
                 &program.constants[*pattern as usize],
                 &program.constants[*flags as usize],
             )
-            && let (Ok(source), Ok(letters)) = (source.to_scalar_string(), letters.to_scalar_string())
+            && let (Ok(source), Ok(letters)) =
+                (source.to_scalar_string(), letters.to_scalar_string())
             && let Some(compiled) = crate::regex::try_compile_regex(&source, &letters)
         {
             let prefix = format!("{symbol}_re_{pattern}_{flags}");
@@ -2078,35 +2086,19 @@ fn render_key_table(output: &mut String, program: &Program, symbol: &str, keys: 
         return;
     }
     for index in keys {
-        writeln!(output, "static const char *{symbol}_key_{index};").unwrap();
+        writeln!(output, "static const kiln_string *{symbol}_key_{index};").unwrap();
     }
     writeln!(output, "static int {symbol}_keys_ready;").unwrap();
     writeln!(output, "static int {symbol}_intern_keys(void) {{").unwrap();
     for index in keys {
-        let Constant::String(text) = &program.constants[*index as usize] else {
+        let Constant::String(_) = &program.constants[*index as usize] else {
             unreachable!("verification rejects a non-string property name before emission")
         };
-        if text.units().all(|unit| unit <= 0xff) {
-            // The key table still feeds the legacy `const char * + len` interner.  The
-            // canonical constant is a headed kiln_string, so passing `_constant_{index}` here
-            // would hash the header (the first bytes are the unit length and flags) rather than
-            // the key bytes.  Latin1 is already one byte per JavaScript code unit; take the
-            // payload explicitly at this ABI boundary.
-            writeln!(
-                output,
-                "    if (({symbol}_key_{index} = kiln_c99_intern_static((const char *)kiln_string_latin1(&{symbol}_string_{index}), {})) == NULL) return KILN_C99_OUT_OF_MEMORY;",
-                text.len()
-            )
-            .unwrap();
-        } else {
-            // The old key API has no UTF-16 unit representation.  Do not feed it a header or
-            // silently lossy bytes until the canonical key store is migrated end to end.
-            writeln!(
-                output,
-                "    return kiln_c99_refuse(\"a UTF-16 named property key crossing the legacy key ABI\");"
-            )
-            .unwrap();
-        }
+        writeln!(
+            output,
+            "    if (({symbol}_key_{index} = kiln_c99_intern_static_key(&{symbol}_string_{index})) == NULL) return KILN_C99_OUT_OF_MEMORY;"
+        )
+        .unwrap();
     }
     writeln!(
         output,
@@ -2399,6 +2391,7 @@ int {symbol}(kiln_host *host, kiln_value *result, const kiln_value *imports,
     kiln_c99_diagnostic_detail = NULL;
     kiln_c99_diagnostic_function = NULL;
     kiln_c99_diagnostic_function_len = 0;
+    kiln_c99_diagnostic_function_key = NULL;
     context.host = host;
     context.result = result;
     context.imports = imports;
@@ -3286,7 +3279,7 @@ fn render_module(
         output.push_str("#define KU_STATUS(PC, OP, UNWIND) do { if (status == KILN_C99_THROWN) { UNWIND; } if (status == KILN_C99_CONTROL_ERROR) { kiln_c99_note_refusal(ku_site, (size_t)(PC), (OP), (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; } while (0)\n");
         output.push_str("#define KU_LOAD_CELL(DST, CELL, THROWN, PC, OP, UNWIND) do { const kiln_val *ku_cell = (const kiln_val *)KILN_VAL_PTR(CELL); int status = kiln_c99_val_check_tdz(*ku_cell, (THROWN)); KU_STATUS((PC), (OP), UNWIND); (DST) = *ku_cell; } while (0)\n");
         output.push_str("#define KU_BINARY(DST, CODE, LEFT, RIGHT, PC, OP, UNWIND) do { int status = KILN_C99_OK; (DST) = kiln_c99_val_binary((CODE), host, (LEFT), (RIGHT), &status, depth, thrown); KU_STATUS((PC), (OP), UNWIND); } while (0)\n");
-        output.push_str("#define KU_READ_PROPERTY(DST, OBJECT, KEY, KEY_LEN, SITE, PC, OP, UNWIND) do { int status = kiln_c99_val_read_property(host, (OBJECT), (KEY), (KEY_LEN), depth, thrown, (SITE), &(DST)); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(OBJECT)); KU_STATUS((PC), (OP), UNWIND); } while (0)\n");
+        output.push_str("#define KU_READ_PROPERTY(DST, OBJECT, KEY, KEY_LEN, SITE, PC, OP, UNWIND) do { int status = kiln_c99_val_read_property_key(host, (OBJECT), (KEY), depth, thrown, (SITE), &(DST)); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(OBJECT)); KU_STATUS((PC), (OP), UNWIND); } while (0)\n");
         COMPACT_DIAGNOSTIC_SITE
     } else {
         diagnostic_site

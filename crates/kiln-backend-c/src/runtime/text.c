@@ -288,9 +288,16 @@ static kiln_value kiln_c99_control_diagnostic(void) {
         uint64_t len = 0;
         uint8_t *bytes;
         if (kiln_realm_diagnostic_render(NULL, 0, &len) == KILN_C99_INVALID_ARGUMENT && len != 0) {
+            const kiln_string *rendered;
             bytes = (uint8_t *)kiln_c99_gc_alloc_text((size_t)len);
-            if (bytes != NULL && kiln_realm_diagnostic_render(bytes, len, &len) == KILN_C99_OK)
-                return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)bytes, (size_t)len);
+            if (bytes != NULL && kiln_realm_diagnostic_render(bytes, len, &len) == KILN_C99_OK) {
+                /* `gc_alloc_text` answers the payload; a string value carries the header the
+                 * payload shares its allocation with. Passing the payload reads the header
+                 * words as units further down the line. */
+                rendered = ((const kiln_string *)bytes) - 1;
+                return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)rendered,
+                                      (size_t)len);
+            }
             kiln_c99_gc_release(bytes);
         }
     }
@@ -320,10 +327,17 @@ static kiln_value kiln_c99_control_diagnostic(void) {
         (void)kiln_c99_text_append_c(&text, " detail=");
         (void)kiln_c99_text_append_c(&text, kiln_c99_diagnostic_detail);
     }
-    if (kiln_c99_diagnostic_function != NULL) {
+    if (kiln_c99_diagnostic_function != NULL || kiln_c99_diagnostic_function_key != NULL) {
         (void)kiln_c99_text_append_c(&text, " function=");
-        (void)kiln_c99_text_append(&text, kiln_c99_diagnostic_function,
-                                   kiln_c99_diagnostic_function_len);
+        if (kiln_c99_diagnostic_function_key != NULL) {
+            kiln_value function = kiln_c99_value(
+                KILN_VALUE_STRING, 0, (const char *)kiln_c99_diagnostic_function_key,
+                kiln_c99_diagnostic_function_key->unit_len);
+            (void)kiln_c99_text_append_string(&text, function);
+        } else {
+            (void)kiln_c99_text_append(&text, kiln_c99_diagnostic_function,
+                                       kiln_c99_diagnostic_function_len);
+        }
     }
     if (kiln_c99_diagnostic_has_method) {
         KILN_DIAGNOSTIC_DECIMAL(kiln_c99_diagnostic_method);
@@ -361,6 +375,7 @@ static void kiln_c99_forget_handled_throw(void) {
     kiln_c99_diagnostic_detail = NULL;
     kiln_c99_diagnostic_function = NULL;
     kiln_c99_diagnostic_function_len = 0;
+    kiln_c99_diagnostic_function_key = NULL;
     /* The realm keeps its own copy, and it is the one that is *rendered*: a refusal reaching the
      * embedding is composed by `kiln_realm_diagnostic_render` whenever a realm is active, and the
      * statics above are only the fallback for a unit running without one. Clearing half of the
@@ -373,10 +388,30 @@ static void kiln_c99_forget_handled_throw(void) {
 }
 
 void kiln_c99_publish_diagnostic(void) {
+    uint8_t *function_owned = NULL;
+    size_t function_owned_len = 0;
+    const uint8_t *function_bytes;
+    size_t function_len;
     if (!kiln_realm_is_active() || kiln_c99_diagnostic_site == NULL ||
         kiln_c99_diagnostic_operation == NULL) return;
     const char *detail = kiln_c99_diagnostic_detail;
     const char *function = kiln_c99_diagnostic_function;
+    if (kiln_c99_diagnostic_function_key != NULL) {
+        kiln_value function_value = kiln_c99_value(
+            KILN_VALUE_STRING, 0, (const char *)kiln_c99_diagnostic_function_key,
+            kiln_c99_diagnostic_function_key->unit_len);
+        if (kiln_c99_string_to_utf8_lossy(function_value, &function_owned,
+                                          &function_owned_len) == KILN_C99_OK) {
+            function_bytes = function_owned;
+            function_len = function_owned_len;
+        } else {
+            function_bytes = (const uint8_t *)"";
+            function_len = 0;
+        }
+    } else {
+        function_bytes = (const uint8_t *)(function == NULL ? "" : function);
+        function_len = function == NULL ? 0 : kiln_c99_diagnostic_function_len;
+    }
     (void)kiln_realm_diagnostic_note(
         (const uint8_t *)kiln_c99_diagnostic_site, (uint64_t)strlen(kiln_c99_diagnostic_site),
         (uint64_t)kiln_c99_diagnostic_instruction,
@@ -385,10 +420,10 @@ void kiln_c99_publish_diagnostic(void) {
         (uint64_t)kiln_c99_diagnostic_depth,
         (const uint8_t *)(detail == NULL ? "" : detail),
         (uint64_t)(detail == NULL ? 0 : strlen(detail)),
-        (const uint8_t *)(function == NULL ? "" : function),
-        (uint64_t)(function == NULL ? 0 : kiln_c99_diagnostic_function_len),
+        function_bytes, (uint64_t)function_len,
         kiln_c99_diagnostic_method, kiln_c99_diagnostic_receiver_tag,
         kiln_c99_diagnostic_has_method);
+    free(function_owned);
 }
 
 int kiln_c99_diagnostic_available(void) {
@@ -424,6 +459,7 @@ static void kiln_c99_note_refusal(const char *site, size_t instruction,
                    "generated function body refused before an instruction owned the failure") == 0) {
             kiln_c99_diagnostic_function = NULL;
             kiln_c99_diagnostic_function_len = 0;
+            kiln_c99_diagnostic_function_key = NULL;
             kiln_c99_diagnostic_detail = NULL;
             kiln_c99_diagnostic_receiver_tag = 0;
             kiln_c99_diagnostic_has_method = 0;
@@ -567,7 +603,11 @@ static int kiln_c99_string_to_utf8_lossy(kiln_value value, uint8_t **out, size_t
         return KILN_C99_INVALID_ARGUMENT;
     }
     string = (const kiln_string *)value.ptr;
-    if (string->unit_len > (SIZE_MAX - 4) / 3) return KILN_C99_OUT_OF_MEMORY;
+#if SIZE_MAX <= UINT32_MAX
+    if ((uint64_t)string->unit_len > ((uint64_t)SIZE_MAX - 4) / 3) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+#endif
     capacity = (size_t)string->unit_len * 3 + 4;
     bytes = capacity == 0 ? NULL : (uint8_t *)malloc(capacity);
     if (capacity != 0 && bytes == NULL) return KILN_C99_OUT_OF_MEMORY;
@@ -736,9 +776,19 @@ static kiln_value kiln_c99_text(kiln_value value) {
         kiln_regexp *regexp = kiln_c99_regexp_of(value);
         kiln_text built = {NULL, 0, 0};
         if (kiln_c99_text_append_c(&built, "/") != KILN_C99_OK ||
-            kiln_c99_text_append(&built, regexp->source, regexp->source_len) != KILN_C99_OK ||
+            kiln_c99_text_append_string(&built,
+                                        kiln_c99_value(KILN_VALUE_STRING, 0,
+                                                       (const char *)regexp->source,
+                                                       regexp->source == NULL ? 0
+                                                                              : regexp->source->unit_len)) !=
+                KILN_C99_OK ||
             kiln_c99_text_append_c(&built, "/") != KILN_C99_OK ||
-            kiln_c99_text_append(&built, regexp->flags, regexp->flags_len) != KILN_C99_OK) {
+            kiln_c99_text_append_string(&built,
+                                        kiln_c99_value(KILN_VALUE_STRING, 0,
+                                                       (const char *)regexp->flags,
+                                                       regexp->flags == NULL ? 0
+                                                                            : regexp->flags->unit_len)) !=
+                KILN_C99_OK) {
             free(built.bytes);
             return kiln_c99_undefined();
         }

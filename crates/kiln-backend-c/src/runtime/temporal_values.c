@@ -163,3 +163,20 @@ static int kiln_c99_temporal_unsupported(kiln_value *thrown, const char *owner, 
     message[at] = '\0';
     return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, message);
 }
+
+/* The member spelling is a canonical unit string at the generic read boundary. Convert it only
+ * for the human-readable error payload; temporal dispatch and identity stay unit based. */
+static int kiln_c99_temporal_unsupported_key(kiln_value *thrown, const char *owner,
+                                             const kiln_string *member) {
+    uint8_t *encoded = NULL;
+    size_t encoded_len = 0;
+    kiln_value value;
+    int status;
+    if (member == NULL) return kiln_c99_temporal_unsupported(thrown, owner, "", 0);
+    value = kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)member, member->unit_len);
+    status = kiln_c99_string_to_utf8_lossy(value, &encoded, &encoded_len);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_temporal_unsupported(thrown, owner, (const char *)encoded, encoded_len);
+    free(encoded);
+    return status;
+}

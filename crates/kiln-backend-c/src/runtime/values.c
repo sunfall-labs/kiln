@@ -163,8 +163,8 @@ static void kiln_c99_mark_uninitialized(kiln_value *slot) {
 
 /* The captured values are boxes, copied by pointer rather than by contents: two closures over one
  * variable have to see each other's writes, which is the whole reason a cell exists. */
-static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char *name,
-                                 size_t name_len, const char *source, size_t source_len,
+static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const kiln_string *name,
+                                 const char *source, size_t source_len,
                                  const char *diagnostic_source,
                                  uint32_t proto, uint32_t arity, int generator,
                                  int asynchronous,
@@ -219,7 +219,6 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
     closure->prototype = kiln_c99_undefined();
     closure->properties = kiln_c99_undefined();
     closure->name = name;
-    closure->name_len = name_len;
     closure->source = source;
     closure->source_len = source_len;
     closure->source_value = kiln_c99_undefined();
@@ -253,8 +252,10 @@ static int kiln_c99_tail_define_accessor(kiln_val *stack, size_t *sp, int setter
     }
     status = kiln_c99_set_function_name(half, key, setter_half ? "set" : "get");
     if (status != KILN_C99_OK) return status;
-    return kiln_c99_define_accessor(kiln_val_to_boundary(stack[cursor - 1]), name.ptr, name.len,
-                                    getter, setter, enumerable);
+    /* The headed form: the byte adapter would read the header's words as key bytes. */
+    return kiln_c99_define_accessor_key(kiln_val_to_boundary(stack[cursor - 1]),
+                                        (const kiln_string *)name.ptr,
+                                        getter, setter, enumerable);
 }
 
 static int kiln_c99_tail_define_method(kiln_val *stack, size_t *sp, const char *site,
@@ -267,8 +268,9 @@ static int kiln_c99_tail_define_method(kiln_val *stack, size_t *sp, const char *
     *sp = cursor;
     if (name.tag != KILN_VALUE_STRING ||
         kiln_c99_set_function_name(method, key, NULL) != KILN_C99_OK ||
-        kiln_c99_define_method(kiln_val_to_boundary(stack[cursor - 1]), name.ptr, name.len,
-                               method) != KILN_C99_OK) {
+        kiln_c99_define_method_key(kiln_val_to_boundary(stack[cursor - 1]),
+                                   (const kiln_string *)name.ptr,
+                                   method) != KILN_C99_OK) {
         KILN_C99_REFUSE_AT(site, pc, operation, diagnostic_depth);
     }
     return KILN_C99_OK;
@@ -356,8 +358,9 @@ static int kiln_c99_invoke_closure_body(kiln_host *host, kiln_val *result,
         kiln_c99_diagnostic_site == NULL) {
         kiln_c99_diagnostic_site = closure->diagnostic_source;
         kiln_c99_diagnostic_operation = "FunctionBody";
-        kiln_c99_diagnostic_function = closure->name;
-        kiln_c99_diagnostic_function_len = closure->name_len;
+        kiln_c99_diagnostic_function = NULL;
+        kiln_c99_diagnostic_function_len = 0;
+        kiln_c99_diagnostic_function_key = closure->name;
         kiln_c99_diagnostic_depth = (size_t)(depth + 1);
         kiln_c99_diagnostic_receiver_tag = KILN_VALUE_FUNCTION;
         kiln_c99_diagnostic_detail =
@@ -388,9 +391,10 @@ static int kiln_c99_invoke_closure_body(kiln_host *host, kiln_val *result,
 static void kiln_c99_attribute_body_refusal(const kiln_closure *closure, int depth) {
     kiln_c99_diagnostic_site = closure->diagnostic_source;
     kiln_c99_diagnostic_operation = "FunctionBody";
-    if (kiln_c99_diagnostic_function == NULL) {
-        kiln_c99_diagnostic_function = closure->name;
-        kiln_c99_diagnostic_function_len = closure->name_len;
+    if (kiln_c99_diagnostic_function == NULL && kiln_c99_diagnostic_function_key == NULL) {
+        kiln_c99_diagnostic_function = NULL;
+        kiln_c99_diagnostic_function_len = 0;
+        kiln_c99_diagnostic_function_key = closure->name;
     }
     kiln_c99_diagnostic_depth = (size_t)(depth + 1);
     if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = KILN_VALUE_FUNCTION;
@@ -401,9 +405,10 @@ static void kiln_c99_attribute_body_refusal(const kiln_closure *closure, int dep
 }
 
 static void kiln_c99_attribute_body_function(const kiln_closure *closure) {
-    if (kiln_c99_diagnostic_function == NULL) {
-        kiln_c99_diagnostic_function = closure->name;
-        kiln_c99_diagnostic_function_len = closure->name_len;
+    if (kiln_c99_diagnostic_function == NULL && kiln_c99_diagnostic_function_key == NULL) {
+        kiln_c99_diagnostic_function = NULL;
+        kiln_c99_diagnostic_function_len = 0;
+        kiln_c99_diagnostic_function_key = closure->name;
         /* A generated instruction may already have recorded the site in the realm before this
          * closure returns. Re-publish the completed cold record so the rendered control value
          * sees the function name too. */
@@ -686,12 +691,14 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
             kiln_value flags;
             if (pattern.tag == KILN_VALUE_REGEXP) {
                 kiln_regexp *existing = kiln_c99_regexp_of(pattern);
-                source = kiln_c99_value(KILN_VALUE_STRING, 0, existing->source,
-                                        existing->source_len);
+                source = kiln_c99_value(KILN_VALUE_STRING, 0,
+                                        (const char *)existing->source,
+                                        existing->source == NULL ? 0 : existing->source->unit_len);
                 flags = argc > 1 && args[1].tag != KILN_VALUE_UNDEFINED
                             ? kiln_c99_text(args[1])
-                            : kiln_c99_value(KILN_VALUE_STRING, 0, existing->flags,
-                                             existing->flags_len);
+                            : kiln_c99_value(KILN_VALUE_STRING, 0,
+                                             (const char *)existing->flags,
+                                             existing->flags == NULL ? 0 : existing->flags->unit_len);
             } else {
                 source = argc > 0 ? kiln_c99_text(pattern) : kiln_c99_from_units(NULL, 0);
                 flags = argc > 1 && args[1].tag != KILN_VALUE_UNDEFINED
@@ -701,8 +708,8 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
             if (source.tag != KILN_VALUE_STRING || flags.tag != KILN_VALUE_STRING) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
-            return kiln_c99_new_regexp(result, source.ptr, source.len, flags.ptr, flags.len,
-                                       thrown);
+            return kiln_c99_new_regexp(result, (const kiln_string *)source.ptr,
+                                       (const kiln_string *)flags.ptr, thrown);
         }
         case KILN_C99_BUILTIN_BOOLEAN:
             /* `Boolean(x)` is `!!x` spelled as a call, and `Boolean()` is false. */

@@ -39,13 +39,16 @@ int kiln_c99_module_completion(kiln_host *host, kiln_value input_promise,
     kiln_value fulfilled;
     kiln_value rejected;
     kiln_value handlers[2];
+    const kiln_string *closure_name;
     int status;
     if (out_promise == NULL || input_promise.tag != KILN_VALUE_PROMISE)
         KILN_C99_REFUSE_INTERNAL("module completion requires a promise output and input");
     captured[0] = kiln_val_from_boundary(kiln_c99_number((double)module_index));
     captured[1] = kiln_val_from_boundary(kiln_c99_number(0.0));
+    closure_name = kiln_c99_intern_static("module completion", 17);
+    if (closure_name == NULL) return KILN_C99_OUT_OF_MEMORY;
     status = kiln_c99_make_closure(&fulfilled, kiln_c99_module_completion_body,
-                                   "module completion", 17, "", 0, "module completion",
+                                   closure_name, "", 0, "module completion",
                                    0, 1, 0, 0, 0, 0, 0, 0, KILN_VAL_UNDEFINED,
                                    KILN_VAL_UNDEFINED, 0, 16, 0, 0, captured, 2);
     if (status != KILN_C99_OK) return status;
@@ -53,7 +56,7 @@ int kiln_c99_module_completion(kiln_host *host, kiln_value input_promise,
     kiln_c99_gc_keep_alive(&input_promise);
     captured[1] = kiln_val_from_boundary(kiln_c99_number(1.0));
     status = kiln_c99_make_closure(&rejected, kiln_c99_module_completion_body,
-                                   "module completion", 17, "", 0, "module completion",
+                                   closure_name, "", 0, "module completion",
                                    0, 1, 0, 0, 0, 0, 0, 0, KILN_VAL_UNDEFINED,
                                    KILN_VAL_UNDEFINED, 0, 16, 0, 0, captured, 2);
     if (status != KILN_C99_OK) return status;
@@ -116,6 +119,25 @@ static int kiln_dyn_scope_set(kiln_dyn_scope *scope, const char *name, size_t na
     scope->bindings[scope->count].value = val;
     scope->count++;
     return 1;
+}
+
+/* The dynamic evaluator's lexer and binding table are UTF-8 text APIs.  Stored object keys are
+ * canonical UTF-16/Latin1 headers, so cross that boundary through the explicit host codec rather
+ * than passing the header as a byte span.  This is evaluator-local text, not property identity;
+ * property lookup remains unit based in the ordinary runtime. */
+static int kiln_dyn_scope_set_key(kiln_dyn_scope *scope, const kiln_string *key, kiln_value val) {
+    kiln_value key_value;
+    uint8_t *encoded = NULL;
+    size_t encoded_len = 0;
+    int status;
+    int result;
+    if (key == NULL) return 0;
+    key_value = kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)key, key->unit_len);
+    status = kiln_c99_string_to_utf8_lossy(key_value, &encoded, &encoded_len);
+    if (status != KILN_C99_OK) return 0;
+    result = kiln_dyn_scope_set(scope, (const char *)encoded, encoded_len, val);
+    free(encoded);
+    return result;
 }
 
 static int kiln_dyn_scope_update(kiln_dyn_scope *scope, const char *name, size_t name_len, kiln_value val) {
@@ -592,7 +614,7 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                                 int depth, kiln_value *out, kiln_value *thrown) {
     if (lex->curr.kind == KILN_DYN_NUM) {
         *out = kiln_c99_number(lex->curr.num_val);
-        kiln_dyn_lexer_next(lex);
+    kiln_dyn_lexer_next(lex);
         return KILN_C99_OK;
     }
     if (lex->curr.kind == KILN_DYN_STR) {
@@ -605,7 +627,21 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
         size_t pat_len = lex->curr.str_len;
         const char *flags = pat + pat_len + 1;
         size_t flags_len = strlen(flags);
-        int reg_status = kiln_c99_new_regexp(out, pat, pat_len, flags, flags_len, thrown);
+        /* The lexer owns and frees this token as soon as it advances. Copy both pieces into
+         * GC-owned canonical strings before handing them to the regexp, which retains their
+         * headers for the lifetime of the object. Keep the values live across the regexp
+         * allocation so GC stress cannot collect either header before it is retained. */
+        kiln_value source = kiln_c99_copy_text(pat, pat_len);
+        kiln_value flag_value = kiln_c99_copy_text(flags, flags_len);
+        int reg_status;
+        if (source.tag != KILN_VALUE_STRING || flag_value.tag != KILN_VALUE_STRING) {
+            kiln_dyn_lexer_next(lex);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        kiln_c99_gc_keep_alive(&source);
+        kiln_c99_gc_keep_alive(&flag_value);
+        reg_status = kiln_c99_new_regexp(out, (const kiln_string *)source.ptr,
+                                         (const kiln_string *)flag_value.ptr, thrown);
         kiln_dyn_lexer_next(lex);
         return reg_status;
     }
@@ -745,7 +781,9 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
         kiln_dyn_lexer_next(lex);
         const char *fn_name = "anonymous";
         size_t fn_name_len = 9;
+        int explicit_name = 0;
         if (lex->curr.kind == KILN_DYN_IDENT) {
+            explicit_name = 1;
             fn_name = lex->curr.start;
             fn_name_len = lex->curr.len;
             kiln_dyn_lexer_next(lex);
@@ -807,6 +845,13 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
         kiln_dyn_lexer_next(lex);
 
         kiln_value upvals[3];
+        kiln_value name_value = kiln_c99_undefined();
+        const kiln_string *closure_name = NULL;
+        if (explicit_name) {
+            name_value = kiln_c99_copy_text(fn_name, fn_name_len);
+            if (name_value.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+            closure_name = (const kiln_string *)name_value.ptr;
+        }
         upvals[0] = kiln_c99_copy_text(&lex->src[pstart], plen);
         upvals[1] = kiln_c99_copy_text(&lex->src[bstart], blen);
         kiln_value env_obj;
@@ -827,14 +872,14 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
         };
 
         status = kiln_c99_make_closure(out, kiln_c99_dynamic_body_trampoline,
-                                       fn_name, fn_name_len,
+                                       closure_name,
                                        "", 0,
                                        "eval", 0, 0, 0, 0, 0, 0, 0, 0,
                                        KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED,
                                        0, 16, 0, 0, val_upvals, 3);
         if (status != KILN_C99_OK) return status;
         kiln_c99_closure_of(*out)->source_value = upvals[1];
-        if (fn_name_len > 0 && strncmp(fn_name, "anonymous", 9) != 0) {
+        if (explicit_name) {
             (void)kiln_dyn_scope_set(scope, fn_name, fn_name_len, *out);
             (void)kiln_c99_put(host, env_obj, fn_name, fn_name_len, *out, 0, NULL);
         }
@@ -1732,7 +1777,7 @@ static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *re
     if (env_val.tag == KILN_VALUE_OBJECT) {
         kiln_object *pobj = kiln_c99_object_of(env_val);
         for (size_t i = 0; i < pobj->count; ++i) {
-            kiln_dyn_scope_set(&scope, pobj->properties[i].key, pobj->properties[i].key_len, pobj->properties[i].value);
+            kiln_dyn_scope_set_key(&scope, pobj->properties[i].key, pobj->properties[i].value);
         }
     }
 
@@ -1879,7 +1924,7 @@ static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
     };
 
     int status = kiln_c99_make_closure(result, kiln_c99_dynamic_body_trampoline,
-                                       "anonymous", 9, "", 0,
+                                       NULL, "", 0,
                                        "eval", 0, (uint32_t)(argc > 1 ? argc - 1 : 0),
                                        0, 0, 0, 0, 0, 0, KILN_VAL_UNDEFINED,
                                        KILN_VAL_UNDEFINED, 0, 16, 0, 0,

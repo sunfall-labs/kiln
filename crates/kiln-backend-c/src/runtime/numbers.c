@@ -680,7 +680,9 @@ static int kiln_c99_exponential_text(kiln_value *out, int negative, const char *
         free(text.bytes);
         return KILN_C99_OUT_OF_MEMORY;
     }
-    *out = kiln_c99_value(KILN_VALUE_STRING, 0, text.bytes, text.len);
+    /* The builder holds malloc'd bytes; a string value carries a headed unit string. The
+     * escape copies through the canonical conversion and frees the builder. */
+    *out = kiln_c99_text_value(&text);
     return KILN_C99_OK;
 }
 
@@ -721,7 +723,9 @@ static int kiln_c99_precision_text(kiln_value *out, int negative, const char *ma
         free(text.bytes);
         return KILN_C99_OUT_OF_MEMORY;
     }
-    *out = kiln_c99_value(KILN_VALUE_STRING, 0, text.bytes, text.len);
+    /* As above: escape through the canonical conversion rather than wrapping malloc'd
+     * bytes as a headed value. */
+    *out = kiln_c99_text_value(&text);
     return KILN_C99_OK;
 }
 

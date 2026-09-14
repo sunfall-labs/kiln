@@ -6,8 +6,9 @@
  *
  * `enumerable` separates the two syntaxes that reach here: an object literal's accessor is an
  * ordinary property and is enumerated, a class body's is not. */
-static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t key_len,
-                                    kiln_value getter, kiln_value setter, int enumerable) {
+static int kiln_c99_define_accessor_key(kiln_value target, const kiln_string *key,
+                                        kiln_value getter, kiln_value setter,
+                                        int enumerable) {
     if (target.tag == KILN_VALUE_OBJECT) kiln_c99_prototype_touched(kiln_c99_object_of(target));
     kiln_object *object;
     kiln_property *property;
@@ -19,7 +20,7 @@ static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t k
         if (status != KILN_C99_OK) {
             return status;
         }
-        return kiln_c99_define_accessor(store, key, key_len, getter, setter, enumerable);
+        return kiln_c99_define_accessor_key(store, key, getter, setter, enumerable);
     }
     if (target.tag != KILN_VALUE_OBJECT) {
         KILN_C99_REFUSE("DefineAccessor target has no property store");
@@ -30,7 +31,7 @@ static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t k
         object->shape = NULL;
     }
     for (index = 0; index < object->count; ++index) {
-        if (!kiln_c99_same_key(&object->properties[index], key, key_len)) {
+        if (!kiln_c99_same_key_view(&object->properties[index], key)) {
             continue;
         }
         if (!object->properties[index].accessor) {
@@ -53,7 +54,7 @@ static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t k
     /* A definition creates an own slot directly. Going through assignment would invoke an
      * inherited setter (or silently refuse a getter-only property), after which no own property
      * exists to turn into the accessor requested here. */
-    status = kiln_c99_own_slot(target, key, key_len, &property);
+    status = kiln_c99_own_slot_key(target, key, NULL, &property);
     if (status != KILN_C99_OK) {
         if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL)
             kiln_c99_diagnostic_detail = "DefineAccessor could not create the property";
@@ -67,6 +68,17 @@ static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t k
     property->enumerable = enumerable;
     property->configurable = 1;
     return KILN_C99_OK;
+}
+
+/* Fixed C names use a borrowed Latin-1 view; the headed implementation above owns the merge. */
+static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t key_len,
+                                    kiln_value getter, kiln_value setter, int enumerable) {
+    kiln_string view;
+    if (key_len > UINT32_MAX) return KILN_C99_INVALID_ARGUMENT;
+    view.unit_len = (uint32_t)key_len;
+    view.flags = KILN_STRING_LATIN1;
+    view.data = key;
+    return kiln_c99_define_accessor_key(target, &view, getter, setter, enumerable);
 }
 
 /* The store a *definition* lands in.
@@ -124,9 +136,11 @@ static int kiln_c99_descriptor_field(kiln_host *host, kiln_value descriptor, con
  * false on a property it creates. `Object.defineProperty(o, "k", { value: 1 })` and `o.k = 1`
  * differ in all four ways, and the lazy-getter idiom -- a prototype accessor that replaces
  * itself with an own value the first time it is read -- depends on every one of them. */
-static int kiln_c99_define_property(kiln_host *host, kiln_value target, const char *key,
-                                    size_t key_len, kiln_value descriptor, int depth,
-                                    kiln_value *thrown) {
+static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
+                                        const kiln_string *view,
+                                        const kiln_string *canonical, kiln_value descriptor,
+                                        int depth, kiln_value *thrown) {
+    const kiln_string *stable = canonical;
     if (target.tag == KILN_VALUE_OBJECT) kiln_c99_prototype_touched(kiln_c99_object_of(target));
     kiln_value store;
     kiln_property *slot;
@@ -146,7 +160,7 @@ static int kiln_c99_define_property(kiln_host *host, kiln_value target, const ch
     int status;
     size_t at;
     /* Protocol slots are owned by their native adapters, never by JavaScript definitions. */
-    if (kiln_c99_is_node_hidden_key(key, key_len)) {
+    if (kiln_c99_is_node_hidden_key_key(view)) {
         return KILN_C99_OK;
     }
     if (descriptor.tag != KILN_VALUE_OBJECT) {
@@ -154,9 +168,9 @@ static int kiln_c99_define_property(kiln_host *host, kiln_value target, const ch
                                     "Property description must be an object");
     }
     if (target.tag == KILN_VALUE_PROXY) {
-        return kiln_c99_proxy_define(host, target,
-                                     kiln_c99_value(KILN_VALUE_STRING, 0, key, key_len),
-                                     descriptor, depth, thrown);
+        kiln_value key_value = kiln_c99_key_value(view, &stable);
+        if (key_value.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+        return kiln_c99_proxy_define(host, target, key_value, descriptor, depth, thrown);
     }
     if (target.tag != KILN_VALUE_OBJECT && target.tag != KILN_VALUE_FUNCTION &&
         kiln_c99_exotic_store(target) == NULL) {
@@ -205,7 +219,7 @@ static int kiln_c99_define_property(kiln_host *host, kiln_value target, const ch
          * attribute table here, so a definition that would make one non-writable, hidden or
          * non-configurable, or turn it into an accessor, is refused by name rather than written
          * as an ordinary element that lies about its own flags. */
-        double at = kiln_c99_key_index(key, key_len);
+        double at = kiln_c99_key_index_key(view);
         if (at >= 0.0) {
             kiln_array *array = kiln_c99_array_of(target);
             size_t slot = (size_t)at;
@@ -242,7 +256,7 @@ static int kiln_c99_define_property(kiln_host *host, kiln_value target, const ch
             object->shape = NULL;
         }
         for (at = 0; at < object->count; ++at) {
-            if (kiln_c99_same_key(&object->properties[at], key, key_len)) {
+            if (kiln_c99_same_key_view(&object->properties[at], view)) {
                 existed = 1;
                 break;
             }
@@ -252,7 +266,7 @@ static int kiln_c99_define_property(kiln_host *host, kiln_value target, const ch
              * particular, export descriptors report writable=true even though [[Set]] rejects;
              * turning one non-writable would make this object look like an ordinary frozen one. */
             if (!existed) {
-                return kiln_c99_throw_module_namespace_define(thrown, key, key_len);
+                return kiln_c99_throw_module_namespace_define_key(thrown, view);
             }
             {
                 kiln_property *fixed = &object->properties[at];
@@ -265,7 +279,7 @@ static int kiln_c99_define_property(kiln_host *host, kiln_value target, const ch
                                    (fixed->enumerable != 0)) ||
                               (has_configurable && kiln_c99_truthy(configurable));
                 if (refused) {
-                    return kiln_c99_throw_module_namespace_define(thrown, key, key_len);
+                    return kiln_c99_throw_module_namespace_define_key(thrown, view);
                 }
             }
             return KILN_C99_OK;
@@ -300,18 +314,16 @@ static int kiln_c99_define_property(kiln_host *host, kiln_value target, const ch
                           (settled && has_value && !kiln_c99_strict_equal(value, fixed->value));
             }
             if (refused) {
-                return kiln_c99_throw_named(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
-                                            "Cannot redefine property: ", key, key_len);
+                return kiln_c99_throw_named_key_text(thrown, "Cannot redefine property: ", view, "");
             }
         }
         if (!existed && object->frozen) {
             /* A frozen object is not extensible either, so a name it never had cannot be added.
              * Same promise, the other half of it. */
-            return kiln_c99_throw_named(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
-                                        "Cannot define property ", key, key_len);
+            return kiln_c99_throw_named_key_text(thrown, "Cannot define property ", view, "");
         }
     }
-    status = kiln_c99_own_slot(store, key, key_len, &slot);
+    status = kiln_c99_own_slot_key(store, view, stable, &slot);
     if (status != KILN_C99_OK) {
         return status;
     }
@@ -353,7 +365,7 @@ static int kiln_c99_define_property(kiln_host *host, kiln_value target, const ch
     }
     if (has_enumerable) {
         kiln_value symbol_key;
-        if (kiln_c99_symbol_of_key(slot->key, slot->key_len, &symbol_key)) {
+        if (kiln_c99_symbol_of_key_view(slot->key, &symbol_key)) {
             /* A symbol key's `enumerable` is not the program's to set: holding it at 0 is what
              * keeps the `@@` spelling out of `Object.keys` and `JSON.stringify`. The answer the
              * program gave is kept beside it instead. */
@@ -370,6 +382,20 @@ static int kiln_c99_define_property(kiln_host *host, kiln_value target, const ch
         kiln_c99_object_of(store)->read_only_seen = 1;
     }
     return KILN_C99_OK;
+}
+
+
+/* Fixed C names use a borrowed Latin-1 view; the headed implementation above owns all
+ * semantic branches and interns only when a proxy or property slot retains the key. */
+static int kiln_c99_define_property(kiln_host *host, kiln_value target, const char *key,
+                                    size_t key_len, kiln_value descriptor, int depth,
+                                    kiln_value *thrown) {
+    kiln_string view;
+    if (key_len > UINT32_MAX) return KILN_C99_INVALID_ARGUMENT;
+    view.unit_len = (uint32_t)key_len;
+    view.flags = KILN_STRING_LATIN1;
+    view.data = key;
+    return kiln_c99_define_property_key(host, target, &view, NULL, descriptor, depth, thrown);
 }
 
 /* Every own property of `descriptors`, defined onto `target`. The shared half of
@@ -396,12 +422,11 @@ static int kiln_c99_define_properties(kiln_host *host, kiln_value target, kiln_v
         if (!source->properties[index].enumerable) {
             continue;
         }
-        status = kiln_c99_get(host, descriptors, source->properties[index].key,
-                              source->properties[index].key_len, &descriptor, depth, thrown);
+        status = kiln_c99_get_key(host, descriptors, source->properties[index].key,
+                                  source->properties[index].key, &descriptor, depth, thrown);
         if (status == KILN_C99_OK) {
-            status = kiln_c99_define_property(host, target, source->properties[index].key,
-                                              source->properties[index].key_len, descriptor,
-                                              depth, thrown);
+            status = kiln_c99_define_property_key(host, target, source->properties[index].key,
+                                                  source->properties[index].key, descriptor, depth, thrown);
         }
         if (status != KILN_C99_OK) {
             return status;
@@ -420,31 +445,38 @@ static int kiln_c99_define_properties(kiln_host *host, kiln_value target, kiln_v
  * The field order is the order a console prints, so it is the specification's: value and
  * writable for a data property, get and set for an accessor, then enumerable and configurable
  * for both. */
-static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const char *key,
-                                      size_t key_len, kiln_value *out, int *found, int depth,
-                                      kiln_value *thrown) {
+static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
+                                          const kiln_string *view,
+                                          const kiln_string *canonical, kiln_value *out,
+                                          int *found, int depth, kiln_value *thrown) {
+    const kiln_string *stable = canonical;
     kiln_value built;
     int status;
     kiln_value store = target;
     *found = 0;
     *out = kiln_c99_undefined();
-    if (kiln_c99_is_node_hidden_key(key, key_len)) {
+    if (kiln_c99_is_node_hidden_key_key(view)) {
         return KILN_C99_OK;
     }
     if (target.tag == KILN_VALUE_PROXY) {
-        return kiln_c99_proxy_describe(host, target,
-                                       kiln_c99_value(KILN_VALUE_STRING, 0, key, key_len), out,
-                                       found, depth, thrown);
+        kiln_value key_value = kiln_c99_key_value(view, &stable);
+        if (key_value.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+        return kiln_c99_proxy_describe(host, target, key_value, out, found, depth, thrown);
     }
-    if (target.tag == KILN_VALUE_BUILTIN &&
-        kiln_c99_namespace_method(target.bits, key, key_len) != 0) {
+    if (target.tag == KILN_VALUE_BUILTIN) {
+        char intrinsic_buffer[256];
+        const char *intrinsic_key;
+        size_t intrinsic_len;
+        if (kiln_c99_intrinsic_ascii_view(view, intrinsic_buffer, &intrinsic_key,
+                                          &intrinsic_len) &&
+            kiln_c99_namespace_method(target.bits, intrinsic_key, intrinsic_len) != 0) {
         /* An intrinsic prototype's methods are real own properties even though this backend
          * keeps them in a table: writable and configurable, never enumerated. A walker looking
          * for the method it should invoke -- which is what a copy-on-write layer does before it
          * forwards -- has to find one here or it forwards nothing. */
         kiln_value method;
         *found = 1;
-        status = kiln_c99_get(host, target, key, key_len, &method, depth, thrown);
+        status = kiln_c99_get_key(host, target, view, stable, &method, depth, thrown);
         if (status == KILN_C99_OK) {
             status = kiln_c99_new_object(&built);
         }
@@ -462,10 +494,11 @@ static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const 
         }
         *out = built;
         return status;
+        }
     }
     if (target.tag == KILN_VALUE_BUILTIN &&
         target.bits == KILN_C99_BUILTIN_ARRAY_PROTOTYPE &&
-        kiln_c99_same_name(key, key_len, "@@unscopables")) {
+        kiln_c99_same_name_key(view, "@@unscopables")) {
         kiln_value val;
         status = kiln_c99_get_array_unscopables(&val);
         if (status != KILN_C99_OK) return status;
@@ -488,7 +521,7 @@ static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const 
     }
     if (target.tag == KILN_VALUE_BUILTIN &&
         target.bits == KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE &&
-        kiln_c99_same_name(key, key_len, "@@toStringTag")) {
+        kiln_c99_same_name_key(view, "@@toStringTag")) {
         /* `%TypedArray%.prototype[@@toStringTag]` is an accessor on the shared prototype, not a
          * string stored on each concrete view. Framework serializers take this getter and call
          * it against arbitrary typed arrays to identify their element kind. */
@@ -522,12 +555,14 @@ static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const 
          * real answer here, so guessing would be a wrong answer indistinguishable from a right
          * one. */
         kiln_closure *closure = kiln_c99_closure_of(target);
-        int is_name = kiln_c99_same_name(key, key_len, "name");
-        if (is_name || kiln_c99_same_name(key, key_len, "length")) {
+        int is_name = kiln_c99_same_name_key(view, "name");
+        if (is_name || kiln_c99_same_name_key(view, "length")) {
             kiln_value value = is_name
                                    ? (closure->name == NULL
                                           ? kiln_c99_from_units(NULL, 0)
-                                          : kiln_c99_copy_text(closure->name, closure->name_len))
+                                          : kiln_c99_value(KILN_VALUE_STRING, 0,
+                                                           (const char *)closure->name,
+                                                           closure->name->unit_len))
                                    : kiln_c99_number((double)closure->arity);
             status = kiln_c99_new_object(&built);
             if (status == KILN_C99_OK) {
@@ -547,7 +582,7 @@ static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const 
             *out = built;
             return status;
         }
-        if (kiln_c99_same_name(key, key_len, "prototype")) {
+        if (kiln_c99_same_name_key(view, "prototype")) {
             KILN_C99_REFUSE("the prototype property of a callable has no descriptor to answer "
                             "with");
         }
@@ -559,10 +594,10 @@ static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const 
     }
     if (target.tag == KILN_VALUE_BUILTIN) {
         if (!kiln_c99_is_namespace(target.bits) &&
-            (kiln_c99_same_name(key, key_len, "name") ||
-             kiln_c99_same_name(key, key_len, "length"))) {
+            (kiln_c99_same_name_key(view, "name") ||
+             kiln_c99_same_name_key(view, "length"))) {
             const char *bname = kiln_c99_builtin_name(target.bits);
-            kiln_value value = kiln_c99_same_name(key, key_len, "name")
+            kiln_value value = kiln_c99_same_name_key(view, "name")
                                    ? kiln_c99_copy_text(bname, strlen(bname))
                                    : kiln_c99_number(1.0);
             status = kiln_c99_new_object(&built);
@@ -583,9 +618,17 @@ static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const 
             *out = built;
             return status;
         }
-        if (kiln_c99_backlog_names(kiln_c99_builtin_name(target.bits), key, key_len)) {
-            KILN_C99_REFUSE("a member the language puts on this built-in and this backend has not "
-                            "built");
+        {
+            char intrinsic_buffer[256];
+            const char *intrinsic_key;
+            size_t intrinsic_len;
+            if (kiln_c99_intrinsic_ascii_view(view, intrinsic_buffer, &intrinsic_key,
+                                              &intrinsic_len) &&
+                kiln_c99_backlog_names(kiln_c99_builtin_name(target.bits), intrinsic_key,
+                                       intrinsic_len)) {
+                KILN_C99_REFUSE("a member the language puts on this built-in and this backend has not "
+                                "built");
+            }
         }
         return KILN_C99_OK;
     }
@@ -595,8 +638,8 @@ static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const 
     }
     if (target.tag == KILN_VALUE_ARRAY) {
         kiln_array *array = kiln_c99_array_of(target);
-        double at = kiln_c99_key_index(key, key_len);
-        if (kiln_c99_same_name(key, key_len, "length")) {
+        double at = kiln_c99_key_index_key(view);
+        if (kiln_c99_same_name_key(view, "length")) {
             status = kiln_c99_new_object(&built);
             if (status != KILN_C99_OK) {
                 return status;
@@ -662,11 +705,19 @@ static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const 
         /* See the note at the matching probe in `read.c`: without the HTTP
          * group no headers object can exist, so this is compiled out. */
 #if KILN_RETAIN_GROUP_NODE_HTTP
-        kiln_c99_node_materialize_header(store, key, key_len, NULL);
+        {
+            char intrinsic_buffer[256];
+            const char *intrinsic_key;
+            size_t intrinsic_len;
+            if (kiln_c99_intrinsic_ascii_view(view, intrinsic_buffer, &intrinsic_key,
+                                              &intrinsic_len)) {
+                kiln_c99_node_materialize_header(store, intrinsic_key, intrinsic_len, NULL);
+            }
+        }
 #endif
         for (index = 0; index < object->count; ++index) {
             kiln_property property;
-            if (!kiln_c99_same_key(&object->properties[index], key, key_len)) {
+            if (!kiln_c99_same_key_view(&object->properties[index], view)) {
                 continue;
             }
             property = object->properties[index];
@@ -705,6 +756,20 @@ static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const 
         }
     }
     return KILN_C99_OK;
+}
+
+
+/* Fixed C names use a borrowed Latin-1 view; the headed implementation above owns the semantic
+ * descriptor walk and keeps non-ASCII and UTF-16 keys in unit space. */
+static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const char *key,
+                                      size_t key_len, kiln_value *out, int *found, int depth,
+                                      kiln_value *thrown) {
+    kiln_string view;
+    if (key_len > UINT32_MAX) return KILN_C99_INVALID_ARGUMENT;
+    view.unit_len = (uint32_t)key_len;
+    view.flags = KILN_STRING_LATIN1;
+    view.data = key;
+    return kiln_c99_describe_property_key(host, target, &view, NULL, out, found, depth, thrown);
 }
 
 /* Whether `key` is an own property of `target` -- the single question behind both
@@ -746,7 +811,9 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
     if (name.tag != KILN_VALUE_STRING) {
         KILN_C99_REFUSE("an own-property question about a key with no string spelling");
     }
-    if (kiln_c99_is_node_hidden_key(name.ptr, name.len)) {
+    const kiln_string *view = (const kiln_string *)name.ptr;
+    const kiln_string *canonical = NULL;
+    if (kiln_c99_is_node_hidden_key_key(view)) {
         return KILN_C99_OK;
     }
     switch (target.tag) {
@@ -757,13 +824,13 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
         object = kiln_c99_object_of(target);
         if (object->shape != NULL) {
             uint32_t slot;
-            const char *ikey = kiln_c99_intern(name.ptr, name.len);
+            const kiln_string *ikey = kiln_c99_interned_key_in(kiln_c99_gc_heap(), view);
             if (ikey != NULL && kiln_c99_shape_find_slot(object->shape, ikey, &slot)) {
                 *found = 1;
                 return KILN_C99_OK;
             }
             if (object->elements != NULL) {
-                double index_num = kiln_c99_key_index(name.ptr, name.len);
+                double index_num = kiln_c99_key_index_key(view);
                 if (index_num >= 0.0 && index_num < 100000.0) {
                     size_t elem_idx = (size_t)index_num;
                     if (elem_idx < object->element_count &&
@@ -780,20 +847,27 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
             kiln_c99_ensure_dictionary(object);
         }
         for (index = 0; index < object->count && !*found; ++index) {
-            *found = kiln_c99_same_key(&object->properties[index], name.ptr, name.len);
+            *found = kiln_c99_same_key_view(&object->properties[index], view);
         }
-        if (!*found && kiln_c99_node_has_lazy_header(target, name.ptr, name.len)) {
-            *found = 1;
+        if (!*found) {
+            char intrinsic_buffer[256];
+            const char *intrinsic_key;
+            size_t intrinsic_len;
+            if (kiln_c99_intrinsic_ascii_view(view, intrinsic_buffer, &intrinsic_key,
+                                              &intrinsic_len) &&
+                kiln_c99_node_has_lazy_header(target, intrinsic_key, intrinsic_len)) {
+                *found = 1;
+            }
         }
         return KILN_C99_OK;
     case KILN_VALUE_ARRAY:
         /* Indices, `length` and the store beside them -- the three the descriptor path already
          * knows about, so it answers rather than a fourth restatement of them. */
-        return kiln_c99_describe_property(host, target, name.ptr, name.len, &descriptor, found,
+        return kiln_c99_describe_property_key(host, target, view, canonical, &descriptor, found,
                                           depth, thrown);
     case KILN_VALUE_FUNCTION: {
         kiln_closure *closure = kiln_c99_closure_of(target);
-        if (kiln_c99_same_name(name.ptr, name.len, "prototype")) {
+        if (kiln_c99_same_name_key(view, "prototype")) {
             if (!closure->arrow &&
                 (!closure->asynchronous || closure->async_generator) &&
                 (!closure->is_method || closure->generator)) {
@@ -807,7 +881,7 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
                     kiln_c99_ensure_dictionary(store);
                 }
                 for (index = 0; index < store->count; ++index) {
-                    if (kiln_c99_same_key(&store->properties[index], name.ptr, name.len)) {
+                    if (kiln_c99_same_key_view(&store->properties[index], view)) {
                         *found = 1;
                         return KILN_C99_OK;
                     }
@@ -816,7 +890,7 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
             *found = 0;
             return KILN_C99_OK;
         }
-        return kiln_c99_describe_property(host, target, name.ptr, name.len, &descriptor, found,
+        return kiln_c99_describe_property_key(host, target, view, canonical, &descriptor, found,
                                           depth, thrown);
     }
     case KILN_VALUE_METHOD:
@@ -830,8 +904,8 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
          * silent shape: the value is plainly there and the question about it says no. */
         kiln_value store;
         int stored;
-        *found = kiln_c99_same_name(name.ptr, name.len, "name") ||
-                 kiln_c99_same_name(name.ptr, name.len, "length");
+        *found = kiln_c99_same_name_key(view, "name") ||
+                 kiln_c99_same_name_key(view, "length");
         if (*found) {
             return KILN_C99_OK;
         }
@@ -845,14 +919,14 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
                 kiln_c99_ensure_dictionary(held);
             }
             for (index = 0; index < held->count && !*found; ++index) {
-                *found = kiln_c99_same_key(&held->properties[index], name.ptr, name.len);
+                *found = kiln_c99_same_key_view(&held->properties[index], view);
             }
         }
         return KILN_C99_OK;
     }
     case KILN_VALUE_TYPED_ARRAY: {
         int enumerable;
-        kiln_c99_typed_own(target, name.ptr, name.len, found, &enumerable);
+        kiln_c99_typed_own_key(target, view, found, &enumerable);
         return KILN_C99_OK;
     }
     case KILN_VALUE_COLLECTION:
@@ -872,14 +946,14 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
     case KILN_VALUE_BUILTIN: {
         int enumerable;
         kiln_value names;
-        if (kiln_c99_typed_prototype_own(target, name.ptr, name.len, found, &enumerable)) {
+        if (kiln_c99_typed_prototype_own_key(target, view, NULL, found, &enumerable)) {
             return KILN_C99_OK;
         }
         /* The names the table answers to, asked the same way `getOwnPropertyNames` asks so the
          * two cannot disagree. A hit is a member the program can reach and is therefore own; a
          * miss is not proof of absence, because the table is still growing, so it refuses. */
         if (kiln_c99_builtin_own_keys(target.bits, &names) == KILN_C99_OK &&
-            kiln_c99_keys_contain(names, name.ptr, name.len)) {
+            kiln_c99_keys_contain(names, view)) {
             *found = 1;
             return KILN_C99_OK;
         }
@@ -914,63 +988,71 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
 static int kiln_c99_set_function_name(kiln_value function, kiln_value key, const char *prefix) {
     static const char private_prefix[] = "@@private:";
     kiln_closure *closure;
-    kiln_text text;
+    kiln_value named = kiln_c99_from_units(NULL, 0);
+    kiln_value part;
+    int no_description_symbol = 0;
     if (function.tag != KILN_VALUE_FUNCTION) {
         return KILN_C99_OK;
     }
-    text.bytes = NULL;
-    text.len = 0;
-    text.capacity = 0;
-    if (prefix != NULL) {
-        if (kiln_c99_text_append_c(&text, prefix) != KILN_C99_OK
-            || kiln_c99_text_append(&text, " ", 1) != KILN_C99_OK) {
-            return KILN_C99_OUT_OF_MEMORY;
-        }
-    }
     if (key.tag == KILN_VALUE_SYMBOL) {
         kiln_symbol *symbol = kiln_c99_symbol_of(key);
+        kiln_value description;
         if (symbol->description_value.tag == KILN_VALUE_STRING || symbol->description_len != 0) {
-            if (kiln_c99_text_append(&text, "[", 1) != KILN_C99_OK
-                || (symbol->description_value.tag == KILN_VALUE_STRING
-                        ? kiln_c99_text_append_string(&text, symbol->description_value)
-                        : kiln_c99_text_append(&text, symbol->description, symbol->description_len))
-                       != KILN_C99_OK
-                || kiln_c99_text_append(&text, "]", 1) != KILN_C99_OK) {
-                return KILN_C99_OUT_OF_MEMORY;
-            }
+            description = symbol->description_value.tag == KILN_VALUE_STRING
+                              ? symbol->description_value
+                              : kiln_c99_copy_text(symbol->description, symbol->description_len);
+            if (description.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+            named = kiln_c99_concat(kiln_c99_static_text("[", 1), description);
+            if (named.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+            named = kiln_c99_concat(named, kiln_c99_static_text("]", 1));
+            if (named.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+        } else {
+            no_description_symbol = 1;
         }
     } else {
         kiln_value name = kiln_c99_property_key(key);
-        const char *bytes = name.ptr;
-        size_t len = name.len;
+        const kiln_string *key_string;
         if (name.tag != KILN_VALUE_STRING) {
             KILN_C99_REFUSE("a function name taken from a key with no string spelling");
         }
-        if (len >= sizeof(private_prefix) - 1
-            && memcmp(bytes, private_prefix, sizeof(private_prefix) - 1) == 0) {
+        key_string = (const kiln_string *)name.ptr;
+        if (kiln_string_starts_ascii(key_string, private_prefix, sizeof(private_prefix) - 1)) {
             size_t index = sizeof(private_prefix) - 1;
-            while (index < len && bytes[index] != ':') {
+            while (index < key_string->unit_len && kiln_string_unit_at(key_string, index) != ':') {
                 ++index;
             }
-            if (index < len) {
+            if (index < key_string->unit_len) {
                 ++index;
             }
-            /* A character rather than a literal: the runtime prelude lives in a raw string
-             * whose terminator is a quote followed by a hash, so the two must not meet here. */
-            char hash = 0x23;
-            bytes += index;
-            len -= index;
-            if (kiln_c99_text_append(&text, &hash, 1) != KILN_C99_OK) {
-                return KILN_C99_OUT_OF_MEMORY;
+            kiln_string suffix = *key_string;
+            suffix.unit_len -= (uint32_t)index;
+            if (kiln_string_is_utf16(key_string)) {
+                suffix.data = (const uint16_t *)key_string->data + index;
+            } else {
+                suffix.data = (const uint8_t *)key_string->data + index;
             }
+            name = kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)&suffix,
+                                  suffix.unit_len);
+            named = kiln_c99_concat(kiln_c99_static_text("#", 1), name);
+        } else {
+            named = name;
         }
-        if (kiln_c99_text_append(&text, bytes, len) != KILN_C99_OK) {
-            return KILN_C99_OUT_OF_MEMORY;
-        }
+        if (named.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+    }
+    if (prefix != NULL) {
+        part = kiln_c99_concat(kiln_c99_static_text(prefix, strlen(prefix)),
+                               kiln_c99_static_text(" ", 1));
+        if (part.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+        named = kiln_c99_concat(part, named);
+        if (named.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
     }
     closure = kiln_c99_closure_of(function);
-    closure->name = text.bytes;
-    closure->name_len = text.len;
+    /* A no-description symbol with no prefix remains the anonymous/null spelling; an empty
+     * computed string key still gets the canonical empty header, preserving its inferred-name
+     * identity for consumers that distinguish anonymous from explicitly empty names. */
+    closure->name = named.len == 0 && prefix == NULL && no_description_symbol
+                        ? NULL
+                        : (const kiln_string *)named.ptr;
     return KILN_C99_OK;
 }
 
@@ -1003,8 +1085,8 @@ static int kiln_c99_define_private(kiln_value target, const char *key, size_t ke
     return KILN_C99_OK;
 }
 
-static int kiln_c99_define_method(kiln_value target, const char *key, size_t key_len,
-                                  kiln_value method) {
+static int kiln_c99_define_method_key(kiln_value target, const kiln_string *key,
+                                      kiln_value method) {
     if (target.tag == KILN_VALUE_OBJECT) kiln_c99_prototype_touched(kiln_c99_object_of(target));
     kiln_object *object;
     size_t index;
@@ -1016,12 +1098,12 @@ static int kiln_c99_define_method(kiln_value target, const char *key, size_t key
         if (status != KILN_C99_OK) {
             return status;
         }
-        return kiln_c99_define_method(store, key, key_len, method);
+        return kiln_c99_define_method_key(store, key, method);
     }
     if (target.tag != KILN_VALUE_OBJECT) {
         KILN_C99_REFUSE("a method definition on a value with no property store");
     }
-    status = kiln_c99_put(NULL, target, key, key_len, method, 0, NULL);
+    status = kiln_c99_put_mode_key(NULL, target, key, NULL, method, 0, 0, NULL);
     if (status != KILN_C99_OK) {
         return status;
     }
@@ -1031,12 +1113,23 @@ static int kiln_c99_define_method(kiln_value target, const char *key, size_t key
         object->shape = NULL;
     }
     for (index = 0; index < object->count; ++index) {
-        if (kiln_c99_same_key(&object->properties[index], key, key_len)) {
+        if (kiln_c99_same_key_view(&object->properties[index], key)) {
             object->properties[index].enumerable = 0;
             return KILN_C99_OK;
         }
     }
     KILN_C99_REFUSE("a method definition that left no property slot");
+}
+
+/* Fixed C names use a borrowed Latin-1 view; the headed implementation above owns the write. */
+static int kiln_c99_define_method(kiln_value target, const char *key, size_t key_len,
+                                  kiln_value method) {
+    kiln_string view;
+    if (key_len > UINT32_MAX) return KILN_C99_INVALID_ARGUMENT;
+    view.unit_len = (uint32_t)key_len;
+    view.flags = KILN_STRING_LATIN1;
+    view.data = key;
+    return kiln_c99_define_method_key(target, &view, method);
 }
 
 /* JSON.

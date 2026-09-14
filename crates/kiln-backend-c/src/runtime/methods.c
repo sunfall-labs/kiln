@@ -51,6 +51,82 @@ static int kiln_c99_reads_only(uint64_t code) {
            code != KILN_C99_METHOD_ARRAY_COPY_WITHIN;
 }
 
+/* Fixed C method tables are an intrinsic-name adapter only. Keep the canonical headed key for
+ * storage and identity; borrow Latin1 payloads, or copy an all-ASCII wide key into a bounded
+ * scratch buffer, and refuse no generic lookup merely because the name is non-ASCII. */
+static int kiln_c99_key_ascii_view(const kiln_string *key, char scratch[256], const char **bytes,
+                                   size_t *length) {
+    size_t index;
+    if (key == NULL || bytes == NULL || length == NULL) return 0;
+    if (!kiln_string_is_utf16(key)) {
+        for (index = 0; index < key->unit_len; ++index) {
+            uint32_t unit = kiln_string_unit_at(key, index);
+            if (unit > 0x7f) return 0;
+        }
+        *bytes = (const char *)kiln_string_latin1(key);
+        *length = key->unit_len;
+        return 1;
+    }
+    if (key->unit_len >= 256) return 0;
+    for (index = 0; index < key->unit_len; ++index) {
+        uint32_t unit = kiln_string_unit_at(key, index);
+        if (unit > 0x7f) return 0;
+        scratch[index] = (char)unit;
+    }
+    *bytes = scratch;
+    *length = key->unit_len;
+    return 1;
+}
+
+static uint64_t kiln_c99_typed_prototype_method_key(const kiln_string *key) {
+    char scratch[256];
+    const char *bytes;
+    size_t length;
+    if (!kiln_c99_key_ascii_view(key, scratch, &bytes, &length)) return 0;
+    return kiln_c99_typed_prototype_method(bytes, length);
+}
+
+static void kiln_c99_typed_own_key(kiln_value target, const kiln_string *key, int *found,
+                                   int *enumerable) {
+    double index = kiln_c99_key_index_key(key);
+    kiln_typed_array *view = kiln_c99_typed_array_of(target);
+    *found = index >= 0.0 && (size_t)index < view->length;
+    *enumerable = *found;
+}
+
+static int kiln_c99_typed_prototype_own_key(kiln_value target, const kiln_string *key,
+                                            const kiln_string *canonical, int *found,
+                                            int *enumerable) {
+    kiln_typed_kind typed_kind;
+    int concrete = target.tag == KILN_VALUE_BUILTIN &&
+                   kiln_c99_typed_prototype_kind(target.bits, &typed_kind);
+    int common = target.tag == KILN_VALUE_BUILTIN &&
+                 target.bits == KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE;
+    (void)typed_kind;
+    *found = 0;
+    *enumerable = 0;
+    if (!concrete && !common) return 0;
+    if (concrete) {
+        *found = kiln_c99_same_name_key(key, "constructor") ||
+                 kiln_c99_same_name_key(key, "BYTES_PER_ELEMENT");
+    } else {
+        *found = kiln_c99_typed_prototype_method_key(key) != 0;
+    }
+    if (!*found) {
+        kiln_value store;
+        if (kiln_c99_callable_store(target, &store, 0) == KILN_C99_OK &&
+            store.tag == KILN_VALUE_OBJECT) {
+            kiln_object *properties = kiln_c99_object_of(store);
+            size_t index = kiln_c99_own_index_key(properties, canonical, key);
+            if (index != properties->count) {
+                *found = 1;
+                *enumerable = properties->properties[index].enumerable;
+            }
+        }
+    }
+    return 1;
+}
+
 /* The method object obtained from `Array.prototype` retains Array's generic species: unlike
  * `view.map`, `Array.prototype.map.call(view, fn)` returns an ordinary Array. */
 static uint64_t kiln_c99_array_prototype_method(const char *key, size_t key_len) {

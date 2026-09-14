@@ -4945,14 +4945,15 @@ enum kiln_value_tag {
 "#,
     );
     output.push_str(kiln_native_runtime::kiln_value_abi_declaration!());
+    output.push_str(kiln_native_runtime::kiln_string_abi_declaration!());
     output.push_str(r#"/* The prelude owns this realm-local guard. The trusted builtin bootstrap may install methods;
  * the launcher seals those writes before any user module can observe or mutate the realm. */
 extern uint64_t kiln_c99_builtin_store_epoch __attribute__((visibility("hidden")));
 
 static kiln_value kiln_graph_diagnostic(const char *phase, const char *module) {
     kiln_value value = { .tag = KILN_VALUE_STRING, .flags = 0, .len = 0, .bits = 0 };
-    value.ptr = phase;
     static char text[2048];
+    static kiln_string string = {0, KILN_STRING_LATIN1, text};
     size_t phase_len = strlen(phase);
     size_t module_len = strlen(module);
     const char prefix[] = "phase=";
@@ -4974,7 +4975,9 @@ static kiln_value kiln_graph_diagnostic(const char *phase, const char *module) {
         memcpy(text + value.len, module, take); value.len += take;
     }
     text[value.len] = '\0';
-    value.ptr = text;
+    string.unit_len = (uint32_t)value.len;
+    string.data = text;
+    value.ptr = &string;
     return value;
 }
 
@@ -5573,7 +5576,7 @@ static int kiln_graph_enter(void *opaque) {
     if let Some(bootstrap) = bootstrap {
         writeln!(
             output,
-            "        status = {}(host, result, NULL, 0, NULL, 0);\n        if (status != 0) {{ if (result->tag != KILN_VALUE_STRING || result->len == 0) *result = kiln_graph_diagnostic(\"builtin-bootstrap\", \"@kiln/runtime-bootstrap\"); return status; }}\n        kiln_c99_builtin_store_epoch = 0;",
+            "        status = {}(host, result, NULL, 0, NULL, 0);\n        if (status != 0) {{ if (result->tag == 9 /* KILN_VALUE_OBJECT */) *result = kiln_cli_describe_error(*result); if (result->tag != KILN_VALUE_STRING || result->len == 0) *result = kiln_graph_diagnostic(\"builtin-bootstrap\", \"@kiln/runtime-bootstrap\"); return status; }}\n        kiln_c99_builtin_store_epoch = 0;",
             bootstrap.symbol
         )
         .unwrap();

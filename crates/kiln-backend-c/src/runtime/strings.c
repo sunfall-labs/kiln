@@ -967,7 +967,6 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
         /* `"x".match("a")` compiles its argument, which is what makes a string pattern work
          * everywhere a regexp does. */
         kiln_value source = kiln_c99_text(pattern);
-        static const char none[] = "";
         free(units);
         if (source.tag != KILN_VALUE_STRING) {
             return KILN_C99_OUT_OF_MEMORY;
@@ -975,7 +974,8 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
         {
             kiln_value made;
             kiln_value forwarded[2];
-            status = kiln_c99_new_regexp(&made, source.ptr, source.len, none, 0, thrown);
+            status = kiln_c99_new_regexp(&made, (const kiln_string *)source.ptr,
+                                         &kiln_c99_empty_string, thrown);
             if (status != KILN_C99_OK) {
                 return status;
             }

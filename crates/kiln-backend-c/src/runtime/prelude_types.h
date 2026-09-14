@@ -1,4 +1,9 @@
 
+static inline int kiln_c99_key_is_reserved(const kiln_string *key) {
+    return key != NULL && key->unit_len >= 2 && kiln_string_unit_at(key, 0) == '@' &&
+           kiln_string_unit_at(key, 1) == '@';
+}
+
 /* =========================================================================
  * ADR 0053: 64-Bit Quiet-NaN Boxed Internal Value Representation
  * ========================================================================= */
@@ -326,6 +331,21 @@ static inline const char *kiln_c99_string_ascii_bytes(kiln_value value, size_t *
     return (const char *)kiln_string_latin1(string);
 }
 
+/* Fixed host predicates still receive a JavaScript string value, so compare its code units
+ * through the canonical header.  The shared helper is also used by generated graph code; this
+ * wrapper keeps the boundary-value tag check beside the other host adapters. */
+static inline int kiln_c99_string_equals_ascii(kiln_value value, const char *ascii,
+                                               size_t length) {
+    if (value.tag != KILN_VALUE_STRING || value.ptr == NULL) return 0;
+    return kiln_string_equals_ascii((const kiln_string *)value.ptr, ascii, length);
+}
+
+static inline int kiln_c99_string_starts_ascii(kiln_value value, const char *ascii,
+                                               size_t length) {
+    if (value.tag != KILN_VALUE_STRING || value.ptr == NULL) return 0;
+    return kiln_string_starts_ascii((const kiln_string *)value.ptr, ascii, length);
+}
+
 /* =========================================================================
  * Step 2.1: Speculation and Versioning Runtime Support
  * ========================================================================= */
@@ -513,9 +533,10 @@ typedef struct kiln_closure {
     kiln_value prototype;
     kiln_value properties;
     /* For the console, which prints `[Function: name]`.  NULL for an anonymous function, which
-     * prints `[Function (anonymous)]` -- a distinct answer, not a missing one. */
-    const char *name;
-    size_t name_len;
+     * prints `[Function (anonymous)]` -- a distinct answer, not a missing one.  A name is a
+     * canonical headed string so inferred names retain exact UTF-16 units and survive a closure
+     * crossing module/GC boundaries without a byte shadow. */
+    const kiln_string *name;
     /* Immutable source ownership and what `Function.prototype.toString` answers: this function's
      * own text, pointing into the
      * emitting unit's one copy of its source rather than owning a copy.  A closure outlives the
@@ -587,19 +608,19 @@ typedef struct kiln_native_constructor {
 struct kiln_shape;
 
 typedef struct kiln_shape_transition {
-    const char *ikey;
+    const kiln_string *ikey;
     struct kiln_shape *next;
     struct kiln_shape_transition *next_transition;
 } kiln_shape_transition;
 
 typedef struct kiln_shape {
     struct kiln_shape *parent;
-    const char *ikey;
+    const kiln_string *ikey;
     uint32_t slot_index;
     uint32_t property_count;
     uint32_t num_transitions;
-    const char *keys[KILN_SHAPE_MAX_FAST_PROPERTIES];
-    const char *inline_trans_ikey[2];
+    const kiln_string *keys[KILN_SHAPE_MAX_FAST_PROPERTIES];
+    const kiln_string *inline_trans_ikey[2];
     struct kiln_shape *inline_trans_next[2];
     kiln_shape_transition *transitions;
     /* Whether any key on the path from the root is a symbol (`@@` spelt): the one thing a spread
@@ -621,7 +642,7 @@ typedef struct kiln_shape {
  * every program-visible read has to go through the runtime rather than being a struct field
  * access -- and why `kiln_c99_get` takes a host and a depth. */
 typedef struct kiln_property {
-    const char *key;
+    const kiln_string *key;
     size_t key_len;
     /* Whether `Object.keys`, `for...in`, spread and JSON see it. Every own property of an error
      * is readable by name and not enumerated, which is why `JSON.stringify(err)` is `{}`. */
@@ -777,7 +798,7 @@ typedef struct kiln_c99_pic_entry {
      * the realm's interned pointer for the name and is never freed. */
     const kiln_object *holder;
     const kiln_shape *holder_shape;
-    const char *holder_key;
+    const kiln_string *holder_key;
     const kiln_object *via;
     const kiln_shape *via_shape;
     uint32_t holder_slot;
@@ -1043,7 +1064,7 @@ static inline int kiln_c99_recv_refused(const kiln_shape *const *refused, const 
 
 static inline const uint32_t *kiln_c99_recv_claim(const kiln_shape **shapes,
                                                   const kiln_shape **refused, uint32_t *slots,
-                                                  size_t columns, const char *const *keys,
+                                                  size_t columns, const kiln_string *const *keys,
                                                   const kiln_object *obj,
                                                   uint32_t double_mask) {
     const kiln_shape *shape = obj->shape;
@@ -1286,10 +1307,10 @@ typedef struct kiln_regexp {
     int (*matcher_ascii)(const uint8_t *bytes, size_t count, size_t start,
                          int64_t *ranges, size_t capacity, size_t *groups,
                          int *matched);
-    const char *source;
-    size_t source_len;
-    const char *flags;
-    size_t flags_len;
+    /* These are canonical string headers. They must outlive the regexp object: generated
+     * literals use static headers and runtime-created patterns use GC-owned string headers. */
+    const kiln_string *source;
+    const kiln_string *flags;
     int global;
     int sticky;
     double last_index;
@@ -1309,8 +1330,7 @@ typedef struct kiln_regexp {
  * symbols with the same description do not collide and a program cannot spell either by writing a
  * string. The description is for display and is never part of the key. */
 typedef struct kiln_symbol {
-    const char *key;
-    size_t key_len;
+    const kiln_string *key;
     const char *description;
     size_t description_len;
     /* Runtime descriptions are canonical strings so UTF-16 units, including lone surrogates,
@@ -1540,14 +1560,15 @@ static int kiln_c99_node_response_is_framed(const kiln_object *headers) {
     if (headers == NULL) return 0;
     if (headers->shape != NULL) {
         for (index = 0; index < headers->shape->property_count; ++index) {
-            const char *key = headers->shape->keys[index];
-            size_t len = strlen(key);
+            const kiln_string *key = headers->shape->keys[index];
+            size_t len = key == NULL ? 0 : key->unit_len;
             for (which = 0; which < 2; ++which) {
                 size_t flen = strlen(framing[which]);
                 size_t byte;
                 if (len != flen) continue;
                 for (byte = 0; byte < flen; ++byte) {
-                    if ((char)tolower((unsigned char)key[byte]) != framing[which][byte])
+                    if (kiln_string_unit_at(key, byte) > 0x7f ||
+                        (char)tolower((unsigned char)kiln_string_unit_at(key, byte)) != framing[which][byte])
                         break;
                 }
                 if (byte == flen) return 1;
@@ -1561,7 +1582,8 @@ static int kiln_c99_node_response_is_framed(const kiln_object *headers) {
             size_t byte;
             if (property->key_len != len) continue;
             for (byte = 0; byte < len; ++byte) {
-                if ((char)tolower((unsigned char)property->key[byte]) != framing[which][byte])
+                if (kiln_string_unit_at(property->key, byte) > 0x7f ||
+                    (char)tolower((unsigned char)kiln_string_unit_at(property->key, byte)) != framing[which][byte])
                     break;
             }
             if (byte == len) return 1;
