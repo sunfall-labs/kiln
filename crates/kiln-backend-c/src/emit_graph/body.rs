@@ -10,7 +10,7 @@ use crate::graph::{
 };
 use crate::prelude::lookup_speculation_invariant;
 use kiln_ir::{BinaryOp, Constant, ExportBinding, FunctionProto, Program, UnaryOp};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
 // Clang spends more on thousands of distinct local declarations than on one constant-indexed
@@ -754,6 +754,111 @@ fn emit_ssa_declarations(
     }
 }
 
+fn graph_value_use_counts(graph: &FunctionGraph) -> HashMap<ValueId, usize> {
+    let mut counts = HashMap::new();
+    for block in &graph.blocks {
+        for (_, op) in &block.operations {
+            for operand in op.operands() {
+                *counts.entry(operand).or_insert(0) += 1;
+            }
+        }
+        match &block.terminator {
+            Terminator::Jump(_) | Terminator::Unreachable => {}
+            Terminator::Branch { condition, .. }
+            | Terminator::BranchNotNullish { condition, .. } => {
+                *counts.entry(*condition).or_insert(0) += 1;
+            }
+            Terminator::Return(result) => {
+                if let Some(value) = result {
+                    *counts.entry(*value).or_insert(0) += 1;
+                }
+            }
+            Terminator::Throw(value) => {
+                *counts.entry(*value).or_insert(0) += 1;
+            }
+            Terminator::Suspend {
+                value,
+                spilled,
+                delegate,
+                ..
+            } => {
+                *counts.entry(*value).or_insert(0) += 1;
+                // A suspended result is also present in the frame spill list, but that entry is
+                // bookkeeping for resumption rather than another semantic consumer. Other
+                // spilled values remain real uses and must keep a candidate from being fused.
+                for spilled_value in spilled {
+                    if *spilled_value != *value {
+                        *counts.entry(*spilled_value).or_insert(0) += 1;
+                    }
+                }
+                if let Some((iterator, _, _)) = delegate {
+                    *counts.entry(*iterator).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+    counts
+}
+
+fn await_resolve_fusion_arg(
+    block: &BasicBlock,
+    value: ValueId,
+    op: &GraphOp,
+    program: &Program,
+    defs: &HashMap<ValueId, &GraphOp>,
+    use_counts: &HashMap<ValueId, usize>,
+) -> Option<ValueId> {
+    let Terminator::Suspend {
+        value: suspended,
+        awaiting: true,
+        ..
+    } = &block.terminator
+    else {
+        return None;
+    };
+    if *suspended != value || use_counts.get(&value).copied().unwrap_or_default() != 1 {
+        return None;
+    }
+    let Some(position) = block.operations.iter().position(|(vid, _)| *vid == value) else {
+        return None;
+    };
+    // ResumeValue is a post-suspension placeholder and emits no pre-suspend C. Const and
+    // LoadGlobal are direct reads that the emitter can place here without invoking user code;
+    // calls, coercions, property access, and stores remain observable barriers.
+    if block.operations[position + 1..].iter().any(|(_, op)| {
+        !matches!(
+            op,
+            GraphOp::Const { .. } | GraphOp::LoadGlobal(_) | GraphOp::ResumeValue
+        )
+    }) {
+        return None;
+    }
+    let GraphOp::CallMethod {
+        object, name, args, ..
+    } = op
+    else {
+        return None;
+    };
+    let Some(Constant::String(key)) = program.constants.get(*name as usize) else {
+        return None;
+    };
+    if key != "resolve" || args.len() != 1 {
+        return None;
+    }
+    let receiver_definition = block
+        .operations
+        .iter()
+        .find_map(|(vid, definition)| (*vid == *object).then_some(definition))
+        .or_else(|| defs.get(object).copied());
+    if !matches!(
+        receiver_definition,
+        Some(GraphOp::LoadBuiltin(kiln_ir::Builtin::Promise))
+    ) {
+        return None;
+    }
+    Some(args[0])
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_block_sequence(
     output: &mut String,
@@ -773,6 +878,7 @@ fn emit_block_sequence(
     ints: &HashSet<ValueId>,
     booleans: &HashSet<ValueId>,
     defs: &std::collections::HashMap<ValueId, &GraphOp>,
+    use_counts: &HashMap<ValueId, usize>,
     ivs: &std::collections::HashMap<ValueId, InductionVariable>,
     block_prefix: &str,
     is_fast_clone: bool,
@@ -1056,6 +1162,8 @@ fn emit_block_sequence(
             }
             let mut op_text = String::new();
             let target: &mut String = &mut op_text;
+            let await_resolve_arg =
+                await_resolve_fusion_arg(block, vid, op, program, defs, use_counts);
             emit_graph_op(
                 target,
                 vid,
@@ -1082,6 +1190,7 @@ fn emit_block_sequence(
                 this_copies.get(&vid).copied(),
                 spec,
                 boxed.as_ref(),
+                await_resolve_arg,
             );
             if kind.restarts() {
                 op_text = bail_out(op, &op_text, RESTART);
@@ -1444,6 +1553,7 @@ fn emit_blocks(
         .iter()
         .flat_map(|b| b.operations.iter().map(|(v, op)| (*v, op)))
         .collect();
+    let use_counts = graph_value_use_counts(graph);
     // A read of `length` from a guarded array bounds a loop below 2^32.
     let length_bounds: HashSet<ValueId> = ops
         .iter()
@@ -1602,6 +1712,7 @@ fn emit_blocks(
             &all_ints,
             &all_booleans,
             &defs,
+            &use_counts,
             &ivs,
             "kiln_fast_block_",
             true,
@@ -1635,6 +1746,7 @@ fn emit_blocks(
             baseline_ints,
             &baseline_booleans,
             &defs,
+            &use_counts,
             &ivs,
             "kiln_generic_block_",
             false,
@@ -1676,6 +1788,7 @@ fn emit_blocks(
             baseline_ints,
             &baseline_booleans,
             &defs,
+            &use_counts,
             &ivs,
             "kiln_block_",
             false,
