@@ -37002,11 +37002,9 @@ fn call_native(
                     .map_or_else(String::new, Value::to_display_string)
             };
             match native {
-                Native::StringToUpperCase => Value::String(text.to_uppercase()),
-                Native::StringToLowerCase => Value::String(text.to_lowercase()),
-                Native::StringTrim => {
-                    Value::String(text.trim_matches(is_js_whitespace).to_owned().into())
-                }
+                Native::StringToUpperCase => Value::String(string_case_map(text, true)),
+                Native::StringToLowerCase => Value::String(string_case_map(text, false)),
+                Native::StringTrim => Value::String(string_trim_units(text, true, true)),
                 // All three take a position, and all three ignored it: `"hello".startsWith("ell", 1)`
                 // is true and read as false, which is a wrong answer rather than a missing
                 // feature. Counted in UTF-16 units, like every other position the language
@@ -37220,11 +37218,17 @@ fn call_native(
                                 Some(character)
                             })
                             .collect();
-                        Value::String(if matches!(native, Native::StringPadStart) {
-                            format!("{filler}{text}")
+                        let mut units = if matches!(native, Native::StringPadStart) {
+                            filler.encode_utf16().collect::<Vec<_>>()
                         } else {
-                            format!("{text}{filler}")
-                        })
+                            text.units().collect::<Vec<_>>()
+                        };
+                        if matches!(native, Native::StringPadStart) {
+                            units.extend(text.units());
+                        } else {
+                            units.extend(filler.encode_utf16());
+                        }
+                        Value::String(StringUnits::from_units(&units))
                     }
                 }
                 // String patterns only. A regular expression is a different search and a
@@ -37429,10 +37433,10 @@ fn call_native(
                     Value::String(text.clone().into())
                 }
                 Native::StringTrimStart => {
-                    Value::String(text.trim_start_matches(is_js_whitespace).to_owned().into())
+                    Value::String(string_trim_units(text, true, false))
                 }
                 Native::StringTrimEnd => {
-                    Value::String(text.trim_end_matches(is_js_whitespace).to_owned().into())
+                    Value::String(string_trim_units(text, false, true))
                 }
                 Native::StringConcat => {
                     let mut joined = text.to_units().into_vec();
@@ -42309,6 +42313,38 @@ fn value_to_string_units(value: &Value) -> Vec<u16> {
         Value::String(text) => text.units().collect(),
         other => other.to_display_string().encode_utf16().collect(),
     }
+}
+
+fn string_case_map(text: &StringUnits, upper: bool) -> StringUnits {
+    let units: Vec<u16> = text.units().collect();
+    let mut out = Vec::with_capacity(units.len());
+    for decoded in char::decode_utf16(units.iter().copied()) {
+        match decoded {
+            Ok(character) => {
+                let mapped = if upper {
+                    character.to_uppercase().collect::<String>()
+                } else {
+                    character.to_lowercase().collect::<String>()
+                };
+                out.extend(mapped.encode_utf16());
+            }
+            Err(error) => out.push(error.unpaired_surrogate()),
+        }
+    }
+    StringUnits::from_units(&out)
+}
+
+fn string_trim_units(text: &StringUnits, trim_start: bool, trim_end: bool) -> StringUnits {
+    let Ok(scalar) = text.to_scalar_string() else {
+        return text.clone();
+    };
+    let trimmed = match (trim_start, trim_end) {
+        (true, true) => scalar.trim_matches(is_js_whitespace),
+        (true, false) => scalar.trim_start_matches(is_js_whitespace),
+        (false, true) => scalar.trim_end_matches(is_js_whitespace),
+        (false, false) => scalar.as_str(),
+    };
+    StringUnits::from(trimmed)
 }
 
 /// The methods on `RegExp.prototype`, without the per-instance data a regexp also answers to.
