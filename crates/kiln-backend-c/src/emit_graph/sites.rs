@@ -11,7 +11,7 @@ use std::collections::HashSet;
 /// is assumed about which closure a site sees.
 pub(crate) fn method_candidates(
     program: &Program,
-    key: &str,
+    key: &kiln_ir::StringUnits,
     publishes_frame: &[bool],
 ) -> Vec<u32> {
     let mut found = Vec::new();
@@ -195,12 +195,12 @@ pub(crate) fn collect_typed_call_sites(
     for block in &graph.blocks {
         for (vid, op) in &block.operations {
             if let GraphOp::CallMethod { name, args, .. } = op {
-                let key_str = match program.constants.get(*name as usize) {
-                    Some(Constant::String(s)) => s.as_str(),
-                    _ => "",
+                let key = match program.constants.get(*name as usize) {
+                    Some(Constant::String(s)) => s,
+                    _ => continue,
                 };
                 let argc = args.len();
-                let candidates = method_candidates(program, key_str, &plan.publishes_frame)
+                let candidates = method_candidates(program, key, &plan.publishes_frame)
                     .into_iter()
                     .filter(|&index| plan.available.get(index as usize).copied().unwrap_or(true))
                     .collect::<Vec<_>>();

@@ -108,14 +108,18 @@ pub(crate) fn validate_code(
                 if matches!(
                     program.constants.get(*name as usize),
                     Some(Constant::String(text))
-                        if refused_host_hook(text)
-                            || text == HOST_CREATE_REALM
-                            || text == HOST_EVAL_SCRIPT
-                            || text == SHADOW_REALM
+                        if text.to_scalar_string().ok().is_some_and(|text| {
+                            refused_host_hook(&text)
+                                || text == HOST_CREATE_REALM
+                                || text == HOST_EVAL_SCRIPT
+                                || text == SHADOW_REALM
+                        })
                 ) =>
             {
                 let hook = match program.constants.get(*name as usize) {
-                    Some(Constant::String(text)) => text.clone(),
+                    Some(Constant::String(text)) => text
+                        .to_scalar_string()
+                        .unwrap_or_else(|_| "<non-scalar host hook>".into()),
                     _ => HOST_CREATE_REALM.to_owned(),
                 };
                 return Err(EmitError::Unsupported {

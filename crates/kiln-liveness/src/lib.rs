@@ -703,13 +703,13 @@ pub fn retained_provider_capabilities(
             let Some(Constant::String(name)) = program.constants.get(index as usize) else {
                 return;
             };
-            required = match name.as_str() {
-                "RegExp" => required.with(ProviderCapability::RegExp),
-                "BigInt" => required.with(ProviderCapability::BigInt),
-                "JSON" => required.with(ProviderCapability::Json),
-                "Temporal" => required.with(ProviderCapability::Temporal),
-                "Intl" => required.with(ProviderCapability::Intl),
-                "parallelMap" => required.with(ProviderCapability::Parallel),
+            required = match name.to_scalar_string().ok().as_deref() {
+                Some("RegExp") => required.with(ProviderCapability::RegExp),
+                Some("BigInt") => required.with(ProviderCapability::BigInt),
+                Some("JSON") => required.with(ProviderCapability::Json),
+                Some("Temporal") => required.with(ProviderCapability::Temporal),
+                Some("Intl") => required.with(ProviderCapability::Intl),
+                Some("parallelMap") => required.with(ProviderCapability::Parallel),
                 _ => required,
             };
         };
