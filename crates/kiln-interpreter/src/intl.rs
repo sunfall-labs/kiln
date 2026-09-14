@@ -678,7 +678,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         IntlValue::Locale(tag) => tag.clone(),
                         _ => return Err(type_error("Intl.Locale expects a locale or a string")),
                     },
-                    Some(Value::String(text)) => text.to_scalar_string().map_err(|_| type_error("locale contains a lone surrogate"))?,
+                    Some(Value::String(text)) => text.to_scalar_string().map_err(|_| range("locale contains a lone surrogate"))?,
                     Some(value @ Value::Object(_)) => {
                         let primitive =
                             self.as_primitive(value, PrimitiveHint::String, instruction)?;
