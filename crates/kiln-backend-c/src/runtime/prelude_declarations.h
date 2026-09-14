@@ -14,6 +14,8 @@ extern void kiln_c99_gc_mark_values(struct kiln_gc_heap *heap, const kiln_value 
 #define KILN_GC_ROOT_SURVIVES_TEARDOWN 1
 typedef int (*kiln_native_entry)(void *heap, void *context, kiln_value *result, size_t depth, kiln_value *thrown);
 extern void kiln_c99_gc_release(void *ptr);
+extern void *kiln_c99_gc_splice_sublist(struct kiln_gc_heap *from_heap, struct kiln_gc_heap *to_heap, void *root_ptr);
+extern void *__kiln_transfer_region(void *ptr);
 extern void kiln_c99_gc_result_roots(void *opaque, void *context, int phase);
 extern char *kiln_c99_gc_alloc_text(size_t len);
 extern kiln_val kiln_c99_val_from_text(const char *bytes, size_t len);

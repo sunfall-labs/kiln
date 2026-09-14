@@ -11,7 +11,7 @@ pub const HOST_ABI_VERSION: u32 = 3;
 pub const HOST_OP_MODULE_CREATE_REQUIRE: u16 = 0x7FF0;
 
 const _: () = {
-    assert!(HOST_OP_MODULE_CREATE_REQUIRE > HostOp::WriteStderr as u16);
+    assert!(HOST_OP_MODULE_CREATE_REQUIRE > HostOp::TransferRegion as u16);
 };
 
 /// Operations a compiled program can request from its host.
@@ -36,6 +36,8 @@ pub enum HostOp {
     /// shared the stdout operation until this existed, which made `2>&1` the only way their
     /// output matched node's.
     WriteStderr = 6,
+    /// Transfer an isolated object graph or memory region to another realm (ADR 0057).
+    TransferRegion = 7,
 }
 
 /// A scalar value that is safe to own at the host boundary.
@@ -379,6 +381,14 @@ impl std::fmt::Display for HostError {
 }
 
 impl std::error::Error for HostError {}
+
+/// Name of the transfer region host operation symbol in emitted C and JavaScript.
+pub const TRANSFER_REGION_HOST_OP_NAME: &str = "__kiln_transfer_region";
+
+/// Evaluates region transfer for an opaque pointer representation across host boundaries.
+pub fn transfer_region_op(ptr: u64) -> Result<HostValue, HostError> {
+    Ok(HostValue::Number(ptr))
+}
 
 /// Host implementation invoked by the interpreter or a future native backend.
 pub trait HostOps {

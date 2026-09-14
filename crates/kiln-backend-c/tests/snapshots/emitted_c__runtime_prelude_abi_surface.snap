@@ -1562,6 +1562,12 @@ static void kiln_c99_key_purge(kiln_gc_heap *heap) {
 static void kiln_c99_gc_unlink(kiln_gc_heap *heap, kiln_gc_block *block) {
 static void kiln_c99_gc_finalize(kiln_gc_block *block);
 static void kiln_c99_gc_release_cell(void *payload) {
+static void kiln_c99_gc_splice_sublist_range(kiln_gc_heap *from_heap, kiln_gc_heap *to_heap,
+static void *kiln_c99_gc_splice_sublist(kiln_gc_heap *from_heap, kiln_gc_heap *to_heap, void *root_ptr) {
+static inline void kiln_c99_destructive_read_val(kiln_val *slot) {
+static inline void kiln_c99_destructive_read_value(kiln_value *slot) {
+static void *__kiln_transfer_region(void *ptr) {
+static inline kiln_val kiln_c99_transfer_val_destructive(kiln_val *slot, kiln_gc_heap *target_heap) {
 static void kiln_c99_gc_release(void *payload) {
 static void kiln_c99_gc_mark_found(kiln_gc_heap *heap, kiln_gc_block *block) {
 static void kiln_c99_gc_mark_block(kiln_gc_heap *heap, const void *payload) {

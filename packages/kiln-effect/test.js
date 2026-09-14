@@ -1,11 +1,10 @@
 import assert from "node:assert";
 import { Effect, Context, Layer, Scope } from "effect";
-import { spawnActorLayer, isolate, transfer, forEachParallel } from "./index.js";
+import { spawnActorLayer, isolate, transfer, forEachParallel, KilnWorkerPool, KilnNativeScheduler } from "./index.js";
 
-// 1. Service Definition
-class MeshService extends Context.Service()("MeshService", {
-  accessors: true,
-}) {}
+class MeshService extends Context.Service()("MeshService") {}
+
+let closed = false;
 
 // 2. Spawn Actor Layer
 const MeshServiceLive = spawnActorLayer(MeshService, () => {
@@ -17,7 +16,7 @@ const MeshServiceLive = spawnActorLayer(MeshService, () => {
     }),
     getCount: () => Effect.sync(() => count),
     __shutdown: () => {
-      // Finalizer invoked on Scope closure
+      closed = true;
     }
   };
 });
@@ -41,12 +40,25 @@ async function run() {
 
   const result = await Effect.runPromise(scopedEffect);
   assert.strictEqual(result, 5);
+  // Verify finalizer ran upon scope closure
+  assert.strictEqual(closed, true);
 
   // Test isolate and transfer
   const data = { vertices: 100 };
   const iso = await Effect.runPromise(isolate(data));
   const transferred = transfer(iso);
   assert.deepStrictEqual(transferred, { vertices: 100 });
+
+  // Test transfer with native hook mock
+  let nativeTransferCalled = false;
+  globalThis.__kiln_transfer_region = (v) => {
+    nativeTransferCalled = true;
+    return v;
+  };
+  const nativeTransferred = transfer(iso);
+  assert.strictEqual(nativeTransferCalled, true);
+  assert.deepStrictEqual(nativeTransferred, { vertices: 100 });
+  delete globalThis.__kiln_transfer_region;
 
   // Test forEachParallel
   const items = [10, 20, 30];
@@ -55,7 +67,16 @@ async function run() {
   );
   assert.deepStrictEqual(mapped, [20, 40, 60]);
 
+  // Test KilnWorkerPool
+  assert(KilnWorkerPool.layer != null);
+
+  // Test KilnNativeScheduler
+  const scheduler = KilnNativeScheduler.make();
+  assert.strictEqual(typeof scheduler.shouldYield, "function");
+  assert.strictEqual(typeof scheduler.makeDispatcher, "function");
+
   console.log("All @kiln/effect tests passed!");
 }
 
 run();
+

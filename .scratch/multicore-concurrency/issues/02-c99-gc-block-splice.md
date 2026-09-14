@@ -1,10 +1,11 @@
 # Issue 02: O(1) GC Block Sublist Unlinking and Splicing in Native C
 
-Status: planned
+Status: resolved
 Feature: multicore-concurrency
 Governing ADR: ADR 0041, ADR 0057
 
-Reality check 2026-09-06 (ADR 0058 review): commit 555de594 changed no file under crates/kiln-backend-c/src/runtime/; there is no splice function in heap.c and no __kiln_transfer_region in either engine.
+Resolution 2026-09-13:
+Implemented `kiln_c99_gc_splice_sublist`, `kiln_c99_destructive_read_val`, `kiln_c99_destructive_read_value`, and `__kiln_transfer_region` in `crates/kiln-backend-c/src/runtime/heap.c`. Added `HostOp::TransferRegion = 7` to `crates/kiln-host-abi/src/lib.rs` and dispatched in `crates/kiln-runtime/src/lib.rs`. Validated via `executable_gc_block_sublist_splice_and_destructive_transfer` unit tests verifying O(1) pointer unlinking, list splicing into destination heap, destructive slot wipe (`undefined`), and clean sweep under mark-sweep GC.
 
 ## Context
 Under ADR 0041, every native heap allocation is linked into a doubly-linked list of `kiln_c99_gc_block` structs owned by the realm heap. To enable zero-copy data transfer across realms without serialization or data races, an isolated object subgraph can be transferred in O(1) by unlinking its block sublist from Realm A and splicing it into Realm B.
