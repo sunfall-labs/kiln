@@ -15,11 +15,23 @@ fn object_data_property_keys_preserve_lone_surrogates() {
 #[test]
 fn regexp_patterns_keep_lone_units_and_utf16_offsets() {
     let lone = StringUnits::from_units(&[0xd800]);
-    let Value::RegExp(regexp) = build_regexp(&lone, "") .expect("lone pattern compiles") else {
+    let Value::RegExp(regexp) = build_regexp(&lone, "").expect("lone pattern compiles") else {
         panic!("regexp constructor returned a non-regexp");
     };
     assert_eq!(regexp.source, lone);
-    assert_eq!(regexp_string_units(&regexp).to_units().as_ref(), &[b'/' as u16, b'\\' as u16, b'u' as u16, b'd' as u16, b'8' as u16, b'0' as u16, b'0' as u16, b'/' as u16]);
+    assert_eq!(
+        regexp_string_units(&regexp).to_units().as_ref(),
+        &[
+            b'/' as u16,
+            b'\\' as u16,
+            b'u' as u16,
+            b'd' as u16,
+            b'8' as u16,
+            b'0' as u16,
+            b'0' as u16,
+            b'/' as u16
+        ]
+    );
     let matched = regexp_search(&regexp, &[0xd800], 0).expect("lone unit matches");
     assert_eq!(matched.0, 0..1);
 
@@ -29,6 +41,73 @@ fn regexp_patterns_keep_lone_units_and_utf16_offsets() {
     };
     let matched = regexp_search(&regexp, &[0x61, 0xd83d, 0xde00], 1).expect("astral unit matches");
     assert_eq!(matched.0, 1..3);
+}
+
+#[test]
+fn computed_lone_surrogate_reads_share_ordinary_and_proxy_paths() {
+    let program = no_program();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: std::collections::VecDeque::new(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+    let key = StringUnits::from_units(&[0xd800]);
+    let key_value = Value::String(key.clone());
+
+    // A prototype accessor is found by the same lookup as an own value. Its getter is omitted
+    // deliberately: the result is `undefined`, but reaching the accessor still matters because
+    // a setter-only property is present for `in` and for proxy invariants.
+    let prototype = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    if let Value::Object(prototype) = &prototype {
+        prototype
+            .borrow_mut()
+            .define_accessor_units(&key, None, None, Attributes::DEFAULT);
+    }
+    let inherited = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    if let Value::Object(inherited_data) = &inherited {
+        inherited_data.borrow_mut().set_prototype(prototype.clone());
+    }
+    assert_eq!(
+        vm.read_computed(&inherited, &key_value, 0),
+        Ok(Value::Undefined)
+    );
+    assert!(
+        vm.has(&inherited, &key_value, 0)
+            .expect("inherited accessor is present")
+    );
+
+    let object = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    if let Value::Object(object_data) = &object {
+        object_data.borrow_mut().set_prototype(prototype);
+        object_data.borrow_mut().set_units(&key, Value::Number(7.0));
+    }
+    assert_eq!(
+        vm.read_computed(&object, &key_value, 0),
+        Ok(Value::Number(7.0))
+    );
+
+    // Reflect.get is a real callable trap. Passing the exact key through it exercises the proxy
+    // route before the target's unit-preserving lookup, including the UTF-16 key identity.
+    let target = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    if let Value::Object(target_data) = &target {
+        target_data.borrow_mut().set_units(&key, Value::Number(9.0));
+    }
+    let handler = ordinary_object([(
+        "get".to_owned(),
+        Value::Native(Native::ReflectGet, RealmId::PRIMARY),
+    )]);
+    let proxy = Value::Proxy(Rc::new(ProxyData {
+        target,
+        handler,
+        revoked: std::cell::Cell::new(false),
+    }));
+    assert_eq!(
+        vm.read_computed(&proxy, &key_value, 0),
+        Ok(Value::Number(9.0))
+    );
 }
 
 fn string_index_of(text: &str, needle: &str, start: Option<f64>) -> f64 {
@@ -1890,7 +1969,8 @@ fn an_empty_message_produces_a_bare_stack_header() {
 /// program had explicitly named, and `if (e.name === "TimeoutError")` took the wrong branch.
 #[test]
 fn an_error_instance_has_no_own_name() {
-    let Value::Object(data) = build_error(ErrorKind::Type, &[Value::String("m".to_owned().into())]) else {
+    let Value::Object(data) = build_error(ErrorKind::Type, &[Value::String("m".to_owned().into())])
+    else {
         panic!("construct_error returns an object");
     };
     let data = data.borrow();
@@ -2191,7 +2271,11 @@ fn unwinding_restores_the_stack_the_handler_expected() {
         source: "".into(),
         template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
-        constants: vec![number(1.0), number(2.0), Constant::String("x".to_owned().into())],
+        constants: vec![
+            number(1.0),
+            number(2.0),
+            Constant::String("x".to_owned().into()),
+        ],
         code: vec![
             Instruction::Const(0), // a value the handler must still see
             Instruction::PushHandler(6),
@@ -3323,7 +3407,10 @@ fn json_allows_the_same_value_twice_in_different_places() {
 fn json_indent_argument_is_capped() {
     assert_eq!(json_indent(Some(&Value::Number(2.0))), "  ");
     assert_eq!(json_indent(Some(&Value::Number(50.0))).len(), 10);
-    assert_eq!(json_indent(Some(&Value::String("ab".to_owned().into()))), "ab");
+    assert_eq!(
+        json_indent(Some(&Value::String("ab".to_owned().into()))),
+        "ab"
+    );
     // A fractional or zero count means no indent at all, same as omitting the argument.
     assert_eq!(json_indent(Some(&Value::Number(0.0))), "");
     assert_eq!(json_indent(None), "");
@@ -3395,7 +3482,10 @@ fn an_array_and_a_string_spread_as_their_indices() {
     );
     assert_eq!(items[0].0, "0");
     assert_eq!(items[1].0, "1");
-    let characters = own_properties(&Intrinsics::default(), &Value::String("hi".to_owned().into()));
+    let characters = own_properties(
+        &Intrinsics::default(),
+        &Value::String("hi".to_owned().into()),
+    );
     assert_eq!(characters.len(), 2);
     assert_eq!(characters[1].0, "1");
 }
@@ -4520,7 +4610,9 @@ fn every_surface_member_is_named_for_its_key() {
         .expect("the private createRequire host hook is published");
     assert_eq!(
         vm.read_property(&host_create_require, "name", 0),
-        Ok(Value::String("__kilnHostModuleCreateRequire".to_owned().into()))
+        Ok(Value::String(
+            "__kilnHostModuleCreateRequire".to_owned().into()
+        ))
     );
 }
 
@@ -5172,7 +5264,8 @@ fn whatwg_url_and_search_params_support() {
             &Value::Undefined,
             &[Value::String(
                 "https://user:pass@example.com:8080/path/to/file?q=1&filter=true#section"
-                    .to_owned().into(),
+                    .to_owned()
+                    .into(),
             )],
             0,
         )
@@ -5181,7 +5274,9 @@ fn whatwg_url_and_search_params_support() {
     assert_eq!(
         vm.property(&url_val, "href"),
         Value::String(
-            "https://user:pass@example.com:8080/path/to/file?q=1&filter=true#section".to_owned().into()
+            "https://user:pass@example.com:8080/path/to/file?q=1&filter=true#section"
+                .to_owned()
+                .into()
         )
     );
     assert_eq!(
@@ -5232,7 +5327,9 @@ fn whatwg_url_and_search_params_support() {
     assert_eq!(
         to_str,
         Value::String(
-            "https://user:pass@example.com:8080/path/to/file?q=1&filter=true#section".to_owned().into()
+            "https://user:pass@example.com:8080/path/to/file?q=1&filter=true#section"
+                .to_owned()
+                .into()
         )
     );
 
@@ -5313,12 +5410,18 @@ fn whatwg_url_and_search_params_support() {
     let Value::Array(get_all_items) = get_all_q else {
         panic!("searchParams.getAll must return an array");
     };
-    assert_eq!(&*get_all_items.borrow(), &[Value::String("1".to_owned().into())]);
+    assert_eq!(
+        &*get_all_items.borrow(),
+        &[Value::String("1".to_owned().into())]
+    );
 
     let sp_to_str = vm
         .dispatch_native(Native::UrlSearchParamsToString, &search_params, &[], 0)
         .expect("searchParams.toString");
-    assert_eq!(sp_to_str, Value::String("q=1&filter=true".to_owned().into()));
+    assert_eq!(
+        sp_to_str,
+        Value::String("q=1&filter=true".to_owned().into())
+    );
 
     // 4. fileURLToPath and pathToFileURL
     let file_url_res = vm
@@ -5343,7 +5446,10 @@ fn whatwg_url_and_search_params_support() {
             0,
         )
         .expect("fileURLToPath from string succeeds");
-    assert_eq!(path_from_str, Value::String("/foo/bar baz.txt".to_owned().into()));
+    assert_eq!(
+        path_from_str,
+        Value::String("/foo/bar baz.txt".to_owned().into())
+    );
 
     // fileURLToPath with URL object
     let path_from_obj = vm
@@ -5354,7 +5460,10 @@ fn whatwg_url_and_search_params_support() {
             0,
         )
         .expect("fileURLToPath from URL object succeeds");
-    assert_eq!(path_from_obj, Value::String("/foo/bar baz.txt".to_owned().into()));
+    assert_eq!(
+        path_from_obj,
+        Value::String("/foo/bar baz.txt".to_owned().into())
+    );
 
     // 5. Invalid URL throws TypeError
     let invalid = vm.dispatch_native(
