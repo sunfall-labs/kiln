@@ -211,6 +211,40 @@ _Static_assert(sizeof(kiln_value) == 16, "kiln_value fits the AAPCS64 register t
     };
 }
 
+/// The canonical immutable JavaScript string header shared by generated C and runtime code.
+#[macro_export]
+macro_rules! kiln_string_abi_declaration {
+    () => {
+        r#"#define KILN_STRING_LATIN1 UINT32_C(0)
+#define KILN_STRING_UTF16 UINT32_C(1)
+typedef struct kiln_string {
+    uint32_t unit_len;
+    uint32_t flags;
+    const void *data;
+} kiln_string;
+#if defined(__cplusplus)
+static_assert(sizeof(kiln_string) == 16, "kiln_string ABI size");
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+_Static_assert(sizeof(kiln_string) == 16, "kiln_string ABI size");
+#endif
+static inline int kiln_string_is_utf16(const kiln_string *string) {
+    return string != NULL && (string->flags & KILN_STRING_UTF16) != 0;
+}
+static inline const uint8_t *kiln_string_latin1(const kiln_string *string) {
+    return (const uint8_t *)(string == NULL ? NULL : string->data);
+}
+static inline const uint16_t *kiln_string_utf16(const kiln_string *string) {
+    return (const uint16_t *)(string == NULL ? NULL : string->data);
+}
+static inline uint16_t kiln_string_unit_at(const kiln_string *string, size_t index) {
+    if (string == NULL || index >= string->unit_len || string->data == NULL) return 0;
+    return kiln_string_is_utf16(string) ? kiln_string_utf16(string)[index]
+                                        : kiln_string_latin1(string)[index];
+}
+"#
+    };
+}
+
 /// Return the C header shared by embedded modules and the native CLI runtime.
 ///
 /// The header is self-contained, include-guarded, and contains only the stable value/callback
