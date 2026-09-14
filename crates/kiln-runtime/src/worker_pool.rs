@@ -575,6 +575,8 @@ fn downcast_panic(payload: Box<dyn std::any::Any + Send + 'static>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{ScriptedHost, ScriptedTransport};
+    use kiln_host_abi::ResourceId;
     use std::time::{Duration, Instant};
 
     #[test]
@@ -754,5 +756,35 @@ mod tests {
         let r4 = pool.spawn_realm().unwrap();
         r2.shutdown_blocking().unwrap();
         r4.shutdown_blocking().unwrap();
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn worker_shutdown_drops_http_connection_before_first_poll() {
+        let resource = ResourceId::new(901);
+        let pool = WorkerPool::<ScriptedHost>::new(1);
+        let realm = pool
+            .spawn_realm_with_factory(
+                move || {
+                    ScriptedHost::new([]).with_transport(
+                        resource,
+                        ScriptedTransport::new([], false),
+                    )
+                },
+                RealmCapabilities::default(),
+            )
+            .expect("worker realm starts");
+
+        realm
+            .execute_blocking(move |runtime| {
+                assert!(runtime.server_attach_queued(resource, false));
+                // Shutdown immediately after admission, before the worker can receive another
+                // mailbox turn. This exercises owner-drop cleanup rather than a protocol Close.
+                assert!(runtime.shutdown());
+                assert!(!runtime.http_owns(resource));
+                assert!(!runtime.has_live_http_work());
+            })
+            .expect("attach and shutdown execute");
+        realm.shutdown_blocking().expect("worker shutdown");
     }
 }
