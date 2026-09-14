@@ -6321,8 +6321,17 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             }
             if (KILN_VAL_IS_STRING(element)) {
                 const kiln_string *s = (const kiln_string *)KILN_VAL_PTR(element);
-                if (s != NULL && s->byte_len > 0) {
-                    if (kiln_c99_text_append(&joined, s->bytes, s->byte_len) != KILN_C99_OK) {
+                if (s != NULL && s->unit_len > 0) {
+                    if (kiln_string_is_utf16(s)) {
+                        /* UTF-16 values are rendered through their scalar UTF-8 form at this
+                         * host-facing text builder boundary. */
+                        kiln_value shown = kiln_c99_text(kiln_val_to_boundary(element));
+                        if (shown.tag != KILN_VALUE_STRING ||
+                            kiln_c99_text_append(&joined, shown.ptr, shown.len) != KILN_C99_OK) {
+                            free(joined.bytes);
+                            return KILN_C99_OUT_OF_MEMORY;
+                        }
+                    } else if (kiln_c99_text_append(&joined, (const char *)kiln_string_latin1(s), s->unit_len) != KILN_C99_OK) {
                         free(joined.bytes);
                         return KILN_C99_OUT_OF_MEMORY;
                     }

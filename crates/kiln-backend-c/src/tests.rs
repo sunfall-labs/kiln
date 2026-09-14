@@ -422,8 +422,8 @@ int main(void) {
     kiln_test_realm_active = 1;
     if (owned.tag != KILN_VALUE_STRING || owned.flags != KILN_VALUE_FLAG_OWNED_STRING ||
         owned.len != sizeof bytes || owned.ptr == NULL) return 2;
-    header = (const kiln_string *)owned.ptr - 1;
-    if (header->bytes != owned.ptr || header->byte_len != sizeof bytes) return 3;
+    header = (const kiln_string *)owned.ptr;
+    if (header->data == NULL || header->unit_len != sizeof bytes) return 3;
     owned_value = kiln_val_from_boundary(owned);
     if (!KILN_VAL_IS_STRING(owned_value) || (const kiln_string *)KILN_VAL_PTR(owned_value) != header)
         return 4;
@@ -435,7 +435,7 @@ int main(void) {
     copied_value = kiln_val_from_boundary(borrowed);
     if (!KILN_VAL_IS_STRING(copied_value) || KILN_VAL_PTR(copied_value) == KILN_VAL_PTR(owned_value))
         return 7;
-    if (memcmp(((const kiln_string *)KILN_VAL_PTR(copied_value))->bytes, bytes, sizeof bytes) != 0)
+    if (memcmp(((const kiln_string *)KILN_VAL_PTR(copied_value))->data, bytes, sizeof bytes) != 0)
         return 8;
     kiln_test_realm_active = 0;
     return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 9;
@@ -5369,7 +5369,7 @@ fn loop_induction_and_string_length_emit_assigned_twins() {
         template_sites: Vec::new(),
     };
     let generated = emit(&prog).expect("emits");
-    assert!(generated.source.contains("str->length"));
+    assert!(generated.source.contains("str->unit_len"));
 }
 
 #[test]

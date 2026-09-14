@@ -6,6 +6,7 @@
  *
  * The caller owns the returned array and frees it. */
 static int kiln_c99_to_units(kiln_value value, uint16_t **out, size_t *count) {
+    const kiln_string *string = value.ptr == NULL ? NULL : (const kiln_string *)value.ptr;
     kiln_c99_utf16_iter iterator;
     uint16_t *units;
     size_t capacity;
@@ -15,23 +16,31 @@ static int kiln_c99_to_units(kiln_value value, uint16_t **out, size_t *count) {
      * decode state machine (kiln_c99_utf8_next by way of kiln_c99_utf16_next) is replaced with
      * a straight widening copy -- still O(len), but branch-free per byte instead of walking a
      * UTF-8 length table and a surrogate split for every unit. */
-    if (kiln_c99_string_is_ascii(value)) {
+    if (string != NULL && !kiln_string_is_utf16(string)) {
         size_t index;
-        if (value.len == 0) {
+        if (string->unit_len == 0) {
             *out = NULL;
             *count = 0;
             return KILN_C99_OK;
         }
-        units = (uint16_t *)malloc(value.len * sizeof *units);
+        units = (uint16_t *)malloc(string->unit_len * sizeof *units);
         if (units == NULL) {
             return KILN_C99_OUT_OF_MEMORY;
         }
-        for (index = 0; index < value.len; ++index) {
-            units[index] = (uint16_t)(unsigned char)value.ptr[index];
+        for (index = 0; index < string->unit_len; ++index) {
+            units[index] = kiln_string_unit_at(string, index);
         }
         *out = units;
-        *count = value.len;
+        *count = string->unit_len;
         return KILN_C99_OK;
+    }
+    if (string == NULL) { *out = NULL; *count = 0; return KILN_C99_OK; }
+    if (kiln_string_is_utf16(string)) {
+        if (string->unit_len == 0) { *out = NULL; *count = 0; return KILN_C99_OK; }
+        units = (uint16_t *)malloc(string->unit_len * sizeof *units);
+        if (units == NULL) return KILN_C99_OUT_OF_MEMORY;
+        memcpy(units, string->data, string->unit_len * sizeof *units);
+        *out = units; *count = string->unit_len; return KILN_C99_OK;
     }
     iterator.text = value.ptr;
     iterator.length = value.len;
@@ -84,66 +93,21 @@ static int kiln_c99_units_ascii(const uint16_t *units, size_t count) {
  * and a free re-decode (ADR 0041's block header is the cache; kiln_c99_string_is_ascii is the
  * reader). */
 static kiln_value kiln_c99_from_units(const uint16_t *units, size_t count) {
-    kiln_text text = {NULL, 0, 0};
-    size_t index;
+    kiln_string *string;
+    if (count == 0 || units == NULL) {
+        return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)&kiln_c99_empty_string, 0);
+    }
     if (kiln_c99_units_ascii(units, count)) {
-        char *copy;
-        kiln_gc_heap *heap;
-        kiln_gc_block *block;
-        if (count == 0) {
-            return kiln_c99_value(KILN_VALUE_STRING, 0, NULL, 0);
-        }
-        copy = kiln_c99_gc_alloc_text(count);
-        if (copy == NULL) {
-            return kiln_c99_undefined();
-        }
-        for (index = 0; index < count; ++index) {
-            copy[index] = (char)units[index];
-        }
-        heap = kiln_c99_gc_heap();
-        block = heap != NULL ? kiln_c99_gc_lookup(heap, copy) : NULL;
-        if (block != NULL) {
-            block->kind = (block->kind & KILN_GC_KIND_MASK) | KILN_GC_FLAG_ASCII_KNOWN |
-                          KILN_GC_FLAG_ASCII;
-        }
-        return kiln_c99_value(KILN_VALUE_STRING, 0, copy, count);
+        string = kiln_c99_gc_alloc_units(count, KILN_STRING_LATIN1);
+        if (string == NULL) return kiln_c99_undefined();
+        for (size_t index = 0; index < count; ++index)
+            ((uint8_t *)(uintptr_t)string->data)[index] = (uint8_t)units[index];
+    } else {
+        string = kiln_c99_gc_alloc_units(count, KILN_STRING_UTF16);
+        if (string == NULL) return kiln_c99_undefined();
+        memcpy((void *)string->data, units, count * sizeof(uint16_t));
     }
-    for (index = 0; index < count; ++index) {
-        uint32_t point = units[index];
-        char bytes[4];
-        size_t width;
-        if (point >= 0xD800 && point <= 0xDBFF && index + 1 < count && units[index + 1] >= 0xDC00 &&
-            units[index + 1] <= 0xDFFF) {
-            point = 0x10000 + ((point - 0xD800) << 10) + (units[index + 1] - 0xDC00);
-            index += 1;
-        } else if (point >= 0xD800 && point <= 0xDFFF) {
-            point = 0xFFFD;
-        }
-        if (point < 0x80) {
-            bytes[0] = (char)point;
-            width = 1;
-        } else if (point < 0x800) {
-            bytes[0] = (char)(0xC0 | (point >> 6));
-            bytes[1] = (char)(0x80 | (point & 0x3F));
-            width = 2;
-        } else if (point < 0x10000) {
-            bytes[0] = (char)(0xE0 | (point >> 12));
-            bytes[1] = (char)(0x80 | ((point >> 6) & 0x3F));
-            bytes[2] = (char)(0x80 | (point & 0x3F));
-            width = 3;
-        } else {
-            bytes[0] = (char)(0xF0 | (point >> 18));
-            bytes[1] = (char)(0x80 | ((point >> 12) & 0x3F));
-            bytes[2] = (char)(0x80 | ((point >> 6) & 0x3F));
-            bytes[3] = (char)(0x80 | (point & 0x3F));
-            width = 4;
-        }
-        if (kiln_c99_text_append(&text, bytes, width) != KILN_C99_OK) {
-            free(text.bytes);
-            return kiln_c99_undefined();
-        }
-    }
-    return kiln_c99_text_value(&text);
+    return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)string, count);
 }
 
 /* The first position at or after `from` where `needle` occurs, or -1. */
@@ -351,6 +315,7 @@ static int kiln_c99_split_ascii_byte(kiln_value *result, const char *bytes, size
 static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, uint64_t code,
                                          kiln_value receiver, const kiln_value *args, size_t argc,
                                          int depth, kiln_value *thrown) {
+    const kiln_string *receiver_string = receiver.ptr == NULL ? NULL : (const kiln_string *)receiver.ptr;
     /* These methods need one UTF-16 code unit, not a materialised string. Keep argument
      * coercion here so a numeric index is never first converted to text merely because the
      * bulk path prepares a possible needle. */
@@ -380,11 +345,11 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
         return KILN_C99_OK;
     }
 
-    if (kiln_c99_string_is_ascii(receiver)) {
+    if (receiver_string != NULL && !kiln_string_is_utf16(receiver_string)) {
         if (code == KILN_C99_METHOD_STRING_SLICE || code == KILN_C99_METHOD_SUBSTRING) {
             int relative = (code == KILN_C99_METHOD_STRING_SLICE);
-            size_t start = kiln_c99_unit_position(argc > 0 ? args[0] : kiln_c99_undefined(), receiver.len, 0, relative);
-            size_t end = kiln_c99_unit_position(argc > 1 ? args[1] : kiln_c99_undefined(), receiver.len, receiver.len, relative);
+            size_t start = kiln_c99_unit_position(argc > 0 ? args[0] : kiln_c99_undefined(), receiver_string->unit_len, 0, relative);
+            size_t end = kiln_c99_unit_position(argc > 1 ? args[1] : kiln_c99_undefined(), receiver_string->unit_len, receiver_string->unit_len, relative);
             if (!relative && start > end) {
                 size_t swap = start;
                 start = end;
@@ -393,7 +358,7 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
             if (start >= end) {
                 *result = kiln_c99_static_text("", 0);
             } else {
-                *result = kiln_c99_copy_text(receiver.ptr + start, end - start);
+                *result = kiln_c99_copy_text((const char *)kiln_string_latin1(receiver_string) + start, end - start);
             }
             return KILN_C99_OK;
         }
@@ -401,21 +366,24 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
             kiln_value needle_arg = argc > 0 ? args[0] : kiln_c99_undefined();
             kiln_value shown = kiln_c99_text(needle_arg);
             if (shown.tag == KILN_VALUE_STRING && kiln_c99_string_is_ascii(shown)) {
-                size_t from = kiln_c99_unit_position(argc > 1 ? args[1] : kiln_c99_undefined(), receiver.len, 0, 0);
+                size_t from = kiln_c99_unit_position(argc > 1 ? args[1] : kiln_c99_undefined(), receiver_string->unit_len, 0, 0);
                 if (shown.len == 0) {
-                    double at = from > receiver.len ? (double)receiver.len : (double)from;
+                    double at = from > receiver_string->unit_len ? (double)receiver_string->unit_len : (double)from;
                     if (code == KILN_C99_METHOD_STRING_INDEX_OF) *result = kiln_c99_number(at);
                     else *result = kiln_c99_boolean(1);
                     return KILN_C99_OK;
                 }
-                if (from >= receiver.len) {
+                if (from >= receiver_string->unit_len) {
                     if (code == KILN_C99_METHOD_STRING_INDEX_OF) *result = kiln_c99_number(-1.0);
                     else *result = kiln_c99_boolean(0);
                     return KILN_C99_OK;
                 }
-                const char *found = kiln_c99_memmem(receiver.ptr + from, receiver.len - from, shown.ptr, shown.len);
+                const kiln_string *shown_string = shown.ptr == NULL ? NULL : (const kiln_string *)shown.ptr;
+                const char *found = shown_string != NULL && !kiln_string_is_utf16(shown_string)
+                    ? kiln_c99_memmem((const char *)kiln_string_latin1(receiver_string) + from, receiver_string->unit_len - from,
+                                      (const char *)kiln_string_latin1(shown_string), shown_string->unit_len) : NULL;
                 if (code == KILN_C99_METHOD_STRING_INDEX_OF) {
-                    *result = kiln_c99_number(found != NULL ? (double)(found - receiver.ptr) : -1.0);
+                    *result = kiln_c99_number(found != NULL ? (double)(found - (const char *)kiln_string_latin1(receiver_string)) : -1.0);
                 } else {
                     *result = kiln_c99_boolean(found != NULL);
                 }
@@ -447,38 +415,39 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
                 return KILN_C99_OK;
             }
             kiln_value shown = kiln_c99_text(sep);
-            if (shown.tag == KILN_VALUE_STRING && kiln_c99_string_is_ascii(shown)) {
+            const kiln_string *shown_string = shown.ptr == NULL ? NULL : (const kiln_string *)shown.ptr;
+            if (shown.tag == KILN_VALUE_STRING && shown_string != NULL && !kiln_string_is_utf16(shown_string)) {
                 kiln_value built;
                 if (shown.len == 0) {
-                    size_t taken = receiver.len < lim ? receiver.len : lim;
+                    size_t taken = receiver_string->unit_len < lim ? receiver_string->unit_len : lim;
                     int st = kiln_c99_new_array_with_capacity(&built, taken, 0);
                     if (st != KILN_C99_OK) return st;
                     kiln_array *arr = kiln_c99_array_of(built);
                     for (size_t i = 0; i < taken; ++i) {
-                        arr->elements[arr->count++] = kiln_c99_val_single_char((unsigned char)receiver.ptr[i]);
+                        arr->elements[arr->count++] = kiln_c99_val_from_unit(kiln_string_unit_at(receiver_string, i));
                     }
                     *result = built;
                     return KILN_C99_OK;
                 }
                 if (shown.len == 1) {
-                    return kiln_c99_split_ascii_byte(result, receiver.ptr, receiver.len,
-                                                     shown.ptr[0], lim);
+                    return kiln_c99_split_ascii_byte(result, (const char *)kiln_string_latin1(receiver_string), receiver_string->unit_len,
+                                                     (char)kiln_string_unit_at(shown_string, 0), lim);
                 }
                 /* Counted first and written once, directly, never through the growable
                  * `kiln_c99_array_push`: that reallocs the array's element pointer, and an
                  * inline-capacity array's element pointer is not a heap block to realloc. */
                 {
                     size_t part_count = 1;
-                    const char *scan = receiver.ptr;
-                    const char *scan_end = receiver.ptr + receiver.len;
+                    const char *scan = (const char *)kiln_string_latin1(receiver_string);
+                    const char *scan_end = scan + receiver_string->unit_len;
                     while (scan <= scan_end && part_count < lim) {
                         const char *next =
-                            kiln_c99_memmem(scan, (size_t)(scan_end - scan), shown.ptr, shown.len);
+                            kiln_c99_memmem(scan, (size_t)(scan_end - scan), (const char *)kiln_string_latin1(shown_string), shown_string->unit_len);
                         if (next == NULL) {
                             break;
                         }
                         part_count += 1;
-                        scan = next + shown.len;
+                        scan = next + shown_string->unit_len;
                     }
                     int st = kiln_c99_new_array_with_capacity(&built, part_count, 0);
                     if (st != KILN_C99_OK) return st;
@@ -491,11 +460,11 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
                          * value allocates and copies a *second* time -- every part of every
                          * split through here was built twice. */
                         kiln_array *arr = kiln_c99_array_of(built);
-                        const char *p = receiver.ptr;
-                        const char *end = receiver.ptr + receiver.len;
+                        const char *p = (const char *)kiln_string_latin1(receiver_string);
+                        const char *end = p + receiver_string->unit_len;
                         while (arr->count < part_count) {
                             const char *next =
-                                kiln_c99_memmem(p, (size_t)(end - p), shown.ptr, shown.len);
+                                kiln_c99_memmem(p, (size_t)(end - p), (const char *)kiln_string_latin1(shown_string), shown_string->unit_len);
                             size_t len = next != NULL ? (size_t)(next - p) : (size_t)(end - p);
                             /* The part before the slot it goes in: building it can collect, and
                              * a slot the count already covers would be traced unwritten. */
@@ -504,7 +473,7 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
                             arr->elements[arr->count] = part;
                             arr->count += 1;
                             if (next == NULL) break;
-                            p = next + shown.len;
+                            p = next + shown_string->unit_len;
                         }
                     }
                     *result = built;

@@ -241,6 +241,34 @@ static inline uint16_t kiln_string_unit_at(const kiln_string *string, size_t ind
     return kiln_string_is_utf16(string) ? kiln_string_utf16(string)[index]
                                         : kiln_string_latin1(string)[index];
 }
+static inline int kiln_string_equal(const kiln_string *left, const kiln_string *right) {
+    if (left == NULL || right == NULL || left->unit_len != right->unit_len) return 0;
+    for (size_t index = 0; index < left->unit_len; ++index)
+        if (kiln_string_unit_at(left, index) != kiln_string_unit_at(right, index)) return 0;
+    return 1;
+}
+static inline int kiln_string_compare_units(const kiln_string *left, const kiln_string *right) {
+    size_t index;
+    size_t common;
+    if (left == NULL || right == NULL) return left == right ? 0 : (left == NULL ? -1 : 1);
+    common = left->unit_len < right->unit_len ? left->unit_len : right->unit_len;
+    for (index = 0; index < common; ++index) {
+        uint16_t a = kiln_string_unit_at(left, index);
+        uint16_t b = kiln_string_unit_at(right, index);
+        if (a != b) return a < b ? -1 : 1;
+    }
+    return left->unit_len == right->unit_len ? 0 : (left->unit_len < right->unit_len ? -1 : 1);
+}
+static inline size_t kiln_string_unit_width(const kiln_string *string) {
+    return kiln_string_is_utf16(string) ? sizeof(uint16_t) : sizeof(uint8_t);
+}
+static inline int kiln_string_storage_size(uint32_t unit_len, uint32_t flags, size_t *out) {
+    size_t width = (flags & KILN_STRING_UTF16) != 0 ? sizeof(uint16_t) : sizeof(uint8_t);
+    size_t units = (size_t)unit_len;
+    if (units > (SIZE_MAX - sizeof(kiln_string)) / width) return 0;
+    *out = sizeof(kiln_string) + units * width;
+    return 1;
+}
 "#
     };
 }

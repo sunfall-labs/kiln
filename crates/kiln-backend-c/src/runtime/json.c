@@ -180,7 +180,9 @@ static int kiln_c99_json_scalar(kiln_text *text, kiln_val value, int *status) {
     if (KILN_VAL_IS_STRING(value)) {
         const kiln_string *string = (const kiln_string *)KILN_VAL_PTR(value);
         *status = string == NULL ? kiln_c99_json_quote(text, "", 0)
-                                 : kiln_c99_json_quote(text, string->bytes, string->byte_len);
+                                 : (!kiln_string_is_utf16(string)
+                                        ? kiln_c99_json_quote(text, (const char *)kiln_string_latin1(string), string->unit_len)
+                                        : kiln_c99_refuse("JSON.stringify on UTF-16 string"));
         return 1;
     }
     if (value == KILN_VAL_NULL) {

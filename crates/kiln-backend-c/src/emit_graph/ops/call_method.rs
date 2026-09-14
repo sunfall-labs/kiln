@@ -1113,12 +1113,12 @@ pub(super) fn emit_call_method(
                          }} \
                      }} else if (!handled && KILN_VAL_IS_STRING(v{o}) && KILN_VAL_IS_NUMBER(v{a0})) {{ \
                          const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
-                         if (s_recv != NULL && s_recv->length == s_recv->byte_len) {{ \
+                         if (s_recv != NULL && !kiln_string_is_utf16(s_recv)) {{ \
                              double d0; memcpy(&d0, &v{a0}, sizeof(d0)); \
                              if (d0 >= 0.0 && d0 == floor(d0)) {{ \
                                  size_t start = (size_t)d0; \
-                                 size_t slen = start < s_recv->byte_len ? s_recv->byte_len - start : 0; \
-                                 v{v} = kiln_c99_val_from_ascii(s_recv->bytes + start, slen); \
+                                 size_t slen = start < s_recv->unit_len ? s_recv->unit_len - start : 0; \
+                                 v{v} = kiln_c99_val_from_ascii(kiln_string_latin1(s_recv) + start, slen); \
                                  handled = 1; \
                              }} \
                          }} \
@@ -1139,38 +1139,33 @@ pub(super) fn emit_call_method(
                              kiln_array *arr = (kiln_array *)ptr; \
                              const kiln_string *sep = (const kiln_string *)KILN_VAL_PTR(v{a0}); \
                              size_t total_bytes = 0; \
-                             int can_fast = (sep != NULL); \
+                             int can_fast = (sep != NULL && !kiln_string_is_utf16(sep)); \
                              for (size_t idx = 0; idx < arr->count && can_fast; ++idx) {{ \
                                  kiln_val elem = arr->elements[idx]; \
                                  if (KILN_VAL_IS_STRING(elem)) {{ \
                                      const kiln_string *es = (const kiln_string *)KILN_VAL_PTR(elem); \
-                                     if (es) total_bytes += es->byte_len; \
+                                     if (es != NULL && !kiln_string_is_utf16(es)) total_bytes += es->unit_len; \
+                                     else can_fast = 0; \
                                  }} else {{ can_fast = 0; }} \
                              }} \
                              if (can_fast) {{ \
-                                 if (arr->count > 1) total_bytes += (arr->count - 1) * sep->byte_len; \
+                                 if (arr->count > 1) total_bytes += (arr->count - 1) * sep->unit_len; \
                                  char *buf = kiln_c99_gc_alloc_text(total_bytes); \
                                  if (buf != NULL) {{ \
                                      char *dst = buf; \
-                                     size_t total_len = 0; \
                                      for (size_t idx = 0; idx < arr->count; ++idx) {{ \
-                                         if (idx > 0 && sep->byte_len > 0) {{ \
-                                             if (sep->byte_len == 1) {{ *dst = sep->bytes[0]; }} \
-                                             else {{ kiln_c99_copy_short(dst, sep->bytes, sep->byte_len); }} \
-                                             dst += sep->byte_len; \
-                                             total_len += sep->length; \
+                                         if (idx > 0 && sep->unit_len > 0) {{ \
+                                             if (sep->unit_len == 1) {{ *dst = (char)kiln_string_unit_at(sep, 0); }} \
+                                             else {{ kiln_c99_copy_short(dst, (const char *)kiln_string_latin1(sep), sep->unit_len); }} \
+                                             dst += sep->unit_len; \
                                          }} \
                                          const kiln_string *es = (const kiln_string *)KILN_VAL_PTR(arr->elements[idx]); \
-                                         if (es && es->byte_len > 0) {{ \
-                                             kiln_c99_copy_short(dst, es->bytes, es->byte_len); \
-                                             dst += es->byte_len; \
-                                             total_len += es->length; \
+                                         if (es && es->unit_len > 0) {{ \
+                                             kiln_c99_copy_short(dst, (const char *)kiln_string_latin1(es), es->unit_len); \
+                                             dst += es->unit_len; \
                                          }} \
                                      }} \
                                      kiln_string *s = ((kiln_string *)buf) - 1; \
-                                     s->length = total_len; \
-                                     s->byte_len = total_bytes; \
-                                     s->bytes = buf; \
                                      v{v} = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, s); \
                                      handled = 1; \
                                  }} \
@@ -1190,9 +1185,9 @@ pub(super) fn emit_call_method(
             "if (!handled && KILN_VAL_IS_STRING(v{o}) && KILN_VAL_IS_STRING(v{a0})) {{ \
                          const kiln_string *src = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                          const kiln_string *sep = (const kiln_string *)KILN_VAL_PTR(v{a0}); \
-                         if (src != NULL && sep != NULL && src->length == src->byte_len && sep->byte_len == 1) {{ \
+                         if (src != NULL && sep != NULL && !kiln_string_is_utf16(src) && !kiln_string_is_utf16(sep) && sep->unit_len == 1) {{ \
                              kiln_value built_val; \
-                             int status = kiln_c99_split_ascii_byte(&built_val, src->bytes, src->byte_len, sep->bytes[0], (size_t)0xFFFFFFFFu); \
+                             int status = kiln_c99_split_ascii_byte(&built_val, (const char *)kiln_string_latin1(src), src->unit_len, (char)kiln_string_unit_at(sep, 0), (size_t)0xFFFFFFFFu); \
                              if (status == KILN_C99_OK) {{ \
                                  v{v} = KILN_VAL_TAG_PTR(KILN_TAG_BUFFER_PREFIX, (const void *)(uintptr_t)built_val.bits); \
                                  handled = 1; \
@@ -1212,9 +1207,9 @@ pub(super) fn emit_call_method(
             "if (!handled && KILN_VAL_IS_STRING(v{o}) && KILN_VAL_IS_STRING(v{a0})) {{ \
                          const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                          const kiln_string *s_ndl = (const kiln_string *)KILN_VAL_PTR(v{a0}); \
-                         if (s_recv != NULL && s_ndl != NULL && s_recv->length == s_recv->byte_len && s_ndl->length == s_ndl->byte_len) {{ \
-                             const char *found = kiln_c99_memmem(s_recv->bytes, s_recv->byte_len, s_ndl->bytes, s_ndl->byte_len); \
-                             v{v} = kiln_c99_val_from_double(found ? (double)(found - s_recv->bytes) : -1.0); \
+                         if (s_recv != NULL && s_ndl != NULL && !kiln_string_is_utf16(s_recv) && !kiln_string_is_utf16(s_ndl)) {{ \
+                             const char *found = kiln_c99_memmem((const char *)kiln_string_latin1(s_recv), s_recv->unit_len, (const char *)kiln_string_latin1(s_ndl), s_ndl->unit_len); \
+                             v{v} = kiln_c99_val_from_double(found ? (double)(found - (const char *)kiln_string_latin1(s_recv)) : -1.0); \
                              handled = 1; \
                          }} \
                      }}",
@@ -1230,12 +1225,12 @@ pub(super) fn emit_call_method(
         Some(format!(
             "if (!handled && KILN_VAL_IS_STRING(v{o}) && KILN_VAL_IS_NUMBER(v{a0}) && KILN_VAL_IS_NUMBER(v{a1})) {{ \
                          const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
-                         if (s_recv != NULL && s_recv->length == s_recv->byte_len) {{ \
+                         if (s_recv != NULL && !kiln_string_is_utf16(s_recv)) {{ \
                              double d0, d1; memcpy(&d0, &v{a0}, sizeof(d0)); memcpy(&d1, &v{a1}, sizeof(d1)); \
-                             if (d0 == floor(d0) && d1 == floor(d1) && d0 >= 0.0 && d1 >= d0 && (size_t)d1 <= s_recv->byte_len) {{ \
+                             if (d0 == floor(d0) && d1 == floor(d1) && d0 >= 0.0 && d1 >= d0 && (size_t)d1 <= s_recv->unit_len) {{ \
                                  size_t start = (size_t)d0; \
                                  size_t len = (size_t)d1 - start; \
-                                 v{v} = kiln_c99_val_from_ascii(s_recv->bytes + start, len); \
+                                 v{v} = kiln_c99_val_from_ascii((const char *)kiln_string_latin1(s_recv) + start, len); \
                                  handled = 1; \
                              }} \
                          }} \
@@ -1449,8 +1444,8 @@ pub(super) fn emit_call_method(
                          }} else if (KILN_VAL_IS_STRING(v{o}) && KILN_VAL_IS_STRING(v{a0})) {{ \
                              const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                              const kiln_string *s_ndl = (const kiln_string *)KILN_VAL_PTR(v{a0}); \
-                             if (s_recv != NULL && s_ndl != NULL) {{ \
-                                 const char *found = kiln_c99_memmem(s_recv->bytes, s_recv->byte_len, s_ndl->bytes, s_ndl->byte_len); \
+                             if (s_recv != NULL && s_ndl != NULL && !kiln_string_is_utf16(s_recv) && !kiln_string_is_utf16(s_ndl)) {{ \
+                                 const char *found = kiln_c99_memmem((const char *)kiln_string_latin1(s_recv), s_recv->unit_len, (const char *)kiln_string_latin1(s_ndl), s_ndl->unit_len); \
                                  v{v} = found ? KILN_VAL_TRUE : KILN_VAL_FALSE; \
                                  handled = 1; \
                              }} \
@@ -1469,7 +1464,7 @@ pub(super) fn emit_call_method(
                          const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                          const kiln_string *s_ndl = (const kiln_string *)KILN_VAL_PTR(v{a0}); \
                          if (s_recv != NULL && s_ndl != NULL) {{ \
-                             int sw = (s_recv->byte_len >= s_ndl->byte_len && memcmp(s_recv->bytes, s_ndl->bytes, s_ndl->byte_len) == 0); \
+                             int sw = (!kiln_string_is_utf16(s_recv) && !kiln_string_is_utf16(s_ndl) && s_recv->unit_len >= s_ndl->unit_len && memcmp(kiln_string_latin1(s_recv), kiln_string_latin1(s_ndl), s_ndl->unit_len) == 0); \
                              v{v} = sw ? KILN_VAL_TRUE : KILN_VAL_FALSE; \
                              handled = 1; \
                          }} \
@@ -1483,7 +1478,7 @@ pub(super) fn emit_call_method(
                          const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                          const kiln_string *s_ndl = (const kiln_string *)KILN_VAL_PTR(v{a0}); \
                          if (s_recv != NULL && s_ndl != NULL) {{ \
-                             int ew = (s_recv->byte_len >= s_ndl->byte_len && memcmp(s_recv->bytes + (s_recv->byte_len - s_ndl->byte_len), s_ndl->bytes, s_ndl->byte_len) == 0); \
+                             int ew = (!kiln_string_is_utf16(s_recv) && !kiln_string_is_utf16(s_ndl) && s_recv->unit_len >= s_ndl->unit_len && memcmp(kiln_string_latin1(s_recv) + (s_recv->unit_len - s_ndl->unit_len), kiln_string_latin1(s_ndl), s_ndl->unit_len) == 0); \
                              v{v} = ew ? KILN_VAL_TRUE : KILN_VAL_FALSE; \
                              handled = 1; \
                          }} \
@@ -1495,12 +1490,12 @@ pub(super) fn emit_call_method(
         ("charCodeAt", 1) => Some(format!(
             "if (!handled && KILN_VAL_IS_STRING(v{o}) && KILN_VAL_IS_NUMBER(v{a0})) {{ \
                          const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
-                         if (s_recv != NULL && s_recv->length == s_recv->byte_len) {{ \
+                         if (s_recv != NULL && !kiln_string_is_utf16(s_recv)) {{ \
                              double d0; memcpy(&d0, &v{a0}, sizeof(d0)); \
                              if (isnan(d0)) d0 = 0.0; \
                              d0 = trunc(d0); \
-                             if (d0 >= 0.0 && (size_t)d0 < s_recv->length) {{ \
-                                 v{v} = kiln_c99_val_from_double((double)(unsigned char)s_recv->bytes[(size_t)d0]); \
+                             if (d0 >= 0.0 && (size_t)d0 < s_recv->unit_len) {{ \
+                                 v{v} = kiln_c99_val_from_double((double)kiln_string_unit_at(s_recv, (size_t)d0)); \
                                  handled = 1; \
                              }} else {{ \
                                  v{v} = KILN_QNAN_BASE; \
@@ -1515,12 +1510,12 @@ pub(super) fn emit_call_method(
         ("charAt", 1) => Some(format!(
             "if (!handled && KILN_VAL_IS_STRING(v{o}) && KILN_VAL_IS_NUMBER(v{a0})) {{ \
                          const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
-                         if (s_recv != NULL && s_recv->length == s_recv->byte_len) {{ \
+                         if (s_recv != NULL && !kiln_string_is_utf16(s_recv)) {{ \
                              double d0; memcpy(&d0, &v{a0}, sizeof(d0)); \
                              if (isnan(d0)) d0 = 0.0; \
                              d0 = trunc(d0); \
-                             if (d0 >= 0.0 && (size_t)d0 < s_recv->length) {{ \
-                                 v{v} = kiln_c99_val_single_char((unsigned char)s_recv->bytes[(size_t)d0]); \
+                             if (d0 >= 0.0 && (size_t)d0 < s_recv->unit_len) {{ \
+                                 v{v} = kiln_c99_val_from_unit(kiln_string_unit_at(s_recv, (size_t)d0)); \
                                  handled = 1; \
                              }} else {{ \
                                  v{v} = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_c99_empty_string); \
@@ -1535,12 +1530,12 @@ pub(super) fn emit_call_method(
         ("trim", 0) => Some(format!(
             "if (!handled && KILN_VAL_IS_STRING(v{o})) {{ \
                          const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
-                         if (s_recv != NULL && s_recv->length == s_recv->byte_len) {{ \
+                         if (s_recv != NULL && !kiln_string_is_utf16(s_recv)) {{ \
                              size_t start = 0; \
-                             while (start < s_recv->byte_len && ((unsigned char)s_recv->bytes[start] <= ' ' || (unsigned char)s_recv->bytes[start] == 0xa0)) start++; \
-                             size_t end = s_recv->byte_len; \
-                             while (end > start && ((unsigned char)s_recv->bytes[end - 1] <= ' ' || (unsigned char)s_recv->bytes[end - 1] == 0xa0)) end--; \
-                             v{v} = kiln_c99_val_from_ascii(s_recv->bytes + start, end - start); \
+                             while (start < s_recv->unit_len && ((unsigned char)kiln_string_latin1(s_recv)[start] <= ' ' || (unsigned char)kiln_string_latin1(s_recv)[start] == 0xa0)) start++; \
+                             size_t end = s_recv->unit_len; \
+                             while (end > start && ((unsigned char)kiln_string_latin1(s_recv)[end - 1] <= ' ' || (unsigned char)kiln_string_latin1(s_recv)[end - 1] == 0xa0)) end--; \
+                             v{v} = kiln_c99_val_from_ascii((const char *)kiln_string_latin1(s_recv) + start, end - start); \
                              handled = 1; \
                          }} \
                      }}",
@@ -1550,13 +1545,13 @@ pub(super) fn emit_call_method(
         ("slice", 2) => Some(format!(
             "if (!handled && KILN_VAL_IS_STRING(v{o}) && KILN_VAL_IS_NUMBER(v{a0}) && KILN_VAL_IS_NUMBER(v{a1})) {{ \
                          const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
-                         if (s_recv != NULL && s_recv->length == s_recv->byte_len) {{ \
+                         if (s_recv != NULL && !kiln_string_is_utf16(s_recv)) {{ \
                              double d0, d1; memcpy(&d0, &v{a0}, sizeof(d0)); memcpy(&d1, &v{a1}, sizeof(d1)); \
                              if (d0 >= 0.0 && d0 == floor(d0) && d1 >= d0 && d1 == floor(d1)) {{ \
                                  size_t start = (size_t)d0; \
-                                 size_t end = (size_t)d1 <= s_recv->byte_len ? (size_t)d1 : s_recv->byte_len; \
+                                 size_t end = (size_t)d1 <= s_recv->unit_len ? (size_t)d1 : s_recv->unit_len; \
                                  size_t slen = start < end ? end - start : 0; \
-                                 v{v} = kiln_c99_val_from_ascii(s_recv->bytes + start, slen); \
+                                 v{v} = kiln_c99_val_from_ascii((const char *)kiln_string_latin1(s_recv) + start, slen); \
                                  handled = 1; \
                              }} \
                          }} \

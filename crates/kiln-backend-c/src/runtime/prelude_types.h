@@ -243,17 +243,13 @@ static inline kiln_val kiln_val_from_boundary(kiln_value v) {
         case KILN_VALUE_NULL:          return KILN_VAL_NULL;
         case KILN_VALUE_BOOLEAN:       return v.bits ? KILN_VAL_TRUE : KILN_VAL_FALSE;
         case KILN_VALUE_STRING: {
-            if ((v.flags & KILN_VALUE_FLAG_OWNED_STRING) != 0) {
-                const kiln_string *owned = (const kiln_string *)v.ptr - 1;
-                return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, owned);
-            }
             if (v.ptr == NULL || v.len == 0) {
                 return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_c99_empty_string);
             }
-            if (v.len == 1 && (unsigned char)v.ptr[0] < 128) {
-                return kiln_c99_val_single_char((unsigned char)v.ptr[0]);
-            }
-            return kiln_c99_val_from_text(v.ptr, v.len);
+            /* Boundary strings carry the canonical header pointer.  Reading a byte pointer here
+             * would silently reinterpret the first sixteen bytes of the header as text and is
+             * forbidden: there is no legacy recovery path. */
+            return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, v.ptr);
         }
         case KILN_VALUE_FUNCTION:      return KILN_VAL_TAG_PTR(KILN_TAG_CLOSURE_PREFIX, (const void *)(uintptr_t)v.bits);
         case KILN_VALUE_OBJECT:        return KILN_VAL_TAG_PTR(KILN_TAG_OBJECT_PREFIX, (const void *)(uintptr_t)v.bits);
@@ -312,7 +308,7 @@ static inline int kiln_c99_val_truthy(kiln_val v) {
     }
     if ((v & KILN_TAG_MASK) == KILN_TAG_STRING_PREFIX) {
         const kiln_string *s = (const kiln_string *)KILN_VAL_PTR(v);
-        return s != NULL && s->length > 0;
+        return s != NULL && s->unit_len > 0;
     }
     return 1;
 }
