@@ -2400,6 +2400,7 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
         kiln_c99_gc_mark_value(heap, &closure->captured_arguments);
         kiln_c99_gc_mark_value(heap, &closure->prototype);
         kiln_c99_gc_mark_value(heap, &closure->properties);
+        kiln_c99_gc_mark_value(heap, &closure->source_value);
         break;
     }
     case KILN_GC_CELL:
