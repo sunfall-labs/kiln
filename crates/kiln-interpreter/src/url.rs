@@ -127,7 +127,7 @@ pub(crate) fn node_legacy_url_parse(input: &str) -> Value {
     let mut object = ObjectData::default();
     object.set("href", Value::String(input.into()));
     object.set("pathname", Value::String(pathname.into()));
-    object.set("path", Value::String(format!("{pathname}{search}")));
+    object.set("path", Value::String(format!("{pathname}{search}").into()));
     object.set(
         "search",
         if query_at.is_some() {
@@ -265,7 +265,7 @@ pub(crate) fn dispatch(
                 .map_err(|_| ExecutionError::TypeErrorMessage {
                     message: "fileURLToPath could not convert file URL to path".to_owned(),
                 })?;
-            Ok(Value::String(path.to_string_lossy().into_owned()))
+            Ok(Value::String(path.to_string_lossy().into_owned().into()))
         }
         Native::NodeUrlPathToFileUrl => {
             let path = arguments
@@ -305,7 +305,7 @@ pub(crate) fn dispatch(
                 Some(NodeObject::Url(state)) => state.href.clone(),
                 _ => String::new(),
             };
-            Ok(Value::String(href))
+            Ok(Value::String(href.into()))
         }
         Native::UrlSearchParamsGet => {
             let Value::Object(object) = receiver else {
@@ -398,7 +398,7 @@ pub(crate) fn dispatch(
             let encoded = ::url::form_urlencoded::Serializer::new(String::new())
                 .extend_pairs(&state.query)
                 .finish();
-            Ok(Value::String(encoded))
+            Ok(Value::String(encoded.into()))
         }
         _ => Err(ExecutionError::TypeErrorMessage {
             message: "Invalid native URL operation".into(),

@@ -55,7 +55,7 @@ pub(crate) fn prototype_property(prop: &str) -> Option<Value> {
         "profile" => Some(Value::Native(Native::ConsoleProfile, RealmId::PRIMARY)),
         "profileEnd" => Some(Value::Native(Native::ConsoleProfileEnd, RealmId::PRIMARY)),
         key if key == WellKnown::ToStringTag.property_key() => {
-            Some(Value::String("console".to_owned()))
+            Some(Value::String("console".to_owned().into()))
         }
         _ => None,
     }

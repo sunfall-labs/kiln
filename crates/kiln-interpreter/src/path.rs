@@ -71,7 +71,7 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
                 .map(Value::to_display_string)
                 .collect::<Vec<_>>()
                 .join("/");
-            Ok(Value::String(normalize_posix_path(&joined)))
+            Ok(Value::String(normalize_posix_path(&joined).into()))
         }
         Native::NodePathResolve => {
             let mut resolved = String::new();
@@ -88,7 +88,7 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
             if !resolved.starts_with('/') {
                 resolved.insert(0, '/');
             }
-            Ok(Value::String(normalize_posix_path(&resolved)))
+            Ok(Value::String(normalize_posix_path(&resolved).into()))
         }
         Native::NodePathPart(part) => {
             let path = arguments
@@ -106,7 +106,7 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
             let to = arguments
                 .get(1)
                 .map_or_else(String::new, Value::to_display_string);
-            Ok(Value::String(posix_path_relative(&from, &to)))
+            Ok(Value::String(posix_path_relative(&from, &to).into()))
         }
         Native::NodePathParse => {
             let path = arguments
@@ -122,15 +122,15 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
             Ok(ordinary_object([
                 (
                     "root".to_owned(),
-                    Value::String(if path.starts_with('/') { "/" } else { "" }.to_owned()),
+                    Value::String(if path.starts_with('/') { "/" } else { "" }.to_owned().into()),
                 ),
                 (
                     "dir".to_owned(),
-                    Value::String(posix_path_part(PathPart::Dir, &path, None).into_owned()),
+                    Value::String(posix_path_part(PathPart::Dir, &path, None).into_owned().into()),
                 ),
-                ("base".to_owned(), Value::String(base)),
-                ("ext".to_owned(), Value::String(ext)),
-                ("name".to_owned(), Value::String(name)),
+                ("base".to_owned(), Value::String(base.into())),
+                ("ext".to_owned(), Value::String(ext.into())),
+                ("name".to_owned(), Value::String(name.into())),
             ]))
         }
         // `format` is `parse` read backwards, and it prefers `base` over `name`+`ext`
