@@ -3697,6 +3697,10 @@ impl HostOps for CaptureHost {
                 self.clock_ms += CAPTURE_HOST_CLOCK_STEP_MS;
                 Ok(HostValue::number(now))
             }
+            HostOp::TransferRegion => {
+                let ptr = arguments.first().cloned().unwrap_or(HostValue::Undefined);
+                Ok(ptr)
+            }
             HostOp::EntropyU64 | HostOp::TimeZone | HostOp::Locale => Err(HostError::new(format!(
                 "deterministic host does not provide {operation:?}"
             ))),
