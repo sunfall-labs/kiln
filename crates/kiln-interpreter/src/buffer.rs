@@ -147,23 +147,23 @@ pub(crate) fn dispatch(
                         hex_str.push(HEX_DIGITS[(b >> 4) as usize] as char);
                         hex_str.push(HEX_DIGITS[(b & 0x0f) as usize] as char);
                     }
-                    Ok(Value::String(hex_str))
+                    Ok(Value::String(hex_str.into()))
                 }
                 "base64" => Ok(Value::String(crate::to_base64_text(&bytes, false, false))),
                 "base64url" => Ok(Value::String(crate::to_base64_text(&bytes, true, true))),
                 "latin1" | "binary" | "ascii" => {
                     let (decoded, _) =
                         encoding_rs::WINDOWS_1252.decode_without_bom_handling(&bytes);
-                    Ok(Value::String(decoded.into_owned()))
+                    Ok(Value::String(decoded.into_owned().into()))
                 }
                 "utf16le" | "utf-16le" | "ucs2" | "ucs-2" => {
                     let (decoded, _) = encoding_rs::UTF_16LE.decode_without_bom_handling(&bytes);
-                    Ok(Value::String(decoded.into_owned()))
+                    Ok(Value::String(decoded.into_owned().into()))
                 }
                 other => {
                     if let Some(enc) = encoding_rs::Encoding::for_label(other.as_bytes()) {
                         let (decoded, _) = enc.decode_without_bom_handling(&bytes);
-                        Ok(Value::String(decoded.into_owned()))
+                        Ok(Value::String(decoded.into_owned().into()))
                     } else {
                         Err(ExecutionError::TypeErrorMessage {
                             message: format!("unsupported Buffer encoding: {encoding}"),
