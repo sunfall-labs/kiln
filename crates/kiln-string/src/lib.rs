@@ -28,10 +28,25 @@ impl StringUnits {
         }
     }
 
+    pub fn from_view(view: StringView<'_>) -> Self {
+        match view {
+            StringView::Latin1(bytes) => Self(Repr::Latin1(Arc::from(bytes))),
+            StringView::Utf16(units) => Self(Repr::Utf16(Arc::from(units))),
+        }
+    }
+
     pub fn unit_len(&self) -> usize {
         match &self.0 {
             Repr::Latin1(bytes) => bytes.len(),
             Repr::Utf16(units) => units.len(),
+        }
+    }
+
+    /// Borrow the unit storage without allocating or widening Latin1 strings.
+    pub fn as_view(&self) -> StringView<'_> {
+        match &self.0 {
+            Repr::Latin1(bytes) => StringView::Latin1(bytes),
+            Repr::Utf16(units) => StringView::Utf16(units),
         }
     }
 
@@ -69,18 +84,9 @@ impl StringUnits {
     /// JavaScript source parsers consume UTF-8 `&str`; callers use this checked view at source
     /// boundaries so malformed UTF-16 is refused instead of being silently replaced.
     pub fn to_scalar_cow(&self) -> Result<Cow<'_, str>, &'static str> {
-        match &self.0 {
-            Repr::Latin1(bytes) if bytes.is_ascii() => Ok(Cow::Borrowed(
-                std::str::from_utf8(bytes).expect("ASCII bytes are valid UTF-8"),
-            )),
-            Repr::Latin1(bytes) => {
-                let mut text = String::with_capacity(bytes.len());
-                for &byte in bytes.iter() {
-                    text.push(char::from(byte));
-                }
-                Ok(Cow::Owned(text))
-            }
-            Repr::Utf16(units) => String::from_utf16(units)
+        match self.as_view() {
+            StringView::Latin1(bytes) => Ok(encoding_rs::mem::decode_latin1(bytes)),
+            StringView::Utf16(units) => String::from_utf16(units)
                 .map(Cow::Owned)
                 .map_err(|_| "string contains a lone surrogate"),
         }
@@ -91,7 +97,74 @@ impl StringUnits {
     }
 
     pub fn to_lossy_string(&self) -> String {
-        String::from_utf16_lossy(&self.to_units())
+        match self.as_view() {
+            StringView::Latin1(bytes) => encoding_rs::mem::decode_latin1(bytes).into_owned(),
+            StringView::Utf16(units) => String::from_utf16_lossy(units),
+        }
+    }
+}
+
+/// A borrowed JavaScript string view. The representation remains visible to consumers that can
+/// specialize Latin1 hot loops, while UTF-16 keeps every code unit including lone surrogates.
+#[derive(Clone, Copy, Debug)]
+pub enum StringView<'a> {
+    Latin1(&'a [u8]),
+    Utf16(&'a [u16]),
+}
+
+impl PartialEq for StringView<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.units().eq(other.units())
+    }
+}
+impl Eq for StringView<'_> {}
+
+impl Hash for StringView<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.unit_len().hash(state);
+        self.units().for_each(|unit| unit.hash(state));
+    }
+}
+
+impl<'a> StringView<'a> {
+    pub fn unit_len(self) -> usize {
+        match self {
+            Self::Latin1(bytes) => bytes.len(),
+            Self::Utf16(units) => units.len(),
+        }
+    }
+
+    pub fn len(self) -> usize {
+        self.unit_len()
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.unit_len() == 0
+    }
+
+    pub fn unit_at(self, index: usize) -> Option<u16> {
+        match self {
+            Self::Latin1(bytes) => bytes.get(index).copied().map(u16::from),
+            Self::Utf16(units) => units.get(index).copied(),
+        }
+    }
+
+    pub fn latin1_slice(self, start: usize, end: usize) -> Option<&'a [u8]> {
+        match self {
+            Self::Latin1(bytes) => bytes.get(start..end),
+            Self::Utf16(_) => None,
+        }
+    }
+
+    pub fn units(self) -> UnitIter<'a> {
+        match self {
+            Self::Latin1(bytes) => UnitIter::Latin1(bytes.iter()),
+            Self::Utf16(units) => UnitIter::Utf16(units.iter()),
+        }
+    }
+
+    pub fn to_units(self) -> Box<[u16]> {
+        self.units().collect()
     }
 }
 
@@ -166,8 +239,7 @@ impl Ord for StringUnits {
 }
 impl Hash for StringUnits {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.unit_len().hash(state);
-        self.units().for_each(|u| u.hash(state));
+        self.as_view().hash(state);
     }
 }
 
@@ -175,7 +247,7 @@ impl Hash for StringUnits {
 mod tests {
     use std::borrow::Cow;
 
-    use super::StringUnits;
+    use super::{StringUnits, StringView};
     #[test]
     fn latin1_index() {
         let s = StringUnits::from("caf\u{e9}");
@@ -198,6 +270,25 @@ mod tests {
             Ok(Cow::Owned(text)) if text == "hé"
         ));
         assert!(StringUnits::from_units(&[0xd800]).to_scalar_cow().is_err());
+    }
+
+    #[test]
+    fn borrowed_view_keeps_units_across_storage_widths() {
+        let latin = StringUnits::from("abc");
+        assert_eq!(latin.as_view(), StringView::Utf16(&[0x61, 0x62, 0x63]));
+        assert_eq!(latin.as_view(), StringView::Latin1(b"abc"));
+        let mut latin_hash = std::collections::hash_map::DefaultHasher::new();
+        let mut wide_hash = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&latin.as_view(), &mut latin_hash);
+        std::hash::Hash::hash(&StringView::Utf16(&[0x61, 0x62, 0x63]), &mut wide_hash);
+        assert_eq!(
+            std::hash::Hasher::finish(&latin_hash),
+            std::hash::Hasher::finish(&wide_hash)
+        );
+        let wide = StringUnits::from_units(&[0x61, 0xd800]);
+        assert_eq!(wide.as_view().unit_at(1), Some(0xd800));
+        assert!(wide.as_view().latin1_slice(0, 2).is_none());
+        assert_ne!(StringView::Utf16(&[0xd800]), StringView::Utf16(&[0xfffd]));
     }
 
     #[test]
