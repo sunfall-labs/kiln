@@ -105,8 +105,8 @@ pub(super) fn emit_get_property(
         }
         return;
     }
+    let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
     let length_check = if key_str == "length" && spec.arrays.contains(object) {
-        let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
         let box_stmt = if need_box {
             format!(" v{v} = kiln_c99_val_from_double((double)arr->count);")
         } else {
@@ -127,7 +127,6 @@ pub(super) fn emit_get_property(
             o = object.0
         )
     } else if key_str == "length" {
-        let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
         let box_stmt = if need_box {
             format!(" v{v} = kiln_c99_val_from_double((double)((const kiln_array *)ptr)->count);")
         } else {
@@ -143,6 +142,21 @@ pub(super) fn emit_get_property(
         } else {
             String::new()
         };
+        let str_int_stmt = if typed_int {
+            format!(" i{v} = (int64_t)str->length;")
+        } else {
+            String::new()
+        };
+        let str_double_stmt = if typed {
+            format!(" d{v} = (double)str->length;")
+        } else {
+            String::new()
+        };
+        let str_box_stmt = if need_box {
+            format!(" v{v} = kiln_c99_val_from_double((double)str->length);")
+        } else {
+            String::new()
+        };
         format!(
             "if (KILN_LIKELY((v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX)) {{ \
                          void *ptr = KILN_VAL_PTR(v{o}); \
@@ -153,7 +167,7 @@ pub(super) fn emit_get_property(
                          }} \
                      }} else if (KILN_VAL_IS_STRING(v{o})) {{ \
                          const kiln_string *str = (const kiln_string *)KILN_VAL_PTR(v{o}); \
-                         v{v} = kiln_c99_val_from_double((double)str->length); \
+                         {str_int_stmt}{str_double_stmt}{str_box_stmt} \
                          handled = 1; \
                      }} ",
             o = object.0
@@ -162,19 +176,33 @@ pub(super) fn emit_get_property(
         String::new()
     };
     let size_check = if key_str == "size" {
+        let size_int_stmt = if typed_int {
+            format!(" i{v} = (int64_t)col->live;")
+        } else {
+            String::new()
+        };
+        let size_double_stmt = if typed {
+            format!(" d{v} = (double)col->live;")
+        } else {
+            String::new()
+        };
+        let size_box_stmt = if need_box {
+            format!(" v{v} = kiln_c99_val_from_double((double)col->live);")
+        } else {
+            String::new()
+        };
         format!(
             "if ((v{o} & KILN_TAG_MASK) == KILN_TAG_OBJECT_PREFIX || (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX) {{ \
                          void *ptr = KILN_VAL_PTR(v{o}); \
                          if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_COLLECTION) {{ \
                              const kiln_collection *col = (const kiln_collection *)ptr; \
                              if (!col->is_weak) {{ \
-                                 v{v} = kiln_c99_val_from_double((double)col->live); \
+                                 {size_int_stmt}{size_double_stmt}{size_box_stmt} \
                                  handled = 1; \
                              }} \
                          }} \
                      }} ",
-            o = object.0,
-            v = v
+            o = object.0
         )
     } else {
         String::new()

@@ -40,7 +40,11 @@ pub(super) fn emit_unary_int(
         }
         UnaryOp::Increment => {
             if ivs.contains_key(&vid) {
-                writeln!(output, "    i{v} = i{x} + 1LL;{box_stmt}").unwrap();
+                writeln!(
+                    output,
+                    "    i{v} = i{x} + 1LL; d{v} = (double)i{v};{box_stmt}"
+                )
+                .unwrap();
             } else if ints.contains(value) {
                 writeln!(
                     output,
@@ -57,7 +61,11 @@ pub(super) fn emit_unary_int(
         }
         UnaryOp::Decrement => {
             if ivs.contains_key(&vid) {
-                writeln!(output, "    i{v} = i{x} - 1LL;{box_stmt}").unwrap();
+                writeln!(
+                    output,
+                    "    i{v} = i{x} - 1LL; d{v} = (double)i{v};{box_stmt}"
+                )
+                .unwrap();
             } else if ints.contains(value) {
                 writeln!(
                     output,
@@ -315,12 +323,11 @@ pub(super) fn emit_binary_ints(
         }
         BinaryOp::Add => {
             if ivs.contains_key(&vid) {
-                let d_sync = if need_box {
-                    format!(" d{v} = (double)i{v};")
-                } else {
-                    String::new()
-                };
-                writeln!(output, "    i{v} = i{l} + i{r};{d_sync}{box_stmt}").unwrap();
+                writeln!(
+                    output,
+                    "    i{v} = i{l} + i{r}; d{v} = (double)i{v};{box_stmt}"
+                )
+                .unwrap();
             } else if typed_int {
                 writeln!(
                     output,
@@ -332,12 +339,11 @@ pub(super) fn emit_binary_ints(
         }
         BinaryOp::Subtract => {
             if ivs.contains_key(&vid) {
-                let d_sync = if need_box {
-                    format!(" d{v} = (double)i{v};")
-                } else {
-                    String::new()
-                };
-                writeln!(output, "    i{v} = i{l} - i{r};{d_sync}{box_stmt}").unwrap();
+                writeln!(
+                    output,
+                    "    i{v} = i{l} - i{r}; d{v} = (double)i{v};{box_stmt}"
+                )
+                .unwrap();
             } else if typed_int {
                 writeln!(
                     output,
