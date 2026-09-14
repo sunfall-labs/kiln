@@ -1472,7 +1472,6 @@ version = "0.0.0"
 dependencies = [
  "kiln-hir",
  "kiln-host-abi",
- "kiln-string",
 ]
 
 [[package]]
