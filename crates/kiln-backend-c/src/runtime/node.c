@@ -1148,8 +1148,17 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
     }
     if (client != NULL && event->kind == 7) {
         kiln_value data_value;
-        int status = kiln_c99_buffer_from_bytes(&data_value, event->data, event->data_len);
-        if (status != KILN_C99_OK) return status;
+        int status;
+        /* Readable.setEncoding("utf8") preserves the established text-chunk path; incremental
+         * cross-chunk decoding remains a separate StringDecoder integration concern. Without it,
+         * Node exposes each response chunk as a binary Buffer. */
+        if (client->utf8) {
+            data_value = kiln_c99_copy_text((const char *)event->data,
+                                            (size_t)event->data_len);
+        } else {
+            status = kiln_c99_buffer_from_bytes(&data_value, event->data, event->data_len);
+            if (status != KILN_C99_OK) return status;
+        }
         return kiln_c99_node_emit(client->host, client->response, "data", data_value, 1,
                                   0, exception);
     }
