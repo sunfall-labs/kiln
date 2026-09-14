@@ -61,13 +61,6 @@ pub(crate) fn promises_property(prop: &str) -> Option<Value> {
     }
 }
 
-pub(crate) fn sync_property(prop: &str) -> Option<Value> {
-    match prop {
-        "native" => Some(Value::Native(Native::NodeFsSync, RealmId::PRIMARY)),
-        _ => None,
-    }
-}
-
 pub(crate) const fn js_name(native: Native) -> Option<&'static str> {
     match native {
         Native::NodeFs => Some("fs"),

@@ -1683,6 +1683,7 @@ struct QueuedDispatch {
     queue: Rc<QueuedHttp>,
 }
 
+#[cfg(feature = "http")]
 impl Drop for QueuedDispatch {
     fn drop(&mut self) {
         self.queue
