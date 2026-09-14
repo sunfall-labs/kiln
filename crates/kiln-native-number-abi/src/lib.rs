@@ -6,6 +6,71 @@
 //! compiler depend on the provider's Tokio/regexp/Temporal implementation crate.
 #![no_std]
 
+/// The kind of work an ABI group authoritatively owns (ADR 0060).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OwnershipKind {
+    RuntimeEngine,
+    SharedSemanticEngine,
+    ForeignInterface,
+}
+
+/// One machine-readable ownership row for a provider feature group.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GroupOwnership {
+    pub group: &'static str,
+    pub owner: &'static str,
+    pub kind: OwnershipKind,
+}
+
+/// The authoritative owner of every group in [`provider_abi_registry!`].
+pub const PROVIDER_GROUP_OWNERSHIP: &[GroupOwnership] = &[
+    GroupOwnership {
+        group: "realm",
+        owner: "kiln-runtime realm engine",
+        kind: OwnershipKind::RuntimeEngine,
+    },
+    GroupOwnership {
+        group: "root",
+        owner: "kiln-number-core",
+        kind: OwnershipKind::SharedSemanticEngine,
+    },
+    GroupOwnership {
+        group: "regexp",
+        owner: "regress adapter",
+        kind: OwnershipKind::SharedSemanticEngine,
+    },
+    GroupOwnership {
+        group: "bigint",
+        owner: "kiln-native-number-ffi BigInt engine",
+        kind: OwnershipKind::SharedSemanticEngine,
+    },
+    GroupOwnership {
+        group: "temporal",
+        owner: "kiln-temporal",
+        kind: OwnershipKind::SharedSemanticEngine,
+    },
+    GroupOwnership {
+        group: "json",
+        owner: "kiln-json",
+        kind: OwnershipKind::SharedSemanticEngine,
+    },
+    GroupOwnership {
+        group: "intl",
+        owner: "kiln-intl",
+        kind: OwnershipKind::SharedSemanticEngine,
+    },
+    GroupOwnership {
+        group: "parallel",
+        owner: "kiln-native-number-ffi parallel engine",
+        kind: OwnershipKind::RuntimeEngine,
+    },
+    GroupOwnership {
+        group: "ffi",
+        owner: "kiln-native-number-ffi foreign interface",
+        kind: OwnershipKind::ForeignInterface,
+    },
+];
+
 /// Expand the private provider ABI entries as `(feature, symbol, signature)` tuples.
 ///
 /// The signature token is interpreted by the consumer because some ABI handles are intentionally
@@ -135,6 +200,14 @@ pub const PROVIDER_EXPORTS: &[&str] = provider_abi_registry!(provider_export_nam
 mod tests {
     use super::*;
 
+    macro_rules! provider_export_groups {
+        ($(($group:ident, $name:ident, $signature:ident);)*) => {
+            &[$(stringify!($group),)*]
+        };
+    }
+
+    const PROVIDER_EXPORT_GROUPS: &[&str] = provider_abi_registry!(provider_export_groups);
+
     #[test]
     fn registry_has_the_packaged_contract_shape() {
         // 35 keeps the same export set but adds the distinct boolean scalar kind to node:ffi;
@@ -158,5 +231,28 @@ mod tests {
         assert_eq!(PROVIDER_EXPORTS.len(), 99);
         assert_eq!(PROVIDER_EXPORTS.first(), Some(&"kiln_realm_create"));
         assert_eq!(PROVIDER_EXPORTS.last(), Some(&"kiln_ffi_last_error"));
+    }
+
+    #[test]
+    fn every_export_group_has_one_owner() {
+        for group in PROVIDER_EXPORT_GROUPS {
+            assert_eq!(
+                PROVIDER_GROUP_OWNERSHIP
+                    .iter()
+                    .filter(|row| row.group == *group)
+                    .count(),
+                1,
+                "provider ABI group `{group}` must have exactly one semantic owner"
+            );
+        }
+        for (index, row) in PROVIDER_GROUP_OWNERSHIP.iter().enumerate() {
+            assert!(PROVIDER_EXPORT_GROUPS.contains(&row.group));
+            assert!(
+                !PROVIDER_GROUP_OWNERSHIP[..index]
+                    .iter()
+                    .any(|earlier| earlier.group == row.group)
+            );
+            assert!(!row.owner.is_empty());
+        }
     }
 }

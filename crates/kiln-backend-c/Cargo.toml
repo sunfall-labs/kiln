@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+bitflags = { workspace = true }
 kiln-builtin-surface = { workspace = true }
 kiln-digest = { workspace = true }
 kiln-host-abi = { workspace = true }
