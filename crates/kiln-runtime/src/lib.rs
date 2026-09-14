@@ -1110,7 +1110,6 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         if self.server_attach(resource, allow_half_close, dispatch) {
             true
         } else {
-            self.state.queued_http.cancel_admission(resource);
             false
         }
     }
@@ -1131,7 +1130,6 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         if self.client_attach(resource, dispatch) {
             true
         } else {
-            self.state.queued_http.cancel_admission(resource);
             false
         }
     }
@@ -1154,13 +1152,9 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
     #[cfg(feature = "http")]
     pub fn http_close(&mut self, resource: ResourceId, mode: HttpCloseMode) -> bool {
         let engine = &mut self.state;
-        let closed = self.executor.run(|| {
+        self.executor.run(|| {
             engine.http_server.close(resource, mode) || engine.http_client.close(resource, mode)
-        });
-        if closed {
-            self.state.queued_http.cancel_admission(resource);
-        }
-        closed
+        })
     }
 
     /// Without `http` no engine can own a transport, so there is nothing to stop.
@@ -1583,10 +1577,6 @@ impl QueuedHttp {
         self.next_admission.set(admission);
         pending.insert(resource, admission);
         Some(admission)
-    }
-
-    fn cancel_admission(&self, resource: ResourceId) {
-        self.pending_admissions.borrow_mut().remove(&resource);
     }
 
     fn cancel_admission_token(&self, resource: ResourceId, admission: u64) {
