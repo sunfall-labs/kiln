@@ -4334,7 +4334,7 @@ impl Value {
     /// Distinct from `to_display_string`: a symbol keys a property under its reserved slot, not
     /// under its human-readable description, and conflating the two would make
     /// `obj[Symbol.iterator]` and `obj["Symbol(Symbol.iterator)"]` the same property.
-    pub fn property_key(&self) -> String {
+    pub fn property_key_lossy(&self) -> String {
         match self {
             Self::Symbol(symbol) => symbol.property_key(),
             other => other.to_display_string(),
@@ -12761,7 +12761,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let Some(key) = self.catchable(coerced, current)? else {
                         continue;
                     };
-                    let name = key.property_key();
+                    let name = key.property_key_units();
                     define_function_name(
                         &function,
                         &key,
@@ -12780,7 +12780,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         Value::Object(object) => {
                             object
                                 .borrow_mut()
-                                .define_accessor(&name, getter, setter, attributes);
+                                .define_accessor_units(&name, getter, setter, attributes);
                         }
                         // A static accessor lands on the constructor, whose properties live in
                         // its own store rather than in an object.
@@ -12788,7 +12788,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             closure
                                 .properties
                                 .borrow_mut()
-                                .define_accessor(&name, getter, setter, attributes);
+                                .define_accessor_units(&name, getter, setter, attributes);
                         }
                         other => {
                             return Err(ExecutionError::NotAnObject {
@@ -12810,13 +12810,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let Some(key) = self.catchable(coerced, current)? else {
                         continue;
                     };
-                    let name = key.property_key();
+                    let name = key.property_key_units();
                     define_function_name(&function, &key, None);
                     let target = self.stack.last().cloned().unwrap_or(Value::Undefined);
                     if let Value::Object(object) = &target {
                         object
                             .borrow_mut()
-                            .define_value(&name, function, Attributes::DEFAULT);
+                            .define_value_units(&name, function, Attributes::DEFAULT);
                     }
                 }
                 Instruction::DefineMethod => {
@@ -12827,18 +12827,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let Some(key) = self.catchable(coerced, current)? else {
                         continue;
                     };
-                    let name = key.property_key();
+                    let name = key.property_key_units();
                     define_function_name(&function, &key, None);
                     match &target {
                         Value::Object(object) => {
                             object
                                 .borrow_mut()
-                                .define_value(&name, function, Attributes::BUILT_IN);
+                                .define_value_units(&name, function, Attributes::BUILT_IN);
                         }
                         // A static method lands on the constructor, whose properties live in its
                         // own store rather than in an object.
                         Value::Function(closure) => {
-                            closure.properties.borrow_mut().define_value(
+                            closure.properties.borrow_mut().define_value_units(
                                 &name,
                                 function,
                                 Attributes::BUILT_IN,
@@ -17886,7 +17886,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             let key = if into_map {
                 canonical_key(produced)
             } else {
-                Value::String(self.property_key_of(Some(&produced), instruction)?.into())
+                Value::String(self.property_key_of_units(Some(&produced), instruction)?)
             };
             match groups
                 .iter_mut()
@@ -17920,7 +17920,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let mut result = ObjectData::default();
         result.set_prototype(Value::Null);
         for (key, members) in groups {
-            result.set(&key.property_key(), Value::Array(ArrayData::new(members)));
+            let key = key.property_key_units();
+            result.set_units(&key, Value::Array(ArrayData::new(members)));
         }
         Ok(Value::Object(Rc::new(RefCell::new(result))))
     }
@@ -17958,7 +17959,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         } else {
             Value::Undefined
         };
-        let key = self.property_key_of(arguments.first(), instruction)?;
+        let key = self.property_key_of_units(arguments.first(), instruction)?;
         if defines {
             // `DefinePropertyOrThrow(O, key, desc)`, spelled by handing the descriptor to
             // `Object.defineProperty` rather than by installing the property directly. Installing
@@ -17980,7 +17981,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 receiver,
                 &[
                     receiver.clone(),
-                    Value::String(key.into()),
+                    Value::String(key.clone()),
                     Value::Object(Rc::new(RefCell::new(described))),
                 ],
                 instruction,
@@ -17992,7 +17993,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // `[[GetOwnProperty]]` and `[[GetPrototypeOf]]` -- so both go through the paths that run
         // a proxy's handler. Reading the property store directly answered for the proxy's target
         // instead, which is a different object than the one the program named.
-        let name = Value::String(key.into());
+        let name = Value::String(key);
         let mut current = receiver.clone();
         for _ in 0..MAX_PROTOTYPE_DEPTH {
             if let Some(descriptor) = self.own_descriptor_value(&current, &name, instruction)? {
@@ -18045,7 +18046,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// Only an object needs converting: every primitive is already a key, and a Number left as
     /// one keeps the array fast path that recognises `a[0]` as an index. An object reduces
     /// through `Symbol.toPrimitive`, `valueOf` and `toString` -- the program's own code, which
-    /// may return anything and may throw. The pure `Value::property_key` could do none of it:
+    /// may return anything and may throw. The diagnostic-only `Value::property_key_lossy` could
+    /// do none of it:
     /// it answered `"[object Object]"` for every object, so `o[{toString(){return "K"}}]` wrote
     /// under the wrong name and `o[{toString(){throw x}}]` did not throw at all.
     fn computed_key(&mut self, key: &Value, instruction: usize) -> Result<Value, ExecutionError> {
@@ -18056,19 +18058,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     }
 
     /// `ToPropertyKey` of an argument, which may run the program's own `toString`.
-    fn property_key_of(
+    fn property_key_of_units(
         &mut self,
         key: Option<&Value>,
         instruction: usize,
-    ) -> Result<String, ExecutionError> {
+    ) -> Result<StringUnits, ExecutionError> {
         let key = key.cloned().unwrap_or(Value::Undefined);
         // A symbol is a key already and must not be stringified; everything else reduces first,
         // and the reduction can be the program's code.
         if matches!(key, Value::Symbol(_)) {
-            return Ok(key.property_key());
+            return Ok(key.property_key_units());
         }
         let primitive = self.as_primitive(&key, PrimitiveHint::String, instruction)?;
-        Ok(primitive.property_key())
+        Ok(primitive.property_key_units())
     }
 
     /// One of the four copying array methods.
@@ -23573,7 +23575,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // trap that answers differently on a second call cannot change it half way through.
         let mut index = 0usize;
         for key in self.own_keys_reflected(source, instruction)? {
-            let name = Value::property_key(&key);
             let Some(descriptor) = self.own_descriptor_value(source, &key, instruction)? else {
                 continue;
             };
@@ -23582,7 +23583,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 continue;
             }
             // Only now is the value read: a non-enumerable key's getter must not run.
-            let item = self.read_property(source, &name, instruction)?;
+            let item = self.read_computed(source, &key, instruction)?;
             walk.keys.borrow_mut().push(key);
             self.subscribe_combinator_input(
                 &walk,
@@ -23708,7 +23709,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let mut data = ObjectData::default();
                 data.set_prototype(Value::Null);
                 for (key, value) in walk.keys.borrow().iter().zip(collected) {
-                    data.set(&Value::property_key(key), value);
+                    let key = key.property_key_units();
+                    data.set_units(&key, value);
                 }
                 let result = Value::Object(Rc::new(RefCell::new(data)));
                 self.call_value(&walk.resolve, Value::Undefined, vec![result], instruction)?;
@@ -24451,7 +24453,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         ExecutionError::TypeErrorMessage {
             message: format!(
                 "Cannot assign to read only property '{}' of object",
-                key.property_key()
+                key.property_key_lossy()
             ),
         }
     }
@@ -24640,7 +24642,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         value: Value,
         instruction: usize,
     ) -> Result<(), ExecutionError> {
-        let key = Self::element_key(index).property_key();
+        let key = index.to_string();
         // Integer-indexed typed arrays implement [[DefineOwnProperty]] by writing their
         // element, rather than by adding a normal property. An out-of-bounds index is a
         // refusal (CreateDataPropertyOrThrow turns that into a TypeError), while conversion
@@ -29918,7 +29920,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // it the symbol -- so `Object.freeze(proxy)` asked about a name no program can
                 // hold. `symbol_of_key` draws the line this depends on: a symbol the program
                 // made comes back, the engine's own bookkeeping does not.
-                let spelling = other.property_key();
+                let spelling = other.property_key_lossy();
                 match self.symbol_of_key(&spelling) {
                     Some(symbol) => Value::Symbol(symbol),
                     None => Value::String(spelling.into()),
@@ -32364,7 +32366,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return Err(ExecutionError::TypeErrorMessage {
                 message: format!(
                     "Cannot delete property '{}' of an object",
-                    computed_key.property_key()
+                    computed_key.property_key_lossy()
                 ),
             });
         }
@@ -39146,11 +39148,10 @@ fn has_property_key(intrinsics: &Intrinsics, target: &Value, key: PropertyKeyRef
 }
 
 fn has_property_ascii(intrinsics: &Intrinsics, target: &Value, name: &str) -> bool {
-    let key = Value::String(name.to_owned().into());
     // `1 in [1, , 3]` is false and `1 in [1, undefined, 3]` is true: the one place the difference
     // between a hole and an undefined element is directly observable.
     if let Value::Array(items) = target
-        && let Some(index) = array_index(&key)
+        && let Some(index) = array_index_key(PropertyKeyRef::Utf8(name))
     {
         if array_exotic_element(items, index).is_some() {
             return true;
@@ -39163,12 +39164,12 @@ fn has_property_ascii(intrinsics: &Intrinsics, target: &Value, name: &str) -> bo
             return true;
         }
         // A hole is the absence of an own property, so the question carries on up the chain.
-        return array_inherited_index(intrinsics, items, &key.property_key()).is_some();
+        return array_inherited_index(intrinsics, items, name).is_some();
     }
     // Every element key is the view's own answer, whether or not it reaches a slot: `"1.5" in
     // sample` is false because no view has such an element, not because the store is empty.
     if let Value::TypedArray(view) = target
-        && let Some(index) = canonical_numeric_index(&key.property_key())
+        && let Some(index) = canonical_numeric_index(name)
     {
         return valid_integer_index(view, index).is_some();
     }
@@ -39224,7 +39225,7 @@ fn has_property_ascii(intrinsics: &Intrinsics, target: &Value, name: &str) -> bo
                 )
         }
         Value::Array(items) => {
-            if let Some(index) = array_index(&key) {
+            if let Some(index) = array_index_key(PropertyKeyRef::Utf8(name)) {
                 return index < items.borrow().len();
             }
             // An array carries a property store beside its elements -- `arr.value = 1` goes
@@ -40528,6 +40529,7 @@ fn array_property(name: &str) -> Value {
 /// `a["0"]` and `a[0]` name the same element, so a string that round-trips through a number is
 /// an index too. `a[-1]` and `a[1.5]` are ordinary string properties in JavaScript, and treating
 /// them as indices would silently move data.
+#[cfg(test)]
 fn array_index(key: &Value) -> Option<usize> {
     let number = match key {
         Value::Number(value) => *value,
