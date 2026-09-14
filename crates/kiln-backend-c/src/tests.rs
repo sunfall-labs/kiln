@@ -213,6 +213,27 @@ fn decoupled_modules_include_one_external_runtime_header() {
 }
 
 #[test]
+fn method_metadata_is_registry_generated_and_unknown_codes_are_zero() {
+    let source = runtime_prelude_source();
+    assert!(source.contains("typedef struct kiln_c99_method_metadata"));
+    assert!(source.contains("kiln_c99_method_metadata_for(uint64_t code)"));
+    assert!(source.contains(
+        "case KILN_C99_METHOD_ARRAY_COPY_WITHIN: return (kiln_c99_method_metadata){UINT32_C(2), UINT32_C(0x7), UINT32_C(0)};"
+    ));
+    assert!(source.contains(
+        "case KILN_C99_METHOD_ESCAPE: return (kiln_c99_method_metadata){UINT32_C(8), UINT32_C(0), UINT32_C(0x1)};"
+    ));
+    assert!(
+        source
+            .contains("return (kiln_c99_method_metadata){UINT32_C(0), UINT32_C(0), UINT32_C(0)};")
+    );
+    assert!(source.contains("code >= KILN_C99_METHOD_TEMPORAL_FROM"));
+    assert!(source.contains("KILN_C99_GROUP_TEMPORAL | KILN_C99_GROUP_TEMPORAL_OP"));
+    assert!(!source.contains("kiln_c99_numeric_arguments(uint64_t code)"));
+    assert!(!source.contains("kiln_c99_textual_arguments(uint64_t code)"));
+}
+
+#[test]
 fn compact_emission_defers_regex_compilation_to_the_provider() {
     let program = program(
         vec![Constant::String("a+".into()), Constant::String("g".into())],

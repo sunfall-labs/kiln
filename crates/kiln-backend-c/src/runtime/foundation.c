@@ -588,6 +588,7 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                                   kiln_value receiver, const kiln_value *args, size_t argc,
                                   int depth, kiln_value *thrown);
 static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, uint64_t code,
+                                           kiln_c99_method_metadata metadata,
                                            kiln_value receiver, const kiln_value *args,
                                            size_t argc, int depth, kiln_value *thrown);
 static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t code,
