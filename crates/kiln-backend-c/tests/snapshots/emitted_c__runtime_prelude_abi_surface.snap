@@ -1531,6 +1531,7 @@ static void kiln_c99_gc_collect_mid_turn(kiln_gc_heap *heap) {
 static int kiln_c99_nursery_fresh_chunk(kiln_gc_heap *heap) {
 static void kiln_c99_nursery_turn_chunk(kiln_gc_heap *heap) {
 static void kiln_c99_gc_note_external(size_t size) {
+static inline int kiln_c99_nursery_pressure_due(const kiln_gc_heap *heap) {
 static inline void kiln_c99_gc_alloc_due(kiln_gc_heap *heap) {
 static void *kiln_c99_gc_alloc_ex(uint32_t kind, size_t size, int zero_payload) {
 static inline void *kiln_c99_gc_nursery_bump(kiln_gc_heap *heap, uint32_t kind, size_t size) {
