@@ -5809,3 +5809,44 @@ and full `scripts/native.sh` parity (193 matched, 1 refused, 0 diverged).
   - `cargo fmt --check`: clean.
 
 
+
+
+## Native HTTP: collect under pressure, not on every timer turn (2026-09-13)
+
+The mixed HTTP workload was slower than Node because each timer continuation could trigger a
+complete GC root walk. `collect_if_due` already delegated collection policy to the C heap, but
+the heap treated any partial nursery allocation as sufficient pressure. The boundary now shares
+the allocator's filled-chunk pressure predicate, including its large-live-heap guard. Existing
+size pressure, forced collection and stress collection still apply; timer ordering and clocks
+are unchanged. Review also found that nursery allocation failure hid owned filled/promoted
+regions behind the `active` flag. Lookup, settlement and teardown now distinguish allocation
+availability from region ownership.
+
+Measured clean baseline `74f65cb1` against candidate `1f5eb63e` on Apple M5 Pro with Node v25.9.0,
+native-release, one worker, four clients of sixteen connections, three interleaved five-second
+passes. Rates are sums across clients, then medians across passes. All 36 aggregates had zero
+errors and zero wrong responses.
+
+| workload | baseline req/s | candidate req/s | Node req/s |
+| --- | ---: | ---: | ---: |
+| hello | 167,428 | 163,594 | 120,340 |
+| mixed | 68,138 | 107,174 | 96,863 |
+| timer-only | 13,270 | 119,760 | 34,763 |
+| mixed without timer route | 115,686 | 115,429 | 96,256 |
+
+Mixed improved 57.3%, timer-only about 9x. Hello decreased 2.3% with overlapping pass ranges;
+this run does not establish statistical significance. The mix without timers changed -0.2%.
+Timer-only client p50 fell from 4.928 ms to 0.516 ms (median of each pass's upper-middle client
+p50, not pooled request percentiles). These fixtures do not establish a general runtime ranking.
+
+The executable collector regression fails under the old policy and covers below-budget
+deferral, explicit force, size pressure and stress. The inactive-nursery regression keeps a
+payload rooted through two collections after deactivation. The async corpus probe retains a
+frame value across 24 timer turns, passes every-allocation stress, and records seven ordinary
+collections reclaiming 2,133,557 bytes.
+
+Verification recorded 1,799 passing workspace tests, no Test262 regressions across 122 chunks,
+and 197 matching native probes with one expected ShadowRealm refusal. Every-allocation stress
+also matched 197 probes; only the number-format fuzz input count was reduced from 200,000 to
+1,000 for stress. The original 200,000-input fixture passed normally. The HTTP close contract
+passed. The prelude ABI snapshot intentionally gains the shared pressure helper declaration.
