@@ -63,7 +63,12 @@ pub(crate) fn dispatch(
     match native {
         Native::NodeBufferFrom => {
             let bytes = match arguments.first().unwrap_or(&Value::Undefined) {
-                Value::String(text) => text.as_bytes().to_vec(),
+                Value::String(text) => text
+                    .to_scalar_string()
+                    .map(|value| value.into_bytes())
+                    .map_err(|_| ExecutionError::TypeErrorMessage {
+                        message: "Buffer.from string contains a lone surrogate".to_owned(),
+                    })?,
                 Value::TypedArray(view) => view.bytes(),
                 Value::Array(items) => items
                     .borrow()
