@@ -7,7 +7,7 @@
 //! function's value graph, so the decision is a list of rules a reviewer can read and a test can
 //! pin one by one, rather than a property of whatever the emitter happens to produce.
 
-use crate::graph::{FunctionGraph, GraphOp, Terminator};
+use crate::graph::{FunctionGraph, GraphOp, Proven, Terminator, proven_numbers_with_assumptions};
 use kiln_ir::{Builtin, Constant, FunctionProto, Program, UnaryOp};
 
 /// The `Math` members a chunk may call: each is one libm call on a double, allocates nothing,
@@ -65,6 +65,16 @@ pub fn parallel_safe(graph: &FunctionGraph, proto: &FunctionProto, program: &Pro
         .flat_map(|b| b.operations.iter())
         .filter_map(|(v, op)| matches!(op, GraphOp::LoadBuiltin(Builtin::Math)).then_some(*v))
         .collect();
+    // Generic coercions are effectful, but parallelMap's guarded numeric clone may use the
+    // corresponding machine operation when every operand is proven numeric under its numeric
+    // entry assumptions. Keep that proof here rather than weakening GraphOp::effects globally.
+    let assumptions = graph
+        .initial_locals
+        .iter()
+        .take(proto.parameter_count as usize)
+        .map(|value| (*value, Proven::Number))
+        .collect();
+    let proven_numbers = proven_numbers_with_assumptions(graph, &assumptions);
     for block in &graph.blocks {
         if block.exception_handler.is_some() {
             return false;
@@ -81,37 +91,38 @@ pub fn parallel_safe(graph: &FunctionGraph, proto: &FunctionProto, program: &Pro
             _ => {}
         }
         for (_, op) in &block.operations {
-            let ok = if op.effects() == crate::graph::Effects::PURE {
-                match op {
-                    GraphOp::Const { constant, .. } => matches!(
-                        constant,
-                        Constant::Number(_) | Constant::Boolean(_) | Constant::Undefined
-                    ),
-                    GraphOp::LoadLocal(_) | GraphOp::StoreLocal { .. } | GraphOp::Phi { .. } => {
-                        true
-                    }
-                    GraphOp::LoadBuiltin(Builtin::Math) => true,
-                    GraphOp::Unary { op, .. } => matches!(
-                        op,
-                        UnaryOp::Plus | UnaryOp::Negate | UnaryOp::Not | UnaryOp::BitwiseNot
-                    ),
-                    GraphOp::Binary { .. } => true,
-                    _ => false,
-                }
-            } else if let GraphOp::CallMethod {
-                object, name, args, ..
-            } = op
-            {
-                math.contains(object)
-                    && match program.constants.get(*name as usize) {
-                        Some(Constant::String(key)) => PARALLEL_MATH
-                            .iter()
-                            .any(|(k, n)| k == key && *n == args.len()),
+            let ok =
+                if op.effects_with_proven_numbers(&proven_numbers) == crate::graph::Effects::PURE {
+                    match op {
+                        GraphOp::Const { constant, .. } => matches!(
+                            constant,
+                            Constant::Number(_) | Constant::Boolean(_) | Constant::Undefined
+                        ),
+                        GraphOp::LoadLocal(_)
+                        | GraphOp::StoreLocal { .. }
+                        | GraphOp::Phi { .. } => true,
+                        GraphOp::LoadBuiltin(Builtin::Math) => true,
+                        GraphOp::Unary { op, .. } => matches!(
+                            op,
+                            UnaryOp::Plus | UnaryOp::Negate | UnaryOp::Not | UnaryOp::BitwiseNot
+                        ),
+                        GraphOp::Binary { .. } => true,
                         _ => false,
                     }
-            } else {
-                false
-            };
+                } else if let GraphOp::CallMethod {
+                    object, name, args, ..
+                } = op
+                {
+                    math.contains(object)
+                        && match program.constants.get(*name as usize) {
+                            Some(Constant::String(key)) => PARALLEL_MATH
+                                .iter()
+                                .any(|(k, n)| k == key && *n == args.len()),
+                            _ => false,
+                        }
+                } else {
+                    false
+                };
             if !ok {
                 return false;
             }
