@@ -24,6 +24,7 @@ kiln-digest = { path = "crates/kiln-digest" }
 kiln-hir = { path = "crates/kiln-hir" }
 kiln-host-abi = { path = "crates/kiln-host-abi" }
 kiln-ir = { path = "crates/kiln-ir" }
+kiln-string = { path = "crates/kiln-string" }
 kiln-interpreter = { path = "crates/kiln-interpreter" }
 kiln-liveness = { path = "crates/kiln-liveness" }
 kiln-module-graph = { path = "crates/kiln-module-graph" }
