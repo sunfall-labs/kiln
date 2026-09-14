@@ -5,7 +5,10 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
-pub enum StringUnits {
+pub struct StringUnits(Repr);
+
+#[derive(Clone, Debug)]
+enum Repr {
     Latin1(Arc<[u8]>),
     Utf16(Arc<[u16]>),
 }
@@ -18,30 +21,30 @@ impl StringUnits {
 
     pub fn from_units(units: &[u16]) -> Self {
         if units.iter().all(|&unit| unit <= 0xff) {
-            Self::Latin1(units.iter().map(|&unit| unit as u8).collect())
+            Self(Repr::Latin1(units.iter().map(|&unit| unit as u8).collect()))
         } else {
-            Self::Utf16(Arc::from(units))
+            Self(Repr::Utf16(Arc::from(units)))
         }
     }
 
     pub fn unit_len(&self) -> usize {
-        match self {
-            Self::Latin1(bytes) => bytes.len(),
-            Self::Utf16(units) => units.len(),
+        match &self.0 {
+            Repr::Latin1(bytes) => bytes.len(),
+            Repr::Utf16(units) => units.len(),
         }
     }
 
     pub fn unit_at(&self, index: usize) -> Option<u16> {
-        match self {
-            Self::Latin1(bytes) => bytes.get(index).copied().map(u16::from),
-            Self::Utf16(units) => units.get(index).copied(),
+        match &self.0 {
+            Repr::Latin1(bytes) => bytes.get(index).copied().map(u16::from),
+            Repr::Utf16(units) => units.get(index).copied(),
         }
     }
 
     pub fn units(&self) -> UnitIter<'_> {
-        match self {
-            Self::Latin1(bytes) => UnitIter::Latin1(bytes.iter()),
-            Self::Utf16(units) => UnitIter::Utf16(units.iter()),
+        match &self.0 {
+            Repr::Latin1(bytes) => UnitIter::Latin1(bytes.iter()),
+            Repr::Utf16(units) => UnitIter::Utf16(units.iter()),
         }
     }
 
