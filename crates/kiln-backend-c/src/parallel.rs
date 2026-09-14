@@ -139,6 +139,7 @@ mod tests {
 
     fn proto(code: Vec<Instruction>, parameter_count: u32) -> FunctionProto {
         FunctionProto {
+        inferred_name: None,
             span: kiln_ir::Span::default(),
             prologue_end: 0,
             declared_length: parameter_count,

@@ -762,6 +762,7 @@ fn executable_numeric_operand_order_matches_symbol_conversion_rules() {
             local_count: 0,
             functions: vec![
                 FunctionProto {
+        inferred_name: None,
                     span: kiln_ir::Span::default(),
                     prologue_end: 0,
                     asynchronous: false,
@@ -784,6 +785,7 @@ fn executable_numeric_operand_order_matches_symbol_conversion_rules() {
                     type_annotations: None,
                 },
                 FunctionProto {
+        inferred_name: None,
                     span: kiln_ir::Span::default(),
                     prologue_end: 0,
                     asynchronous: false,
@@ -1303,6 +1305,7 @@ fn nested_call_refusal_preserves_the_failing_instruction_without_blaming_the_cal
         ],
         local_count: 0,
         functions: vec![FunctionProto {
+        inferred_name: None,
             span: kiln_ir::Span::default(),
             prologue_end: 0,
             asynchronous: false,
@@ -2179,6 +2182,7 @@ fn linked_source(module_source: &str, wrapper: &str) -> String {
 
 fn function(code: Vec<Instruction>) -> FunctionProto {
     FunctionProto {
+        inferred_name: None,
         span: kiln_ir::Span::default(),
         prologue_end: 0,
         asynchronous: false,
@@ -2217,62 +2221,74 @@ fn program_hash_covers_function_table_and_proto_contents() {
 
     for change in [
         FunctionProto {
+        inferred_name: None,
             prologue_end: 0,
             asynchronous: true,
             ..function(vec![Instruction::Return])
         },
         FunctionProto {
+        inferred_name: None,
             prologue_end: 0,
             name: Some("named".into()),
             ..function(vec![Instruction::Return])
         },
         FunctionProto {
+        inferred_name: None,
             prologue_end: 0,
             name: Some(String::new()),
             ..function(vec![Instruction::Return])
         },
         FunctionProto {
+        inferred_name: None,
             prologue_end: 0,
             arrow: true,
             ..function(vec![Instruction::Return])
         },
         FunctionProto {
+        inferred_name: None,
             prologue_end: 0,
             generator: true,
             async_generator: false,
             ..function(vec![Instruction::Return])
         },
         FunctionProto {
+        inferred_name: None,
             prologue_end: 0,
             is_method: true,
             ..function(vec![Instruction::Return])
         },
         FunctionProto {
+        inferred_name: None,
             prologue_end: 0,
             parameter_count: 1,
             ..function(vec![Instruction::Return])
         },
         FunctionProto {
+        inferred_name: None,
             prologue_end: 0,
             local_count: 1,
             ..function(vec![Instruction::Return])
         },
         FunctionProto {
+        inferred_name: None,
             prologue_end: 0,
             upvalues: vec![Upvalue::ParentLocal(0)],
             ..function(vec![Instruction::Return])
         },
         FunctionProto {
+        inferred_name: None,
             prologue_end: 0,
             upvalues: vec![Upvalue::ParentUpvalue(0)],
             ..function(vec![Instruction::Return])
         },
         FunctionProto {
+        inferred_name: None,
             prologue_end: 0,
             upvalues: vec![Upvalue::ParentLocal(1)],
             ..function(vec![Instruction::Return])
         },
         FunctionProto {
+        inferred_name: None,
             prologue_end: 0,
             upvalues: vec![Upvalue::ParentUpvalue(1)],
             ..function(vec![Instruction::Return])
@@ -3810,6 +3826,7 @@ fn run_with_main(generated: &CModule, wrapper: &str, label: &str) -> std::proces
 #[test]
 fn borrowed_array_map_and_filter_keep_generic_typed_array_semantics() {
     let callback = FunctionProto {
+        inferred_name: None,
         /* Return the callback's third argument, the receiver. This makes a snapshot receiver
          * observably different from the original typed view. */
         code: vec![
@@ -3927,6 +3944,7 @@ fn borrowed_array_map_and_filter_keep_generic_typed_array_semantics() {
 #[test]
 fn executable_closure_shares_a_cell_with_the_module_body() {
     let bump = FunctionProto {
+        inferred_name: None,
         prologue_end: 0,
         local_count: 0,
         upvalues: vec![Upvalue::ParentLocal(0)],
@@ -3985,12 +4003,14 @@ fn executable_closure_shares_a_cell_with_the_module_body() {
 #[test]
 fn executable_arrow_captures_its_defining_receiver() {
     let arrow = FunctionProto {
+        inferred_name: None,
         prologue_end: 0,
         arrow: true,
         code: vec![Instruction::LoadThis, Instruction::Return],
         ..function(Vec::new())
     };
     let maker = FunctionProto {
+        inferred_name: None,
         prologue_end: 0,
         code: vec![Instruction::MakeFunction(1), Instruction::Return],
         ..function(Vec::new())
@@ -4041,6 +4061,7 @@ fn executable_arrow_captures_its_defining_receiver() {
 #[test]
 fn executable_runaway_recursion_reports_rather_than_crashing() {
     let forever = FunctionProto {
+        inferred_name: None,
         prologue_end: 0,
         local_count: 0,
         upvalues: vec![Upvalue::ParentLocal(0)],
@@ -5069,6 +5090,7 @@ fn proven_numbers_reach_a_loop_carried_phi_and_stop_at_a_parameter() {
     // phis whose every input is one. `n` is a parameter and is never proven; the compare that
     // reads it therefore stays untyped, while `sum += i` and `i++` are typed.
     let proto = FunctionProto {
+        inferred_name: None,
         span: kiln_ir::Span::default(),
         prologue_end: 0,
         declared_length: 1,
@@ -5157,6 +5179,7 @@ fn proven_numbers_reach_a_loop_carried_phi_and_stop_at_a_parameter() {
 #[test]
 fn versioning_emits_two_clones_with_entry_guard_and_loop_exit() {
     let proto = FunctionProto {
+        inferred_name: None,
         span: kiln_ir::Span::default(),
         prologue_end: 0,
         declared_length: 1,
@@ -5247,6 +5270,7 @@ fn speculation_invariants_table_is_sound_and_complete() {
 #[test]
 fn speculation_disabled_emits_generic_clone_alone() {
     let proto = FunctionProto {
+        inferred_name: None,
         span: kiln_ir::Span::default(),
         prologue_end: 0,
         declared_length: 1,
@@ -5314,6 +5338,7 @@ fn speculation_disabled_emits_generic_clone_alone() {
 #[test]
 fn loop_induction_and_string_length_emit_assigned_twins() {
     let proto = FunctionProto {
+        inferred_name: None,
         span: kiln_ir::Span::default(),
         prologue_end: 0,
         declared_length: 1,
@@ -5380,6 +5405,7 @@ fn value_graph_merges_locals_at_a_loop_header_with_phis() {
     // must be a phi with one input per predecessor; without that the header compared the
     // pre-loop `i` forever (conformance/native/for-loop-in-arrow.js).
     let proto = FunctionProto {
+        inferred_name: None,
         span: kiln_ir::Span::default(),
         prologue_end: 0,
         declared_length: 0,
@@ -5484,6 +5510,7 @@ fn value_graph_merges_locals_at_a_loop_header_with_phis() {
 fn value_graph_builds_and_verifies_scalar_loop() {
     // for (let i = 0; i < 10; i++) sum += i;
     let proto = FunctionProto {
+        inferred_name: None,
         span: kiln_ir::Span::default(),
         prologue_end: 0,
         declared_length: 0,
@@ -5546,6 +5573,7 @@ fn value_graph_builds_and_verifies_scalar_loop() {
 #[test]
 fn value_graph_builds_and_verifies_try_catch() {
     let proto = FunctionProto {
+        inferred_name: None,
         span: kiln_ir::Span::default(),
         prologue_end: 0,
         declared_length: 0,
@@ -5590,6 +5618,7 @@ fn value_graph_builds_and_verifies_try_catch() {
 #[test]
 fn value_graph_does_not_protect_an_operation_before_try() {
     let proto = FunctionProto {
+        inferred_name: None,
         span: kiln_ir::Span::default(),
         prologue_end: 0,
         declared_length: 0,
@@ -5644,6 +5673,7 @@ fn value_graph_does_not_protect_an_operation_before_try() {
 #[test]
 fn closed_world_module_omits_an_unread_exported_function_body() {
     let function = || FunctionProto {
+        inferred_name: None,
         span: kiln_ir::Span::default(),
         prologue_end: 0,
         declared_length: 0,
@@ -5711,6 +5741,7 @@ fn closed_world_module_omits_an_unread_exported_function_body() {
 #[test]
 fn closed_world_module_keeps_a_declaration_captured_by_a_live_function() {
     let function = |upvalues| FunctionProto {
+        inferred_name: None,
         span: kiln_ir::Span::default(),
         prologue_end: 0,
         declared_length: 0,
@@ -5779,6 +5810,7 @@ fn closed_world_module_keeps_a_declaration_captured_by_a_live_function() {
 #[test]
 fn closed_world_module_omits_an_unread_declaration_inside_a_live_function() {
     let function = |local_count, code| FunctionProto {
+        inferred_name: None,
         span: kiln_ir::Span::default(),
         prologue_end: 0,
         declared_length: 0,
@@ -5845,6 +5877,7 @@ fn closed_world_module_omits_an_unread_declaration_inside_a_live_function() {
 #[test]
 fn closed_world_module_keeps_a_nested_declaration_captured_by_a_live_sibling() {
     let function = |local_count, code, upvalues| FunctionProto {
+        inferred_name: None,
         span: kiln_ir::Span::default(),
         prologue_end: 0,
         declared_length: 0,
@@ -5924,6 +5957,7 @@ fn closed_world_module_keeps_a_nested_declaration_captured_by_a_live_sibling() {
 #[test]
 fn nested_parent_local_does_not_keep_an_unrelated_module_slot() {
     let proto = |code, upvalues| FunctionProto {
+        inferred_name: None,
         span: kiln_ir::Span::default(),
         prologue_end: 0,
         declared_length: 0,
@@ -6034,6 +6068,7 @@ fn closed_world_namespace_traces_a_captured_module_binding() {
         ],
         local_count: 2,
         functions: vec![FunctionProto {
+        inferred_name: None,
             span: kiln_ir::Span::default(),
             prologue_end: 0,
             declared_length: 0,
@@ -6077,6 +6112,7 @@ fn closed_world_namespace_keeps_every_member_when_a_capture_escapes() {
         ],
         local_count: 2,
         functions: vec![FunctionProto {
+        inferred_name: None,
             span: kiln_ir::Span::default(),
             prologue_end: 0,
             declared_length: 0,
@@ -6117,6 +6153,7 @@ fn closed_world_namespace_keeps_every_member_when_the_value_escapes() {
 #[test]
 fn value_graph_lowers_to_c_without_stack_or_sp() {
     let proto = FunctionProto {
+        inferred_name: None,
         span: kiln_ir::Span::default(),
         prologue_end: 0,
         declared_length: 0,
@@ -6211,6 +6248,7 @@ fn typed_dist_compiles_to_guarded_unboxed_clone_with_entry_guards_matching_untyp
 
     // function dist(x, y) { return x * x + y * y; }
     let make_proto = |type_annotations: Option<TypeAnnotations>| FunctionProto {
+        inferred_name: None,
         span: kiln_ir::Span::default(),
         prologue_end: 0,
         declared_length: 2,
@@ -6328,6 +6366,7 @@ fn type_annotations_drive_candidate_speculation_without_prior_inferred_uses() {
 
     // function passthrough(x) { return x; }
     let make_proto = |type_annotations: Option<TypeAnnotations>| FunctionProto {
+        inferred_name: None,
         span: kiln_ir::Span::default(),
         prologue_end: 0,
         declared_length: 1,
@@ -6416,6 +6455,7 @@ fn type_profile_serialization_and_deserialization() {
 #[test]
 fn type_profile_drives_candidate_speculation_and_recording() {
     let make_proto = || FunctionProto {
+        inferred_name: None,
         span: kiln_ir::Span::default(),
         prologue_end: 0,
         declared_length: 1,
@@ -6646,6 +6686,7 @@ fn pure_closure_classification_and_parallel_map_emission() {
 
     // A pure callback: (x) => x * 2
     let callback = FunctionProto {
+        inferred_name: None,
         prologue_end: 0,
         local_count: 1,
         parameter_count: 1,

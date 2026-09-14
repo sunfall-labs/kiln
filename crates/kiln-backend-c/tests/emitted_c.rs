@@ -64,6 +64,7 @@ fn function(
     upvalues: Vec<Upvalue>,
 ) -> FunctionProto {
     FunctionProto {
+        inferred_name: None,
         span: kiln_ir::Span::default(),
         prologue_end: 0,
         asynchronous: false,
@@ -1182,6 +1183,7 @@ fn function_call_with_closure() {
 #[test]
 fn typed_array_borrowed_generic_methods() {
     let callback = FunctionProto {
+        inferred_name: None,
         code: vec![
             Instruction::LoadArguments,
             Instruction::Const(6),

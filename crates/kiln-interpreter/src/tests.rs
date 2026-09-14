@@ -670,6 +670,7 @@ fn calling_program(argc: u16, arguments: Vec<Instruction>) -> Program {
         code,
         local_count: 0,
         functions: vec![kiln_ir::FunctionProto {
+        inferred_name: None,
             span: kiln_ir::Span::default(),
             prologue_end: 0,
             asynchronous: false,
@@ -720,6 +721,45 @@ fn run(program: &Program) -> Result<Value, ExecutionError> {
         ExecutionCapabilities::default(),
     )
     .map(|result| result.value)
+}
+
+#[test]
+fn inferred_closure_name_property_preserves_utf16_units() {
+    let inferred = StringUnits::from_units(&[0xd800]);
+    let program = Program {
+        source: "".into(),
+        template_sites: Vec::new(),
+        version: kiln_ir::BYTECODE_VERSION,
+        constants: Vec::new(),
+        code: vec![Instruction::MakeFunction(0), Instruction::Return],
+        local_count: 0,
+        functions: vec![kiln_ir::FunctionProto {
+            inferred_name: Some(inferred.clone()),
+            asynchronous: false,
+            name: None,
+            arrow: false,
+            generator: false,
+            async_generator: false,
+            is_method: false,
+            parameter_count: 0,
+            mapped_arguments: false,
+            declared_length: 0,
+            local_count: 0,
+            prologue_end: 0,
+            code: vec![Instruction::Return],
+            upvalues: Vec::new(),
+            span: kiln_ir::Span::default(),
+            type_annotations: None,
+        }],
+    };
+    let Value::Function(closure) = run(&program).expect("closure should be returned") else {
+        panic!("expected a function");
+    };
+    assert_eq!(closure.display_name_units(), inferred);
+    assert_eq!(
+        closure.properties.borrow().get_own("name"),
+        Some(&Value::String(inferred))
+    );
 }
 
 fn test_vm<'a>(program: &'a Program, host: &'a mut TestHost) -> Vm<'a, TestHost> {
@@ -1985,6 +2025,7 @@ fn new_on_a_non_constructor_is_rejected() {
 fn instanceof_walks_the_chain_by_identity() {
     let parent_prototype = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
     let parent = Rc::new(Closure {
+        inferred_name: None,
         realm: RealmId::PRIMARY,
         name: None,
         program: no_program(),
@@ -2003,6 +2044,7 @@ fn instanceof_walks_the_chain_by_identity() {
     child_prototype_data.set_prototype(parent_prototype);
     let child_prototype = Value::Object(Rc::new(RefCell::new(child_prototype_data)));
     let child = Rc::new(Closure {
+        inferred_name: None,
         realm: RealmId::PRIMARY,
         name: None,
         program: no_program(),
@@ -2033,6 +2075,7 @@ fn instanceof_walks_the_chain_by_identity() {
 
     // A separate constructor with its own prototype must not match, however alike.
     let unrelated = Rc::new(Closure {
+        inferred_name: None,
         realm: RealmId::PRIMARY,
         name: None,
         program: no_program(),
@@ -2376,6 +2419,7 @@ fn closures_from_separate_calls_capture_separate_cells() {
         local_count: 0,
         functions: vec![
             kiln_ir::FunctionProto {
+        inferred_name: None,
                 span: kiln_ir::Span::default(),
                 prologue_end: 0,
                 asynchronous: false,
@@ -2399,6 +2443,7 @@ fn closures_from_separate_calls_capture_separate_cells() {
                 type_annotations: None,
             },
             kiln_ir::FunctionProto {
+        inferred_name: None,
                 span: kiln_ir::Span::default(),
                 prologue_end: 0,
                 asynchronous: false,
@@ -2446,6 +2491,7 @@ fn a_captured_cell_outlives_the_frame_that_created_it() {
         local_count: 0,
         functions: vec![
             kiln_ir::FunctionProto {
+        inferred_name: None,
                 span: kiln_ir::Span::default(),
                 prologue_end: 0,
                 asynchronous: false,
@@ -2469,6 +2515,7 @@ fn a_captured_cell_outlives_the_frame_that_created_it() {
                 type_annotations: None,
             },
             kiln_ir::FunctionProto {
+        inferred_name: None,
                 span: kiln_ir::Span::default(),
                 prologue_end: 0,
                 asynchronous: false,
@@ -2500,6 +2547,7 @@ fn capturing_a_slot_that_was_never_boxed_is_rejected() {
         code: vec![Instruction::MakeFunction(0), Instruction::Return],
         local_count: 1,
         functions: vec![kiln_ir::FunctionProto {
+        inferred_name: None,
             span: kiln_ir::Span::default(),
             prologue_end: 0,
             asynchronous: false,
@@ -2602,6 +2650,7 @@ fn runaway_recursion_is_bounded_by_call_depth() {
         ],
         local_count: 0,
         functions: vec![kiln_ir::FunctionProto {
+        inferred_name: None,
             span: kiln_ir::Span::default(),
             prologue_end: 0,
             asynchronous: false,
@@ -2670,6 +2719,7 @@ fn module_slots_are_shared_across_frames() {
         local_count: 1,
         functions: vec![
             kiln_ir::FunctionProto {
+        inferred_name: None,
                 span: kiln_ir::Span::default(),
                 prologue_end: 0,
                 asynchronous: false,
@@ -2692,6 +2742,7 @@ fn module_slots_are_shared_across_frames() {
                 type_annotations: None,
             },
             kiln_ir::FunctionProto {
+        inferred_name: None,
                 span: kiln_ir::Span::default(),
                 prologue_end: 0,
                 asynchronous: false,
@@ -2822,6 +2873,7 @@ fn symbol_with_throwing_right_value_of(operator: BinaryOp) -> Program {
         local_count: 0,
         functions: vec![
             kiln_ir::FunctionProto {
+        inferred_name: None,
                 span: kiln_ir::Span::default(),
                 prologue_end: 0,
                 asynchronous: false,
@@ -2844,6 +2896,7 @@ fn symbol_with_throwing_right_value_of(operator: BinaryOp) -> Program {
                 type_annotations: None,
             },
             kiln_ir::FunctionProto {
+        inferred_name: None,
                 span: kiln_ir::Span::default(),
                 prologue_end: 0,
                 asynchronous: false,
@@ -2956,6 +3009,7 @@ fn a_captured_dead_zone_read_names_its_source_binding() {
         ],
         local_count: 1,
         functions: vec![kiln_ir::FunctionProto {
+        inferred_name: None,
             span: kiln_ir::Span::default(),
             prologue_end: 0,
             asynchronous: false,
@@ -3773,6 +3827,7 @@ fn timer_program(schedule: &[(&str, f64)]) -> Program {
         code.push(Instruction::Call { argc: 2 });
         code.push(Instruction::Pop);
         functions.push(kiln_ir::FunctionProto {
+        inferred_name: None,
             span: kiln_ir::Span::default(),
             prologue_end: 0,
             asynchronous: false,
@@ -3841,6 +3896,7 @@ fn generator_receiver_program() -> Program {
         ],
         local_count: 0,
         functions: vec![kiln_ir::FunctionProto {
+        inferred_name: None,
             span: kiln_ir::Span::default(),
             prologue_end: 0,
             asynchronous: false,
@@ -3920,6 +3976,7 @@ fn node_next_tick_runs_before_promise_reactions() {
         local_count: 0,
         functions: vec![
             kiln_ir::FunctionProto {
+        inferred_name: None,
                 span: kiln_ir::Span::default(),
                 prologue_end: 0,
                 asynchronous: false,
@@ -3944,6 +4001,7 @@ fn node_next_tick_runs_before_promise_reactions() {
                 type_annotations: None,
             },
             kiln_ir::FunctionProto {
+        inferred_name: None,
                 span: kiln_ir::Span::default(),
                 prologue_end: 0,
                 asynchronous: false,
@@ -3983,6 +4041,7 @@ fn a_program_is_not_finished_while_it_still_has_work_scheduled() {
 #[test]
 fn an_async_arrow_captures_its_defining_receiver() {
     let maker = kiln_ir::FunctionProto {
+        inferred_name: None,
         span: kiln_ir::Span::default(),
         prologue_end: 0,
         asynchronous: false,
@@ -4000,6 +4059,7 @@ fn an_async_arrow_captures_its_defining_receiver() {
         type_annotations: None,
     };
     let arrow = kiln_ir::FunctionProto {
+        inferred_name: None,
         span: kiln_ir::Span::default(),
         prologue_end: 0,
         asynchronous: true,
@@ -4021,6 +4081,7 @@ fn an_async_arrow_captures_its_defining_receiver() {
         type_annotations: None,
     };
     let report = kiln_ir::FunctionProto {
+        inferred_name: None,
         span: kiln_ir::Span::default(),
         prologue_end: 0,
         asynchronous: false,
@@ -4968,6 +5029,7 @@ fn process_object_is_event_emitter() {
         ],
         local_count: 0,
         functions: vec![kiln_ir::FunctionProto {
+        inferred_name: None,
             span: kiln_ir::Span::default(),
             prologue_end: 0,
             asynchronous: false,
@@ -5854,6 +5916,7 @@ fn generator_and_async_generator_prototype_and_constructor_hierarchy() {
         functions: vec![
             // Function 0: generator function
             kiln_ir::FunctionProto {
+        inferred_name: None,
                 span: kiln_ir::Span::default(),
                 prologue_end: 0,
                 asynchronous: false,
@@ -5872,6 +5935,7 @@ fn generator_and_async_generator_prototype_and_constructor_hierarchy() {
             },
             // Function 1: async generator function
             kiln_ir::FunctionProto {
+        inferred_name: None,
                 span: kiln_ir::Span::default(),
                 prologue_end: 0,
                 asynchronous: true,

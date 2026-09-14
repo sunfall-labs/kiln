@@ -5252,16 +5252,17 @@ impl Compiler {
         // the program cannot spell and must never read back. What it *does* read back is the name
         // a named evaluation supplied -- `var C = class {}` is `"C"` -- and the empty string only
         // when nothing named it.
-        let written_name = if name.starts_with('%') {
-            class.inferred_name.clone().unwrap_or_default()
+        let (written_name, inferred_name) = if name.starts_with('%') {
+            (None, class.inferred_name.clone())
         } else {
-            name.clone()
+            (Some(name.clone()), None)
         };
         let constructor = match &class.constructor {
             // The constructor *is* the class as a value, so it carries the class's name: that is
             // what `new.target.name` and a console's `C {}` both read.
             Some(constructor) => Function {
-                name: Some(written_name.clone()),
+                name: written_name.clone(),
+                inferred_name: inferred_name.clone(),
                 // The class's span, not the constructor's. The constructor *is* the class as a
                 // value, and `Function.prototype.toString` on a class answers with the whole
                 // `class C { ... }` text -- the methods included -- never with the one member
@@ -5275,7 +5276,8 @@ impl Compiler {
                 rest: None,
                 return_type: None,
                 asynchronous: false,
-                name: Some(written_name),
+                name: written_name,
+                inferred_name,
                 // A class binds its own name through `class_expression`, not through this.
                 binds_own_name: false,
                 arrow: false,
@@ -6305,6 +6307,7 @@ impl Compiler {
             };
         let proto = FunctionProto {
             name: function.name.clone(),
+            inferred_name: function.inferred_name.clone(),
             arrow: function.arrow,
             asynchronous: function.asynchronous,
             // An async body suspends at every `await`, which is a `yield` in every way the
