@@ -4505,6 +4505,13 @@ impl Value {
     pub fn to_string_units(&self) -> StringUnits {
         match self {
             Self::String(value) => value.clone(),
+            Self::Array(items) => join_units(&items.borrow(), ","),
+            Self::TypedArray(view) => join_units(&view.items(), ","),
+            Self::Proxy(proxy) if !is_callable(&proxy.target) => proxy.target.to_string_units(),
+            Self::Intl(value) => match value.as_ref() {
+                intl::IntlValue::Locale(tag) => StringUnits::from(tag.as_str()),
+                _ => StringUnits::from(self.to_display_string()),
+            },
             _ => StringUnits::from(self.to_display_string()),
         }
     }
@@ -40049,6 +40056,20 @@ fn join(items: &[Value], separator: &str) -> Result<String, ExecutionError> {
         }
     }
     Ok(out)
+}
+
+fn join_units(items: &[Value], separator: &str) -> StringUnits {
+    let mut units = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        if index > 0 {
+            units.extend(separator.encode_utf16());
+        }
+        match item {
+            Value::Undefined | Value::Null | Value::Native(Native::Hole, _) => {}
+            other => units.extend(other.to_string_units().units()),
+        }
+    }
+    StringUnits::from_units(&units)
 }
 
 /// Remove an own property, reporting whether it is gone afterwards.
