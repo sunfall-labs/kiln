@@ -7,6 +7,7 @@ repository.workspace = true
 
 [dependencies]
 kiln-host-abi = { workspace = true }
+kiln-string = { workspace = true }
 
 [dev-dependencies]
 kiln-native-number = { workspace = true }

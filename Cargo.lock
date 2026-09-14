@@ -1420,6 +1420,7 @@ name = "kiln-host-abi"
 version = "0.0.0"
 dependencies = [
  "kiln-number-core",
+ "kiln-string",
 ]
 
 [[package]]
@@ -1597,6 +1598,7 @@ version = "0.0.0"
 dependencies = [
  "kiln-host-abi",
  "kiln-native-number",
+ "kiln-string",
 ]
 
 [[package]]
