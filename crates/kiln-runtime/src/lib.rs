@@ -48,6 +48,10 @@ pub mod node_net;
 pub mod node_stream;
 pub mod scripted_transport;
 pub use scripted_transport::{ScriptedTransport, ScriptedTransportLog};
+pub mod worker_pool;
+pub use worker_pool::{
+    ActorHandler, ActorId, DEFAULT_MAILBOX_CAPACITY, WorkerError, WorkerPool, WorkerRealmHandle,
+};
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashSet, VecDeque};
@@ -3728,6 +3732,10 @@ impl HostOps for CaptureHost {
                 let now = self.clock_ms;
                 self.clock_ms += CAPTURE_HOST_CLOCK_STEP_MS;
                 Ok(HostValue::number(now))
+            }
+            HostOp::TransferRegion => {
+                let ptr = arguments.first().cloned().unwrap_or(HostValue::Undefined);
+                Ok(ptr)
             }
             HostOp::EntropyU64 | HostOp::TimeZone | HostOp::Locale => Err(HostError::new(format!(
                 "deterministic host does not provide {operation:?}"

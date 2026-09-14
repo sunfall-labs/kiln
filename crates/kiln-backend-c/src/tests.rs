@@ -6580,3 +6580,103 @@ fn pure_closure_classification_and_parallel_map_emission() {
         "emitted C should contain native array lowering for parallelMap"
     );
 }
+
+#[test]
+fn executable_gc_block_sublist_splice_and_destructive_transfer() {
+    let program = program(vec![], vec![Instruction::Return], 0);
+    let generated = emit(&program).expect("program emits");
+    let wrapper = r#"
+int main(void) {
+    /* 1. Initialize two disjoint heaps A and B */
+    kiln_gc_heap heap_a;
+    kiln_gc_heap heap_b;
+    kiln_c99_gc_heap_init(&heap_a);
+    kiln_c99_gc_heap_init(&heap_b);
+    heap_a.enabled = 1;
+    heap_b.enabled = 1;
+
+    /* 2. Allocate a large tenured block in heap_a */
+    size_t payload_size = 1024 * 1024; /* 1 MB payload */
+    kiln_gc_block *block = (kiln_gc_block *)malloc(sizeof(kiln_gc_block) + payload_size);
+    if (block == NULL) return 1;
+    block->kind = KILN_GC_BYTES | KILN_GC_FLAG_LARGE;
+    block->mark = 0;
+    block->size = payload_size;
+    block->prev = NULL;
+    block->next = heap_a.head;
+    if (heap_a.head != NULL) heap_a.head->prev = block;
+    heap_a.head = block;
+    kiln_c99_gc_bound(&heap_a, block, sizeof(kiln_gc_block) + payload_size);
+    if (kiln_c99_gc_ptrset_insert(&heap_a.large_table, block) != KILN_C99_OK) return 2;
+    heap_a.count += 1;
+    heap_a.bytes += payload_size;
+
+    void *payload_ptr = block + 1;
+    memset(payload_ptr, 0x42, payload_size);
+
+    /* Verify initial state in heap_a */
+    if (heap_a.count != 1 || heap_a.bytes != payload_size) return 3;
+    if (heap_b.count != 0 || heap_b.bytes != 0) return 4;
+    if (!kiln_c99_gc_ptrset_contains(&heap_a.large_table, block)) return 5;
+    if (kiln_c99_gc_ptrset_contains(&heap_b.large_table, block)) return 6;
+
+    /* 3. Splice from heap_a to heap_b */
+    void *spliced_ptr = kiln_c99_gc_splice_sublist(&heap_a, &heap_b, payload_ptr);
+    if (spliced_ptr != payload_ptr) return 7; /* Zero-copy: exact same payload pointer! */
+
+    /* Verify heap_a is now empty */
+    if (heap_a.count != 0 || heap_a.bytes != 0 || heap_a.head != NULL) return 8;
+    if (kiln_c99_gc_ptrset_contains(&heap_a.large_table, block)) return 9;
+
+    /* Verify heap_b now owns the spliced block */
+    if (heap_b.count != 1 || heap_b.bytes != payload_size || heap_b.head != block) return 10;
+    if (!kiln_c99_gc_ptrset_contains(&heap_b.large_table, block)) return 11;
+    if (block->prev != NULL || block->next != NULL) return 12;
+
+    /* Payload bytes intact with zero copy */
+    unsigned char *bytes = (unsigned char *)spliced_ptr;
+    if (bytes[0] != 0x42 || bytes[payload_size - 1] != 0x42) return 13;
+
+    /* 4. Test destructive read on sender local slot */
+    kiln_val local_slot = KILN_TAG_OBJECT_PREFIX | ((uint64_t)(uintptr_t)spliced_ptr & KILN_PAYLOAD_MASK);
+    kiln_c99_destructive_read_val(&local_slot);
+    if (local_slot != KILN_VAL_UNDEFINED) return 14;
+
+    kiln_value boundary_slot;
+    boundary_slot.tag = KILN_VALUE_OBJECT;
+    boundary_slot.len = 1;
+    boundary_slot.bits = 0x1234;
+    kiln_c99_destructive_read_value(&boundary_slot);
+    if (boundary_slot.tag != KILN_VALUE_UNDEFINED || boundary_slot.len != 0 || boundary_slot.bits != 0) return 15;
+
+    /* 5. Mark and sweep in heap_b */
+    heap_b.epoch += 1;
+    block->mark = heap_b.epoch; /* Mark root block as live */
+    kiln_c99_gc_sweep(&heap_b, 0);
+
+    /* Verified survived in heap_b */
+    if (heap_b.count != 1 || heap_b.bytes != payload_size || heap_b.head != block) return 16;
+
+    /* Sweep in heap_a (empty heap) */
+    heap_a.epoch += 1;
+    kiln_c99_gc_sweep(&heap_a, 0);
+    if (heap_a.count != 0 || heap_a.head != NULL) return 17;
+
+    /* Clean teardown: unmark and sweep to free block */
+    heap_b.epoch += 1;
+    kiln_c99_gc_sweep(&heap_b, 0);
+    if (heap_b.count != 0 || heap_b.head != NULL) return 18;
+
+    free(heap_a.large_table.table);
+    free(heap_b.large_table.table);
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "gc-splice-test");
+    assert!(
+        run.status.success(),
+        "executable gc block sublist splice test failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}

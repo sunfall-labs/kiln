@@ -985,8 +985,10 @@ fn runtime_prelude_size() {
     // Widened on 2026-09-13, at 44,631 lines: built-in arity reflection table and ArrayBuffer
     // prototype modeling in the C runtime object reflection substrate. The process completion
     // ABI and its diagnostic/error helpers then brought the prelude to 45,012 lines; 45,200.
+    // Zero-copy GC block sublist splicing and region transfer (Issue 02, ADR 0057) brought it to
+    // 45,232 lines; 45,500.
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 45_200;
+    const CEILING_LINES: usize = 45_500;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
