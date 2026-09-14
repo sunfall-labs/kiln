@@ -5867,3 +5867,19 @@ The binaries were measured before the final integration rebase; later upstream c
 linker changes, including `440a4336`, are unmeasured. Native method metadata generation should not
 be read as unified interpreter dispatch semantics. Shape and multi-worker scaling remain unmeasured.
 Focused validation passed; the final full gate remains pending.
+
+## Final validation (2026-09-14, individual stages complete)
+
+The final gate's ten individual stages all completed successfully. Its aggregate deliberately refused to produce a green verdict because tracked documentation changed while the gate was running, so the records came from mixed code snapshots. Root will rerun the aggregate on the frozen tree.
+
+- Crate tests: 1,809 passed, 7 ignored, 0 failed.
+- Native parity: 199 matched, 1 expected `shadow-realm` refusal, 0 diverged.
+- Third-party corpus: 22 interpreter matches and 22 native matches; 0 diverged and 0 native refusals.
+- Third-party timing baseline: 15 bundles measured, 4 gains, no regressions. Final YAML was 4.89 ms versus 5.08 ms baseline (-3.7%); Zod was 7.86 ms versus 15.52 ms (-49.4%).
+- Facts baseline: all 31 targets passed (14 benchmarks, 17 bundles).
+- `conformance/node --node`: 36/36; `conformance/server --node`: 8/8; `conformance/regress --node`: 15/15.
+- Test262: no regressions across 122 chunks; 96,776 / 102,638 passing, with five chunks gained.
+
+The earlier focused YAML result (+47.2%, +2.40 ms) remains in the raw history; the final 15-bundle timing run above is the current measurement. The percentage increase was recorded plainly and remained below the harness's 3.0 ms absolute-delta threshold when it occurred.
+
+The controlled HTTP pair in the retained performance report remains explicitly pre-rebase evidence: baseline `b9bbb589` versus candidate `100c7c7b`, before later upstream compiler/provider/linker changes. It is not a measurement of the final rebased tree. The later setEncoding object/string regression was fixed through the existing text path; incremental decoder behavior remains the existing limitation.
