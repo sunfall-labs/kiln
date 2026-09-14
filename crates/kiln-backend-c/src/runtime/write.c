@@ -3,13 +3,19 @@
  * neither frozen nor a module namespace, which is the case the slow path answers by assigning
  * in place after its own-list scan; every other case, a setter on the chain included, is the
  * slow path's. */
-static int kiln_c99_put_site(kiln_host *host, kiln_value target, const char *key, size_t key_len,
-                             kiln_value value, int strict, int depth, kiln_value *thrown,
-                             kiln_c99_site *site) {
+static int kiln_c99_put_site_key(kiln_host *host, kiln_value target, const kiln_string *key,
+                                 const kiln_string *canonical, kiln_value value, int strict,
+                                 int depth, kiln_value *thrown, kiln_c99_site *site) {
+    const kiln_string *stable = canonical;
+    if (key == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (stable == NULL) {
+        stable = kiln_c99_intern_key(key);
+        if (stable == NULL) return KILN_C99_OUT_OF_MEMORY;
+    }
     if (target.tag == KILN_VALUE_OBJECT) kiln_c99_prototype_touched(kiln_c99_object_of(target));
     int status;
     if (site == NULL || target.tag != KILN_VALUE_OBJECT) {
-        return kiln_c99_put_mode(host, target, key, key_len, value, strict, depth, thrown);
+        return kiln_c99_put_mode_key(host, target, key, stable, value, strict, depth, thrown);
     }
     {
         kiln_object *object = kiln_c99_object_of(target);
@@ -23,7 +29,7 @@ static int kiln_c99_put_site(kiln_host *host, kiln_value target, const char *key
                             if ((object->shape->double_slots_mask & (1u << site->entries[p].slot)) &&
                                 value.tag != KILN_VALUE_NUMBER) {
                                 kiln_c99_ensure_dictionary(object);
-                                return kiln_c99_put_site(host, target, key, key_len, value, strict, depth, thrown, site);
+                                return kiln_c99_put_site_key(host, target, key, stable, value, strict, depth, thrown, site);
                             }
                             object->slots[site->entries[p].slot] = kiln_val_from_boundary(value);
                             return KILN_C99_OK;
@@ -48,7 +54,7 @@ static int kiln_c99_put_site(kiln_host *host, kiln_value target, const char *key
             }
             {
                 uint32_t slot;
-                if (kiln_c99_shape_find_slot(object->shape, key, &slot)) {
+                if (kiln_c99_shape_find_slot(object->shape, stable, &slot)) {
                     if (slot < object->slot_capacity) {
                         object->slots[slot] = kiln_val_from_boundary(value);
                         if (site->pic_count < KILN_C99_PIC_SIZE) {
@@ -64,7 +70,7 @@ static int kiln_c99_put_site(kiln_host *host, kiln_value target, const char *key
         }
         uint32_t own = kiln_c99_site_decode_dictionary_index(site->own);
         if (own < object->count && object->properties != NULL &&
-            object->properties[own].key == key && !object->frozen && !object->module_namespace) {
+            object->properties[own].key == stable && !object->frozen && !object->module_namespace) {
             kiln_property *property = &object->properties[own];
             if (!property->accessor && property->writable) {
                 property->value = value;
@@ -73,8 +79,8 @@ static int kiln_c99_put_site(kiln_host *host, kiln_value target, const char *key
         }
         {
             const kiln_shape *orig_shape = object->shape;
-            status = kiln_c99_put_mode_ikey(host, target, key, key_len, key, value, strict, depth,
-                                            thrown);
+            status = kiln_c99_put_mode_key(host, target, key, stable, value, strict, depth,
+                                           thrown);
             if (status == KILN_C99_OK && site->misses < KILN_C99_SITE_GIVE_UP) {
                 if (object->shape != NULL) {
                     if (orig_shape != NULL && object->shape != orig_shape) {
@@ -96,7 +102,7 @@ static int kiln_c99_put_site(kiln_host *host, kiln_value target, const char *key
                         }
                     } else {
                         uint32_t slot;
-                        if (kiln_c99_shape_find_slot(object->shape, key, &slot)) {
+                        if (kiln_c99_shape_find_slot(object->shape, stable, &slot)) {
                             uint32_t p;
                             int found = 0;
                             for (p = 0; p < site->pic_count; ++p) {
@@ -113,17 +119,30 @@ static int kiln_c99_put_site(kiln_host *host, kiln_value target, const char *key
                                 site->entries[site->pic_count].slot = slot;
                                 site->pic_count += 1;
                             }
-                        } else if (!kiln_c99_site_learn(site, object, key, key_len)) {
+                        } else if (!kiln_c99_site_learn(site, object, key, stable)) {
                             site->misses += 1;
                         }
                     }
-                } else if (!kiln_c99_site_learn(site, object, key, key_len)) {
+                } else if (!kiln_c99_site_learn(site, object, key, stable)) {
                     site->misses += 1;
                 }
             }
             return status;
         }
     }
+}
+
+/* Byte-only callers are fixed-name adapters. The borrowed header is consumed synchronously and
+ * the headed implementation interns before it can enter a proxy or retain the key. */
+static int kiln_c99_put_site(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+                             kiln_value value, int strict, int depth, kiln_value *thrown,
+                             kiln_c99_site *site) {
+    kiln_string view;
+    if (key_len > UINT32_MAX) return KILN_C99_INVALID_ARGUMENT;
+    view.unit_len = (uint32_t)key_len;
+    view.flags = KILN_STRING_LATIN1;
+    view.data = key;
+    return kiln_c99_put_site_key(host, target, &view, NULL, value, strict, depth, thrown, site);
 }
 
 /* `ToPropertyKey` of a computed key that arrived from the program.
@@ -172,10 +191,12 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
              * not. */
             if (key.tag == KILN_VALUE_SYMBOL) {
                 kiln_value name = kiln_c99_property_key(key);
+                const kiln_string *name_key;
                 if (name.tag != KILN_VALUE_STRING) {
                     KILN_C99_REFUSE("an array read through a symbol key with no reserved slot to "
                                     "name it");
                 }
+                name_key = (const kiln_string *)name.ptr;
                 if (array->properties.tag == KILN_VALUE_OBJECT) {
                     kiln_object *store = kiln_c99_object_of(array->properties);
                     size_t slot;
@@ -183,7 +204,7 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
                         kiln_c99_ensure_dictionary(store);
                     }
                     for (slot = 0; slot < store->count; ++slot) {
-                        if (kiln_c99_same_key(&store->properties[slot], name.ptr, name.len)) {
+                        if (kiln_c99_same_key_view(&store->properties[slot], name_key)) {
                             *out = store->properties[slot].value;
                             return KILN_C99_OK;
                         }
@@ -193,16 +214,16 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
                  * general read answers it. Any other that nobody set is *absent*, and absent is
                  * undefined -- not the refusal an unknown ordinary name gets, which is there to
                  * catch a method this backend has not grown and which a symbol can never be. */
-                if (!kiln_c99_same_name(name.ptr, name.len, "@@iterator") &&
-                    !kiln_c99_same_name(name.ptr, name.len, "@@unscopables")) {
+                if (!kiln_c99_same_name_key(name_key, "@@iterator") &&
+                    !kiln_c99_same_name_key(name_key, "@@unscopables")) {
                     KILN_C99_ABSENT("a reserved slot nobody set on this object", out);
                 }
-                return kiln_c99_get(host, target, name.ptr, name.len, out, depth, thrown);
+                return kiln_c99_get_key(host, target, name_key, NULL, out, depth, thrown);
             }
             /* Reserved protocol slots are reached through Symbols. An ordinary string that only
              * happens to have the same spelling remains an ordinary named property. */
-            if (key.tag == KILN_VALUE_STRING && key.len >= 2 && key.ptr[0] == '@' &&
-                key.ptr[1] == '@') {
+            if (key.tag == KILN_VALUE_STRING &&
+                kiln_c99_key_is_reserved((const kiln_string *)key.ptr)) {
                 if (array->properties.tag == KILN_VALUE_OBJECT) {
                     kiln_object *store = kiln_c99_object_of(array->properties);
                     size_t slot;
@@ -210,7 +231,8 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
                         kiln_c99_ensure_dictionary(store);
                     }
                     for (slot = 0; slot < store->count; ++slot) {
-                        if (kiln_c99_same_key(&store->properties[slot], key.ptr, key.len)) {
+                        if (kiln_c99_same_key_view(&store->properties[slot],
+                                                   (const kiln_string *)key.ptr)) {
                             *out = store->properties[slot].value;
                             return KILN_C99_OK;
                         }
@@ -218,8 +240,10 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
                 }
                 KILN_C99_ABSENT("a reserved slot nobody set on this array", out);
             }
-            return kiln_c99_get(host, target, key.tag == KILN_VALUE_STRING ? key.ptr : NULL,
-                                key.tag == KILN_VALUE_STRING ? key.len : 0, out, depth, thrown);
+            return key.tag == KILN_VALUE_STRING
+                       ? kiln_c99_get_key(host, target, (const kiln_string *)key.ptr, NULL, out,
+                                          depth, thrown)
+                       : KILN_C99_INVALID_ARGUMENT;
         }
         *out = (size_t)index < array->count && array->elements[(size_t)index] != KILN_VAL_HOLE
                    ? kiln_val_to_boundary(array->elements[(size_t)index])
@@ -256,8 +280,8 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
         }
         return KILN_C99_OK;
     }
-    if (target.tag == KILN_VALUE_TYPED_ARRAY && key.tag == KILN_VALUE_STRING && key.len >= 2 &&
-        key.ptr[0] == '@' && key.ptr[1] == '@') {
+    if (target.tag == KILN_VALUE_TYPED_ARRAY && key.tag == KILN_VALUE_STRING &&
+        kiln_c99_key_is_reserved((const kiln_string *)key.ptr)) {
         KILN_C99_ABSENT("a reserved slot a typed array does not carry", out);
     }
     if (target.tag == KILN_VALUE_OBJECT && index >= 0.0 && index < 100000.0) {
@@ -278,7 +302,8 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
             KILN_C99_REFUSE("a computed property key that is neither a string nor a named symbol "
                             "slot");
         }
-        return kiln_c99_get(host, target, text.ptr, text.len, out, depth, thrown);
+        return kiln_c99_get_key(host, target, (const kiln_string *)text.ptr, NULL, out, depth,
+                                thrown);
     }
 }
 
@@ -305,7 +330,7 @@ static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_v
         if (array->frozen) {
             kiln_value text = kiln_c99_property_key(key);
             return strict && text.tag == KILN_VALUE_STRING
-                       ? kiln_c99_throw_read_only(thrown, text.ptr, text.len)
+                       ? kiln_c99_throw_read_only_key(thrown, (const kiln_string *)text.ptr)
                        : KILN_C99_OK;
         }
         if (array->elements != NULL && !kiln_c99_array_elements_owned(array)) {
@@ -385,22 +410,28 @@ static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_v
             KILN_C99_REFUSE("a computed property key that is neither a string nor a named symbol "
                             "slot");
         }
-        return kiln_c99_put_mode(host, target, text.ptr, text.len, value, strict, depth, thrown);
+        return kiln_c99_put_mode_key(host, target, (const kiln_string *)text.ptr, NULL, value,
+                                     strict, depth, thrown);
     }
 }
 
 /* Reflect.set reports whether [[Set]] accepted a write; unlike an assignment it never turns a
  * normal refusal into an exception. The ordinary write path intentionally keeps sloppy refusal
  * silent, so probe the descriptor shape first and only then perform that path. */
-static int kiln_c99_write_would_accept(kiln_value target, const char *key, size_t key_len) {
+static int kiln_c99_write_would_accept_key(kiln_value target, const kiln_string *key,
+                                           const kiln_string *canonical) {
     kiln_value current = target;
     size_t steps;
-    kiln_gc_heap *heap = kiln_c99_gc_heap();
-    const char *ikey = kiln_c99_interned_in(heap, key, key_len);
+    const kiln_string *stable = canonical;
+    if (key == NULL) return 0;
+    if (stable == NULL) {
+        stable = kiln_c99_intern_key(key);
+        if (stable == NULL) return 0;
+    }
 
     if (target.tag == KILN_VALUE_FUNCTION) {
         kiln_closure *closure = kiln_c99_closure_of(target);
-        if (kiln_c99_same_name(key, key_len, "prototype")) {
+        if (kiln_c99_same_name_key(key, "prototype")) {
             return closure->properties.tag != KILN_VALUE_OBJECT ||
                    !kiln_c99_object_of(closure->properties)->frozen;
         }
@@ -417,8 +448,7 @@ static int kiln_c99_write_would_accept(kiln_value target, const char *key, size_
          * a)` then reported false and dropped the element, which is how a vue reactive effect
          * stopped seeing `push`: vue's array instrumentation forwards through the set trap with
          * `Reflect.set`, so the refusal swallowed the write and the dependency never fired. */
-        if (kiln_c99_same_name(key, key_len, "length") ||
-            kiln_c99_array_index(kiln_c99_value(KILN_VALUE_STRING, 0, key, key_len)) >= 0.0) {
+        if (kiln_c99_same_name_key(key, "length") || kiln_c99_key_index_key(key) >= 0.0) {
             return 1;
         }
         current = array->properties;
@@ -431,7 +461,7 @@ static int kiln_c99_write_would_accept(kiln_value target, const char *key, size_
         if (target.tag == KILN_VALUE_FUNCTION || target.tag == KILN_VALUE_ARRAY) {
             return 1;
         }
-        return target.tag == KILN_VALUE_REGEXP && kiln_c99_same_name(key, key_len, "lastIndex");
+        return target.tag == KILN_VALUE_REGEXP && kiln_c99_same_name_key(key, "lastIndex");
     }
     for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
         kiln_object *object = kiln_c99_object_of(current);
@@ -442,7 +472,7 @@ static int kiln_c99_write_would_accept(kiln_value target, const char *key, size_
         if (steps == 0 && object->frozen) {
             return 0;
         }
-        index = kiln_c99_own_index(object, ikey, key, key_len);
+        index = kiln_c99_own_index_key(object, stable, key);
         if (index != object->count) {
             const kiln_property *property = &object->properties[index];
             if (property->accessor) {
@@ -456,6 +486,15 @@ static int kiln_c99_write_would_accept(kiln_value target, const char *key, size_
         current = object->prototype;
     }
     return 1;
+}
+
+static int kiln_c99_write_would_accept(kiln_value target, const char *key, size_t key_len) {
+    kiln_string view;
+    if (key_len > UINT32_MAX) return 0;
+    view.unit_len = (uint32_t)key_len;
+    view.flags = KILN_STRING_LATIN1;
+    view.data = key;
+    return kiln_c99_write_would_accept_key(target, &view, NULL);
 }
 
 static int kiln_c99_reflect_set(kiln_host *host, kiln_value target, kiln_value key,
@@ -491,7 +530,7 @@ static int kiln_c99_reflect_set(kiln_host *host, kiln_value target, kiln_value k
     if (text.tag != KILN_VALUE_STRING) {
         KILN_C99_REFUSE("a computed property key that is neither a string nor a named symbol slot");
     }
-    if (!kiln_c99_write_would_accept(target, text.ptr, text.len)) {
+    if (!kiln_c99_write_would_accept_key(target, (const kiln_string *)text.ptr, NULL)) {
         *accepted = 0;
         return KILN_C99_OK;
     }
@@ -528,7 +567,8 @@ static int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_valu
     }
     object = kiln_c99_object_of(target);
     if (object->shape != NULL) {
-        double index_num = kiln_c99_key_index(text.ptr, text.len);
+        const kiln_string *text_key = (const kiln_string *)text.ptr;
+        double index_num = kiln_c99_key_index_key(text_key);
         if (index_num >= 0.0 && index_num < 100000.0) {
             size_t elem_idx = (size_t)index_num;
             if (elem_idx >= object->element_capacity) {
@@ -550,7 +590,7 @@ static int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_valu
             }
             return KILN_C99_OK;
         } else {
-            const char *ikey = kiln_c99_intern(text.ptr, text.len);
+            const kiln_string *ikey = kiln_c99_intern_key((const kiln_string *)text.ptr);
             uint32_t slot_idx;
             kiln_shape *next_shape;
             if (ikey == NULL) return KILN_C99_OUT_OF_MEMORY;
@@ -598,7 +638,7 @@ static int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_valu
     fallback_dict:
         kiln_c99_ensure_dictionary(object);
     }
-    status = kiln_c99_own_slot(target, text.ptr, text.len, &slot);
+    status = kiln_c99_own_slot_key(target, (const kiln_string *)text.ptr, NULL, &slot);
     if (status != KILN_C99_OK) {
         return status;
     }
@@ -614,7 +654,7 @@ static int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_valu
     slot->setter = kiln_c99_undefined();
     slot->value = value;
     slot->writable = 1;
-    slot->enumerable = !(text.len >= 2 && text.ptr[0] == '@' && text.ptr[1] == '@');
+    slot->enumerable = !kiln_c99_key_is_reserved((const kiln_string *)text.ptr);
     slot->configurable = 1;
     return KILN_C99_OK;
 }

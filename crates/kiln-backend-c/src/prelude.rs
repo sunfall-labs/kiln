@@ -1860,9 +1860,11 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
         proved_by: "an accessor with no getter: the language defines that read as undefined",
     },
     AbsentAnswer {
-        function: "kiln_c99_store_get",
+        function: "kiln_c99_store_get_key",
         sites: 1,
-        proved_by: "an accessor with no getter: the language defines that read as undefined",
+        proved_by: "an accessor with no getter: the language defines that read as undefined. \
+                    The site moved here with the headed store walk; kiln_c99_store_get in keys.c \
+                    remains a Latin1 adapter for fixed C names and holds no site",
     },
     AbsentAnswer {
         function: "kiln_c99_get_own_kind",
@@ -1879,7 +1881,7 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
                     scripts/native-surface-inventory.py --gate is what measures them",
     },
     AbsentAnswer {
-        function: "kiln_c99_get_ikey",
+        function: "kiln_c99_get_key",
         sites: 2,
         proved_by: "a hidden runtime slot no program can name, and -- THE WEAKEST ROW HERE -- a \
                     well-known symbol whose read reached a refusal. That second one is a \
@@ -2298,8 +2300,11 @@ const _: () = assert_refusals_name_themselves(
 /// argument has been shown to be a C string and this number raised, or it is rewritten as
 /// `kiln_c99_key_len`. The pass that set it classified all ninety sites on 2026-09-07: fourteen
 /// took a shape or property key and became `kiln_c99_key_len`, one became the property's stored
-/// `key_len`, and these are the rest.
-pub const C_STRING_LENGTH_SITES: usize = 78;
+/// `key_len`, and these are the rest. Site 79 is `kiln_c99_set_function_name`'s
+/// `prefix` (`"get"`/`"set"`/NULL at every caller in values.c): a genuine NUL-terminated
+/// C string literal, previously measured inside `kiln_c99_text_append_c`, now spelled
+/// out at the `kiln_c99_static_text(prefix, strlen(prefix))` call in definitions.c.
+pub const C_STRING_LENGTH_SITES: usize = 79;
 
 /// How far the `strlen(` scan may skip after reading the last byte of its seven-byte window:
 /// the Horspool shift, as `refusal_scan_shift` is for the refusal scan, so the const evaluator
@@ -2364,7 +2369,8 @@ pub fn builtin_surface_members(global: &str) -> Vec<&'static str> {
 
 macro_rules! header_prefix {
     () => {
-        r#"/* Kiln C99 backend: deterministic scalar unit. */
+        concat!(
+            r#"/* Kiln C99 backend: deterministic scalar unit. */
 /* `sigaction`, `SA_RESTART` and `write` are POSIX, and `-std=c99` puts glibc in strict-ANSI mode
  * where none of them is declared -- which shows up as `storage size of 'action' isn't known`, not
  * as a missing header. A feature-test macro has to be asked for before the first include, so this
@@ -2475,7 +2481,14 @@ macro_rules! header_prefix {
 #define KILN_RETAIN_GROUP_MATH_NUMBER 1
 #endif
 
-"#
+/* The 16-byte string header is load-bearing ABI shared by constants, GC storage and
+ * boundary values, so it is declared in the prefix: the static diagnostics below already
+ * hold a `const kiln_string *`, and both the single-TU header and the separate-prelude
+ * header start here. It is declared exactly once; the method-metadata section below
+ * only adds `kiln_value` and `prelude_types.h`. */
+"#,
+            kiln_native_runtime::kiln_string_abi_declaration!(),
+        )
     };
 }
 
@@ -2495,6 +2508,9 @@ static int kiln_c99_diagnostic_has_method = 0;
 static const char *kiln_c99_diagnostic_detail = NULL;
 static const char *kiln_c99_diagnostic_function = NULL;
 static size_t kiln_c99_diagnostic_function_len = 0;
+/* Generated and inferred function names remain canonical units until the diagnostic reaches its
+ * UTF-8 host boundary. Fixed runtime names may still use the legacy ASCII slot below. */
+static const kiln_string *kiln_c99_diagnostic_function_key = NULL;
 /* Composed text for a diagnostic that wants more than one name. `GetComputed` is the only
  * operation whose key is a value rather than a constant, so its refusal could not say which member
  * was read -- `operation=GetComputed` and nothing else. Written at the moment of failure, when
@@ -2609,6 +2625,7 @@ extern int kiln_c99_diagnostic_has_method;
 extern const char *kiln_c99_diagnostic_detail;
 extern const char *kiln_c99_diagnostic_function;
 extern size_t kiln_c99_diagnostic_function_len;
+extern const kiln_string *kiln_c99_diagnostic_function_key;
 extern char kiln_c99_diagnostic_compose[128];
 extern int kiln_c99_diagnostic_active_depth;
 
@@ -2642,6 +2659,7 @@ macro_rules! header_rest {
     kiln_c99_diagnostic_detail = NULL;
     kiln_c99_diagnostic_function = NULL;
     kiln_c99_diagnostic_function_len = 0;
+    kiln_c99_diagnostic_function_key = NULL;
 }
 
 /* THE OTHER HALF OF A REFUSAL, AND THE ONE THAT HAD NO CEREMONY.
@@ -3663,7 +3681,7 @@ static int kiln_c99_method_in_group(uint64_t code, uint32_t group) {
 }
 /* KILN_RUNTIME_ONLY_METHOD_GROUPS_END */
 "#,
-            concat!(kiln_native_runtime::kiln_value_abi_declaration!(), kiln_native_runtime::kiln_string_abi_declaration!(), include_str!("runtime/prelude_types.h")),
+            concat!(kiln_native_runtime::kiln_value_abi_declaration!(), include_str!("runtime/prelude_types.h")),
             kiln_native_number_abi::provider_abi_registry!(provider_c_declaration),
         )
     };
@@ -4247,14 +4265,14 @@ pub fn runtime_prelude_header() -> &'static str {
             "the prototype epoch's definition moved"
         );
         let json_document =
-            "static int kiln_c99_json_document(const char *bytes, size_t len, kiln_val *out);";
+            "static int kiln_c99_json_document(const kiln_string *source, kiln_val *out);";
         assert!(
             text.contains(json_document),
             "the JSON document bridge declaration moved"
         );
         text = text.replace(
             json_document,
-            "extern int kiln_c99_json_document(const char *bytes, size_t len, kiln_val *out);",
+            "extern int kiln_c99_json_document(const kiln_string *source, kiln_val *out);",
         );
         const ASCII_STRINGS_BEGIN: &str = "/* KILN_RUNTIME_ONLY_ASCII_STRINGS_BEGIN */";
         const ASCII_STRINGS_END: &str = "/* KILN_RUNTIME_ONLY_ASCII_STRINGS_END */";
@@ -4301,6 +4319,7 @@ fn build_runtime_prelude_source(src: &str) -> String {
         "kiln_c99_diagnostic_detail",
         "kiln_c99_diagnostic_function",
         "kiln_c99_diagnostic_function_len",
+        "kiln_c99_diagnostic_function_key",
         "kiln_c99_diagnostic_compose",
         "kiln_c99_diagnostic_active_depth",
         "kiln_c99_new_target",
@@ -4377,6 +4396,7 @@ pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_diagnostic_detail", C99StateOwner::Realm),
     ("kiln_c99_diagnostic_function", C99StateOwner::Realm),
     ("kiln_c99_diagnostic_function_len", C99StateOwner::Realm),
+    ("kiln_c99_diagnostic_function_key", C99StateOwner::Realm),
     ("kiln_c99_diagnostic_compose", C99StateOwner::Realm),
     ("kiln_c99_diagnostic_active_depth", C99StateOwner::Frame),
     ("kiln_c99_active_http_response", C99StateOwner::Frame),

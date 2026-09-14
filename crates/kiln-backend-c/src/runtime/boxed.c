@@ -519,7 +519,7 @@ static int kiln_c99_val_json_parse_fast(kiln_host *host, kiln_val val, kiln_val 
     }
     const kiln_string *s = (const kiln_string *)KILN_VAL_PTR(val);
     kiln_val parsed;
-    int status = kiln_c99_json_document(s ? s->data : "", s ? s->unit_len : 0, &parsed);
+    int status = kiln_c99_json_document(s, &parsed);
     if (status == KILN_C99_CONTROL_ERROR) {
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR, "Unexpected token in JSON");
     }
@@ -886,7 +886,12 @@ static int kiln_c99_read_property(kiln_host *host, kiln_value target,
             return KILN_C99_OK;
         }
     }
-    int status = kiln_c99_get_site(host, target, key, key_len, out, depth, thrown, site);
+    kiln_string view;
+    if (key_len > UINT32_MAX) return KILN_C99_INVALID_ARGUMENT;
+    view.unit_len = (uint32_t)key_len;
+    view.flags = KILN_STRING_LATIN1;
+    view.data = key;
+    int status = kiln_c99_get_site(host, target, &view, NULL, out, depth, thrown, site);
     if (site != NULL && status == KILN_C99_OK && out->tag == KILN_VALUE_METHOD && !site->has_cached_method) {
         if (target.tag == KILN_VALUE_STRING ||
             target.tag == KILN_VALUE_NUMBER ||
@@ -986,10 +991,11 @@ static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln
 }
 #endif
 
-static int kiln_c99_val_read_property(kiln_host *host, kiln_val target,
-                                      const char *key, size_t key_len,
-                                      int depth, kiln_value *thrown,
-                                      kiln_c99_site *site, kiln_val *out) {
+static int kiln_c99_val_read_property_view(kiln_host *host, kiln_val target,
+                                           const kiln_string *key,
+                                           const kiln_string *canonical, int depth,
+                                           kiln_value *thrown, kiln_c99_site *site,
+                                           kiln_val *out) {
     if (KILN_LIKELY(site != NULL && site->pic_count > 0 && KILN_VAL_IS_OBJECT(target))) {
         const kiln_object *object = (const kiln_object *)KILN_VAL_PTR(target);
         size_t p;
@@ -1007,16 +1013,35 @@ static int kiln_c99_val_read_property(kiln_host *host, kiln_val target,
     }
     kiln_value t = kiln_val_to_boundary(target);
     kiln_value o = kiln_c99_undefined();
-    int status = kiln_c99_read_property(host, t, key, key_len, depth, thrown, site, &o);
+    int status = kiln_c99_get_site(host, t, key, canonical, &o, depth, thrown, site);
     if (status == KILN_C99_OK) *out = kiln_val_from_boundary(o);
     return status;
 }
 
-static int kiln_c99_val_write_property(kiln_host *host, kiln_val target,
-                                       const char *key, size_t key_len,
-                                       kiln_val value, int strict,
-                                       int depth, kiln_value *thrown,
-                                       kiln_c99_site *site) {
+static int kiln_c99_val_read_property_key(kiln_host *host, kiln_val target,
+                                          const kiln_string *key, int depth,
+                                          kiln_value *thrown, kiln_c99_site *site,
+                                          kiln_val *out) {
+    return kiln_c99_val_read_property_view(host, target, key, key, depth, thrown, site, out);
+}
+
+static int kiln_c99_val_read_property(kiln_host *host, kiln_val target,
+                                      const char *key, size_t key_len,
+                                      int depth, kiln_value *thrown,
+                                      kiln_c99_site *site, kiln_val *out) {
+    kiln_string view;
+    if (key_len > UINT32_MAX) return KILN_C99_OUT_OF_MEMORY;
+    view.unit_len = (uint32_t)key_len;
+    view.flags = KILN_STRING_LATIN1;
+    view.data = key;
+    return kiln_c99_val_read_property_view(host, target, &view, NULL, depth, thrown, site, out);
+}
+
+static int kiln_c99_val_write_property_view(kiln_host *host, kiln_val target,
+                                            const kiln_string *key,
+                                            const kiln_string *canonical, kiln_val value,
+                                            int strict, int depth, kiln_value *thrown,
+                                            kiln_c99_site *site) {
     if (KILN_LIKELY(site != NULL && site->pic_count > 0 && KILN_VAL_IS_OBJECT(target))) {
         kiln_object *object = (kiln_object *)KILN_VAL_PTR(target);
         size_t p;
@@ -1030,7 +1055,8 @@ static int kiln_c99_val_write_property(kiln_host *host, kiln_val target,
                             kiln_c99_ensure_dictionary(object);
                             kiln_value t = kiln_val_to_boundary(target);
                             kiln_value v = kiln_val_to_boundary(value);
-                            return kiln_c99_write_property(host, t, key, key_len, v, strict, depth, thrown, site);
+                            return kiln_c99_put_site_key(host, t, key, canonical, v, strict,
+                                                         depth, thrown, site);
                         }
                         object->slots[site->entries[p].slot] = value;
                         return KILN_C99_OK;
@@ -1055,12 +1081,35 @@ static int kiln_c99_val_write_property(kiln_host *host, kiln_val target,
     }
     kiln_value t = kiln_val_to_boundary(target);
     kiln_value v = kiln_val_to_boundary(value);
-    return kiln_c99_write_property(host, t, key, key_len, v, strict, depth, thrown, site);
+    return kiln_c99_put_site_key(host, t, key, canonical, v, strict, depth, thrown, site);
+}
+
+static int kiln_c99_val_write_property_key(kiln_host *host, kiln_val target,
+                                           const kiln_string *key, kiln_val value, int strict,
+                                           int depth, kiln_value *thrown,
+                                           kiln_c99_site *site) {
+    return kiln_c99_val_write_property_view(host, target, key, key, value, strict, depth, thrown,
+                                             site);
+}
+
+static int kiln_c99_val_write_property(kiln_host *host, kiln_val target,
+                                       const char *key, size_t key_len,
+                                       kiln_val value, int strict,
+                                       int depth, kiln_value *thrown,
+                                       kiln_c99_site *site) {
+    kiln_string view;
+    if (key_len > UINT32_MAX) return KILN_C99_OUT_OF_MEMORY;
+    view.unit_len = (uint32_t)key_len;
+    view.flags = KILN_STRING_LATIN1;
+    view.data = key;
+    return kiln_c99_val_write_property_view(host, target, &view, NULL, value, strict, depth,
+                                            thrown, site);
 }
 
 static void kiln_c99_note_get_property_refusal(kiln_value target) {
     if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = target.tag;
-    if (target.tag == KILN_VALUE_BUILTIN && kiln_c99_diagnostic_function == NULL) {
+    if (target.tag == KILN_VALUE_BUILTIN && kiln_c99_diagnostic_function == NULL &&
+        kiln_c99_diagnostic_function_key == NULL) {
         const char *named = kiln_c99_builtin_name(target.bits);
         if (named != NULL) {
             kiln_c99_diagnostic_function = named;
@@ -1072,7 +1121,8 @@ static void kiln_c99_note_get_property_refusal(kiln_value target) {
 
 static void kiln_c99_note_get_computed_refusal(kiln_value target, kiln_value key) {
     if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = target.tag;
-    if (kiln_c99_diagnostic_function == NULL && kiln_c99_diagnostic_detail != kiln_c99_diagnostic_compose) {
+    if (kiln_c99_diagnostic_function == NULL && kiln_c99_diagnostic_function_key == NULL &&
+        kiln_c99_diagnostic_detail != kiln_c99_diagnostic_compose) {
         const char *named = target.tag == KILN_VALUE_BUILTIN ? kiln_c99_builtin_name(target.bits) : NULL;
         if (key.tag == KILN_VALUE_STRING && key.ptr != NULL) {
             uint8_t *key_owned = NULL;
@@ -1251,11 +1301,12 @@ static int kiln_c99_val_write_element(kiln_host *host, kiln_val target, kiln_val
  * boundary representation, and then only its arguments. This is the seam the shape and slot
  * migration left in front of every method call: the stack-shaped op below converts the whole
  * frame both ways and re-reads nothing, but it does convert. */
-static int kiln_c99_val_call_method(kiln_host *host, kiln_val receiver, const kiln_val *args,
-                                    size_t argc, const char *key, size_t key_len, int depth,
-                                    kiln_value *thrown, kiln_c99_site *site,
-                                    const char *inst_site, size_t inst_idx, const char *inst_op,
-                                    kiln_val *out) {
+static int kiln_c99_val_call_method_view(kiln_host *host, kiln_val receiver, const kiln_val *args,
+                                         size_t argc, const kiln_string *key,
+                                         const kiln_string *canonical, int depth,
+                                         kiln_value *thrown, kiln_c99_site *site,
+                                         const char *inst_site, size_t inst_idx,
+                                         const char *inst_op, kiln_val *out) {
     kiln_val method = 0;
     int from_cache = 0;
     if (KILN_LIKELY(kiln_c99_cached_method_matches(site, receiver))) {
@@ -1272,7 +1323,8 @@ static int kiln_c99_val_call_method(kiln_host *host, kiln_val receiver, const ki
     }
     int status = KILN_C99_OK;
     if (!from_cache) {
-        status = kiln_c99_val_read_property(host, receiver, key, key_len, depth, thrown, NULL, &method);
+        status = kiln_c99_val_read_property_view(host, receiver, key, canonical, depth, thrown,
+                                                 NULL, &method);
         if (status == KILN_C99_CONTROL_ERROR) {
             if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = kiln_val_to_boundary(receiver).tag;
             if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = "CallMethod property lookup refused";
@@ -1315,7 +1367,7 @@ static int kiln_c99_val_call_method(kiln_host *host, kiln_val receiver, const ki
                     uint32_t slot = UINT32_MAX;
                     int steps;
                     kiln_value link = object->prototype;
-                    const char *holder_key = NULL;
+                    const kiln_string *holder_key = NULL;
                     for (steps = 0; steps < 2 && link.tag == KILN_VALUE_OBJECT; ++steps) {
                         const kiln_object *candidate = (const kiln_object *)(uintptr_t)link.bits;
                         if (kiln_c99_gc_kind_of_ptr((void *)candidate) != KILN_GC_OBJECT) {
@@ -1337,8 +1389,7 @@ static int kiln_c99_val_call_method(kiln_host *host, kiln_val receiver, const ki
                             int seen = 0;
                             for (i = 0; i < candidate->count; ++i) {
                                 const kiln_property *property = &candidate->properties[i];
-                                if (property->key_len == key_len &&
-                                    memcmp(property->key, key, key_len) == 0) {
+                                if (property->key == key || kiln_string_equal(property->key, key)) {
                                     seen = 1;
                                     if (property->key == key && !property->accessor &&
                                         !property->refused &&
@@ -1427,6 +1478,31 @@ done:
     return status;
 }
 
+static int kiln_c99_val_call_method_key(kiln_host *host, kiln_val receiver, const kiln_val *args,
+                                        size_t argc, const kiln_string *key, int depth,
+                                        kiln_value *thrown, kiln_c99_site *site,
+                                        const char *inst_site, size_t inst_idx, const char *inst_op,
+                                        kiln_val *out) {
+    return kiln_c99_val_call_method_view(host, receiver, args, argc, key, key, depth, thrown, site,
+                                         inst_site, inst_idx, inst_op, out);
+}
+
+/* Keep the byte-shaped entry point for handwritten/runtime callers. Generated code uses the
+ * headed form above so a constant's storage header is never mistaken for its payload. */
+static int kiln_c99_val_call_method(kiln_host *host, kiln_val receiver, const kiln_val *args,
+                                    size_t argc, const char *key, size_t key_len, int depth,
+                                    kiln_value *thrown, kiln_c99_site *site,
+                                    const char *inst_site, size_t inst_idx, const char *inst_op,
+                                    kiln_val *out) {
+    kiln_string view;
+    if (key_len > UINT32_MAX) return KILN_C99_OUT_OF_MEMORY;
+    view.unit_len = (uint32_t)key_len;
+    view.flags = KILN_STRING_LATIN1;
+    view.data = key;
+    return kiln_c99_val_call_method_view(host, receiver, args, argc, &view, NULL, depth, thrown,
+                                         site, inst_site, inst_idx, inst_op, out);
+}
+
 /* A call on machine values. A plain closure is entered directly with the receiver the language
  * gives it: an arrow's captured `this`, the global object for sloppy code, `undefined` otherwise.
  * Anything else -- a built-in method, a generator, a bound or proxied callable -- crosses the
@@ -1498,7 +1574,8 @@ static int kiln_c99_val_new(kiln_host *host, kiln_val callee, const kiln_val *ar
     status = kiln_c99_construct(host, &built, bcallee, argc > 0 ? bargs : NULL, argc, depth, thrown);
     if (status == KILN_C99_CONTROL_ERROR) {
         if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = bcallee.tag;
-        if (bcallee.tag == KILN_VALUE_BUILTIN && kiln_c99_diagnostic_function == NULL) {
+        if (bcallee.tag == KILN_VALUE_BUILTIN && kiln_c99_diagnostic_function == NULL &&
+            kiln_c99_diagnostic_function_key == NULL) {
             const char *named = kiln_c99_builtin_name(bcallee.bits);
             if (named != NULL) {
                 kiln_c99_diagnostic_function = named;

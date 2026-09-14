@@ -49,32 +49,58 @@ static double kiln_c99_key_index(const char *key, size_t key_len) {
     return number;
 }
 
+static double kiln_c99_key_index_key(const kiln_string *key) {
+    char buffer[64];
+    size_t index;
+    if (key == NULL || key->unit_len == 0 || key->unit_len > 10) return -1.0;
+    for (index = 0; index < key->unit_len; ++index) {
+        uint32_t unit = kiln_string_unit_at(key, index);
+        if (unit > 0x7f) return -1.0;
+        buffer[index] = (char)unit;
+    }
+    return kiln_c99_key_index(buffer, key->unit_len);
+}
+
 static int kiln_c99_same_name(const char *key, size_t key_len, const char *name) {
     size_t len = strlen(name);
     return len == key_len && memcmp(key, name, len) == 0;
 }
 
+static int kiln_c99_same_name_key(const kiln_string *key, const char *name) {
+    size_t len = 0;
+    size_t index;
+    while (name[len] != '\0') ++len;
+    if (key == NULL || key->unit_len != len) return 0;
+    for (index = 0; index < len; ++index) {
+        if (kiln_string_unit_at(key, index) != (unsigned char)name[index]) return 0;
+    }
+    return 1;
+}
+
+static int kiln_c99_is_node_hidden_key_key(const kiln_string *key) {
+    static const char *const names[] = {
+        "@@node:socket", "@@node:server", "@@node:client", "@@node:response",
+        "@@node:lazy-headers", "@@kiln:node:is-file", "@@kiln:node:is-directory",
+    };
+    size_t index;
+    for (index = 0; index < sizeof names / sizeof names[0]; ++index) {
+        if (kiln_c99_same_name_key(key, names[index])) return 1;
+    }
+    return 0;
+}
+
+static int kiln_c99_same_key_view(const kiln_property *property, const kiln_string *key) {
+    return property != NULL && key != NULL &&
+           (property->key == key || kiln_string_equal(property->key, key));
+}
+
 static int kiln_c99_same_key(const kiln_property *property, const char *key, size_t key_len) {
-    if (property->key_len != key_len) {
-        return 0;
-    }
-    if (key_len == 0) {
-        return 1;
-    }
-    /* Two pointers into the same bytes are the same key -- trivially, not by assumption -- and
-     * are common: an emitted constant is one static array shared by every read and write of a
-     * given literal name, and a property that was itself interned this way keeps that pointer
-     * when it is looked up again by the same literal. Different pointers say nothing either way,
-     * which is why this falls through to a real comparison rather than refusing on the strength
-     * of not matching -- a dynamic key can hold the same bytes as an interned one at some other
-     * address. */
-    if (property->key == key) {
-        return 1;
-    }
-    if (property->key[0] != key[0]) {
-        return 0;
-    }
-    return memcmp(property->key, key, key_len) == 0;
+    kiln_string view;
+    if (key_len > UINT32_MAX) return 0;
+    view.unit_len = (uint32_t)key_len;
+    view.flags = KILN_STRING_LATIN1;
+    view.data = key;
+    return kiln_c99_same_key_view(property, &view);
 }
 
 /* The slot on `object` holding the canonical key `ikey`, or `object->count` when there is none.
@@ -83,14 +109,14 @@ static int kiln_c99_same_key(const kiln_property *property, const char *key, siz
  * key no object has: the scan is skipped rather than run. `KILN_KEYS_CHECK=1` re-runs it by
  * bytes and aborts on a disagreement, which is how "every stored key is interned" is tested
  * rather than assumed. */
-static size_t kiln_c99_own_index(const kiln_object *object, const char *ikey, const char *key,
-                                 size_t key_len) {
+static size_t kiln_c99_own_index_key(const kiln_object *object, const kiln_string *ikey,
+                                     const kiln_string *key) {
     size_t index;
     size_t found;
     if (object->shape != NULL) {
         kiln_c99_ensure_dictionary((kiln_object *)object);
         if (ikey == NULL) {
-            ikey = kiln_c99_interned_in(kiln_c99_gc_heap(), key, key_len);
+            ikey = kiln_c99_interned_key_in(kiln_c99_gc_heap(), key);
         }
     }
     found = object->count;
@@ -103,8 +129,7 @@ static size_t kiln_c99_own_index(const kiln_object *object, const char *ikey, co
         }
     } else {
         for (index = 0; index < object->count; ++index) {
-            if (object->properties[index].key_len == key_len &&
-                memcmp(object->properties[index].key, key, key_len) == 0) {
+            if (kiln_c99_same_key_view(&object->properties[index], key)) {
                 found = index;
                 break;
             }
@@ -113,14 +138,18 @@ static size_t kiln_c99_own_index(const kiln_object *object, const char *ikey, co
     if (kiln_c99_keys_checked()) {
         size_t by_bytes = object->count;
         for (index = 0; index < object->count; ++index) {
-            if (kiln_c99_same_key(&object->properties[index], key, key_len)) {
+            if (kiln_c99_same_key_view(&object->properties[index], key)) {
                 by_bytes = index;
                 break;
             }
         }
         if (by_bytes != found) {
             fputs("kiln: interned-key invariant broken for `", stderr);
-            fwrite(key, 1, key_len, stderr);
+            if (key != NULL && !kiln_string_is_utf16(key)) {
+                fwrite(kiln_string_latin1(key), 1, key->unit_len, stderr);
+            } else {
+                fputs("<utf16>", stderr);
+            }
             fputs(found == object->count ? "`: stored under a non-canonical pointer\n"
                                          : "`: two slots answer one key\n",
                   stderr);
@@ -128,6 +157,16 @@ static size_t kiln_c99_own_index(const kiln_object *object, const char *ikey, co
         }
     }
     return found;
+}
+
+static size_t kiln_c99_own_index(const kiln_object *object, const kiln_string *ikey,
+                                 const char *key, size_t key_len) {
+    kiln_string view;
+    if (key_len > UINT32_MAX) return object->count;
+    view.unit_len = (uint32_t)key_len;
+    view.flags = KILN_STRING_LATIN1;
+    view.data = key;
+    return kiln_c99_own_index_key(object, ikey, &view);
 }
 
 static int kiln_c99_has_inherited_setter_or_readonly(kiln_value proto) {
@@ -149,16 +188,31 @@ static int kiln_c99_has_inherited_setter_or_readonly(kiln_value proto) {
 
 /* A write to an existing key replaces it in place, so insertion order is the order of first
  * appearance -- which is the order `Object.keys` reports and the order a console prints. */
+/* `ikey` as for `kiln_c99_get_ikey`: a compiled site's canonical pointer, or NULL to look it
+ * up. The headed form is the semantic implementation; fixed C names use the adapter below. */
+static int kiln_c99_own_slot_key(kiln_value target, const kiln_string *key,
+                                 const kiln_string *ikey, kiln_property **out);
+
+static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_string *key,
+                                 const kiln_string *ikey, kiln_value value, int strict,
+                                 int depth, kiln_value *thrown);
+
 static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                              kiln_value value, int strict, int depth, kiln_value *thrown) {
-    return kiln_c99_put_mode_ikey(host, target, key, key_len, NULL, value, strict, depth, thrown);
+    kiln_string view;
+    if (key_len > UINT32_MAX) return KILN_C99_OUT_OF_MEMORY;
+    view.unit_len = (uint32_t)key_len;
+    view.flags = KILN_STRING_LATIN1;
+    view.data = key;
+    return kiln_c99_put_mode_key(host, target, &view, NULL, value, strict, depth, thrown);
 }
 
-/* `ikey` as for `kiln_c99_get_ikey`: a compiled site's canonical pointer, or NULL to look it
- * up. */
-static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char *key,
-                                  size_t key_len, const char *ikey, kiln_value value, int strict,
-                                  int depth, kiln_value *thrown) {
+/* Byte callers above are fixed-name adapters. They never hand their borrowed view to user code:
+ * the headed implementation interns before a proxy trap or a property is retained. */
+static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_string *key,
+                                 const kiln_string *ikey, kiln_value value, int strict,
+                                 int depth, kiln_value *thrown) {
+    const kiln_string *stable_key = ikey;
     if (target.tag == KILN_VALUE_OBJECT) kiln_c99_prototype_touched(kiln_c99_object_of(target));
     kiln_object *object;
     size_t index;
@@ -167,24 +221,27 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
      * but they are not JavaScript properties.  A program can spell the key as a string, so hide
      * and ignore these protocol slots explicitly instead of exposing a C pointer as an object or
      * allowing an assignment to replace it. */
-    if (kiln_c99_is_node_hidden_key(key, key_len)) {
+    if (kiln_c99_is_node_hidden_key_key(key)) {
         return KILN_C99_OK;
     }
     if (target.tag == KILN_VALUE_PROXY) {
         /* Writing to a proxy is a call, exactly as reading one is. */
+        if (stable_key == NULL) stable_key = kiln_c99_intern_key(key);
+        if (stable_key == NULL) return KILN_C99_OUT_OF_MEMORY;
         return kiln_c99_proxy_set(host, target,
-                                  kiln_c99_value(KILN_VALUE_STRING, 0, key, key_len), value,
-                                  strict, depth, thrown);
+                                  kiln_c99_value(KILN_VALUE_STRING, 0,
+                                                 (const char *)stable_key, stable_key->unit_len),
+                                  value, strict, depth, thrown);
     }
     if (target.tag == KILN_VALUE_FUNCTION) {
         kiln_closure *closure = kiln_c99_closure_of(target);
         /* `f.prototype = {...}` replaces the object `new f()` links instances to, which is a
          * slot on the closure rather than an ordinary property -- a write that landed in the
          * store would be read back by `f.prototype` and ignored by `new`. */
-        if (kiln_c99_same_name(key, key_len, "prototype")) {
+        if (kiln_c99_same_name_key(key, "prototype")) {
             if (closure->properties.tag == KILN_VALUE_OBJECT &&
                 kiln_c99_object_of(closure->properties)->frozen) {
-                return strict ? kiln_c99_throw_read_only(thrown, key, key_len) : KILN_C99_OK;
+                return strict ? kiln_c99_throw_read_only_key(thrown, key) : KILN_C99_OK;
             }
             closure->prototype = value;
             return KILN_C99_OK;
@@ -195,17 +252,17 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
                 return status;
             }
         }
-        return kiln_c99_put_mode(host, closure->properties, key, key_len, value, strict, depth,
-                                 thrown);
+        return kiln_c99_put_mode_key(host, closure->properties, key, ikey, value, strict, depth,
+                                     thrown);
     }
     if (target.tag == KILN_VALUE_METHOD || target.tag == KILN_VALUE_BUILTIN ||
         target.tag == KILN_VALUE_BOUND) {
         kiln_value store;
         status = kiln_c99_callable_store(target, &store, 1);
         if (status != KILN_C99_OK) return status;
-        return kiln_c99_put_mode(host, store, key, key_len, value, strict, depth, thrown);
+        return kiln_c99_put_mode_key(host, store, key, ikey, value, strict, depth, thrown);
     }
-    if (target.tag == KILN_VALUE_REGEXP && kiln_c99_same_name(key, key_len, "lastIndex")) {
+    if (target.tag == KILN_VALUE_REGEXP && kiln_c99_same_name_key(key, "lastIndex")) {
         /* The one property of a regexp a program may write, and the reason two evaluations of one
          * literal must not share a `kiln_regexp`. */
         kiln_c99_regexp_of(target)->last_index = kiln_c99_as_number(value);
@@ -215,7 +272,7 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
         /* An array is not an object here, but it can still carry a property that is not an
          * element -- which is how `exec` reports `index` and `input`. */
         kiln_array *array = kiln_c99_array_of(target);
-        if (kiln_c99_same_name(key, key_len, "length")) {
+        if (kiln_c99_same_name_key(key, "length")) {
             /* `length` is derived, not stored, so writing it is a resize: truncating drops the
              * tail and growing fills with holes, which are not undefined elements. */
             double wanted = kiln_c99_as_number(value);
@@ -226,7 +283,7 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
                                             "Invalid array length");
             }
             if (array->frozen) {
-                return strict ? kiln_c99_throw_read_only(thrown, key, key_len) : KILN_C99_OK;
+                return strict ? kiln_c99_throw_read_only_key(thrown, key) : KILN_C99_OK;
             }
             if ((size_t)wanted <= array->count) {
                 array->count = (size_t)wanted;
@@ -253,7 +310,7 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
             return KILN_C99_OK;
         }
         if (array->frozen) {
-            return strict ? kiln_c99_throw_read_only(thrown, key, key_len) : KILN_C99_OK;
+            return strict ? kiln_c99_throw_read_only_key(thrown, key) : KILN_C99_OK;
         }
         if (array->properties.tag != KILN_VALUE_OBJECT) {
             status = kiln_c99_new_object(&array->properties);
@@ -261,8 +318,8 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
                 return status;
             }
         }
-        return kiln_c99_put_mode(host, array->properties, key, key_len, value, strict, depth,
-                                 thrown);
+        return kiln_c99_put_mode_key(host, array->properties, key, ikey, value, strict, depth,
+                                     thrown);
     }
     if (target.tag == KILN_VALUE_COLLECTION) {
         kiln_collection *collection = kiln_c99_collection_of(target);
@@ -272,8 +329,8 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
                 return status;
             }
         }
-        return kiln_c99_put_mode(host, collection->properties, key, key_len, value, strict, depth,
-                                 thrown);
+        return kiln_c99_put_mode_key(host, collection->properties, key, ikey, value, strict, depth,
+                                     thrown);
     }
     if (target.tag == KILN_VALUE_PROMISE) {
         kiln_promise *promise = kiln_c99_promise_of(target);
@@ -283,8 +340,8 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
                 return status;
             }
         }
-        return kiln_c99_put_mode(host, promise->properties, key, key_len, value, strict, depth,
-                                 thrown);
+        return kiln_c99_put_mode_key(host, promise->properties, key, ikey, value, strict, depth,
+                                     thrown);
     }
     if (target.tag != KILN_VALUE_OBJECT) {
         /* A primitive has nowhere to put a property, and every module is strict, so the language
@@ -302,23 +359,23 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
     }
     object = kiln_c99_object_of(target);
     if (object->module_namespace) {
-        return strict ? kiln_c99_throw_module_namespace_write(thrown, key, key_len)
+        return strict ? kiln_c99_throw_module_namespace_write_key(thrown, key)
                        : KILN_C99_OK;
     }
     if (object->frozen) {
-        return strict ? kiln_c99_throw_read_only(thrown, key, key_len) : KILN_C99_OK;
+        return strict ? kiln_c99_throw_read_only_key(thrown, key) : KILN_C99_OK;
     }
     /* Interned here, once, rather than looked up here and interned again in `own_slot` when
      * the write turns out to create the property: a fresh object being filled by the prelude --
      * a request, a response, a URL -- is a run of new-key writes, and each was paying two
      * hashes. A refused write leaves a weak entry behind, which the next collection drops. */
     if (ikey == NULL) {
-        ikey = kiln_c99_intern(key, key_len);
+        ikey = kiln_c99_intern_key(key);
         if (ikey == NULL) {
             return KILN_C99_OUT_OF_MEMORY;
         }
     }
-    if (kiln_c99_same_name(key, key_len, "__proto__") &&
+    if (kiln_c99_same_name_key(key, "__proto__") &&
         object->prototype.tag != KILN_VALUE_NULL) {
         /* The other half of the accessor above: a write relinks the object instead of giving it
          * a property called `__proto__`. A primitive is ignored rather than refused, which is the
@@ -340,7 +397,7 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
     /* Fast path for shape-based objects (ADR 0050) */
     if (object->shape != NULL) {
         if (object->elements != NULL) {
-            double index_num = kiln_c99_key_index(key, key_len);
+            double index_num = kiln_c99_key_index_key(key);
             if (index_num >= 0.0 && index_num < 100000.0) {
                 size_t elem_idx = (size_t)index_num;
                 if (elem_idx < object->element_count && object->elements[elem_idx] != KILN_VAL_HOLE) {
@@ -355,7 +412,7 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
                 if ((object->shape->double_slots_mask & (1u << slot)) &&
                     value.tag != KILN_VALUE_NUMBER) {
                     kiln_c99_ensure_dictionary(object);
-                    return kiln_c99_put_mode_ikey(host, target, key, key_len, ikey, value, strict, depth, thrown);
+                    return kiln_c99_put_mode_key(host, target, key, ikey, value, strict, depth, thrown);
                 }
                 object->slots[slot] = kiln_val_from_boundary(value);
                 return KILN_C99_OK;
@@ -363,7 +420,7 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
         } else if (!object->not_extensible &&
                    (object->prototype.tag == KILN_VALUE_UNDEFINED ||
                     !kiln_c99_has_inherited_setter_or_readonly(object->prototype))) {
-            double index_num = kiln_c99_key_index(key, key_len);
+            double index_num = kiln_c99_key_index_key(key);
             if (index_num < 0.0) {
                 kiln_shape *next_shape = NULL;
                 int is_double = (value.tag == KILN_VALUE_NUMBER);
@@ -422,20 +479,20 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
     if (object->shape != NULL) {
         kiln_c99_ensure_dictionary(object);
     }
-    index = kiln_c99_own_index(object, ikey, key, key_len);
+        index = kiln_c99_own_index_key(object, ikey, key);
     if (index != object->count) {
         if (!object->properties[index].accessor) {
             /* A refused write is observable only in strict code. */
             if (object->properties[index].writable) {
                 object->properties[index].value = value;
             } else if (strict) {
-                return kiln_c99_throw_read_only(thrown, key, key_len);
+                return kiln_c99_throw_read_only_key(thrown, key);
             }
             return KILN_C99_OK;
         }
         if (object->properties[index].setter.tag == KILN_VALUE_UNDEFINED) {
             if (strict) {
-                return kiln_c99_throw_read_only(thrown, key, key_len);
+                return kiln_c99_throw_read_only_key(thrown, key);
             }
             return KILN_C99_OK;
         }
@@ -461,11 +518,11 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
             }
             walked = kiln_c99_object_of(current);
             if (walked->accessor_count != 0 || walked->read_only_seen) {
-                index = kiln_c99_own_index(walked, ikey, key, key_len);
+                index = kiln_c99_own_index_key(walked, ikey, key);
                 if (index != walked->count) {
                     if (!walked->properties[index].accessor) {
                         if (!walked->properties[index].writable) {
-                            return strict ? kiln_c99_throw_read_only(thrown, key, key_len)
+                            return strict ? kiln_c99_throw_read_only_key(thrown, key)
                                            : KILN_C99_OK;
                         }
                         /* A writable data property up the chain: nothing intercepts, and the
@@ -474,7 +531,7 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
                     }
                     if (walked->properties[index].setter.tag == KILN_VALUE_UNDEFINED) {
                         if (strict) {
-                            return kiln_c99_throw_read_only(thrown, key, key_len);
+                            return kiln_c99_throw_read_only_key(thrown, key);
                         }
                         return KILN_C99_OK;
                     }
@@ -495,17 +552,28 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
          * set means this key would be a new one. The wording is the frozen write's on purpose:
          * the interpreter words both the same, and `error.message` is program-visible. */
         if (object->not_extensible) {
-            if (kiln_c99_own_index(object, ikey, key, key_len) == object->count) {
-                return strict ? kiln_c99_throw_read_only(thrown, key, key_len) : KILN_C99_OK;
+            if (kiln_c99_own_index_key(object, ikey, key) == object->count) {
+                return strict ? kiln_c99_throw_read_only_key(thrown, key) : KILN_C99_OK;
             }
         }
-        status = kiln_c99_own_slot_ikey(target, key, key_len, ikey, &slot);
+        status = kiln_c99_own_slot_key(target, key, ikey, &slot);
         if (status != KILN_C99_OK) {
             return status;
         }
         slot->value = value;
     }
     return KILN_C99_OK;
+}
+
+static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char *key,
+                                  size_t key_len, const kiln_string *ikey, kiln_value value,
+                                  int strict, int depth, kiln_value *thrown) {
+    kiln_string view;
+    if (key_len > UINT32_MAX) return KILN_C99_OUT_OF_MEMORY;
+    view.unit_len = (uint32_t)key_len;
+    view.flags = KILN_STRING_LATIN1;
+    view.data = key;
+    return kiln_c99_put_mode_key(host, target, &view, ikey, value, strict, depth, thrown);
 }
 
 static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
@@ -522,18 +590,37 @@ static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
  *
  * A fresh slot is what an assignment would have made: writable, configurable, enumerable, data.
  * A definition then overwrites exactly the fields its descriptor mentions. */
+static int kiln_c99_own_slot_key(kiln_value target, const kiln_string *key,
+                                 const kiln_string *ikey, kiln_property **out);
+
 static int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len,
                              kiln_property **out) {
-    return kiln_c99_own_slot_ikey(target, key, key_len, NULL, out);
+    kiln_string view;
+    if (key_len > UINT32_MAX) return KILN_C99_OUT_OF_MEMORY;
+    view.unit_len = (uint32_t)key_len;
+    view.flags = KILN_STRING_LATIN1;
+    view.data = key;
+    return kiln_c99_own_slot_key(target, &view, NULL, out);
 }
 
 /* `ikey` is the canonical pointer when the caller holds one that is already in the table -- a
  * compiled site's, or a write path's successful lookup -- or NULL to intern here. */
 static int kiln_c99_own_slot_ikey(kiln_value target, const char *key, size_t key_len,
-                                  const char *ikey, kiln_property **out) {
+                                  const kiln_string *ikey, kiln_property **out) {
+    kiln_string view;
+    if (key_len > UINT32_MAX) return KILN_C99_OUT_OF_MEMORY;
+    view.unit_len = (uint32_t)key_len;
+    view.flags = KILN_STRING_LATIN1;
+    view.data = key;
+    return kiln_c99_own_slot_key(target, &view, ikey, out);
+}
+
+static int kiln_c99_own_slot_key(kiln_value target, const kiln_string *key,
+                                 const kiln_string *ikey, kiln_property **out) {
     kiln_object *object;
     size_t index;
     int status;
+    size_t key_len = key == NULL ? 0 : key->unit_len;
     if (target.tag != KILN_VALUE_OBJECT) {
         KILN_C99_REFUSE("an own-slot lookup on a value that is not an ordinary object");
     }
@@ -544,12 +631,12 @@ static int kiln_c99_own_slot_ikey(kiln_value target, const char *key, size_t key
     /* The one place a key is stored, so the one place interning has to be total (ADR 0047):
      * whatever spelling arrived, the property carries the realm's canonical pointer for it. */
     if (ikey == NULL) {
-        ikey = kiln_c99_intern(key, key_len);
+        ikey = kiln_c99_intern_key(key);
         if (ikey == NULL) {
             return KILN_C99_OUT_OF_MEMORY;
         }
     }
-    index = kiln_c99_own_index(object, ikey, key, key_len);
+    index = kiln_c99_own_index_key(object, ikey, key);
     if (index != object->count) {
         *out = &object->properties[index];
         return KILN_C99_OK;
@@ -564,12 +651,11 @@ static int kiln_c99_own_slot_ikey(kiln_value target, const char *key, size_t key
      * the order a console prints and the order `Object.keys` would report -- keeping the list
      * sorted on insert means nothing downstream has to re-derive it. */
     {
-        double slot_index = kiln_c99_key_index(key, key_len);
+        double slot_index = kiln_c99_key_index_key(key);
         size_t position = object->count;
         if (slot_index >= 0.0) {
             for (index = 0; index < object->count; ++index) {
-                double existing = kiln_c99_key_index(object->properties[index].key,
-                                                     object->properties[index].key_len);
+                double existing = kiln_c99_key_index_key(object->properties[index].key);
                 if (existing < 0.0 || existing > slot_index) {
                     break;
                 }
@@ -580,14 +666,14 @@ static int kiln_c99_own_slot_ikey(kiln_value target, const char *key, size_t key
             object->properties[index] = object->properties[index - 1];
         }
         object->properties[position].key = ikey;
-        object->properties[position].key_len = key_len;
+        object->properties[position].key_len = ikey == NULL ? key_len : ikey->unit_len;
         /* A `@@` key is the machine's, not the program's: a private member, an error's kind, a
          * combinator's bookkeeping. Nothing that enumerates own string properties may see one, and
          * marking it here is one place rather than at each of the seven walks. The program cannot
          * spell such a key -- `obj["@@x"]` is a different property only because nothing in the
          * language produces this prefix. */
         object->properties[position].enumerable =
-            !(key_len >= 2 && key[0] == '@' && key[1] == '@');
+            !kiln_c99_key_is_reserved(ikey);
         object->properties[position].writable = 1;
         object->properties[position].configurable = 1;
         object->properties[position].symbol_hidden = 0;
@@ -631,7 +717,7 @@ static int kiln_c99_own_data(kiln_value target, const char *key, size_t key_len,
  *
  * Lazy rather than filled at heap init, so nothing depends on the order in which a realm brings
  * its heap up; a NULL slot simply means "not yet", and the first request through pays for it. */
-static const char *kiln_c99_hot_key(int id) {
+static const kiln_string *kiln_c99_hot_key(int id) {
     kiln_gc_heap *heap = kiln_c99_gc_heap();
     /* A `@@` name is a reserved slot reached through a Symbol, not a string key, and it is
      * resolved by a path this table knows nothing about. Interning one as a string and handing the

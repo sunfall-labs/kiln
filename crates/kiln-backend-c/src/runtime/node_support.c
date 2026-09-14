@@ -196,8 +196,8 @@ static int kiln_c99_node_dns_lookup(kiln_host *host, kiln_value *out,
     }
     status = kiln_c99_new_array(&addresses);
     if (status != KILN_C99_OK) return status;
-    if ((name.len == 9 && memcmp(name.ptr, "localhost", 9) == 0) ||
-        (name.len == 9 && memcmp(name.ptr, "127.0.0.1", 9) == 0)) {
+    if (kiln_c99_string_equals_ascii(name, "localhost", 9) ||
+        kiln_c99_string_equals_ascii(name, "127.0.0.1", 9)) {
         kiln_value address;
         status = kiln_c99_new_object(&address);
         if (status == KILN_C99_OK)
@@ -207,8 +207,8 @@ static int kiln_c99_node_dns_lookup(kiln_host *host, kiln_value *out,
             status = kiln_c99_put(NULL, address, "family", 6, kiln_c99_number(4.0), 0, NULL);
         if (status == KILN_C99_OK) status = kiln_c99_array_push(addresses, address);
     }
-    if ((name.len == 9 && memcmp(name.ptr, "localhost", 9) == 0) ||
-        (name.len == 3 && memcmp(name.ptr, "::1", 3) == 0)) {
+    if (kiln_c99_string_equals_ascii(name, "localhost", 9) ||
+        kiln_c99_string_equals_ascii(name, "::1", 3)) {
         kiln_value address;
         status = kiln_c99_new_object(&address);
         if (status == KILN_C99_OK)
@@ -329,6 +329,7 @@ static int kiln_c99_node_util(kiln_host *host, kiln_value *out, uint64_t code,
     }
     if (code == KILN_C99_METHOD_NODE_UTIL_FORMAT) {
         kiln_text built = {NULL, 0, 0};
+        uint8_t *format_bytes = NULL;
         size_t next = 1;
         if (argc == 0) {
             *out = kiln_c99_copy_text("", 0);
@@ -345,13 +346,20 @@ static int kiln_c99_node_util(kiln_host *host, kiln_value *out, uint64_t code,
                 }
             }
         } else {
-            for (index = 0; index < args[0].len; ++index) {
-                char character = args[0].ptr[index];
-                if (character != '%' || index + 1 >= args[0].len) {
+            size_t format_len = 0;
+            int format_status = kiln_c99_string_to_utf8_lossy(args[0], &format_bytes,
+                                                               &format_len);
+            if (format_status != KILN_C99_OK) {
+                free(built.bytes);
+                return format_status;
+            }
+            for (index = 0; index < format_len; ++index) {
+                char character = (char)format_bytes[index];
+                if (character != '%' || index + 1 >= format_len) {
                     if (kiln_c99_text_append(&built, &character, 1) != KILN_C99_OK) goto format_oom;
                     continue;
                 }
-                character = args[0].ptr[++index];
+                character = (char)format_bytes[++index];
                 if (character == '%') {
                     if (kiln_c99_text_append_c(&built, "%") != KILN_C99_OK) goto format_oom;
                     continue;
@@ -378,6 +386,8 @@ static int kiln_c99_node_util(kiln_host *host, kiln_value *out, uint64_t code,
                     }
                 }
             }
+            free(format_bytes);
+            format_bytes = NULL;
             while (next < argc) {
                 kiln_value shown = kiln_c99_inspect(args[next++]);
                 if (kiln_c99_text_append_c(&built, " ") != KILN_C99_OK ||
@@ -389,6 +399,7 @@ static int kiln_c99_node_util(kiln_host *host, kiln_value *out, uint64_t code,
         *out = kiln_c99_text_value(&built);
         return KILN_C99_OK;
 format_oom:
+        free(format_bytes);
         free(built.bytes);
         return KILN_C99_OUT_OF_MEMORY;
     }

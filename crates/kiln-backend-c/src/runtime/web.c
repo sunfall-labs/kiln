@@ -410,26 +410,33 @@ static int kiln_c99_node_querystring_parse(kiln_value *out, const kiln_value *ar
         if (object->shape != NULL) {
             kiln_c99_ensure_dictionary(object);
         }
-        for (index = 0; index < object->count; ++index) {
-            if (kiln_c99_same_key(&object->properties[index], name.ptr, name.len)) {
-                property = &object->properties[index];
-                break;
+        /* The decoded names are headed values; the byte adapters would read the headers
+         * as key bytes. A non-string here is only the out-of-memory undefined. */
+        {
+            const kiln_string *name_key =
+                name.tag == KILN_VALUE_STRING ? (const kiln_string *)name.ptr : NULL;
+            if (name_key == NULL) KILN_QUERYSTRING_RETURN(KILN_C99_OUT_OF_MEMORY);
+            for (index = 0; index < object->count; ++index) {
+                if (kiln_c99_same_key_view(&object->properties[index], name_key)) {
+                    property = &object->properties[index];
+                    break;
+                }
             }
-        }
-        if (property == NULL) {
-            status = kiln_c99_own_slot(*out, name.ptr, name.len, &property);
-            if (status == KILN_C99_OK) property->value = value;
-        } else {
-            kiln_value previous = property->value;
-            kiln_c99_gc_release((void *)name.ptr);
-            if (previous.tag == KILN_VALUE_ARRAY) {
-                status = kiln_c99_array_push(previous, value);
+            if (property == NULL) {
+                status = kiln_c99_own_slot_key(*out, name_key, NULL, &property);
+                if (status == KILN_C99_OK) property->value = value;
             } else {
-                kiln_value values;
-                status = kiln_c99_new_array(&values);
-                if (status == KILN_C99_OK) status = kiln_c99_array_push(values, previous);
-                if (status == KILN_C99_OK) status = kiln_c99_array_push(values, value);
-                if (status == KILN_C99_OK) property->value = values;
+                kiln_value previous = property->value;
+                kiln_c99_gc_release((void *)name.ptr);
+                if (previous.tag == KILN_VALUE_ARRAY) {
+                    status = kiln_c99_array_push(previous, value);
+                } else {
+                    kiln_value values;
+                    status = kiln_c99_new_array(&values);
+                    if (status == KILN_C99_OK) status = kiln_c99_array_push(values, previous);
+                    if (status == KILN_C99_OK) status = kiln_c99_array_push(values, value);
+                    if (status == KILN_C99_OK) property->value = values;
+                }
             }
         }
         if (status != KILN_C99_OK) KILN_QUERYSTRING_RETURN(status);

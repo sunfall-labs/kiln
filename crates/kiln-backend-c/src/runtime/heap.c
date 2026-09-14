@@ -142,13 +142,12 @@ static void kiln_c99_gc_aligned_free(void *aligned);
  * (`JSON.parse('{"a\\u0000b":1}')`, a registry symbol's binary id), and the collector's
  * interior-pointer fallback for strings already looks one header back from the bytes. The
  * trailing NUL stays so a `%s` diagnostic keeps working; it is not the length. */
-static inline size_t kiln_c99_key_len(const char *ikey) {
-    return ((const kiln_string *)ikey - 1)->unit_len;
+static inline size_t kiln_c99_key_len(const kiln_string *ikey) {
+    return ikey == NULL ? 0 : ikey->unit_len;
 }
 
 typedef struct kiln_key_entry {
-    const char *bytes; /* NULL when the slot is empty */
-    size_t len;
+    const kiln_string *string; /* NULL when the slot is empty */
     uint64_t hash;
     int pinned;
 } kiln_key_entry;
@@ -293,7 +292,7 @@ typedef struct kiln_gc_heap {
     /* Canonical pointers for the keys the HTTP path writes on every request and response. See
      * KILN_C99_HOT_KEYS. NULL means "not interned in this heap yet"; the table is per-heap
      * because a canonical pointer from one realm means nothing in another. */
-    const char *hot_keys[KILN_C99_HOT_KEY_COUNT];
+    const kiln_string *hot_keys[KILN_C99_HOT_KEY_COUNT];
     /* Mid-turn collection (perf/gc-mid-turn). The collector used to run only between turns,
      * when no frame of the program is live and the realm's roots are the whole root set. A
      * synchronous loop then never had its garbage reclaimed: it spilled out of the nursery into
@@ -1763,11 +1762,13 @@ static void *kiln_c99_gc_calloc(uint32_t kind, size_t size) {
 /* The empty key, headed like every other so `kiln_c99_key_len` reads zero from it. */
 static const struct kiln_c99_key_empty_storage {
     kiln_string header;
-    char bytes[8];
-} kiln_c99_key_empty_storage = {{0, 0, kiln_c99_key_empty_storage.bytes}, ""};
-#define kiln_c99_key_empty (kiln_c99_key_empty_storage.bytes)
+    uint8_t bytes[1];
+} kiln_c99_key_empty_storage = {{0, KILN_STRING_LATIN1, kiln_c99_key_empty_storage.bytes}, {0}};
+#define kiln_c99_key_empty (&kiln_c99_key_empty_storage.header)
 static void kiln_c99_gc_mark_block(kiln_gc_heap *heap, const void *payload);
-static char *kiln_c99_gc_alloc_text_tenured(size_t len);
+static kiln_string *kiln_c99_gc_alloc_key_copy(const kiln_string *view);
+static const kiln_string *kiln_c99_intern_key(const kiln_string *string);
+static const kiln_string *kiln_c99_intern_static_key(const kiln_string *string);
 
 /* `KILN_KEYS_CHECK=1`: every pointer-identity scan is re-run by bytes and a disagreement aborts
  * naming the key. The acceptance test for "interning is total", not a mode to ship. Read once
@@ -1783,42 +1784,40 @@ static int kiln_c99_keys_checked(void) {
     return kiln_c99_keys_check_mode;
 }
 
-static uint64_t kiln_c99_key_hash(const char *bytes, size_t len) {
-    /* Eight bytes at a time, because nearly every key is shorter than sixteen.
-     *
-     * FNV-1a walked a byte per iteration and each multiply waited on the one before it, so a
-     * ten-character header name cost ten dependent multiplies before the probe could start.
-     * Interning was 4.79% of the mixed server workload with `kiln_c99_intern` the second most
-     * expensive function in the prelude, and this is most of what it was doing: the keys that
-     * reach it are the ones off the wire, hashed fresh on every request.
-     *
-     * The mixing constant and the shift are murmur3's finaliser, which is where the avalanche
-     * comes from -- the table masks the low bits, so a hash whose low bits track the input would
-     * lengthen every probe chain. `len` seeds it so that keys differing only by trailing bytes
-     * that fall outside the last word still separate. Nothing persists a hash: it is used to
-     * probe and to rehash, both within one process, so changing it changes no artifact. */
+static uint64_t kiln_c99_key_hash(const kiln_string *string) {
+    /* Hash JavaScript UTF-16 code units rather than storage bytes. Latin1 and UTF-16 headers
+     * with the same units therefore share one canonical key identity. Pack four units into an
+     * eight-byte word so the hot path retains the old chunked mixing (one dependent multiply per
+     * word), while the normalized 16-bit lanes make the result independent of storage width. */
     const uint64_t mix = UINT64_C(0xff51afd7ed558ccd);
-    uint64_t hash = UINT64_C(0x9e3779b97f4a7c15) ^ (uint64_t)len;
-    size_t index = 0;
-    while (len - index >= 8) {
-        uint64_t word;
-        memcpy(&word, bytes + index, sizeof word);
+    uint64_t hash = UINT64_C(0x9e3779b97f4a7c15) ^
+                    (uint64_t)(string == NULL ? 0 : string->unit_len);
+    size_t index;
+    if (string == NULL) return hash ^ (hash >> 32);
+    index = 0;
+    while (string->unit_len - index >= 4) {
+        uint64_t word = (uint64_t)kiln_string_unit_at(string, index) |
+                        ((uint64_t)kiln_string_unit_at(string, index + 1) << 16) |
+                        ((uint64_t)kiln_string_unit_at(string, index + 2) << 32) |
+                        ((uint64_t)kiln_string_unit_at(string, index + 3) << 48);
         hash = (hash ^ word) * mix;
         hash ^= hash >> 29;
-        index += 8;
+        index += 4;
     }
-    if (index < len) {
-        /* The tail goes into a zeroed word, so a shorter key never reads past its own bytes. */
+    if (index < string->unit_len) {
         uint64_t tail = 0;
-        memcpy(&tail, bytes + index, len - index);
+        size_t lane = 0;
+        while (index < string->unit_len) {
+            tail |= (uint64_t)kiln_string_unit_at(string, index++) << (16 * lane++);
+        }
         hash = (hash ^ tail) * mix;
         hash ^= hash >> 29;
     }
     return hash ^ (hash >> 32);
 }
 
-static kiln_key_entry *kiln_c99_key_probe(const kiln_key_table *table, const char *bytes,
-                                          size_t len, uint64_t hash) {
+static kiln_key_entry *kiln_c99_key_probe(const kiln_key_table *table, const kiln_string *string,
+                                          uint64_t hash) {
     size_t mask;
     size_t at;
     if (table->capacity == 0) return NULL;
@@ -1826,9 +1825,8 @@ static kiln_key_entry *kiln_c99_key_probe(const kiln_key_table *table, const cha
     at = (size_t)hash & mask;
     for (;;) {
         kiln_key_entry *entry = &table->entries[at];
-        if (entry->bytes == NULL) return NULL;
-        if (entry->hash == hash && entry->len == len &&
-            (entry->bytes == bytes || memcmp(entry->bytes, bytes, len) == 0))
+        if (entry->string == NULL) return NULL;
+        if (entry->hash == hash && kiln_string_equal(entry->string, string))
             return entry;
         at = (at + 1) & mask;
     }
@@ -1837,7 +1835,7 @@ static kiln_key_entry *kiln_c99_key_probe(const kiln_key_table *table, const cha
 static void kiln_c99_key_place(kiln_key_table *table, kiln_key_entry entry) {
     size_t mask = table->capacity - 1;
     size_t at = (size_t)entry.hash & mask;
-    while (table->entries[at].bytes != NULL) at = (at + 1) & mask;
+    while (table->entries[at].string != NULL) at = (at + 1) & mask;
     table->entries[at] = entry;
     table->count += 1;
 }
@@ -1855,22 +1853,21 @@ static int kiln_c99_key_grow(kiln_key_table *table) {
     table->capacity = capacity;
     table->count = 0;
     for (index = 0; index < old_capacity; ++index)
-        if (old[index].bytes != NULL) kiln_c99_key_place(table, old[index]);
+        if (old[index].string != NULL) kiln_c99_key_place(table, old[index]);
     free(old);
     return KILN_C99_OK;
 }
 
-static const char *kiln_c99_key_insert(kiln_key_table *table, const char *bytes, size_t len,
-                                       uint64_t hash, int pinned) {
+static const kiln_string *kiln_c99_key_insert(kiln_key_table *table, const kiln_string *string,
+                                              uint64_t hash, int pinned) {
     kiln_key_entry entry;
     if ((table->count + 1) * 2 > table->capacity && kiln_c99_key_grow(table) != KILN_C99_OK)
         return NULL;
-    entry.bytes = bytes;
-    entry.len = len;
+    entry.string = string;
     entry.hash = hash;
     entry.pinned = pinned;
     kiln_c99_key_place(table, entry);
-    return bytes;
+    return string;
 }
 
 /* Linear probing deletes by shifting the entries after the hole back over it: an entry moves
@@ -1878,49 +1875,92 @@ static const char *kiln_c99_key_insert(kiln_key_table *table, const char *bytes,
 static void kiln_c99_key_delete_at(kiln_key_table *table, size_t hole) {
     size_t mask = table->capacity - 1;
     size_t at = (hole + 1) & mask;
-    table->entries[hole].bytes = NULL;
+    table->entries[hole].string = NULL;
     table->count -= 1;
-    while (table->entries[at].bytes != NULL) {
+    while (table->entries[at].string != NULL) {
         size_t home = (size_t)table->entries[at].hash & mask;
         if (((hole - home) & mask) < ((at - home) & mask)) {
             table->entries[hole] = table->entries[at];
-            table->entries[at].bytes = NULL;
+            table->entries[at].string = NULL;
             hole = at;
         }
         at = (at + 1) & mask;
     }
 }
 
-static const char *kiln_c99_interned_in(kiln_gc_heap *heap, const char *bytes, size_t len) {
+const kiln_string *kiln_c99_interned_key_in(kiln_gc_heap *heap, const kiln_string *string) {
     const kiln_key_entry *entry;
-    if (len == 0) return kiln_c99_key_empty;
+    if (string == NULL || string->unit_len == 0) return kiln_c99_key_empty;
     if (heap == NULL) return NULL;
-    entry = kiln_c99_key_probe(&heap->keys, bytes, len, kiln_c99_key_hash(bytes, len));
-    return entry == NULL ? NULL : entry->bytes;
+    entry = kiln_c99_key_probe(&heap->keys, string, kiln_c99_key_hash(string));
+    return entry == NULL ? NULL : entry->string;
 }
 
-static const char *kiln_c99_interned(const char *bytes, size_t len) {
+const kiln_string *kiln_c99_interned_key(const kiln_string *string) {
+    return kiln_c99_interned_key_in(kiln_c99_gc_heap(), string);
+}
+
+static kiln_string *kiln_c99_gc_alloc_key_copy(const kiln_string *view) {
+    size_t storage;
+    size_t total;
+    kiln_string *copy;
+    if (view == NULL || !kiln_string_storage_size(view->unit_len, view->flags, &storage) ||
+        storage > SIZE_MAX - sizeof *copy) {
+        return NULL;
+    }
+    total = storage;
+    copy = (kiln_string *)kiln_c99_gc_alloc_tenured(KILN_GC_STRING, total);
+    if (copy == NULL) return NULL;
+    copy->unit_len = view->unit_len;
+    copy->flags = view->flags;
+    copy->data = (const void *)(copy + 1);
+    if (storage > sizeof *copy) {
+        memcpy((void *)copy->data, view->data, storage - sizeof *copy);
+    }
+    return copy;
+}
+
+/* Byte callers are legacy fixed-ASCII adapters. They create a borrowed Latin1 view for the
+ * duration of this call; only the key APIs retain the returned canonical headed string. */
+static const kiln_string *kiln_c99_intern(const char *bytes, size_t len) {
+    if (len > UINT32_MAX) return NULL;
+    kiln_string view = {(uint32_t)len, KILN_STRING_LATIN1, bytes};
+    return kiln_c99_intern_key(&view);
+}
+
+static const kiln_string *kiln_c99_interned_in(kiln_gc_heap *heap, const char *bytes,
+                                               size_t len) {
+    if (len > UINT32_MAX) return NULL;
+    kiln_string view = {(uint32_t)len, KILN_STRING_LATIN1, bytes};
+    return kiln_c99_interned_key_in(heap, &view);
+}
+
+static const kiln_string *kiln_c99_interned(const char *bytes, size_t len) {
     return kiln_c99_interned_in(kiln_c99_gc_heap(), bytes, len);
 }
 
-static const char *kiln_c99_intern(const char *bytes, size_t len) {
+static const kiln_string *kiln_c99_intern_static(const char *bytes, size_t len) {
+    if (len > UINT32_MAX) return NULL;
+    kiln_string view = {(uint32_t)len, KILN_STRING_LATIN1, bytes};
+    return kiln_c99_intern_static_key(&view);
+}
+
+/* Legacy byte callers above are being migrated to headed views. The canonical implementations
+ * below are the only routines that insert or probe semantic property keys. */
+const kiln_string *kiln_c99_intern_key(const kiln_string *string) {
     kiln_gc_heap *heap;
     uint64_t hash;
     kiln_key_entry *entry;
-    char *copy;
-    if (len == 0) return kiln_c99_key_empty;
+    kiln_string *copy;
+    if (string == NULL || string->unit_len == 0) return kiln_c99_key_empty;
     heap = kiln_c99_gc_heap();
     if (heap == NULL) return NULL;
-    hash = kiln_c99_key_hash(bytes, len);
-    entry = kiln_c99_key_probe(&heap->keys, bytes, len, hash);
-    if (entry != NULL) return entry->bytes;
-    /* A headed, NUL-terminated string block: `kiln_c99_key_len` reads the header, and the
-     * conservative scanner and the purge below find the block from these bytes the way they
-     * find any string's. */
-    copy = kiln_c99_gc_alloc_text_tenured(len);
+    hash = kiln_c99_key_hash(string);
+    entry = kiln_c99_key_probe(&heap->keys, string, hash);
+    if (entry != NULL) return entry->string;
+    copy = kiln_c99_gc_alloc_key_copy(string);
     if (copy == NULL) return NULL;
-    memcpy(copy, bytes, len);
-    return kiln_c99_key_insert(&heap->keys, copy, len, hash, 0);
+    return kiln_c99_key_insert(&heap->keys, copy, hash, 0);
 }
 
 /* For a spelling that must stay canonical for the realm's whole life: a unit's constant, a
@@ -1929,36 +1969,35 @@ static const char *kiln_c99_intern(const char *bytes, size_t len) {
  * literal's address is not a key, and the caller must use the pointer returned here. NULL only
  * when the table or the heap cannot grow; a unit that gets NULL for one of its keys fails its
  * entry with out-of-memory rather than run a site with a pointer that is not canonical. */
-static const char *kiln_c99_intern_static(const char *bytes, size_t len) {
+const kiln_string *kiln_c99_intern_static_key(const kiln_string *string) {
     kiln_gc_heap *heap;
     uint64_t hash;
     kiln_key_entry *entry;
-    char *copy;
-    if (len == 0) return kiln_c99_key_empty;
+    kiln_string *copy;
+    if (string == NULL || string->unit_len == 0) return kiln_c99_key_empty;
     heap = kiln_c99_gc_heap();
     if (heap == NULL) return NULL;
-    hash = kiln_c99_key_hash(bytes, len);
-    entry = kiln_c99_key_probe(&heap->keys, bytes, len, hash);
+    hash = kiln_c99_key_hash(string);
+    entry = kiln_c99_key_probe(&heap->keys, string, hash);
     if (entry != NULL) {
         entry->pinned = 1;
-        return entry->bytes;
+        return entry->string;
     }
-    copy = kiln_c99_gc_alloc_text_tenured(len);
+    copy = kiln_c99_gc_alloc_key_copy(string);
     if (copy == NULL) return NULL;
-    memcpy(copy, bytes, len);
-    return kiln_c99_key_insert(&heap->keys, copy, len, hash, 1);
+    return kiln_c99_key_insert(&heap->keys, copy, hash, 1);
 }
 
 /* A string block released by hand (`kiln_c99_gc_release`) must not stay canonical. */
-static void kiln_c99_key_forget(kiln_gc_heap *heap, const char *bytes, size_t len) {
+static void kiln_c99_key_forget(kiln_gc_heap *heap, const kiln_string *string) {
     kiln_key_table *table = &heap->keys;
     size_t mask;
     size_t at;
     if (table->capacity == 0) return;
     mask = table->capacity - 1;
-    at = (size_t)kiln_c99_key_hash(bytes, len) & mask;
-    while (table->entries[at].bytes != NULL) {
-        if (table->entries[at].bytes == bytes) {
+    at = (size_t)kiln_c99_key_hash(string) & mask;
+    while (table->entries[at].string != NULL) {
+        if (table->entries[at].string == string) {
             kiln_c99_key_delete_at(table, at);
             return;
         }
@@ -1970,7 +2009,7 @@ static void kiln_c99_key_mark_pinned(kiln_gc_heap *heap) {
     size_t index;
     for (index = 0; index < heap->keys.capacity; ++index) {
         const kiln_key_entry *entry = &heap->keys.entries[index];
-        if (entry->bytes != NULL && entry->pinned) kiln_c99_gc_mark_block(heap, entry->bytes);
+        if (entry->string != NULL && entry->pinned) kiln_c99_gc_mark_block(heap, entry->string);
     }
 }
 
@@ -1983,11 +2022,11 @@ static void kiln_c99_key_purge(kiln_gc_heap *heap) {
     while (index < table->capacity) {
         const kiln_key_entry *entry = &table->entries[index];
         kiln_gc_block *block;
-        if (entry->bytes == NULL || entry->pinned) {
+        if (entry->string == NULL || entry->pinned) {
             ++index;
             continue;
         }
-        block = kiln_c99_gc_lookup(heap, entry->bytes);
+        block = kiln_c99_gc_lookup(heap, entry->string);
         if (block == NULL || block->mark != heap->epoch) {
             kiln_c99_key_delete_at(table, index);
             continue;
@@ -2252,7 +2291,7 @@ static void kiln_c99_gc_release(void *payload) {
         if ((block->kind & KILN_GC_FLAG_DEAD) == 0) {
             if ((block->kind & KILN_GC_KIND_MASK) == KILN_GC_STRING) {
                 const kiln_string *text = (const kiln_string *)payload;
-                kiln_c99_key_forget(heap, (const char *)text->data, text->unit_len);
+                kiln_c99_key_forget(heap, text);
             }
             kiln_c99_gc_finalize(block);
             block->kind |= KILN_GC_FLAG_DEAD;
@@ -2274,7 +2313,7 @@ static void kiln_c99_gc_release(void *payload) {
         /* Every string block is headed, an interned key's included, so the entry to forget is
          * the one whose bytes are the header's. */
         const kiln_string *text = (const kiln_string *)payload;
-        kiln_c99_key_forget(heap, (const char *)text->data, text->unit_len);
+        kiln_c99_key_forget(heap, text);
     }
     kiln_c99_gc_finalize(block);
     heap->freed_blocks += 1;
@@ -2400,6 +2439,10 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
         kiln_c99_gc_mark_value(heap, &closure->captured_arguments);
         kiln_c99_gc_mark_value(heap, &closure->prototype);
         kiln_c99_gc_mark_value(heap, &closure->properties);
+        /* Generated names may point at static headers; runtime-created/inferred names point at
+         * GC strings.  The marker's lookup treats static headers as non-heap and marks the latter
+         * without a second representation or an unsafe header-kind probe. */
+        kiln_c99_gc_mark_block(heap, closure->name);
         kiln_c99_gc_mark_value(heap, &closure->source_value);
         break;
     }

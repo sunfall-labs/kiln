@@ -8695,6 +8695,64 @@ mod json {
         }
 
         #[test]
+        fn non_ascii_text_answers_units_with_unit_offsets() {
+            // "é" is two UTF-8 bytes for one unit and "😀" four bytes for two units. A
+            // UTF-16 source exercises the wide path; offsets that survive are unit
+            // offsets, so byte offsets would land mid-character here.
+            let want: Vec<u16> = "é😀".encode_utf16().collect();
+            let mut source: Vec<u16> = r#"{"k":""#.encode_utf16().collect();
+            source.extend_from_slice(&want);
+            source.extend(r#""}"#.encode_utf16());
+            let head = KilnString {
+                unit_len: source.len() as u32,
+                flags: 1,
+                data: source.as_ptr().cast(),
+            };
+            let mut nodes: *const Node = core::ptr::null();
+            let mut count = 0usize;
+            let mut arena = KilnString {
+                unit_len: 0,
+                flags: 0,
+                data: core::ptr::null(),
+            };
+            let status = unsafe { kiln_json_parse(&head, &mut nodes, &mut count, &mut arena) };
+            assert_eq!(status, 0);
+            // SAFETY: a zero status answers a readable tape and headed text.
+            let tape = unsafe { core::slice::from_raw_parts(nodes, count) };
+            assert_eq!(
+                tape.iter().map(|node| node.tag).collect::<Vec<_>>(),
+                vec![TAG_OBJECT, TAG_STRING, TAG_STRING]
+            );
+            let node = tape
+                .get(2)
+                .filter(|node| node.tag == TAG_STRING)
+                .expect("wide value node");
+            let start = node.value as usize;
+            let got = if arena.flags == 0 {
+                // SAFETY: the arena borrows the reader's scratch, live for this check.
+                unsafe {
+                    core::slice::from_raw_parts(
+                        arena.data.cast::<u8>().add(start),
+                        node.len as usize,
+                    )
+                    .iter()
+                    .map(|unit| u16::from(*unit))
+                    .collect::<Vec<_>>()
+                }
+            } else {
+                // SAFETY: same borrow; the header promises aligned units.
+                unsafe {
+                    core::slice::from_raw_parts(
+                        arena.data.cast::<u16>().add(start),
+                        node.len as usize,
+                    )
+                    .to_vec()
+                }
+            };
+            assert_eq!(got, want);
+        }
+
+        #[test]
         fn refusals_and_bad_arguments_are_told_apart() {
             assert_eq!(parse("{").status, SYNTAX_ERROR);
             assert_eq!(parse("").status, SYNTAX_ERROR);
