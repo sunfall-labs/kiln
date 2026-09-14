@@ -404,6 +404,36 @@ fn commonjs_require_reads_replacements_through_the_shared_cache_cell() {
 
 #[test]
 fn node_readable_is_a_transport_independent_buffered_event_source() {
+    let readable_prototype = Value::Native(
+        Native::PrototypeOf(PrototypeTable::Readable),
+        RealmId::PRIMARY,
+    );
+    // The direct marker lookup and the later materialized property store must expose the same
+    // stream methods. This is the regression for IncomingMessage.prototype.unpipe: Express
+    // reaches it after reflecting on the prototype, when the store becomes authoritative.
+    assert!(matches!(
+        Native::PrototypeOf(PrototypeTable::Readable).property("pipe"),
+        Some(Value::Native(Native::NodeReadablePipe, _))
+    ));
+    assert!(matches!(
+        Native::PrototypeOf(PrototypeTable::Readable).property("unpipe"),
+        Some(Value::Native(Native::NodeReadableUnpipe, _))
+    ));
+    let intrinsics = Intrinsics::default();
+    let reflected = own_property_keys_with_symbols(&intrinsics, &readable_prototype);
+    assert!(reflected.contains(&"pipe".to_owned()));
+    assert!(reflected.contains(&"unpipe".to_owned()));
+    assert!(delete_property(
+        &intrinsics,
+        &readable_prototype,
+        &Value::String("unpipe".to_owned())
+    ));
+    assert!(
+        !own_property_keys_with_symbols(&intrinsics, &readable_prototype)
+            .contains(&"unpipe".to_owned())
+    );
+    assert!(own_attributes(&intrinsics, &readable_prototype, "unpipe").is_none());
+
     let readable = node_readable(
         &[ordinary_object([(
             "highWaterMark".into(),
