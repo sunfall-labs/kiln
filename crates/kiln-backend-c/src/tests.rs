@@ -6800,3 +6800,56 @@ int main(void) {
         String::from_utf8_lossy(&run.stderr)
     );
 }
+#[test]
+fn executable_gc_inactive_nursery_still_finds_filled_chunk_roots() {
+    let program = program(vec![], vec![Instruction::Return], 0);
+    let generated = emit(&program).expect("program emits");
+    let wrapper = r#"
+int main(void) {
+    kiln_gc_heap heap;
+    void *volatile root;
+    void *unused_current;
+    kiln_c99_gc_heap_init(&heap);
+    heap.enabled = 1;
+    root = kiln_c99_gc_nursery_bump(&heap, KILN_GC_BYTES, 32);
+    if (root == NULL) return 1;
+    memset((void *)root, 0x5a, 32);
+    kiln_c99_nursery_turn_chunk(&heap);
+    if (heap.nursery.full == NULL) return 2;
+    unused_current = heap.nursery.region;
+
+    /* Simulate an allocation failure while retaining the already-filled region. */
+    kiln_c99_nursery_free_region(&heap.nursery, unused_current);
+    heap.nursery.active = 0;
+    heap.nursery.region = NULL;
+    heap.nursery.base = NULL;
+    heap.nursery.bump = NULL;
+    heap.nursery.limit = NULL;
+    heap.nursery.bitmap = NULL;
+    if (kiln_c99_gc_lookup(&heap, (void *)root) == NULL) return 3;
+    kiln_c99_gc_collect_mid_turn(&heap);
+    if (heap.nursery.full != NULL || heap.nursery.promoted == NULL) return 4;
+    if (kiln_c99_gc_lookup(&heap, (void *)root) == NULL) return 5;
+    for (size_t index = 0; index < 32; ++index) {
+        if (((unsigned char *)root)[index] != 0x5a) return 6;
+    }
+    kiln_c99_gc_collect_mid_turn(&heap);
+    if (kiln_c99_gc_lookup(&heap, (void *)root) == NULL) return 7;
+    for (size_t index = 0; index < 32; ++index) {
+        if (((unsigned char *)root)[index] != 0x5a) return 8;
+    }
+
+    kiln_c99_nursery_destroy(&heap.nursery);
+    free(heap.large_table.table);
+    free(heap.slab_table.table);
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "gc-inactive-nursery-test");
+    assert!(
+        run.status.success(),
+        "inactive nursery lookup test failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
