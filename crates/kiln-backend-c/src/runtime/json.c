@@ -376,8 +376,14 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
         written = kiln_c99_double_to_js(number, spelled);
         return kiln_c99_text_append(text, spelled, written);
     }
-    case KILN_VALUE_STRING:
-        return kiln_c99_json_quote(text, value.ptr, value.len);
+    case KILN_VALUE_STRING: {
+        const kiln_string *string = (const kiln_string *)value.ptr;
+        if (string == NULL) return kiln_c99_json_quote(text, "", 0);
+        return kiln_string_is_utf16(string)
+                   ? kiln_c99_json_quote_units(text, string)
+                   : kiln_c99_json_quote(text, (const char *)kiln_string_latin1(string),
+                                         string->unit_len);
+    }
     case KILN_VALUE_BIGINT:
         /* BigInt has no JSON representation.  This is a TypeError, rather than an omitted
          * value, and must travel through the ordinary thrown-value path so callers can catch it. */
@@ -583,7 +589,14 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
                 return status;
             }
             KILN_JSON_BREAK(written == 0);
-            if (!is_array && (kiln_c99_json_quote(text, key.ptr, key.len) != KILN_C99_OK ||
+            const kiln_string *key_string = (const kiln_string *)key.ptr;
+            int key_status = key_string == NULL
+                                 ? kiln_c99_json_quote(text, "", 0)
+                                 : kiln_string_is_utf16(key_string)
+                                       ? kiln_c99_json_quote_units(text, key_string)
+                                       : kiln_c99_json_quote(text, (const char *)kiln_string_latin1(key_string),
+                                                             key_string->unit_len);
+            if (!is_array && (key_status != KILN_C99_OK ||
                               (indent_len != 0 ? kiln_c99_text_append(text, ": ", 2) : kiln_c99_text_append(text, ":", 1)) !=
                                   KILN_C99_OK)) {
                 kiln_c99_json_drop_nested(&nested);
@@ -1118,7 +1131,13 @@ static int kiln_c99_json_build(const kiln_json_node *nodes, size_t count,
                 if (ikey == NULL) {
                     /* Free for a string: the bytes and length are read out of the block. */
                     kiln_value spelling = kiln_val_to_boundary(frame->key);
-                    ikey = kiln_c99_intern(spelling.ptr, spelling.len);
+                    size_t spelling_len = 0;
+                    const char *spelling_bytes = kiln_c99_string_ascii_bytes(spelling, &spelling_len);
+                    if (spelling_bytes == NULL) {
+                        kiln_c99_json_build_release(&stack);
+                        return KILN_C99_OUT_OF_MEMORY;
+                    }
+                    ikey = kiln_c99_intern(spelling_bytes, spelling_len);
                     if (ikey == NULL) {
                         kiln_c99_json_build_release(&stack);
                         return KILN_C99_OUT_OF_MEMORY;

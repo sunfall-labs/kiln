@@ -631,7 +631,10 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
             if (subject.tag == KILN_VALUE_STRING) {
                 /* A string that is not an integer is a SyntaxError, unlike `Number("x")` which
                  * is NaN -- a BigInt has no NaN to be. */
-                if (kiln_bigint_parse((const unsigned char *)subject.ptr, subject.len, 10,
+                size_t subject_len = 0;
+                const char *subject_bytes = kiln_c99_string_ascii_bytes(subject, &subject_len);
+                if (subject_bytes == NULL || kiln_bigint_parse((const unsigned char *)subject_bytes,
+                                      subject_len, 10,
                                       &handle) != 0) {
                     return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
                                                 "Cannot convert this string to a BigInt");
