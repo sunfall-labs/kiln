@@ -4008,18 +4008,17 @@ fn escaped_source_units(source: &StringUnits) -> StringUnits {
     if let Ok(scalar) = source.to_scalar_string() {
         return StringUnits::from(escaped_source(&scalar));
     }
-    let source = {
-        let mut escaped = String::new();
-        for unit in source.units() {
-            if (0xd800..=0xdfff).contains(&unit) {
-                escaped.push_str(&format!("\\u{unit:04x}"));
-            } else if let Some(character) = char::from_u32(u32::from(unit)) {
-                escaped.push_str(&escaped_source(&character.to_string()));
-            }
+    // `source` hands back the pattern text, and a lone surrogate is the unit it is:
+    // only scalar text goes through the escaper, which has no spelling for one.
+    let mut units = Vec::with_capacity(source.unit_len());
+    for unit in source.units() {
+        if (0xd800..=0xdfff).contains(&unit) {
+            units.push(unit);
+        } else if let Some(character) = char::from_u32(u32::from(unit)) {
+            units.extend(escaped_source(&character.to_string()).encode_utf16());
         }
-        escaped
-    };
-    StringUnits::from(source)
+    }
+    StringUnits::from_units(&units)
 }
 
 /// A compiled regular expression, its source, and the cursor `g` and `y` advance.
@@ -17179,15 +17178,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 };
                 // `ToString(S)`, which for an object *calls* its `toString`. The display
                 // spelling is the machine's: `/\.14/.exec({ toString: () => Math.PI })` matched
-                // against the literal text "[object Object]" and answered null.
-                let subject_text = match arguments.first() {
+                // against the literal text "[object Object]" and answered null. Units travel
+                // losslessly: a lone surrogate in the subject stays the unit the language
+                // counts rather than becoming U+FFFD before the matcher sees it.
+                let subject_units: StringUnits = match arguments.first() {
                     Some(argument) if is_an_object(argument) && !is_callable(argument) => {
-                        self.as_text(argument, instruction)?
+                        self.as_text_units(argument, instruction)?
                     }
-                    Some(argument) => argument.to_display_string(),
-                    None => String::new(),
+                    Some(argument) => argument.to_string_units_checked()?,
+                    None => StringUnits::default(),
                 };
-                let subject: Vec<u16> = subject_text.encode_utf16().collect();
+                let subject: Vec<u16> = subject_units.to_units().into_vec();
                 // Only `g` and `y` carry a cursor; a plain pattern always searches from the
                 // start, however many times it is used.
                 // `ToLength(Get(R, "lastIndex"))` happens for every regexp, global or not: the
@@ -43247,11 +43248,15 @@ fn match_result(
     names: &[(String, Option<std::ops::Range<usize>>)],
     has_indices: bool,
 ) -> Value {
-    let mut items = vec![Value::String(utf16_slice(subject, range.clone()).into())];
+    let mut items = vec![Value::String(StringUnits::from_units(
+        &subject[range.clone()],
+    ))];
     // The first group `regress` reports is the whole match, which is already element zero.
     for group in groups.iter().skip(1) {
         items.push(match group {
-            Some(range) => Value::String(utf16_slice(subject, range.clone()).into()),
+            // Sliced as units: the match text keeps lone surrogates rather than replacing
+            // them on the way into the result array.
+            Some(range) => Value::String(StringUnits::from_units(&subject[range.clone()])),
             // A group that did not participate is undefined rather than empty.
             None => Value::Undefined,
         });
@@ -43265,7 +43270,7 @@ fn match_result(
         .set("index", Value::Number(range.start as f64));
     result.properties.borrow_mut().set(
         "input",
-        Value::String(utf16_slice(subject, 0..subject.len()).into()),
+        Value::String(StringUnits::from_units(&subject[0..subject.len()])),
     );
     // Present and undefined rather than absent when the pattern has no named groups: a program
     // reads `m.groups?.name`, and node shows the key. With names, it is a real object -- reading
@@ -43274,7 +43279,7 @@ fn match_result(
         Value::Undefined
     } else {
         named_group_object(names, |group| match group {
-            Some(range) => Value::String(utf16_slice(subject, range.clone()).into()),
+            Some(range) => Value::String(StringUnits::from_units(&subject[range.clone()])),
             None => Value::Undefined,
         })
     };
