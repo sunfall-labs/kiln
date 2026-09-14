@@ -1631,9 +1631,9 @@ static int kiln_c99_get_ikey(kiln_host *host, kiln_value target, const char *key
     if (target.tag == KILN_VALUE_PROXY) {
         /* Reading a proxy *is* a call, so it cannot go through the pure walk below. The trap
          * takes a key value; a name reached by this path was always an ordinary string. */
-        return kiln_c99_proxy_get(host, target,
-                                  kiln_c99_value(KILN_VALUE_STRING, 0, key, key_len), target, out,
-                                  depth, thrown);
+        kiln_value key_value = kiln_c99_copy_text(key, key_len);
+        if (key_value.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+        return kiln_c99_proxy_get(host, target, key_value, target, out, depth, thrown);
     }
     status = kiln_c99_get_own_kind(host, target, key, key_len, ikey, out, depth, thrown);
     if (status == KILN_C99_CONTROL_ERROR && key_len >= 2 && key[0] == '@' && key[1] == '@') {
