@@ -424,6 +424,7 @@ async fn run(
     shared: Rc<ClientShared>,
     table: Rc<RefCell<HashMap<ResourceId, ClientConnection>>>,
 ) {
+    shared.dispatcher.started();
     let dispatcher = Rc::clone(&shared.dispatcher);
     let handshake = hyper::client::conn::http1::handshake(TokioIo::new(transport.0));
     let (mut sender, connection) = match handshake.await {

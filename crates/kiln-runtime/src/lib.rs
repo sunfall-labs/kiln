@@ -56,6 +56,8 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::time::Duration;
+#[cfg(test)]
+use std::time::Instant;
 
 pub use kiln_artifact_cache::{CapabilityIdentity, RealmCapabilityIdentity};
 use kiln_host_abi::{
@@ -1098,24 +1100,40 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
     /// (the queued adapter of ADR 0046, for a loop that drains events at its checkpoint).
     #[cfg(feature = "http")]
     pub fn server_attach_queued(&mut self, resource: ResourceId, allow_half_close: bool) -> bool {
+        if !self.state.queued_http.admit(resource) {
+            return false;
+        }
         let dispatch = Rc::new(QueuedDispatch {
             resource,
             role: QueuedRole::Server,
             queue: Rc::clone(&self.state.queued_http),
         });
-        self.server_attach(resource, allow_half_close, dispatch)
+        if self.server_attach(resource, allow_half_close, dispatch) {
+            true
+        } else {
+            self.state.queued_http.cancel_admission(resource);
+            false
+        }
     }
 
     /// Attach a client connection whose events are queued for
     /// [`Self::take_http_client_events`].
     #[cfg(feature = "http")]
     pub fn client_attach_queued(&mut self, resource: ResourceId) -> bool {
+        if !self.state.queued_http.admit(resource) {
+            return false;
+        }
         let dispatch = Rc::new(QueuedDispatch {
             resource,
             role: QueuedRole::Client,
             queue: Rc::clone(&self.state.queued_http),
         });
-        self.client_attach(resource, dispatch)
+        if self.client_attach(resource, dispatch) {
+            true
+        } else {
+            self.state.queued_http.cancel_admission(resource);
+            false
+        }
     }
 
     /// The direct HTTP server engine.
@@ -1136,9 +1154,13 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
     #[cfg(feature = "http")]
     pub fn http_close(&mut self, resource: ResourceId, mode: HttpCloseMode) -> bool {
         let engine = &mut self.state;
-        self.executor.run(|| {
+        let closed = self.executor.run(|| {
             engine.http_server.close(resource, mode) || engine.http_client.close(resource, mode)
-        })
+        });
+        if closed {
+            self.state.queued_http.cancel_admission(resource);
+        }
+        closed
     }
 
     /// Without `http` no engine can own a transport, so there is nothing to stop.
@@ -1275,36 +1297,6 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         self.executor
             .local
             .block_on(&self.executor.runtime, async move { operation() })
-    }
-
-    /// Poll every realm-owned HTTP task before the event loop blocks on HostOps.
-    ///
-    /// A protocol task can become runnable without another socket completion: committing the
-    /// response for one HTTP/1 request lets Hyper dispatch the next request already buffered
-    /// in that connection. The interpreter's checkpoint calls this between draining the queued
-    /// adapter's events; the native drive never does, because its one `block_on` runs the set.
-    pub fn poll_http_tasks(&mut self) {
-        if self.is_shutdown() {
-            return;
-        }
-        self.executor.local.block_on(&self.executor.runtime, async {
-            // Hyper commonly needs more than one cooperative turn: a body wake schedules the
-            // connection, which schedules transport output or a service response. A zero-length
-            // timeout races the first poll and made progress depend on executor polling details.
-            // A small fixed drain advances no clock and keeps the checkpoint reproducible while
-            // allowing each already-runnable layer to hand work to the next.
-            //
-            // Each yield here is a park_yield, a reactor turn. The interpreter's Node loop
-            // depends on those turns: with fewer than four, or with direct LocalSet polls in
-            // their place, it parks in `next_turn` and never wakes, which the conformance
-            // coordinator reproduces on every server probe. The native drive has no such
-            // dependency: its connections dispatch from their own tasks (ADR 0046) and its one
-            // `block_on` runs the set, so it never calls this. Why the interpreter's loop needs
-            // the reactor turns is not yet established and is worth its own measurement.
-            for _ in 0..4 {
-                tokio::task::yield_now().await;
-            }
-        });
     }
 
     /// Drives `realm` until it has no microtasks or timers left.
@@ -1464,6 +1456,7 @@ impl<H: RealmHostProvider> RealmState<H> {
     pub fn has_live_http_work(&self) -> bool {
         self.http_server.requests_in_flight() != 0
             || self.http_client.requests_in_flight() != 0
+            || self.queued_http.has_pending_admissions()
             || self.queued_http.has_events()
     }
 
@@ -1576,9 +1569,25 @@ pub struct QueuedHttp {
     signal: Rc<tokio::sync::Notify>,
     /// A permit the signal would otherwise hand to a wait that has not started yet.
     signalled: std::cell::Cell<bool>,
+    pending_admissions: std::cell::RefCell<BTreeSet<ResourceId>>,
 }
 
 impl QueuedHttp {
+    fn admit(&self, resource: ResourceId) -> bool {
+        self.pending_admissions.borrow_mut().insert(resource)
+    }
+
+    fn cancel_admission(&self, resource: ResourceId) {
+        self.pending_admissions.borrow_mut().remove(&resource);
+    }
+
+    fn started(&self, resource: ResourceId) {
+        if self.pending_admissions.borrow_mut().remove(&resource) {
+            self.signalled.set(true);
+            self.signal.notify_one();
+        }
+    }
+
     fn push_server(&self, resource: ResourceId, event: RuntimeHttpEvent) {
         self.server
             .borrow_mut()
@@ -1626,6 +1635,10 @@ impl QueuedHttp {
         !self.server.borrow().is_empty() || !self.client.borrow().is_empty()
     }
 
+    fn has_pending_admissions(&self) -> bool {
+        !self.pending_admissions.borrow().is_empty()
+    }
+
     fn retain_resources(&self, known: &[ResourceId]) -> usize {
         let mut server = self.server.borrow_mut();
         let mut client = self.client.borrow_mut();
@@ -1644,6 +1657,7 @@ impl QueuedHttp {
     fn clear(&self) {
         self.server.borrow_mut().clear();
         self.client.borrow_mut().clear();
+        self.pending_admissions.borrow_mut().clear();
     }
 }
 
@@ -1684,6 +1698,10 @@ fn unflatten_headers(bytes: &[u8]) -> Vec<(String, String)> {
 
 #[cfg(feature = "http")]
 impl HttpDispatch for QueuedDispatch {
+    fn started(&self) {
+        self.queue.started(self.resource);
+    }
+
     fn event(&self, event: &HttpEvent<'_>) -> i32 {
         match self.role {
             QueuedRole::Server => {
@@ -6132,20 +6150,55 @@ mod tests {
         (runtime, log)
     }
 
-    /// Let the engine tasks run and collect what they queued, until `done` says so or the
-    /// budget of scheduler turns runs out.
+    /// Let the runtime's real turn selector drive engine tasks and collect what they queued.
     fn drain_server_events<H: RealmHostProvider>(
         runtime: &mut RealmRuntime<H>,
         resource: ResourceId,
         done: impl Fn(&[RuntimeHttpEvent]) -> bool,
     ) -> Vec<RuntimeHttpEvent> {
         let mut events = Vec::new();
-        for _ in 0..32 {
-            runtime.poll_http_tasks();
-            events.extend(runtime.take_queued_server_events(resource));
+        let mut realm: Realm = Realm::new();
+        let started = Instant::now();
+        loop {
             if done(&events) {
                 break;
             }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "HTTP server did not reach its requested event within 5s: {events:?}"
+            );
+            assert!(
+                runtime.next_referenced_turn(&mut realm).is_some(),
+                "HTTP server became idle before its requested event: {events:?} (host={}, http={})",
+                runtime.has_referenced_host_work(),
+                runtime.has_live_http_work()
+            );
+            events.extend(runtime.take_queued_server_events(resource));
+        }
+        events
+    }
+
+    fn drain_client_events<H: RealmHostProvider>(
+        runtime: &mut RealmRuntime<H>,
+        resource: ResourceId,
+        done: impl Fn(&[RuntimeHttpClientEvent]) -> bool,
+    ) -> Vec<RuntimeHttpClientEvent> {
+        let mut events = Vec::new();
+        let mut realm: Realm = Realm::new();
+        let started = Instant::now();
+        loop {
+            if done(&events) {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "HTTP client did not reach its requested event within 5s: {events:?}"
+            );
+            assert!(
+                runtime.next_referenced_turn(&mut realm).is_some(),
+                "HTTP client became idle before its requested event: {events:?}"
+            );
+            events.extend(runtime.take_queued_client_events(resource));
         }
         events
     }
@@ -6227,11 +6280,30 @@ mod tests {
     }
 
     #[test]
+    fn queued_admission_wakes_once_then_idle_http_does_not_starve_timer() {
+        let resource = ResourceId::new(48);
+        let (mut runtime, _log) = scripted_http_runtime(resource, &[], false);
+        assert!(runtime.server_attach_queued(resource, false));
+        let mut realm: Realm = Realm::new();
+        realm.set_timeout(Duration::ZERO, WorkId::new(480));
+        assert!(matches!(
+            runtime.next_referenced_turn(&mut realm),
+            Some(RuntimeTurn::Protocol)
+        ));
+        assert!(matches!(
+            runtime.next_referenced_turn(&mut realm),
+            Some(RuntimeTurn::Timer(WorkItem::Timer { work, .. })) if work == WorkId::new(480)
+        ));
+        assert!(runtime.shutdown());
+    }
+
+    #[test]
     fn an_abort_publishes_closed_from_a_task_and_never_inside_the_caller() {
         let resource = ResourceId::new(46);
         let (mut runtime, log) = scripted_http_runtime(resource, &[b"GET /"], false);
         assert!(runtime.server_attach_queued(resource, false));
-        runtime.poll_http_tasks();
+        let mut realm: Realm = Realm::new();
+        let _ = runtime.next_referenced_turn(&mut realm);
         assert!(runtime.http_close(resource, HttpCloseMode::Abort));
         assert!(
             runtime.take_queued_server_events(resource).is_empty(),
@@ -6568,14 +6640,9 @@ mod tests {
                 .ready
         );
         assert!(runtime.has_live_http_work());
-        let mut events = Vec::new();
-        for _ in 0..32 {
-            runtime.poll_http_tasks();
-            events.extend(runtime.take_queued_client_events(resource));
-            if events.contains(&RuntimeHttpClientEvent::Closed) {
-                break;
-            }
-        }
+        let events = drain_client_events(&mut runtime, resource, |events| {
+            events.contains(&RuntimeHttpClientEvent::Closed)
+        });
         let request = String::from_utf8(log.written()).expect("HTTP is ASCII");
         assert!(
             request.starts_with("POST /upload HTTP/1.1\r\n"),
@@ -6662,9 +6729,15 @@ mod tests {
         let server = server.expect("accepted stream exists");
         let client = client.expect("client stream exists");
         assert!(runtime.server_attach_queued(server.id, false));
+        let waiting_accept = runtime.start_host_op(
+            AsyncHostOp::TcpAccept {
+                listener: listener.id,
+            },
+            true,
+        );
         assert!(
-            !runtime.has_referenced_host_work(),
-            "a taken transport does not keep the realm alive by itself"
+            runtime.has_referenced_host_work(),
+            "the referenced listener accept keeps the realm alive while waiting for request data"
         );
         runtime.start_host_op(
             AsyncHostOp::TcpWrite {
@@ -6683,6 +6756,11 @@ mod tests {
         assert_eq!(request.method, "POST");
         assert_eq!(request.target, "/health");
         assert_eq!(body, b"ping");
+        assert!(runtime.cancel_host_op(waiting_accept));
+        assert!(
+            !runtime.has_referenced_host_work(),
+            "once the server listener is unrefed, idle transports do not keep the realm alive"
+        );
         assert!(runtime.http_server().start_response(
             server.id,
             id,

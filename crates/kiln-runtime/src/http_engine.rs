@@ -149,6 +149,9 @@ impl HttpEvent<'static> {
 /// language queued (next-ticks, microtasks, the rejection check) before the engine continues.
 /// A non-zero return is a realm failure and ends the connection.
 pub trait HttpDispatch {
+    /// Called when the connection task reaches its first poll. This is an admission
+    /// notification, not a request-ready notification.
+    fn started(&self) {}
     fn event(&self, event: &HttpEvent<'_>) -> i32;
     fn checkpoint(&self) -> i32;
 }
@@ -177,6 +180,10 @@ impl Dispatcher {
 
     pub(crate) fn failed(&self) -> bool {
         self.failed.get()
+    }
+
+    pub(crate) fn started(&self) {
+        self.dispatch.started();
     }
 
     pub(crate) fn set_failed(&self, failed: bool) {
@@ -1038,6 +1045,7 @@ async fn serve(
     shared: Rc<ConnectionShared>,
     table: Rc<RefCell<HashMap<ResourceId, ServerConnection>>>,
 ) {
+    shared.dispatcher.started();
     let next_id = Cell::new(1_u64);
     let service_shared = Rc::clone(&shared);
     let service = service_fn(move |request: Request<Incoming>| {
