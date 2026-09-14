@@ -5,6 +5,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::intrinsic_members::NamedMembers;
 use crate::{
     ExecutionError, Native, NodeObject, ObjectData, PrototypeTable, RealmId, Value, is_callable,
     own_data_property,
@@ -202,22 +203,44 @@ pub(crate) fn readable_constructor_property(prop: &str) -> Option<Value> {
     }
 }
 
-pub(crate) fn readable_prototype_property(prop: &str) -> Option<Value> {
-    match prop {
-        "constructor" => Some(Value::Native(Native::NodeReadable, RealmId::PRIMARY)),
-        "push" => Some(Value::Native(Native::NodeReadablePush, RealmId::PRIMARY)),
-        "read" => Some(Value::Native(Native::NodeReadableRead, RealmId::PRIMARY)),
-        "destroy" => Some(Value::Native(Native::NodeReadableDestroy, RealmId::PRIMARY)),
-        "pause" => Some(Value::Native(Native::NodeReadablePause, RealmId::PRIMARY)),
-        "resume" => Some(Value::Native(Native::NodeReadableResume, RealmId::PRIMARY)),
-        "setEncoding" => Some(Value::Native(
-            Native::NodeReadableSetEncoding,
-            RealmId::PRIMARY,
-        )),
-        "pipe" => Some(Value::Native(Native::NodeReadablePipe, RealmId::PRIMARY)),
-        "unpipe" => Some(Value::Native(Native::NodeReadableUnpipe, RealmId::PRIMARY)),
-        _ => None,
-    }
+macro_rules! readable_prototype_members {
+    ($(($name:literal, $native:ident)),* $(,)?) => {
+        // One declaration feeds both marker lookup and materialized own-key enumeration.
+        const READABLE_PROTOTYPE_MEMBERS: NamedMembers =
+            NamedMembers::new(&[$($name),*]);
+
+        pub(crate) const fn readable_prototype_member_names() -> &'static [&'static str] {
+            READABLE_PROTOTYPE_MEMBERS.names()
+        }
+
+        pub(crate) fn readable_prototype_property(prop: &str) -> Option<Value> {
+            match prop {
+                "constructor" => Some(Value::Native(Native::NodeReadable, RealmId::PRIMARY)),
+                $($name => Some(Value::Native(Native::$native, RealmId::PRIMARY)),)*
+                _ => None,
+            }
+        }
+    };
+}
+
+readable_prototype_members! {
+    ("push", NodeReadablePush),
+    ("read", NodeReadableRead),
+    ("destroy", NodeReadableDestroy),
+    ("pause", NodeReadablePause),
+    ("resume", NodeReadableResume),
+    ("setEncoding", NodeReadableSetEncoding),
+    ("pipe", NodeReadablePipe),
+    ("unpipe", NodeReadableUnpipe),
+    // Preserve the interpreter's existing Readable-own EventEmitter surface.
+    ("on", NodeEventOn),
+    ("addListener", NodeEventOn),
+    ("once", NodeEventOnce),
+    ("emit", NodeEventEmit),
+    ("listeners", NodeEventListeners),
+    ("eventNames", NodeEventNames),
+    ("removeAllListeners", NodeEventRemoveAllListeners),
+    ("setMaxListeners", NodeEventSetMaxListeners),
 }
 
 pub(crate) fn writable_constructor_property(prop: &str) -> Option<Value> {

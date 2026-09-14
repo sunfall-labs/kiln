@@ -45301,28 +45301,6 @@ const EVENT_EMITTER_MEMBERS: intrinsic_members::NamedMembers =
         "removeAllListeners",
         "setMaxListeners",
     ]);
-/// A stream's own members, the emitter's included.
-///
-/// Node's `Readable.prototype` owns `on` rather than inheriting it, and this table answers it the
-/// same way -- by delegating to the emitter table inside the value lookup, which makes it an own
-/// member here too. Listing it is what makes `getOwnPropertyNames` agree with the
-/// `hasOwnProperty` that delegation already produced; they disagreed on all eight.
-const READABLE_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
-    "push",
-    "read",
-    "destroy",
-    "pause",
-    "resume",
-    "setEncoding",
-    "on",
-    "addListener",
-    "once",
-    "emit",
-    "listeners",
-    "eventNames",
-    "removeAllListeners",
-    "setMaxListeners",
-]);
 const WRITABLE_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
     "write",
     "end",
@@ -45405,7 +45383,7 @@ fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'static [&'static
         PrototypeTable::AsyncDisposableStack => ASYNC_DISPOSABLE_STACK_MEMBERS.names(),
         PrototypeTable::FinalizationRegistry => FINALIZATION_REGISTRY_MEMBERS.names(),
         PrototypeTable::EventEmitter => EVENT_EMITTER_MEMBERS.names(),
-        PrototypeTable::Readable => READABLE_MEMBERS.names(),
+        PrototypeTable::Readable => stream::readable_prototype_member_names(),
         PrototypeTable::Writable => WRITABLE_MEMBERS.names(),
         PrototypeTable::Console => CONSOLE_MEMBERS.names(),
         PrototypeTable::AsyncIterator => &[],
