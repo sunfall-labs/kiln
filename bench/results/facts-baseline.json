@@ -385,8 +385,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -489,8 +489,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -624,8 +624,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -633,8 +633,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -643,8 +643,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -1073,8 +1073,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -1177,8 +1177,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -1304,8 +1304,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -1736,8 +1736,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -1840,8 +1840,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -2619,8 +2619,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -2723,8 +2723,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -3209,8 +3209,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -3313,8 +3313,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -3910,8 +3910,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -4014,8 +4014,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -4740,8 +4740,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -4844,8 +4844,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -5330,8 +5330,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -5434,8 +5434,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -6008,8 +6008,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -6112,8 +6112,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -6628,8 +6628,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -6732,8 +6732,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -7276,8 +7276,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -7380,8 +7380,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -7866,8 +7866,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -7970,8 +7970,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -8501,8 +8501,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -8605,8 +8605,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -9131,8 +9131,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -9235,8 +9235,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -13775,7 +13775,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -14220,8 +14220,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -14268,8 +14268,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -14278,8 +14278,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -14341,8 +14341,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -14351,8 +14351,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -14361,8 +14361,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -14371,8 +14371,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -14381,8 +14381,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -14391,8 +14391,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -14401,8 +14401,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -36572,7 +36572,7 @@
             {
               "return_type": "Unknown",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "sites": [
                 {
@@ -41731,7 +41731,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -44532,7 +44532,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -67968,8 +67968,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -84550,7 +84550,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -87465,8 +87465,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             }
           ]
@@ -91517,7 +91517,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -92532,8 +92532,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -92912,7 +92912,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -92943,7 +92943,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -92980,7 +92980,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -93378,8 +93378,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -93387,8 +93387,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -93972,8 +93972,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -94207,8 +94207,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -94216,8 +94216,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -94723,7 +94723,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -99441,8 +99441,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -99451,8 +99451,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -99461,8 +99461,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -103285,8 +103285,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -106014,8 +106014,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -106577,7 +106577,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -106729,7 +106729,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -106912,7 +106912,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -107080,7 +107080,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -108656,8 +108656,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -108707,8 +108707,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -108719,8 +108719,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -108730,8 +108730,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -108837,8 +108837,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -108866,8 +108866,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -110902,7 +110902,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -114652,8 +114652,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -118284,8 +118284,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -118465,8 +118465,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -118475,8 +118475,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -118485,8 +118485,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -120243,7 +120243,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -121047,7 +121047,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -121085,7 +121085,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -121334,7 +121334,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -121681,7 +121681,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -124512,8 +124512,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -125341,8 +125341,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -126030,7 +126030,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -127696,7 +127696,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -127838,7 +127838,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -127896,7 +127896,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -128002,7 +128002,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -128053,7 +128053,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -128220,7 +128220,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -128403,7 +128403,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -128770,7 +128770,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -128826,7 +128826,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -129118,7 +129118,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -129165,7 +129165,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -129368,7 +129368,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -130786,7 +130786,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -131341,7 +131341,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -136396,7 +136396,7 @@
               ],
               "return_type": "Object",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -138217,7 +138217,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -138617,7 +138617,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -138634,7 +138634,7 @@
               "name": "stubArray",
               "return_type": "Object",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -138657,7 +138657,7 @@
               "name": "stubObject",
               "return_type": "Unknown",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -139067,7 +139067,7 @@
             {
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 1
@@ -140203,7 +140203,7 @@
             {
               "return_type": "Object",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 2
@@ -140627,8 +140627,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -140672,8 +140672,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -141300,7 +141300,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -141338,7 +141338,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -141357,8 +141357,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -141367,8 +141367,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -141377,8 +141377,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -141387,8 +141387,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -150761,7 +150761,7 @@
               "name": "A",
               "return_type": "Unknown",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -150818,7 +150818,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 1
@@ -162631,7 +162631,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -162695,7 +162695,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -166284,7 +166284,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -166303,8 +166303,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -166314,7 +166314,7 @@
               ],
               "return_type": "Boolean",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -166323,8 +166323,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -166695,8 +166695,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -171189,7 +171189,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -171736,7 +171736,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -173867,7 +173867,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -173948,7 +173948,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -174045,7 +174045,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -175000,8 +175000,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -175026,8 +175026,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -175083,8 +175083,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -175166,8 +175166,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -175176,8 +175176,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -185115,7 +185115,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -185959,8 +185959,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -192265,7 +192265,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -197296,7 +197296,7 @@
             {
               "return_type": "Unknown",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "sites": [
                 {
@@ -200188,7 +200188,7 @@
             {
               "return_type": "Unknown",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "sites": [
                 {
@@ -203072,8 +203072,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -203406,7 +203406,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 1
@@ -204021,8 +204021,8 @@
                 "Unknown"
               ],
               "return_type": "Number",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -224717,7 +224717,7 @@
             {
               "return_type": "Object",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -225007,7 +225007,7 @@
             {
               "return_type": "Object",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -226330,7 +226330,7 @@
               "name": "plugin2",
               "return_type": "Unknown",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "sites": [
                 {
@@ -227529,7 +227529,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -228266,7 +228266,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -228827,8 +228827,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -229092,7 +229092,7 @@
               ],
               "return_type": "Unknown",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -229515,7 +229515,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -233601,7 +233601,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -234621,8 +234621,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -234650,8 +234650,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -234741,8 +234741,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -234770,8 +234770,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -234798,8 +234798,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -235753,7 +235753,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -238117,7 +238117,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -239813,8 +239813,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -240712,7 +240712,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -241382,7 +241382,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -248718,7 +248718,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -252705,8 +252705,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
@@ -256753,7 +256753,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -256823,7 +256823,7 @@
               ],
               "return_type": "Callable",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "returned_sites": [
                 0
@@ -257565,8 +257565,8 @@
                 "Unknown"
               ],
               "return_type": "Number",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -258037,8 +258037,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -258047,8 +258047,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -258057,8 +258057,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -258067,8 +258067,8 @@
                 "Unknown"
               ],
               "return_type": "Boolean",
-              "pure": false,
-              "can_throw": true,
+              "pure": true,
+              "can_throw": false,
               "reads_arguments": false
             },
             {
@@ -261557,8 +261557,8 @@
                 "Unknown"
               ],
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {
