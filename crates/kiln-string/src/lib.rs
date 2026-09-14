@@ -119,6 +119,13 @@ impl PartialEq for StringView<'_> {
 }
 impl Eq for StringView<'_> {}
 
+impl Hash for StringView<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.unit_len().hash(state);
+        self.units().for_each(|unit| unit.hash(state));
+    }
+}
+
 impl<'a> StringView<'a> {
     pub fn unit_len(self) -> usize {
         match self {
