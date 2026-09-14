@@ -1684,6 +1684,105 @@ fn source_compiler_authority_is_scoped_to_one_execution() {
     ));
 }
 
+#[test]
+fn dynamic_source_boundary_rejects_raw_units_and_keeps_parser_errors_distinct() {
+    fn constant_compiler(
+        request: &EvalSource<'_>,
+    ) -> Result<(Program, Strictness), EvalCompileError> {
+        Ok((
+            Program {
+                source: "".into(),
+                template_sites: Vec::new(),
+                version: kiln_ir::BYTECODE_VERSION,
+                constants: vec![Constant::Number(7.0f64.to_bits())],
+                code: vec![Instruction::Const(0), Instruction::Return],
+                local_count: request.outer.len() as u32,
+                functions: Vec::new(),
+            },
+            Strictness::default(),
+        ))
+    }
+
+    fn syntax_compiler(
+        _request: &EvalSource<'_>,
+    ) -> Result<(Program, Strictness), EvalCompileError> {
+        Err(EvalCompileError::Syntax("ordinary parser error".to_owned()))
+    }
+
+    let run_eval = |source: StringUnits, compiler: SourceCompiler| {
+        let program = Program {
+            source: "".into(),
+            template_sites: Vec::new(),
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: vec![Constant::String(source)],
+            code: vec![
+                Instruction::LoadBuiltin(kiln_ir::Builtin::Eval),
+                Instruction::Const(0),
+                Instruction::Call { argc: 1 },
+                Instruction::Return,
+            ],
+            local_count: 0,
+            functions: Vec::new(),
+        };
+        let mut host = TestHost {
+            calls: Vec::new(),
+            clock_now: None,
+            entropy: std::collections::VecDeque::new(),
+            timezone: None,
+            locale: None,
+        };
+        execute(
+            Rc::new(program),
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default().with_source_compiler(compiler),
+        )
+        .map(|result| result.value)
+    };
+
+    let escaped = StringUnits::from(r#""\ud800""#);
+    assert_eq!(run_eval(escaped, constant_compiler), Ok(Value::Number(7.0)));
+
+    let raw = StringUnits::from_units(&[b'"' as u16, 0xd800, b'"' as u16]);
+    assert!(matches!(
+        run_eval(raw, constant_compiler),
+        Err(ExecutionError::EvalUnsupported { message })
+            if message == DYNAMIC_SOURCE_UNPAIRED_SURROGATE
+    ));
+    let program = no_program();
+    let mut syntax_host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: std::collections::VecDeque::new(),
+        timezone: None,
+        locale: None,
+    };
+    let mut syntax_vm = test_vm(&program, &mut syntax_host);
+    syntax_vm.source_compiler = Some(syntax_compiler);
+    let syntax = syntax_vm.enter_eval_units(&StringUnits::from(")"), None, false);
+    assert!(matches!(
+        syntax,
+        Err(ExecutionError::SyntaxErrorMessage { message })
+            if message == "ordinary parser error"
+    ));
+
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: std::collections::VecDeque::new(),
+        timezone: None,
+        locale: None,
+    };
+    let program = no_program();
+    let mut vm = test_vm(&program, &mut host);
+    let raw_body = Value::String(StringUnits::from_units(&[0xd800]));
+    assert!(matches!(
+        vm.dispatch_native(Native::FunctionConstructor, &Value::Undefined, &[raw_body], 0),
+        Err(ExecutionError::EvalUnsupported { message })
+            if message == DYNAMIC_SOURCE_UNPAIRED_SURROGATE
+    ));
+}
+
 /// A directive prologue decides an eval's strictness, and an escaped spelling is not one.
 #[test]
 fn a_use_strict_directive_is_recognised_only_when_it_is_written_literally() {

@@ -1,5 +1,6 @@
 //! Lossless JavaScript string units shared by the frontend, both runtimes, and host boundaries.
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -63,8 +64,30 @@ impl StringUnits {
         self.units().collect()
     }
 
+    /// Return scalar UTF-8 text without allocating for the common ASCII representation.
+    ///
+    /// JavaScript source parsers consume UTF-8 `&str`; callers use this checked view at source
+    /// boundaries so malformed UTF-16 is refused instead of being silently replaced.
+    pub fn to_scalar_cow(&self) -> Result<Cow<'_, str>, &'static str> {
+        match &self.0 {
+            Repr::Latin1(bytes) if bytes.is_ascii() => Ok(Cow::Borrowed(
+                std::str::from_utf8(bytes).expect("ASCII bytes are valid UTF-8"),
+            )),
+            Repr::Latin1(bytes) => {
+                let mut text = String::with_capacity(bytes.len());
+                for &byte in bytes.iter() {
+                    text.push(char::from(byte));
+                }
+                Ok(Cow::Owned(text))
+            }
+            Repr::Utf16(units) => String::from_utf16(units)
+                .map(Cow::Owned)
+                .map_err(|_| "string contains a lone surrogate"),
+        }
+    }
+
     pub fn to_scalar_string(&self) -> Result<String, &'static str> {
-        String::from_utf16(&self.to_units()).map_err(|_| "string contains a lone surrogate")
+        self.to_scalar_cow().map(Cow::into_owned)
     }
 
     pub fn to_lossy_string(&self) -> String {
@@ -150,6 +173,8 @@ impl Hash for StringUnits {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use super::StringUnits;
     #[test]
     fn latin1_index() {
@@ -162,6 +187,19 @@ mod tests {
         assert!(s.to_scalar_string().is_err());
         assert_eq!(s.to_units().as_ref(), &[0xd800]);
     }
+    #[test]
+    fn scalar_cow_borrows_ascii_and_rejects_lone_surrogates() {
+        assert!(matches!(
+            StringUnits::from("source").to_scalar_cow(),
+            Ok(Cow::Borrowed("source"))
+        ));
+        assert!(matches!(
+            StringUnits::from("hé").to_scalar_cow(),
+            Ok(Cow::Owned(text)) if text == "hé"
+        ));
+        assert!(StringUnits::from_units(&[0xd800]).to_scalar_cow().is_err());
+    }
+
     #[test]
     fn utf8_decodes_pairs() {
         let s = StringUnits::from_utf8("😀".as_bytes()).unwrap();
