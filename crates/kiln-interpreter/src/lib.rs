@@ -1169,10 +1169,21 @@ fn tabulated_property(intrinsics: &Intrinsics, target: &Value, key: &str) -> Opt
             Some(Property::Value(intrinsics.array_unscopables(realm)))
         }
         _ => match target {
-            Value::Native(native, _) => match native.property(key) {
-                Some(Value::Undefined) | None => None,
-                Some(found) => Some(Property::Value(found)),
-            },
+            Value::Native(native, _) => {
+                // Symbol's well-known statics are stored under their reserved symbol key
+                // (`@@iterator`) while Native::property names that constructor's exports by
+                // their public spelling (`iterator`). Prototype tables deliberately use the
+                // reserved spelling, so normalize only the constructor arm here.
+                let lookup = if matches!(native, Native::SymbolConstructor) {
+                    key.strip_prefix("@@").unwrap_or(key)
+                } else {
+                    key
+                };
+                match native.property(lookup) {
+                    Some(Value::Undefined) | None => None,
+                    Some(found) => Some(Property::Value(found)),
+                }
+            }
             _ => None,
         },
     }
@@ -42669,7 +42680,15 @@ fn intrinsic_owns(native: Native, key: &str) -> Option<Value> {
     {
         return Some(Value::Null);
     }
-    let found = native.property(key)?;
+    // Symbol's static well-known exports are keyed internally as `@@name`, while its
+    // constructor table uses the public `name` spelling. Keep prototype-table symbol keys
+    // untouched; those arms intentionally match the reserved spelling.
+    let lookup = if matches!(native, Native::SymbolConstructor) {
+        key.strip_prefix("@@").unwrap_or(key)
+    } else {
+        key
+    };
+    let found = native.property(lookup)?;
     if matches!(found, Value::Undefined) {
         return None;
     }
@@ -45115,7 +45134,7 @@ const GENERATOR_MEMBERS: intrinsic_members::NamedMembers =
 
 const ITERATOR_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
     "map", "filter", "take", "drop", "flatMap", "reduce", "toArray", "forEach", "some", "every",
-    "find", "includes", "join",
+    "find", "includes", "join", "chunks", "windows",
 ]);
 /// `BigInt.prototype`, which owns a `toLocaleString` of its own.
 const BIG_INT_MEMBERS: intrinsic_members::NamedMembers =
@@ -45506,6 +45525,9 @@ fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
 /// `own_attributes`: a name is included only when the same property machinery can describe it.
 fn intrinsic_extra_property_names(target: &Value) -> Vec<String> {
     match target {
+        Value::Native(Native::PromiseConstructor, _) => {
+            vec!["allKeyed".to_owned(), "allSettledKeyed".to_owned()]
+        }
         Value::Native(Native::Temporal(op), _) => temporal::property_names(*op)
             .iter()
             .map(|name| (*name).to_owned())
