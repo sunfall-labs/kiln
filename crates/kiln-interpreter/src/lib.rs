@@ -1169,21 +1169,10 @@ fn tabulated_property(intrinsics: &Intrinsics, target: &Value, key: &str) -> Opt
             Some(Property::Value(intrinsics.array_unscopables(realm)))
         }
         _ => match target {
-            Value::Native(native, _) => {
-                // Symbol's well-known statics are stored under their reserved symbol key
-                // (`@@iterator`) while Native::property names that constructor's exports by
-                // their public spelling (`iterator`). Prototype tables deliberately use the
-                // reserved spelling, so normalize only the constructor arm here.
-                let lookup = if matches!(native, Native::SymbolConstructor) {
-                    key.strip_prefix("@@").unwrap_or(key)
-                } else {
-                    key
-                };
-                match native.property(lookup) {
-                    Some(Value::Undefined) | None => None,
-                    Some(found) => Some(Property::Value(found)),
-                }
-            }
+            Value::Native(native, _) => match native.property(key) {
+                Some(Value::Undefined) | None => None,
+                Some(found) => Some(Property::Value(found)),
+            },
             _ => None,
         },
     }
@@ -42680,15 +42669,7 @@ fn intrinsic_owns(native: Native, key: &str) -> Option<Value> {
     {
         return Some(Value::Null);
     }
-    // Symbol's static well-known exports are keyed internally as `@@name`, while its
-    // constructor table uses the public `name` spelling. Keep prototype-table symbol keys
-    // untouched; those arms intentionally match the reserved spelling.
-    let lookup = if matches!(native, Native::SymbolConstructor) {
-        key.strip_prefix("@@").unwrap_or(key)
-    } else {
-        key
-    };
-    let found = native.property(lookup)?;
+    let found = native.property(key)?;
     if matches!(found, Value::Undefined) {
         return None;
     }
@@ -44789,7 +44770,11 @@ impl Intrinsics {
             );
         }
         for symbol in WellKnown::ALL {
-            let key = symbol.property_key();
+            let key = if matches!(target, Value::Native(Native::SymbolConstructor, _)) {
+                symbol.js_name()
+            } else {
+                symbol.property_key()
+            };
             if !keys.iter().any(|existing| existing == key) {
                 keys.push(key.to_owned());
             }
