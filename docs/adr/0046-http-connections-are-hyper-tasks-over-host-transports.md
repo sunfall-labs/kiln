@@ -88,6 +88,15 @@ The listener is a task that accepts in a loop and dispatches `connection` direct
 connection future before it dispatches. One accept in flight per realm turn was a round trip
 through the realm per connection; it is gone.
 
+The queued interpreter adapter also has an explicit admission lifecycle. An attachment is visible
+to the realm scheduler until its connection task reaches its first poll; a task that is aborted
+before that point settles the admission through its dispatch owner. Admissions carry an owner
+token, so a late task drop cannot clear a newer attachment that reused a resource identifier.
+`Closed` dispatch and dispatch-owner drop are both idempotent cleanup paths. Admission is only a
+startup wake-up: an idle, unreferenced keep-alive socket does not keep the realm alive. A listener
+or other host resource that is genuinely referenced remains the authority while a caller waits
+for new request data.
+
 ## Consequences
 
 - The request path becomes syscall, Hyper parse, one call into the language, Hyper encode,
