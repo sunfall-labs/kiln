@@ -3443,6 +3443,9 @@ pub struct Closure {
     /// proto rather than copied, because a function expression in a loop makes one closure per
     /// pass and the name is the same every time.
     pub name: Option<Rc<str>>,
+    /// A lossless display name supplied by named evaluation for a function whose source had no
+    /// written identifier. This stays separate from `name`: the latter is a scalar binding.
+    pub inferred_name: Option<StringUnits>,
     /// One cell per [`kiln_ir::FunctionProto::upvalues`] entry, in the same order.
     pub upvalues: Vec<Cell>,
     /// The realm this function was created in.
@@ -3578,6 +3581,15 @@ impl CommonJsRequire {
 }
 
 impl Closure {
+    /// The display name exposed through function metadata, preserving UTF-16 code units.
+    pub fn display_name_units(&self) -> StringUnits {
+        self.name
+            .as_deref()
+            .map(StringUnits::from)
+            .or_else(|| self.inferred_name.clone())
+            .unwrap_or_default()
+    }
+
     /// Whether this body is strict code.
     ///
     /// A property of the source text the body was written in, not of the call: a strict function
@@ -28219,6 +28231,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // with the name of the caller's function number 0 -- and panicked outright when the
             // caller had fewer functions than the eval did.
             name: proto.name.as_deref().map(Rc::from),
+            inferred_name: proto.inferred_name.clone(),
             upvalues,
             realm: self.current_realm,
             // An arrow takes `this` from where it is written; an ordinary function takes it from
@@ -28249,7 +28262,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             );
             properties.define_value(
                 "name",
-                Value::String(closure.name.as_deref().unwrap_or_default().to_owned().into()),
+                Value::String(closure.display_name_units()),
                 FUNCTION_IDENTITY,
             );
         }
@@ -44471,30 +44484,37 @@ fn define_function_name(function: &Value, key: &Value, prefix: Option<&str>) {
         // A symbol names the property after its description, in brackets; one with no description
         // names it nothing, and a prefix is still applied to that nothing.
         Value::Symbol(symbol) => match symbol.description() {
-            "" => String::new(),
-            description => format!("[{description}]"),
+            "" => StringUnits::default(),
+            description => StringUnits::from(format!("[{description}]")),
         },
         other => {
-            let key = other.property_key();
+            let key = other.property_key_units();
             // A private name is spelled the way the program wrote it rather than the way the
             // store keys it: `#m`, not the scope-numbered reservation standing in for it.
-            match key.strip_prefix(PRIVATE_KEY_PREFIX) {
-                Some(reserved) => format!(
-                    "#{}",
-                    reserved.split_once(':').map_or(reserved, |(_, name)| name)
-                ),
-                None => key,
+            match key.to_scalar_string() {
+                Ok(key) => match key.strip_prefix(PRIVATE_KEY_PREFIX) {
+                    Some(reserved) => StringUnits::from(format!(
+                        "#{}",
+                        reserved.split_once(':').map_or(reserved, |(_, name)| name)
+                    )),
+                    None => StringUnits::from(key),
+                },
+                // Ordinary property keys can contain lone surrogates. They are already in the
+                // canonical units representation; keep them intact rather than widening through
+                // a replacement character just to inspect a private-name prefix.
+                Err(_) => key,
             }
         }
     };
-    let name = match prefix {
-        Some(prefix) => format!("{prefix} {name}"),
-        None => name,
-    };
+    let name = prefix.map_or(name.clone(), |prefix| {
+        let mut units = StringUnits::from(format!("{prefix} ")).to_units().into_vec();
+        units.extend(name.units());
+        StringUnits::from_units(&units)
+    });
     closure
         .properties
         .borrow_mut()
-        .define_value("name", Value::String(name.into()), FUNCTION_IDENTITY);
+        .define_value("name", Value::String(name), FUNCTION_IDENTITY);
 }
 
 const FUNCTION_IDENTITY: Attributes = Attributes {

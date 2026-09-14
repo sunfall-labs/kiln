@@ -1156,6 +1156,7 @@ fn analyze_program_functions(program: &Program) -> Vec<FunctionFacts> {
     // Analyze top-level code as a function
     if !program.code.is_empty() {
         let top_level_proto = FunctionProto {
+        inferred_name: None,
             asynchronous: false,
             name: Some("<top-level>".to_string()),
             arrow: false,
@@ -1496,6 +1497,7 @@ mod tests {
         ];
 
         let handler_proto = FunctionProto {
+        inferred_name: None,
             asynchronous: false,
             name: Some("http_handler".to_string()),
             arrow: true,

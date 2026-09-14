@@ -141,6 +141,12 @@ impl TypeAnnotation {
 pub struct Function {
     /// `None` for a function expression that was never given one.
     pub name: Option<String>,
+    /// The display name supplied by named evaluation for an otherwise anonymous function.
+    ///
+    /// This is kept in JavaScript's UTF-16 code units so quoted and computed property keys can
+    /// retain lone surrogates. A written identifier remains in [`name`] because it is also a
+    /// binding inside the function body.
+    pub inferred_name: Option<StringUnits>,
     /// The source wrote that name, rather than it being inferred from what the function was
     /// assigned to.
     ///
@@ -276,7 +282,7 @@ pub struct Class {
     /// Folding it into `name` would invent a scope the program did not write, which is exactly
     /// why the frontend refused to infer a class name at all and `var C = class {}` read back
     /// the empty string that no engine produces.
-    pub inferred_name: Option<String>,
+    pub inferred_name: Option<StringUnits>,
     pub superclass: Option<Expression>,
     /// `None` when the class declares no constructor; one is synthesized.
     pub constructor: Option<Function>,

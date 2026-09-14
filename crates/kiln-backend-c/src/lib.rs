@@ -1528,6 +1528,7 @@ fn graph_for(
 /// starting undefined, and nothing captured.
 fn entry_proto(program: &Program) -> FunctionProto {
     FunctionProto {
+        inferred_name: None,
         asynchronous: has_top_level_await(program),
         name: None,
         arrow: false,

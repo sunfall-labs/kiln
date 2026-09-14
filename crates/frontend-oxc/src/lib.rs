@@ -1738,7 +1738,7 @@ impl Lowerer<'_> {
                 if let (kiln_hir::Pattern::Identifier(name), Some(value)) =
                     (&pattern, &mut initializer)
                 {
-                    name_anonymous_function(value, name);
+                    name_anonymous_function(value, &StringUnits::from(name.as_str()));
                 }
                 HirVariableDeclarator {
                     pattern,
@@ -1899,7 +1899,7 @@ impl Lowerer<'_> {
                             | HirAssignmentOperator::Nullish
                     )
                 {
-                    name_anonymous_function(&mut value, &identifier.name);
+                    name_anonymous_function(&mut value, &StringUnits::from(identifier.name.as_str()));
                 }
                 return self.assign_to(&expression.left, operator, value, expression_span);
             }
@@ -2708,10 +2708,10 @@ impl Lowerer<'_> {
                     if let Some(value) = &mut value {
                         match &key {
                             kiln_hir::ObjectKey::Static(name) => {
-                                name_anonymous_function(value, &name.to_lossy_string());
+                                name_anonymous_function(value, name);
                             }
                             kiln_hir::ObjectKey::Private(name) => {
-                                name_anonymous_function(value, &format!("#{name}"));
+                                name_anonymous_function(value, &StringUnits::from(format!("#{name}")));
                             }
                             kiln_hir::ObjectKey::Computed(_) => {}
                         }
@@ -2730,6 +2730,7 @@ impl Lowerer<'_> {
                         // so a name here would only show up in a stack frame that should read
                         // as the class body it is.
                         name: None,
+                        inferred_name: None,
                         binds_own_name: false,
                         arrow: false,
                         generator: false,
@@ -2776,7 +2777,7 @@ impl Lowerer<'_> {
                     // is not an identifier character, so this can never collide with a `#x` the
                     // class declares, and nothing can reach the storage except the two
                     // functions below.
-                    let storage = format!("%accessor:{}", key.to_lossy_string());
+                    let storage = format!("%accessor:{}:{}", accessor.span.start, accessor.span.end);
                     let member_span = span(accessor.span);
                     let this = || HirExpression {
                         kind: HirExpressionKind::This,
@@ -2808,6 +2809,7 @@ impl Lowerer<'_> {
                         |parameters: Vec<kiln_hir::Parameter>, body: Vec<HirStatement>| {
                             HirFunction {
                                 name: None,
+                                inferred_name: None,
                                 binds_own_name: false,
                                 arrow: false,
                                 generator: false,
@@ -2823,7 +2825,7 @@ impl Lowerer<'_> {
                         };
                     let mut value = accessor.value.as_ref().map(|value| self.expression(value));
                     if let Some(value) = &mut value {
-                        name_anonymous_function(value, &key.to_lossy_string());
+                        name_anonymous_function(value, &key);
                     }
                     initialisers.push(kiln_hir::ClassInitialiser::Field(kiln_hir::ClassField {
                         key: kiln_hir::ObjectKey::Private(storage),
@@ -2986,6 +2988,7 @@ impl Lowerer<'_> {
 
         Some(HirFunction {
             name: None,
+            inferred_name: None,
             // An arrow can never be given a name, so it never binds one.
             binds_own_name: false,
             arrow: true,
@@ -3021,6 +3024,7 @@ impl Lowerer<'_> {
 
         Some(HirFunction {
             name: declaration.id.as_ref().map(|id| id.name.to_string()),
+            inferred_name: None,
             binds_own_name: declaration.id.is_some(),
             arrow: false,
             generator: declaration.generator,
@@ -3231,7 +3235,7 @@ impl Lowerer<'_> {
                 && !(name == &StringUnits::from("__proto__")
                     && form == kiln_hir::PropertyForm::KeyValue)
             {
-                name_anonymous_function(&mut value, &name.to_lossy_string());
+                name_anonymous_function(&mut value, name);
             }
             members.push(kiln_hir::ObjectMember::Property(kiln_hir::ObjectProperty {
                 key,
@@ -3441,15 +3445,17 @@ fn span(value: Span) -> HirSpan {
 /// inferred name into `name` would make `var C = class { m() { return C } }` resolve `C` from a
 /// scope the program never wrote. With the field there, both kinds of anonymous definition can
 /// be named -- and `var C = class {}` stops reporting the empty string, which no engine does.
-fn name_anonymous_function(value: &mut kiln_hir::Expression, name: &str) {
+fn name_anonymous_function(value: &mut kiln_hir::Expression, name: &StringUnits) {
     match &mut value.kind {
-        kiln_hir::ExpressionKind::Function(function) if function.name.is_none() => {
-            function.name = Some(name.to_owned());
+        kiln_hir::ExpressionKind::Function(function)
+            if function.name.is_none() && function.inferred_name.is_none() =>
+        {
+            function.inferred_name = Some(name.clone());
         }
         kiln_hir::ExpressionKind::Class(class)
             if class.name.is_none() && class.inferred_name.is_none() =>
         {
-            class.inferred_name = Some(name.to_owned());
+            class.inferred_name = Some(name.clone());
         }
         _ => {}
     }
@@ -3464,7 +3470,7 @@ fn name_anonymous_function(value: &mut kiln_hir::Expression, name: &str) {
 /// the whole.
 fn name_anonymous_default(inner: &kiln_hir::Pattern, default: &mut kiln_hir::Expression) {
     if let kiln_hir::Pattern::Identifier(name) = inner {
-        name_anonymous_function(default, name);
+        name_anonymous_function(default, &StringUnits::from(name.as_str()));
     }
 }
 
@@ -4175,7 +4181,12 @@ mod tests {
     fn defaulted_function_name(pattern: &kiln_hir::Pattern) -> Option<Option<String>> {
         match pattern {
             kiln_hir::Pattern::WithDefault { default, .. } => match &default.kind {
-                HirExpressionKind::Function(function) => Some(function.name.clone()),
+                HirExpressionKind::Function(function) => Some(
+                    function
+                        .name
+                        .clone()
+                        .or_else(|| function.inferred_name.as_ref().map(StringUnits::to_lossy_string)),
+                ),
                 _ => None,
             },
             kiln_hir::Pattern::Array { elements, .. } => {
@@ -4281,7 +4292,11 @@ mod tests {
             let HirExpressionKind::Function(function) = &value.kind else {
                 panic!("{source}: expected a function on the right");
             };
-            assert_eq!(function.name.as_deref(), expected, "{source}");
+            let display_name = function
+                .name
+                .clone()
+                .or_else(|| function.inferred_name.as_ref().map(StringUnits::to_lossy_string));
+            assert_eq!(display_name.as_deref(), expected, "{source}");
         }
     }
 
@@ -4299,7 +4314,72 @@ mod tests {
             panic!("expected a class initializer, got {:?}", initializer.kind);
         };
         assert_eq!(class.name, None);
-        assert_eq!(class.inferred_name.as_deref(), Some("C"));
+        assert_eq!(class.inferred_name, Some(StringUnits::from("C")));
+    }
+
+    #[test]
+    fn inferred_property_names_keep_lone_surrogate_units() {
+        let module = parse_with_goal(
+            "inferred-name.js",
+            r#"const object = { "\ud800": function () {}, "\udc00": () => {}, "\ufffd": function () {} };"#,
+            SourceGoal::Script,
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let HirStatementKind::Variable { declarations, .. } = &module.body[0].kind else {
+            panic!("expected a variable declaration");
+        };
+        let Some(initializer) = &declarations[0].initializer else {
+            panic!("expected an object initializer");
+        };
+        let HirExpressionKind::Object { members } = &initializer.kind else {
+            panic!("expected an object initializer, got {:?}", initializer.kind);
+        };
+        let mut found = Vec::new();
+        for member in members {
+            let kiln_hir::ObjectMember::Property(property) = member else {
+                continue;
+            };
+            let kiln_hir::ObjectKey::Static(key) = &property.key else {
+                continue;
+            };
+            let HirExpressionKind::Function(function) = &property.value.kind else {
+                panic!("expected a function value");
+            };
+            found.push((key.to_units().to_vec(), function.inferred_name.clone()));
+        }
+        assert_eq!(
+            found,
+            vec![
+                (vec![0xd800], Some(StringUnits::from_units(&[0xd800]))),
+                (vec![0xdc00], Some(StringUnits::from_units(&[0xdc00]))),
+                (vec![0xfffd], Some(StringUnits::from_units(&[0xfffd]))),
+            ]
+        );
+    }
+
+    #[test]
+    fn auto_accessor_storage_identity_does_not_use_lossy_key_text() {
+        let module = parse_with_goal(
+            "accessor-name.js",
+            r#"class Holder { accessor "\ud800" = 1; accessor "\ufffd" = 2; }"#,
+            SourceGoal::Script,
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let HirStatementKind::Class(class) = &module.body[0].kind else {
+            panic!("expected a class declaration");
+        };
+        let storage: Vec<_> = class
+            .initialisers
+            .iter()
+            .filter_map(|initializer| initializer.as_field())
+            .filter_map(|field| match &field.key {
+                kiln_hir::ObjectKey::Private(name) => Some(name.clone()),
+                kiln_hir::ObjectKey::Static(_) | kiln_hir::ObjectKey::Computed(_) => None,
+            })
+            .collect();
+        assert_eq!(storage.len(), 2);
+        assert_ne!(storage[0], storage[1]);
+        assert!(storage.iter().all(|name| name.starts_with("%accessor:")));
     }
 
     #[test]
