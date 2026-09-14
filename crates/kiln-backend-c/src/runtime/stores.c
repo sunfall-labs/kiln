@@ -9,12 +9,18 @@ static double kiln_c99_array_index(kiln_value key) {
     } else if (key.tag == KILN_VALUE_STRING) {
         char buffer[64];
         int length;
-        number = kiln_string_to_number(key.ptr, key.len);
+        const kiln_string *string = key.ptr == NULL ? NULL : (const kiln_string *)key.ptr;
+        const char *bytes = string != NULL && !kiln_string_is_utf16(string)
+                                ? (const char *)kiln_string_latin1(string)
+                                : NULL;
+        size_t key_len = string == NULL ? 0 : string->unit_len;
+        if (bytes == NULL) return -1.0;
+        number = kiln_string_to_number(bytes, key_len);
         if (!isfinite(number) || number < 0.0 || floor(number) != number) {
             return -1.0;
         }
         length = kiln_c99_double_to_js(number, buffer);
-        if (length != key.len || memcmp(buffer, key.ptr, key.len) != 0) {
+        if ((size_t)length != key_len || memcmp(buffer, bytes, key_len) != 0) {
             return -1.0;
         }
         return number;

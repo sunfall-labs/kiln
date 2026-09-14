@@ -313,6 +313,19 @@ static inline int kiln_c99_val_truthy(kiln_val v) {
     return 1;
 }
 
+/* Host-facing C routines that explicitly require UTF-8 may borrow bytes only from a Latin1
+ * string. UTF-16 callers must select an encoding operation instead of treating the header as a
+ * byte pointer. */
+static inline const char *kiln_c99_string_ascii_bytes(kiln_value value, size_t *length) {
+    const kiln_string *string;
+    if (length != NULL) *length = 0;
+    if (value.tag != KILN_VALUE_STRING || value.ptr == NULL) return NULL;
+    string = (const kiln_string *)value.ptr;
+    if (kiln_string_is_utf16(string)) return NULL;
+    if (length != NULL) *length = string->unit_len;
+    return (const char *)kiln_string_latin1(string);
+}
+
 /* =========================================================================
  * Step 2.1: Speculation and Versioning Runtime Support
  * ========================================================================= */
