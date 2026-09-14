@@ -39,12 +39,12 @@ fn restartable(
                     v == object && matches!(op, GraphOp::LoadBuiltin(kiln_ir::Builtin::Math))
                 });
             let key = match program.constants.get(*name as usize) {
-                Some(Constant::String(s)) => s.as_str(),
-                _ => "",
+                Some(Constant::String(s)) => s.to_scalar_string().unwrap_or_default(),
+                _ => String::new(),
             };
             on_math
                 && matches!(
-                    key,
+                    key.as_str(),
                     "sqrt" | "abs" | "floor" | "ceil" | "round" | "min" | "max" | "trunc" | "sign"
                 )
         }

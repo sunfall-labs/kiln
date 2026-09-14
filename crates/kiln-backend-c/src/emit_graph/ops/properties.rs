@@ -75,8 +75,8 @@ pub(super) fn emit_get_property(
         return;
     }
     let key_str = match program.constants.get(*name as usize) {
-        Some(Constant::String(s)) => s.as_str(),
-        _ => "",
+        Some(Constant::String(s)) => s.to_scalar_string().unwrap_or_default(),
+        _ => String::new(),
     };
     let key_len = key_str.len();
     let check = status_check(diagnostic_site, pc, label, unwind);
@@ -448,8 +448,8 @@ pub(super) fn emit_set_property(
         return;
     }
     let key_str = match program.constants.get(*name as usize) {
-        Some(Constant::String(s)) => s.as_str(),
-        _ => "",
+        Some(Constant::String(s)) => s.to_scalar_string().unwrap_or_default(),
+        _ => String::new(),
     };
     let key_len = key_str.len();
     let strict = matches!(op, GraphOp::SetPropertyStrict { strict: true, .. }) as u8;
@@ -530,7 +530,7 @@ pub(super) fn emit_get_computed(
         && let Some(key_str) = resolve_const_string(*key, defs, program)
     {
         let alloc = root.0;
-        if let Some(&field_idx) = scalar_obj.fields.get(key_str) {
+        if let Some(&field_idx) = scalar_obj.fields.get(&key_str) {
             writeln!(output, "    v{v} = v{alloc}_f_{field_idx};").unwrap();
             if typed {
                 writeln!(output, "    d{v} = d{alloc}_f_{field_idx};").unwrap();
@@ -665,7 +665,7 @@ pub(super) fn emit_set_computed(
     {
         let alloc = root.0;
         let val = value.0;
-        if let Some(&field_idx) = scalar_obj.fields.get(key_str) {
+        if let Some(&field_idx) = scalar_obj.fields.get(&key_str) {
             writeln!(output, "    v{alloc}_f_{field_idx} = v{val};").unwrap();
             if numbers.contains(value) {
                 writeln!(output, "    d{alloc}_f_{field_idx} = d{val};").unwrap();

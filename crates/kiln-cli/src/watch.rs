@@ -1140,7 +1140,9 @@ fn scalar_results_equal(expected: &ScalarValueSummary, actual: &HostValue) -> bo
         | (ScalarValueSummary::Null, HostValue::Null) => true,
         (ScalarValueSummary::Boolean(expected), HostValue::Boolean(actual)) => expected == actual,
         (ScalarValueSummary::Number(expected), HostValue::Number(actual)) => expected == actual,
-        (ScalarValueSummary::String(expected), HostValue::String(actual)) => expected == actual,
+        (ScalarValueSummary::String(expected), HostValue::String(actual)) => actual
+            .to_scalar_string()
+            .is_ok_and(|actual| expected == &actual),
         _ => false,
     }
 }

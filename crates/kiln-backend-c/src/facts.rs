@@ -193,7 +193,7 @@ pub fn analyze_demanded_members(
             .0
         });
         let name_at = |index: u32| match program.constants.get(index as usize) {
-            Some(Constant::String(name)) => Some(name.clone()),
+            Some(Constant::String(name)) => name.to_scalar_string().ok(),
             _ => None,
         };
         let mut scan = |code: &[Instruction]| {
@@ -946,7 +946,7 @@ pub fn extract_handlers_from_program(program: &Program) -> Vec<HandlerFacts> {
                         GraphOp::GetProperty { object, name, .. } => {
                             let prop_name = program.constants.get(*name as usize).and_then(|c| {
                                 if let Constant::String(s) = c {
-                                    Some(s.as_str())
+                                    s.to_scalar_string().ok()
                                 } else {
                                     None
                                 }
@@ -973,7 +973,7 @@ pub fn extract_handlers_from_program(program: &Program) -> Vec<HandlerFacts> {
                         GraphOp::CallMethod { object, name, .. } => {
                             let prop_name = program.constants.get(*name as usize).and_then(|c| {
                                 if let Constant::String(s) = c {
-                                    Some(s.as_str())
+                                    s.to_scalar_string().ok()
                                 } else {
                                     None
                                 }
@@ -997,7 +997,7 @@ pub fn extract_handlers_from_program(program: &Program) -> Vec<HandlerFacts> {
                         | GraphOp::SetPropertyStrict { object, name, .. } => {
                             let prop_name = program.constants.get(*name as usize).and_then(|c| {
                                 if let Constant::String(s) = c {
-                                    Some(s.as_str())
+                                    s.to_scalar_string().ok()
                                 } else {
                                     None
                                 }
@@ -1034,9 +1034,9 @@ pub fn extract_handlers_from_program(program: &Program) -> Vec<HandlerFacts> {
                     let obj = eval_stack.pop().flatten();
                     if let Some(Constant::String(prop)) = program.constants.get(*name as usize) {
                         if obj == Some(0) {
-                            req_members_read.insert(prop.clone());
+                            req_members_read.insert(prop.to_scalar_string().unwrap_or_default());
                         } else if obj == Some(1) {
-                            res_members_read.insert(prop.clone());
+                            res_members_read.insert(prop.to_scalar_string().unwrap_or_default());
                         }
                         if prop == "pathname" {
                             has_pathname = true;
@@ -1055,9 +1055,9 @@ pub fn extract_handlers_from_program(program: &Program) -> Vec<HandlerFacts> {
                     };
                     if let Some(Constant::String(prop)) = program.constants.get(*name as usize) {
                         if receiver == Some(0) {
-                            req_members_read.insert(prop.clone());
+                            req_members_read.insert(prop.to_scalar_string().unwrap_or_default());
                         } else if receiver == Some(1) {
-                            res_members_read.insert(prop.clone());
+                            res_members_read.insert(prop.to_scalar_string().unwrap_or_default());
                         }
                     }
                     if eval_stack.len() > argc {
@@ -1073,7 +1073,7 @@ pub fn extract_handlers_from_program(program: &Program) -> Vec<HandlerFacts> {
                     if obj == Some(1)
                         && let Some(Constant::String(prop)) = program.constants.get(*name as usize)
                     {
-                        res_members_read.insert(prop.clone());
+                        res_members_read.insert(prop.to_scalar_string().unwrap_or_default());
                     }
                     eval_stack.push(None);
                 }
@@ -1287,7 +1287,7 @@ fn extract_function_facts(graph: &FunctionGraph, program: &Program) -> FunctionF
 
 fn format_constant_name(program: &Program, index: u32) -> String {
     if let Some(Constant::String(name)) = program.constants.get(index as usize) {
-        format!("\"{name}\"")
+        format!("\"{}\"", name.to_scalar_string().unwrap_or_else(|_| "<non-scalar>".into()))
     } else {
         format!("#{index}")
     }
@@ -1487,13 +1487,13 @@ mod tests {
     #[test]
     fn handler_facts_extraction_and_explain() {
         let constants = vec![
-            Constant::String("url".to_string()),
-            Constant::String("method".to_string()),
-            Constant::String("pathname".to_string()),
-            Constant::String("writeHead".to_string()),
-            Constant::String("end".to_string()),
+            Constant::String("url".to_string().into()),
+            Constant::String("method".to_string().into()),
+            Constant::String("pathname".to_string().into()),
+            Constant::String("writeHead".to_string().into()),
+            Constant::String("end".to_string().into()),
             Constant::Number(200.0f64.to_bits()),
-            Constant::String("ok".to_string()),
+            Constant::String("ok".to_string().into()),
         ];
 
         let handler_proto = FunctionProto {

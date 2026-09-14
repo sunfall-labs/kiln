@@ -110,6 +110,33 @@ static kiln_value kiln_c99_from_units(const uint16_t *units, size_t count) {
     return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)string, count);
 }
 
+/* Copy a range without crossing a codec boundary.  Latin1 storage is already one code unit per
+ * byte, but those bytes are not UTF-8: passing a range through `kiln_c99_copy_text` would decode
+ * 0xE9 (or any other high byte) as malformed input and replace it. */
+static int kiln_c99_copy_string_slice(const kiln_string *source, size_t start, size_t end,
+                                      kiln_value *out) {
+    size_t count;
+    kiln_string *copy;
+    if (source == NULL || out == NULL || start > end || end > source->unit_len) {
+        return KILN_C99_INVALID_ARGUMENT;
+    }
+    count = end - start;
+    if (count == 0) {
+        *out = kiln_c99_static_text("", 0);
+        return KILN_C99_OK;
+    }
+    copy = kiln_c99_gc_alloc_units(count, source->flags);
+    if (copy == NULL) return KILN_C99_OUT_OF_MEMORY;
+    if (kiln_string_is_utf16(source)) {
+        memcpy((void *)copy->data, (const uint16_t *)source->data + start,
+               count * sizeof(uint16_t));
+    } else {
+        memcpy((void *)copy->data, (const uint8_t *)source->data + start, count);
+    }
+    *out = kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)copy, count);
+    return KILN_C99_OK;
+}
+
 /* The first position at or after `from` where `needle` occurs, or -1. */
 static double kiln_c99_units_find(const uint16_t *haystack, size_t haystack_len,
                                   const uint16_t *needle, size_t needle_len, size_t from) {
@@ -358,17 +385,14 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
                 /* `slice` clamps a reversed range to the start; only `substring` swaps it. */
                 end = start;
             }
-            if (start >= end) {
-                *result = kiln_c99_static_text("", 0);
-            } else {
-                *result = kiln_c99_copy_text((const char *)kiln_string_latin1(receiver_string) + start, end - start);
-            }
-            return KILN_C99_OK;
+            return kiln_c99_copy_string_slice(receiver_string, start, end, result);
         }
         if (code == KILN_C99_METHOD_STRING_INDEX_OF || code == KILN_C99_METHOD_STRING_INCLUDES) {
             kiln_value needle_arg = argc > 0 ? args[0] : kiln_c99_undefined();
             kiln_value shown = kiln_c99_text(needle_arg);
-            if (shown.tag == KILN_VALUE_STRING && kiln_c99_string_is_ascii(shown)) {
+            const kiln_string *shown_string = shown.ptr == NULL ? NULL : (const kiln_string *)shown.ptr;
+            if (shown.tag == KILN_VALUE_STRING && kiln_c99_string_is_ascii(shown) &&
+                shown_string != NULL && !kiln_string_is_utf16(shown_string)) {
                 size_t from = kiln_c99_unit_position(argc > 1 ? args[1] : kiln_c99_undefined(), receiver_string->unit_len, 0, 0);
                 if (shown.len == 0) {
                     double at = from > receiver_string->unit_len ? (double)receiver_string->unit_len : (double)from;
@@ -381,10 +405,10 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
                     else *result = kiln_c99_boolean(0);
                     return KILN_C99_OK;
                 }
-                const kiln_string *shown_string = shown.ptr == NULL ? NULL : (const kiln_string *)shown.ptr;
-                const char *found = shown_string != NULL && !kiln_string_is_utf16(shown_string)
-                    ? kiln_c99_memmem((const char *)kiln_string_latin1(receiver_string) + from, receiver_string->unit_len - from,
-                                      (const char *)kiln_string_latin1(shown_string), shown_string->unit_len) : NULL;
+                const char *found = kiln_c99_memmem(
+                    (const char *)kiln_string_latin1(receiver_string) + from,
+                    receiver_string->unit_len - from,
+                    (const char *)kiln_string_latin1(shown_string), shown_string->unit_len);
                 if (code == KILN_C99_METHOD_STRING_INDEX_OF) {
                     *result = kiln_c99_number(found != NULL ? (double)(found - (const char *)kiln_string_latin1(receiver_string)) : -1.0);
                 } else {

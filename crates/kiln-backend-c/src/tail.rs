@@ -60,7 +60,11 @@ pub(crate) fn emit_tail_instruction(
             };
             // A fresh object every time the literal is evaluated, because `lastIndex` is mutable
             // and program-visible: two evaluations of one literal must not share a cursor.
-            if !compact && crate::regex::try_compile_regex(source, letters).is_some() {
+            if !compact
+                && let (Ok(source), Ok(letters)) =
+                    (source.to_scalar_string(), letters.to_scalar_string())
+                && crate::regex::try_compile_regex(&source, &letters).is_some()
+            {
                 writeln!(
                     output,
                     "    {{ kiln_value built; int status = kiln_c99_new_regexp_matcher(&built, {symbol}_constant_{pattern}, {}, {symbol}_constant_{flags}, {}, {symbol}_re_{pattern}_{flags}, {symbol}_re_{pattern}_{flags}_ascii, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = kiln_val_from_boundary(built); }}",
@@ -108,8 +112,8 @@ pub(crate) fn emit_tail_instruction(
                 output,
                 "    {{ kiln_value brand = kiln_val_to_boundary(stack[--sp]); kiln_value receiver = kiln_val_to_boundary(stack[sp - 1]); if (brand.tag != KILN_VALUE_UNDEFINED) {{ kiln_property *brand_slot = kiln_c99_own_private(receiver, \"{brand_key}\", {brand_len}); if (brand_slot == NULL || brand_slot->accessor || !kiln_c99_strict_equal(brand_slot->value, brand)) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 0); {unwind} }} }} kiln_property *slot = kiln_c99_own_private(receiver, {symbol}_constant_{name}, {len}); if (slot == NULL) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 0); {unwind} }} if (slot->accessor) {{ kiln_value getter = slot->getter; kiln_value produced; int status; if (getter.tag == KILN_VALUE_UNDEFINED) {{ status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 2); {unwind} }} status = kiln_c99_call(host, &produced, getter, receiver, NULL, 0, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_val_from_boundary(produced); }} else {{ stack[sp - 1] = kiln_val_from_boundary(slot->value); }} }}",
                 len = text.len(),
-                brand_key = private_brand_key_of(text),
-                brand_len = private_brand_key_of(text).len()
+                brand_key = private_brand_key_of(&text.to_scalar_string().unwrap_or_default()),
+                brand_len = private_brand_key_of(&text.to_scalar_string().unwrap_or_default()).len()
             )
             .unwrap();
         }
@@ -121,8 +125,8 @@ pub(crate) fn emit_tail_instruction(
                 output,
                 "    {{ kiln_value brand = kiln_val_to_boundary(stack[--sp]); kiln_value member = kiln_val_to_boundary(stack[--sp]); kiln_value receiver = kiln_val_to_boundary(stack[sp - 1]); if (brand.tag != KILN_VALUE_UNDEFINED) {{ kiln_property *brand_slot = kiln_c99_own_private(receiver, \"{brand_key}\", {brand_len}); if (brand_slot == NULL || brand_slot->accessor || !kiln_c99_strict_equal(brand_slot->value, brand)) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 1); {unwind} }} }} kiln_property *slot = kiln_c99_own_private(receiver, {symbol}_constant_{name}, {len}); if (slot == NULL) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 1); {unwind} }} if (slot->accessor) {{ kiln_value setter = slot->setter; kiln_value produced; int status; if (setter.tag == KILN_VALUE_UNDEFINED) {{ status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 3); {unwind} }} status = kiln_c99_call(host, &produced, setter, receiver, &member, 1, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }} else if (!slot->writable) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 4); {unwind} }} else {{ slot->value = member; }} stack[sp - 1] = kiln_val_from_boundary(member); }}",
                 len = text.len(),
-                brand_key = private_brand_key_of(text),
-                brand_len = private_brand_key_of(text).len()
+                brand_key = private_brand_key_of(&text.to_scalar_string().unwrap_or_default()),
+                brand_len = private_brand_key_of(&text.to_scalar_string().unwrap_or_default()).len()
             )
             .unwrap();
         }
@@ -144,8 +148,8 @@ pub(crate) fn emit_tail_instruction(
             writeln!(
                 output,
                 "    {{ static const char kiln_missing_name_{index}[] = {}; static const char kiln_missing_{index}[] = {}; int found = 0; kiln_value val; int status = kiln_c99_global_binding(&val, kiln_missing_name_{index}, {}, &found); if (status != KILN_C99_OK) return status; if (found) {{ stack[sp++] = kiln_val_from_boundary(val); }} else {{ status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, kiln_missing_{index}); {} }} }}",
-                c_string(text),
-                c_string(&format!("{text} is not defined")),
+                c_string(&text.to_scalar_string().unwrap_or_default()),
+                c_string(&format!("{} is not defined", text.to_scalar_string().unwrap_or_default())),
                 text.len(),
                 unwind
             )
@@ -197,7 +201,7 @@ pub(crate) fn emit_tail_instruction(
                 output,
                 "    {{ kiln_value existing; int found = 0; int status = kiln_c99_global_binding(&existing, {symbol}_constant_{name}, {}, &found); if (status != KILN_C99_OK) return status; if (!found) {{ static const char kiln_unbound_{index}[] = {}; status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, kiln_unbound_{index}); {unwind} }} }}",
                 text.len(),
-                c_string(&format!("{text} is not defined"))
+                c_string(&format!("{} is not defined", text.to_scalar_string().unwrap_or_default()))
             )
             .unwrap();
         }
@@ -211,7 +215,7 @@ pub(crate) fn emit_tail_instruction(
             writeln!(
                 output,
                 "    {{ kiln_value member = kiln_val_to_boundary(stack[--sp]); kiln_value existing; int found = 0; int status = kiln_c99_global_binding(&existing, {symbol}_constant_{name}, {len}, &found); if (status != KILN_C99_OK) return status; if (!found) {{ static const char kiln_unbound_{index}[] = {}; status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, kiln_unbound_{index}); {unwind} }} {{ kiln_value globals; status = kiln_c99_global_object(&globals); if (status != KILN_C99_OK) return status; status = kiln_c99_put_mode(host, globals, {symbol}_constant_{name}, {len}, member, 1, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }} }}",
-                c_string(&format!("{text} is not defined")),
+                c_string(&format!("{} is not defined", text.to_scalar_string().unwrap_or_default())),
                 len = text.len()
             )
             .unwrap();

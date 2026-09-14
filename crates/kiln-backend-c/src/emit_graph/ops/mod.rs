@@ -885,7 +885,7 @@ pub(super) fn emit_graph_op(
                     .iter()
                     .filter_map(|(k, _)| {
                         resolve_const_string(*k, defs, program)
-                            .and_then(|s| scalar_obj.fields.get(s))
+                            .and_then(|s| scalar_obj.fields.get(&s))
                             .copied()
                     })
                     .collect();
@@ -899,7 +899,7 @@ pub(super) fn emit_graph_op(
                 }
                 for (key, val) in pairs {
                     if let Some(prop_name) = resolve_const_string(*key, defs, program)
-                        && let Some(&field_idx) = scalar_obj.fields.get(prop_name)
+                        && let Some(&field_idx) = scalar_obj.fields.get(&prop_name)
                     {
                         let val_vid = val.0;
                         writeln!(output, "    v{alloc}_f_{field_idx} = v{val_vid};").unwrap();
@@ -1200,7 +1200,7 @@ fn emit_sunk_bridge(
         Instruction::DefineNamedProperty => {
             let key = resolve_const_string(operands[1], ctx.defs, ctx.program)
                 .expect("a sunk define's key is a constant string: the escape analysis checked");
-            if let Some(&field_idx) = scalar_obj.fields.get(key) {
+            if let Some(&field_idx) = scalar_obj.fields.get(&key) {
                 emit_sunk_field_store(output, alloc, field_idx, operands[2], ctx.numbers, ctx.ints);
             }
             writeln!(output, "    v{v} = KILN_VAL_UNDEFINED;").unwrap();

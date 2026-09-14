@@ -408,7 +408,7 @@ mod tests {
     #[test]
     fn throwing_function_marked_can_throw() {
         let mut program = empty_program();
-        program.constants.push(Constant::String("err".to_string()));
+        program.constants.push(Constant::String("err".to_string().into()));
 
         let proto = test_proto(
             "fail",
