@@ -1,0 +1,10 @@
+[package]
+name = "kiln-auto-harness"
+version = "0.0.0"
+edition = "2024"
+[dependencies]
+frontend-oxc = { path = "/Users/alee/Developer/Personal/kiln-source-names/crates/frontend-oxc" }
+kiln-hir = { path = "/Users/alee/Developer/Personal/kiln-source-names/crates/kiln-hir" }
+kiln-ir = { path = "/Users/alee/Developer/Personal/kiln-source-names/crates/kiln-ir" }
+kiln-interpreter = { path = "/Users/alee/Developer/Personal/kiln-source-names/crates/kiln-interpreter" }
+kiln-runtime = { path = "/Users/alee/Developer/Personal/kiln-source-names/crates/kiln-runtime" }

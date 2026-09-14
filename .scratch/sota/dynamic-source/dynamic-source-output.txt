@@ -1,0 +1,5 @@
+compiler-source=34,65533,34
+compiler-source=34,92,117,68,56,48,48,34
+compiler-source=65533
+stdout=""
+result=Undefined
