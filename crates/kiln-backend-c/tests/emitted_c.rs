@@ -858,14 +858,16 @@ fn numeric_id_parser_rejects_malformed_definitions() {
 fn method_dispatch_membership_is_generated_from_registry() {
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
-    assert!(prelude.contains("static uint32_t kiln_c99_method_groups(uint64_t code)"));
-    assert!(prelude.contains("case KILN_C99_METHOD_ARRAY_AT: return UINT32_C(2);"));
-    assert!(
-        prelude
-            .contains("case KILN_C99_METHOD_MATH_FLOOR: return UINT32_C(8) | UINT32_C(1048576);")
-    );
-    assert!(prelude.contains("(groups & KILN_C99_GROUP_GENERIC)"));
-    assert!(prelude.contains("(groups & KILN_C99_GROUP_STRING_DISPATCH)"));
+    assert!(prelude.contains("static kiln_c99_method_metadata kiln_c99_method_metadata_for(uint64_t code)"));
+    assert!(prelude.contains(
+        "case KILN_C99_METHOD_ARRAY_AT: return (kiln_c99_method_metadata){UINT32_C(2), UINT32_C(0x1), UINT32_C(0)};"
+    ));
+    assert!(prelude.contains(
+        "case KILN_C99_METHOD_MATH_FLOOR: return (kiln_c99_method_metadata){UINT32_C(8) | UINT32_C(1048576), UINT32_C(0), UINT32_C(0)};"
+    ));
+    assert!(prelude.contains(
+        "case KILN_C99_METHOD_STRING_CONCAT: return (kiln_c99_method_metadata){UINT32_C(4), UINT32_C(0), UINT32_C(0)};"
+    ));
     assert!(!prelude.contains("code < KILN_C99_METHOD_ARRAY_AT"));
     assert!(!prelude.contains("code <= KILN_C99_METHOD_ARRAY_AT"));
 }
@@ -914,8 +916,7 @@ fn set_encoding_is_routed_by_receiver_before_any_dispatch_group() {
     // than as a method that happens to live in two of the three handlers.
     assert!(
         prelude.contains(
-            "case KILN_C99_METHOD_NODE_READABLE_SET_ENCODING: \
-             return UINT32_C(8192) | UINT32_C(2048) | UINT32_C(262144);"
+            "case KILN_C99_METHOD_NODE_READABLE_SET_ENCODING: return (kiln_c99_method_metadata){UINT32_C(8192) | UINT32_C(2048) | UINT32_C(262144), UINT32_C(0), UINT32_C(0)};"
         ),
         "setEncoding must declare its NodeHttp, NodeNet and NodeStream membership"
     );
