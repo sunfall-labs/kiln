@@ -355,27 +355,27 @@ pub(super) fn emit_call_method(
         && let Some(Constant::String(key)) = program.constants.get(*name as usize)
         && crate::parallel::PARALLEL_MATH
             .iter()
-            .any(|(k, n)| k == key && *n == args.len())
+            .any(|(k, n)| key == *k && *n == args.len())
     {
         // The same expressions the guarded intrinsics below compute, so the clone and the
         // sequential lowering agree bit for bit on every edge (`-0`, NaN, the sign of a zero).
         let a = format!("d{}", args[0].0);
         let b = args.get(1).map(|x| format!("d{}", x.0)).unwrap_or_default();
-        let call = match (key.as_str(), args.len()) {
-            ("sqrt", 1) => format!("sqrt({a})"),
-            ("abs", 1) => format!("fabs({a})"),
-            ("floor", 1) => format!("floor({a})"),
-            ("ceil", 1) => format!("ceil({a})"),
-            ("trunc", 1) => format!("trunc({a})"),
-            ("round", 1) => format!(
+        let call = match (key.to_scalar_string().ok().as_deref(), args.len()) {
+            (Some("sqrt"), 1) => format!("sqrt({a})"),
+            (Some("abs"), 1) => format!("fabs({a})"),
+            (Some("floor"), 1) => format!("floor({a})"),
+            (Some("ceil"), 1) => format!("ceil({a})"),
+            (Some("trunc"), 1) => format!("trunc({a})"),
+            (Some("round"), 1) => format!(
                 "({{ double r = isfinite({a}) ? floor({a} + 0.5) : {a}; if (r == 0.0 && signbit({a})) r = -0.0; r; }})"
             ),
-            ("sign", 1) => format!("(isnan({a}) || {a} == 0.0 ? {a} : ({a} < 0.0 ? -1.0 : 1.0))"),
-            ("pow", 2) => format!("pow({a}, {b})"),
-            ("min", 2) => format!(
+            (Some("sign"), 1) => format!("(isnan({a}) || {a} == 0.0 ? {a} : ({a} < 0.0 ? -1.0 : 1.0))"),
+            (Some("pow"), 2) => format!("pow({a}, {b})"),
+            (Some("min"), 2) => format!(
                 "((isnan({a}) || isnan({b})) ? NAN : (({a} < {b} || ({a} == 0.0 && {b} == 0.0 && signbit({a}))) ? {a} : {b}))"
             ),
-            ("max", 2) => format!(
+            (Some("max"), 2) => format!(
                 "((isnan({a}) || isnan({b})) ? NAN : (({a} > {b} || ({a} == 0.0 && {b} == 0.0 && !signbit({a}))) ? {a} : {b}))"
             ),
             _ => unreachable!("PARALLEL_MATH names only these"),
@@ -398,8 +398,8 @@ pub(super) fn emit_call_method(
         .unwrap_or((0, "Op"));
     let argc = args.len();
     let key_str = match program.constants.get(*name as usize) {
-        Some(Constant::String(s)) => s.as_str(),
-        _ => "",
+        Some(Constant::String(s)) => s.to_scalar_string().unwrap_or_default(),
+        _ => String::new(),
     };
     let key_len = key_str.len();
     let diagnostic_source = diagnostic_source(diagnostic_site);
@@ -428,7 +428,14 @@ pub(super) fn emit_call_method(
     }
     // The unit's own methods of this name: a cached callee whose body is one of them is
     // called by name, and the C compiler may inline it into this site.
-    let candidates = method_candidates(program, key_str, &plan.publishes_frame)
+    let candidates = method_candidates(
+        program,
+        program.constants.get(*name as usize).and_then(|c| match c {
+            Constant::String(s) => Some(s),
+            _ => None,
+        }).unwrap_or_else(|| unreachable!("method name is a string constant")),
+        &plan.publishes_frame,
+    )
         .into_iter()
         .filter(|&index| plan.available.get(index as usize).copied().unwrap_or(true))
         .collect::<Vec<_>>();
@@ -640,7 +647,7 @@ pub(super) fn emit_call_method(
 
     // 1. Math.* intrinsic if closed_world
     let math_intrinsic = if closed_world && await_resolve_intrinsic.is_none() {
-        match (key_str, argc) {
+        match (key_str.as_str(), argc) {
             ("resolve", 1) => Some(format!(
                 "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_PROMISE)) {{ \
                              kiln_val kiln_resolved; \
@@ -1244,7 +1251,7 @@ pub(super) fn emit_call_method(
         None
     };
 
-    let collection_intrinsic = match (key_str, argc) {
+    let collection_intrinsic = match (key_str.as_str(), argc) {
         ("set", 2) => Some(format!(
             "if (!handled && ((v{o} & KILN_TAG_MASK) == KILN_TAG_OBJECT_PREFIX || (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX)) {{ \
                          void *ptr = KILN_VAL_PTR(v{o}); \
@@ -1339,7 +1346,7 @@ pub(super) fn emit_call_method(
         _ => None,
     };
 
-    let json_intrinsic = match (key_str, argc) {
+    let json_intrinsic = match (key_str.as_str(), argc) {
         ("stringify", 1) => Some(format!(
             "if (!handled && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_JSON) {{ \
                          if (kiln_c99_val_json_stringify_fast(host, v{a0}, &v{v}, depth, thrown) == KILN_C99_OK) {{ \
@@ -1388,7 +1395,7 @@ pub(super) fn emit_call_method(
         None
     };
 
-    let array_extra_intrinsic = match (key_str, argc) {
+    let array_extra_intrinsic = match (key_str.as_str(), argc) {
         ("pop", 0) => Some(format!(
             "if (!handled && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX) {{ \
                          void *ptr = KILN_VAL_PTR(v{o}); \
@@ -1458,7 +1465,7 @@ pub(super) fn emit_call_method(
         _ => None,
     };
 
-    let string_extra_intrinsic = match (key_str, argc) {
+    let string_extra_intrinsic = match (key_str.as_str(), argc) {
         ("startsWith", 1) => Some(format!(
             "if (!handled && KILN_VAL_IS_STRING(v{o}) && KILN_VAL_IS_STRING(v{a0})) {{ \
                          const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \

@@ -1345,7 +1345,14 @@ fn scalar_value_summary(value: &kiln_interpreter::Value) -> Option<ScalarValueSu
         kiln_interpreter::Value::Null => Some(ScalarValueSummary::Null),
         kiln_interpreter::Value::Boolean(value) => Some(ScalarValueSummary::Boolean(*value)),
         kiln_interpreter::Value::Number(value) => Some(ScalarValueSummary::Number(value.to_bits())),
-        kiln_interpreter::Value::String(value) => Some(ScalarValueSummary::String(value.clone())),
+        kiln_interpreter::Value::String(value) => Some(ScalarValueSummary::String(
+            value.to_scalar_string().unwrap_or_else(|_| {
+                value
+                    .units()
+                    .map(|unit| format!("\\u{{{unit:04X}}}"))
+                    .collect()
+            }),
+        )),
         _ => None,
     }
 }
@@ -1775,7 +1782,14 @@ fn native_scalar_value_summary(value: kiln_native::HostValue) -> ScalarValueSumm
         kiln_native::HostValue::Null => ScalarValueSummary::Null,
         kiln_native::HostValue::Boolean(value) => ScalarValueSummary::Boolean(value),
         kiln_native::HostValue::Number(bits) => ScalarValueSummary::Number(bits),
-        kiln_native::HostValue::String(value) => ScalarValueSummary::String(value),
+        kiln_native::HostValue::String(value) => ScalarValueSummary::String(
+            value.to_scalar_string().unwrap_or_else(|_| {
+                value
+                    .units()
+                    .map(|unit| format!("\\u{{{unit:04X}}}"))
+                    .collect()
+            }),
+        ),
     }
 }
 

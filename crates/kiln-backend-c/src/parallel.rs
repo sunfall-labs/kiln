@@ -117,7 +117,7 @@ pub fn parallel_safe(graph: &FunctionGraph, proto: &FunctionProto, program: &Pro
                         && match program.constants.get(*name as usize) {
                             Some(Constant::String(key)) => PARALLEL_MATH
                                 .iter()
-                                .any(|(k, n)| k == key && *n == args.len()),
+                        .any(|(k, n)| key == *k && *n == args.len()),
                             _ => false,
                         }
                 } else {

@@ -3388,18 +3388,18 @@ pub fn resolve_root_alias(mut vid: ValueId, defs: &HashMap<ValueId, &GraphOp>) -
     vid
 }
 
-pub fn resolve_const_string<'a>(
+pub fn resolve_const_string(
     vid: ValueId,
-    defs: &HashMap<ValueId, &'a GraphOp>,
-    _program: &'a Program,
-) -> Option<&'a str> {
+    defs: &HashMap<ValueId, &GraphOp>,
+    _program: &Program,
+) -> Option<String> {
     let root = resolve_root_alias(vid, defs);
     if let Some(GraphOp::Const {
         constant: Constant::String(s),
         ..
     }) = defs.get(&root)
     {
-        return Some(s.as_str());
+        return s.to_scalar_string().ok();
     }
     None
 }
@@ -3436,7 +3436,7 @@ pub fn escape_analysis(graph: &FunctionGraph, program: &Program) -> EscapeAnalys
 /// target, the define's key and value when it is a define, and the source when it is a spread.
 type SpreadBridge<'a> = (
     &'a ValueId,
-    Option<(&'a str, u32, &'a ValueId)>,
+    Option<(String, u32, &'a ValueId)>,
     Option<&'a ValueId>,
 );
 
@@ -3848,18 +3848,18 @@ fn escape_analysis_with(
                 GraphOp::GetProperty { object, name, .. } => {
                     if let Some(&root) = alias_to_root.get(object) {
                         let prop_name = match program.constants.get(*name as usize) {
-                            Some(Constant::String(s)) => s.as_str(),
-                            _ => "",
+                            Some(Constant::String(s)) => s.to_scalar_string().unwrap_or_default(),
+                            _ => String::new(),
                         };
-                        if OBJECT_PROTOTYPE_PROPERTIES.contains(&prop_name) {
+                        if OBJECT_PROTOTYPE_PROPERTIES.contains(&prop_name.as_str()) {
                             let defined =
                                 if let Some(GraphOp::NewObject { pairs, .. }) = defs.get(&root) {
                                     pairs.iter().any(|(k, _)| {
-                                        resolve_const_string(*k, &defs, program) == Some(prop_name)
+                                        resolve_const_string(*k, &defs, program) == Some(prop_name.clone())
                                     })
                                 } else {
                                     false
-                                } || defined_by_bridge(root, prop_name);
+                                } || defined_by_bridge(root, &prop_name);
                             if !defined {
                                 escaped.insert(root);
                             }
@@ -3883,8 +3883,8 @@ fn escape_analysis_with(
                     }
                     if let Some(&root) = alias_to_root.get(object) {
                         let prop_name = match program.constants.get(*name as usize) {
-                            Some(Constant::String(s)) => s.as_str(),
-                            _ => "",
+                            Some(Constant::String(s)) => s.to_scalar_string().unwrap_or_default(),
+                            _ => String::new(),
                         };
                         if prop_name == "__proto__" {
                             escaped.insert(root);
@@ -3897,12 +3897,12 @@ fn escape_analysis_with(
                     }
                     if let Some(&root) = alias_to_root.get(object) {
                         if let Some(prop_name) = resolve_const_string(*key, &defs, program) {
-                            if OBJECT_PROTOTYPE_PROPERTIES.contains(&prop_name) {
+                            if OBJECT_PROTOTYPE_PROPERTIES.contains(&prop_name.as_str()) {
                                 let defined = if let Some(GraphOp::NewObject { pairs, .. }) =
                                     defs.get(&root)
                                 {
                                     pairs.iter().any(|(k, _)| {
-                                        resolve_const_string(*k, &defs, program) == Some(prop_name)
+                                        resolve_const_string(*k, &defs, program) == Some(prop_name.clone())
                                     })
                                 } else {
                                     false
@@ -3980,7 +3980,9 @@ fn escape_analysis_with(
                         if alias_to_root.get(object) == Some(&alloc_id) =>
                     {
                         if let Some(Constant::String(s)) = program.constants.get(*name as usize) {
-                            field_names.insert(s.clone());
+                            if let Some(name) = s.to_scalar_string().ok() {
+                                field_names.insert(name);
+                            }
                         }
                     }
                     GraphOp::GetComputed { object, key, .. }
@@ -4006,7 +4008,8 @@ fn escape_analysis_with(
         let mut field_by_name_index = HashMap::new();
         for (c_idx, c) in program.constants.iter().enumerate() {
             if let Constant::String(s) = c
-                && let Some(&field_idx) = fields.get(s)
+                && let Some(name) = s.to_scalar_string().ok()
+                && let Some(&field_idx) = fields.get(&name)
             {
                 field_by_name_index.insert(c_idx as u32, field_idx);
             }
@@ -4018,7 +4021,7 @@ fn escape_analysis_with(
         if let Some(GraphOp::NewObject { pairs, .. }) = defs.get(&alloc_id) {
             for (k, v) in pairs {
                 if let Some(prop) = resolve_const_string(*k, &defs, program)
-                    && let Some(&field_idx) = fields.get(prop)
+                    && let Some(&field_idx) = fields.get(&prop)
                 {
                     initial_values.insert(field_idx, *v);
                     field_written_values.entry(field_idx).or_default().push(*v);
@@ -4055,7 +4058,7 @@ fn escape_analysis_with(
                         object, key, value, ..
                     } if alias_to_root.get(object) == Some(&alloc_id) => {
                         if let Some(prop) = resolve_const_string(*key, &defs, program)
-                            && let Some(&field_idx) = fields.get(prop)
+                            && let Some(&field_idx) = fields.get(&prop)
                         {
                             field_written_values
                                 .entry(field_idx)
@@ -4068,7 +4071,7 @@ fn escape_analysis_with(
                             && alias_to_root.get(target) == Some(&alloc_id)
                         {
                             if let Some((key, _, value)) = define
-                                && let Some(&field_idx) = fields.get(key)
+                                && let Some(&field_idx) = fields.get(&key)
                             {
                                 field_written_values
                                     .entry(field_idx)

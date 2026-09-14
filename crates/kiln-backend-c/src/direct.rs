@@ -411,13 +411,13 @@ impl DirectPlan {
                 if let GraphOp::CallMethod { name, args, .. } = op
                     && let Some(Constant::String(key)) = program.constants.get(*name as usize)
                 {
-                    let arities: &[u32] = match (key.as_str(), args.len()) {
-                        ("map", 1) | ("filter", 1) => &[1, 2],
-                        ("reduce", 2) => &[2],
+                    let arities: &[u32] = match (key.to_scalar_string().ok().as_deref(), args.len()) {
+                        (Some("map"), 1) | (Some("filter"), 1) => &[1, 2],
+                        (Some("reduce"), 2) => &[2],
                         // `parallelMap`'s pooled lowering calls the typed entry from its chunk
                         // worker (ADR 0058, application 2); the callback is referenced only when
                         // its body may run there, so a non-qualifying one gets no dead entry.
-                        ("parallelMap", 1)
+                        (Some("parallelMap"), 1)
                             if plan
                                 .known
                                 .get(&args[0])
@@ -640,11 +640,11 @@ fn intrinsic_results(graph: &FunctionGraph, program: &Program) -> HashMap<ValueI
                 object, name, args, ..
             } if math.contains(object) => {
                 let key = match program.constants.get(*name as usize) {
-                    Some(Constant::String(s)) => s.as_str(),
+                    Some(Constant::String(s)) => s.to_scalar_string().ok()?,
                     _ => return None,
                 };
                 let intrinsic = matches!(
-                    (key, args.len()),
+                    (key.as_str(), args.len()),
                     ("sqrt", 1)
                         | ("abs", 1)
                         | ("floor", 1)
