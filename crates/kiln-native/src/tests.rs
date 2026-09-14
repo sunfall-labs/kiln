@@ -3874,7 +3874,7 @@ static int write_host_call(void *context, uint16_t operation, uint16_t argc,
         (arguments[0].len != 0 && arguments[0].ptr == NULL)) return KILN_C99_HOST_ERROR;
     if (fwrite(arguments[0].ptr, 1, arguments[0].len, stdout) != arguments[0].len ||
         fputc('\n', stdout) == EOF) return KILN_C99_HOST_ERROR;
-    *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};
+    *result = (kiln_value){{ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 }};
     return KILN_C99_OK;
 }}
 
@@ -3980,7 +3980,7 @@ static int host_call(void *context, uint16_t operation, uint16_t argc,
     if (arguments[0].len != 0 && arguments[0].ptr == NULL) return KILN_C99_HOST_ERROR;
     if (fwrite(arguments[0].ptr, 1, arguments[0].len, stdout) != arguments[0].len ||
         fputc('\n', stdout) == EOF) return KILN_C99_HOST_ERROR;
-    *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};
+    *result = (kiln_value){{ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 }};
     return KILN_C99_OK;
 }}
 int main(void) {{
@@ -4096,7 +4096,7 @@ static int host_call(void *context, uint16_t operation, uint16_t argc,
         (arguments[0].len != 0 && arguments[0].ptr == NULL)) return KILN_C99_HOST_ERROR;
     if (fwrite(arguments[0].ptr, 1, arguments[0].len, stdout) != arguments[0].len ||
         fputc('\n', stdout) == EOF) return KILN_C99_HOST_ERROR;
-    *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};
+    *result = (kiln_value){{ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 }};
     return KILN_C99_OK;
 }}
 int main(void) {{
@@ -6427,7 +6427,7 @@ struct capture {
     capture->length = arguments[0].len;
     capture->bytes[capture->length++] = '\n';
     capture->calls += 1;
-    *result = (kiln_value){ KILN_VALUE_UNDEFINED, 0, {0} };
+    *result = (kiln_value){ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 };
     return KILN_C99_OK;
 }
 
@@ -6545,11 +6545,12 @@ int main(void) {{
         api->struct_size < sizeof(*api) || api->run == NULL || api->read == NULL ||
         api->dispose == NULL) return 1;
     if ({module_symbol}(NULL, &legacy) != KILN_C99_OK ||
-        legacy.tag != KILN_VALUE_STRING || legacy.len != 10 ||
+        legacy.tag != KILN_VALUE_STRING || legacy.flags != KILN_VALUE_FLAG_OWNED_STRING || legacy.len != 10 ||
         memcmp(legacy.ptr, "left\0right", 10) != 0) return 2;
     for (index = 0; index < 64; ++index) {{
         if (api->run(NULL, &owned) != KILN_C99_OK || owned == NULL) return 3;
         if (api->read(owned, &value) != KILN_C99_OK || value.tag != KILN_VALUE_STRING ||
+            value.flags != 0 ||
             value.len != 10 || value.ptr == NULL || memcmp(value.ptr, "left\0right", 10) != 0)
             return 4;
         api->dispose(&owned);
@@ -6669,7 +6670,7 @@ static int malformed_call(void *context, uint16_t operation, uint16_t argc,
     (void)argc;
     (void)arguments;
     if (result == NULL) return KILN_C99_HOST_ERROR;
-    *result = (kiln_value){{ KILN_VALUE_STRING, 3, {{0}} }};
+    *result = (kiln_value){{ .tag = KILN_VALUE_STRING, .flags = 0, .len = 3, .bits = 0 }};
     return KILN_C99_OK;
 }}
 
@@ -7755,33 +7756,33 @@ static int host_call(void *opaque, uint16_t operation, uint16_t argc,
     if (argc == 0) {{
         if (context->mode == 2) return 7;
         if (context->mode == 3) {{
-            *result = (kiln_value){{ KILN_VALUE_STRING, 3, {{0}} }};
+            *result = (kiln_value){{ .tag = KILN_VALUE_STRING, .flags = 0, .len = 3, .bits = 0 }};
             return KILN_C99_OK;
         }}
         if (context->mode == 1) {{
-            *result = (kiln_value){{ KILN_VALUE_STRING, 0, {{0}} }};
+            *result = (kiln_value){{ .tag = KILN_VALUE_STRING, .flags = 0, .len = 0, .bits = 0 }};
             return KILN_C99_OK;
         }}
         memcpy(context->storage, "dep", 3);
-        *result = (kiln_value){{KILN_VALUE_STRING, 3, {{0}}}};
+        *result = (kiln_value){{ .tag = KILN_VALUE_STRING, .flags = KILN_VALUE_FLAG_OWNED_STRING, .len = 3, .bits = 0 }};
         result->ptr = context->storage;
         return KILN_C99_OK;
     }}
     if (argc != 1 || arguments == NULL || arguments[0].tag != KILN_VALUE_STRING)
         return KILN_C99_HOST_ERROR;
     if (context->mode == 1) {{
-        if (arguments[0].len != 0 || arguments[0].ptr == NULL)
+        if (arguments[0].flags != 0 || arguments[0].len != 0 || arguments[0].ptr == NULL)
             return KILN_C99_HOST_ERROR;
-    }} else if (arguments[0].len != 3 || arguments[0].ptr == NULL ||
+    }} else if (arguments[0].flags != 0 || arguments[0].len != 3 || arguments[0].ptr == NULL ||
                arguments[0].ptr == context->storage ||
                memcmp(arguments[0].ptr, "dep", 3) != 0) {{
         return KILN_C99_HOST_ERROR;
     }}
     if (context->mode == 0) {{
-        *result = (kiln_value){{KILN_VALUE_STRING, 3, {{0}}}};
+        *result = (kiln_value){{ .tag = KILN_VALUE_STRING, .flags = KILN_VALUE_FLAG_OWNED_STRING, .len = 3, .bits = 0 }};
         result->ptr = context->storage;
     }} else {{
-        *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};
+        *result = (kiln_value){{ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 }};
     }}
     return KILN_C99_OK;
 }}
@@ -10109,7 +10110,7 @@ static int host_call(void *context, uint16_t operation, uint16_t argc,
     if (arguments[0].len != 0 && arguments[0].ptr == NULL) return KILN_C99_HOST_ERROR;
     if (fwrite(arguments[0].ptr, 1, arguments[0].len, stdout) != arguments[0].len ||
         fputc('\n', stdout) == EOF) return KILN_C99_HOST_ERROR;
-    *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};
+    *result = (kiln_value){{ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 }};
     return KILN_C99_OK;
 }}
 int main(void) {{

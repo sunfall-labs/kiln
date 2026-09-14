@@ -613,6 +613,7 @@ static int kiln_c99_node_set_raw_mode(int mode);
 static kiln_value kiln_c99_value(uint32_t tag, uint64_t bits, const char *ptr, size_t len) {
     kiln_value value;
     value.tag = tag;
+    value.flags = 0;
     value.len = (uint32_t)len;
     /* `bits` and `ptr` share one word: a value is a payload or a pointer, never both. */
     if (ptr != NULL) { value.ptr = ptr; } else { value.bits = bits; }

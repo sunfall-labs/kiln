@@ -199,6 +199,7 @@ static int kiln_c99_url_construct(kiln_value *out, const kiln_value *args, size_
                 block->size = path_len;
             }
             resp->pathname_val.len = (uint32_t)path_len;
+            resp->pathname_val.flags = 0;
             status = kiln_c99_put_hot_key(NULL, resp->url_object, KILN_C99_HOT_KEY_PATHNAME,
                                           resp->pathname_val, 0, NULL);
             if (status != KILN_C99_OK) return status;
@@ -223,6 +224,7 @@ static int kiln_c99_url_construct(kiln_value *out, const kiln_value *args, size_
                     qblock->size = q_len;
                 }
                 resp->query_val.len = (uint32_t)q_len;
+                resp->query_val.flags = 0;
                 status = kiln_c99_put(NULL, resp->search_params_object, "@@url:query", 11,
                                       resp->query_val, 0, NULL);
             }
@@ -300,6 +302,7 @@ static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,
                         block->size = val_len;
                     }
                     resp->param_val.len = (uint32_t)val_len;
+                    resp->param_val.flags = 0;
                     *out = resp->param_val;
                     return KILN_C99_OK;
                 }

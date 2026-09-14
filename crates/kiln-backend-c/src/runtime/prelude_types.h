@@ -2,10 +2,15 @@
 /* This layout is the complete boundary value.  bits stores booleans and IEEE-754 numbers;
  * ptr/len stores UTF-8 string bytes and is not required to be NUL terminated. */
 typedef struct kiln_value {
-    uint32_t tag;
+    uint16_t tag;
+    uint16_t flags;
     uint32_t len;
     union { uint64_t bits; const char *ptr; };
 } kiln_value;
+
+/* Private provenance on an internal string result. Public/foreign boundary strings always have
+ * flags == 0; this bit is consumed by kiln_val_from_boundary before any host-facing operation. */
+#define KILN_VALUE_FLAG_OWNED_STRING UINT16_C(1)
 
 /* =========================================================================
  * ADR 0053: 64-Bit Quiet-NaN Boxed Internal Value Representation
@@ -257,6 +262,10 @@ static inline kiln_val kiln_val_from_boundary(kiln_value v) {
         case KILN_VALUE_NULL:          return KILN_VAL_NULL;
         case KILN_VALUE_BOOLEAN:       return v.bits ? KILN_VAL_TRUE : KILN_VAL_FALSE;
         case KILN_VALUE_STRING: {
+            if ((v.flags & KILN_VALUE_FLAG_OWNED_STRING) != 0) {
+                const kiln_string *owned = (const kiln_string *)v.ptr - 1;
+                return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, owned);
+            }
             if (v.ptr == NULL || v.len == 0) {
                 return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_c99_empty_string);
             }
@@ -285,7 +294,7 @@ static inline kiln_val kiln_val_from_boundary(kiln_value v) {
 }
 
 static inline kiln_value kiln_c99_return_signal(void) {
-    kiln_value v = { .tag = KILN_VALUE_RETURN_SIGNAL, .len = 0, .bits = 0 };
+    kiln_value v = { .tag = KILN_VALUE_RETURN_SIGNAL, .flags = 0, .len = 0, .bits = 0 };
     return v;
 }
 

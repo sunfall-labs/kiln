@@ -54,6 +54,7 @@ static kiln_value kiln_val_to_boundary(kiln_val v) {
     if (KILN_VAL_IS_NUMBER(v)) {
         kiln_value out;
         out.tag = KILN_VALUE_NUMBER;
+        out.flags = 0;
         out.len = 0;
         out.bits = (uint64_t)v;
         return out;
@@ -80,7 +81,9 @@ static kiln_value kiln_val_to_boundary(kiln_val v) {
                 if (s == NULL) {
                     return kiln_c99_value(KILN_VALUE_STRING, 0, kiln_c99_empty_chars, 0);
                 }
-                return kiln_c99_value(KILN_VALUE_STRING, 0, s->bytes, s->byte_len);
+                kiln_value result = kiln_c99_value(KILN_VALUE_STRING, 0, s->bytes, s->byte_len);
+                if (s->bytes == (const char *)(s + 1)) result.flags = KILN_VALUE_FLAG_OWNED_STRING;
+                return result;
             }
             if (tag == KILN_TAG_CLOSURE_PREFIX) {
                 return kiln_c99_value(KILN_VALUE_FUNCTION, (uint64_t)(uintptr_t)ptr, NULL, 0);

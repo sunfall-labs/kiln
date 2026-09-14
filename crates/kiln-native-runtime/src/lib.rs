@@ -358,19 +358,23 @@ enum kiln_value_tag {
  * a call-bound benchmark, and at nothing on benchmarks whose values already stayed in registers,
  * which is the shape that says the threshold is what moved rather than the byte count. */
 typedef struct kiln_value {
-    uint32_t tag;
+    uint16_t tag;
+    uint16_t flags;
     uint32_t len;
     union { uint64_t bits; const char *ptr; };
 } kiln_value;
+#define KILN_VALUE_FLAG_OWNED_STRING UINT16_C(1)
 
 #if defined(__cplusplus)
 static_assert(offsetof(kiln_value, tag) == 0, "kiln_value.tag ABI offset");
+static_assert(offsetof(kiln_value, flags) == 2, "kiln_value.flags ABI offset");
 static_assert(offsetof(kiln_value, len) == 4, "kiln_value.len ABI offset");
 static_assert(offsetof(kiln_value, bits) == 8, "kiln_value.bits ABI offset");
 static_assert(offsetof(kiln_value, ptr) == 8, "kiln_value.ptr shares the payload word");
 static_assert(sizeof(kiln_value) == 16, "kiln_value fits the AAPCS64 register threshold");
 #elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 _Static_assert(offsetof(kiln_value, tag) == 0, "kiln_value.tag ABI offset");
+_Static_assert(offsetof(kiln_value, flags) == 2, "kiln_value.flags ABI offset");
 _Static_assert(offsetof(kiln_value, len) == 4, "kiln_value.len ABI offset");
 _Static_assert(offsetof(kiln_value, bits) == 8, "kiln_value.bits ABI offset");
 _Static_assert(offsetof(kiln_value, ptr) == 8, "kiln_value.ptr shares the payload word");
@@ -515,6 +519,9 @@ int kiln_cli_write_result_file(const char *path, kiln_value value) {
     uint8_t tag;
     uint64_t length;
     int status = KILN_C99_OK;
+    /* The result file is a public scalar boundary.  Preserve bytes and length, but never
+     * expose the internal GC-ownership provenance outside the runtime ABI. */
+    value.flags = 0;
     if (path == NULL || path[0] == '\0') {
         return KILN_C99_INVALID_ARGUMENT;
     }
@@ -615,6 +622,7 @@ int kiln_cli_write_result(kiln_value value) {
     if (!kiln_cli_result_representable(value)) {
         return KILN_C99_OK;
     }
+    value.flags = 0;
     return kiln_cli_write_result_file(path, value);
 }
 
@@ -686,10 +694,11 @@ kiln_value kiln_cli_describe_error(kiln_value value) {
     return value;
 }
 
-kiln_value kiln_cli_last_host_error = { KILN_VALUE_UNDEFINED, 0, {0} };
+kiln_value kiln_cli_last_host_error = { .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 };
 
 void kiln_cli_report_failure_in(int status, kiln_value value, const char *phase) {
     value = kiln_cli_describe_error(value);
+    value.flags = 0;
     fputs("kiln: ", stderr);
     if (status == KILN_C99_THROWN) {
         fputs("uncaught ", stderr);
@@ -757,6 +766,9 @@ static int kiln_cli_write_value_to(FILE *sink, kiln_value value) {
     static const char null_text[] = "null";
     static const char true_text[] = "true";
     static const char false_text[] = "false";
+    /* Console/host output consumes a borrowed span; ownership is an internal optimization
+     * and must not escape through this public writer. */
+    value.flags = 0;
     switch (value.tag) {
     case KILN_VALUE_UNDEFINED:
         return kiln_cli_write_bytes(sink, undefined_text, sizeof(undefined_text) - 1);
@@ -855,7 +867,7 @@ int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
     FILE *sink;
     (void)context;
     if (result == NULL || (argc != 0 && arguments == NULL)) {
-        kiln_cli_last_host_error = (kiln_value){ KILN_VALUE_STRING, 15, { .ptr = "host capability" } };
+        kiln_cli_last_host_error = (kiln_value){ .tag = KILN_VALUE_STRING, .flags = 0, .len = 15, .ptr = "host capability" };
         if (result != NULL) {
             *result = kiln_cli_last_host_error;
         }
@@ -863,32 +875,32 @@ int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
     }
     if (operation == KILN_HOST_OP_CLOCK_NOW) {
         if (argc != 0) {
-            kiln_cli_last_host_error = (kiln_value){ KILN_VALUE_STRING, 10, { .ptr = "clock time" } };
+            kiln_cli_last_host_error = (kiln_value){ .tag = KILN_VALUE_STRING, .flags = 0, .len = 10, .ptr = "clock time" };
             *result = kiln_cli_last_host_error;
             return KILN_C99_HOST_ERROR;
         }
         int status = kiln_cli_clock_now(result);
         if (status != KILN_C99_OK) {
-            kiln_cli_last_host_error = (kiln_value){ KILN_VALUE_STRING, 10, { .ptr = "clock time" } };
+            kiln_cli_last_host_error = (kiln_value){ .tag = KILN_VALUE_STRING, .flags = 0, .len = 10, .ptr = "clock time" };
             *result = kiln_cli_last_host_error;
         }
         return status;
     }
     if (operation == KILN_HOST_OP_ENTROPY_U64) {
         if (argc != 0) {
-            kiln_cli_last_host_error = (kiln_value){ KILN_VALUE_STRING, 7, { .ptr = "entropy" } };
+            kiln_cli_last_host_error = (kiln_value){ .tag = KILN_VALUE_STRING, .flags = 0, .len = 7, .ptr = "entropy" };
             *result = kiln_cli_last_host_error;
             return KILN_C99_HOST_ERROR;
         }
         int status = kiln_cli_entropy_u64(result);
         if (status != KILN_C99_OK) {
-            kiln_cli_last_host_error = (kiln_value){ KILN_VALUE_STRING, 7, { .ptr = "entropy" } };
+            kiln_cli_last_host_error = (kiln_value){ .tag = KILN_VALUE_STRING, .flags = 0, .len = 7, .ptr = "entropy" };
             *result = kiln_cli_last_host_error;
         }
         return status;
     }
     if (operation != KILN_HOST_OP_WRITE_STDOUT && operation != KILN_HOST_OP_WRITE_STDERR) {
-        kiln_cli_last_host_error = (kiln_value){ KILN_VALUE_STRING, 15, { .ptr = "host capability" } };
+        kiln_cli_last_host_error = (kiln_value){ .tag = KILN_VALUE_STRING, .flags = 0, .len = 15, .ptr = "host capability" };
         *result = kiln_cli_last_host_error;
         return KILN_C99_HOST_ERROR;
     }
@@ -898,18 +910,18 @@ int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
     sink = operation == KILN_HOST_OP_WRITE_STDERR ? stderr : stdout;
     for (index = 0; index < argc; ++index) {
         if (index != 0 && fputc(' ', sink) == EOF) {
-            kiln_cli_last_host_error = (kiln_value){ KILN_VALUE_STRING, 12, { .ptr = "terminal I/O" } };
+            kiln_cli_last_host_error = (kiln_value){ .tag = KILN_VALUE_STRING, .flags = 0, .len = 12, .ptr = "terminal I/O" };
             *result = kiln_cli_last_host_error;
             return KILN_C99_HOST_ERROR;
         }
         if (kiln_cli_write_value_to(sink, arguments[index]) != KILN_C99_OK) {
-            kiln_cli_last_host_error = (kiln_value){ KILN_VALUE_STRING, 12, { .ptr = "terminal I/O" } };
+            kiln_cli_last_host_error = (kiln_value){ .tag = KILN_VALUE_STRING, .flags = 0, .len = 12, .ptr = "terminal I/O" };
             *result = kiln_cli_last_host_error;
             return KILN_C99_HOST_ERROR;
         }
     }
     if (fputc('\n', sink) == EOF || fflush(sink) != 0) {
-        kiln_cli_last_host_error = (kiln_value){ KILN_VALUE_STRING, 12, { .ptr = "terminal I/O" } };
+        kiln_cli_last_host_error = (kiln_value){ .tag = KILN_VALUE_STRING, .flags = 0, .len = 12, .ptr = "terminal I/O" };
         *result = kiln_cli_last_host_error;
         return KILN_C99_HOST_ERROR;
     }
@@ -969,7 +981,7 @@ int main(int argc, char **argv) {
     }
     host.call = kiln_cli_host_call;
     host.context = NULL;
-    result = (kiln_value){ KILN_VALUE_UNDEFINED, 0, {0} };
+    result = (kiln_value){ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 };
     context.host = &host;
     context.result = &result;
     /* Which call failed, so a failure outside the module body still names something.
@@ -1007,7 +1019,7 @@ int main(int argc, char **argv) {
             } else if (promise->state == 0 /* KILN_C99_PENDING */) {
                 status = KILN_C99_CONTROL_ERROR;
                 phase = "the turn loop";
-                result = (kiln_value){ KILN_VALUE_STRING, 29, { .ptr = "top-level await never settled" } };
+                result = (kiln_value){ .tag = KILN_VALUE_STRING, .flags = 0, .len = 29, .ptr = "top-level await never settled" };
             } else if (promise->state == 1 /* KILN_C99_FULFILLED */) {
                 result = promise->value;
             }
@@ -1025,7 +1037,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     if (kiln_cli_write_result(result) != KILN_C99_OK) {
-        kiln_cli_report_failure_in(KILN_C99_HOST_ERROR, (kiln_value){ KILN_VALUE_STRING, 17, { .ptr = "filesystem access" } }, "result write");
+        kiln_cli_report_failure_in(KILN_C99_HOST_ERROR, (kiln_value){ .tag = KILN_VALUE_STRING, .flags = 0, .len = 17, .ptr = "filesystem access" }, "result write");
         return 1;
     }
     return 0;
@@ -1176,7 +1188,9 @@ mod tests {
         assert!(embedding_header().contains("#define KILN_C99_CALL_DEPTH_ERROR (-5)"));
         assert!(embedding_header().contains("#define KILN_C99_UNINITIALIZED_ERROR (-6)"));
         assert!(embedding_header().contains("#define KILN_HOST_OP_WRITE_STDOUT 1"));
-        assert!(embedding_header().contains("uint32_t tag;"));
+        assert!(embedding_header().contains("uint16_t tag;"));
+        assert!(embedding_header().contains("uint16_t flags;"));
+        assert!(embedding_header().contains("#define KILN_VALUE_FLAG_OWNED_STRING UINT16_C(1)"));
         assert!(embedding_header().contains("union { uint64_t bits; const char *ptr; };"));
         assert!(embedding_header().contains("uint64_t bits;"));
         assert!(embedding_header().contains("const char *ptr;"));
@@ -1320,7 +1334,11 @@ int main(void) {
 
 int main(void) {
     kiln_host host = {0, 0};
-    kiln_value result = {0, 0, {0}};
+    kiln_value result;
+    result.tag = 0;
+    result.flags = 0;
+    result.len = 0;
+    result.bits = 0;
     const kiln_module_api_v2 *(*api)(void) = kiln_module_probe_api_v2;
     (void)api;
     return kiln_module_probe(&host, &result);
@@ -1747,6 +1765,9 @@ int main(int argc, char **argv) {
         return 1;
     }
     value.tag = KILN_VALUE_STRING;
+    /* This is the internal owned-string provenance bit.  The public result writer must
+     * consume the ordinary ptr/len span without serializing that provenance. */
+    value.flags = KILN_VALUE_FLAG_OWNED_STRING;
     value.ptr = text;
     value.len = sizeof(text);
     return kiln_cli_write_result_file(argv[5], value) == KILN_C99_OK ? 0 : 1;
@@ -1759,13 +1780,14 @@ int main(int argc, char **argv) {
 extern void kiln_cli_report_failure_in(int status, kiln_value value, const char *phase);
 
 int main(void) {
-    kiln_value value = { KILN_VALUE_UNDEFINED, 0, {0} };
+    kiln_value value = { .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 };
     kiln_cli_report_failure_in(KILN_C99_CONTROL_ERROR, value, NULL);
     value.tag = KILN_VALUE_STRING;
+    value.flags = KILN_VALUE_FLAG_OWNED_STRING;
     value.ptr = "module=node:http instruction=7 method=240 receiver_tag=18";
     value.len = sizeof("module=node:http instruction=7 method=240 receiver_tag=18") - 1;
     kiln_cli_report_failure_in(KILN_C99_CONTROL_ERROR, value, NULL);
-    value = (kiln_value){ KILN_VALUE_UNDEFINED, 0, {0} };
+    value = (kiln_value){ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 };
     kiln_cli_report_failure_in(KILN_C99_OUT_OF_MEMORY, value, NULL);
     kiln_cli_report_failure_in(KILN_C99_CALL_DEPTH_ERROR, value, NULL);
     kiln_cli_report_failure_in(KILN_C99_UNINITIALIZED_ERROR, value, NULL);
@@ -1777,7 +1799,7 @@ int main(void) {
     value.ptr = "terminal I/O";
     value.len = sizeof("terminal I/O") - 1;
     kiln_cli_report_failure_in(KILN_C99_HOST_ERROR, value, NULL);
-    value = (kiln_value){ KILN_VALUE_UNDEFINED, 0, {0} };
+    value = (kiln_value){ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 };
     kiln_cli_report_failure_in(KILN_C99_HOST_ERROR, value, "the turn loop");
     kiln_cli_report_failure_in(KILN_C99_INVALID_ARGUMENT, value, NULL);
     kiln_cli_report_failure_in(-99, value, NULL);
