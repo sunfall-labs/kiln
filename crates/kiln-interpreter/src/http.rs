@@ -7,7 +7,7 @@ use std::rc::{Rc, Weak};
 
 use crate::net::{NetSocketState, NodeServerState};
 use crate::{
-    ExecutionError, Native, NodeObject, ObjectData, Property, RealmId, Value, is_callable,
+    is_callable, ExecutionError, Native, NodeObject, ObjectData, Property, RealmId, Value,
 };
 
 #[derive(Debug)]
@@ -208,7 +208,7 @@ pub(crate) fn node_http_request_arguments(
             .filter(|property| property.attributes.enumerable)
         {
             if let Property::Value(value) = &property.property {
-                headers.push((property.key.clone(), value.to_display_string()));
+                headers.push((property.key.to_lossy_string(), value.to_display_string()));
             }
         }
     }
@@ -223,7 +223,7 @@ pub(crate) fn node_http_request_arguments(
 pub(crate) fn node_body_bytes(value: Option<&Value>) -> Result<Vec<u8>, ExecutionError> {
     match value.unwrap_or(&Value::Undefined) {
         Value::Undefined | Value::Null => Ok(Vec::new()),
-        Value::String(value) => Ok(value.as_bytes().to_vec()),
+        Value::String(value) => Ok(value.to_lossy_string().into_bytes()),
         Value::TypedArray(value) => Ok(value.bytes()),
         value => Err(ExecutionError::TypeErrorMessage {
             message: format!(

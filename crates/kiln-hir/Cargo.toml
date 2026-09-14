@@ -8,3 +8,4 @@ repository.workspace = true
 # Compiler-owned values crossing the frontend boundary. Keep this crate dependency-free:
 # every frontend and every downstream compiler pass sits above it.
 [dependencies]
+kiln-string = { workspace = true }

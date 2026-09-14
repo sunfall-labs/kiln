@@ -10,6 +10,7 @@ kiln-builtin-surface = { workspace = true }
 kiln-builtins = { workspace = true }
 kiln-host-abi = { workspace = true }
 kiln-ir = { workspace = true }
+kiln-string = { workspace = true }
 kiln-runtime = { workspace = true }
 kiln-temporal = { workspace = true }
 kiln-json = { workspace = true }

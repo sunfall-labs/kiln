@@ -106,7 +106,7 @@ pub(crate) fn dispatch(
                 &bytes,
                 matches!(native, Native::NodeStringDecoderEnd),
             );
-            Ok(Value::String(text))
+            Ok(Value::String(text.into()))
         }
         _ => Err(ExecutionError::TypeErrorMessage {
             message: "Invalid native StringDecoder operation".into(),

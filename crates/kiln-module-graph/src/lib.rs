@@ -19,7 +19,7 @@ use kiln_interpreter::{
     Cell, CommonJsModuleLoader, CommonJsRequire, ExecutionCapabilities, ExecutionError,
     ExecutionLimits, ExecutionResult, ImportAttributes, ModuleBinding, ModuleLoadError,
     ModuleLoadRequest, ModuleLoaderService, ModulePlan, ModuleRealmSession, ModuleSelfExport,
-    ModuleSelfImport, ModuleValueRef, PlannedModule, Value, execute_module_in_runtime_with_loader,
+    ModuleSelfImport, ModuleValueRef, PlannedModule, Property, Value, execute_module_in_runtime_with_loader,
     execute_node_module_in_session_with_loader, ordinary_object, own_data_property,
     parse_json_module, read_through_cell,
 };
@@ -1888,7 +1888,7 @@ impl ModuleGraph {
                     })?;
                 values.insert(
                     module_node.path.clone(),
-                    HashMap::from([("default".to_owned(), Value::String(path.to_owned()))]),
+                    HashMap::from([("default".to_owned(), Value::String(path.to_owned().into()))]),
                 );
                 continue;
             }
@@ -2413,12 +2413,12 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
             initial_exports,
             Value::CommonJsRequire(std::rc::Rc::new(CommonJsRequire::new(targets))),
             module_object.clone(),
-            Value::String(path.to_string_lossy().into_owned()),
+            Value::String(path.to_string_lossy().into_owned().into()),
             Value::String(
                 path.parent()
                     .unwrap_or_else(|| Path::new(""))
                     .to_string_lossy()
-                    .into_owned(),
+                    .into_owned().into(),
             ),
         ];
         let total_steps = unsafe { *self.total_steps };
@@ -2486,18 +2486,18 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
                 let object_ref = object.borrow();
                 for key in object_ref.keys() {
                     if key != "default"
-                        && let Some(val) = object_ref.get_own(key)
+                        && let Some(Property::Value(val)) = object_ref.get_own_property_units(key)
                     {
-                        exports_map.insert(key.to_owned(), val.clone());
+                        exports_map.insert(key.to_lossy_string(), val.clone());
                     }
                 }
             } else if let Value::Function(closure) = &final_exports {
                 let properties_ref = closure.properties.borrow();
                 for key in properties_ref.keys() {
                     if key != "default"
-                        && let Some(val) = properties_ref.get_own(key)
+                        && let Some(Property::Value(val)) = properties_ref.get_own_property_units(key)
                     {
-                        exports_map.insert(key.to_owned(), val.clone());
+                        exports_map.insert(key.to_lossy_string(), val.clone());
                     }
                 }
             }
@@ -3434,7 +3434,7 @@ fn json_module_program() -> ModuleProgram {
 fn asset_module_program(path: &str) -> Program {
     Program {
         version: BYTECODE_VERSION,
-        constants: vec![kiln_ir::Constant::String(path.to_owned())],
+        constants: vec![kiln_ir::Constant::String(path.to_owned().into())],
         code: vec![
             Instruction::Const(0),
             Instruction::NewArray { count: 1 },
