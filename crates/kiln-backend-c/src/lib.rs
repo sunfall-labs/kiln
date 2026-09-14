@@ -84,6 +84,9 @@ pub struct EmissionPolicy {
     pub compact: bool,
     /// Emit only generic bodies, without speculative, typed, fast, or parallel clones.
     pub generic_only: bool,
+    /// Whether speculative versioning is enabled. Native orchestration resolves its process
+    /// setting before emission; `None` preserves the direct emitter's default.
+    pub speculate: Option<bool>,
     pub type_profile_record: bool,
     pub type_profile: Option<std::sync::Arc<graph::TypeProfile>>,
     /// Module slots whose exported values can be observed by this closed-world executable.
@@ -1575,6 +1578,7 @@ fn plan_unit(
     diagnostic_site: &str,
     compact: bool,
     generic_only: bool,
+    speculate: Option<bool>,
     extra_entry_slots: Option<&HashSet<u32>>,
 ) -> Result<
     (
@@ -1611,6 +1615,7 @@ fn plan_unit(
         &publishes_frame,
         compact,
         generic_only,
+        speculate,
     );
     Ok((graphs, body, entry_graph, direct))
 }
@@ -2673,6 +2678,7 @@ fn render(
         symbol,
         policy.compact,
         policy.generic_only,
+        policy.speculate,
         extra_entry_slots.as_ref(),
     )?;
     if program.has_dynamic_import() {
@@ -3367,6 +3373,7 @@ fn render_module(
         diagnostic_site,
         policy.compact,
         policy.generic_only,
+        policy.speculate,
         Some(&extra_entry_slots),
     )?;
     let reachable = liveness.as_ref().map(|(reachable, _, _)| reachable);
@@ -3663,6 +3670,14 @@ fn hash_program_pair_with_policy(program: &Program, policy: &EmissionPolicy) -> 
 
 fn hash_program_with_policy_and_seed(program: &Program, policy: &EmissionPolicy, seed: u64) -> u64 {
     let mut hash = hash_program_with_seed(program, seed);
+    let mut canonical_policy;
+    let policy = if policy.speculate == Some(true) {
+        canonical_policy = policy.clone();
+        canonical_policy.speculate = None;
+        &canonical_policy
+    } else {
+        policy
+    };
     if *policy == EmissionPolicy::default() {
         return hash;
     }
@@ -3678,6 +3693,7 @@ fn hash_program_with_policy_and_seed(program: &Program, policy: &EmissionPolicy,
         u8::from(policy.decoupled_prelude),
         u8::from(policy.compact),
         u8::from(policy.generic_only),
+        u8::from(!matches!(policy.speculate, Some(false))),
     ] {
         hash ^= u64::from(value);
         hash = hash.wrapping_mul(0x100000001b3);
