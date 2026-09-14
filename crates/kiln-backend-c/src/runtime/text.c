@@ -922,6 +922,30 @@ static int kiln_c99_utf16_next(kiln_c99_utf16_iter *iterator, uint16_t *unit) {
     return 1;
 }
 
+/* Read one JavaScript UTF-16 code unit without materialising the complete unit array.  The
+ * ASCII metadata is authoritative for the direct-byte case; every other string follows the
+ * same iterator used by length, slicing, and the bulk string operations. */
+static int kiln_c99_utf16_unit_at(kiln_value value, size_t index, uint16_t *unit) {
+    kiln_c99_utf16_iter iterator;
+    size_t current = 0;
+    if (unit == NULL) return 0;
+    if (kiln_c99_string_is_ascii(value)) {
+        if (index >= value.len || value.ptr == NULL) return 0;
+        *unit = (uint16_t)(unsigned char)value.ptr[index];
+        return 1;
+    }
+    iterator.text = value.ptr;
+    iterator.length = value.len;
+    iterator.offset = 0;
+    iterator.pending = 0;
+    iterator.has_pending = 0;
+    while (kiln_c99_utf16_next(&iterator, unit)) {
+        if (current == index) return 1;
+        current += 1;
+    }
+    return 0;
+}
+
 /* `length` in UTF-16 code units, which is what JavaScript counts and is neither bytes nor
  * characters. For ASCII text a code unit is a byte (ADR 0022), so `value.len` -- already known,
  * already paid for -- is the answer without walking a single byte. */

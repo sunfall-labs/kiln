@@ -1,7 +1,8 @@
 
-/* Every position-taking string method counts UTF-16 code units (ADR 0022), so each of them
- * converts once, works on units, and re-encodes.  One conversion pair rather than a dozen
- * ad-hoc walks is what keeps them agreeing with each other and with the interpreter.
+/* Bulk position-taking string methods count UTF-16 code units (ADR 0022), so they convert once,
+ * work on units, and re-encode. One conversion pair rather than a dozen ad-hoc walks is what
+ * keeps them agreeing with each other and with the interpreter. Single-unit access has a direct
+ * iterator path below and does not need that temporary array.
  *
  * The caller owns the returned array and frees it. */
 static int kiln_c99_to_units(kiln_value value, uint16_t **out, size_t *count) {
@@ -347,8 +348,38 @@ static int kiln_c99_split_ascii_byte(kiln_value *result, const char *bytes, size
 
 /* The string methods.  Split out from the array ones because they share nothing but the dispatch
  * -- every one of these works on code units and every one of those works on elements. */
-static int kiln_c99_invoke_string_method(kiln_value *result, uint64_t code, kiln_value receiver,
-                                         const kiln_value *args, size_t argc) {
+static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, uint64_t code,
+                                         kiln_value receiver, const kiln_value *args, size_t argc,
+                                         int depth, kiln_value *thrown) {
+    /* These methods need one UTF-16 code unit, not a materialised string. Keep argument
+     * coercion here so a numeric index is never first converted to text merely because the
+     * bulk path prepares a possible needle. */
+    if (code == KILN_C99_METHOD_CHAR_AT || code == KILN_C99_METHOD_CHAR_CODE_AT ||
+        code == KILN_C99_METHOD_STRING_AT) {
+        double index = 0.0;
+        int index_status = argc > 0 ? kiln_c99_to_number_checked(host, args[0], &index, depth,
+                                                                  thrown)
+                                    : KILN_C99_OK;
+        uint16_t unit;
+        if (index_status != KILN_C99_OK) return index_status;
+        if (isnan(index)) index = 0.0;
+        index = trunc(index);
+        if (code == KILN_C99_METHOD_STRING_AT && index < 0.0) {
+            double length = (double)kiln_c99_string_length(receiver);
+            index += length;
+        }
+        if (!isfinite(index) || index < 0.0 || index >= (double)SIZE_MAX ||
+            !kiln_c99_utf16_unit_at(receiver, (size_t)index, &unit)) {
+            *result = code == KILN_C99_METHOD_CHAR_AT      ? kiln_c99_from_units(NULL, 0)
+                      : code == KILN_C99_METHOD_STRING_AT  ? kiln_c99_undefined()
+                                                           : kiln_c99_number(0.0 / 0.0);
+            return KILN_C99_OK;
+        }
+        *result = code == KILN_C99_METHOD_CHAR_CODE_AT ? kiln_c99_number((double)unit)
+                                                        : kiln_c99_from_units(&unit, 1);
+        return KILN_C99_OK;
+    }
+
     if (kiln_c99_string_is_ascii(receiver)) {
         if (code == KILN_C99_METHOD_STRING_SLICE || code == KILN_C99_METHOD_SUBSTRING) {
             int relative = (code == KILN_C99_METHOD_STRING_SLICE);
@@ -482,6 +513,7 @@ static int kiln_c99_invoke_string_method(kiln_value *result, uint64_t code, kiln
             }
         }
     }
+
     uint16_t *units = NULL;
     uint16_t *needle = NULL;
     size_t count = 0;
@@ -579,29 +611,6 @@ static int kiln_c99_invoke_string_method(kiln_value *result, uint64_t code, kiln
         *result = kiln_c99_boolean(needle_count <= end &&
                                    memcmp(units + end - needle_count, needle,
                                           needle_count * sizeof *units) == 0);
-        break;
-    }
-    case KILN_C99_METHOD_CHAR_AT:
-    case KILN_C99_METHOD_CHAR_CODE_AT:
-    case KILN_C99_METHOD_STRING_AT: {
-        double index = argc > 0 ? kiln_c99_as_number(args[0]) : 0.0;
-        if (isnan(index)) {
-            index = 0.0;
-        }
-        /* `at` accepts a negative index, where `charAt` clamps and `charCodeAt` answers NaN --
-         * three spellings of "the character there" that differ only at the edges. */
-        if (code == KILN_C99_METHOD_STRING_AT && index < 0.0) {
-            index += (double)count;
-        }
-        if (index < 0.0 || index >= (double)count) {
-            *result = code == KILN_C99_METHOD_CHAR_AT      ? kiln_c99_from_units(NULL, 0)
-                      : code == KILN_C99_METHOD_STRING_AT  ? kiln_c99_undefined()
-                                                           : kiln_c99_number(0.0 / 0.0);
-        } else if (code == KILN_C99_METHOD_CHAR_CODE_AT) {
-            *result = kiln_c99_number((double)units[(size_t)index]);
-        } else {
-            *result = kiln_c99_from_units(units + (size_t)index, 1);
-        }
         break;
     }
     case KILN_C99_METHOD_STRING_TO_STRING:
