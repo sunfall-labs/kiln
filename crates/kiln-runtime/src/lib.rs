@@ -1098,11 +1098,12 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
     /// (the queued adapter of ADR 0046, for a loop that drains events at its checkpoint).
     #[cfg(feature = "http")]
     pub fn server_attach_queued(&mut self, resource: ResourceId, allow_half_close: bool) -> bool {
-        if !self.state.queued_http.admit(resource) {
+        let Some(admission) = self.state.queued_http.admit(resource) else {
             return false;
-        }
+        };
         let dispatch = Rc::new(QueuedDispatch {
             resource,
+            admission,
             role: QueuedRole::Server,
             queue: Rc::clone(&self.state.queued_http),
         });
@@ -1118,11 +1119,12 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
     /// [`Self::take_http_client_events`].
     #[cfg(feature = "http")]
     pub fn client_attach_queued(&mut self, resource: ResourceId) -> bool {
-        if !self.state.queued_http.admit(resource) {
+        let Some(admission) = self.state.queued_http.admit(resource) else {
             return false;
-        }
+        };
         let dispatch = Rc::new(QueuedDispatch {
             resource,
+            admission,
             role: QueuedRole::Client,
             queue: Rc::clone(&self.state.queued_http),
         });
@@ -1567,20 +1569,35 @@ pub struct QueuedHttp {
     signal: Rc<tokio::sync::Notify>,
     /// A permit the signal would otherwise hand to a wait that has not started yet.
     signalled: std::cell::Cell<bool>,
-    pending_admissions: std::cell::RefCell<BTreeSet<ResourceId>>,
+    next_admission: std::cell::Cell<u64>,
+    pending_admissions: std::cell::RefCell<BTreeMap<ResourceId, u64>>,
 }
 
 impl QueuedHttp {
-    fn admit(&self, resource: ResourceId) -> bool {
-        self.pending_admissions.borrow_mut().insert(resource)
+    fn admit(&self, resource: ResourceId) -> Option<u64> {
+        let mut pending = self.pending_admissions.borrow_mut();
+        if pending.contains_key(&resource) {
+            return None;
+        }
+        let admission = self.next_admission.get().wrapping_add(1).max(1);
+        self.next_admission.set(admission);
+        pending.insert(resource, admission);
+        Some(admission)
     }
 
     fn cancel_admission(&self, resource: ResourceId) {
         self.pending_admissions.borrow_mut().remove(&resource);
     }
 
-    fn started(&self, resource: ResourceId) {
-        if self.pending_admissions.borrow_mut().remove(&resource) {
+    fn cancel_admission_token(&self, resource: ResourceId, admission: u64) {
+        if self.pending_admissions.borrow().get(&resource) == Some(&admission) {
+            self.pending_admissions.borrow_mut().remove(&resource);
+        }
+    }
+
+    fn started(&self, resource: ResourceId, admission: u64) {
+        if self.pending_admissions.borrow().get(&resource) == Some(&admission) {
+            self.pending_admissions.borrow_mut().remove(&resource);
             self.signalled.set(true);
             self.signal.notify_one();
         }
@@ -1671,8 +1688,16 @@ enum QueuedRole {
 #[cfg(feature = "http")]
 struct QueuedDispatch {
     resource: ResourceId,
+    admission: u64,
     role: QueuedRole,
     queue: Rc<QueuedHttp>,
+}
+
+impl Drop for QueuedDispatch {
+    fn drop(&mut self) {
+        self.queue
+            .cancel_admission_token(self.resource, self.admission);
+    }
 }
 
 /// `name NUL value NUL` pairs back into owned strings; a value that is not UTF-8 is dropped,
@@ -1697,10 +1722,14 @@ fn unflatten_headers(bytes: &[u8]) -> Vec<(String, String)> {
 #[cfg(feature = "http")]
 impl HttpDispatch for QueuedDispatch {
     fn started(&self) {
-        self.queue.started(self.resource);
+        self.queue.started(self.resource, self.admission);
     }
 
     fn event(&self, event: &HttpEvent<'_>) -> i32 {
+        if event.kind == HttpEventKind::Closed {
+            self.queue
+                .cancel_admission_token(self.resource, self.admission);
+        }
         match self.role {
             QueuedRole::Server => {
                 let queued = match event.kind {
@@ -6325,6 +6354,10 @@ mod tests {
             "duplicate resource ownership is rejected"
         );
         assert!(
+            runtime.has_live_http_work(),
+            "a rejected duplicate attach must not erase the original admission"
+        );
+        assert!(
             !runtime.client_attach_queued(resource),
             "nor may the other engine take an owned resource"
         );
@@ -6364,6 +6397,42 @@ mod tests {
         // An aborted task is dropped when its executor next runs, or goes away with it.
         drop(runtime);
         assert!(log.is_dropped(), "shutdown drops the transports it took");
+    }
+
+    #[test]
+    fn direct_engine_close_settles_pre_first_poll_admissions() {
+        let server_resource = ResourceId::new(60);
+        let client_resource = ResourceId::new(61);
+        let host = ScriptedHost::new([])
+            .with_transport(server_resource, ScriptedTransport::new([], false))
+            .with_transport(client_resource, ScriptedTransport::new([], false));
+        let mut runtime = RealmRuntime::with_host(host).expect("scripted runtime builds");
+
+        assert!(runtime.server_attach_queued(server_resource, false));
+        let executor = &runtime.executor;
+        let server_engine = &mut runtime.state.http_server;
+        assert!(executor.local.block_on(&executor.runtime, async {
+            server_engine.close(server_resource, HttpCloseMode::Abort)
+        }));
+        let mut realm: Realm = Realm::new();
+        let _ = runtime.next_referenced_turn(&mut realm);
+        assert_eq!(
+            runtime.take_queued_server_events(server_resource),
+            vec![RuntimeHttpEvent::Closed]
+        );
+        assert!(runtime.next_referenced_turn(&mut realm).is_none());
+
+        assert!(runtime.client_attach_queued(client_resource));
+        let executor = &runtime.executor;
+        let client_engine = &mut runtime.state.http_client;
+        assert!(executor.local.block_on(&executor.runtime, async {
+            client_engine.close(client_resource, HttpCloseMode::Abort)
+        }));
+        let events = drain_client_events(&mut runtime, client_resource, |events| {
+            events.contains(&RuntimeHttpClientEvent::Closed)
+        });
+        assert_eq!(events, vec![RuntimeHttpClientEvent::Closed]);
+        assert!(runtime.next_referenced_turn(&mut realm).is_none());
     }
 
     /// Drive one scripted HTTP/1 request through the engine and return the bytes the
