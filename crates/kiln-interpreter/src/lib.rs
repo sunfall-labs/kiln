@@ -3892,6 +3892,34 @@ fn escaped_source(source: &str) -> String {
     escaped
 }
 
+fn regexp_string_units(regexp: &RegExpData) -> StringUnits {
+    let source = escaped_source_units(&regexp.source);
+    let mut units = Vec::with_capacity(source.unit_len() + regexp.flags.len() + 2);
+    units.extend("/".encode_utf16());
+    units.extend(source.units());
+    units.extend("/".encode_utf16());
+    units.extend(regexp.flags.encode_utf16());
+    StringUnits::from_units(&units)
+}
+
+fn escaped_source_units(source: &StringUnits) -> StringUnits {
+    if let Ok(scalar) = source.to_scalar_string() {
+        return StringUnits::from(escaped_source(&scalar));
+    }
+    let source = {
+        let mut escaped = String::new();
+        for unit in source.units() {
+            if (0xd800..=0xdfff).contains(&unit) {
+                escaped.push_str(&format!("\\u{unit:04x}"));
+            } else if let Some(character) = char::from_u32(u32::from(unit)) {
+                escaped.push_str(&escaped_source(&character.to_string()));
+            }
+        }
+        escaped
+    };
+    StringUnits::from(source)
+}
+
 /// A compiled regular expression, its source, and the cursor `g` and `y` advance.
 ///
 /// The engine is `regress`, which targets ECMAScript semantics rather than the linear-time
@@ -3901,7 +3929,7 @@ fn escaped_source(source: &str) -> String {
 #[derive(Debug)]
 pub struct RegExpData {
     /// The pattern as written, which `source` hands back to the program.
-    source: String,
+    source: StringUnits,
     flags: String,
     compiled: regress::Regex,
     global: bool,
@@ -4558,7 +4586,7 @@ impl Value {
             // `String(/a/g)` is the literal as written, which is what `toString` returns.
             Self::RegExp(regexp) => format!(
                 "/{}/{}",
-                regexp.source,
+                regexp.source.to_lossy_string(),
                 canonical_regexp_flags(&regexp.flags)
             ),
             Self::Date(date) => date_to_string(date.time.get()),
@@ -4617,6 +4645,7 @@ impl Value {
             Self::String(value) => value.clone(),
             Self::Array(items) => join_units(&items.borrow(), &StringUnits::from(",")),
             Self::TypedArray(view) => join_units(&view.items(), &StringUnits::from(",")),
+            Self::RegExp(regexp) => regexp_string_units(regexp),
             Self::Proxy(proxy) if !is_callable(&proxy.target) => proxy.target.to_string_units(),
             Self::Intl(value) => match value.as_ref() {
                 intl::IntlValue::Locale(tag) => StringUnits::from(tag.as_str()),
@@ -12359,7 +12388,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Instruction::NewRegExp { pattern, flags } => {
                     let pattern = self.string_constant(*pattern, current)?;
                     let flags = self.string_constant(*flags, current)?;
-                    match build_regexp(&pattern, &flags) {
+                    match build_regexp(&StringUnits::from(pattern.clone()), &flags) {
                         Some(regexp) => self.stack.push(regexp),
                         // A pattern oxc parsed but this engine rejects. A SyntaxError is what a
                         // program would get from `new RegExp` with the same text.
@@ -16856,8 +16885,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::RegExpConstructor => {
                 let pattern = match arguments.first() {
                     Some(Value::RegExp(existing)) => existing.source.clone(),
-                    None | Some(Value::Undefined) => String::new(),
-                    Some(value) => value.to_display_string(),
+                    None | Some(Value::Undefined) => StringUnits::default(),
+                    Some(value) => value.to_string_units(),
                 };
                 let flags = match arguments.get(1) {
                     None | Some(Value::Undefined) => match arguments.first() {
@@ -17587,7 +17616,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             });
         };
         Ok(match accessor {
-            RegExpAccessor::Source => Value::String(escaped_source(&regexp.source).into()),
+            RegExpAccessor::Source => Value::String(escaped_source_units(&regexp.source)),
             RegExpAccessor::Flags => unreachable!("handled above"),
             other => Value::Boolean(
                 other
@@ -28989,7 +29018,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Some(value @ Value::RegExp(_)) => Ok(Some(value.clone())),
             // `"abc".match()` is `RegExpCreate(undefined, undefined)`: the empty pattern, which
             // matches at position zero. Answering `null` instead skipped the match entirely.
-            None | Some(Value::Undefined) => match build_regexp("", flags) {
+            None | Some(Value::Undefined) => match build_regexp(&StringUnits::default(), flags) {
                 Some(regexp) => Ok(Some(regexp)),
                 None => Ok(None),
             },
@@ -28999,7 +29028,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // "[object Object]" against the subject rather than what the program said.
                 let text = self.as_text(value, instruction)?;
                 let escaped = regress::escape(&text);
-                match build_regexp(&escaped, flags) {
+                match build_regexp(&StringUnits::from(escaped), flags) {
                     Some(regexp) => Ok(Some(regexp)),
                     None => {
                         self.throw_error(
@@ -31146,7 +31175,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // Escaped, exactly as the accessor on the prototype escapes it: the two must
                 // not disagree about what `re.source` is, and the raw pattern would not survive
                 // being written back between slashes.
-                "source" => Value::String(escaped_source(&regexp.source).into()),
+                "source" => Value::String(escaped_source_units(&regexp.source)),
                 // The specification's order -- `dgimsuvy` -- not the order the program wrote
                 // them: `new RegExp("a", "yigm").flags` is "gimy". Answering the stored spelling
                 // made the getter disagree with the generic one on `RegExp.prototype`, which
@@ -41113,7 +41142,7 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
         ),
         Value::RegExp(regexp) => format!(
             "/{}/{}",
-            regexp.source,
+            regexp.source.to_lossy_string(),
             canonical_regexp_flags(&regexp.flags)
         ),
         Value::Date(date) => {
@@ -41286,10 +41315,11 @@ fn constructor_label(object: &ObjectData) -> Option<String> {
 }
 
 /// Compile a regular expression, or `None` when the engine rejects the pattern.
-fn build_regexp(pattern: &str, flags: &str) -> Option<Value> {
-    let compiled = regress::Regex::with_flags(pattern, flags).ok()?;
+fn build_regexp(pattern: &StringUnits, flags: &str) -> Option<Value> {
+    let units = pattern.to_units();
+    let compiled = regress::Regex::from_unicode(units.iter().copied().map(u32::from), flags).ok()?;
     Some(Value::RegExp(Rc::new(RegExpData {
-        source: pattern.to_owned(),
+        source: pattern.clone(),
         flags: flags.to_owned(),
         compiled,
         global: flags.contains('g'),
