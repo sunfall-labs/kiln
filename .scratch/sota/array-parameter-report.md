@@ -44,11 +44,22 @@ Its generated-C artifact `.kiln/cache/generated-c/4a/4a39c29bd0ef22c6ac2efc4d682
 
 ## Correctness
 
-The profile-loaded semantic fixture is `.scratch/array-bench/candidate-tree/semantic.js`.
-Baseline and candidate output hashes match for normal, compile-time disabled, and forced-exit runs:
-`49a71d405afa09e85813428c5b2e0ea8ac511ff708105d30e277a2ebfed94ebe`.
-It covers dense arrays, holes, array-like objects, strings, getters, changing receiver kind, and parameter reassignment.
-The indexed benchmark checksum is `14336` for baseline, candidate, disabled candidate, and Node.
+The semantic fixture is `.scratch/array-bench/candidate-tree/semantic.js` (the baseline tree has the same bytes).
+SHA256: `de6ad87be5fca75b41993468c0bcbd60d51d9f4ea272837736311b56c5ee6832`.
+It covers dense arrays, holes, array-like objects, strings, a real own index accessor, an inherited
+`Array.prototype[1]` getter installed with `Object.defineProperty` and restored in `finally`, changing
+receiver kind, and parameter reassignment. Node's oracle output is in
+`.scratch/array-bench/semantic-node-new.out`, SHA256
+`a86b299b614f709eee3eba493d249e6bbbbd71870a18d0a612653e6a2d2e2098`.
+
+The interpreter output matches Node byte-for-byte for both normal and `KILN_SPECULATE=0` runs;
+those outputs are `.scratch/array-bench/semantic-candidate-interpreter.out` and
+`.scratch/array-bench/semantic-candidate-disabled-interpreter.out`, with the same SHA256.
+The profile-loaded and disabled native builds both compile (`semantic-candidate-new-build.log`
+and `semantic-disabled-new-build.log`), but executing either native binary refuses at the
+`Object.defineProperty` call because that native operation is outside its supported subset.
+The baseline native build has the same refusal. This fixture therefore validates accessor semantics
+through the interpreter and Node oracle while recording the native coverage gap honestly.
 
 ## Quiet-slot warm measurements
 
