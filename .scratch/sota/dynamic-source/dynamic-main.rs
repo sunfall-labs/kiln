@@ -26,16 +26,10 @@ fn compile_dynamic(
     ))
 }
 
-fn main() {
-    let dynamic_source = r#"
-const high = String.fromCharCode(0xd800);
-eval('"' + high + '"');
-eval('"' + '\\uD800' + '"');
-try { eval(high); } catch (error) { console.log(error.name); }
-"#;
+fn run_dynamic_case(label: &str, source: &str, expect_refusal: bool) {
     let dynamic_module = compile_module(&frontend_oxc::parse_with_goal(
         "dynamic.js",
-        dynamic_source,
+        source,
         SourceGoal::Script,
     ))
     .expect("compile dynamic source");
@@ -46,10 +40,53 @@ try { eval(high); } catch (error) { console.log(error.name); }
         &mut dynamic_host,
         Default::default(),
         ExecutionCapabilities::default().with_source_compiler(compile_dynamic),
-    )
-    .expect("execute dynamic source");
-    println!("dynamic-stdout={:?}", dynamic_host.stdout());
-    println!("dynamic-result={:?}", dynamic_result.execution.value);
+    );
+    println!("{label}-stdout={:?}", dynamic_host.stdout());
+    match dynamic_result {
+        Ok(result) => {
+            assert!(
+                !expect_refusal,
+                "{label} unexpectedly reached the stub source compiler"
+            );
+            println!("{label}-result={:?}", result.execution.value);
+        }
+        Err(kiln_interpreter::ExecutionError::EvalUnsupported { message }) => {
+            assert!(expect_refusal, "{label} unexpectedly refused valid source");
+            assert_eq!(
+                message,
+                "dynamic source contains unpaired UTF-16 surrogate code units"
+            );
+            println!("{label}-error=EvalUnsupported {{ message: {message:?} }}");
+        }
+        Err(error) => panic!("{label} returned an unexpected dynamic-source error: {error:?}"),
+    }
+}
+
+fn main() {
+    run_dynamic_case(
+        "raw-quoted",
+        r#"
+const high = String.fromCharCode(0xd800);
+eval('"' + high + '"');
+"#,
+        true,
+    );
+    run_dynamic_case(
+        "escaped-quoted",
+        r#"
+const high = String.fromCharCode(0xd800);
+eval('"' + '\\uD800' + '"');
+"#,
+        false,
+    );
+    run_dynamic_case(
+        "raw-outside-literal",
+        r#"
+const high = String.fromCharCode(0xd800);
+eval(high);
+"#,
+        true,
+    );
 
     let accessor_source =
         include_str!("../../../conformance/native/inferred-name-auto-accessor.ts");
@@ -68,6 +105,11 @@ try { eval(high); } catch (error) { console.log(error.name); }
         ExecutionCapabilities::default(),
     )
     .expect("execute auto-accessor source");
+    assert_eq!(
+        accessor_host.stdout(),
+        "11 22\n101 202\n",
+        "auto-accessor public keys lost their exact UTF-16 identity"
+    );
     println!("auto-accessor-stdout={:?}", accessor_host.stdout());
     println!("auto-accessor-result={:?}", accessor_result.execution.value);
 }

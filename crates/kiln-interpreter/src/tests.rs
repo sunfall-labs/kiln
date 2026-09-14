@@ -2184,7 +2184,7 @@ fn arrays_expose_the_same_properties_to_reads_and_to_in() {
 #[test]
 fn a_symbol_key_is_not_its_display_string() {
     let symbol = Value::Symbol(Symbol::WellKnown(WellKnown::Iterator));
-    assert_eq!(symbol.property_key(), "@@iterator");
+    assert_eq!(symbol.property_key_lossy(), "@@iterator");
     assert_eq!(symbol.to_display_string(), "Symbol(Symbol.iterator)");
     assert_eq!(symbol.type_of(), "symbol");
 }
@@ -4187,7 +4187,7 @@ fn a_symbol_shows_its_description_rather_than_its_reserved_key() {
     // The key is `@@iterator`, which is an implementation detail and not what a console says.
     let symbol = Value::Symbol(Symbol::WellKnown(WellKnown::Iterator));
     assert_eq!(inspect(&symbol), "Symbol(Symbol.iterator)");
-    assert_eq!(symbol.property_key(), "@@iterator");
+    assert_eq!(symbol.property_key_lossy(), "@@iterator");
 }
 
 #[test]
