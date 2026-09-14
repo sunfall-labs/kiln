@@ -913,10 +913,10 @@ pub(crate) fn closure_construction(
     capture_count: usize,
 ) -> String {
     let target = &functions[proto as usize];
-    let (name, name_len) = match &target.name {
-        Some(text) => (format!("{symbol}_name_{proto}"), text.len()),
-        None => ("NULL".to_owned(), 0),
-    };
+    let name = target.effective_name_units().map_or_else(
+        || "NULL".to_owned(),
+        |_| format!("&{symbol}_function_name_{proto}"),
+    );
     let span = target.span;
     let (source, source_len) =
         if source.is_empty() || span.end as usize > source.len() || span.start > span.end {
@@ -953,7 +953,7 @@ pub(crate) fn closure_construction(
     };
     let diagnostic_source = diagnostic_source(diagnostic_site);
     format!(
-        "kiln_c99_make_closure(&built, {symbol}_fn_{proto}, {name}, {name_len}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {is_method}, {arrow}, {strict}, {defining_receiver}, kiln_val_from_boundary(kiln_c99_new_target), UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), {captured}, UINT32_C({capture_count}))"
+        "kiln_c99_make_closure(&built, {symbol}_fn_{proto}, {name}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {is_method}, {arrow}, {strict}, {defining_receiver}, kiln_val_from_boundary(kiln_c99_new_target), UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), {captured}, UINT32_C({capture_count}))"
     )
 }
 
@@ -1645,6 +1645,8 @@ fn render_entry(
     policy: &EmissionPolicy,
 ) -> Result<(), EmitError> {
     if body.asynchronous {
+        let entry_name = format!("{unit_symbol}_entry_name");
+        render_static_string(output, &entry_name, &kiln_ir::StringUnits::from("<entry>"));
         emit_graph::emit_async_entry_body(
             output,
             graph,
@@ -1743,7 +1745,7 @@ fn render_entry(
     int status = kiln_c99_make_closure(
         &entry_closure,
         {unit_symbol}_entry_body,
-        "<entry>", 7,
+        &{unit_symbol}_entry_name,
         "<entry>", 7,
         {diagnostic_source},
         0, 0,
@@ -2015,6 +2017,12 @@ fn render_constant_declarations(output: &mut String, program: &Program, symbol: 
                 writeln!(output, "static void *{symbol}_bigint_{index} = NULL;").unwrap();
             }
             Constant::Undefined | Constant::Null | Constant::Boolean(_) | Constant::Number(_) => {}
+        }
+    }
+    for (index, function) in program.functions.iter().enumerate() {
+        if let Some(name) = function.effective_name_units() {
+            let symbol_name = format!("{symbol}_function_name_{index}");
+            render_static_string(output, &symbol_name, &name);
         }
     }
 }
@@ -4127,12 +4135,12 @@ fn hash_function_proto(hash: &mut u64, function: &FunctionProto) {
 
     byte(hash, 0x61);
     byte(hash, u8::from(function.asynchronous));
-    match &function.name {
+    match function.effective_name_units() {
         Some(name) => {
             byte(hash, 1);
-            word(hash, name.len() as u64);
-            for value in name.bytes() {
-                byte(hash, value);
+            word(hash, name.unit_len() as u64);
+            for unit in name.units() {
+                word(hash, u64::from(unit));
             }
         }
         None => byte(hash, 0),
