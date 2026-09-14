@@ -24,6 +24,9 @@
 #[cfg(any(feature = "regexp", feature = "bigint", feature = "json"))]
 extern crate alloc;
 
+#[cfg(any(feature = "regexp", feature = "json"))]
+use kiln_string::StringView;
+
 const INVALID_ARGUMENT: i32 = -1;
 #[cfg(feature = "realm")]
 const RUNTIME_ERROR: i32 = -8;
@@ -44,13 +47,9 @@ const _: () = {
     assert!(core::mem::offset_of!(KilnString, data) == 8);
 };
 
-pub(crate) enum ValidatedString<'a> {
-    Latin1(&'a [u8]),
-    Utf16(&'a [u16]),
-}
-
 /// Validate a string view once at a coarse provider boundary.
-pub(crate) unsafe fn validate_string<'a>(view: *const KilnString) -> Option<ValidatedString<'a>> {
+#[cfg(any(feature = "regexp", feature = "json"))]
+pub(crate) unsafe fn validate_string<'a>(view: *const KilnString) -> Option<StringView<'a>> {
     if view.is_null() {
         return None;
     }
@@ -60,30 +59,81 @@ pub(crate) unsafe fn validate_string<'a>(view: *const KilnString) -> Option<Vali
     match view.flags {
         0 => {
             if len == 0 {
-                return Some(ValidatedString::Latin1(&[]));
+                return Some(StringView::Latin1(&[]));
             }
             if view.data.is_null() || len > isize::MAX as usize {
                 return None;
             }
             // SAFETY: validated by the private C ABI contract.
-            Some(ValidatedString::Latin1(unsafe {
+            Some(StringView::Latin1(unsafe {
                 core::slice::from_raw_parts(view.data.cast(), len)
             }))
         }
         1 => {
             if len == 0 {
-                return Some(ValidatedString::Utf16(&[]));
+                return Some(StringView::Utf16(&[]));
             }
             if view.data.is_null() || (view.data as usize & 1) != 0 || len > isize::MAX as usize / 2
             {
                 return None;
             }
             // SAFETY: validated by the private C ABI contract.
-            Some(ValidatedString::Utf16(unsafe {
+            Some(StringView::Utf16(unsafe {
                 core::slice::from_raw_parts(view.data.cast(), len)
             }))
         }
         _ => None,
+    }
+}
+
+#[cfg(all(test, any(feature = "regexp", feature = "json")))]
+mod string_view_tests {
+    use super::{KilnString, StringView, validate_string};
+    use core::ffi::c_void;
+
+    #[test]
+    fn validates_flags_nulls_and_utf16_alignment() {
+        let bytes = [b'x'];
+        let unknown_flags = KilnString {
+            unit_len: 1,
+            flags: 2,
+            data: bytes.as_ptr().cast(),
+        };
+        assert!(unsafe { validate_string(&unknown_flags) }.is_none());
+
+        let null_nonempty = KilnString {
+            unit_len: 1,
+            flags: 0,
+            data: core::ptr::null(),
+        };
+        assert!(unsafe { validate_string(&null_nonempty) }.is_none());
+
+        let units = [0x61_u16];
+        let misaligned = KilnString {
+            unit_len: 1,
+            flags: 1,
+            data: units.as_ptr().cast::<u8>().wrapping_add(1).cast::<c_void>(),
+        };
+        assert!(unsafe { validate_string(&misaligned) }.is_none());
+
+        let empty_latin1 = KilnString {
+            unit_len: 0,
+            flags: 0,
+            data: core::ptr::null(),
+        };
+        assert_eq!(
+            unsafe { validate_string(&empty_latin1) },
+            Some(StringView::Latin1(&[]))
+        );
+        let empty_utf16 = KilnString {
+            unit_len: 0,
+            flags: 1,
+            data: core::ptr::null(),
+        };
+        assert_eq!(
+            unsafe { validate_string(&empty_utf16) },
+            Some(StringView::Utf16(&[]))
+        );
     }
 }
 
@@ -6333,6 +6383,9 @@ mod temporal_stubs {
 }
 
 #[cfg(not(feature = "json"))]
+/// # Safety
+///
+/// This disabled feature stub does not dereference its arguments.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kiln_json_parse(
     _source: *const KilnString,
@@ -6517,8 +6570,8 @@ mod regexp {
             return INVALID_ARGUMENT;
         };
         let units: &[u16] = match subject {
-            super::ValidatedString::Utf16(units) => units,
-            super::ValidatedString::Latin1(bytes) => {
+            super::StringView::Utf16(units) => units,
+            super::StringView::Latin1(bytes) => {
                 state.latin1_subject.clear();
                 state
                     .latin1_subject
@@ -6621,12 +6674,12 @@ mod regexp {
         length
     }
 
-    fn view_to_unicode(view: super::ValidatedString<'_>) -> Option<Vec<u32>> {
+    fn view_to_unicode(view: super::StringView<'_>) -> Option<Vec<u32>> {
         match view {
-            super::ValidatedString::Latin1(bytes) => {
+            super::StringView::Latin1(bytes) => {
                 Some(bytes.iter().map(|&byte| u32::from(byte)).collect())
             }
-            super::ValidatedString::Utf16(units) => Some(
+            super::StringView::Utf16(units) => Some(
                 char::decode_utf16(units.iter().copied())
                     .map(|result| {
                         result
@@ -6638,14 +6691,14 @@ mod regexp {
         }
     }
 
-    fn view_to_flags(view: super::ValidatedString<'_>) -> Option<String> {
+    fn view_to_flags(view: super::StringView<'_>) -> Option<String> {
         match view {
-            super::ValidatedString::Latin1(bytes) => bytes
+            super::StringView::Latin1(bytes) => bytes
                 .iter()
                 .all(|&byte| byte.is_ascii())
                 .then(|| String::from_utf8(bytes.to_vec()).ok())
                 .flatten(),
-            super::ValidatedString::Utf16(units) => units
+            super::StringView::Utf16(units) => units
                 .iter()
                 .copied()
                 .map(u8::try_from)
@@ -8346,7 +8399,7 @@ mod temporal {
 #[cfg(feature = "json")]
 mod json {
     use super::INVALID_ARGUMENT;
-    use super::{KilnString, ValidatedString};
+    use super::{KilnString, StringView};
     use kiln_json::{Node, ParseError, TextSlice, UnitSource};
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -8379,17 +8432,21 @@ mod json {
         })
     }
 
-    /// Parse `len` bytes of UTF-8 at `bytes`.
+    /// Parse the canonical Latin1 or UTF-16 [`KilnString`] source view.
     ///
-    /// Returns 0 with the tape -- `out_count` nodes at `out_nodes`, in source order, whose string
-    /// offsets index the `out_text_len` bytes at `out_text` -- or -1 for text that is not JSON,
-    /// or -2 when the reader could not run. The four pointers stay valid until the next call on
-    /// this thread and belong to the reader; the caller reads them and does not free them.
+    /// Returns 0 with `out_count` tape nodes at `out_nodes`, in source order, and the decoded text
+    /// view in `out_text`; string node offsets and lengths count JavaScript UTF-16 units. Returns
+    /// -1 for text that is not JSON or an invalid string header, or -2 when the reader could not
+    /// run. The three output slots point into this thread's scratch and remain valid until its
+    /// next parse; the caller reads them and does not free them.
     ///
     /// # Safety
     ///
-    /// `bytes` must be readable for `len` bytes (null is accepted only with a length of zero), and
-    /// the four out pointers must be writable slots.
+    /// `source` must be null only for the invalid-argument case; otherwise its header must name
+    /// readable Latin1 bytes or aligned UTF-16 units for `unit_len`, with flags 0 or 1. The three
+    /// output pointers must be writable slots. The returned pointers are borrowed from the
+    /// provider's thread-local scratch and must not be retained after the next parse on that
+    /// thread.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_json_parse(
         source: *const KilnString,
@@ -8406,12 +8463,12 @@ mod json {
         // A panic must not cross the C boundary: the archive's unwind policy makes one fatal to
         // the process, and this is `JSON.parse`, which a program wraps in `try`.
         let parsed = catch_unwind(AssertUnwindSafe(|| match source {
-            ValidatedString::Latin1(bytes) => parse_tape(bytes),
-            ValidatedString::Utf16(units) => parse_tape(units),
+            StringView::Latin1(bytes) => parse_tape(bytes),
+            StringView::Utf16(units) => parse_tape(units),
         }));
         match parsed {
             Ok(Ok((nodes, count, text))) => {
-                // SAFETY: the four slots are writable by the caller contract. The pointers are
+                // SAFETY: the three output slots are writable by the caller contract. The pointers are
                 // into the crate's thread-local scratch, which outlives this call.
                 unsafe {
                     out_nodes.write(nodes);
