@@ -1,10 +1,13 @@
 # Issue 05: HIR Escape Analysis & SSA Purity Loop Lowering
 
-Status: planned
+Status: resolved
 Feature: multicore-concurrency
-Governing ADR: ADR 0056, ADR 0057
+Governing ADR: ADR 0056, ADR 0057, ADR 0058
 
-Update 2026-09-06: `is_pure()` deleted; `check_isolate_escapes` kept (wired, tested). The allocation-free predicate ADR 0058 application 2 needs is tracked as `.scratch/rust-parallel-engine/issues/03`. Earlier reality check: check_isolate_escapes is wired into frontend-oxc; is_pure() in kiln-backend-c graph.rs is called only by a test, is not consulted by the parallelMap lowering, and checks for stores rather than allocation, which is the property a foreign thread needs.
+Resolution 2026-09-13:
+- Region escape analysis `check_isolate_escapes` implemented in `crates/kiln-hir/src/lib.rs` and wired into `frontend-oxc`, emitting diagnostics when an object passed to `isolate()` escapes via local aliases or closure captures.
+- SSA effect classification and native C work-stealing loop lowering implemented in `crates/kiln-backend-c` via `parallel_safe`, static C chunk worker lowering, and `kiln_parallel_map` in the native provider archive across a private Rayon pool (ADR 0058 Application 2).
+- Verified via `mbx test -p kiln-hir` and `conformance/native/parallel-map.ts`.
 
 ## Context
 Rather than executing parallel loops or region transfers interpretively through JS microtask state machines, Kiln's AOT compiler can verify non-aliasing and purity at compile time, lowering parallel operations directly into scalar C11 loops.

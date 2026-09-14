@@ -1,6 +1,6 @@
 # Multicore In-Process Concurrency: Native Actors, Zero-Copy Region Transfer, and Effect v4 Integration
 
-Status: in-progress
+Status: resolved
 
 Governing ADRs: [ADR 0057](file:///home/coder/kiln/docs/adr/0057-region-isolated-actors-and-zero-copy-transfer.md), [ADR 0028](file:///home/coder/kiln/docs/adr/0028-one-tokio-runtime-owns-interpreted-and-native-execution.md), [ADR 0041](file:///home/coder/kiln/docs/adr/0041-the-native-heap-is-collected-at-the-turn-boundary.md), [ADR 0056](file:///home/coder/kiln/docs/adr/0056-value-graph-and-verifier.md).
 
@@ -67,8 +67,8 @@ By combining Kiln's ahead-of-time (AOT) C compiler with its Rust/Tokio runtime, 
 | [02](issues/02-c99-gc-block-splice.md) | `c99-gc-block-splice` | $O(1)$ GC Block Sublist Unlinking and Splicing in Native C | resolved |
 | [03](issues/03-base-concurrency-surface.md) | `base-concurrency-surface` | Base TypeScript Concurrency Surface (`@kiln/concurrency`) | done |
 | [04](issues/04-effect-v4-worker-pool-and-scheduler.md) | `effect-v4-worker-pool-and-scheduler` | Universal Effect v4 Integration (`@kiln/effect`) | resolved |
-| [05](issues/05-hir-escape-and-purity-analysis.md) | `hir-escape-and-purity-analysis` | HIR Escape Analysis & SSA Purity Loop Lowering | planned |
-| [06](issues/06-conformance-and-benchmarking.md) | `conformance-and-benchmarking` | Conformance Test Suite & Multicore Performance Benchmarking | planned |
+| [05](issues/05-hir-escape-and-purity-analysis.md) | `hir-escape-and-purity-analysis` | HIR Escape Analysis & SSA Purity Loop Lowering | resolved |
+| [06](issues/06-conformance-and-benchmarking.md) | `conformance-and-benchmarking` | Conformance Test Suite & Multicore Performance Benchmarking | resolved |
 
 ---
 
