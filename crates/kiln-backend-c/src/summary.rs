@@ -13,7 +13,7 @@ use kiln_ir::{FunctionProto, Instruction, Program};
 use serde::{Deserialize, Serialize};
 
 use crate::graph::{
-    BasicBlock, BlockId, Effect, FunctionGraph, GraphOp, Proven, Terminator, ValueId,
+    BasicBlock, BlockId, Effects, FunctionGraph, GraphOp, Proven, Terminator, ValueId,
     build_function_graph, proven_types,
 };
 
@@ -198,7 +198,7 @@ pub fn summarize_graph(graph: &FunctionGraph) -> FunctionSummary {
         }
         if block.exception_handler.is_none() {
             for (_, op) in &block.operations {
-                if op.effect() != Effect::Pure {
+                if op.effects() != Effects::PURE {
                     can_throw = true;
                     break;
                 }
@@ -221,7 +221,7 @@ pub fn summarize_graph(graph: &FunctionGraph) -> FunctionSummary {
                     | Terminator::BranchNotNullish { .. }
                     | Terminator::Return(_)
             ) && b.operations.iter().all(|(_, op)| {
-                op.effect() == Effect::Pure || matches!(op, GraphOp::StoreLocal { .. })
+                op.effects() == Effects::PURE || matches!(op, GraphOp::StoreLocal { .. })
             })
         });
 

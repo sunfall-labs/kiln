@@ -5,6 +5,7 @@
 //! stack bytecode and lowers it into immutable SSA values, eliminating the runtime operand stack
 //! and resolving operand dependencies into direct value edges.
 
+use bitflags::bitflags;
 use kiln_ir::{BinaryOp, Constant, FunctionProto, Instruction, Program, UnaryOp, Upvalue};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -20,12 +21,32 @@ pub struct BlockId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SiteId(pub u32);
 
-/// What an operation may do besides produce its value: nothing, or anything. Two-valued on
-/// purpose (plan invariant); a finer lattice waits for a benchmark that needs one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Effect {
-    Pure,
-    Unknown,
+bitflags! {
+    /// Observable effects an operation may have (ADR 0061).
+    ///
+    /// The first migration preserves the old `Pure | Unknown` classification: operations are
+    /// either [`Effects::PURE`] or [`Effects::UNKNOWN`]. Later changes may narrow one operation at
+    /// a time, with the verifier and optimization that consumes the narrower fact in the same
+    /// change.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct Effects: u16 {
+        const MAY_THROW       = 1 << 0;
+        const CALLS_USER_CODE = 1 << 1;
+        const ALLOCATES       = 1 << 2;
+        const READS_HEAP      = 1 << 3;
+        const WRITES_HEAP     = 1 << 4;
+        const READS_HOST      = 1 << 5;
+        const WRITES_HOST     = 1 << 6;
+        const MAY_SUSPEND     = 1 << 7;
+        const READS_CLOCK     = 1 << 8;
+        const READS_ENTROPY   = 1 << 9;
+        const READS_LOCALE    = 1 << 10;
+    }
+}
+
+impl Effects {
+    pub const PURE: Self = Self::empty();
+    pub const UNKNOWN: Self = Self::all();
 }
 
 /// Node operations within the SSA Value Graph.
@@ -298,7 +319,7 @@ impl GraphOp {
     }
 
     /// Effect classification for this operation.
-    pub fn effect(&self) -> Effect {
+    pub fn effects(&self) -> Effects {
         match self {
             Self::Const { .. }
             | Self::LoadLocal(_)
@@ -306,12 +327,12 @@ impl GraphOp {
             | Self::ResumeValue
             | Self::LoadThis
             | Self::LoadNewTarget
-            | Self::Phi { .. } => Effect::Pure,
+            | Self::Phi { .. } => Effects::PURE,
             Self::Unary {
                 op:
                     UnaryOp::Not | UnaryOp::BitwiseNot | UnaryOp::Void | UnaryOp::Plus | UnaryOp::Negate,
                 ..
-            } => Effect::Pure,
+            } => Effects::PURE,
             Self::Binary {
                 op:
                     BinaryOp::StrictEqual
@@ -332,9 +353,26 @@ impl GraphOp {
                     | BinaryOp::ShiftRight
                     | BinaryOp::UnsignedShiftRight,
                 ..
-            } => Effect::Pure,
-            _ => Effect::Unknown,
+            } => Effects::PURE,
+            _ => Effects::UNKNOWN,
         }
+    }
+}
+
+#[cfg(test)]
+mod effect_tests {
+    use super::Effects;
+
+    #[test]
+    fn unknown_contains_every_declared_effect() {
+        assert_eq!(Effects::UNKNOWN, Effects::all());
+        assert!(Effects::PURE.is_empty());
+    }
+
+    #[test]
+    fn untrusted_bits_are_rejected() {
+        let unknown_bit = 1 << 15;
+        assert!(Effects::from_bits(unknown_bit).is_none());
     }
 }
 
