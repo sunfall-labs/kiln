@@ -35,6 +35,9 @@ export function isolate(valOrFactory) {
 }
 
 export function transfer(val) {
+  if (typeof globalThis.__kiln_transfer_region === "function") {
+    return globalThis.__kiln_transfer_region(val);
+  }
   return val;
 }
 
