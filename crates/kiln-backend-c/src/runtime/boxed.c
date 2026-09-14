@@ -81,8 +81,8 @@ static kiln_value kiln_val_to_boundary(kiln_val v) {
                 if (s == NULL) {
                     return kiln_c99_value(KILN_VALUE_STRING, 0, kiln_c99_empty_chars, 0);
                 }
-                kiln_value result = kiln_c99_value(KILN_VALUE_STRING, 0, s->bytes, s->byte_len);
-                if (s->bytes == (const char *)(s + 1)) result.flags = KILN_VALUE_FLAG_OWNED_STRING;
+                kiln_value result = kiln_c99_value(KILN_VALUE_STRING, 0, s->data, s->unit_len);
+                if (s->data == (const char *)(s + 1)) result.flags = KILN_VALUE_FLAG_OWNED_STRING;
                 return result;
             }
             if (tag == KILN_TAG_CLOSURE_PREFIX) {
@@ -160,7 +160,7 @@ static int kiln_c99_val_promise_resolve(kiln_val value, kiln_val *out) {
 static size_t kiln_c99_val_string_length(kiln_val v) {
     if (KILN_LIKELY(KILN_VAL_IS_STRING(v))) {
         const kiln_string *s = (const kiln_string *)KILN_VAL_PTR(v);
-        if (s != NULL) return s->length;
+        if (s != NULL) return s->unit_len;
     }
     return kiln_c99_string_length(kiln_val_to_boundary(v));
 }
@@ -517,7 +517,7 @@ static int kiln_c99_val_json_parse_fast(kiln_host *host, kiln_val val, kiln_val 
     }
     const kiln_string *s = (const kiln_string *)KILN_VAL_PTR(val);
     kiln_val parsed;
-    int status = kiln_c99_json_document(s ? s->bytes : "", s ? s->byte_len : 0, &parsed);
+    int status = kiln_c99_json_document(s ? s->data : "", s ? s->unit_len : 0, &parsed);
     if (status == KILN_C99_CONTROL_ERROR) {
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR, "Unexpected token in JSON");
     }
@@ -695,8 +695,8 @@ static int kiln_c99_val_compare(uint16_t operation, kiln_val left, kiln_val righ
         if (KILN_VAL_IS_STRING(left) && KILN_VAL_IS_STRING(right)) {
             const kiln_string *s1 = (const kiln_string *)KILN_VAL_PTR(left);
             const kiln_string *s2 = (const kiln_string *)KILN_VAL_PTR(right);
-            if (s1->byte_len != s2->byte_len) { *result = 0; return 1; }
-            *result = (s1->bytes == s2->bytes || memcmp(s1->bytes, s2->bytes, s1->byte_len) == 0);
+            if (s1->unit_len != s2->unit_len) { *result = 0; return 1; }
+            *result = (s1->data == s2->data || memcmp(s1->data, s2->data, s1->unit_len) == 0);
             return 1;
         }
     }
@@ -705,8 +705,8 @@ static int kiln_c99_val_compare(uint16_t operation, kiln_val left, kiln_val righ
         if (KILN_VAL_IS_STRING(left) && KILN_VAL_IS_STRING(right)) {
             const kiln_string *s1 = (const kiln_string *)KILN_VAL_PTR(left);
             const kiln_string *s2 = (const kiln_string *)KILN_VAL_PTR(right);
-            if (s1->byte_len != s2->byte_len) { *result = 0; return 1; }
-            *result = (s1->bytes == s2->bytes || memcmp(s1->bytes, s2->bytes, s1->byte_len) == 0);
+            if (s1->unit_len != s2->unit_len) { *result = 0; return 1; }
+            *result = (s1->data == s2->data || memcmp(s1->data, s2->data, s1->unit_len) == 0);
             return 1;
         }
     }
@@ -716,8 +716,8 @@ static int kiln_c99_val_compare(uint16_t operation, kiln_val left, kiln_val righ
         if (KILN_VAL_IS_STRING(left) && KILN_VAL_IS_STRING(right)) {
             const kiln_string *s1 = (const kiln_string *)KILN_VAL_PTR(left);
             const kiln_string *s2 = (const kiln_string *)KILN_VAL_PTR(right);
-            if (s1->byte_len != s2->byte_len) { *result = 1; return 1; }
-            *result = !(s1->bytes == s2->bytes || memcmp(s1->bytes, s2->bytes, s1->byte_len) == 0);
+            if (s1->unit_len != s2->unit_len) { *result = 1; return 1; }
+            *result = !(s1->data == s2->data || memcmp(s1->data, s2->data, s1->unit_len) == 0);
             return 1;
         }
     }
@@ -726,8 +726,8 @@ static int kiln_c99_val_compare(uint16_t operation, kiln_val left, kiln_val righ
         if (KILN_VAL_IS_STRING(left) && KILN_VAL_IS_STRING(right)) {
             const kiln_string *s1 = (const kiln_string *)KILN_VAL_PTR(left);
             const kiln_string *s2 = (const kiln_string *)KILN_VAL_PTR(right);
-            if (s1->byte_len != s2->byte_len) { *result = 1; return 1; }
-            *result = !(s1->bytes == s2->bytes || memcmp(s1->bytes, s2->bytes, s1->byte_len) == 0);
+            if (s1->unit_len != s2->unit_len) { *result = 1; return 1; }
+            *result = !(s1->data == s2->data || memcmp(s1->data, s2->data, s1->unit_len) == 0);
             return 1;
         }
     }
@@ -774,15 +774,15 @@ static kiln_val kiln_c99_val_binary_fast(uint16_t operation, kiln_val left, kiln
     if (operation == 1 && KILN_VAL_IS_STRING(left) && KILN_VAL_IS_STRING(right)) {
         const kiln_string *s1 = (const kiln_string *)KILN_VAL_PTR(left);
         const kiln_string *s2 = (const kiln_string *)KILN_VAL_PTR(right);
-        size_t total_bytes = s1->byte_len + s2->byte_len;
+        size_t total_bytes = s1->unit_len + s2->unit_len;
         char *buf = kiln_c99_gc_alloc_text(total_bytes);
         if (buf != NULL) {
-            memcpy(buf, s1->bytes, s1->byte_len);
-            memcpy(buf + s1->byte_len, s2->bytes, s2->byte_len);
+            memcpy(buf, s1->data, s1->unit_len);
+            memcpy(buf + s1->unit_len, s2->data, s2->unit_len);
             kiln_string *s = ((kiln_string *)buf) - 1;
-            s->length = s1->length + s2->length;
-            s->byte_len = total_bytes;
-            s->bytes = buf;
+            s->unit_len = s1->unit_len + s2->unit_len;
+            s->unit_len = total_bytes;
+            s->data = buf;
             return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, s);
         }
     }
@@ -790,21 +790,21 @@ static kiln_val kiln_c99_val_binary_fast(uint16_t operation, kiln_val left, kiln
         if (left == right) return KILN_VAL_TRUE;
         const kiln_string *s1 = (const kiln_string *)KILN_VAL_PTR(left);
         const kiln_string *s2 = (const kiln_string *)KILN_VAL_PTR(right);
-        size_t len1 = s1 ? s1->byte_len : 0;
-        size_t len2 = s2 ? s2->byte_len : 0;
+        size_t len1 = s1 ? s1->unit_len : 0;
+        size_t len2 = s2 ? s2->unit_len : 0;
         if (len1 != len2) return KILN_VAL_FALSE;
         if (len1 == 0) return KILN_VAL_TRUE;
-        return memcmp(s1->bytes, s2->bytes, len1) == 0 ? KILN_VAL_TRUE : KILN_VAL_FALSE;
+        return memcmp(s1->data, s2->data, len1) == 0 ? KILN_VAL_TRUE : KILN_VAL_FALSE;
     }
     if ((operation == 8 || operation == 16) && KILN_VAL_IS_STRING(left) && KILN_VAL_IS_STRING(right)) {
         if (left == right) return KILN_VAL_FALSE;
         const kiln_string *s1 = (const kiln_string *)KILN_VAL_PTR(left);
         const kiln_string *s2 = (const kiln_string *)KILN_VAL_PTR(right);
-        size_t len1 = s1 ? s1->byte_len : 0;
-        size_t len2 = s2 ? s2->byte_len : 0;
+        size_t len1 = s1 ? s1->unit_len : 0;
+        size_t len2 = s2 ? s2->unit_len : 0;
         if (len1 != len2) return KILN_VAL_TRUE;
         if (len1 == 0) return KILN_VAL_FALSE;
-        return memcmp(s1->bytes, s2->bytes, len1) != 0 ? KILN_VAL_TRUE : KILN_VAL_FALSE;
+        return memcmp(s1->data, s2->data, len1) != 0 ? KILN_VAL_TRUE : KILN_VAL_FALSE;
     }
     return kiln_val_from_boundary(kiln_c99_binary(operation, kiln_val_to_boundary(left), kiln_val_to_boundary(right)));
 }
@@ -1185,12 +1185,12 @@ static int kiln_c99_val_read_element(kiln_host *host, kiln_val target, kiln_val 
         if (idx >= 0.0 && idx <= 4294967294.0 && floor(idx) == idx) {
             size_t slot = (size_t)idx;
             const kiln_string *str = (const kiln_string *)KILN_VAL_PTR(target);
-            if (str != NULL && slot < str->length) {
-                if (str->length == str->byte_len) {
-                    *out = kiln_c99_val_single_char((unsigned char)str->bytes[slot]);
+            if (str != NULL && slot < str->unit_len) {
+                if (str->unit_len == str->unit_len) {
+                    *out = kiln_c99_val_single_char((unsigned char)str->data[slot]);
                     return KILN_C99_OK;
                 }
-                kiln_c99_utf16_iter iterator = {str->bytes, str->byte_len, 0, 0, 0};
+                kiln_c99_utf16_iter iterator = {str->data, str->unit_len, 0, 0, 0};
                 size_t position = 0;
                 uint16_t unit;
                 while (kiln_c99_utf16_next(&iterator, &unit)) {
@@ -1201,7 +1201,7 @@ static int kiln_c99_val_read_element(kiln_host *host, kiln_val target, kiln_val 
                     }
                     position += 1;
                 }
-            } else if (str != NULL && slot >= str->length) {
+            } else if (str != NULL && slot >= str->unit_len) {
                 *out = KILN_VAL_UNDEFINED;
                 return KILN_C99_OK;
             }

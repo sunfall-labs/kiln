@@ -147,6 +147,44 @@ static inline size_t kiln_c99_utf8_to_utf16_len(const char *text, size_t len) {
     return count;
 }
 
+static uint32_t kiln_c99_utf8_next(const char *text, size_t length, size_t *offset);
+static kiln_string *kiln_c99_gc_alloc_units(size_t count, uint32_t flags) {
+    size_t width = flags == KILN_STRING_UTF16 ? sizeof(uint16_t) : sizeof(uint8_t);
+    if (count > UINT32_MAX || count > (SIZE_MAX - sizeof(kiln_string)) / width) return NULL;
+    kiln_string *string = (kiln_string *)kiln_c99_gc_alloc_hot(
+        KILN_GC_STRING, sizeof(kiln_string) + count * width, 1);
+    if (string == NULL) return NULL;
+    string->unit_len = (uint32_t)count;
+    string->flags = flags;
+    string->data = (const void *)(string + 1);
+    return string;
+}
+
+static kiln_string *kiln_c99_string_from_utf8(const char *bytes, size_t len) {
+    if (kiln_c99_ascii_scan(bytes, len)) {
+        kiln_string *string = kiln_c99_gc_alloc_units(len, KILN_STRING_LATIN1);
+        if (string != NULL && len != 0) memcpy((void *)string->data, bytes, len);
+        return string;
+    }
+    size_t count = kiln_c99_utf8_to_utf16_len(bytes, len);
+    kiln_string *string = kiln_c99_gc_alloc_units(count, KILN_STRING_UTF16);
+    if (string == NULL) return NULL;
+    uint16_t *units = (uint16_t *)(uintptr_t)string->data;
+    size_t offset = 0;
+    size_t index = 0;
+    while (index < count) {
+        uint32_t codepoint = kiln_c99_utf8_next(bytes, len, &offset);
+        if (codepoint > UINT32_C(0xFFFF)) {
+            codepoint -= UINT32_C(0x10000);
+            units[index++] = (uint16_t)(UINT32_C(0xD800) | (codepoint >> 10));
+            units[index++] = (uint16_t)(UINT32_C(0xDC00) | (codepoint & UINT32_C(0x3FF)));
+        } else {
+            units[index++] = (uint16_t)codepoint;
+        }
+    }
+    return string;
+}
+
 static kiln_val kiln_c99_val_from_text(const char *bytes, size_t len) {
     if (len == 0 || bytes == NULL) {
         return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_c99_empty_string);
@@ -154,19 +192,9 @@ static kiln_val kiln_c99_val_from_text(const char *bytes, size_t len) {
     if (len == 1 && (unsigned char)bytes[0] < 128) {
         return kiln_c99_val_single_char((unsigned char)bytes[0]);
     }
-    char *copy = kiln_c99_gc_alloc_text(len);
-    if (copy == NULL) {
-        return KILN_VAL_UNDEFINED;
-    }
-    memcpy(copy, bytes, len);
-    kiln_string *s = ((kiln_string *)copy) - 1;
-    /* Eight bytes at a time; the byte loop this replaces was a second pass over every string
-     * built. */
-    int is_ascii = kiln_c99_ascii_scan(copy, len);
-    s->length = is_ascii ? len : kiln_c99_utf8_to_utf16_len(copy, len);
-    s->byte_len = len;
-    s->bytes = copy;
-    return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, s);
+    kiln_string *string = kiln_c99_string_from_utf8(bytes, len);
+    if (string == NULL) return KILN_VAL_UNDEFINED;
+    return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, string);
 }
 
 static kiln_val kiln_c99_val_from_ascii(const char *bytes, size_t len) {
@@ -182,9 +210,9 @@ static kiln_val kiln_c99_val_from_ascii(const char *bytes, size_t len) {
     }
     memcpy(copy, bytes, len);
     kiln_string *s = ((kiln_string *)copy) - 1;
-    s->length = len;
-    s->byte_len = len;
-    s->bytes = copy;
+    s->unit_len = (uint32_t)len;
+    s->flags = KILN_STRING_LATIN1;
+    s->data = copy;
     return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, s);
 }
 
@@ -198,10 +226,9 @@ static kiln_value kiln_c99_copy_text(const char *text, size_t len) {
     }
     memcpy(copy, text, len);
     kiln_string *s = ((kiln_string *)copy) - 1;
-    int is_ascii = kiln_c99_ascii_scan(copy, len);
-    s->length = is_ascii ? len : kiln_c99_utf8_to_utf16_len(copy, len);
-    s->byte_len = len;
-    s->bytes = copy;
+    s->unit_len = (uint32_t)len;
+    s->flags = KILN_STRING_LATIN1;
+    s->data = copy;
     kiln_value result = kiln_c99_value(KILN_VALUE_STRING, 0, copy, len);
     result.flags = KILN_VALUE_FLAG_OWNED_STRING;
     return result;
