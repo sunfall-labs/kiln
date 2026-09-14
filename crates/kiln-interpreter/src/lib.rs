@@ -45468,11 +45468,15 @@ fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
         | Value::Capability(..)
         | Value::Element(_) => {
             let mut keys = intrinsics.own_keys(target).unwrap_or_default();
-            // Promise combinators create their resolve/reject element functions as runtime
-            // callables rather than intrinsics, so they have no materialized store.  Their
-            // identity slots are still own properties, and CreateBuiltinFunction installs them
-            // in length/name order.  Keep that order visible to OrdinaryOwnPropertyKeys.
-            if matches!(target, Value::Element(_)) {
+            // Promise combinators and capability machinery create these runtime callables rather
+            // than intrinsics, so they have no materialized store. Their identity slots are still
+            // own properties, and CreateBuiltinFunction installs them in length/name order. Keep
+            // that order visible to OrdinaryOwnPropertyKeys.
+            if matches!(
+                target,
+                Value::Settler(..) | Value::Capability(..) | Value::Element(_)
+            ) && intrinsic_identity(target).is_some()
+            {
                 keys.splice(0..0, ["length".to_owned(), "name".to_owned()]);
             }
             keys
