@@ -66,15 +66,9 @@ static inline int kiln_c99_typed_failed(double d) {
 #define KILN_VAL_TAG_PTR(pfx, p) ((kiln_val)((pfx) | ((uint64_t)(uintptr_t)(p) & KILN_PAYLOAD_MASK)))
 #define KILN_VAL_IS_DOUBLE(v)    KILN_VAL_IS_NUMBER(v)
 
-typedef struct kiln_string {
-    size_t length;
-    size_t byte_len;
-    const char *bytes;
-} kiln_string;
-
 /* KILN_RUNTIME_ONLY_ASCII_STRINGS_BEGIN */
-static const char kiln_c99_empty_chars[] = "";
-static const kiln_string kiln_c99_empty_string = { 0, 0, kiln_c99_empty_chars };
+static const uint8_t kiln_c99_empty_chars[] = { 0 };
+static const kiln_string kiln_c99_empty_string = { 0, KILN_STRING_LATIN1, kiln_c99_empty_chars };
 
 static const char kiln_c99_single_char_bytes[256][2] = {
 #define ROW4(a)   { (char)(a), 0 }, { (char)((a)+1), 0 }, { (char)((a)+2), 0 }, { (char)((a)+3), 0 }
@@ -86,7 +80,7 @@ static const char kiln_c99_single_char_bytes[256][2] = {
 #undef ROW4
 };
 static const kiln_string kiln_c99_ascii_strings[256] = {
-#define S4(a)   { 1, 1, kiln_c99_single_char_bytes[a] }, { 1, 1, kiln_c99_single_char_bytes[(a)+1] }, { 1, 1, kiln_c99_single_char_bytes[(a)+2] }, { 1, 1, kiln_c99_single_char_bytes[(a)+3] }
+#define S4(a)   { 1, KILN_STRING_LATIN1, kiln_c99_single_char_bytes[a] }, { 1, KILN_STRING_LATIN1, kiln_c99_single_char_bytes[(a)+1] }, { 1, KILN_STRING_LATIN1, kiln_c99_single_char_bytes[(a)+2] }, { 1, KILN_STRING_LATIN1, kiln_c99_single_char_bytes[(a)+3] }
 #define S16(a)  S4(a), S4((a)+4), S4((a)+8), S4((a)+12)
 #define S64(a)  S16(a), S16((a)+16), S16((a)+32), S16((a)+48)
     S64(0), S64(64), S64(128), S64(192)

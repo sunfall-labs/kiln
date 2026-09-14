@@ -1,51 +1,14 @@
-//! `JSON.parse`'s grammar, once, as a flat tape both engines walk.
+//! One JSON grammar shared by the interpreter and native provider.
 //!
-//! The interpreter and the emitted C each used to carry a recursive-descent reader of their own,
-//! held in agreement by the differential corpus: two implementations of one exactly-specified
-//! thing, which agree until one of them has a bug and then nothing can tell which (ADR 0025 gives
-//! the same reason for regular expressions and `BigInt`). Now there is one reader, here, and each
-//! engine keeps only the part that has to touch its own heap: allocate a string, an array or an
-//! object, and insert a property.
-//!
-//! The boundary is a **tape**: a document becomes a flat sequence of [`Node`]s in source order --
-//! a container node carries its child count, a string node points into the decoded text, a number
-//! node carries the double -- so a consumer walks it once with an explicit stack and never needs to
-//! know the grammar. Across the native provider ABI nothing but scalars and byte ranges cross,
-//! exactly as ADR 0025 requires.
-//!
-//! The reader is the one-pass scalar scanner in `scalar.rs`. It began as simd-json's tape with a
-//! conversion pass, and simd-json was measured against the scalar pass on documents of the
-//! benchmark's shape before being dropped (2026-09-06, Apple Silicon, release, us per parse):
-//!
-//! | bytes | scalar | simd-json | simd/scalar |
-//! | --- | --- | --- | --- |
-//! | 159 | 0.127 | 0.153 | 1.21 |
-//! | 1,894 | 1.31 | 1.32 | 1.01 |
-//! | 31,694 | 21.3 | 24.1 | 1.13 |
-//! | 519,892 | 344 | 391 | 1.14 |
-//! | 2,094,981 | 1,369 | 1,581 | 1.16 |
-//! | 8,494,746 | 5,553 | 6,435 | 1.16 |
-//!
-//! The scalar pass won at every size, by a fifth on small documents and a sixth on large ones:
-//! the tape has to be written either way, and simd-json's structural index was a second pass over
-//! the input before that, plus a padded copy and a conversion of its tape into this one. The
-//! rules simd-json needed help with -- a lone surrogate escape as U+FFFD (ADR 0022), `-0`, a
-//! number past a double's range as infinity, integers past `u64` -- are the scanner's own now,
-//! and `tests/agreement.rs` pins the number rule to `f64::from_str` across a generated sweep.
-//!
-//! Depth is bounded by the input's length, not by a constant: the scanner's stack is explicit and
-//! so is every walker's.
+//! The scanner consumes JavaScript UTF-16 units. UTF-8 is only an input adapter; parsed strings
+//! are stored as units, so escaped and raw lone surrogates never pass through a lossy scalar or
+//! WTF-8 representation.
 
+use kiln_string::{StringUnits, StringView};
 use std::cell::RefCell;
 
 mod scalar;
 
-/// One entry of the tape. `#[repr(C)]` because the emitted C reads it as `kiln_json_node`.
-///
-/// * `tag` is one of the `TAG_*` constants.
-/// * `len` is a string's byte length, or a container's number of children (elements, or key/value
-///   pairs).
-/// * `value` is a string's byte offset into the text, or a number's `f64` bits.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Node {
@@ -63,168 +26,316 @@ pub const TAG_ARRAY: u32 = 5;
 pub const TAG_OBJECT: u32 = 6;
 
 impl Node {
-    /// The double of a number node.
     pub fn as_number(&self) -> Option<f64> {
         (self.tag == TAG_NUMBER).then(|| f64::from_bits(self.value))
     }
 }
 
-/// A parsed document: the tape in source order and the decoded text every string node indexes.
-///
-/// Borrowed from this thread's scratch for the duration of [`parse`]'s walk, so a parse allocates
-/// nothing once the scratch has grown to the size of the documents it sees.
+/// A source of JavaScript UTF-16 units. Implement this for a borrowed runtime string view to use
+/// the same grammar without allocating or converting one unit at a time across an FFI seam.
+pub trait UnitSource {
+    fn unit_len(&self) -> usize;
+    fn unit_at(&self, index: usize) -> Option<u16>;
+    #[inline]
+    fn unit_or_end(&self, index: usize) -> u32 {
+        self.unit_at(index).map(u32::from).unwrap_or(0x1_0000)
+    }
+    fn latin1_slice(&self, _start: usize, _end: usize) -> Option<&[u8]> {
+        None
+    }
+    fn utf16_slice(&self, _start: usize, _end: usize) -> Option<&[u16]> {
+        None
+    }
+}
+
+impl<T: UnitSource + ?Sized> UnitSource for &T {
+    fn unit_len(&self) -> usize {
+        (*self).unit_len()
+    }
+    fn unit_at(&self, index: usize) -> Option<u16> {
+        (*self).unit_at(index)
+    }
+    fn unit_or_end(&self, index: usize) -> u32 {
+        (*self).unit_or_end(index)
+    }
+    fn latin1_slice(&self, start: usize, end: usize) -> Option<&[u8]> {
+        (*self).latin1_slice(start, end)
+    }
+    fn utf16_slice(&self, start: usize, end: usize) -> Option<&[u16]> {
+        (*self).utf16_slice(start, end)
+    }
+}
+
+impl UnitSource for [u8] {
+    fn unit_len(&self) -> usize {
+        self.len()
+    }
+    fn unit_at(&self, index: usize) -> Option<u16> {
+        self.get(index).copied().map(u16::from)
+    }
+    #[inline]
+    fn unit_or_end(&self, index: usize) -> u32 {
+        if index < self.len() {
+            u32::from(self[index])
+        } else {
+            0x1_0000
+        }
+    }
+    fn latin1_slice(&self, start: usize, end: usize) -> Option<&[u8]> {
+        self.get(start..end)
+    }
+}
+impl UnitSource for [u16] {
+    fn unit_len(&self) -> usize {
+        self.len()
+    }
+    fn unit_at(&self, index: usize) -> Option<u16> {
+        self.get(index).copied()
+    }
+    #[inline]
+    fn unit_or_end(&self, index: usize) -> u32 {
+        if index < self.len() {
+            u32::from(self[index])
+        } else {
+            0x1_0000
+        }
+    }
+    fn utf16_slice(&self, start: usize, end: usize) -> Option<&[u16]> {
+        self.get(start..end)
+    }
+}
+
+/// The storage backing one tape's decoded string spans. Latin1 is retained for the common ASCII
+/// path and upgraded once, on the first unit above 0xff, with offsets unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TextEncoding {
+    Latin1,
+    Utf16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TextArena {
+    latin1: Vec<u8>,
+    utf16: Vec<u16>,
+    encoding: TextEncoding,
+}
+
+impl Default for TextArena {
+    fn default() -> Self {
+        Self {
+            latin1: Vec::new(),
+            utf16: Vec::new(),
+            encoding: TextEncoding::Latin1,
+        }
+    }
+}
+
+impl TextArena {
+    pub(crate) fn clear(&mut self) {
+        self.latin1.clear();
+        self.utf16.clear();
+        self.encoding = TextEncoding::Latin1;
+    }
+    pub(crate) fn len(&self) -> usize {
+        match self.encoding {
+            TextEncoding::Latin1 => self.latin1.len(),
+            TextEncoding::Utf16 => self.utf16.len(),
+        }
+    }
+    pub(crate) fn push_unit(&mut self, unit: u16) {
+        if self.encoding == TextEncoding::Latin1 && unit > 0xff {
+            self.upgrade();
+        }
+        match self.encoding {
+            TextEncoding::Latin1 => self.latin1.push(unit as u8),
+            TextEncoding::Utf16 => self.utf16.push(unit),
+        }
+    }
+    pub(crate) fn extend_latin1(&mut self, bytes: &[u8]) {
+        if self.encoding == TextEncoding::Latin1 {
+            self.latin1.extend_from_slice(bytes);
+        } else {
+            self.utf16.extend(bytes.iter().copied().map(u16::from));
+        }
+    }
+    pub(crate) fn extend_utf16(&mut self, units: &[u16]) {
+        if self.encoding == TextEncoding::Latin1 {
+            self.upgrade();
+        }
+        self.utf16.extend_from_slice(units);
+    }
+    pub(crate) fn ensure_utf16(&mut self) {
+        self.upgrade();
+    }
+    fn upgrade(&mut self) {
+        if self.encoding == TextEncoding::Utf16 {
+            return;
+        }
+        self.utf16
+            .extend(self.latin1.iter().copied().map(u16::from));
+        self.encoding = TextEncoding::Utf16;
+    }
+    pub(crate) fn slice(&self, start: usize, len: usize) -> Option<TextSlice<'_>> {
+        let end = start.checked_add(len)?;
+        match self.encoding {
+            TextEncoding::Latin1 => Some(TextSlice::Latin1(self.latin1.get(start..end)?)),
+            TextEncoding::Utf16 => Some(TextSlice::Utf16(self.utf16.get(start..end)?)),
+        }
+    }
+}
+
+/// A decoded string span, addressed in JavaScript units.
+pub type TextSlice<'a> = StringView<'a>;
+
 #[derive(Clone, Copy, Debug)]
 pub struct Tape<'a> {
     nodes: &'a [Node],
-    text: &'a [u8],
+    text: &'a TextArena,
 }
-
 impl<'a> Tape<'a> {
-    /// The tape, in source order.
     pub fn nodes(&self) -> &'a [Node] {
         self.nodes
     }
-
-    /// The decoded text every string node's offset and length index.
-    pub fn text(&self) -> &'a [u8] {
+    pub fn text(&self) -> TextSlice<'a> {
         self.text
+            .slice(0, self.text.len())
+            .unwrap_or(TextSlice::Latin1(&[]))
     }
-
-    /// The decoded bytes of a string node.
-    ///
-    /// Valid UTF-8 by construction -- the input is a JavaScript string's UTF-8 and every escape
-    /// decodes to a scalar value -- but read back through `from_utf8` rather than an unchecked
-    /// conversion, because the offsets crossed an ABI and a lie there must not become undefined
-    /// behaviour here.
-    pub fn string(&self, node: &Node) -> Option<&'a str> {
+    pub fn string(&self, node: &Node) -> Option<TextSlice<'a>> {
         if node.tag != TAG_STRING {
             return None;
         }
-        let start = usize::try_from(node.value).ok()?;
-        let end = start.checked_add(node.len as usize)?;
-        std::str::from_utf8(self.text.get(start..end)?).ok()
+        self.text
+            .slice(usize::try_from(node.value).ok()?, node.len as usize)
+    }
+    pub fn string_units(&self, node: &Node) -> Option<StringUnits> {
+        self.string(node).map(StringUnits::from_view)
     }
 }
 
-/// An owned copy of a [`Tape`], for a caller that wants to keep one past the walk. Tests, mostly.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Document {
     nodes: Vec<Node>,
-    text: Vec<u8>,
+    text: TextArena,
 }
-
 impl Document {
-    /// The tape, in source order.
     pub fn nodes(&self) -> &[Node] {
         &self.nodes
     }
-
-    /// The decoded text every string node's offset and length index.
-    pub fn text(&self) -> &[u8] {
-        &self.text
+    pub fn text(&self) -> TextSlice<'_> {
+        self.text
+            .slice(0, self.text.len())
+            .unwrap_or(TextSlice::Latin1(&[]))
     }
-
-    /// The decoded bytes of a string node; see [`Tape::string`].
-    pub fn string(&self, node: &Node) -> Option<&str> {
-        self.tape().string(node)
-    }
-
-    fn tape(&self) -> Tape<'_> {
-        Tape {
-            nodes: &self.nodes,
-            text: &self.text,
+    pub fn string(&self, node: &Node) -> Option<TextSlice<'_>> {
+        if node.tag != TAG_STRING {
+            return None;
         }
+        self.text
+            .slice(usize::try_from(node.value).ok()?, node.len as usize)
+    }
+    pub fn string_units(&self, node: &Node) -> Option<StringUnits> {
+        self.string(node).map(StringUnits::from_view)
     }
 }
 
-/// Why a document did not parse.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParseError {
-    /// The text is not JSON. `offset` is where the scanner stopped, for a diagnostic; the language
-    /// reports a `SyntaxError` regardless.
     Syntax { offset: usize },
-    /// Longer than the tape can index.
     TooLarge,
 }
 
-/// Everything a parse needs, kept per thread and grown once: the copy of the input the scanner
-/// decodes into, the node array, and the scanner's frame stack. A parse writes into these in
-/// place and lends them to the walk; nothing is allocated per call after the first document of a
-/// given size.
 #[derive(Default)]
 struct Scratch {
-    text: Vec<u8>,
+    text: TextArena,
     nodes: Vec<Node>,
     stack: Vec<scalar::Frame>,
+    token: Vec<u8>,
 }
+thread_local! { static SCRATCH: RefCell<Scratch> = RefCell::new(Scratch::default()); }
+thread_local! { static UTF8_UNITS: RefCell<Vec<u16>> = const { RefCell::new(Vec::new()) }; }
 
-thread_local! {
-    static SCRATCH: RefCell<Scratch> = RefCell::new(Scratch::default());
-}
-
-/// Parse `source` -- the bytes of a JavaScript string, so valid UTF-8 -- and hand the tape to
-/// `walk`.
-///
-/// One parse is in flight per thread: the tape borrows the thread's scratch, and a walk that
-/// parsed again would be overwriting the tape it is reading. That is asserted, not assumed -- a
-/// re-entrant parse panics -- and neither engine's walk parses, so the panic names a bug rather
-/// than a case. The scratch outlives the walk, which is what lets a C caller keep reading the
-/// tape after the call returns, until the next parse on its thread.
-pub fn parse<R>(source: &[u8], walk: impl FnOnce(&Tape<'_>) -> R) -> Result<R, ParseError> {
-    if u32::try_from(source.len()).is_err() {
+pub fn parse_source<S: UnitSource, R>(
+    source: &S,
+    walk: impl FnOnce(&Tape<'_>) -> R,
+) -> Result<R, ParseError> {
+    if source.unit_len() > u32::MAX as usize {
         return Err(ParseError::TooLarge);
     }
     SCRATCH.with(|scratch| {
-        // The one-parse-in-flight invariant is asserted, not assumed: this is the crate's own
-        // scratch, and a re-entrant parse would overwrite the tape its caller is still reading.
-        #[expect(clippy::panic, reason = "an asserted invariant, not an error path")]
+        #[expect(
+            clippy::panic,
+            reason = "a parse re-entering its tape would overwrite live data"
+        )]
         let mut scratch = scratch
             .try_borrow_mut()
-            .unwrap_or_else(|_| panic!("kiln-json: a parse re-entered from inside a parse's walk"));
-        let Scratch { text, nodes, stack } = &mut *scratch;
-        scalar::scan(source, nodes, text, stack)?;
+            .unwrap_or_else(|_| panic!("kiln-json: parse re-entered"));
+        let Scratch {
+            text,
+            nodes,
+            stack,
+            token,
+        } = &mut *scratch;
+        scalar::scan(source, nodes, text, stack, token)?;
         Ok(walk(&Tape { nodes, text }))
     })
 }
 
-/// [`parse`], keeping the result: a copy of the tape and text.
+pub fn parse_units<R>(
+    source: &StringUnits,
+    walk: impl FnOnce(&Tape<'_>) -> R,
+) -> Result<R, ParseError> {
+    match source.as_view() {
+        StringView::Latin1(bytes) => parse_source(&bytes, walk),
+        StringView::Utf16(units) => parse_source(&units, walk),
+    }
+}
+pub fn parse_utf8<R>(source: &[u8], walk: impl FnOnce(&Tape<'_>) -> R) -> Result<R, ParseError> {
+    if encoding_rs::mem::is_ascii(source) {
+        return parse_source(&source, walk);
+    }
+    UTF8_UNITS.with(|units| {
+        let mut units = units.borrow_mut();
+        units.clear();
+        // `encoding_rs` uses its bulk UTF-8 decoder, including an ASCII prefix fast path, while
+        // validating the bytes in the same pass. Invalid input keeps the adapter's existing
+        // syntax refusal, while valid input preserves every UTF-16 unit in the source scalar.
+        units.resize(source.len(), 0);
+        let written =
+            encoding_rs::mem::convert_utf8_to_utf16_without_replacement(source, &mut units)
+                .ok_or(ParseError::Syntax { offset: 0 })?;
+        units.truncate(written);
+        parse_source(&&units[..], walk)
+    })
+}
+pub fn parse<R>(source: &[u8], walk: impl FnOnce(&Tape<'_>) -> R) -> Result<R, ParseError> {
+    parse_utf8(source, walk)
+}
+
 pub fn parse_owned(source: &[u8]) -> Result<Document, ParseError> {
-    parse(source, |tape| Document {
-        nodes: tape.nodes().to_vec(),
-        text: tape.text().to_vec(),
+    parse_utf8(source, |tape| Document {
+        nodes: tape.nodes.to_vec(),
+        text: tape.text.clone(),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn tape(source: &str) -> Vec<(u32, u32, Option<String>, Option<f64>)> {
-        let parsed = parse_owned(source.as_bytes());
-        assert!(parsed.is_ok(), "{source} parses: {parsed:?}");
-        let document = parsed.unwrap_or_default();
-        document
-            .nodes()
+    fn tape(source: &str) -> Document {
+        parse_owned(source.as_bytes()).unwrap_or_default()
+    }
+    fn units(source: &str) -> Vec<Vec<u16>> {
+        let doc = tape(source);
+        doc.nodes()
             .iter()
-            .map(|node| {
-                (
-                    node.tag,
-                    node.len,
-                    document.string(node).map(str::to_owned),
-                    node.as_number(),
-                )
-            })
+            .filter_map(|node| doc.string_units(node).map(|s| s.to_units().into_vec()))
             .collect()
     }
-
-    fn strings(source: &str) -> Vec<String> {
-        tape(source).into_iter().filter_map(|row| row.2).collect()
-    }
-
     fn numbers(source: &str) -> Vec<f64> {
-        tape(source).into_iter().filter_map(|row| row.3).collect()
+        let doc = tape(source);
+        doc.nodes().iter().filter_map(Node::as_number).collect()
     }
-
     fn refused(source: &str) -> bool {
         matches!(
             parse_owned(source.as_bytes()),
@@ -233,34 +344,147 @@ mod tests {
     }
 
     #[test]
+    fn keys_and_values_keep_units() {
+        assert_eq!(
+            units(r#"{"\ud800":"\ude00","x":"\ud83d\ude00"}"#),
+            vec![
+                vec![0xd800],
+                vec![0xde00],
+                vec![b'x' as u16],
+                vec![0xd83d, 0xde00]
+            ]
+        );
+    }
+    #[test]
+    fn ascii_tape_stays_latin1() {
+        assert!(matches!(
+            tape(r#"{"a":"b\u0000"}"#).text(),
+            TextSlice::Latin1(_)
+        ));
+    }
+    #[test]
+    fn numbers_keep_ecmascript_rules() {
+        assert!(numbers("[-0,0,1e400,-1e400]")[0].is_sign_negative());
+        assert_eq!(numbers("[1e400,-1e400]")[0], f64::INFINITY);
+    }
+    #[test]
+    fn grammar_refusals() {
+        for bad in [
+            "", "{", "[", "{\"a\"}", "[1,]", "01", "1.", ".5", "1e", "truex", "1 2",
+        ] {
+            assert!(refused(bad), "{bad:?}");
+        }
+    }
+    #[test]
+    fn deep_stack_is_iterative() {
+        let deep = "[".repeat(4000) + &"]".repeat(4000);
+        assert!(parse_owned(deep.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn raw_utf16_and_escaped_surrogates_are_the_same_units() {
+        let source = StringUnits::from_units(&[
+            0x7b, 0x22, 0xd800, 0x22, 0x3a, 0x22, 0xd800, 0x22, 0x2c, 0x22, 0x70, 0x22, 0x3a, 0x22,
+            0x5c, 0x75, 0x64, 0x38, 0x30, 0x30, 0x22, 0x7d,
+        ]);
+        let parsed = parse_units(&source, |tape| {
+            tape.nodes()
+                .iter()
+                .filter_map(|node| {
+                    tape.string_units(node)
+                        .map(|value| value.to_units().into_vec())
+                })
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            parsed.unwrap_or_default(),
+            vec![vec![0xd800], vec![0xd800], vec![0x70], vec![0xd800]]
+        );
+    }
+
+    #[test]
+    fn escaped_pairs_and_nul_keep_offsets_in_mixed_keys() {
+        let document = tape(r#"{"a\u0000":"\ud83d\ude00","\udc00":"x"}"#);
+        let values = document
+            .nodes()
+            .iter()
+            .filter_map(|node| {
+                document
+                    .string_units(node)
+                    .map(|value| value.to_units().into_vec())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            values,
+            vec![
+                vec![b'a' as u16, 0],
+                vec![0xd83d, 0xde00],
+                vec![0xdc00],
+                vec![b'x' as u16]
+            ]
+        );
+    }
+
+    #[test]
+    fn incomplete_deep_document_is_refused() {
+        assert!(refused(&"[".repeat(300)));
+    }
+
+    fn string_units(source: &str) -> Vec<Vec<u16>> {
+        units(source)
+    }
+    fn scalar_units(text: &str) -> Vec<u16> {
+        StringUnits::from(text).to_units().into_vec()
+    }
+
+    #[test]
     fn keys_keep_source_order_and_duplicates_stay_in_place() {
-        let rows = tape(r#"{"b":1,"a":2,"b":3,"__proto__":4}"#);
-        assert_eq!(rows[0].0, TAG_OBJECT);
-        assert_eq!(rows[0].1, 4);
-        let keys: Vec<_> = rows
+        let document = tape(r#"{"b":1,"a":2,"b":3,"__proto__":4}"#);
+        assert_eq!(
+            (document.nodes()[0].tag, document.nodes()[0].len),
+            (TAG_OBJECT, 4)
+        );
+        let keys: Vec<_> = document
+            .nodes()
             .iter()
             .skip(1)
             .step_by(2)
-            .map(|row| row.2.clone())
+            .filter_map(|node| {
+                document
+                    .string_units(node)
+                    .map(|value| value.to_units().into_vec())
+            })
             .collect();
         assert_eq!(
             keys,
             vec![
-                Some("b".into()),
-                Some("a".into()),
-                Some("b".into()),
-                Some("__proto__".into())
+                scalar_units("b"),
+                scalar_units("a"),
+                scalar_units("b"),
+                scalar_units("__proto__")
             ]
         );
     }
 
     #[test]
     fn containers_carry_child_counts() {
-        let rows = tape(r#"[[],{},[1,[2,3]],{"k":[]}]"#);
-        assert_eq!((rows[0].0, rows[0].1), (TAG_ARRAY, 4));
-        assert_eq!((rows[1].0, rows[1].1), (TAG_ARRAY, 0));
-        assert_eq!((rows[2].0, rows[2].1), (TAG_OBJECT, 0));
-        assert_eq!((rows[3].0, rows[3].1), (TAG_ARRAY, 2));
+        let document = tape(r#"[[],{},[1,[2,3]],{"k":[]}]"#);
+        assert_eq!(
+            (document.nodes()[0].tag, document.nodes()[0].len),
+            (TAG_ARRAY, 4)
+        );
+        assert_eq!(
+            (document.nodes()[1].tag, document.nodes()[1].len),
+            (TAG_ARRAY, 0)
+        );
+        assert_eq!(
+            (document.nodes()[2].tag, document.nodes()[2].len),
+            (TAG_OBJECT, 0)
+        );
+        assert_eq!(
+            (document.nodes()[3].tag, document.nodes()[3].len),
+            (TAG_ARRAY, 2)
+        );
     }
 
     #[test]
@@ -301,47 +525,48 @@ mod tests {
             vec![f64::INFINITY, 2.0, f64::NEG_INFINITY, 0.0]
         );
         assert_eq!(
-            strings(r#"[1e400, "1e400", {"1e400": 1}]"#),
-            vec!["1e400", "1e400"]
+            string_units(r#"[1e400, "1e400", {"1e400": 1}]"#),
+            vec![scalar_units("1e400"), scalar_units("1e400")]
         );
-        // A spelling JSON forbids stays refused even when a double would overflow on it.
         assert!(refused("01e400"));
         assert!(refused("1e400x"));
         assert!(refused("[1e400,]"));
     }
 
     #[test]
-    fn surrogate_pairs_combine_and_lone_halves_are_replaced() {
-        assert_eq!(strings(r#""\ud83d\ude00""#), vec!["\u{1F600}"]);
-        assert_eq!(strings(r#""a\ud83d\ude00b""#), vec!["a\u{1F600}b"]);
-        assert_eq!(strings(r#""\ud83d""#), vec!["\u{FFFD}"]);
-        assert_eq!(strings(r#""\ude00""#), vec!["\u{FFFD}"]);
-        assert_eq!(strings(r#""\ud83dx""#), vec!["\u{FFFD}x"]);
-        assert_eq!(strings(r#""\ud83d\ud83d""#), vec!["\u{FFFD}\u{FFFD}"]);
-        assert_eq!(strings(r#""\ud83dA""#), vec!["\u{FFFD}A"]);
+    fn surrogate_pairs_and_lone_halves_are_preserved() {
+        assert_eq!(units(r#""\ud83d\ude00""#), vec![vec![0xd83d, 0xde00]]);
         assert_eq!(
-            strings(r#""\ud83d\ude00\uDE00""#),
-            vec!["\u{1F600}\u{FFFD}"]
+            units(r#""a\ud83d\ude00b""#),
+            vec![vec![b'a' as u16, 0xd83d, 0xde00, b'b' as u16]]
+        );
+        assert_eq!(units(r#""\ud83d""#), vec![vec![0xd83d]]);
+        assert_eq!(units(r#""\ude00""#), vec![vec![0xde00]]);
+        assert_eq!(units(r#""\ud83dx""#), vec![vec![0xd83d, b'x' as u16]]);
+        assert_eq!(units(r#""\ud83d\ud83d""#), vec![vec![0xd83d, 0xd83d]]);
+        assert_eq!(units(r#""\ud83dA""#), vec![vec![0xd83d, b'A' as u16]]);
+        assert_eq!(
+            units(r#""\ud83d\ude00\uDE00""#),
+            vec![vec![0xd83d, 0xde00, 0xde00]]
         );
         assert_eq!(
-            strings(r#"{"\ud83d\ude00":"\u00e9"}"#),
-            vec!["\u{1F600}", "\u{e9}"]
+            units(r#"{"\ud83d\ude00":"\u00e9"}"#),
+            vec![vec![0xd83d, 0xde00], vec![0xe9]]
         );
-        // An escaped backslash followed by the letters of a surrogate is not an escape.
-        assert_eq!(strings(r#""\\ud800""#), vec!["\\ud800"]);
-        assert_eq!(strings(r#""\\\ud800""#), vec!["\\\u{FFFD}"]);
-        assert_eq!(strings(r#""\u0000A""#), vec!["\0A"]);
+        assert_eq!(units(r#""\\ud800""#), vec![scalar_units("\\ud800")]);
+        assert_eq!(units(r#""\\\ud800""#), vec![vec![b'\\' as u16, 0xd800]]);
+        assert_eq!(units(r#""\u0000A""#), vec![vec![0, b'A' as u16]]);
     }
 
     #[test]
     fn escapes_and_raw_text() {
         assert_eq!(
-            strings(r#""\"\\\/\b\f\n\r\t""#),
-            vec!["\"\\/\u{8}\u{c}\n\r\t"]
+            units(r#""\"\\\/\b\f\n\r\t""#),
+            vec![vec![0x22, 0x5c, 0x2f, 8, 12, 10, 13, 9]]
         );
         assert_eq!(
-            strings("\"h\u{e9}llo w\u{f6}rld \u{1F600}\""),
-            vec!["h\u{e9}llo w\u{f6}rld \u{1F600}"]
+            units("\"h\u{e9}llo w\u{f6}rld \u{1F600}\""),
+            vec![scalar_units("héllo wörld 😀")]
         );
         assert!(refused(r#""\x""#));
         assert!(refused(r#""\u12""#));
@@ -431,10 +656,10 @@ mod tests {
     #[test]
     fn scalar_roots_and_whitespace() {
         assert_eq!(numbers(" \t\r\n42 \t\r\n"), vec![42.0]);
-        assert_eq!(strings("\"x\""), vec!["x"]);
-        assert_eq!(tape("null")[0].0, TAG_NULL);
-        assert_eq!(tape("true")[0].0, TAG_TRUE);
-        assert_eq!(tape("false")[0].0, TAG_FALSE);
+        assert_eq!(units("\"x\""), vec![vec![b'x' as u16]]);
+        assert_eq!(tape("null").nodes()[0].tag, TAG_NULL);
+        assert_eq!(tape("true").nodes()[0].tag, TAG_TRUE);
+        assert_eq!(tape("false").nodes()[0].tag, TAG_FALSE);
     }
 
     #[test]
@@ -443,13 +668,19 @@ mod tests {
         assert_eq!(numbers("[1]"), vec![1.0]);
         assert!(refused("1e400x"));
         assert_eq!(numbers("[1e400]"), vec![f64::INFINITY]);
-        let parsed = parse_owned(b"[\"a\"]");
-        assert!(parsed.is_ok(), "{parsed:?}");
-        let first = parsed.unwrap_or_default();
-        let parsed = parse_owned(b"[\"b\"]");
-        assert!(parsed.is_ok(), "{parsed:?}");
-        let second = parsed.unwrap_or_default();
-        assert_eq!(first.string(&first.nodes()[1]), Some("a"));
-        assert_eq!(second.string(&second.nodes()[1]), Some("b"));
+        let first = parse_owned(b"[\"a\"]").unwrap_or_default();
+        let second = parse_owned(b"[\"b\"]").unwrap_or_default();
+        assert_eq!(
+            first
+                .string_units(&first.nodes()[1])
+                .map(|s| s.to_units().into_vec()),
+            Some(vec![b'a' as u16])
+        );
+        assert_eq!(
+            second
+                .string_units(&second.nodes()[1])
+                .map(|s| s.to_units().into_vec()),
+            Some(vec![b'b' as u16])
+        );
     }
 }

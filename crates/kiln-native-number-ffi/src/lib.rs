@@ -24,9 +24,118 @@
 #[cfg(any(feature = "regexp", feature = "bigint", feature = "json"))]
 extern crate alloc;
 
+#[cfg(any(feature = "regexp", feature = "json"))]
+use kiln_string::StringView;
+
 const INVALID_ARGUMENT: i32 = -1;
 #[cfg(feature = "realm")]
 const RUNTIME_ERROR: i32 = -8;
+
+/// Canonical borrowed JavaScript string view used by the native provider seams.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct KilnString {
+    pub unit_len: u32,
+    pub flags: u32,
+    pub data: *const core::ffi::c_void,
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<KilnString>() == 16);
+    assert!(core::mem::offset_of!(KilnString, unit_len) == 0);
+    assert!(core::mem::offset_of!(KilnString, flags) == 4);
+    assert!(core::mem::offset_of!(KilnString, data) == 8);
+};
+
+/// Validate a string view once at a coarse provider boundary.
+#[cfg(any(feature = "regexp", feature = "json"))]
+pub(crate) unsafe fn validate_string<'a>(view: *const KilnString) -> Option<StringView<'a>> {
+    if view.is_null() {
+        return None;
+    }
+    // SAFETY: null was rejected; the caller owns the view for this call.
+    let view = unsafe { &*view };
+    let len = view.unit_len as usize;
+    match view.flags {
+        0 => {
+            if len == 0 {
+                return Some(StringView::Latin1(&[]));
+            }
+            if view.data.is_null() || len > isize::MAX as usize {
+                return None;
+            }
+            // SAFETY: validated by the private C ABI contract.
+            Some(StringView::Latin1(unsafe {
+                core::slice::from_raw_parts(view.data.cast(), len)
+            }))
+        }
+        1 => {
+            if len == 0 {
+                return Some(StringView::Utf16(&[]));
+            }
+            if view.data.is_null() || (view.data as usize & 1) != 0 || len > isize::MAX as usize / 2
+            {
+                return None;
+            }
+            // SAFETY: validated by the private C ABI contract.
+            Some(StringView::Utf16(unsafe {
+                core::slice::from_raw_parts(view.data.cast(), len)
+            }))
+        }
+        _ => None,
+    }
+}
+
+#[cfg(all(test, any(feature = "regexp", feature = "json")))]
+mod string_view_tests {
+    use super::{KilnString, StringView, validate_string};
+    use core::ffi::c_void;
+
+    #[test]
+    fn validates_flags_nulls_and_utf16_alignment() {
+        let bytes = [b'x'];
+        let unknown_flags = KilnString {
+            unit_len: 1,
+            flags: 2,
+            data: bytes.as_ptr().cast(),
+        };
+        assert!(unsafe { validate_string(&unknown_flags) }.is_none());
+
+        let null_nonempty = KilnString {
+            unit_len: 1,
+            flags: 0,
+            data: core::ptr::null(),
+        };
+        assert!(unsafe { validate_string(&null_nonempty) }.is_none());
+
+        let units = [0x61_u16];
+        let misaligned = KilnString {
+            unit_len: 1,
+            flags: 1,
+            data: units.as_ptr().cast::<u8>().wrapping_add(1).cast::<c_void>(),
+        };
+        assert!(unsafe { validate_string(&misaligned) }.is_none());
+
+        let empty_latin1 = KilnString {
+            unit_len: 0,
+            flags: 0,
+            data: core::ptr::null(),
+        };
+        assert_eq!(
+            unsafe { validate_string(&empty_latin1) },
+            Some(StringView::Latin1(&[]))
+        );
+        let empty_utf16 = KilnString {
+            unit_len: 0,
+            flags: 1,
+            data: core::ptr::null(),
+        };
+        assert_eq!(
+            unsafe { validate_string(&empty_utf16) },
+            Some(StringView::Utf16(&[]))
+        );
+    }
+}
 
 #[cfg(feature = "ffi")]
 mod ffi;
@@ -6178,10 +6287,8 @@ mod regexp_stubs {
 
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_regexp_compile(
-        _pattern: *const u8,
-        _pattern_len: usize,
-        _flags: *const u8,
-        _flags_len: usize,
+        _pattern: *const super::KilnString,
+        _flags: *const super::KilnString,
         _out: *mut *mut c_void,
     ) -> i32 {
         INVALID_ARGUMENT
@@ -6191,8 +6298,7 @@ mod regexp_stubs {
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_regexp_search(
         _handle: *mut c_void,
-        _subject: *const u16,
-        _subject_len: usize,
+        _subject: *const super::KilnString,
         _start: usize,
         _ranges: *mut i64,
         _capacity: usize,
@@ -6277,19 +6383,23 @@ mod temporal_stubs {
 }
 
 #[cfg(not(feature = "json"))]
+/// # Safety
+///
+/// This disabled feature stub does not dereference its arguments.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kiln_json_parse(
-    _bytes: *const u8,
-    _len: usize,
+    _source: *const KilnString,
     _out_nodes: *mut *const core::ffi::c_void,
     _out_count: *mut usize,
-    _out_text: *mut *const u8,
-    _out_text_len: *mut usize,
+    _out_text: *mut KilnString,
 ) -> i32 {
     INVALID_ARGUMENT
 }
 
 #[cfg(not(feature = "intl"))]
+/// # Safety
+///
+/// This disabled feature stub does not dereference its arguments.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kiln_intl_segment(
     _bytes: *const u8,
@@ -6302,6 +6412,9 @@ pub unsafe extern "C" fn kiln_intl_segment(
 }
 
 #[cfg(not(feature = "parallel"))]
+/// # Safety
+///
+/// This disabled feature stub does not dereference its arguments.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kiln_parallel_map(
     _in: *const core::ffi::c_void,
@@ -6364,6 +6477,7 @@ mod regexp {
     pub struct KilnRegex {
         compiled: regress::Regex,
         last: Option<regress::Match>,
+        latin1_subject: Vec<u16>,
     }
 
     /// Compile `pattern` with `flags`.
@@ -6379,32 +6493,33 @@ mod regexp {
     /// [`kiln_regexp_free`].
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_regexp_compile(
-        pattern: *const u8,
-        pattern_len: usize,
-        flags: *const u8,
-        flags_len: usize,
+        pattern: *const super::KilnString,
+        flags: *const super::KilnString,
         out_handle: *mut *mut KilnRegex,
     ) -> i32 {
         if out_handle.is_null() {
             return INVALID_ARGUMENT;
         }
-        // SAFETY: the caller contract guarantees both spans are readable for their lengths; a null
-        // pointer with a zero length is the empty span, which `from_raw_parts` requires be dangling
-        // rather than null.
-        let (pattern, flags) = unsafe { (span(pattern, pattern_len), span(flags, flags_len)) };
-        let (Some(pattern), Some(flags)) = (pattern, flags) else {
+        // Compile patterns through one scalar string conversion; matching itself stays on the
+        // regress UTF-16 API so subject offsets remain JavaScript unit offsets.
+        let (Some(pattern), Some(flags)) = (unsafe { super::validate_string(pattern) }, unsafe {
+            super::validate_string(flags)
+        }) else {
             return INVALID_ARGUMENT;
         };
-        let (Ok(pattern), Ok(flags)) = (core::str::from_utf8(pattern), core::str::from_utf8(flags))
-        else {
+        let Some(pattern) = view_to_unicode(pattern) else {
             return INVALID_ARGUMENT;
         };
-        let Ok(compiled) = regress::Regex::with_flags(pattern, flags) else {
+        let Some(flags) = view_to_flags(flags) else {
+            return INVALID_ARGUMENT;
+        };
+        let Ok(compiled) = regress::Regex::from_unicode(pattern.into_iter(), flags.as_str()) else {
             return INVALID_ARGUMENT;
         };
         let handle = alloc::boxed::Box::new(KilnRegex {
             compiled,
             last: None,
+            latin1_subject: Vec::new(),
         });
         // SAFETY: `out_handle` is a writable slot by the caller contract.
         unsafe { out_handle.write(alloc::boxed::Box::into_raw(handle)) };
@@ -6441,8 +6556,7 @@ mod regexp {
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_regexp_search(
         handle: *mut KilnRegex,
-        subject: *const u16,
-        subject_len: usize,
+        subject: *const super::KilnString,
         start: usize,
         out_ranges: *mut i64,
         out_capacity: usize,
@@ -6452,14 +6566,23 @@ mod regexp {
         }
         // SAFETY: the caller contract guarantees the handle is live and uniquely borrowed here.
         let state = unsafe { &mut *handle };
-        if start > subject_len {
+        let Some(subject) = (unsafe { super::validate_string(subject) }) else {
+            return INVALID_ARGUMENT;
+        };
+        let units: &[u16] = match subject {
+            super::StringView::Utf16(units) => units,
+            super::StringView::Latin1(bytes) => {
+                state.latin1_subject.clear();
+                state
+                    .latin1_subject
+                    .extend(bytes.iter().map(|&byte| u16::from(byte)));
+                &state.latin1_subject
+            }
+        };
+        if start > units.len() {
             state.last = None;
             return 0;
         }
-        // SAFETY: the caller contract guarantees the span is readable for its length.
-        let Some(units) = (unsafe { units(subject, subject_len) }) else {
-            return INVALID_ARGUMENT;
-        };
         let Some(found) = state.compiled.find_from_utf16(units, start).next() else {
             state.last = None;
             return 0;
@@ -6551,36 +6674,39 @@ mod regexp {
         length
     }
 
-    /// A byte span, or `None` when the pointer contract is violated.
-    ///
-    /// # Safety
-    ///
-    /// A non-null `pointer` must be readable for `length` bytes.
-    unsafe fn span<'a>(pointer: *const u8, length: usize) -> Option<&'a [u8]> {
-        if length == 0 {
-            return Some(&[]);
+    fn view_to_unicode(view: super::StringView<'_>) -> Option<Vec<u32>> {
+        match view {
+            super::StringView::Latin1(bytes) => {
+                Some(bytes.iter().map(|&byte| u32::from(byte)).collect())
+            }
+            super::StringView::Utf16(units) => Some(
+                char::decode_utf16(units.iter().copied())
+                    .map(|result| {
+                        result
+                            .map(u32::from)
+                            .unwrap_or_else(|error| u32::from(error.unpaired_surrogate()))
+                    })
+                    .collect(),
+            ),
         }
-        if pointer.is_null() || length > isize::MAX as usize {
-            return None;
-        }
-        // SAFETY: checked above and guaranteed by the caller contract.
-        Some(unsafe { core::slice::from_raw_parts(pointer, length) })
     }
 
-    /// The same, for the UTF-16 subject.
-    ///
-    /// # Safety
-    ///
-    /// A non-null `pointer` must be readable for `length` units.
-    unsafe fn units<'a>(pointer: *const u16, length: usize) -> Option<&'a [u16]> {
-        if length == 0 {
-            return Some(&[]);
+    fn view_to_flags(view: super::StringView<'_>) -> Option<String> {
+        match view {
+            super::StringView::Latin1(bytes) => bytes
+                .iter()
+                .all(|&byte| byte.is_ascii())
+                .then(|| String::from_utf8(bytes.to_vec()).ok())
+                .flatten(),
+            super::StringView::Utf16(units) => units
+                .iter()
+                .copied()
+                .map(u8::try_from)
+                .collect::<Result<Vec<_>, _>>()
+                .ok()
+                .filter(|bytes| bytes.iter().all(u8::is_ascii))
+                .and_then(|bytes| String::from_utf8(bytes).ok()),
         }
-        if pointer.is_null() || length > isize::MAX as usize / 2 {
-            return None;
-        }
-        // SAFETY: checked above and guaranteed by the caller contract.
-        Some(unsafe { core::slice::from_raw_parts(pointer, length) })
     }
 
     /// An offset that fits the boundary type, saturating rather than wrapping.
@@ -6593,13 +6719,13 @@ mod regexp {
             $(assert_provider_export!($group, $name, $signature);)*
         };
         (regexp, kiln_regexp_compile, regexp_compile) => {
-            const _: unsafe extern "C" fn(*const u8, usize, *const u8, usize, *mut *mut KilnRegex) -> i32 = kiln_regexp_compile;
+            const _: unsafe extern "C" fn(*const super::KilnString, *const super::KilnString, *mut *mut KilnRegex) -> i32 = kiln_regexp_compile;
         };
         (regexp, kiln_regexp_free, regexp_free) => {
             const _: unsafe extern "C" fn(*mut KilnRegex) = kiln_regexp_free;
         };
         (regexp, kiln_regexp_search, regexp_search) => {
-            const _: unsafe extern "C" fn(*mut KilnRegex, *const u16, usize, usize, *mut i64, usize) -> i32 = kiln_regexp_search;
+            const _: unsafe extern "C" fn(*mut KilnRegex, *const super::KilnString, usize, *mut i64, usize) -> i32 = kiln_regexp_search;
         };
         (regexp, kiln_regexp_group_count, regexp_group_count) => {
             const _: unsafe extern "C" fn(*const KilnRegex) -> usize = kiln_regexp_group_count;
@@ -8273,7 +8399,8 @@ mod temporal {
 #[cfg(feature = "json")]
 mod json {
     use super::INVALID_ARGUMENT;
-    use kiln_json::{Node, ParseError};
+    use super::{KilnString, StringView};
+    use kiln_json::{Node, ParseError, TextSlice, UnitSource};
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
     /// The text is not JSON. The caller raises the SyntaxError the language specifies. Shares the
@@ -8284,58 +8411,69 @@ mod json {
     /// The reader could not run at all: the text is longer than the tape indexes, or it panicked.
     const READER_FAILED: i32 = -2;
 
-    /// Parse `len` bytes of UTF-8 at `bytes`.
+    fn parse_tape<S: UnitSource>(
+        source: S,
+    ) -> Result<(*const Node, usize, KilnString), ParseError> {
+        kiln_json::parse_source(&source, |tape| {
+            let nodes = tape.nodes();
+            let view = match tape.text() {
+                TextSlice::Latin1(bytes) => KilnString {
+                    unit_len: bytes.len() as u32,
+                    flags: 0,
+                    data: bytes.as_ptr().cast(),
+                },
+                TextSlice::Utf16(units) => KilnString {
+                    unit_len: units.len() as u32,
+                    flags: 1,
+                    data: units.as_ptr().cast(),
+                },
+            };
+            (nodes.as_ptr(), nodes.len(), view)
+        })
+    }
+
+    /// Parse the canonical Latin1 or UTF-16 [`KilnString`] source view.
     ///
-    /// Returns 0 with the tape -- `out_count` nodes at `out_nodes`, in source order, whose string
-    /// offsets index the `out_text_len` bytes at `out_text` -- or -1 for text that is not JSON,
-    /// or -2 when the reader could not run. The four pointers stay valid until the next call on
-    /// this thread and belong to the reader; the caller reads them and does not free them.
+    /// Returns 0 with `out_count` tape nodes at `out_nodes`, in source order, and the decoded text
+    /// view in `out_text`; string node offsets and lengths count JavaScript UTF-16 units. Returns
+    /// -1 for text that is not JSON or an invalid string header, or -2 when the reader could not
+    /// run. The three output slots point into this thread's scratch and remain valid until its
+    /// next parse; the caller reads them and does not free them.
     ///
     /// # Safety
     ///
-    /// `bytes` must be readable for `len` bytes (null is accepted only with a length of zero), and
-    /// the four out pointers must be writable slots.
+    /// `source` must be null only for the invalid-argument case; otherwise its header must name
+    /// readable Latin1 bytes or aligned UTF-16 units for `unit_len`, with flags 0 or 1. The three
+    /// output pointers must be writable slots. The returned pointers are borrowed from the
+    /// provider's thread-local scratch and must not be retained after the next parse on that
+    /// thread.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_json_parse(
-        bytes: *const u8,
-        len: usize,
+        source: *const KilnString,
         out_nodes: *mut *const Node,
         out_count: *mut usize,
-        out_text: *mut *const u8,
-        out_text_len: *mut usize,
+        out_text: *mut KilnString,
     ) -> i32 {
-        if (bytes.is_null() && len != 0)
-            || out_nodes.is_null()
-            || out_count.is_null()
-            || out_text.is_null()
-            || out_text_len.is_null()
-        {
+        if out_nodes.is_null() || out_count.is_null() || out_text.is_null() {
             return INVALID_ARGUMENT;
         }
-        let source: &[u8] = if len == 0 {
-            &[]
-        } else {
-            // SAFETY: the caller contract guarantees `bytes` is readable for `len` bytes.
-            unsafe { core::slice::from_raw_parts(bytes, len) }
+        let Some(source) = (unsafe { super::validate_string(source) }) else {
+            return INVALID_ARGUMENT;
         };
         // A panic must not cross the C boundary: the archive's unwind policy makes one fatal to
         // the process, and this is `JSON.parse`, which a program wraps in `try`.
-        let parsed = catch_unwind(AssertUnwindSafe(|| {
-            kiln_json::parse(source, |tape| {
-                let nodes = tape.nodes();
-                let text = tape.text();
-                (nodes.as_ptr(), nodes.len(), text.as_ptr(), text.len())
-            })
+        let parsed = catch_unwind(AssertUnwindSafe(|| match source {
+            StringView::Latin1(bytes) => parse_tape(bytes),
+            StringView::Utf16(units) => parse_tape(units),
         }));
         match parsed {
-            Ok(Ok((nodes, count, text, text_len))) => {
-                // SAFETY: the four slots are writable by the caller contract. The pointers are
+            Ok(Ok((nodes, count, text))) => {
+                // SAFETY: the three output slots are writable by the caller contract. The pointers are
                 // into the crate's thread-local scratch, which outlives this call.
                 unsafe {
                     out_nodes.write(nodes);
                     out_count.write(count);
                     out_text.write(text);
-                    out_text_len.write(text_len);
                 }
                 0
             }
@@ -8349,7 +8487,7 @@ mod json {
             $(assert_provider_export!($group, $name, $signature);)*
         };
         (json, kiln_json_parse, json_parse) => {
-            const _: unsafe extern "C" fn(*const u8, usize, *mut *const Node, *mut usize, *mut *const u8, *mut usize) -> i32 = kiln_json_parse;
+            const _: unsafe extern "C" fn(*const KilnString, *mut *const Node, *mut usize, *mut KilnString) -> i32 = kiln_json_parse;
         };
         ($group:ident, $name:ident, $signature:ident) => {};
     }
@@ -8370,18 +8508,17 @@ mod json {
         fn parse(text: &str) -> Parsed {
             let mut nodes: *const Node = core::ptr::null();
             let mut count = 0usize;
-            let mut arena: *const u8 = core::ptr::null();
-            let mut arena_len = 0usize;
-            let status = unsafe {
-                kiln_json_parse(
-                    text.as_ptr(),
-                    text.len(),
-                    &mut nodes,
-                    &mut count,
-                    &mut arena,
-                    &mut arena_len,
-                )
+            let source = KilnString {
+                unit_len: text.len() as u32,
+                flags: 0,
+                data: text.as_ptr().cast(),
             };
+            let mut arena = KilnString {
+                unit_len: 0,
+                flags: 0,
+                data: core::ptr::null(),
+            };
+            let status = unsafe { kiln_json_parse(&source, &mut nodes, &mut count, &mut arena) };
             if status != 0 {
                 return Parsed {
                     status,
@@ -8390,15 +8527,32 @@ mod json {
                 };
             }
             let tape = unsafe { core::slice::from_raw_parts(nodes, count) };
-            let text = unsafe { core::slice::from_raw_parts(arena, arena_len) };
             let key = tape
                 .get(1)
                 .filter(|node| node.tag == TAG_STRING)
-                .and_then(|node| {
-                    text.get(node.value as usize..(node.value as usize + node.len as usize))
+                .map(|node| {
+                    let index = node.value as usize;
+                    let ptr = arena.data.cast::<u16>();
+                    if arena.flags == 0 {
+                        unsafe {
+                            core::slice::from_raw_parts(
+                                arena.data.cast::<u8>().add(index),
+                                node.len as usize,
+                            )
+                            .iter()
+                            .map(|&unit| u16::from(unit))
+                            .collect::<Vec<_>>()
+                        }
+                    } else {
+                        unsafe {
+                            core::slice::from_raw_parts(ptr.add(index), node.len as usize).to_vec()
+                        }
+                    }
                 })
-                .map(<[u8]>::to_vec)
-                .unwrap_or_default();
+                .unwrap_or_default()
+                .into_iter()
+                .map(|unit| unit as u8)
+                .collect();
             Parsed {
                 status,
                 tags: tape.iter().map(|node| node.tag).collect(),
@@ -8428,9 +8582,7 @@ mod json {
             let status = unsafe {
                 kiln_json_parse(
                     core::ptr::null(),
-                    3,
                     &mut nodes,
-                    core::ptr::null_mut(),
                     core::ptr::null_mut(),
                     core::ptr::null_mut(),
                 )

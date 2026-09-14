@@ -2,6 +2,7 @@
 //! without either engine's heap, so a slow parse can be told from a slow walk; and `sizes`, the
 //! reader over documents of the benchmark's shape at each size (the table simd-json was measured
 //! against before it was dropped; see `src/lib.rs`).
+use kiln_string::StringUnits;
 use std::time::Instant;
 
 fn per_parse_us(source: &[u8], budget_ms: u64) -> f64 {
@@ -10,6 +11,18 @@ fn per_parse_us(source: &[u8], budget_ms: u64) -> f64 {
     let started = Instant::now();
     while started.elapsed().as_millis() < u128::from(budget_ms) || iterations < 5 {
         sink += kiln_json::parse(source, |tape| tape.nodes().len()).expect("parses");
+        iterations += 1;
+    }
+    assert!(sink > 0);
+    started.elapsed().as_secs_f64() * 1e6 / f64::from(iterations)
+}
+
+fn per_parse_units(source: &StringUnits, budget_ms: u64) -> f64 {
+    let mut iterations = 0u32;
+    let mut sink = 0usize;
+    let started = Instant::now();
+    while started.elapsed().as_millis() < u128::from(budget_ms) || iterations < 5 {
+        sink += kiln_json::parse_units(source, |tape| tape.nodes().len()).expect("parses");
         iterations += 1;
     }
     assert!(sink > 0);
@@ -66,5 +79,33 @@ fn sizes() {
     for (label, source) in &docs {
         let per = per_parse_us(source, 600);
         println!("{label:<20} {:>8} {per:>12.3}", source.len());
+    }
+}
+
+#[test]
+#[ignore]
+fn unit_shapes() {
+    let long_ascii = StringUnits::from(format!("\"{}\"", "a".repeat(4094)));
+    let escaped = StringUnits::from(r#"["a\u0041\u0000\ud83d\ude00"]"#);
+    let unicode = StringUnits::from("[\"café 😀 café 😀 café 😀\"]");
+    let numbers = StringUnits::from(
+        "[".to_owned()
+            + &(0..200)
+                .map(|i| format!("{}.{}e{}", i, i % 10, i % 8))
+                .collect::<Vec<_>>()
+                .join(",")
+            + "]",
+    );
+    for (label, source) in [
+        ("short-ascii", StringUnits::from("[1,2,3]")),
+        ("long-ascii", long_ascii),
+        ("escaped", escaped),
+        ("unicode", unicode),
+        ("number-heavy", numbers),
+    ] {
+        println!(
+            "{label:<14} {:>12.3} us per parse",
+            per_parse_units(&source, 300)
+        );
     }
 }
