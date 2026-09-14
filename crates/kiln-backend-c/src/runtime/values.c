@@ -222,6 +222,7 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
     closure->name_len = name_len;
     closure->source = source;
     closure->source_len = source_len;
+    closure->source_value = kiln_c99_undefined();
     closure->diagnostic_source = diagnostic_source;
     closure->arity = arity;
     closure->prologue_resume = prologue_resume;

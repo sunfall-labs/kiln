@@ -525,6 +525,9 @@ typedef struct kiln_closure {
      * allocation, or ambient current-module state. */
     const char *source;
     size_t source_len;
+    /* Runtime-created functions carry their source as a canonical string value. The legacy
+     * pointer/length pair remains for generated static source, whose bytes are UTF-8 literals. */
+    kiln_value source_value;
     /* Immutable module ownership for diagnostics. This is deliberately distinct from `source`:
      * the latter is the function's exact source slice, not the module identifier. */
     const char *diagnostic_source;

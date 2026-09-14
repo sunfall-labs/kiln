@@ -794,6 +794,9 @@ static kiln_value kiln_c99_text(kiln_value value) {
          * pointer into the unit's static source.  The interpreter slices the same span out of
          * the same text, so the two engines answer with identical bytes. */
         kiln_closure *closure = kiln_c99_closure_of(value);
+        if (closure->source_value.tag == KILN_VALUE_STRING) {
+            return closure->source_value;
+        }
         if (closure->source == NULL) {
             /* A closure the runtime built for itself has no text.  It is a built-in in every
              * sense that matters here, so it answers as one. */
