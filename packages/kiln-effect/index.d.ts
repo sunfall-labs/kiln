@@ -3,7 +3,7 @@
  * Effect v4 spellings of `@kiln/concurrency`. Conforms to ADR 0058 (revised 2026-09-06).
  */
 
-import type { Effect, Layer, Scope } from "effect";
+import type { Context, Effect, Layer, Scope, Scheduler } from "effect";
 import type { Isolated } from "@kiln/concurrency";
 
 export type { Isolated };
@@ -13,7 +13,10 @@ export type { Isolated };
  * scope calls the instance's `__shutdown`, if it has one.
  */
 export function spawnActorLayer<Id, Shape, Error = never, In = never>(
-  service: { readonly key: string; new (...args: any[]): Id },
+  service:
+    | Context.Service<Id, Shape>
+    | { readonly key: string; new (...args: any[]): Id }
+    | { readonly key: string },
   factory: () => Shape
 ): Layer.Layer<Id, Error, In | Scope.Scope>;
 
@@ -36,3 +39,17 @@ export function forEachParallel<A, B, E, R>(
   f: (a: A) => Effect.Effect<B, E, R>,
   options?: { readonly concurrency?: "native" | number }
 ): Effect.Effect<B[], E, R>;
+
+/**
+ * Kiln native worker pool layer for Effect.
+ */
+export namespace KilnWorkerPool {
+  export const layer: Layer.Layer<never, never, never>;
+}
+
+/**
+ * Kiln native Tokio work-stealing fiber scheduler for Effect.
+ */
+export namespace KilnNativeScheduler {
+  export function make(options?: { workers?: "auto" | number }): Scheduler.Scheduler;
+}

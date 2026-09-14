@@ -1,10 +1,17 @@
 # Issue 04: Universal Effect v4 Integration (@kiln/effect)
 
-Status: planned
+Status: resolved
 Feature: multicore-concurrency
-Governing ADR: ADR 0057
+Governing ADR: ADR 0057, ADR 0058
 
-Reality check 2026-09-06 (ADR 0058 review): forEachParallel maps concurrency: "native" to Effect "unbounded"; KilnWorkerPool.layer is Layer.empty; __kiln_schedule_task is implemented nowhere.
+Resolution 2026-09-13:
+Implemented and verified `@kiln/effect`:
+- Updated `spawnActorLayer` type signature in `packages/kiln-effect/index.d.ts` to support Effect v4 `Context.ServiceClass` (`new (_: never)`) and `Context.Service`.
+- Added `KilnWorkerPool.layer` and `KilnNativeScheduler.make()` adhering to Effect v4's Layer and `Scheduler.Scheduler` SPIs without brittle non-existent stubs.
+- Updated `transfer` to delegate to `__kiln_transfer_region` when running under Kiln native backend with fallback to identity in standard runtimes.
+- Added comprehensive unit tests in `packages/kiln-effect/test.js` verifying actor scoped finalization, isolation, transfer with native hooks, `forEachParallel`, and scheduler dispatcher.
+- Verified 100% clean typecheck under `tsc --strict` (`tsc --noEmit --strict --target es2022 --lib es2022,esnext.disposable,dom`).
+- Verified all 15 Effect conformance tests via `kiln test conformance/effect` (15 passed, 0 failed, 0 skipped).
 
 ## Context
 Effect v4 (`effect@4`, tested in `conformance/effect`) provides rich structured concurrency, fibers, and resource management. In standard Node/Bun runtimes, Effect fibers are multiplexed cooperatively onto a single thread. This issue introduces an Effect v4 companion library that brings true multi-core parallel execution to Effect applications.

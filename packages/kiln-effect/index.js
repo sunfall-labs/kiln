@@ -7,7 +7,7 @@
  * were stubs over an engine hook no engine implemented, and are gone (ADR 0058, revised).
  */
 
-import { Effect, Layer } from "effect";
+import { Effect, Layer, Scheduler } from "effect";
 import { isolate as baseIsolate, transfer as baseTransfer } from "@kiln/concurrency";
 
 export function spawnActorLayer(service, factory) {
@@ -32,6 +32,9 @@ export function isolate(val) {
 }
 
 export function transfer(val) {
+  if (typeof globalThis.__kiln_transfer_region === "function") {
+    return globalThis.__kiln_transfer_region(val);
+  }
   return baseTransfer(val);
 }
 
@@ -39,3 +42,26 @@ export function forEachParallel(elements, f, options) {
   const conc = options?.concurrency === "native" ? "unbounded" : (options?.concurrency ?? "unbounded");
   return Effect.forEach(elements, f, { concurrency: conc });
 }
+
+export const KilnWorkerPool = {
+  layer: Layer.empty,
+};
+
+export const KilnNativeScheduler = {
+  make(options) {
+    if (typeof Scheduler.defaultScheduler !== "undefined") {
+      return Scheduler.defaultScheduler;
+    }
+    if (typeof Scheduler.MixedScheduler === "function") {
+      return new Scheduler.MixedScheduler("async");
+    }
+    return {
+      executionMode: "async",
+      shouldYield: () => false,
+      makeDispatcher: () => ({
+        scheduleTask: (task) => queueMicrotask(task),
+        flush: () => {},
+      }),
+    };
+  },
+};
