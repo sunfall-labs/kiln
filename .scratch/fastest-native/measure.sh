@@ -28,7 +28,7 @@ src_of() { case $1 in loop) echo bench/cpu/loop.mjs ;; fib) echo bench/cpu/fib.m
 for b in loop fib class-poly; do
 	src="$(src_of "$b")"
 	"$KILN" --one-shot build "$src" --profile native-release --output "$WORK/$b.today" >/dev/null
-	clang -O2 -std=c99 -o "$WORK/$b.ideal" ".scratch/fastest-native/$b.c" -lm
+	clang -O2 -std=c99 -D_POSIX_C_SOURCE=199309L -o "$WORK/$b.ideal" ".scratch/fastest-native/$b.c" -lm
 	# bench/harness.mjs prints one JSON record per run: the checksum decides agreement and
 	# warm_median is the in-process number, the same basis for node and for today's native.
 	field() { python3 -c 'import sys,json; r=[l for l in sys.stdin.read().splitlines() if l.startswith("{")][-1]; print(json.loads(r)[sys.argv[1]])' "$1"; }

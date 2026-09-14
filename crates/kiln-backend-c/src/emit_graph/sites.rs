@@ -1,7 +1,8 @@
 use super::EntryKind;
-use crate::direct::direct_callable;
+use crate::direct::{CallPlan, direct_callable};
 use crate::graph::{FunctionGraph, GraphOp, ValueId};
 use kiln_ir::{Constant, Instruction, Program};
+use std::collections::HashSet;
 
 /// The protos this unit defines as a method of `key` -- `class C { key() {} }` and
 /// `{ key() {} }` -- read off the bytecode as `Const(key) MakeFunction(i) DefineMethod`. A hint
@@ -108,7 +109,7 @@ mod tests {
 /// cache: one column per property name, in first-read order -- the same order in every
 /// clone. Two reads of one name share a column because for one receiver of one shape they
 /// are one slot, and the C compiler then reads it once.
-pub(super) fn this_columns(
+pub(crate) fn this_columns(
     graph: &FunctionGraph,
 ) -> (std::collections::HashMap<ValueId, usize>, Vec<u32>) {
     let mut names: Vec<u32> = Vec::new();
@@ -149,6 +150,7 @@ pub(super) fn receiver_prologue(
     index: usize,
     columns: &[u32],
     kind: EntryKind,
+    double_mask: u32,
 ) -> String {
     let keys: Vec<String> = columns
         .iter()
@@ -157,13 +159,67 @@ pub(super) fn receiver_prologue(
     let count = columns.len();
     // A typed entry takes the row from a caller that has it, and looks one up only when the
     // caller had none: the site remembers the callee's row for the receiver's shape.
-    let (init, lookup) = if matches!(kind, EntryKind::Typed { .. }) {
-        ("recv_row_in", "if (recv_row == NULL) ")
-    } else {
-        ("NULL", "")
-    };
+    let (init, lookup, shapes_var, refused_var, slot_var, check_guard) =
+        if matches!(kind, EntryKind::Typed { .. }) {
+            (
+                "recv_row_in",
+                "if (recv_row == NULL) ",
+                format!("{symbol}_fn_{index}_typed_recv_shape"),
+                format!("{symbol}_fn_{index}_typed_recv_refused"),
+                format!("{symbol}_fn_{index}_typed_recv_slot"),
+                "    if (KILN_UNLIKELY(recv_row == NULL || recv_obj == NULL)) goto kiln_refusal;\n",
+            )
+        } else {
+            (
+                "NULL",
+                "",
+                format!("{symbol}_fn_{index}_recv_shape"),
+                format!("{symbol}_fn_{index}_recv_refused"),
+                format!("{symbol}_fn_{index}_recv_slot"),
+                "",
+            )
+        };
     format!(
-        "    const uint32_t *recv_row = {init}; const kiln_object *recv_obj = NULL; if (KILN_VAL_IS_OBJECT(receiver)) {{ recv_obj = (const kiln_object *)KILN_VAL_PTR(receiver); {lookup}{{ recv_row = kiln_c99_recv_row({symbol}_fn_{index}_recv_shape, &{symbol}_fn_{index}_recv_slot[0][0], {count}, recv_obj->shape); if (recv_row == NULL && !kiln_c99_recv_refused({symbol}_fn_{index}_recv_refused, recv_obj->shape) && kiln_c99_gc_kind_of_ptr(recv_obj) == KILN_GC_OBJECT) {{ const char *const recv_keys[{count}] = {{ {} }}; recv_row = kiln_c99_recv_claim({symbol}_fn_{index}_recv_shape, {symbol}_fn_{index}_recv_refused, &{symbol}_fn_{index}_recv_slot[0][0], {count}, recv_keys, recv_obj); }} }} }} (void)recv_row; (void)recv_obj;\n",
+        "    const uint32_t *recv_row = {init}; const kiln_object *recv_obj = NULL; if (KILN_VAL_IS_OBJECT(receiver)) {{ recv_obj = (const kiln_object *)KILN_VAL_PTR(receiver); if (recv_obj == NULL) __builtin_unreachable(); {lookup}{{ recv_row = kiln_c99_recv_row({shapes_var}, &{slot_var}[0][0], {count}, recv_obj->shape); if (recv_row == NULL && !kiln_c99_recv_refused({refused_var}, recv_obj->shape) && kiln_c99_gc_kind_of_ptr(recv_obj) == KILN_GC_OBJECT) {{ const char *const recv_keys[{count}] = {{ {} }}; recv_row = kiln_c99_recv_claim({shapes_var}, {refused_var}, &{slot_var}[0][0], {count}, recv_keys, recv_obj, {double_mask}u); }} }} }} (void)recv_row; (void)recv_obj;\n{check_guard}",
         keys.join(", ")
     )
+}
+
+pub(crate) fn collect_typed_call_sites(
+    graph: &FunctionGraph,
+    program: &Program,
+    plan: &CallPlan,
+    numbers: &HashSet<ValueId>,
+) -> Vec<(ValueId, Vec<u32>)> {
+    let mut sites = Vec::new();
+    for block in &graph.blocks {
+        for (vid, op) in &block.operations {
+            if let GraphOp::CallMethod { name, args, .. } = op {
+                let key_str = match program.constants.get(*name as usize) {
+                    Some(Constant::String(s)) => s.as_str(),
+                    _ => "",
+                };
+                let argc = args.len();
+                let candidates = method_candidates(program, key_str, &plan.publishes_frame)
+                    .into_iter()
+                    .filter(|&index| plan.available.get(index as usize).copied().unwrap_or(true))
+                    .collect::<Vec<_>>();
+                let typed_candidates: Vec<u32> = candidates
+                    .iter()
+                    .copied()
+                    .filter(|&i| {
+                        let callee = &program.functions[i as usize];
+                        plan.typed_entries.get(i as usize).copied().unwrap_or(false)
+                            && !callee.arrow
+                            && callee.parameter_count as usize == argc
+                            && args.iter().all(|a| numbers.contains(a))
+                    })
+                    .collect();
+                if !typed_candidates.is_empty() {
+                    sites.push((*vid, typed_candidates));
+                }
+            }
+        }
+    }
+    sites
 }

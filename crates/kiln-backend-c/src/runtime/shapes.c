@@ -60,23 +60,30 @@ static void kiln_c99_pin_interned_key(const char *ikey) {
     }
 }
 
-static int kiln_c99_shape_transition(kiln_shape *current, const char *ikey, kiln_shape **out_shape) {
+static int kiln_c99_shape_transition(kiln_shape *current, const char *ikey, int is_double, kiln_shape **out_shape) {
     kiln_shape_transition *tr;
     kiln_shape *next_shape;
     size_t i;
     if (current == NULL || ikey == NULL || current->property_count >= KILN_SHAPE_MAX_FAST_PROPERTIES) {
         return 0;
     }
+    uint32_t expected_bit = is_double ? (1u << current->property_count) : 0;
     for (i = 0; i < 2 && i < current->num_transitions; ++i) {
         if (current->inline_trans_ikey[i] == ikey) {
-            *out_shape = current->inline_trans_next[i];
-            return 1;
+            kiln_shape *cand = current->inline_trans_next[i];
+            if ((cand->double_slots_mask & (1u << current->property_count)) == expected_bit) {
+                *out_shape = cand;
+                return 1;
+            }
         }
     }
     for (tr = current->transitions; tr != NULL; tr = tr->next_transition) {
         if (tr->ikey == ikey) {
-            *out_shape = tr->next;
-            return 1;
+            kiln_shape *cand = tr->next;
+            if ((cand->double_slots_mask & (1u << current->property_count)) == expected_bit) {
+                *out_shape = cand;
+                return 1;
+            }
         }
     }
     if (current->num_transitions >= 32) {
@@ -93,6 +100,7 @@ static int kiln_c99_shape_transition(kiln_shape *current, const char *ikey, kiln
     next_shape->slot_index = current->property_count;
     next_shape->property_count = current->property_count + 1;
     next_shape->num_transitions = 0;
+    next_shape->double_slots_mask = current->double_slots_mask | expected_bit;
     memcpy((void *)next_shape->keys, (const void *)current->keys,
            current->property_count * sizeof(const char *));
     next_shape->keys[current->property_count] = ikey;

@@ -1,6 +1,6 @@
 use super::clones::{RESTART, bail_out, route_typed_failures, typed_fail};
 use super::ops::emit_graph_op;
-use super::sites::{receiver_prologue, share_sites, this_columns};
+use super::sites::{self, receiver_prologue, share_sites, this_columns};
 use super::{EntryKind, Site, Speculation, this_site_count, typed_signature};
 use crate::direct::{CallPlan, direct_callable};
 use crate::graph::{
@@ -9,7 +9,7 @@ use crate::graph::{
     find_induction_variables, proven_ints_with_assumptions, proven_numbers_with_assumptions,
 };
 use crate::prelude::lookup_speculation_invariant;
-use kiln_ir::{BinaryOp, Constant, ExportBinding, FunctionProto, Program};
+use kiln_ir::{BinaryOp, Constant, ExportBinding, FunctionProto, Program, UnaryOp};
 use std::collections::HashSet;
 use std::fmt::Write;
 
@@ -194,6 +194,23 @@ pub fn emit_function_from_graph_with_profile(
     type_profile_record: bool,
 ) {
     let function_start = output.len();
+    if kind == EntryKind::Boxed {
+        let typed_sites = sites::collect_typed_call_sites(graph, program, plan, &plan.numbers);
+        for (vid, typed_candidates) in typed_sites {
+            for i in typed_candidates {
+                let pfx = format!("{}_fn_{}_v{}_t_{}", symbol, index, vid.0, i);
+                if plan.typed_needs[i as usize].row {
+                    writeln!(
+                        output,
+                        "static kiln_val {pfx}_fn = 0;\nstatic const kiln_shape *{pfx}_shape = NULL;\nstatic const uint32_t *{pfx}_row = NULL;\nstatic uint64_t {pfx}_proto = 0;\nstatic uint64_t {pfx}_epoch = UINT64_MAX;\nstatic kiln_val *{pfx}_upvalues = NULL;"
+                    )
+                    .unwrap();
+                } else {
+                    writeln!(output, "static kiln_val {pfx}_fn = 0;").unwrap();
+                }
+            }
+        }
+    }
     // 1. Function comment header
     if let Some(name) = proto.name.as_deref().filter(|name| {
         !name.is_empty()
@@ -241,7 +258,12 @@ pub fn emit_function_from_graph_with_profile(
             // A restartable typed entry is the fast clone's body with a typed signature: no
             // runtime call survives in it, so it inlines where a method call enters it by
             // name, and the receiver the caller matched is the receiver it reads.
-            let inline = if restartable {
+            let has_user_calls = graph.blocks.iter().any(|b| {
+                b.operations
+                    .iter()
+                    .any(|(_, op)| matches!(op, GraphOp::Call { .. }))
+            });
+            let inline = if restartable || (!needs.runtime && !has_user_calls) {
                 "static inline __attribute__((always_inline))"
             } else {
                 "static inline"
@@ -259,7 +281,36 @@ pub fn emit_function_from_graph_with_profile(
     // emitted direct path alike, passes its own.
     let context_start = output.len();
     let receiver_cache = if !plan.generic_only && this_site_count(graph) > 0 {
-        receiver_prologue(symbol, index, &this_columns(graph).1, kind)
+        let (this_col_map, this_col_names) = this_columns(graph);
+        let double_mask = if matches!(kind, EntryKind::Typed { .. }) {
+            let mut mask = 0u32;
+            for (vid, col_idx) in &this_col_map {
+                if plan.numbers.contains(vid) && *col_idx < 32 {
+                    mask |= 1u32 << col_idx;
+                }
+            }
+            mask
+        } else {
+            0u32
+        };
+        receiver_prologue(symbol, index, &this_col_names, kind, double_mask)
+    } else {
+        String::new()
+    };
+    let typed_epoch_check: String = if matches!(kind, EntryKind::Boxed | EntryKind::Fast) {
+        let typed_sites = sites::collect_typed_call_sites(graph, program, plan, &plan.numbers);
+        let mut checks = String::new();
+        for (vid, typed_candidates) in typed_sites {
+            for i in typed_candidates {
+                if plan.typed_needs[i as usize].row {
+                    let pfx = format!("{}_fn_{}_v{}_t_{}", symbol, index, vid.0, i);
+                    checks.push_str(&format!(
+                        "    if (KILN_UNLIKELY({pfx}_epoch != kiln_c99_proto_epoch)) {pfx}_shape = NULL;\n"
+                    ));
+                }
+            }
+        }
+        checks
     } else {
         String::new()
     };
@@ -279,6 +330,7 @@ pub fn emit_function_from_graph_with_profile(
         );
         output.push_str("    const int kiln_inheriting = kiln_c99_inheriting_new_target; (void)kiln_inheriting;\n");
         output.push_str(&receiver_cache);
+        output.push_str(&typed_epoch_check);
     } else if scalar_proto {
         output.push_str("    (void)ctx; (void)receiver_ptr; (void)upvalues;\n");
         output.push_str("    const int kiln_inheriting = kiln_c99_inheriting_new_target; (void)kiln_inheriting;\n");
@@ -293,6 +345,7 @@ pub fn emit_function_from_graph_with_profile(
         );
         output.push_str("    (void)receiver_ptr;\n");
         output.push_str(&receiver_cache);
+        output.push_str(&typed_epoch_check);
         // Which of the two `arguments` objects a mention in this body, or in an arrow made
         // here, would build. Only such a body reads the frame global, so only such a body
         // writes it; a plain body leaves its caller's value alone.
@@ -434,7 +487,7 @@ pub fn emit_function_from_graph_with_profile(
             let row = vec!["UINT32_MAX"; this_sites].join(", ");
             writeln!(
                 declarations,
-                "static const kiln_shape *{symbol}_fn_{index}_recv_shape[4];\nstatic const kiln_shape *{symbol}_fn_{index}_recv_refused[4];\nstatic uint32_t {symbol}_fn_{index}_recv_slot[4][{this_sites}] = {{ {{{row}}}, {{{row}}}, {{{row}}}, {{{row}}} }};"
+                "static const kiln_shape *{symbol}_fn_{index}_recv_shape[4];\nstatic const kiln_shape *{symbol}_fn_{index}_recv_refused[4];\nstatic uint32_t {symbol}_fn_{index}_recv_slot[4][{this_sites}] = {{ {{{row}}}, {{{row}}}, {{{row}}}, {{{row}}} }};\nstatic const kiln_shape *{symbol}_fn_{index}_typed_recv_shape[4];\nstatic const kiln_shape *{symbol}_fn_{index}_typed_recv_refused[4];\nstatic uint32_t {symbol}_fn_{index}_typed_recv_slot[4][{this_sites}] = {{ {{{row}}}, {{{row}}}, {{{row}}}, {{{row}}} }};"
             )
             .unwrap();
         }
@@ -497,6 +550,26 @@ pub fn emit_entry_from_graph_with_profile(
     plan: &CallPlan,
     type_profile_record: bool,
 ) {
+    let typed_sites = sites::collect_typed_call_sites(graph, program, plan, &plan.numbers);
+    for (vid, typed_candidates) in &typed_sites {
+        for &i in typed_candidates {
+            let pfx = format!("{}_fn_entry_v{}_t_{}", symbol, vid.0, i);
+            if plan.typed_needs[i as usize].row {
+                writeln!(
+                    output,
+                    "    static kiln_val {pfx}_fn = 0; static const kiln_shape *{pfx}_shape = NULL; static const uint32_t *{pfx}_row = NULL; static uint64_t {pfx}_proto = 0; static uint64_t {pfx}_epoch = UINT64_MAX; static kiln_val *{pfx}_upvalues = NULL;"
+                )
+                .unwrap();
+                writeln!(
+                    output,
+                    "    if (KILN_UNLIKELY({pfx}_epoch != kiln_c99_proto_epoch)) {pfx}_shape = NULL;"
+                )
+                .unwrap();
+            } else {
+                writeln!(output, "    static kiln_val {pfx}_fn = 0;").unwrap();
+            }
+        }
+    }
     output.push_str(
         "    const int kiln_inheriting = kiln_c99_inheriting_new_target; (void)kiln_inheriting;\n",
     );
@@ -712,10 +785,19 @@ fn emit_block_sequence(
     // a versioned body's clones share every value, and the generic one reads them boxed. (A
     // fast clone that boxed only at its exits was tried on 2026-09-06: it measured nothing,
     // and a bundled `marked` answered wrongly under it.)
-    let boxed = if block_prefix == "kiln_block_" {
-        Some(boxed_uses(graph, numbers, booleans, array_slots, kind))
-    } else {
+    let boxed = if block_prefix == "kiln_generic_block_" {
         None
+    } else {
+        Some(boxed_uses(
+            graph,
+            program,
+            numbers,
+            ints,
+            booleans,
+            array_slots,
+            kind,
+            spec,
+        ))
     };
     // A second read of the same `this` slot in a block, with nothing between the two that could
     // run code or write a property, reads what the first read. Only the row path copies -- an
@@ -946,11 +1028,23 @@ fn emit_block_sequence(
                 block.id.0
             )
             .unwrap();
+            let mut materialize_phis = String::new();
+            for &(phi_vid, ref op) in &block.operations {
+                if let GraphOp::Phi { .. } = op {
+                    if numbers.contains(&phi_vid) {
+                        materialize_phis.push_str(&format!(
+                            " v{} = kiln_c99_val_from_double(d{});",
+                            phi_vid.0, phi_vid.0
+                        ));
+                    }
+                }
+            }
             writeln!(
                 output,
-                "    if (KILN_UNLIKELY(kiln_c99_guard_should_exit_in(kiln_spec_mode, &kiln_loop_guard_{}))) {{ {} goto kiln_generic_block_{}; }}",
+                "    if (KILN_UNLIKELY(kiln_c99_guard_should_exit_in(kiln_spec_mode, &kiln_loop_guard_{}))) {{ {}{} goto kiln_generic_block_{}; }}",
                 block.id.0,
                 super::ops::materialize_all_sunk(graph, symbol, defs, array_slots),
+                materialize_phis,
                 block.id.0
             )
             .unwrap();
@@ -987,6 +1081,7 @@ fn emit_block_sequence(
                 this_sites.get(&vid).copied(),
                 this_copies.get(&vid).copied(),
                 spec,
+                boxed.as_ref(),
             );
             if kind.restarts() {
                 op_text = bail_out(op, &op_text, RESTART);
@@ -1034,6 +1129,7 @@ fn emit_block_sequence(
             type_profile_record,
             plan.compact && graph.next_value_id >= COMPACT_INDEXED_VALUE_THRESHOLD,
             &used,
+            boxed.as_ref(),
         );
     }
 }
@@ -1056,10 +1152,13 @@ fn booleans_with(
 /// read boxed reads its inputs boxed.
 fn boxed_uses(
     graph: &FunctionGraph,
+    program: &Program,
     numbers: &HashSet<ValueId>,
+    ints: &HashSet<ValueId>,
     booleans: &HashSet<ValueId>,
     array_slots: &HashSet<u32>,
     kind: EntryKind,
+    spec: &Speculation,
 ) -> HashSet<ValueId> {
     let twin_only = |op: &BinaryOp| {
         matches!(
@@ -1101,8 +1200,52 @@ fn boxed_uses(
                 GraphOp::CheckTdz { value, .. } if numbers.contains(value) => {
                     phis.push((*vid, vec![*value]));
                 }
+                GraphOp::Unary { op, value }
+                    if matches!(op, UnaryOp::Plus | UnaryOp::ToNumeric | UnaryOp::Negate)
+                        && numbers.contains(value) => {}
                 GraphOp::Binary { op, left, right }
                     if twin_only(op) && numbers.contains(left) && numbers.contains(right) => {}
+                GraphOp::GetComputed { object, key, .. } => {
+                    used.insert(*object);
+                    if !(spec.arrays.contains(object) && ints.contains(key)) {
+                        used.insert(*key);
+                    }
+                }
+                GraphOp::CallMethod {
+                    object, name, args, ..
+                } => {
+                    let is_math = !program.has_direct_eval()
+                        && !program.has_dynamic_import()
+                        && matches!(
+                            defs.get(object),
+                            Some(GraphOp::LoadBuiltin(kiln_ir::Builtin::Math))
+                        );
+                    let key = program.constants.get(*name as usize).and_then(|c| match c {
+                        Constant::String(s) => Some(s.as_str()),
+                        _ => None,
+                    });
+                    let is_math_intrinsic = is_math
+                        && match (key, args.len()) {
+                            (
+                                Some(
+                                    "sqrt" | "abs" | "floor" | "ceil" | "round" | "trunc" | "sign",
+                                ),
+                                1,
+                            ) => true,
+                            (Some("pow" | "min" | "max"), 2) => true,
+                            _ => false,
+                        };
+                    if is_math_intrinsic {
+                        for arg in args {
+                            if !numbers.contains(arg) {
+                                used.insert(*arg);
+                            }
+                        }
+                    } else {
+                        used.insert(*object);
+                        used.extend(args.iter().copied());
+                    }
+                }
                 _ => used.extend(op.operands()),
             }
         }
@@ -1760,6 +1903,7 @@ fn emit_terminator(
     type_profile_record: bool,
     indexed_values: bool,
     used: &HashSet<ValueId>,
+    boxed: Option<&HashSet<ValueId>>,
 ) {
     match terminator {
         Terminator::Return(value) => match site {
@@ -1885,6 +2029,7 @@ fn emit_terminator(
                 booleans,
                 indexed_values,
                 used,
+                boxed,
             );
             writeln!(output, "    goto {block_prefix}{};", target.0).unwrap();
         }
@@ -1941,6 +2086,7 @@ fn emit_terminator(
                 booleans,
                 indexed_values,
                 used,
+                boxed,
             );
             writeln!(output, "        goto {block_prefix}{};", true_block.0).unwrap();
             output.push_str("    } else {\n");
@@ -1954,6 +2100,7 @@ fn emit_terminator(
                 booleans,
                 indexed_values,
                 used,
+                boxed,
             );
             writeln!(output, "        goto {block_prefix}{};", false_block.0).unwrap();
             output.push_str("    }\n");
@@ -1975,6 +2122,7 @@ fn emit_terminator(
                 booleans,
                 indexed_values,
                 used,
+                boxed,
             );
             writeln!(output, "        goto {block_prefix}{};", true_block.0).unwrap();
             output.push_str("    } else {\n");
@@ -1988,6 +2136,7 @@ fn emit_terminator(
                 booleans,
                 indexed_values,
                 used,
+                boxed,
             );
             writeln!(output, "        goto {block_prefix}{};", false_block.0).unwrap();
             output.push_str("    }\n");
@@ -2044,6 +2193,7 @@ fn emit_phi_assignments(
     booleans: &HashSet<ValueId>,
     indexed_values: bool,
     used: &HashSet<ValueId>,
+    _boxed: Option<&HashSet<ValueId>>,
 ) {
     // A parallel move: every input is read before any phi is written, so two phis that swap
     // values (`[a, b] = [b, a]` across a back edge) do not clobber each other.

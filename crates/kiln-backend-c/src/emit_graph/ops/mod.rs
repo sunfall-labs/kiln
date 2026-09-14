@@ -53,6 +53,7 @@ pub(super) struct OpContext<'a> {
     pub spec: &'a Speculation,
     /// Emitting the parallel clone of a typed entry; see `emit_graph::parallel_clone`.
     pub parallel: bool,
+    pub boxed: Option<&'a HashSet<ValueId>>,
 }
 
 /// One status check after a runtime call. A throw unwinds; a refusal is attributed to this site
@@ -218,6 +219,7 @@ pub(super) fn emit_graph_op(
     this_site: Option<usize>,
     this_copy: Option<ValueId>,
     spec: &Speculation,
+    boxed: Option<&HashSet<ValueId>>,
 ) {
     let v = vid.0;
     let typed = numbers.contains(&vid);
@@ -251,6 +253,7 @@ pub(super) fn emit_graph_op(
         this_site,
         this_copy,
         spec,
+        boxed,
     };
     match op {
         GraphOp::Const { index, constant } => match constant {
@@ -347,6 +350,9 @@ pub(super) fn emit_graph_op(
                 "    v{v} = *(const kiln_val *)KILN_VAL_PTR(locals[{slot}]);"
             )
             .unwrap();
+        }
+        GraphOp::LoadUpvalue(_) if spec.arrays.contains(&vid) => {
+            writeln!(output, "    v{v} = kiln_spec_{v};").unwrap();
         }
         GraphOp::LoadUpvalue(index) if plan.unchecked.contains(&vid) => {
             writeln!(
