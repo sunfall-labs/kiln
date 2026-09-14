@@ -37202,7 +37202,7 @@ fn call_native(
                     let padding: Vec<u16> = match arguments.get(1) {
                         None | Some(Value::Undefined) => vec![u16::from(b' ')],
                         Some(Value::String(value)) => value.units().collect(),
-                        Some(value) => value.to_display_string().encode_utf16().collect(),
+                        Some(value) => value.to_string_units().units().collect(),
                     };
                     let current = text.encode_utf16().count();
                     let target = if target.is_finite() && target > 0.0 {
@@ -37446,7 +37446,7 @@ fn call_native(
                     for argument in arguments {
                         match argument {
                             Value::String(argument) => joined.extend(argument.units()),
-                            _ => joined.extend(argument.to_display_string().encode_utf16()),
+                            _ => joined.extend(argument.to_string_units().units()),
                         }
                     }
                     Value::String(StringUnits::from_units(&joined))
@@ -42314,7 +42314,7 @@ fn string_code_point_units(text: &StringUnits) -> Vec<StringUnits> {
 fn value_to_string_units(value: &Value) -> Vec<u16> {
     match value {
         Value::String(text) => text.units().collect(),
-        other => other.to_display_string().encode_utf16().collect(),
+        other => other.to_string_units().units().collect(),
     }
 }
 
