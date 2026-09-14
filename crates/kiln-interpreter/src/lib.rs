@@ -1143,6 +1143,13 @@ fn own_property_state(
 /// What a built-in's own property held when the realm was built.
 fn tabulated_property(intrinsics: &Intrinsics, target: &Value, key: &str) -> Option<Property> {
     let realm = value_realm(target);
+    // `String.prototype` is the empty String exotic object. Its locked own `length` lives in
+    // the boxed value rather than Native's method table, but materializing the intrinsic must
+    // copy it just like every tabulated property; otherwise the complete store records the key
+    // as absent and a prior `Object.getOwnPropertyNames(String.prototype)` erases the next read.
+    if let Some(value) = string_exotic(target, key) {
+        return Some(Property::Value(value));
+    }
     // An accessor is asked about first, because one of them is named `length`:
     // `%TypedArray%.prototype.length` is a getter over the view's element count, and reading it
     // as the arity of a callable answered `None` for a property that is really there.
@@ -45408,9 +45415,15 @@ fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'static [&'static
 fn intrinsic_prototype_entries(table: PrototypeTable) -> Vec<(String, Property)> {
     let target = Value::Native(Native::PrototypeOf(table), RealmId::PRIMARY);
     std::iter::once("constructor")
+        // Unlike the methods below, this own property is supplied by String exotic semantics.
+        // It still belongs in the complete materialized store and in own-key enumeration.
+        .chain(matches!(table, PrototypeTable::String).then_some("length"))
         .chain(intrinsic_prototype_method_names(table).iter().copied())
         .chain(intrinsic_members::accessor_keys(table))
         .filter_map(|name| {
+            if let Some(value) = string_exotic(&target, name) {
+                return Some((name.to_owned(), Property::Value(value)));
+            }
             if let Some(accessor) = intrinsic_accessor(&target, name) {
                 return Some((name.to_owned(), accessor));
             }
@@ -46054,6 +46067,9 @@ fn intrinsic_own_attributes(target: &Value, key: &str) -> Option<Attributes> {
     let Value::Native(native, _) = target else {
         return None;
     };
+    if string_exotic(target, key).is_some() {
+        return Some(Attributes::NONE);
+    }
     // Accessors are the one kind with no slot to look up -- the "value" is a getter -- so they
     // are settled before the value lookup rather than by it. Both of these answer only for names
     // that genuinely are accessors on this target, so neither can invent one.

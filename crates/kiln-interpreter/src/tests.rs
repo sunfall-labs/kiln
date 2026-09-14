@@ -4665,6 +4665,25 @@ fn listing_and_describing_agree() {
     );
 }
 
+#[test]
+fn materializing_string_prototype_preserves_its_exotic_length() {
+    let intrinsics = Intrinsics::default();
+    let target = Value::Native(
+        Native::PrototypeOf(PrototypeTable::String),
+        RealmId::PRIMARY,
+    );
+
+    intrinsics.materialize(&target);
+
+    match intrinsics.overridden(&target, "length") {
+        Overridden::Held(Property::Value(Value::Number(length)), attributes) => {
+            assert_eq!(length, 0.0);
+            assert_eq!(attributes, Attributes::NONE);
+        }
+        _ => panic!("materialized String.prototype lost its own length"),
+    }
+}
+
 /// No enumeration list carries the internal spelling of a symbol.
 ///
 /// `NamedMembers::new` refuses one while the compiler builds the table, so this cannot fail today.
