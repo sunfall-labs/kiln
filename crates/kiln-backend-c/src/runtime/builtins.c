@@ -262,16 +262,26 @@ static int kiln_c99_expand_replacement(kiln_text *out, const uint16_t *pattern,
         }
         if (piece != NULL) {
             kiln_value text = kiln_c99_from_units(piece, piece_count);
+            uint8_t *encoded = NULL;
+            size_t encoded_len = 0;
             if (text.tag != KILN_VALUE_STRING ||
-                kiln_c99_text_append(out, text.ptr, text.len) != KILN_C99_OK) {
+                kiln_c99_string_to_utf8_lossy(text, &encoded, &encoded_len) != KILN_C99_OK ||
+                kiln_c99_text_append(out, (const char *)encoded, encoded_len) != KILN_C99_OK) {
+                free(encoded);
                 return KILN_C99_OUT_OF_MEMORY;
             }
+            free(encoded);
         } else {
             kiln_value text = kiln_c99_from_units(&literal, 1);
+            uint8_t *encoded = NULL;
+            size_t encoded_len = 0;
             if (text.tag != KILN_VALUE_STRING ||
-                kiln_c99_text_append(out, text.ptr, text.len) != KILN_C99_OK) {
+                kiln_c99_string_to_utf8_lossy(text, &encoded, &encoded_len) != KILN_C99_OK ||
+                kiln_c99_text_append(out, (const char *)encoded, encoded_len) != KILN_C99_OK) {
+                free(encoded);
                 return KILN_C99_OUT_OF_MEMORY;
             }
+            free(encoded);
         }
         at += taken;
     }
@@ -380,7 +390,10 @@ static int kiln_c99_build_arguments_object(kiln_value *out) {
         if (key.tag != KILN_VALUE_STRING) {
             return KILN_C99_OUT_OF_MEMORY;
         }
-        status = kiln_c99_own_slot(*out, key.ptr, key.len, &slot);
+        size_t key_len = 0;
+        const char *key_bytes = kiln_c99_string_ascii_bytes(key, &key_len);
+        if (key_bytes == NULL) return KILN_C99_OUT_OF_MEMORY;
+        status = kiln_c99_own_slot(*out, key_bytes, key_len, &slot);
         if (status != KILN_C99_OK) {
             return status;
         }

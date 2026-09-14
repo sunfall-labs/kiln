@@ -400,7 +400,9 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
             if (args[0].tag == KILN_VALUE_DATE) {
                 time = kiln_c99_date_time(args[0]);
             } else if (args[0].tag == KILN_VALUE_STRING) {
-                time = kiln_c99_parse_date(args[0].ptr, args[0].len);
+                size_t date_len = 0;
+                const char *date_bytes = kiln_c99_string_ascii_bytes(args[0], &date_len);
+                time = date_bytes == NULL ? NAN : kiln_c99_parse_date(date_bytes, date_len);
             } else {
                 kiln_value primitive;
                 status = kiln_c99_to_primitive(host, args[0], 2 /* default */,
@@ -409,7 +411,9 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
                     return status;
                 }
                 if (primitive.tag == KILN_VALUE_STRING) {
-                    time = kiln_c99_parse_date(primitive.ptr, primitive.len);
+                    size_t date_len = 0;
+                    const char *date_bytes = kiln_c99_string_ascii_bytes(primitive, &date_len);
+                    time = date_bytes == NULL ? NAN : kiln_c99_parse_date(date_bytes, date_len);
                 } else if (primitive.tag == KILN_VALUE_SYMBOL) {
                     return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                                 "Cannot convert a Symbol value to a number");
@@ -889,7 +893,9 @@ static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *a
             return KILN_C99_OK;
         case KILN_C99_BUILTIN_FUNCTION: {
             kiln_value type = kiln_c99_typeof(value);
-            *answer = type.len == 8 && memcmp(type.ptr, "function", 8) == 0;
+            size_t type_len = 0;
+            const char *type_bytes = kiln_c99_string_ascii_bytes(type, &type_len);
+            *answer = type_bytes != NULL && type_len == 8 && memcmp(type_bytes, "function", 8) == 0;
             return KILN_C99_OK;
         }
         case KILN_C99_BUILTIN_STRING:
