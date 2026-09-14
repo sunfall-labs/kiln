@@ -76,7 +76,7 @@ intl_namespace_rows! {
 macro_rules! intl_prototype_rows {
     ($( $services:pat => $name:literal => $method:ident ),+ $(,)?) => {
         const PROTOTYPE_NAMES: &[&str] = &[
-            "constructor", $($name),+,
+            "constructor", "@@toStringTag", $($name),+,
         ];
         fn method_for_service(service: Service, name: &str) -> Option<Method> {
             let method = match (service, name) {
@@ -394,6 +394,11 @@ pub fn static_property(op: Op, name: &str) -> Option<Value> {
         (Op::Prototype(service), "constructor") if service != Service::Segments => Some(
             Value::Native(Native::Intl(Op::Constructor(service)), RealmId::PRIMARY),
         ),
+        (Op::Prototype(service), name)
+            if service != Service::Segments && name == WellKnown::ToStringTag.property_key() =>
+        {
+            Some(Value::String(service.tag().to_owned()))
+        }
         (Op::Prototype(service), _) => prototype_method(service, name),
         _ => None,
     }
