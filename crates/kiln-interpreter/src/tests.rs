@@ -68,18 +68,12 @@ fn regexp_patterns_keep_lone_units_and_utf16_offsets() {
         panic!("regexp constructor returned a non-regexp");
     };
     assert_eq!(regexp.source, lone);
+    // `source` hands back the pattern text and `toString` wraps it in slashes: neither
+    // escapes the lone unit, matching node (`new RegExp("\ud800").toString()` is three
+    // units, not eight).
     assert_eq!(
         regexp_string_units(&regexp).to_units().as_ref(),
-        &[
-            b'/' as u16,
-            b'\\' as u16,
-            b'u' as u16,
-            b'd' as u16,
-            b'8' as u16,
-            b'0' as u16,
-            b'0' as u16,
-            b'/' as u16
-        ]
+        &[b'/' as u16, 0xd800, b'/' as u16]
     );
     let matched = regexp_search(&regexp, &[0xd800], 0).expect("lone unit matches");
     assert_eq!(matched.0, 0..1);
