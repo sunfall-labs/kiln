@@ -17,7 +17,7 @@ use kiln_hir::{
     ItemKind, ListElement, Literal as HirLiteral, LogicalOperator as HirLogicalOperator, Module,
     ModuleRequestKind, ModuleRequestOccurrence, NodeRuntimeRequest, Parameter as HirParameter,
     RequestedModule, SourceGoal, SourceKind, Span as HirSpan, Statement as HirStatement,
-    StatementKind as HirStatementKind, TypeAnnotation as HirTypeAnnotation,
+    StatementKind as HirStatementKind, StringUnits, TypeAnnotation as HirTypeAnnotation,
     UnaryOperator as HirUnaryOperator, VariableDeclarator as HirVariableDeclarator,
     VariableKind as HirVariableKind,
 };
@@ -49,6 +49,61 @@ use oxc_syntax::module_record::{
 use oxc_syntax::operator::UpdateOperator;
 use oxc_syntax::operator::{AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator};
 use oxc_transformer::{JsxOptions, JsxRuntime, TransformOptions, Transformer};
+
+/// Convert Oxc's lossless sentinel representation into ECMAScript UTF-16 units.
+///
+/// Oxc stores a lone surrogate in its otherwise-UTF-8 `Str` as U+FFFD followed by four
+/// hexadecimal digits, and uses U+FFFDfffd for a real replacement character when the
+/// `lone_surrogates` bit is set. This is the representation documented by Oxc's AST serializer;
+/// it is not JavaScript source decoding and remains confined to this adapter.
+fn oxc_string_units(value: &str, lone_surrogates: bool) -> StringUnits {
+    if !lone_surrogates {
+        return StringUnits::from(value);
+    }
+    let chars: Vec<char> = value.chars().collect();
+    let mut units = Vec::with_capacity(chars.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '\u{fffd}' && index + 4 < chars.len() {
+            let digits: String = chars[index + 1..index + 5].iter().collect();
+            if let Ok(unit) = u16::from_str_radix(&digits, 16) {
+                units.push(unit);
+                index += 5;
+                continue;
+            }
+        }
+        let mut encoded = [0; 2];
+        units.extend(chars[index].encode_utf16(&mut encoded).iter().copied());
+        index += 1;
+    }
+    StringUnits::from_units(&units)
+}
+
+/// Lossless equivalent of Oxc's `PropertyKey::static_name()`. The latter intentionally exposes
+/// only `&str`, so it cannot carry the AST node's `lone_surrogates` bit for quoted or template
+/// property keys.
+fn oxc_static_key_units(key: &oxc_ast::ast::PropertyKey<'_>) -> Option<StringUnits> {
+    if let Some(expression) = key.as_expression() {
+        match expression {
+            Expression::StringLiteral(literal) => {
+                return Some(oxc_string_units(
+                    literal.value.as_str(),
+                    literal.lone_surrogates,
+                ));
+            }
+            Expression::TemplateLiteral(literal) if literal.expressions.is_empty() => {
+                let quasi = literal.quasis.first()?;
+                return Some(oxc_string_units(
+                    quasi.value.cooked.as_ref()?.as_str(),
+                    quasi.lone_surrogates,
+                ));
+            }
+            _ => {}
+        }
+    }
+    key.static_name()
+        .map(|name| StringUnits::from(name.as_ref()))
+}
 
 /// Parse one JavaScript or TypeScript module and lower its module-level structure into Kiln HIR.
 ///
@@ -1718,9 +1773,9 @@ impl Lowerer<'_> {
             Expression::NumericLiteral(literal) => {
                 HirExpressionKind::Literal(HirLiteral::Number(literal.value.to_bits()))
             }
-            Expression::StringLiteral(literal) => {
-                HirExpressionKind::Literal(HirLiteral::String(literal.value.to_string()))
-            }
+            Expression::StringLiteral(literal) => HirExpressionKind::Literal(HirLiteral::String(
+                oxc_string_units(literal.value.as_str(), literal.lone_surrogates),
+            )),
             Expression::Identifier(identifier) => {
                 HirExpressionKind::Identifier(identifier.name.to_string())
             }
@@ -1756,7 +1811,7 @@ impl Lowerer<'_> {
                     Expression::StaticMemberExpression(member) => HirExpressionKind::Delete {
                         object: Box::new(self.expression(&member.object)),
                         property: Box::new(kiln_hir::ObjectKey::Static(
-                            member.property.name.to_string(),
+                            member.property.name.to_string().into(),
                         )),
                     },
                     Expression::ComputedMemberExpression(member) => HirExpressionKind::Delete {
@@ -1869,12 +1924,12 @@ impl Lowerer<'_> {
                 if !member.optional && matches!(&member.object, Expression::Super(_)) =>
             {
                 HirExpressionKind::SuperMember {
-                    property: member.property.name.to_string(),
+                    property: member.property.name.to_string().into(),
                 }
             }
             Expression::StaticMemberExpression(member) => HirExpressionKind::StaticMember {
                 object: Box::new(self.expression(&member.object)),
-                property: member.property.name.to_string(),
+                property: member.property.name.to_string().into(),
                 optional: member.optional,
             },
             Expression::ComputedMemberExpression(member)
@@ -1953,11 +2008,10 @@ impl Lowerer<'_> {
                         // `cooked` is None only when the raw text has an invalid escape, which
                         // is a syntax error in an untagged template -- so oxc has already
                         // reported it and the empty string keeps lowering going.
-                        quasi
-                            .value
-                            .cooked
-                            .as_ref()
-                            .map_or_else(String::new, |text| text.to_string())
+                        quasi.value.cooked.as_ref().map_or_else(
+                            || StringUnits::from(""),
+                            |text| oxc_string_units(text.as_str(), quasi.lone_surrogates),
+                        )
                     })
                     .collect(),
                 expressions: literal
@@ -1981,18 +2035,16 @@ impl Lowerer<'_> {
                             .quasis
                             .iter()
                             .map(|quasi| {
-                                quasi
-                                    .value
-                                    .cooked
-                                    .as_ref()
-                                    .map(std::string::ToString::to_string)
+                                quasi.value.cooked.as_ref().map(|text| {
+                                    oxc_string_units(text.as_str(), quasi.lone_surrogates)
+                                })
                             })
                             .collect(),
                         raw: tagged
                             .quasi
                             .quasis
                             .iter()
-                            .map(|quasi| quasi.value.raw.to_string())
+                            .map(|quasi| StringUnits::from(quasi.value.raw.as_str()))
                             .collect(),
                     },
                     span: expression_span,
@@ -2029,7 +2081,7 @@ impl Lowerer<'_> {
                 let (object, property) = match &update.argument {
                     SimpleAssignmentTarget::StaticMemberExpression(member) => (
                         self.expression(&member.object),
-                        kiln_hir::ObjectKey::Static(member.property.name.to_string()),
+                        kiln_hir::ObjectKey::Static(member.property.name.to_string().into()),
                     ),
                     SimpleAssignmentTarget::ComputedMemberExpression(member) => (
                         self.expression(&member.object),
@@ -2179,27 +2231,31 @@ impl Lowerer<'_> {
                 HirExpressionKind::Object {
                     members: vec![
                         kiln_hir::ObjectMember::Property(kiln_hir::ObjectProperty {
-                            key: kiln_hir::ObjectKey::Static("url".to_string()),
+                            key: kiln_hir::ObjectKey::Static("url".to_string().into()),
                             value: HirExpression {
-                                kind: HirExpressionKind::Literal(HirLiteral::String(url)),
+                                kind: HirExpressionKind::Literal(HirLiteral::String(url.into())),
                                 span: expression_span,
                             },
                             form: kiln_hir::PropertyForm::KeyValue,
                             span: expression_span,
                         }),
                         kiln_hir::ObjectMember::Property(kiln_hir::ObjectProperty {
-                            key: kiln_hir::ObjectKey::Static("dirname".to_string()),
+                            key: kiln_hir::ObjectKey::Static("dirname".to_string().into()),
                             value: HirExpression {
-                                kind: HirExpressionKind::Literal(HirLiteral::String(dirname)),
+                                kind: HirExpressionKind::Literal(HirLiteral::String(
+                                    dirname.into(),
+                                )),
                                 span: expression_span,
                             },
                             form: kiln_hir::PropertyForm::KeyValue,
                             span: expression_span,
                         }),
                         kiln_hir::ObjectMember::Property(kiln_hir::ObjectProperty {
-                            key: kiln_hir::ObjectKey::Static("filename".to_string()),
+                            key: kiln_hir::ObjectKey::Static("filename".to_string().into()),
                             value: HirExpression {
-                                kind: HirExpressionKind::Literal(HirLiteral::String(filename)),
+                                kind: HirExpressionKind::Literal(HirLiteral::String(
+                                    filename.into(),
+                                )),
                                 span: expression_span,
                             },
                             form: kiln_hir::PropertyForm::KeyValue,
@@ -2299,7 +2355,7 @@ impl Lowerer<'_> {
             {
                 HirExpressionKind::SuperMemberAssignment {
                     operator,
-                    property: member.property.name.to_string(),
+                    property: member.property.name.to_string().into(),
                     value: Box::new(value),
                 }
             }
@@ -2307,7 +2363,7 @@ impl Lowerer<'_> {
                 HirExpressionKind::MemberAssignment {
                     operator,
                     object: Box::new(self.expression(&member.object)),
-                    property: member.property.name.to_string(),
+                    property: member.property.name.to_string().into(),
                     value: Box::new(value),
                 }
             }
@@ -2386,7 +2442,7 @@ impl Lowerer<'_> {
                                 None => value,
                             };
                             properties.push(kiln_hir::PatternProperty {
-                                key: kiln_hir::PatternKey::Static(name),
+                                key: kiln_hir::PatternKey::Static(name.into()),
                                 value,
                             });
                         }
@@ -2398,7 +2454,7 @@ impl Lowerer<'_> {
                                     self.expression(named.name.as_expression()?),
                                 )
                             } else {
-                                kiln_hir::PatternKey::Static(named.name.static_name()?.to_string())
+                                kiln_hir::PatternKey::Static(oxc_static_key_units(&named.name)?)
                             };
                             properties.push(kiln_hir::PatternProperty {
                                 key,
@@ -2451,13 +2507,13 @@ impl Lowerer<'_> {
                         kind: HirExpressionKind::This,
                         span: span(member.span),
                     }),
-                    property: member.property.name.to_string(),
+                    property: member.property.name.to_string().into(),
                 })
             }
             AssignmentTarget::StaticMemberExpression(member) if !member.optional => {
                 Some(kiln_hir::Pattern::Member {
                     object: Box::new(self.expression(&member.object)),
-                    property: member.property.name.to_string(),
+                    property: member.property.name.to_string().into(),
                 })
             }
             AssignmentTarget::PrivateFieldExpression(member) => {
@@ -2558,11 +2614,11 @@ impl Lowerer<'_> {
                         };
                         kiln_hir::PatternKey::Computed(self.expression(key))
                     } else {
-                        let Some(key) = property.key.static_name() else {
+                        let Some(key) = oxc_static_key_units(&property.key) else {
                             self.unsupported("destructuring key", span);
                             return kiln_hir::Pattern::Identifier(String::new());
                         };
-                        kiln_hir::PatternKey::Static(key.to_string())
+                        kiln_hir::PatternKey::Static(key)
                     };
                     properties.push(kiln_hir::PatternProperty {
                         key,
@@ -2626,7 +2682,7 @@ impl Lowerer<'_> {
                 self.expression(key.as_expression()?),
             ));
         }
-        Some(kiln_hir::ObjectKey::Static(key.static_name()?.to_string()))
+        Some(kiln_hir::ObjectKey::Static(oxc_static_key_units(key)?))
     }
 
     fn class(
@@ -2652,7 +2708,7 @@ impl Lowerer<'_> {
                     if let Some(value) = &mut value {
                         match &key {
                             kiln_hir::ObjectKey::Static(name) => {
-                                name_anonymous_function(value, name);
+                                name_anonymous_function(value, &name.to_lossy_string());
                             }
                             kiln_hir::ObjectKey::Private(name) => {
                                 name_anonymous_function(value, &format!("#{name}"));
@@ -2712,15 +2768,15 @@ impl Lowerer<'_> {
                     ) {
                         return Err("private class accessor property".into());
                     }
-                    let Some(key) = accessor.key.static_name() else {
+                    let Some(key) = oxc_static_key_units(&accessor.key) else {
                         return Err("class accessor property name".into());
                     };
-                    let key = key.to_string();
+                    let key = key;
                     // The backing slot is a private name the program cannot have written: `%`
                     // is not an identifier character, so this can never collide with a `#x` the
                     // class declares, and nothing can reach the storage except the two
                     // functions below.
-                    let storage = format!("%accessor:{key}");
+                    let storage = format!("%accessor:{}", key.to_lossy_string());
                     let member_span = span(accessor.span);
                     let this = || HirExpression {
                         kind: HirExpressionKind::This,
@@ -2767,7 +2823,7 @@ impl Lowerer<'_> {
                         };
                     let mut value = accessor.value.as_ref().map(|value| self.expression(value));
                     if let Some(value) = &mut value {
-                        name_anonymous_function(value, &key);
+                        name_anonymous_function(value, &key.to_lossy_string());
                     }
                     initialisers.push(kiln_hir::ClassInitialiser::Field(kiln_hir::ClassField {
                         key: kiln_hir::ObjectKey::Private(storage),
@@ -2775,7 +2831,7 @@ impl Lowerer<'_> {
                         is_static: accessor.r#static,
                     }));
                     methods.push(kiln_hir::ClassMethod {
-                        key: kiln_hir::ObjectKey::Static(key.clone()),
+                        key: kiln_hir::ObjectKey::Static(key.clone().into()),
                         function: accessor_function(
                             Vec::new(),
                             vec![HirStatement {
@@ -2787,7 +2843,7 @@ impl Lowerer<'_> {
                         kind: kiln_hir::MethodKind::Get,
                     });
                     methods.push(kiln_hir::ClassMethod {
-                        key: kiln_hir::ObjectKey::Static(key),
+                        key: kiln_hir::ObjectKey::Static(key.into()),
                         function: accessor_function(
                             vec![kiln_hir::Parameter {
                                 pattern: kiln_hir::Pattern::Identifier("%value".to_owned()),
@@ -3032,7 +3088,7 @@ impl Lowerer<'_> {
             oxc_ast::ast::MemberExpression::StaticMemberExpression(member) => {
                 HirExpressionKind::StaticMember {
                     object: Box::new(self.expression(&member.object)),
-                    property: member.property.name.to_string(),
+                    property: member.property.name.to_string().into(),
                     optional: member.optional,
                 }
             }
@@ -3112,8 +3168,8 @@ impl Lowerer<'_> {
                         }
                     }
                 } else {
-                    match property.key.static_name() {
-                        Some(key) => kiln_hir::ObjectKey::Static(key.to_string()),
+                    match oxc_static_key_units(&property.key) {
+                        Some(key) => kiln_hir::ObjectKey::Static(key),
                         None => return self.unsupported_expression("object key", expression_span),
                     }
                 };
@@ -3143,10 +3199,10 @@ impl Lowerer<'_> {
                 };
                 kiln_hir::ObjectKey::Computed(self.expression(key))
             } else {
-                let Some(key) = property.key.static_name() else {
+                let Some(key) = oxc_static_key_units(&property.key) else {
                     return self.unsupported_expression("object key", expression_span);
                 };
-                kiln_hir::ObjectKey::Static(key.to_string())
+                kiln_hir::ObjectKey::Static(key)
             };
             // Only `{ __proto__: v }` sets a prototype, so which of the three productions wrote
             // this pair has to survive lowering. Oxc reports the shorthand and the method
@@ -3172,9 +3228,10 @@ impl Lowerer<'_> {
             // the specification's named evaluation, so `{ __proto__: function () {} }` leaves
             // the function anonymous.
             if let kiln_hir::ObjectKey::Static(name) = &key
-                && !(name == "__proto__" && form == kiln_hir::PropertyForm::KeyValue)
+                && !(name == &StringUnits::from("__proto__")
+                    && form == kiln_hir::PropertyForm::KeyValue)
             {
-                name_anonymous_function(&mut value, name);
+                name_anonymous_function(&mut value, &name.to_lossy_string());
             }
             members.push(kiln_hir::ObjectMember::Property(kiln_hir::ObjectProperty {
                 key,
@@ -4259,7 +4316,7 @@ mod tests {
         let method = class
             .methods
             .iter()
-            .find(|method| matches!(method.key, kiln_hir::ObjectKey::Static(ref name) if name == "read"))
+            .find(|method| matches!(method.key, kiln_hir::ObjectKey::Static(ref name) if name == &StringUnits::from("read")))
             .expect("read method");
         let Some(statement) = method.function.body.first() else {
             panic!("expected a return statement");
@@ -4558,5 +4615,63 @@ mod tests {
         let module = parse("/path/to/module.js", source);
         assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
         assert_eq!(module.body.len(), 2);
+    }
+
+    #[test]
+    fn lowers_oxc_lone_surrogates_and_tagged_template_raw_text_losslessly() {
+        let module = parse(
+            "surrogates.js",
+            r#"const literal = "\ud800"; const tagged = tag`\ud800�abcd${value}`;"#,
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let HirStatementKind::Variable { declarations, .. } = &module.body[0].kind else {
+            panic!("expected literal declaration");
+        };
+        let HirExpressionKind::Literal(HirLiteral::String(literal)) = &declarations[0]
+            .initializer
+            .as_ref()
+            .expect("literal initializer")
+            .kind
+        else {
+            panic!("expected literal string");
+        };
+        assert_eq!(literal.to_units().as_ref(), &[0xd800]);
+
+        let HirStatementKind::Variable { declarations, .. } = &module.body[1].kind else {
+            panic!("expected tagged declaration");
+        };
+        let HirExpressionKind::Call {
+            callee: _,
+            arguments,
+            ..
+        } = &declarations[0]
+            .initializer
+            .as_ref()
+            .expect("tagged initializer")
+            .kind
+        else {
+            panic!("expected tagged call");
+        };
+        let ListElement::Item(template) = &arguments[0] else {
+            panic!("expected template object argument");
+        };
+        let HirExpressionKind::TemplateStrings { cooked, raw } = &template.kind else {
+            panic!("expected template strings");
+        };
+        assert_eq!(
+            cooked[0].as_ref().expect("cooked").to_units().as_ref(),
+            &[
+                0xd800,
+                0xfffd,
+                b'a' as u16,
+                b'b' as u16,
+                b'c' as u16,
+                b'd' as u16
+            ]
+        );
+        assert_eq!(
+            raw[0].to_units().as_ref(),
+            "\\ud800�abcd".encode_utf16().collect::<Vec<_>>()
+        );
     }
 }

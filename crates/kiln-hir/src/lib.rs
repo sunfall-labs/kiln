@@ -7,6 +7,8 @@
 
 use std::sync::Arc;
 
+pub use kiln_string::StringUnits;
+
 /// A byte range in UTF-8 source text, with an exclusive end.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Span {
@@ -248,7 +250,7 @@ pub enum ObjectMember {
 /// produce a symbol. Collapsing it into a string at lowering would lose both.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObjectKey {
-    Static(String),
+    Static(StringUnits),
     Computed(Expression),
     /// `#name`. Not a string key that happens to start with a hash: a private name is not
     /// inherited, is not enumerable, and cannot be reached by any computed access -- so the only
@@ -619,7 +621,7 @@ pub struct PatternProperty {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PatternKey {
     /// `{ a: x }`, `{ "a": x }` and `{ 0: x }`, all normalised to the string they name.
-    Static(String),
+    Static(StringUnits),
     /// `{ [expression]: x }`, evaluated where the source wrote it -- before the value is read
     /// out of the source, and once even when a rest has to exclude the key it produced.
     Computed(Expression),
@@ -822,7 +824,7 @@ pub enum ExpressionKind {
     /// Not lowered to concatenation in the frontend: the desugaring is real but it belongs in one
     /// place, and doing it here would put a `+` in the HIR that the source never wrote.
     Template {
-        quasis: Vec<String>,
+        quasis: Vec<StringUnits>,
         expressions: Vec<Expression>,
     },
     /// The template object a tagged template hands its tag as the first argument.
@@ -836,8 +838,8 @@ pub enum ExpressionKind {
     /// is an ordinary call whose first argument happens to be built this way, and every rule
     /// about how a callee is evaluated stays written once.
     TemplateStrings {
-        cooked: Vec<Option<String>>,
-        raw: Vec<String>,
+        cooked: Vec<Option<StringUnits>>,
+        raw: Vec<StringUnits>,
     },
     /// `await value`, which suspends until the value settles.
     ///
@@ -934,7 +936,7 @@ pub enum Literal {
     Null,
     Boolean(bool),
     Number(u64),
-    String(String),
+    String(StringUnits),
     /// `123n`, kept as the digits the source wrote.
     ///
     /// Not parsed here: a BigInt is arbitrary-precision, so there is no fixed-width field to put
