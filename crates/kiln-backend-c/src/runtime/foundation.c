@@ -826,7 +826,9 @@ static int kiln_c99_node_path(kiln_value *result, uint64_t code,
         kiln_value path = argc > 0 ? args[0] : kiln_c99_undefined();
         if (path.tag != KILN_VALUE_STRING)
             return kiln_c99_throw_not_a(thrown, path, "string path");
-        *result = kiln_c99_boolean(path.len > 0 && path.ptr[0] == '/');
+        size_t path_len = 0;
+        const char *path_bytes = kiln_c99_string_ascii_bytes(path, &path_len);
+        *result = kiln_c99_boolean(path_bytes != NULL && path_len > 0 && path_bytes[0] == '/');
         return KILN_C99_OK;
     }
     if (code == KILN_C99_METHOD_NODE_PATH_DIRNAME ||
@@ -840,13 +842,19 @@ static int kiln_c99_node_path(kiln_value *result, uint64_t code,
                                                                      : 2u;
         if (path.tag != KILN_VALUE_STRING)
             return kiln_c99_throw_not_a(thrown, path, "string path");
+        size_t path_len = 0;
+        const char *path_bytes = kiln_c99_string_ascii_bytes(path, &path_len);
+        if (path_bytes == NULL) return KILN_C99_OUT_OF_MEMORY;
         if (part == 1u && argc > 1 && args[1].tag == KILN_VALUE_STRING) {
-            suffix_ptr = (const uint8_t *)args[1].ptr;
-            suffix_len = (uint64_t)args[1].len;
+            size_t suffix_size = 0;
+            const char *suffix_bytes = kiln_c99_string_ascii_bytes(args[1], &suffix_size);
+            if (suffix_bytes == NULL) return KILN_C99_OUT_OF_MEMORY;
+            suffix_ptr = (const uint8_t *)suffix_bytes;
+            suffix_len = (uint64_t)suffix_size;
         }
         /* No decomposition is longer than the path it came from; the empty path answers ".". */
-        return kiln_c99_node_path_answer(part, (const uint8_t *)path.ptr, (uint64_t)path.len,
-                                         suffix_ptr, suffix_len, path.len + 1, result, thrown);
+        return kiln_c99_node_path_answer(part, (const uint8_t *)path_bytes, (uint64_t)path_len,
+                                         suffix_ptr, suffix_len, path_len + 1, result, thrown);
     }
     if (code == KILN_C99_METHOD_NODE_PATH_RELATIVE) {
         kiln_value from = argc > 0 ? args[0] : kiln_c99_undefined();
@@ -855,11 +863,16 @@ static int kiln_c99_node_path(kiln_value *result, uint64_t code,
             return kiln_c99_throw_not_a(thrown, from, "string path");
         if (to.tag != KILN_VALUE_STRING)
             return kiln_c99_throw_not_a(thrown, to, "string path");
+        size_t from_len = 0;
+        size_t to_len = 0;
+        const char *from_bytes = kiln_c99_string_ascii_bytes(from, &from_len);
+        const char *to_bytes = kiln_c99_string_ascii_bytes(to, &to_len);
+        if (from_bytes == NULL || to_bytes == NULL) return KILN_C99_OUT_OF_MEMORY;
         /* Unlike the decompositions this can outgrow both inputs: every component of `from` that
          * `to` does not share becomes "../", and a component can be a single byte. */
-        return kiln_c99_node_path_answer(KILN_C99_NODE_PATH_RELATIVE, (const uint8_t *)from.ptr,
-                                         (uint64_t)from.len, (const uint8_t *)to.ptr,
-                                         (uint64_t)to.len, from.len * 3 + to.len + 1, result,
+        return kiln_c99_node_path_answer(KILN_C99_NODE_PATH_RELATIVE, (const uint8_t *)from_bytes,
+                                         (uint64_t)from_len, (const uint8_t *)to_bytes,
+                                         (uint64_t)to_len, from_len * 3 + to_len + 1, result,
                                          thrown);
     }
     /* `join` concatenates every argument with a separator and normalizes the result -- the empty
@@ -873,9 +886,12 @@ static int kiln_c99_node_path(kiln_value *result, uint64_t code,
         if (args[index].tag != KILN_VALUE_STRING)
             return kiln_c99_throw_not_a(thrown, args[index], "string path");
         part = args[index];
+        size_t part_len = 0;
+        const char *part_bytes = kiln_c99_string_ascii_bytes(part, &part_len);
+        if (part_bytes == NULL) { status = KILN_C99_OUT_OF_MEMORY; goto done; }
         if (code == KILN_C99_METHOD_NODE_PATH_RESOLVE) {
-            if (part.len == 0) continue;
-            if (part.ptr[0] == '/') {
+            if (part_len == 0) continue;
+            if (part_bytes[0] == '/') {
                 joined.len = 0;
                 absolute = 1;
             }
@@ -884,7 +900,7 @@ static int kiln_c99_node_path(kiln_value *result, uint64_t code,
         } else if (index > 0) {
             status = kiln_c99_text_append_c(&joined, "/");
         }
-        if (status == KILN_C99_OK) status = kiln_c99_text_append(&joined, part.ptr, part.len);
+        if (status == KILN_C99_OK) status = kiln_c99_text_append(&joined, part_bytes, part_len);
         if (status != KILN_C99_OK) goto done;
     }
     if (absolute && (joined.len == 0 || joined.bytes[0] != '/')) {
