@@ -43,6 +43,9 @@ pub trait UnitSource {
     fn latin1_slice(&self, _start: usize, _end: usize) -> Option<&[u8]> {
         None
     }
+    fn utf16_slice(&self, _start: usize, _end: usize) -> Option<&[u16]> {
+        None
+    }
 }
 
 impl<T: UnitSource + ?Sized> UnitSource for &T {
@@ -58,6 +61,9 @@ impl<T: UnitSource + ?Sized> UnitSource for &T {
     fn latin1_slice(&self, start: usize, end: usize) -> Option<&[u8]> {
         (*self).latin1_slice(start, end)
     }
+    fn utf16_slice(&self, start: usize, end: usize) -> Option<&[u16]> {
+        (*self).utf16_slice(start, end)
+    }
 }
 
 impl UnitSource for [u8] {
@@ -70,8 +76,7 @@ impl UnitSource for [u8] {
     #[inline]
     fn unit_or_end(&self, index: usize) -> u32 {
         if index < self.len() {
-            // SAFETY: the explicit length check proves this index is in the slice.
-            unsafe { u32::from(*self.get_unchecked(index)) }
+            u32::from(self[index])
         } else {
             0x1_0000
         }
@@ -90,11 +95,13 @@ impl UnitSource for [u16] {
     #[inline]
     fn unit_or_end(&self, index: usize) -> u32 {
         if index < self.len() {
-            // SAFETY: the explicit length check proves this index is in the slice.
-            unsafe { u32::from(*self.get_unchecked(index)) }
+            u32::from(self[index])
         } else {
             0x1_0000
         }
+    }
+    fn utf16_slice(&self, start: usize, end: usize) -> Option<&[u16]> {
+        self.get(start..end)
     }
 }
 
@@ -150,6 +157,15 @@ impl TextArena {
         } else {
             self.utf16.extend(bytes.iter().copied().map(u16::from));
         }
+    }
+    pub(crate) fn extend_utf16(&mut self, units: &[u16]) {
+        if self.encoding == TextEncoding::Latin1 {
+            self.upgrade();
+        }
+        self.utf16.extend_from_slice(units);
+    }
+    pub(crate) fn ensure_utf16(&mut self) {
+        self.upgrade();
     }
     fn upgrade(&mut self) {
         if self.encoding == TextEncoding::Utf16 {
@@ -236,8 +252,10 @@ impl<'a> Tape<'a> {
             .slice(usize::try_from(node.value).ok()?, node.len as usize)
     }
     pub fn string_units(&self, node: &Node) -> Option<StringUnits> {
-        self.string(node)
-            .map(|slice| StringUnits::from_units(&slice.to_units()))
+        self.string(node).map(|slice| match slice {
+            TextSlice::Latin1(bytes) => StringUnits::from_view(StringView::Latin1(bytes)),
+            TextSlice::Utf16(units) => StringUnits::from_view(StringView::Utf16(units)),
+        })
     }
 }
 
@@ -263,8 +281,10 @@ impl Document {
             .slice(usize::try_from(node.value).ok()?, node.len as usize)
     }
     pub fn string_units(&self, node: &Node) -> Option<StringUnits> {
-        self.string(node)
-            .map(|slice| StringUnits::from_units(&slice.to_units()))
+        self.string(node).map(|slice| match slice {
+            TextSlice::Latin1(bytes) => StringUnits::from_view(StringView::Latin1(bytes)),
+            TextSlice::Utf16(units) => StringUnits::from_view(StringView::Utf16(units)),
+        })
     }
 }
 
@@ -282,6 +302,7 @@ struct Scratch {
     token: Vec<u8>,
 }
 thread_local! { static SCRATCH: RefCell<Scratch> = RefCell::new(Scratch::default()); }
+thread_local! { static UTF8_UNITS: RefCell<Vec<u16>> = const { RefCell::new(Vec::new()) }; }
 
 pub fn parse_source<S: UnitSource, R>(
     source: &S,
@@ -322,8 +343,17 @@ pub fn parse_utf8<R>(source: &[u8], walk: impl FnOnce(&Tape<'_>) -> R) -> Result
     if source.is_ascii() {
         return parse_source(&source, walk);
     }
-    let units = StringUnits::from_utf8(source).map_err(|_| ParseError::Syntax { offset: 0 })?;
-    parse_units(&units, walk)
+    let text = std::str::from_utf8(source).map_err(|_| ParseError::Syntax { offset: 0 })?;
+    UTF8_UNITS.with(|units| {
+        let mut units = units.borrow_mut();
+        units.clear();
+        units.reserve(text.len());
+        for scalar in text.chars() {
+            let mut encoded = [0; 2];
+            units.extend_from_slice(scalar.encode_utf16(&mut encoded));
+        }
+        parse_source(&&units[..], walk)
+    })
 }
 pub fn parse<R>(source: &[u8], walk: impl FnOnce(&Tape<'_>) -> R) -> Result<R, ParseError> {
     parse_utf8(source, walk)
