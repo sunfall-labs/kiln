@@ -66,33 +66,6 @@ static inline int kiln_c99_typed_failed(double d) {
 #define KILN_VAL_TAG_PTR(pfx, p) ((kiln_val)((pfx) | ((uint64_t)(uintptr_t)(p) & KILN_PAYLOAD_MASK)))
 #define KILN_VAL_IS_DOUBLE(v)    KILN_VAL_IS_NUMBER(v)
 
-/* One immutable representation for every JavaScript string. `data` points to either
- * Latin-1 units (KILN_STRING_LATIN1) or UTF-16 units (KILN_STRING_UTF16). The header is
- * deliberately 16 bytes so static literals and GC-owned strings cross the same value seam. */
-#define KILN_STRING_LATIN1 UINT32_C(0)
-#define KILN_STRING_UTF16 UINT32_C(1)
-typedef struct kiln_string {
-    uint32_t unit_len;
-    uint32_t flags;
-    const void *data;
-} kiln_string;
-_Static_assert(sizeof(kiln_string) == 16, "kiln_string ABI must remain 16 bytes");
-
-static inline int kiln_string_is_utf16(const kiln_string *string) {
-    return string != NULL && (string->flags & KILN_STRING_UTF16) != 0;
-}
-static inline const uint8_t *kiln_string_latin1(const kiln_string *string) {
-    return (const uint8_t *)(string == NULL ? NULL : string->data);
-}
-static inline const uint16_t *kiln_string_utf16(const kiln_string *string) {
-    return (const uint16_t *)(string == NULL ? NULL : string->data);
-}
-static inline uint16_t kiln_string_unit_at(const kiln_string *string, size_t index) {
-    if (string == NULL || index >= string->unit_len || string->data == NULL) return 0;
-    return kiln_string_is_utf16(string) ? kiln_string_utf16(string)[index]
-                                        : kiln_string_latin1(string)[index];
-}
-
 /* KILN_RUNTIME_ONLY_ASCII_STRINGS_BEGIN */
 static const uint8_t kiln_c99_empty_chars[] = { 0 };
 static const kiln_string kiln_c99_empty_string = { 0, KILN_STRING_LATIN1, kiln_c99_empty_chars };
