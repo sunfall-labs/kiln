@@ -50,14 +50,13 @@ impl Digest {
     /// identity decision.
     pub fn to_base64_url(self) -> String {
         let mut output = String::with_capacity(43);
-        let mut chunks = self.0.chunks_exact(3);
-        for chunk in &mut chunks {
+        let (chunks, remainder) = self.0.as_chunks::<3>();
+        for chunk in chunks {
             output.push(BASE64_URL[(chunk[0] >> 2) as usize] as char);
             output.push(BASE64_URL[(((chunk[0] & 0x03) << 4) | (chunk[1] >> 4)) as usize] as char);
             output.push(BASE64_URL[(((chunk[1] & 0x0f) << 2) | (chunk[2] >> 6)) as usize] as char);
             output.push(BASE64_URL[(chunk[2] & 0x3f) as usize] as char);
         }
-        let remainder = chunks.remainder();
         if let [first, second] = remainder {
             output.push(BASE64_URL[(first >> 2) as usize] as char);
             output.push(BASE64_URL[(((first & 0x03) << 4) | (second >> 4)) as usize] as char);
@@ -222,7 +221,7 @@ fn sha256(input: &[u8]) -> [u8; DIGEST_BYTES] {
     padded.extend_from_slice(&bit_len.to_be_bytes());
 
     let mut state = INITIAL;
-    for block in padded.chunks_exact(64) {
+    for block in padded.as_chunks::<64>().0 {
         let mut schedule = [0u32; 64];
         for (index, word) in schedule[..16].iter_mut().enumerate() {
             let start = index * 4;
