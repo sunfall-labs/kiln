@@ -1956,6 +1956,10 @@ pub const SPECULATION_INVARIANTS: &[SpeculationInvariant] = &[
         language_rule: "ECMA-262 §9.1.1.1 declarative environment records: a binding stored once holds that value at every later read, so an Array exotic object read from it at entry is the object read in the body",
     },
     SpeculationInvariant {
+        name: "parameter_array",
+        language_rule: "ECMA-262 §9.2.1 ordinary positional parameter binding: a simple, unmapped parameter retains its entry argument until an assignment; an Array-kind guard therefore authorizes the existing indexed-array fast tier",
+    },
+    SpeculationInvariant {
         name: "property_number",
         language_rule: "ECMA-262 §13.15.3 ApplyStringOrNumericBinaryOperator: an operand that is a Number takes the numeric branch; a property that answered anything else leaves for the generic clone at the read that answered it",
     },
@@ -2013,6 +2017,7 @@ const _: usize = assert_speculation_invariants(SPECULATION_INVARIANTS);
 const _: &SpeculationInvariant = lookup_speculation_invariant("parameter_number");
 const _: &SpeculationInvariant = lookup_speculation_invariant("loop_speculation_exit");
 const _: &SpeculationInvariant = lookup_speculation_invariant("upvalue_array");
+const _: &SpeculationInvariant = lookup_speculation_invariant("parameter_array");
 const _: &SpeculationInvariant = lookup_speculation_invariant("method_call_number");
 
 /// A refusal in the emitted prelude names what it lacked, and an `undefined` answer names what

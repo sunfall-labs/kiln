@@ -167,6 +167,7 @@ impl NativeRealmPolicy {
             decoupled_prelude: true,
             compact: false,
             generic_only: false,
+            speculate: Some(std::env::var("KILN_SPECULATE").as_deref() != Ok("0")),
             type_profile_record: false,
             type_profile: None,
             live_module_slots: None,
