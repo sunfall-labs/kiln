@@ -1940,28 +1940,63 @@ fn render_publish_exports(
 /// A string is its bytes. A BigInt is its digits plus a slot for the handle the provider builds
 /// from them on first use: parsing is not free and a literal's value never changes, so the unit
 /// pays for it once however often the literal is loaded.
+fn render_static_string(output: &mut String, name: &str, value: &kiln_ir::StringUnits) {
+    let units: Vec<u16> = value.units().collect();
+    let latin1 = units.iter().all(|unit| *unit <= 0xff);
+    if latin1 {
+        let payload = if units.is_empty() {
+            "0".to_owned()
+        } else {
+            units
+                .iter()
+                .map(|unit| unit.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        writeln!(
+            output,
+            "static const uint8_t {name}_data[{}] = {{ {payload} }};",
+            units.len().max(1)
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "static const kiln_string {name} = {{ {}, KILN_STRING_LATIN1, {name}_data }};",
+            units.len()
+        )
+        .unwrap();
+    } else {
+        let payload = if units.is_empty() {
+            "0".to_owned()
+        } else {
+            units
+                .iter()
+                .map(|unit| format!("UINT16_C({unit})"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        writeln!(
+            output,
+            "static const uint16_t {name}_data[{}] = {{ {payload} }};",
+            units.len().max(1)
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "static const kiln_string {name} = {{ {}, KILN_STRING_UTF16, {name}_data }};",
+            units.len()
+        )
+        .unwrap();
+    }
+}
+
 fn render_constant_declarations(output: &mut String, program: &Program, symbol: &str) {
     for (index, constant) in program.constants.iter().enumerate() {
         match constant {
             Constant::String(value) => {
-                // The runtime's static C string ABI is still UTF-8 backed. Keep the IR lossless
-                // now; the runtime owner will replace this temporary scalar projection with the
-                // unit-backed initializer when its representation lands.
-                let text = value.to_lossy_string();
-                let byte_len = text.len();
-                let utf16_len = text.encode_utf16().count();
-                writeln!(
-                    output,
-                    "static const struct {{ kiln_string header; char bytes[{}]; }} {symbol}_string_{index} = {{ {{ {utf16_len}, {byte_len}, {symbol}_string_{index}.bytes }}, {} }};",
-                    byte_len + 1,
-                    c_string(&text)
-                )
-                .unwrap();
-                writeln!(
-                    output,
-                    "#define {symbol}_constant_{index} ({symbol}_string_{index}.bytes)"
-                )
-                .unwrap();
+                let name = format!("{symbol}_string_{index}");
+                render_static_string(output, &name, value);
+                writeln!(output, "#define {symbol}_constant_{index} (&{name})").unwrap();
             }
             Constant::BigInt(digits) => {
                 writeln!(
@@ -2084,29 +2119,13 @@ fn render_template_sites(output: &mut String, program: &Program, symbol: &str) {
     }
     for (site_idx, site) in program.template_sites.iter().enumerate() {
         for (raw_idx, raw) in site.raw.iter().enumerate() {
-            let text = raw.to_lossy_string();
-            let byte_len = text.len();
-            let utf16_len = text.encode_utf16().count();
-            writeln!(
-                output,
-                "static const struct {{ kiln_string header; char bytes[{}]; }} {symbol}_site_{site_idx}_raw_{raw_idx} = {{ {{ {utf16_len}, {byte_len}, {symbol}_site_{site_idx}_raw_{raw_idx}.bytes }}, {} }};",
-                byte_len + 1,
-                c_string(&text)
-            )
-            .unwrap();
+            let name = format!("{symbol}_site_{site_idx}_raw_{raw_idx}");
+            render_static_string(output, &name, raw);
         }
         for (cooked_idx, cooked) in site.cooked.iter().enumerate() {
             if let Some(text) = cooked {
-                let text = text.to_lossy_string();
-                let byte_len = text.len();
-                let utf16_len = text.encode_utf16().count();
-                writeln!(
-                    output,
-                    "static const struct {{ kiln_string header; char bytes[{}]; }} {symbol}_site_{site_idx}_cooked_{cooked_idx} = {{ {{ {utf16_len}, {byte_len}, {symbol}_site_{site_idx}_cooked_{cooked_idx}.bytes }}, {} }};",
-                    byte_len + 1,
-                    c_string(&text)
-                )
-                .unwrap();
+                let name = format!("{symbol}_site_{site_idx}_cooked_{cooked_idx}");
+                render_static_string(output, &name, text);
             }
         }
     }
