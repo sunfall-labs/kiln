@@ -2856,8 +2856,13 @@ impl PartialEq for BufferData {
 impl BufferData {
     /// A buffer of `length` zero bytes whose length can never change.
     fn fixed(length: usize) -> Rc<Self> {
+        Self::owned(vec![0; length])
+    }
+
+    /// A fixed buffer that adopts already-owned bytes without another allocation or copy.
+    fn owned(bytes: Vec<u8>) -> Rc<Self> {
         Rc::new(Self {
-            bytes: Bytes::new(false, vec![0; length]),
+            bytes: Bytes::new(false, bytes),
             max_byte_length: None,
             shared: false,
             detached: std::cell::Cell::new(false),

@@ -14,8 +14,7 @@ use crate::{
 /// Constructs a `Buffer` (`Uint8Array` of `TypedKind::Uint8`) from a raw byte vector.
 pub(crate) fn node_bytes_value(bytes: Vec<u8>) -> Value {
     let length = bytes.len();
-    let buffer = BufferData::fixed(length);
-    buffer.bytes.borrow_mut().copy_from_slice(&bytes);
+    let buffer = BufferData::owned(bytes);
     Value::TypedArray(Rc::new(TypedArrayData {
         buffer,
         offset: 0,

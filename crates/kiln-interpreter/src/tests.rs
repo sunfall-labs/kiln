@@ -79,6 +79,21 @@ fn every_machine_dispatched_native_has_a_route() {
 }
 
 #[test]
+fn node_bytes_value_adopts_owned_vec_and_keeps_buffer_mutable() {
+    let mut bytes = vec![1_u8, 2, 3, 4];
+    let source_ptr = bytes.as_mut_ptr();
+    let value = node_bytes_value(bytes);
+    let Value::TypedArray(array) = value else {
+        panic!("node_bytes_value must construct a Uint8Array");
+    };
+
+    assert_eq!(array.buffer.bytes.borrow().as_ptr(), source_ptr);
+    assert_eq!(&*array.buffer.bytes.borrow(), &[1, 2, 3, 4]);
+    array.buffer.bytes.borrow_mut()[1] = 9;
+    assert_eq!(&*array.buffer.bytes.borrow(), &[1, 9, 3, 4]);
+}
+
+#[test]
 fn materialized_intrinsic_store_makes_absence_and_symbol_order_authoritative() {
     let intrinsics = Intrinsics::default();
     let target = Value::Native(Native::Math, RealmId::PRIMARY);
