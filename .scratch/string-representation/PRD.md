@@ -1,6 +1,6 @@
 # PRD: Lone Surrogate Representation in Runtime Strings
 
-Status: ready-for-agent
+Status: wontfix (governed by ADR 0022: Accepted indefinitely 2026-08-30; Servo precedent adopted)
 Branch: `feat/utf16-surrogates`
 
 ## Problem Statement

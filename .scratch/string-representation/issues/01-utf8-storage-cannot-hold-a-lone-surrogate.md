@@ -1,6 +1,6 @@
 # Strings are UTF-8, so a lone surrogate becomes U+FFFD
 
-Status: ready-for-agent · Severity: medium
+Status: wontfix · Severity: medium (ADR 0022 accepted indefinitely)
 
     String.fromCharCode(0xD800).charCodeAt(0).toString(16)   // "fffd", node "d800"
     ("a" + String.fromCharCode(0xDC00)).charCodeAt(1)         // 0xFFFD, node 0xDC00
