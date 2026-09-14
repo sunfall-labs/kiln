@@ -110,6 +110,11 @@ impl From<String> for StringUnits {
         Self::from(text.as_str())
     }
 }
+impl Default for StringUnits {
+    fn default() -> Self {
+        Self::from_units(&[])
+    }
+}
 impl PartialEq for StringUnits {
     fn eq(&self, other: &Self) -> bool {
         self.units().eq(other.units())
