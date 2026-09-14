@@ -8,7 +8,7 @@
 //! pin one by one, rather than a property of whatever the emitter happens to produce.
 
 use crate::graph::{FunctionGraph, GraphOp, Terminator};
-use kiln_ir::{BinaryOp, Builtin, Constant, FunctionProto, Program, UnaryOp};
+use kiln_ir::{Builtin, Constant, FunctionProto, Program, UnaryOp};
 
 /// The `Math` members a chunk may call: each is one libm call on a double, allocates nothing,
 /// and never throws. This is exactly the set `direct::intrinsic_results` proves returns a number
@@ -81,30 +81,36 @@ pub fn parallel_safe(graph: &FunctionGraph, proto: &FunctionProto, program: &Pro
             _ => {}
         }
         for (_, op) in &block.operations {
-            let ok = match op {
-                GraphOp::Const { constant, .. } => matches!(
-                    constant,
-                    Constant::Number(_) | Constant::Boolean(_) | Constant::Undefined
-                ),
-                GraphOp::LoadLocal(_) | GraphOp::StoreLocal { .. } | GraphOp::Phi { .. } => true,
-                GraphOp::LoadBuiltin(Builtin::Math) => true,
-                GraphOp::Unary { op, .. } => matches!(
-                    op,
-                    UnaryOp::Plus | UnaryOp::Negate | UnaryOp::Not | UnaryOp::BitwiseNot
-                ),
-                GraphOp::Binary { op, .. } => !matches!(op, BinaryOp::In | BinaryOp::InstanceOf),
-                GraphOp::CallMethod {
-                    object, name, args, ..
-                } => {
-                    math.contains(object)
-                        && match program.constants.get(*name as usize) {
-                            Some(Constant::String(key)) => PARALLEL_MATH
-                                .iter()
-                                .any(|(k, n)| k == key && *n == args.len()),
-                            _ => false,
-                        }
+            let ok = if op.effects() == crate::graph::Effects::PURE {
+                match op {
+                    GraphOp::Const { constant, .. } => matches!(
+                        constant,
+                        Constant::Number(_) | Constant::Boolean(_) | Constant::Undefined
+                    ),
+                    GraphOp::LoadLocal(_) | GraphOp::StoreLocal { .. } | GraphOp::Phi { .. } => {
+                        true
+                    }
+                    GraphOp::LoadBuiltin(Builtin::Math) => true,
+                    GraphOp::Unary { op, .. } => matches!(
+                        op,
+                        UnaryOp::Plus | UnaryOp::Negate | UnaryOp::Not | UnaryOp::BitwiseNot
+                    ),
+                    GraphOp::Binary { .. } => true,
+                    _ => false,
                 }
-                _ => false,
+            } else if let GraphOp::CallMethod {
+                object, name, args, ..
+            } = op
+            {
+                math.contains(object)
+                    && match program.constants.get(*name as usize) {
+                        Some(Constant::String(key)) => PARALLEL_MATH
+                            .iter()
+                            .any(|(k, n)| k == key && *n == args.len()),
+                        _ => false,
+                    }
+            } else {
+                false
             };
             if !ok {
                 return false;
@@ -118,7 +124,7 @@ pub fn parallel_safe(graph: &FunctionGraph, proto: &FunctionProto, program: &Pro
 mod tests {
     use super::*;
     use crate::graph::build_function_graph;
-    use kiln_ir::{BYTECODE_VERSION, Instruction};
+    use kiln_ir::{BYTECODE_VERSION, BinaryOp, Instruction};
 
     fn proto(code: Vec<Instruction>, parameter_count: u32) -> FunctionProto {
         FunctionProto {
