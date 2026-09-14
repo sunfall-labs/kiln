@@ -8375,6 +8375,12 @@ mod json {
                 Self::Utf16(units) => units.get(index).copied(),
             }
         }
+        fn latin1_slice(&self, start: usize, end: usize) -> Option<&[u8]> {
+            match self {
+                Self::Latin1(bytes) => bytes.get(start..end),
+                Self::Utf16(_) => None,
+            }
+        }
     }
 
     /// Parse `len` bytes of UTF-8 at `bytes`.

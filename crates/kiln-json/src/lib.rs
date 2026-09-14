@@ -4,7 +4,7 @@
 //! are stored as units, so escaped and raw lone surrogates never pass through a lossy scalar or
 //! WTF-8 representation.
 
-use kiln_string::StringUnits;
+use kiln_string::{StringUnits, StringView};
 use std::cell::RefCell;
 
 mod scalar;
@@ -59,6 +59,20 @@ impl UnitSource for StringUnits {
     }
     fn unit_at(&self, index: usize) -> Option<u16> {
         self.unit_at(index)
+    }
+    fn latin1_slice(&self, start: usize, end: usize) -> Option<&[u8]> {
+        self.as_view().latin1_slice(start, end)
+    }
+}
+impl UnitSource for StringView<'_> {
+    fn unit_len(&self) -> usize {
+        (*self).unit_len()
+    }
+    fn unit_at(&self, index: usize) -> Option<u16> {
+        (*self).unit_at(index)
+    }
+    fn latin1_slice(&self, start: usize, end: usize) -> Option<&[u8]> {
+        (*self).latin1_slice(start, end)
     }
 }
 impl UnitSource for [u8] {

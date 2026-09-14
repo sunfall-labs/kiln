@@ -34,6 +34,14 @@ impl StringUnits {
         }
     }
 
+    /// Borrow the unit storage without allocating or widening Latin1 strings.
+    pub fn as_view(&self) -> StringView<'_> {
+        match &self.0 {
+            Repr::Latin1(bytes) => StringView::Latin1(bytes),
+            Repr::Utf16(units) => StringView::Utf16(units),
+        }
+    }
+
     pub fn unit_at(&self, index: usize) -> Option<u16> {
         match &self.0 {
             Repr::Latin1(bytes) => bytes.get(index).copied().map(u16::from),
@@ -58,6 +66,44 @@ impl StringUnits {
 
     pub fn to_lossy_string(&self) -> String {
         String::from_utf16_lossy(&self.to_units())
+    }
+}
+
+/// A borrowed JavaScript string view. The representation remains visible to consumers that can
+/// specialize Latin1 hot loops, while UTF-16 keeps every code unit including lone surrogates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StringView<'a> {
+    Latin1(&'a [u8]),
+    Utf16(&'a [u16]),
+}
+
+impl<'a> StringView<'a> {
+    pub fn unit_len(self) -> usize {
+        match self {
+            Self::Latin1(bytes) => bytes.len(),
+            Self::Utf16(units) => units.len(),
+        }
+    }
+
+    pub fn unit_at(self, index: usize) -> Option<u16> {
+        match self {
+            Self::Latin1(bytes) => bytes.get(index).copied().map(u16::from),
+            Self::Utf16(units) => units.get(index).copied(),
+        }
+    }
+
+    pub fn latin1_slice(self, start: usize, end: usize) -> Option<&'a [u8]> {
+        match self {
+            Self::Latin1(bytes) => bytes.get(start..end),
+            Self::Utf16(_) => None,
+        }
+    }
+
+    pub fn units(self) -> UnitIter<'a> {
+        match self {
+            Self::Latin1(bytes) => UnitIter::Latin1(bytes.iter()),
+            Self::Utf16(units) => UnitIter::Utf16(units.iter()),
+        }
     }
 }
 
@@ -116,7 +162,7 @@ impl Hash for StringUnits {
 
 #[cfg(test)]
 mod tests {
-    use super::StringUnits;
+    use super::{StringUnits, StringView};
     #[test]
     fn latin1_index() {
         let s = StringUnits::from("caf\u{e9}");
@@ -127,6 +173,15 @@ mod tests {
         let s = StringUnits::from_units(&[0xd800]);
         assert!(s.to_scalar_string().is_err());
         assert_eq!(s.to_units().as_ref(), &[0xd800]);
+    }
+
+    #[test]
+    fn borrowed_view_keeps_representation_and_units() {
+        let latin = StringUnits::from("abc");
+        assert_eq!(latin.as_view(), StringView::Latin1(b"abc"));
+        let wide = StringUnits::from_units(&[0x61, 0xd800]);
+        assert_eq!(wide.as_view().unit_at(1), Some(0xd800));
+        assert!(wide.as_view().latin1_slice(0, 2).is_none());
     }
     #[test]
     fn utf8_decodes_pairs() {
