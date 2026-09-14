@@ -103,8 +103,8 @@ function validResponse(status, body) {
     try {
       const value = JSON.parse(body);
       const expectedKind = scenario.includes("64k") ? "64k" : "1k";
-      return status === 200 && value.received?.kind === expectedKind && typeof value.received?.data === "string" &&
-        value.received.data.length === (expectedKind === "64k" ? 65000 : 950) && value.bytes === Buffer.byteLength(bodyData) &&
+      const expected = { kind: expectedKind, data: "x".repeat(expectedKind === "64k" ? 65000 : 950), nums: [1, 2, 3, 4, 5] };
+      return status === 200 && JSON.stringify(value.received) === JSON.stringify(expected) && value.bytes === Buffer.byteLength(bodyData) &&
         value.keys === 3 && value.sum === null;
     } catch { return false; }
   }
@@ -129,6 +129,14 @@ function once() {
       (response) => {
         const chunks = [];
         response.on("data", (chunk) => chunks.push(chunk));
+        const failed = () => {
+          if (settled) return;
+          settled = true;
+          errors += 1;
+          resolve(false);
+        };
+        response.on("aborted", failed);
+        response.on("error", failed);
         response.on("end", () => {
           if (settled) return;
           settled = true;

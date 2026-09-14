@@ -62,3 +62,50 @@ test("drive fails cleanly when the server is unavailable", async () => {
   assert.ok(report.errors > 0);
   assert.equal(report.requests, 0);
 });
+
+test("drive rejects same-length JSON echo corruption", async () => {
+  const fixture = await serverScript(`
+    import http from "node:http";
+    const server = http.createServer((req, res) => {
+      req.resume(); req.on("end", () => res.end(JSON.stringify({received:{kind:"1k",data:"y".repeat(950),nums:[1,2,3,4,5]},bytes:1009,keys:3,sum:null})));
+    });
+    server.listen(0, "127.0.0.1", () => console.log(server.address().port));
+  `);
+  const { child, port } = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [fixture.path], { stdio: ["ignore", "pipe", "inherit"] });
+    child.stdout.once("data", (data) => resolve({ child, port: Number(data) }));
+  });
+  try {
+    const result = await runDrive(port, "json-echo-1k");
+    const report = JSON.parse(result.stdout);
+    assert.notEqual(result.code, 0);
+    assert.ok(report.wrong > 0);
+    assert.equal(report.errors, 0);
+  } finally {
+    await stopServer(child);
+    await rm(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test("drive settles a truncated response as an error", async () => {
+  const fixture = await serverScript(`
+    import http from "node:http";
+    const server = http.createServer((req, res) => {
+      res.writeHead(200, {"content-length":"32"}); res.write("partial"); res.socket.destroy();
+    });
+    server.listen(0, "127.0.0.1", () => console.log(server.address().port));
+  `);
+  const { child, port } = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [fixture.path], { stdio: ["ignore", "pipe", "inherit"] });
+    child.stdout.once("data", (data) => resolve({ child, port: Number(data) }));
+  });
+  try {
+    const result = await runDrive(port);
+    const report = JSON.parse(result.stdout);
+    assert.notEqual(result.code, 0);
+    assert.ok(report.errors > 0);
+  } finally {
+    await stopServer(child);
+    await rm(fixture.dir, { recursive: true, force: true });
+  }
+});
