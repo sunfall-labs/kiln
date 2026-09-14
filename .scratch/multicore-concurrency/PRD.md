@@ -64,7 +64,7 @@ By combining Kiln's ahead-of-time (AOT) C compiler with its Rust/Tokio runtime, 
 | # | Issue Slug | Title | Status |
 |---|---|---|---|
 | [01](issues/01-multi-realm-tokio-runtime.md) | `multi-realm-tokio-runtime` | Multi-Realm In-Process Hosting on Tokio Worker Threads | resolved |
-| [02](issues/02-c99-gc-block-splice.md) | `c99-gc-block-splice` | $O(1)$ GC Block Sublist Unlinking and Splicing in Native C | planned |
+| [02](issues/02-c99-gc-block-splice.md) | `c99-gc-block-splice` | $O(1)$ GC Block Sublist Unlinking and Splicing in Native C | resolved |
 | [03](issues/03-base-concurrency-surface.md) | `base-concurrency-surface` | Base TypeScript Concurrency Surface (`@kiln/concurrency`) | done |
 | [04](issues/04-effect-v4-worker-pool-and-scheduler.md) | `effect-v4-worker-pool-and-scheduler` | Universal Effect v4 Integration (`@kiln/effect`) | planned |
 | [05](issues/05-hir-escape-and-purity-analysis.md) | `hir-escape-and-purity-analysis` | HIR Escape Analysis & SSA Purity Loop Lowering | planned |
