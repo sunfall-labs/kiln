@@ -183,6 +183,13 @@ fn reflection_materialization_preserves_special_native_property_rows() {
             "from",
         ),
         (
+            Value::Native(
+                Native::Temporal(temporal::Op::Prototype(kiln_temporal::Kind::PlainDate)),
+                RealmId::PRIMARY,
+            ),
+            "calendarId",
+        ),
+        (
             Value::Native(Native::Intl(intl::Op::Namespace), RealmId::PRIMARY),
             "DateTimeFormat",
         ),
@@ -202,6 +209,9 @@ fn reflection_materialization_preserves_special_native_property_rows() {
             .expect("materialized row should remain own")
             .0;
         assert_eq!(before, after, "reflection changed {key}");
+        if key == "calendarId" {
+            assert!(matches!(after, Property::Accessor { get: Some(_), .. }));
+        }
     }
 }
 
