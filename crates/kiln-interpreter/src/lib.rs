@@ -116,6 +116,7 @@ mod buffer;
 pub(crate) use buffer::node_bytes_value;
 // `console` houses console methods and node:console.
 mod console;
+pub use kiln_string::StringUnits;
 
 /// The built-ins the runtime provides natively.
 ///
