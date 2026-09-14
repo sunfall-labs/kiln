@@ -29,7 +29,7 @@ pub use eviction::{
 };
 
 /// Version of the serialized cache record and key canonicalization.
-pub const CACHE_FORMAT_VERSION: u16 = 2;
+pub const CACHE_FORMAT_VERSION: u16 = 3;
 
 const MAGIC: &[u8; 8] = b"KILNART\0";
 const HEADER_BYTES: usize = 8 + 2 + DIGEST_BYTES + DIGEST_BYTES + 8;
