@@ -13745,7 +13745,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         &mut self,
         accessor: BuiltinAccessor,
         receiver: &Value,
-        instruction: usize,
+        _instruction: usize,
     ) -> Result<Value, ExecutionError> {
         // `Symbol.species` is the exception: it reports its receiver rather than anything about
         // it, and is defined for any receiver at all.
@@ -13826,7 +13826,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Value::Symbol(_) => receiver.clone(),
                 other => wrapped_primitive(other).unwrap_or(Value::Undefined),
             };
-            return self.read_property(&symbol, "description", instruction);
+            return Ok(builtin_accessor_slot(accessor, &symbol));
         }
         if matches!(accessor, BuiltinAccessor::CollectionSize(_)) {
             let Value::Object(object) = receiver else {
@@ -13848,7 +13848,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // Everything else is the same answer an instance gives for the same name, taken from
         // the one place that knows it -- including the `TypeError` a `DataView` a shrink has
         // stranded raises for its two measurements.
-        Ok(self.property(receiver, accessor.property_key()))
+        Ok(builtin_accessor_slot(accessor, receiver))
     }
 
     /// The specification's `InternalizeJSONProperty`: one node of the parsed document, revived.
@@ -30813,13 +30813,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // one property that is not a method, and it distinguishes an absent description from
             // an empty one -- `Symbol().description` is undefined and `Symbol("").description`
             // is `""`, which is the only way a program can tell the two calls apart.
-            Value::Symbol(symbol) if name == "description" => match symbol {
-                Symbol::WellKnown(well_known) => Value::String(well_known.description().to_owned()),
-                Symbol::Unique(unique) => match &unique.description {
-                    Some(text) => Value::String(text.clone()),
-                    None => Value::Undefined,
-                },
-            },
+            Value::Symbol(_) if name == "description" => {
+                builtin_accessor_slot(BuiltinAccessor::SymbolDescription, target)
+            }
             Value::Symbol(_) => match table_step(
                 &self.intrinsics,
                 PrototypeTable::Symbol,
@@ -30847,18 +30843,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 method => method,
             },
             Value::TypedArray(view) => match name {
-                "length" => Value::Number(view.len() as f64),
-                "byteLength" => Value::Number((view.len() * view.kind.width()) as f64),
+                "length" => builtin_accessor_slot(BuiltinAccessor::TypedArrayLength, target),
+                "byteLength" => {
+                    builtin_accessor_slot(BuiltinAccessor::TypedArrayByteLength, target)
+                }
                 // Zero, not the recorded offset, once a shrink has left the window outside the
                 // buffer: the specification reports an out-of-bounds view as having no position
                 // at all, and an offset into bytes that are gone is worse than no offset.
-                "byteOffset" => Value::Number(if view.out_of_bounds() {
-                    0.0
-                } else {
-                    view.offset as f64
-                }),
+                "byteOffset" => {
+                    builtin_accessor_slot(BuiltinAccessor::TypedArrayByteOffset, target)
+                }
                 "BYTES_PER_ELEMENT" => Value::Number(view.kind.width() as f64),
-                "buffer" => Value::ArrayBuffer(Rc::clone(&view.buffer)),
+                "buffer" => builtin_accessor_slot(BuiltinAccessor::TypedArrayBuffer, target),
                 "constructor" => {
                     Value::Native(Native::TypedArrayConstructor(view.kind), RealmId::PRIMARY)
                 }
@@ -30898,28 +30894,33 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 },
             },
             Value::ArrayBuffer(buffer) => match name {
-                "byteLength" => Value::Number(buffer.byte_length() as f64),
+                "byteLength" => builtin_accessor_slot(BuiltinAccessor::BufferByteLength, target),
                 // Each buffer type answers only its own name for the ceiling's meaning. A
                 // shared buffer has no `resizable` and an unshared one no `growable`: the
                 // specification makes each accessor a `TypeError` on the other type, and
                 // answering `false` instead would tell a program that a growable buffer cannot
                 // grow.
-                "resizable" if !buffer.shared => Value::Boolean(buffer.max_byte_length.is_some()),
-                "growable" if buffer.shared => Value::Boolean(buffer.max_byte_length.is_some()),
+                "resizable" if !buffer.shared => {
+                    builtin_accessor_slot(BuiltinAccessor::BufferResizable, target)
+                }
+                "growable" if buffer.shared => {
+                    builtin_accessor_slot(BuiltinAccessor::SharedGrowable, target)
+                }
                 // A fixed-length buffer answers its own length rather than zero or `undefined`:
                 // the accessor is defined for every buffer, and "the most this can ever hold"
                 // is a question a fixed buffer has an answer to.
-                "maxByteLength" if buffer.detached() => Value::Number(0.0),
-                "maxByteLength" => Value::Number(
-                    buffer
-                        .max_byte_length
-                        .unwrap_or_else(|| buffer.byte_length()) as f64,
-                ),
+                "maxByteLength" => {
+                    builtin_accessor_slot(BuiltinAccessor::BufferMaxByteLength, target)
+                }
                 // A shared buffer has no `detached` at all -- nothing can take bytes away from
                 // a holder that has no way to learn it happened, which is the same reason it has
                 // no `resize`.
-                "detached" if !buffer.shared => Value::Boolean(buffer.detached()),
-                "immutable" if !buffer.shared => Value::Boolean(buffer.immutable),
+                "detached" if !buffer.shared => {
+                    builtin_accessor_slot(BuiltinAccessor::BufferDetached, target)
+                }
+                "immutable" if !buffer.shared => {
+                    builtin_accessor_slot(BuiltinAccessor::BufferImmutable, target)
+                }
                 "constructor" if buffer.shared => {
                     Value::Native(Native::SharedArrayBufferConstructor, RealmId::PRIMARY)
                 }
@@ -30945,18 +30946,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     method => method,
                 },
             },
-            Value::DataView(view) => match name {
-                "buffer" => Value::ArrayBuffer(Rc::clone(&view.buffer)),
+            Value::DataView(_) => match name {
+                "buffer" => builtin_accessor_slot(BuiltinAccessor::DataViewBuffer, target),
                 // Zero for a stranded view, which is not what the specification says -- it says
                 // `TypeError`. Only `read_property` can raise one, so the guard lives there and
                 // this arm answers the machinery that reaches a property without being able to
                 // throw at all.
-                "byteLength" => Value::Number(view.byte_length().unwrap_or(0) as f64),
-                "byteOffset" => Value::Number(if view.out_of_bounds() {
-                    0.0
-                } else {
-                    view.offset as f64
-                }),
+                "byteLength" => builtin_accessor_slot(BuiltinAccessor::DataViewByteLength, target),
+                "byteOffset" => builtin_accessor_slot(BuiltinAccessor::DataViewByteOffset, target),
                 "constructor" => Value::Native(Native::DataViewConstructor, RealmId::PRIMARY),
                 other => match table_step(
                     &self.intrinsics,
@@ -43219,12 +43216,107 @@ impl BuiltinAccessor {
     }
 }
 
-/// Which accessor an intrinsic prototype publishes under `key`, or `None` if that name is not an
+/// Read a branded slot without consulting ordinary own properties or prototype tables.
+///
+/// Callers must perform the accessor's brand check first. DataView bounds errors are checked by
+/// the dispatch path; this helper retains the zero used by the non-throwing internal property
+/// reader.
+fn builtin_accessor_slot(accessor: BuiltinAccessor, receiver: &Value) -> Value {
+    match accessor {
+        BuiltinAccessor::BufferByteLength | BuiltinAccessor::SharedByteLength => match receiver {
+            Value::ArrayBuffer(buffer) => Value::Number(buffer.byte_length() as f64),
+            _ => unreachable!("buffer accessor passed a non-buffer receiver"),
+        },
+        BuiltinAccessor::BufferMaxByteLength | BuiltinAccessor::SharedMaxByteLength => {
+            match receiver {
+                Value::ArrayBuffer(buffer) => Value::Number(if buffer.detached() {
+                    0.0
+                } else {
+                    buffer
+                        .max_byte_length
+                        .unwrap_or_else(|| buffer.byte_length()) as f64
+                }),
+                _ => unreachable!("buffer accessor passed a non-buffer receiver"),
+            }
+        }
+        BuiltinAccessor::BufferResizable => match receiver {
+            Value::ArrayBuffer(buffer) => Value::Boolean(buffer.max_byte_length.is_some()),
+            _ => unreachable!("buffer accessor passed a non-buffer receiver"),
+        },
+        BuiltinAccessor::BufferDetached => match receiver {
+            Value::ArrayBuffer(buffer) => Value::Boolean(buffer.detached()),
+            _ => unreachable!("buffer accessor passed a non-buffer receiver"),
+        },
+        BuiltinAccessor::BufferImmutable => match receiver {
+            Value::ArrayBuffer(buffer) => Value::Boolean(buffer.immutable),
+            _ => unreachable!("buffer accessor passed a non-buffer receiver"),
+        },
+        BuiltinAccessor::SharedGrowable => match receiver {
+            Value::ArrayBuffer(buffer) => Value::Boolean(buffer.max_byte_length.is_some()),
+            _ => unreachable!("shared-buffer accessor passed a non-buffer receiver"),
+        },
+        BuiltinAccessor::DataViewBuffer => match receiver {
+            Value::DataView(view) => Value::ArrayBuffer(Rc::clone(&view.buffer)),
+            _ => unreachable!("DataView accessor passed a non-DataView receiver"),
+        },
+        BuiltinAccessor::DataViewByteLength => match receiver {
+            Value::DataView(view) => Value::Number(view.byte_length().unwrap_or(0) as f64),
+            _ => unreachable!("DataView accessor passed a non-DataView receiver"),
+        },
+        BuiltinAccessor::DataViewByteOffset => match receiver {
+            Value::DataView(view) => Value::Number(if view.out_of_bounds() {
+                0.0
+            } else {
+                view.offset as f64
+            }),
+            _ => unreachable!("DataView accessor passed a non-DataView receiver"),
+        },
+        BuiltinAccessor::TypedArrayBuffer => match receiver {
+            Value::TypedArray(view) => Value::ArrayBuffer(Rc::clone(&view.buffer)),
+            _ => unreachable!("TypedArray accessor passed a non-TypedArray receiver"),
+        },
+        BuiltinAccessor::TypedArrayByteLength => match receiver {
+            Value::TypedArray(view) => Value::Number((view.len() * view.kind.width()) as f64),
+            _ => unreachable!("TypedArray accessor passed a non-TypedArray receiver"),
+        },
+        BuiltinAccessor::TypedArrayByteOffset => match receiver {
+            Value::TypedArray(view) => Value::Number(if view.out_of_bounds() {
+                0.0
+            } else {
+                view.offset as f64
+            }),
+            _ => unreachable!("TypedArray accessor passed a non-TypedArray receiver"),
+        },
+        BuiltinAccessor::TypedArrayLength => match receiver {
+            Value::TypedArray(view) => Value::Number(view.len() as f64),
+            _ => unreachable!("TypedArray accessor passed a non-TypedArray receiver"),
+        },
+        BuiltinAccessor::SymbolDescription => match receiver {
+            Value::Symbol(symbol) => match symbol {
+                Symbol::WellKnown(well_known) => Value::String(well_known.description().to_owned()),
+                Symbol::Unique(unique) => unique
+                    .description
+                    .as_ref()
+                    .map_or(Value::Undefined, |text| Value::String(text.clone())),
+            },
+            _ => unreachable!("Symbol accessor passed a non-symbol receiver"),
+        },
+        BuiltinAccessor::Species
+        | BuiltinAccessor::CollectionSize(_)
+        | BuiltinAccessor::DisposableStackDisposed
+        | BuiltinAccessor::AsyncDisposableStackDisposed => {
+            unreachable!("stateful accessor handled before direct slot read")
+        }
+    }
+}
+
+/// Which accessor an intrinsic prototype publishes under `key`, or `None` if the name is not an
 /// accessor.
 ///
 /// One row in `intrinsic_members` carries both the name and the getter, because they used to be
 /// two tables and a name present in one but absent from the other is not a compile error -- it is
 /// a property that lists and describes as a data property holding `undefined`.
+
 fn prototype_accessor(table: PrototypeTable, key: &str) -> Option<BuiltinAccessor> {
     intrinsic_members::accessor(table, key)
 }
