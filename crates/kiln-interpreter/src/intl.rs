@@ -426,13 +426,13 @@ pub fn instance_property(value: &IntlValue, name: &str) -> Option<Value> {
 /// One `resolvedOptions()` entry as a JavaScript value.
 fn setting_to_value(setting: &engine::Setting) -> Value {
     match setting {
-        engine::Setting::String(text) => Value::String(text.clone()),
+        engine::Setting::String(text) => Value::String(text.clone().into()),
         engine::Setting::Number(number) => Value::Number(*number),
         engine::Setting::Bool(flag) => Value::Boolean(*flag),
         engine::Setting::Strings(items) => Value::Array(ArrayData::new(
             items
                 .iter()
-                .map(|item| Value::String(item.clone()))
+                .map(|item| Value::String(item.clone().into()))
                 .collect(),
         )),
         engine::Setting::Undefined => Value::Undefined,
@@ -477,7 +477,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             Op::GetCanonicalLocales => {
                 let tags = self.canonicalize_locale_list(arguments.first(), instruction)?;
                 Ok(Value::Array(ArrayData::new(
-                    tags.into_iter().map(Value::String).collect(),
+                    tags.into_iter().map(|text| Value::String(text.into())).collect(),
                 )))
             }
             Op::SupportedLocalesOf(_) => {
@@ -489,7 +489,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 Ok(Value::Array(ArrayData::new(
                     engine::locale::supported_locales(&tags)
                         .into_iter()
-                        .map(Value::String)
+                        .map(|text| Value::String(text.into()))
                         .collect(),
                 )))
             }
@@ -501,7 +501,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 let key = self.intl_string_argument(arguments.first(), instruction)?;
                 let values = supported_values(&key)?;
                 Ok(Value::Array(ArrayData::new(
-                    values.into_iter().map(Value::String).collect(),
+                    values.into_iter().map(|text| Value::String(text.into())).collect(),
                 )))
             }
             Op::Constructor(
@@ -551,7 +551,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 Ok(Value::String(
                     formatter
                         .format(&engine::number::Numeric::Double(number))
-                        .map_err(failure)?,
+                        .map_err(failure)?.into(),
                 ))
             }
             Adapter::StringLocaleCompare => {
@@ -602,9 +602,9 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 self.canonicalize_locale_list(arguments.first(), instruction)?;
                 Ok(Value::String(
                     if matches!(adapter, Adapter::StringToLocaleLowerCase) {
-                        text.to_lowercase()
+                        text.to_lowercase().into()
                     } else {
-                        text.to_uppercase()
+                        text.to_uppercase().into()
                     },
                 ))
             }
@@ -618,7 +618,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 // Before any option is read: an invalid date is the string, not a formatting
                 // attempt, so a throwing getter on the options bag never runs for one.
                 if !time.is_finite() {
-                    return Ok(Value::String("Invalid Date".to_owned()));
+                    return Ok(Value::String("Invalid Date".to_owned().into()));
                 }
                 let (wants_date, wants_time) = match adapter {
                     Adapter::DateToLocaleDateString => (true, false),
@@ -657,7 +657,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     options,
                 )
                 .map_err(failure)?;
-                Ok(Value::String(formatter.format(time).map_err(failure)?))
+                Ok(Value::String(formatter.format(time).map_err(failure)?.into()))
             }
         }
     }
@@ -678,7 +678,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         IntlValue::Locale(tag) => tag.clone(),
                         _ => return Err(type_error("Intl.Locale expects a locale or a string")),
                     },
-                    Some(Value::String(text)) => text.clone(),
+                    Some(Value::String(text)) => text.to_scalar_string().map_err(|_| range("locale contains a lone surrogate"))?,
                     Some(value @ Value::Object(_)) => {
                         let primitive =
                             self.as_primitive(value, PrimitiveHint::String, instruction)?;
@@ -943,7 +943,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             }
             (Method::Format, IntlValue::NumberFormat(formatter)) => {
                 let numeric = self.intl_numeric_argument(arguments.first(), instruction)?;
-                Ok(Value::String(formatter.format(&numeric).map_err(failure)?))
+                Ok(Value::String(formatter.format(&numeric).map_err(failure)?.into()))
             }
             (Method::FormatToParts, IntlValue::NumberFormat(formatter)) => {
                 let numeric = self.intl_numeric_argument(arguments.first(), instruction)?;
@@ -952,7 +952,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             }
             (Method::Format, IntlValue::ListFormat(formatter)) => {
                 let items = self.intl_string_list(arguments.first(), instruction)?;
-                Ok(Value::String(formatter.format(&items)))
+                Ok(Value::String(formatter.format(&items).into()))
             }
             (Method::FormatToParts, IntlValue::ListFormat(formatter)) => {
                 let items = self.intl_string_list(arguments.first(), instruction)?;
@@ -965,7 +965,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     Some(shape) => formatter.format_shape(shape, at),
                     None => formatter.format(at),
                 };
-                Ok(Value::String(formatted.map_err(failure)?))
+                Ok(Value::String(formatted.map_err(failure)?.into()))
             }
             (Method::FormatToParts, IntlValue::DateTimeFormat(formatter)) => {
                 let (shape, at) =
@@ -1007,7 +1007,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             Some(shape) => f.format_shape_range(shape, start, end),
                             None => f.format_range(start, end),
                         }
-                        .map_err(failure)?,
+                        .map_err(failure)?.into(),
                     ));
                 }
                 let parts = match start_shape {
@@ -1020,9 +1020,9 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         .into_iter()
                         .map(|(kind, source, text)| {
                             let mut data = ObjectData::default();
-                            data.set("type", Value::String(kind.to_owned()));
-                            data.set("value", Value::String(text));
-                            data.set("source", Value::String(source.to_owned()));
+                            data.set("type", Value::String(kind.to_owned().into()));
+                            data.set("value", Value::String(text.into()));
+                            data.set("source", Value::String(source.to_owned().into()));
                             Value::Object(Rc::new(RefCell::new(data)))
                         })
                         .collect(),
@@ -1031,7 +1031,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             (Method::Format | Method::FormatToParts, IntlValue::DurationFormat(formatter)) => {
                 let duration = self.intl_duration_argument(arguments.first(), instruction)?;
                 if method == Method::Format {
-                    return Ok(Value::String(formatter.format(&duration).map_err(failure)?));
+                    return Ok(Value::String(formatter.format(&duration).map_err(failure)?.into()));
                 }
                 let parts = formatter.format_to_parts(&duration).map_err(failure)?;
                 Ok(Value::Array(ArrayData::new(
@@ -1039,12 +1039,12 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         .into_iter()
                         .map(|(kind, text, unit)| {
                             let mut data = ObjectData::default();
-                            data.set("type", Value::String(kind.to_owned()));
-                            data.set("value", Value::String(text));
+                            data.set("type", Value::String(kind.to_owned().into()));
+                            data.set("value", Value::String(text.into()));
                             // The `unit` field exists only on the runs that belong to one: a list
                             // separator is not a nanosecond's punctuation.
                             if let Some(unit) = unit {
-                                data.set("unit", Value::String(unit.to_owned()));
+                                data.set("unit", Value::String(unit.to_owned().into()));
                             }
                             Value::Object(Rc::new(RefCell::new(data)))
                         })
@@ -1054,7 +1054,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             (Method::Of, IntlValue::DisplayNames(names)) => {
                 let code = self.intl_string_argument(arguments.first(), instruction)?;
                 Ok(match names.of(&code).map_err(failure)? {
-                    Some(name) => Value::String(name),
+                    Some(name) => Value::String(name.into()),
                     None => Value::Undefined,
                 })
             }
@@ -1067,7 +1067,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 let unit = engine::relative::canonical_unit(&spelled)
                     .ok_or_else(|| range(format!("invalid unit: {spelled}")))?;
                 if method == Method::Format {
-                    return Ok(Value::String(f.format(value, unit).map_err(failure)?));
+                    return Ok(Value::String(f.format(value, unit).map_err(failure)?.into()));
                 }
                 let parts = f.format_to_parts(value, unit).map_err(failure)?;
                 Ok(Value::Array(ArrayData::new(
@@ -1075,10 +1075,10 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         .into_iter()
                         .map(|(kind, text, numeric)| {
                             let mut data = ObjectData::default();
-                            data.set("type", Value::String(kind.to_owned()));
-                            data.set("value", Value::String(text));
+                            data.set("type", Value::String(kind.to_owned().into()));
+                            data.set("value", Value::String(text.into()));
                             if numeric {
-                                data.set("unit", Value::String(unit.to_owned()));
+                                data.set("unit", Value::String(unit.to_owned().into()));
                             }
                             Value::Object(Rc::new(RefCell::new(data)))
                         })
@@ -1091,7 +1091,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     rules
                         .select(&engine::number::Numeric::Double(number))
                         .map_err(failure)?
-                        .to_owned(),
+                        .to_owned().into(),
                 ))
             }
             (Method::SelectRange, IntlValue::PluralRules(rules)) => {
@@ -1117,7 +1117,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             &engine::number::Numeric::Double(end),
                         )
                         .map_err(failure)?
-                        .to_owned(),
+                        .to_owned().into(),
                 ))
             }
             (Method::Compare, IntlValue::Collator(collator)) => {
@@ -1175,7 +1175,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             (Method::Minimize, IntlValue::Locale(tag)) => Ok(Value::Intl(Rc::new(
                 IntlValue::Locale(engine::locale::minimize(tag).map_err(failure)?),
             ))),
-            (Method::LocaleToString, IntlValue::Locale(tag)) => Ok(Value::String(tag.clone())),
+            (Method::LocaleToString, IntlValue::Locale(tag)) => Ok(Value::String(tag.clone().into())),
             // The brand check: `Intl.NumberFormat.prototype.format.call(collator)` is a TypeError
             // rather than a formatted anything.
             (method, value) => Err(type_error(format!(
@@ -1236,7 +1236,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     IntlValue::Locale(tag) => tag.clone(),
                     _ => return Err(type_error("a locale list element is not a string")),
                 },
-                Value::String(text) => text.clone(),
+                Value::String(text) => text.to_scalar_string().map_err(|_| range("locale contains a lone surrogate"))?,
                 Value::Object(_) | Value::Array(_) => {
                     let primitive =
                         self.as_primitive(&element, PrimitiveHint::String, instruction)?;
@@ -1795,7 +1795,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             Some(Value::String(text)) => {
                 // A string keeps every digit it was written with rather than going through a
                 // double, which is the whole reason the specification widened this argument.
-                let trimmed = text.trim();
+                let trimmed = text.to_scalar_string().map_err(|_| type_error("numeric string contains a lone surrogate"))?;
+                let trimmed = trimmed.trim();
                 if trimmed
                     .strip_prefix(['+', '-'])
                     .unwrap_or(trimmed)
@@ -1850,7 +1851,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 // is refused rather than quietly spelled out in whatever locale happens to apply.
                 return Err(type_error("a list element is not a string"));
             };
-            items.push(text);
+            items.push(text.to_scalar_string().map_err(|_| type_error("a list element contains a lone surrogate"))?);
         }
     }
 
@@ -2010,9 +2011,9 @@ fn segment_record(
     segment: &engine::segmenter::Segment,
 ) -> Value {
     let mut data = ObjectData::default();
-    data.set("segment", Value::String(segments.text_of(segment)));
+    data.set("segment", Value::String(segments.text_of(segment).into()));
     data.set("index", Value::Number(segment.start as f64));
-    data.set("input", Value::String(segments.input().to_owned()));
+    data.set("input", Value::String(segments.input().to_owned().into()));
     if let Some(word_like) = segment.word_like {
         data.set("isWordLike", Value::Boolean(word_like));
     }
@@ -2026,8 +2027,8 @@ fn parts_array(parts: &[(&'static str, String)], value_key: &str) -> Value {
             .iter()
             .map(|(kind, text)| {
                 let mut data = ObjectData::default();
-                data.set("type", Value::String((*kind).to_owned()));
-                data.set(value_key, Value::String(text.clone()));
+                data.set("type", Value::String((*kind).to_owned().into()));
+                data.set(value_key, Value::String(text.clone().into()));
                 Value::Object(Rc::new(RefCell::new(data)))
             })
             .collect(),

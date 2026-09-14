@@ -3,7 +3,7 @@
 //! Provides utility functions including string formatting (`format`), inheritance helpers (`inherits`),
 //! inspection (`inspect`), and debug logging (`debuglog`).
 
-use crate::{ExecutionError, Native, RealmId, Value, is_callable};
+use crate::{is_callable, ExecutionError, Native, RealmId, Value};
 
 /// `node:util` property resolution.
 pub(crate) fn property(prop: &str) -> Option<Value> {
@@ -54,7 +54,10 @@ pub(crate) fn format(arguments: &[Value]) -> String {
     };
     let mut out = String::new();
     let mut values = arguments.iter().skip(1);
-    let mut chars = template.chars().peekable();
+    let mut chars = template
+        .units()
+        .map(|unit| char::from_u32(unit as u32).unwrap_or('\u{fffd}'))
+        .peekable();
     while let Some(character) = chars.next() {
         if character != '%' {
             out.push(character);
@@ -140,10 +143,10 @@ where
         // Warning delivery is an embedding policy. A deterministic realm preserves the
         // wrapped callable and performs no ambient stderr write.
         Native::NodeUtilDeprecate => Ok(arguments.first().cloned().unwrap_or(Value::Undefined)),
-        Native::NodeUtilInspect => Ok(Value::String(crate::inspect(
-            arguments.first().unwrap_or(&Value::Undefined),
-        ))),
-        Native::NodeUtilFormat => Ok(Value::String(format(arguments))),
+        Native::NodeUtilInspect => Ok(Value::String(
+            crate::inspect(arguments.first().unwrap_or(&Value::Undefined)).into(),
+        )),
+        Native::NodeUtilFormat => Ok(Value::String(format(arguments).into())),
         Native::NodeUtilInherits => inherits(arguments, read_property),
         _ => Err(ExecutionError::TypeErrorMessage {
             message: "Invalid native util operation".into(),

@@ -7,8 +7,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::{
-    BufferData, ExecutionError, Native, ObjectData, RealmId, TypedArrayData, TypedKind, Value,
-    bounded_buffer, ordinary_object,
+    bounded_buffer, ordinary_object, BufferData, ExecutionError, Native, ObjectData, RealmId,
+    TypedArrayData, TypedKind, Value,
 };
 
 /// Constructs a `Buffer` (`Uint8Array` of `TypedKind::Uint8`) from a raw byte vector.
@@ -63,7 +63,12 @@ pub(crate) fn dispatch(
     match native {
         Native::NodeBufferFrom => {
             let bytes = match arguments.first().unwrap_or(&Value::Undefined) {
-                Value::String(text) => text.as_bytes().to_vec(),
+                Value::String(text) => text
+                    .to_scalar_string()
+                    .map(|value| value.into_bytes())
+                    .map_err(|_| ExecutionError::TypeErrorMessage {
+                        message: "Buffer.from string contains a lone surrogate".to_owned(),
+                    })?,
                 Value::TypedArray(view) => view.bytes(),
                 Value::Array(items) => items
                     .borrow()
@@ -139,7 +144,9 @@ pub(crate) fn dispatch(
                 .to_ascii_lowercase();
             let bytes = view.bytes();
             match encoding.as_str() {
-                "utf8" | "utf-8" => Ok(Value::String(String::from_utf8_lossy(&bytes).into_owned())),
+                "utf8" | "utf-8" => Ok(Value::String(
+                    String::from_utf8_lossy(&bytes).into_owned().into(),
+                )),
                 "hex" => {
                     const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
                     let mut hex_str = String::with_capacity(bytes.len() * 2);
@@ -147,23 +154,27 @@ pub(crate) fn dispatch(
                         hex_str.push(HEX_DIGITS[(b >> 4) as usize] as char);
                         hex_str.push(HEX_DIGITS[(b & 0x0f) as usize] as char);
                     }
-                    Ok(Value::String(hex_str))
+                    Ok(Value::String(hex_str.into()))
                 }
-                "base64" => Ok(Value::String(crate::to_base64_text(&bytes, false, false))),
-                "base64url" => Ok(Value::String(crate::to_base64_text(&bytes, true, true))),
+                "base64" => Ok(Value::String(
+                    crate::to_base64_text(&bytes, false, false).into(),
+                )),
+                "base64url" => Ok(Value::String(
+                    crate::to_base64_text(&bytes, true, true).into(),
+                )),
                 "latin1" | "binary" | "ascii" => {
                     let (decoded, _) =
                         encoding_rs::WINDOWS_1252.decode_without_bom_handling(&bytes);
-                    Ok(Value::String(decoded.into_owned()))
+                    Ok(Value::String(decoded.into_owned().into()))
                 }
                 "utf16le" | "utf-16le" | "ucs2" | "ucs-2" => {
                     let (decoded, _) = encoding_rs::UTF_16LE.decode_without_bom_handling(&bytes);
-                    Ok(Value::String(decoded.into_owned()))
+                    Ok(Value::String(decoded.into_owned().into()))
                 }
                 other => {
                     if let Some(enc) = encoding_rs::Encoding::for_label(other.as_bytes()) {
                         let (decoded, _) = enc.decode_without_bom_handling(&bytes);
-                        Ok(Value::String(decoded.into_owned()))
+                        Ok(Value::String(decoded.into_owned().into()))
                     } else {
                         Err(ExecutionError::TypeErrorMessage {
                             message: format!("unsupported Buffer encoding: {encoding}"),
