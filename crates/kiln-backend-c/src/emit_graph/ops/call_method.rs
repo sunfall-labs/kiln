@@ -2,7 +2,6 @@ use super::OpContext;
 use super::{method_candidates, status_check};
 use crate::diagnostic_source;
 use crate::direct::TypedNeeds;
-use crate::emit_graph::EntryKind;
 use crate::graph::{GraphOp, ValueId};
 use crate::prelude::lookup_speculation_invariant;
 use kiln_ir::Constant;
@@ -1641,16 +1640,6 @@ pub(super) fn emit_call_method(
     let iterator_s = iterator_intrinsic
         .map(|s| format!(" {s}"))
         .unwrap_or_default();
-    if matches!(ctx.kind, EntryKind::Typed { .. }) {
-        writeln!(
-            output,
-            "    {{ int handled = 0; int kiln_twin = 0; (void)kiln_twin; \
-            {math_s}{push_s}{regex_s}{map_s}{parallel_pool_s}{parallel_map_s}{filter_s}{reduce_s}{slice_s}{join_s}{split_s}{index_of_s}{substring_s}{collection_s}{json_s}{sort_s}{array_extra_s}{string_extra_s}{iterator_s} \
-            if (KILN_UNLIKELY(!handled)) {{ goto kiln_refusal; }} }}"
-        )
-        .unwrap();
-        return;
-    }
     let n = argc.max(1);
 
     writeln!(
