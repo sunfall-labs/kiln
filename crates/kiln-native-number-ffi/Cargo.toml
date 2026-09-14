@@ -45,8 +45,9 @@ ffi = ["dep:libc", "dep:libffi"]
 kiln-native-number-abi = { workspace = true }
 kiln-number-core = { workspace = true }
 kiln-host-abi = { workspace = true }
-kiln-node-path = { workspace = true }
+hashbrown = { version = "0.16.1", default-features = false, features = ["equivalent"] }
 kiln-string = { workspace = true }
+kiln-node-path = { workspace = true }
 # Path-only (not workspace-inherited): Cargo forbids `default-features` on an inherited
 # edge, and this edge must default off so the slim `--no-default-features` build does
 # not unify `kiln-runtime/http` back on through the dependency's own defaults. Every
