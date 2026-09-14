@@ -5474,14 +5474,14 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                                        : kiln_val_to_boundary(segments->elements[at]);
                 kiln_value shown = kiln_c99_text(piece);
                 if (shown.tag != KILN_VALUE_STRING ||
-                    kiln_c99_text_append(&built, shown.ptr, shown.len) != KILN_C99_OK) {
+                    kiln_c99_text_append_string(&built, shown) != KILN_C99_OK) {
                     free(built.bytes);
                     return KILN_C99_OUT_OF_MEMORY;
                 }
                 if (at + 1 < segments->count && at + 1 < argc) {
                     kiln_value between = kiln_c99_text(args[at + 1]);
                     if (between.tag != KILN_VALUE_STRING ||
-                        kiln_c99_text_append(&built, between.ptr, between.len) != KILN_C99_OK) {
+                        kiln_c99_text_append_string(&built, between) != KILN_C99_OK) {
                         free(built.bytes);
                         return KILN_C99_OUT_OF_MEMORY;
                     }
@@ -6000,26 +6000,25 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             kiln_text joined = {NULL, 0, 0};
             kiln_value separator = argc > 0 ? args[0] : kiln_c99_undefined();
             kiln_value shown_separator;
-            const char *separator_bytes = ",";
-            size_t separator_len = 1;
+            int has_separator = 0;
             if (separator.tag != KILN_VALUE_UNDEFINED) {
                 shown_separator = kiln_c99_text(separator);
                 if (shown_separator.tag != KILN_VALUE_STRING) {
                     KILN_C99_REFUSE("Array.prototype.join given a separator with no text form");
                 }
-                separator_bytes = shown_separator.ptr;
-                separator_len = shown_separator.len;
+                has_separator = 1;
             }
             for (index = 0; index < view->length; ++index) {
                 kiln_value shown;
-                if (index != 0 && kiln_c99_text_append(&joined, separator_bytes, separator_len) !=
-                                      KILN_C99_OK) {
+                if (index != 0 &&
+                    (has_separator ? kiln_c99_text_append_string(&joined, shown_separator)
+                                   : kiln_c99_text_append(&joined, ",", 1)) != KILN_C99_OK) {
                     free(joined.bytes);
                     return KILN_C99_OUT_OF_MEMORY;
                 }
                 shown = kiln_c99_text(kiln_c99_number(kiln_c99_typed_get(view, index)));
                 if (shown.tag != KILN_VALUE_STRING ||
-                    kiln_c99_text_append(&joined, shown.ptr, shown.len) != KILN_C99_OK) {
+                    kiln_c99_text_append_string(&joined, shown) != KILN_C99_OK) {
                     free(joined.bytes);
                     return KILN_C99_OUT_OF_MEMORY;
                 }
@@ -6336,19 +6335,20 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
     case KILN_C99_METHOD_JOIN: {
         kiln_text joined = {NULL, 0, 0};
         kiln_value separator = argc > 0 ? args[0] : kiln_c99_undefined();
-        const char *bytes = ",";
-        size_t len = 1;
+        int has_separator = 0;
         if (separator.tag != KILN_VALUE_UNDEFINED) {
             kiln_value shown = kiln_c99_text(separator);
             if (shown.tag != KILN_VALUE_STRING) {
                 KILN_C99_REFUSE("join given a separator with no text form");
             }
-            bytes = shown.ptr;
-            len = shown.len;
+            separator = shown;
+            has_separator = 1;
         }
         for (index = 0; index < array->count; ++index) {
             kiln_val element = array->elements[index];
-            if (index != 0 && kiln_c99_text_append(&joined, bytes, len) != KILN_C99_OK) {
+            if (index != 0 &&
+                (has_separator ? kiln_c99_text_append_string(&joined, separator)
+                               : kiln_c99_text_append(&joined, ",", 1)) != KILN_C99_OK) {
                 free(joined.bytes);
                 return KILN_C99_OUT_OF_MEMORY;
             }
@@ -6366,7 +6366,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                          * host-facing text builder boundary. */
                         kiln_value shown = kiln_c99_text(kiln_val_to_boundary(element));
                         if (shown.tag != KILN_VALUE_STRING ||
-                            kiln_c99_text_append(&joined, shown.ptr, shown.len) != KILN_C99_OK) {
+                            kiln_c99_text_append_string(&joined, shown) != KILN_C99_OK) {
                             free(joined.bytes);
                             return KILN_C99_OUT_OF_MEMORY;
                         }
@@ -6380,7 +6380,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             {
                 kiln_value shown = kiln_c99_text(kiln_val_to_boundary(element));
                 if (shown.tag != KILN_VALUE_STRING ||
-                    kiln_c99_text_append(&joined, shown.ptr, shown.len) != KILN_C99_OK) {
+                    kiln_c99_text_append_string(&joined, shown) != KILN_C99_OK) {
                     free(joined.bytes);
                     return KILN_C99_OUT_OF_MEMORY;
                 }
