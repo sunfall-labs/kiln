@@ -790,6 +790,22 @@ mod realm {
         unsafe { drop(Box::from_raw(pointer.cast::<CompletionWork>())) };
     }
 
+    /// A borrowed unit view for hashbrown's `Equivalent` lookup. The map owns `StringUnits`;
+    /// this query object lets an existing Symbol.for key probe it without allocating.
+    struct BorrowedStringView<'a>(kiln_string::StringView<'a>);
+
+    impl Hash for BorrowedStringView<'_> {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            self.0.hash(state);
+        }
+    }
+
+    impl hashbrown::Equivalent<StringUnits> for BorrowedStringView<'_> {
+        fn equivalent(&self, key: &StringUnits) -> bool {
+            self.0 == key.as_view()
+        }
+    }
+
     struct NativeRealm {
         runtime: RefCell<RealmRuntime>,
         work: RefCell<Realm<NativeMicrotask, NativeWork>>,
@@ -800,10 +816,8 @@ mod realm {
         next_http_client_request_id: Cell<u64>,
         cancelled: Rc<RefCell<HashSet<RequestId>>>,
         queued: Rc<RefCell<HashSet<RequestId>>>,
-        /// A borrowed-view hash points at the registered IDs sharing that hash. The owned unit
-        /// spelling stays in `symbol_keys`; this keeps Symbol.for's common lookup allocation-free
-        /// while still checking the full code-unit value on a hash collision.
-        symbols: RefCell<HashMap<u64, Vec<u64>>>,
+        symbols:
+            RefCell<hashbrown::HashMap<StringUnits, u64, std::collections::hash_map::RandomState>>,
         symbol_keys: RefCell<HashMap<u64, StringUnits>>,
         callable_stores: RefCell<HashMap<(u32, u64), CallableStore>>,
         value_slots: RefCell<HashMap<u32, Box<[u64; 4]>>>,
@@ -1139,7 +1153,9 @@ mod realm {
                 next_http_client_request_id: Cell::new(1),
                 cancelled: Rc::new(RefCell::new(HashSet::new())),
                 queued: Rc::new(RefCell::new(HashSet::new())),
-                symbols: RefCell::new(HashMap::new()),
+                symbols: RefCell::new(hashbrown::HashMap::with_hasher(
+                    std::collections::hash_map::RandomState::new(),
+                )),
                 symbol_keys: RefCell::new(HashMap::new()),
                 callable_stores: RefCell::new(HashMap::new()),
                 value_slots: RefCell::new(HashMap::new()),
@@ -1939,32 +1955,19 @@ mod realm {
             let Some(realm) = active_realm() else {
                 return INVALID_ARGUMENT;
             };
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            key.hash(&mut hasher);
-            let hash = hasher.finish();
-            {
-                let candidates = realm.symbols.borrow();
-                let keys = realm.symbol_keys.borrow();
-                if let Some(ids) = candidates.get(&hash) {
-                    if let Some(&id) = ids
-                        .iter()
-                        .find(|&&id| keys.get(&id).is_some_and(|owned| owned.as_view() == key))
-                    {
-                        unsafe { out_id.write(id) };
-                        return 0;
-                    }
-                }
+            let borrowed_key = BorrowedStringView(key);
+            if let Some(id) = realm.symbols.borrow().get(&borrowed_key).copied() {
+                unsafe { out_id.write(id) };
+                return 0;
             }
             let Ok(id) = NEXT_SYMBOL.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
                 next.checked_add(1)
             }) else {
                 return RUNTIME_ERROR;
             };
-            realm.symbols.borrow_mut().entry(hash).or_default().push(id);
-            realm
-                .symbol_keys
-                .borrow_mut()
-                .insert(id, StringUnits::from_view(key));
+            let owned = StringUnits::from_view(key);
+            realm.symbols.borrow_mut().insert(owned.clone(), id);
+            realm.symbol_keys.borrow_mut().insert(id, owned);
             unsafe { out_id.write(id) };
             0
         })

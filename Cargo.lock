@@ -1564,6 +1564,7 @@ version = "0.0.0"
 name = "kiln-native-number-ffi"
 version = "0.0.0"
 dependencies = [
+ "hashbrown 0.16.1",
  "kiln-host-abi",
  "kiln-intl",
  "kiln-json",
