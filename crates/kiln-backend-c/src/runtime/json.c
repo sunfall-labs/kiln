@@ -149,6 +149,57 @@ static int kiln_c99_json_quote(kiln_text *text, const char *bytes, size_t len) {
     return kiln_c99_text_append(text, "\"", 1);
 }
 
+static int kiln_c99_json_quote_units(kiln_text *text, const kiln_string *string) {
+    static const char hex[] = "0123456789abcdef";
+    size_t index;
+    if (kiln_c99_text_append(text, "\"", 1) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;
+    for (index = 0; index < string->unit_len; ++index) {
+        uint32_t point = kiln_string_unit_at(string, index);
+        char bytes[4];
+        size_t width = 0;
+        if (point == '"' || point == '\\') {
+            char escape[2] = {'\\', (char)point};
+            if (kiln_c99_text_append(text, escape, 2) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;
+            continue;
+        }
+        if (point == '\n' || point == '\r' || point == '\t' || point == '\b' || point == '\f') {
+            char escape[2] = {'\\', point == '\n' ? 'n' : point == '\r' ? 'r' : point == '\t' ? 't' : point == '\b' ? 'b' : 'f'};
+            if (kiln_c99_text_append(text, escape, 2) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;
+            continue;
+        }
+        if (point < 0x20) {
+            char escape[6] = {'\\', 'u', '0', '0', hex[(point >> 4) & 15], hex[point & 15]};
+            if (kiln_c99_text_append(text, escape, 6) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;
+            continue;
+        }
+        if (point >= 0xD800 && point <= 0xDBFF && index + 1 < string->unit_len) {
+            uint32_t low = kiln_string_unit_at(string, index + 1);
+            if (low >= 0xDC00 && low <= 0xDFFF) {
+                point = 0x10000 + ((point - 0xD800) << 10) + (low - 0xDC00);
+                index += 1;
+            } else {
+                char escape[6] = {'\\', 'u', 'd', '8', '0', '0'};
+                escape[2] = hex[(point >> 12) & 15]; escape[3] = hex[(point >> 8) & 15];
+                escape[4] = hex[(point >> 4) & 15]; escape[5] = hex[point & 15];
+                if (kiln_c99_text_append(text, escape, 6) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;
+                continue;
+            }
+        } else if (point >= 0xDC00 && point <= 0xDFFF) {
+            char escape[6] = {'\\', 'u', 'd', 'c', '0', '0'};
+            escape[2] = hex[(point >> 12) & 15]; escape[3] = hex[(point >> 8) & 15];
+            escape[4] = hex[(point >> 4) & 15]; escape[5] = hex[point & 15];
+            if (kiln_c99_text_append(text, escape, 6) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;
+            continue;
+        }
+        if (point < 0x80) { bytes[0] = (char)point; width = 1; }
+        else if (point < 0x800) { bytes[0] = (char)(0xC0 | (point >> 6)); bytes[1] = (char)(0x80 | (point & 63)); width = 2; }
+        else if (point < 0x10000) { bytes[0] = (char)(0xE0 | (point >> 12)); bytes[1] = (char)(0x80 | ((point >> 6) & 63)); bytes[2] = (char)(0x80 | (point & 63)); width = 3; }
+        else { bytes[0] = (char)(0xF0 | (point >> 18)); bytes[1] = (char)(0x80 | ((point >> 12) & 63)); bytes[2] = (char)(0x80 | ((point >> 6) & 63)); bytes[3] = (char)(0x80 | (point & 63)); width = 4; }
+        if (kiln_c99_text_append(text, bytes, width) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;
+    }
+    return kiln_c99_text_append(text, "\"", 1);
+}
+
 /* The four scalars a document is mostly made of, written straight from the heap's own
  * representation.
  *
@@ -182,7 +233,7 @@ static int kiln_c99_json_scalar(kiln_text *text, kiln_val value, int *status) {
         *status = string == NULL ? kiln_c99_json_quote(text, "", 0)
                                  : (!kiln_string_is_utf16(string)
                                         ? kiln_c99_json_quote(text, (const char *)kiln_string_latin1(string), string->unit_len)
-                                        : kiln_c99_refuse("JSON.stringify on UTF-16 string"));
+                                 : kiln_c99_json_quote_units(text, string));
         return 1;
     }
     if (value == KILN_VAL_NULL) {
