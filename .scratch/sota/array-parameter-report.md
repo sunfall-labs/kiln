@@ -56,10 +56,14 @@ The interpreter output matches Node byte-for-byte for both normal and `KILN_SPEC
 those outputs are `.scratch/array-bench/semantic-candidate-interpreter.out` and
 `.scratch/array-bench/semantic-candidate-disabled-interpreter.out`, with the same SHA256.
 The profile-loaded and disabled native builds both compile (`semantic-candidate-new-build.log`
-and `semantic-disabled-new-build.log`), but executing either native binary refuses at the
-`Object.defineProperty` call because that native operation is outside its supported subset.
-The baseline native build has the same refusal. This fixture therefore validates accessor semantics
-through the interpreter and Node oracle while recording the native coverage gap honestly.
+and `semantic-disabled-new-build.log`). Executing the candidate, disabled, and baseline native
+binaries refuses at the non-plain array index descriptor call:
+`instruction=21 operation=CallMethod(defineProperty) detail=an array index definition that is not a plain writable value receiver_tag=8`.
+This is a native coverage refusal for non-plain array index descriptors, not a claim that
+`Object.defineProperty` generally fails. Captured stderr and exit status are in
+`semantic-candidate-new.err`/`.status`, `semantic-disabled-new.err`/`.status`, and
+`semantic-baseline-new.err`/`.status`. This fixture therefore validates accessor semantics through
+the interpreter and Node oracle while recording the exact native coverage gap honestly.
 
 ## Quiet-slot warm measurements
 
