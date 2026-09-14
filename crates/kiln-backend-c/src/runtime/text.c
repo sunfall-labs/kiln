@@ -134,9 +134,26 @@ static int kiln_c99_truthy(kiln_value value) {
  * `kiln_c99_copy_text` would allocate a block per request. */
 static kiln_value kiln_c99_copy_text(const char *text, size_t len);
 static kiln_value kiln_c99_static_text(const char *text, size_t len) {
-    /* Static text is upgraded by the caller into the canonical header representation.  This
-     * helper remains for the empty singleton, whose header is immortal and shared. */
+    typedef struct { kiln_string header; const char *source; } static_text;
+    static static_text entries[128];
+    size_t slot;
     if (len == 0) return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)&kiln_c99_empty_string, 0);
+    if (!kiln_c99_ascii_scan(text, len)) return kiln_c99_copy_text(text, len);
+    for (slot = 0; slot < sizeof(entries) / sizeof(entries[0]); ++slot) {
+        if (entries[slot].source == text && entries[slot].header.unit_len == len)
+            return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)&entries[slot].header, len);
+    }
+    for (slot = 0; slot < sizeof(entries) / sizeof(entries[0]); ++slot) {
+        if (entries[slot].source == NULL) {
+            entries[slot].source = text;
+            entries[slot].header.unit_len = (uint32_t)len;
+            entries[slot].header.flags = KILN_STRING_LATIN1;
+            entries[slot].header.data = text;
+            return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)&entries[slot].header, len);
+        }
+    }
+    /* Builtin text is ASCII and the table is deliberately bounded; an exhausted cache is still
+     * correct, only less allocation-efficient. */
     return kiln_c99_copy_text(text, len);
 }
 
@@ -232,22 +249,34 @@ static kiln_val kiln_c99_val_from_ascii(const char *bytes, size_t len) {
     return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, s);
 }
 
+static kiln_value kiln_c99_copy_ascii(const char *text, size_t len);
 static kiln_value kiln_c99_copy_text(const char *text, size_t len) {
+    kiln_string *decoded;
     if (len == 0 || text == NULL) {
         return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)&kiln_c99_empty_string, 0);
     }
-    char *copy = kiln_c99_gc_alloc_text(len);
-    if (copy == NULL) {
+    if (kiln_c99_ascii_scan(text, len)) return kiln_c99_copy_ascii(text, len);
+    decoded = kiln_c99_string_from_utf8(text, len);
+    if (decoded == NULL) {
         return kiln_c99_undefined();
     }
-    memcpy(copy, text, len);
-    kiln_string *s = ((kiln_string *)copy) - 1;
-    s->unit_len = (uint32_t)len;
-    s->flags = KILN_STRING_LATIN1;
-    s->data = copy;
-    kiln_value result = kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)s, len);
+    kiln_value result = kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)decoded, decoded->unit_len);
     result.flags = KILN_VALUE_FLAG_OWNED_STRING;
     return result;
+}
+
+/* Callers handling protocol bytes or already-decoded Latin1 use this explicitly.  Keeping it
+ * separate prevents arbitrary UTF-8 input from being mislabeled as one-byte JavaScript units. */
+static kiln_value kiln_c99_copy_ascii(const char *text, size_t len) {
+    kiln_string *s;
+    char *copy;
+    if (len == 0 || text == NULL)
+        return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)&kiln_c99_empty_string, 0);
+    copy = kiln_c99_gc_alloc_text(len);
+    if (copy == NULL) return kiln_c99_undefined();
+    memcpy(copy, text, len);
+    s = ((kiln_string *)copy) - 1;
+    return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)s, s->unit_len);
 }
 
 static kiln_value kiln_c99_control_diagnostic(void) {
@@ -535,14 +564,14 @@ static kiln_value kiln_c99_text(kiln_value value) {
     value = kiln_c99_proxy_inner(value);
     switch (value.tag) {
     case KILN_VALUE_UNDEFINED:
-        return kiln_c99_copy_text(undefined_text, sizeof(undefined_text) - 1);
+        return kiln_c99_static_text(undefined_text, sizeof(undefined_text) - 1);
     case KILN_VALUE_NULL:
-        return kiln_c99_copy_text(null_text, sizeof(null_text) - 1);
+        return kiln_c99_static_text(null_text, sizeof(null_text) - 1);
     case KILN_VALUE_BOOLEAN:
         if (value.bits) {
-            return kiln_c99_copy_text(true_text, sizeof(true_text) - 1);
+            return kiln_c99_static_text(true_text, sizeof(true_text) - 1);
         }
-        return kiln_c99_copy_text(false_text, sizeof(false_text) - 1);
+        return kiln_c99_static_text(false_text, sizeof(false_text) - 1);
     case KILN_VALUE_STRING:
         return value;
     case KILN_VALUE_NUMBER: {
@@ -565,7 +594,7 @@ static kiln_value kiln_c99_text(kiln_value value) {
             shown.tag == KILN_VALUE_STRING) {
             return shown;
         }
-        return kiln_c99_copy_text(object_text, sizeof(object_text) - 1);
+        return kiln_c99_static_text(object_text, sizeof(object_text) - 1);
     }
     case KILN_VALUE_DATE: {
         /* `String(date)` is the human form, not the ISO one: the hint is a string and
@@ -772,12 +801,17 @@ static kiln_value kiln_c99_concat(kiln_value left, kiln_value right) {
     }
     if (flags == KILN_STRING_UTF16) {
         uint16_t *units = (uint16_t *)(uintptr_t)joined->data;
-        for (size_t index = 0; index < ls->unit_len; ++index) units[index] = kiln_string_unit_at(ls, index);
-        for (size_t index = 0; index < rs->unit_len; ++index) units[ls->unit_len + index] = kiln_string_unit_at(rs, index);
+        if (kiln_string_is_utf16(ls) && kiln_string_is_utf16(rs)) {
+            memcpy(units, ls->data, ls->unit_len * sizeof(uint16_t));
+            memcpy(units + ls->unit_len, rs->data, rs->unit_len * sizeof(uint16_t));
+        } else {
+            for (size_t index = 0; index < ls->unit_len; ++index) units[index] = kiln_string_unit_at(ls, index);
+            for (size_t index = 0; index < rs->unit_len; ++index) units[ls->unit_len + index] = kiln_string_unit_at(rs, index);
+        }
     } else {
         uint8_t *bytes = (uint8_t *)(uintptr_t)joined->data;
-        for (size_t index = 0; index < ls->unit_len; ++index) bytes[index] = (uint8_t)kiln_string_unit_at(ls, index);
-        for (size_t index = 0; index < rs->unit_len; ++index) bytes[ls->unit_len + index] = (uint8_t)kiln_string_unit_at(rs, index);
+        memcpy(bytes, ls->data, ls->unit_len);
+        memcpy(bytes + ls->unit_len, rs->data, rs->unit_len);
     }
     return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)joined, total);
 }

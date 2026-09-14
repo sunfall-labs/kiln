@@ -243,6 +243,9 @@ static inline uint16_t kiln_string_unit_at(const kiln_string *string, size_t ind
 }
 static inline int kiln_string_equal(const kiln_string *left, const kiln_string *right) {
     if (left == NULL || right == NULL || left->unit_len != right->unit_len) return 0;
+    if (left->flags == right->flags && left->unit_len != 0)
+        return memcmp(left->data, right->data,
+                      (size_t)left->unit_len * (kiln_string_is_utf16(left) ? sizeof(uint16_t) : sizeof(uint8_t))) == 0;
     for (size_t index = 0; index < left->unit_len; ++index)
         if (kiln_string_unit_at(left, index) != kiln_string_unit_at(right, index)) return 0;
     return 1;
@@ -415,6 +418,7 @@ const EMBEDDING_HEADER: &str = concat!(
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #define KILN_NATIVE_RUNTIME_VERSION 11
 #define KILN_C_ABI_VERSION 1
