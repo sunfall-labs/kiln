@@ -64,12 +64,12 @@ static int kiln_c99_node_client_attach(kiln_node_client_request *request,
  * grammar; what is left here is the walk that makes this engine's strings, arrays and objects.
  * The readback is a node array and a byte range -- scalars only -- lent from the reader's
  * per-thread scratch until the next parse on this thread; nothing is freed here. */
-int32_t kiln_json_parse(const unsigned char *bytes, size_t len, const kiln_json_node **out_nodes,
-                        size_t *out_count, const unsigned char **out_text, size_t *out_text_len);
-int32_t kiln_regexp_compile(const unsigned char *pattern, size_t pattern_len,
-                            const unsigned char *flags, size_t flags_len, void **out_handle);
+int32_t kiln_json_parse(const kiln_string *source, const kiln_json_node **out_nodes,
+                        size_t *out_count, kiln_string *out_text);
+int32_t kiln_regexp_compile(const kiln_string *pattern, const kiln_string *flags,
+                            void **out_handle);
 void kiln_regexp_free(void *handle);
-int32_t kiln_regexp_search(void *handle, const uint16_t *subject, size_t subject_len, size_t start,
+int32_t kiln_regexp_search(void *handle, const kiln_string *subject, size_t start,
                            int64_t *out_ranges, size_t out_capacity);
 size_t kiln_regexp_group_count(const void *handle);
 int32_t kiln_regexp_group_name(const void *handle, size_t index, unsigned char *buffer,
@@ -194,8 +194,27 @@ static const char *kiln_c99_temporal_tag(kiln_value value);
 static const char *kiln_c99_temporal_builtin_name(uint64_t builtin);
 static int32_t kiln_c99_temporal_kind_of_builtin(uint64_t builtin);
 static uint64_t kiln_c99_temporal_builtin_of(kiln_value value);
+/* These helpers are defined in later concatenated runtime units.  Keep their headed
+ * declarations here so a caller cannot silently fall back to an implicit byte-key ABI. */
+static uint64_t kiln_c99_typed_prototype_method(const char *key, size_t key_len);
+static kiln_value kiln_c99_key_value(const kiln_string *view, const kiln_string **canonical);
+static kiln_value kiln_c99_stable_key_value(const kiln_string *stable);
+static int kiln_c99_symbol_of_key_view(const kiln_string *key, kiln_value *out);
+static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
+                                          const kiln_string *view,
+                                          const kiln_string *canonical, kiln_value *out,
+                                          int *found, int depth, kiln_value *thrown);
+static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
+                                         const kiln_string *view,
+                                         const kiln_string *canonical, kiln_value descriptor,
+                                         int depth, kiln_value *thrown);
+static int kiln_c99_has_property_key(kiln_host *host, kiln_value target,
+                                     const kiln_string *view, const kiln_string *canonical,
+                                     int *answer, int depth, kiln_value *thrown);
 static int kiln_c99_temporal_unsupported(kiln_value *thrown, const char *owner, const char *member,
                                          size_t member_len);
+static int kiln_c99_temporal_unsupported_key(kiln_value *thrown, const char *owner,
+                                             const kiln_string *member);
 static const char *kiln_c99_temporal_op_name(uint64_t code);
 static const char *kiln_c99_temporal_now_name(uint64_t code);
 static uint64_t kiln_c99_temporal_op_code(const char *key, size_t key_len);
@@ -237,6 +256,7 @@ static kiln_value kiln_c99_text_value(kiln_text *text);
 static kiln_val kiln_c99_text_val(kiln_text *text);
 static int kiln_c99_same_name(const char *key, size_t key_len, const char *name);
 static int kiln_c99_same_key(const kiln_property *property, const char *key, size_t key_len);
+static int kiln_c99_same_key_view(const kiln_property *property, const kiln_string *key);
 static int kiln_c99_new_object(kiln_value *out);
 static int kiln_c99_new_object_with_capacity(kiln_value *out, size_t capacity);
 static int kiln_c99_new_object_tenured(kiln_value *out);
@@ -268,7 +288,7 @@ static int kiln_c99_new_typed_iterator(kiln_value *out, kiln_value source, int p
 static int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len,
                              kiln_property **out);
 static int kiln_c99_own_slot_ikey(kiln_value target, const char *key, size_t key_len,
-                                  const char *ikey, kiln_property **out);
+                                  const kiln_string *ikey, kiln_property **out);
 static int kiln_c99_own_data(kiln_value target, const char *key, size_t key_len,
                              kiln_value value);
 static int kiln_c99_own_data_hot_key(kiln_value target, int id, kiln_value value);
@@ -280,12 +300,33 @@ static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
 static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                              kiln_value value, int strict, int depth, kiln_value *thrown);
 static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char *key,
-                                  size_t key_len, const char *ikey, kiln_value value, int strict,
+                                  size_t key_len, const kiln_string *ikey, kiln_value value, int strict,
                                   int depth, kiln_value *thrown);
 static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value *out, int depth, kiln_value *thrown);
 static int kiln_c99_get_ikey(kiln_host *host, kiln_value target, const char *key, size_t key_len,
-                             const char *ikey, kiln_value *out, int depth, kiln_value *thrown);
+                             const kiln_string *ikey, kiln_value *out, int depth,
+                             kiln_value *thrown);
+static int kiln_c99_get_key(kiln_host *host, kiln_value target, const kiln_string *view,
+                            const kiln_string *canonical, kiln_value *out, int depth,
+                            kiln_value *thrown);
+static int kiln_c99_get_site(kiln_host *host, kiln_value target, const kiln_string *view,
+                             const kiln_string *canonical, kiln_value *out, int depth,
+                             kiln_value *thrown, kiln_c99_site *site);
+static int kiln_c99_put_site_key(kiln_host *host, kiln_value target, const kiln_string *view,
+                                 const kiln_string *canonical, kiln_value value, int strict,
+                                 int depth, kiln_value *thrown, kiln_c99_site *site);
+static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_string *view,
+                                 const kiln_string *canonical, kiln_value value, int strict,
+                                 int depth, kiln_value *thrown);
+static int kiln_c99_own_slot_key(kiln_value target, const kiln_string *view,
+                                 const kiln_string *canonical, kiln_property **out);
+static int kiln_c99_has_key(kiln_host *host, kiln_value target, const kiln_string *view,
+                            const kiln_string *canonical, int *answer, int depth,
+                            kiln_value *thrown);
+static int kiln_c99_delete_key(kiln_host *host, kiln_value target, const kiln_string *view,
+                               const kiln_string *canonical, int *answer, int depth,
+                               kiln_value *thrown);
 static kiln_value *kiln_c99_exotic_store(kiln_value target);
 static int kiln_c99_proxy_trap(kiln_host *host, kiln_value proxy, const char *name,
                                kiln_value *trap, int depth, kiln_value *thrown);
@@ -347,8 +388,11 @@ static int kiln_c99_super_call_val(kiln_host *host, kiln_val *produced, kiln_val
                                    int depth, kiln_value *thrown);
 static int kiln_c99_store_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                               kiln_value *out, int depth, kiln_value *thrown, int *found);
-static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char *key,
-                                 size_t key_len, const char *ikey, kiln_value *out, int depth,
+static int kiln_c99_store_get_key(kiln_host *host, kiln_value target,
+                                  const kiln_string *key, const kiln_string *canonical,
+                                  kiln_value *out, int depth, kiln_value *thrown, int *found);
+static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_string *key,
+                                 const kiln_string *canonical, kiln_value *out, int depth,
                                  kiln_value *thrown);
 static int kiln_c99_array_reserve(kiln_array *array, size_t needed);
 static void kiln_c99_bytes_retire(uint8_t *bytes, size_t size);
@@ -388,8 +432,8 @@ static int kiln_c99_expand_replacement(kiln_text *out, const uint16_t *pattern,
 static kiln_regexp *kiln_c99_regexp_of(kiln_value value);
 static int kiln_c99_global_object(kiln_value *out);
 static int kiln_c99_global_object_val(kiln_val *out);
-static int kiln_c99_new_regexp(kiln_value *out, const char *source, size_t source_len,
-                               const char *flags, size_t flags_len, kiln_value *thrown);
+static int kiln_c99_new_regexp(kiln_value *out, const kiln_string *source,
+                               const kiln_string *flags, kiln_value *thrown);
 static int kiln_c99_string_compare(kiln_value left, kiln_value right);
 static uint64_t kiln_c99_array_method(const char *key, size_t key_len);
 static uint64_t kiln_c99_string_method(const char *key, size_t key_len);
@@ -407,6 +451,21 @@ static int kiln_c99_precision_text(kiln_value *out, int negative, const char *ma
 static int kiln_c99_hex_digit(char character);
 static int kiln_c99_append_hex(kiln_text *text, unsigned value, int width);
 static int kiln_c99_valid_utf8(const char *bytes, size_t len);
+/* Refusal subjects are diagnostic bytes, not property identity. Encode a canonical key only at
+ * this boundary; callers keep unit-based lookup and equality. */
+static int kiln_c99_refuse_named_key(const char *lacked, const kiln_string *key) {
+    uint8_t *encoded = NULL;
+    size_t encoded_len = 0;
+    kiln_value value;
+    int status;
+    if (key == NULL) return kiln_c99_refuse(lacked);
+    value = kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)key, key->unit_len);
+    status = kiln_c99_string_to_utf8_lossy(value, &encoded, &encoded_len);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_refuse_named(lacked, (const char *)encoded, encoded_len);
+    free(encoded);
+    return status;
+}
 static int kiln_c99_url_construct(kiln_value *out, const kiln_value *args, size_t argc,
                                   kiln_value *thrown);
 static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,
@@ -511,12 +570,19 @@ static int kiln_c99_throw_not_a(kiln_value *thrown, kiln_value value, const char
 static int kiln_c99_throw_not_iterable(kiln_value *thrown, kiln_value value);
 static int kiln_c99_throw_cannot_set(kiln_value *thrown, kiln_value target);
 static int kiln_c99_throw_read_only(kiln_value *thrown, const char *key, size_t key_len);
+static int kiln_c99_throw_read_only_key(kiln_value *thrown, const kiln_string *key);
+static int kiln_c99_throw_named_key_text(kiln_value *thrown, const char *prefix,
+                                         const kiln_string *key, const char *suffix);
 static int kiln_c99_throw_module_namespace_write(kiln_value *thrown, const char *key,
                                                  size_t key_len);
+static int kiln_c99_throw_module_namespace_write_key(kiln_value *thrown,
+                                                     const kiln_string *key);
 static int kiln_c99_throw_module_namespace_delete(kiln_value *thrown, const char *key,
                                                   size_t key_len);
 static int kiln_c99_throw_module_namespace_define(kiln_value *thrown, const char *key,
                                                   size_t key_len);
+static int kiln_c99_throw_module_namespace_define_key(kiln_value *thrown,
+                                                      const kiln_string *key);
 static int kiln_c99_throw_module_namespace_freeze(kiln_value *thrown);
 static int kiln_c99_throw_cannot_delete(kiln_value *thrown, const char *key, size_t key_len);
 static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_value left,
@@ -548,18 +614,24 @@ static int kiln_c99_delete_or_throw(kiln_host *host, kiln_value target, const ch
 static int kiln_c99_delete_computed_or_throw(kiln_host *host, kiln_value target, kiln_value key,
                                              int strict, int *answer, int depth,
                                              kiln_value *thrown);
-static void kiln_c99_typed_own(kiln_value target, const char *key, size_t key_len,
-                               int *found, int *enumerable);
-static int kiln_c99_typed_prototype_own(kiln_value target, const char *key, size_t key_len,
-                                        int *found, int *enumerable);
+static void kiln_c99_typed_own_key(kiln_value target, const kiln_string *key, int *found,
+                                   int *enumerable);
+static int kiln_c99_typed_prototype_own_key(kiln_value target, const kiln_string *key,
+                                            const kiln_string *canonical, int *found,
+                                            int *enumerable);
 static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out, int depth,
                              kiln_value *thrown);
 static int kiln_c99_enumerate_keys(kiln_host *host, kiln_value target, kiln_value *out,
                                    int depth, kiln_value *thrown);
 static int kiln_c99_define_method(kiln_value target, const char *key, size_t key_len,
                                   kiln_value method);
+static int kiln_c99_define_method_key(kiln_value target, const kiln_string *key,
+                                      kiln_value method);
 static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t key_len,
                                     kiln_value getter, kiln_value setter, int enumerable);
+static int kiln_c99_define_accessor_key(kiln_value target, const kiln_string *key,
+                                        kiln_value getter, kiln_value setter,
+                                        int enumerable);
 static int kiln_c99_set_function_name(kiln_value function, kiln_value key,
                                      const char *prefix);
 static double kiln_c99_key_index(const char *key, size_t key_len);
@@ -580,7 +652,7 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
                                const char *indent, size_t indent_len, const char *current,
                                size_t current_len, int *serialised, int depth,
                                const kiln_json_frame *parents, kiln_value *thrown);
-static int kiln_c99_json_document(const char *bytes, size_t len, kiln_val *out);
+static int kiln_c99_json_document(const kiln_string *source, kiln_val *out);
 static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
                          kiln_value receiver, const kiln_value *args, size_t argc, int depth,
                          kiln_value *thrown);

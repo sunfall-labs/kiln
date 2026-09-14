@@ -1,12 +1,65 @@
 
-static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char *key,
-                                 size_t key_len, const char *ikey, kiln_value *out, int depth,
+/* Fixed-name readers still have byte-oriented tables.  A headed key can use those tables only
+ * when every unit is ASCII; this adapter is exact in that case.  A wide or non-ASCII key takes
+ * the headed property walk below rather than being converted or refused. */
+static int kiln_c99_intrinsic_ascii_view(const kiln_string *key, char buffer[256],
+                                         const char **bytes, size_t *length) {
+    size_t index;
+    if (key == NULL) return 0;
+    if (!kiln_string_is_utf16(key)) {
+        const unsigned char *raw = (const unsigned char *)kiln_string_latin1(key);
+        for (index = 0; index < key->unit_len; ++index) {
+            if (raw[index] > 0x7f) return 0;
+        }
+        *bytes = (const char *)kiln_string_latin1(key);
+        *length = key->unit_len;
+        return 1;
+    }
+    if (key->unit_len > 256) return 0;
+    for (index = 0; index < key->unit_len; ++index) {
+        uint32_t unit = kiln_string_unit_at(key, index);
+        if (unit > 0x7f) return 0;
+        buffer[index] = (char)unit;
+    }
+    *bytes = buffer;
+    *length = key->unit_len;
+    return 1;
+}
+
+/* The boundary value used by a proxy trap must point at a realm-owned header.  A borrowed view
+ * is fine for an ordinary walk, but a trap can retain the key in user code, so it is interned
+ * exactly at this exposure point. */
+static kiln_value kiln_c99_key_value(const kiln_string *view, const kiln_string **canonical) {
+    const kiln_string *stable = canonical == NULL ? NULL : *canonical;
+    if (stable == NULL) {
+        stable = kiln_c99_intern_key(view);
+        if (stable == NULL) return kiln_c99_undefined();
+        if (canonical != NULL) *canonical = stable;
+    }
+    return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)stable, stable->unit_len);
+}
+
+#include <assert.h>
+
+/* Stored shape/property keys are already realm-owned canonical headers. Keep their exposure
+ * allocation-free; only a borrowed computed key takes the interning path above. */
+static kiln_value kiln_c99_stable_key_value(const kiln_string *stable) {
+    assert(stable != NULL);
+    return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)stable, stable->unit_len);
+}
+
+static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_string *key,
+                                 const kiln_string *ikey, kiln_value *out, int depth,
                                  kiln_value *thrown) {
     /* `length` only means anything special to an array or a string; every other kind -- and an
      * ordinary object, the one a request or response property read is, most of all -- paid for
      * this `memcmp` on every read whether or not the key could possibly be it. Checked instead at
      * the two places that use it, so the cost is real only where the answer can matter. */
     size_t index;
+    size_t key_len = key == NULL ? 0 : key->unit_len;
+    char intrinsic_buffer[256];
+    const char *intrinsic_key = NULL;
+    size_t intrinsic_len = 0;
     switch (target.tag) {
     case KILN_VALUE_OBJECT: {
         kiln_value current = target;
@@ -16,8 +69,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
          * the canonical pointer. NULL is a spelling the realm has never stored, so no level of
          * the chain can hold it and the walk is not made at all -- unless the check mode is on,
          * which wants every level's scan run by bytes. */
-        if (ikey == NULL) ikey = kiln_c99_interned(key, key_len);
-        walk = ikey != NULL || kiln_c99_keys_checked() || kiln_c99_key_index(key, key_len) >= 0.0;
+        if (ikey == NULL) ikey = kiln_c99_interned_key(key);
+        walk = ikey != NULL || kiln_c99_keys_checked() || kiln_c99_key_index_key(key) >= 0.0;
         /* Own properties first, then the chain. Iterative and bounded rather than recursive:
          * the walk is on the C stack, and a program can build a chain long enough to exhaust
          * it. */
@@ -30,7 +83,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             }
             if (current.tag != KILN_VALUE_OBJECT) {
                 if (current.tag != KILN_VALUE_UNDEFINED && current.tag != KILN_VALUE_NULL) {
-                    return kiln_c99_get_ikey(host, current, key, key_len, ikey, out, depth, thrown);
+                    return kiln_c99_get_key(host, current, key, ikey, out, depth, thrown);
                 }
                 break;
             }
@@ -46,7 +99,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                     }
                 }
                 if (object->elements != NULL) {
-                    double index_num = kiln_c99_key_index(key, key_len);
+                    double index_num = kiln_c99_key_index_key(key);
                     if (index_num >= 0.0 && index_num < 100000.0) {
                         size_t elem_idx = (size_t)index_num;
                         if (elem_idx < object->element_count &&
@@ -62,13 +115,12 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 }
                 kiln_c99_ensure_dictionary(object);
             }
-            index = kiln_c99_own_index(object, ikey, key, key_len);
+            index = kiln_c99_own_index_key(object, ikey, key);
             if (index != object->count) {
                 /* A published name with nothing behind it stops the program and lets the
                  * instruction say which one. See `kiln_property::refused`. */
                 if (object->properties[index].refused) {
-                    KILN_C99_REFUSE_NAMED("a member this backend declares and has not implemented", 
-                                          key, key_len);
+                    KILN_C99_REFUSE("a member this backend declares and has not implemented");
                 }
                 if (!object->properties[index].accessor) {
                     *out = object->properties[index].value;
@@ -88,7 +140,9 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
              * installs. Without the HTTP group the pointer can never exist,
              * so this probe is compiled out (see `retained_method_groups`). */
 #if KILN_RETAIN_GROUP_NODE_HTTP
-            if (kiln_c99_node_materialize_header(current, key, key_len, out)) {
+            (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
+                                                &intrinsic_len);
+            if (intrinsic_key != NULL && kiln_c99_node_materialize_header(current, intrinsic_key, intrinsic_len, out)) {
                 return KILN_C99_OK;
             }
 #endif
@@ -107,16 +161,18 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
          * so, while `it.chunks` reading undefined would quietly fail a feature test. */
         if (kiln_c99_object_of(target)->prototype.tag == KILN_VALUE_BUILTIN &&
             kiln_c99_object_of(target)->prototype.bits == KILN_C99_BUILTIN_ITERATOR_PROTOTYPE) {
-            uint64_t helper = kiln_c99_iterator_prototype_method(key, key_len);
+            (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
+                                                &intrinsic_len);
+            uint64_t helper = kiln_c99_iterator_prototype_method(intrinsic_key, intrinsic_len);
             if (helper != 0) {
                 *out = kiln_c99_method(helper);
                 return KILN_C99_OK;
             }
-            if (kiln_c99_same_name(key, key_len, "constructor")) {
+            if (kiln_c99_same_name_key(key, "constructor")) {
                 *out = kiln_c99_builtin(KILN_C99_BUILTIN_ITERATOR);
                 return KILN_C99_OK;
             }
-            if (kiln_c99_iterator_prototype_gap(key, key_len)) {
+            if (kiln_c99_iterator_prototype_gap(intrinsic_key, intrinsic_len)) {
                 KILN_C99_REFUSE("an Iterator.prototype helper this backend has not implemented");
             }
         }
@@ -125,11 +181,13 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
          * that asks for. */
         if (kiln_c99_object_of(target)->prototype.tag != KILN_VALUE_NULL) {
             uint64_t inherited;
+            (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
+                                                &intrinsic_len);
             /* An error inherits `toString` from `Error.prototype`, not from `Object.prototype`:
              * it is the one object that converts to something other than "[object Object]". The
              * range lookup below would hand out the generic method and `String(err)` would lose
              * the message, so the error's own is answered first. */
-            if (kiln_c99_same_name(key, key_len, "toString") &&
+            if (kiln_c99_same_name_key(key, "toString") &&
                 kiln_c99_error_kind(target) != 0) {
                 *out = kiln_c99_method(KILN_C99_METHOD_ERROR_TO_STRING);
                 return KILN_C99_OK;
@@ -137,8 +195,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             /* `name` and `message` live on the error prototypes, not on the instance, so an own
              * `name = "TimeoutError"` class field and a `get name()` on a subclass prototype are
              * both found by the walk above and only the default reaches here. */
-            if (kiln_c99_same_name(key, key_len, "name") ||
-                kiln_c99_same_name(key, key_len, "message")) {
+            if (kiln_c99_same_name_key(key, "name") ||
+                kiln_c99_same_name_key(key, "message")) {
                 uint64_t kind = kiln_c99_error_kind(target);
                 const char *named = kind == 0 ? NULL : kiln_c99_error_name(kind);
                 if (named != NULL) {
@@ -147,20 +205,20 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                     return KILN_C99_OK;
                 }
             }
-            inherited = kiln_c99_same_name(key, key_len, "isPrototypeOf")
+            inherited = kiln_c99_same_name_key(key, "isPrototypeOf")
                                      ? KILN_C99_METHOD_IS_PROTOTYPE_OF
-                                 : kiln_c99_same_name(key, key_len, "propertyIsEnumerable")
+                                 : kiln_c99_same_name_key(key, "propertyIsEnumerable")
                                      ? KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE
-                                 : kiln_c99_same_name(key, key_len, "toLocaleString")
+                                 : kiln_c99_same_name_key(key, "toLocaleString")
                                      ? KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING
-                                     : kiln_c99_lookup_method(key, key_len,
+                                     : kiln_c99_lookup_method(intrinsic_key, intrinsic_len,
                                                               KILN_C99_METHOD_HAS_OWN_PROPERTY,
                                                               KILN_C99_METHOD_OBJECT_VALUE_OF);
             if (inherited != 0) {
                 *out = kiln_c99_method(inherited);
                 return KILN_C99_OK;
             }
-            if (kiln_c99_same_name(key, key_len, "constructor")) {
+            if (kiln_c99_same_name_key(key, "constructor")) {
                 /* An error already records its kind, and `error.constructor.name` is the ordinary
                  * way a program asks which one it caught -- so the answer comes from the kind
                  * rather than from the fact that an error is an object. */
@@ -169,7 +227,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 return KILN_C99_OK;
             }
         }
-        if (kiln_c99_same_name(key, key_len, "__proto__") &&
+        if (kiln_c99_same_name_key(key, "__proto__") &&
             kiln_c99_object_of(target)->prototype.tag != KILN_VALUE_NULL) {
             /* An accessor on `Object.prototype`, not a property, which is why it is answered
              * here rather than stored: it reports the same link `Object.getPrototypeOf` does and
@@ -188,18 +246,18 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
     }
     case KILN_VALUE_FUNCTION: {
         kiln_closure *closure = kiln_c99_closure_of(target);
-        if (kiln_c99_same_name(key, key_len, "prototype") &&
+        if (kiln_c99_same_name_key(key, "prototype") &&
             !closure->arrow &&
             (!closure->asynchronous || closure->async_generator) &&
             (!closure->is_method || closure->generator)) {
             return kiln_c99_prototype_object(target, out);
         }
-        if (kiln_c99_same_name(key, key_len, "name")) {
+        if (kiln_c99_same_name_key(key, "name")) {
             *out = closure->name == NULL ? kiln_c99_from_units(NULL, 0)
-                                         : kiln_c99_copy_text(closure->name, closure->name_len);
+                                         : kiln_c99_stable_key_value(closure->name);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "length")) {
+        if (kiln_c99_same_name_key(key, "length")) {
             *out = kiln_c99_number((double)closure->arity);
             return KILN_C99_OK;
         }
@@ -210,20 +268,22 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 kiln_c99_ensure_dictionary(store);
             }
             for (index = 0; index < store->count; ++index) {
-                if (kiln_c99_same_key(&store->properties[index], key, key_len)) {
+                if (kiln_c99_same_key_view(&store->properties[index], key)) {
                     /* An assigned property wins, exactly as an own property shadows an
                      * inherited one -- which is what `Function.prototype.call` is. */
-                    return kiln_c99_get(host, closure->properties, key, key_len, out, depth,
+                    return kiln_c99_get_key(host, closure->properties, key, ikey, out, depth,
                                         thrown);
                 }
             }
         }
-        if (kiln_c99_same_name(key, key_len, "@@species")) {
+        if (kiln_c99_same_name_key(key, "@@species")) {
             *out = target;
             return KILN_C99_OK;
         }
         {
-            uint64_t callable = kiln_c99_callable_method(key, key_len);
+            (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
+                                                &intrinsic_len);
+            uint64_t callable = kiln_c99_callable_method(intrinsic_key, intrinsic_len);
             if (callable != 0) {
                 *out = kiln_c99_method(callable);
                 return KILN_C99_OK;
@@ -231,7 +291,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         }
         /* `f.constructor === Function`, which is how a program asks what it is holding. The
          * bound and method paths already answered this; a plain function did not. */
-        if (kiln_c99_same_name(key, key_len, "constructor")) {
+        if (kiln_c99_same_name_key(key, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_FUNCTION);
             return KILN_C99_OK;
         }
@@ -247,11 +307,11 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
          * `toString` exactly as it does for a plain object. */
         {
             uint64_t borrowed =
-                kiln_c99_same_name(key, key_len, "hasOwnProperty") ? KILN_C99_METHOD_HAS_OWN_PROPERTY
-                : kiln_c99_same_name(key, key_len, "isPrototypeOf") ? KILN_C99_METHOD_IS_PROTOTYPE_OF
-                : kiln_c99_same_name(key, key_len, "propertyIsEnumerable")
+                kiln_c99_same_name_key(key, "hasOwnProperty") ? KILN_C99_METHOD_HAS_OWN_PROPERTY
+                : kiln_c99_same_name_key(key, "isPrototypeOf") ? KILN_C99_METHOD_IS_PROTOTYPE_OF
+                : kiln_c99_same_name_key(key, "propertyIsEnumerable")
                     ? KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE
-                : kiln_c99_same_name(key, key_len, "valueOf") ? KILN_C99_METHOD_OBJECT_VALUE_OF
+                : kiln_c99_same_name_key(key, "valueOf") ? KILN_C99_METHOD_OBJECT_VALUE_OF
                     : 0;
             if (borrowed != 0) {
                 *out = kiln_c99_method(borrowed);
@@ -263,17 +323,18 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                             "answer",
                             out);
         }
-        return kiln_c99_get(host, closure->properties, key, key_len, out, depth, thrown);
+        return kiln_c99_get_key(host, closure->properties, key, ikey, out, depth, thrown);
     }
 #if KILN_RETAIN_GROUP_TEMPORAL
     case KILN_VALUE_TEMPORAL: {
+        (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
         /* Every calendar and wall-clock field of all eight types comes through one name-keyed call
          * into the engine, so there is no per-field code here and no second table to drift. */
         char inline_buffer[64];
         double number = 0.0;
         int32_t length = 0;
         int32_t shape = kiln_temporal_get(kiln_c99_temporal_of(target),
-                                          (const unsigned char *)key, key_len, &number,
+                                          (const unsigned char *)intrinsic_key, intrinsic_len, &number,
                                           (unsigned char *)inline_buffer, sizeof inline_buffer,
                                           &length);
         switch (shape) {
@@ -307,7 +368,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                     return KILN_C99_OUT_OF_MEMORY;
                 }
                 shape = kiln_temporal_get(kiln_c99_temporal_of(target),
-                                          (const unsigned char *)key, key_len, &number,
+                                          (const unsigned char *)intrinsic_key, intrinsic_len, &number,
                                           (unsigned char *)spilled, wanted, &length);
                 if (shape != (wide ? 5 : 2) || length < 0) {
                     free(spilled);
@@ -332,27 +393,27 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         default:
             break;
         }
-        if (kiln_c99_same_name(key, key_len, "toLocaleString")) {
+        if (kiln_c99_same_name_key(key, "toLocaleString")) {
             /* `toString` is in the operation table below instead, because it takes options --
              * `{ smallestUnit: "minute" }` really does shorten the text. `toLocaleString` takes
              * locale arguments this realm does not have, and answers the plain form. */
             *out = kiln_c99_method(KILN_C99_METHOD_TEMPORAL_TO_STRING);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "toJSON")) {
+        if (kiln_c99_same_name_key(key, "toJSON")) {
             *out = kiln_c99_method(KILN_C99_METHOD_TEMPORAL_TO_JSON);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "valueOf")) {
+        if (kiln_c99_same_name_key(key, "valueOf")) {
             *out = kiln_c99_method(KILN_C99_METHOD_TEMPORAL_VALUE_OF);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "@@toStringTag")) {
+        if (kiln_c99_same_name_key(key, "@@toStringTag")) {
             const char *tag = kiln_c99_temporal_tag(target);
             *out = kiln_c99_copy_text(tag, strlen(tag));
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "constructor")) {
+        if (kiln_c99_same_name_key(key, "constructor")) {
             *out = kiln_c99_builtin(kiln_c99_temporal_builtin_of(target));
             return KILN_C99_OK;
         }
@@ -360,7 +421,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
          * `toPlainDate` and their siblings -- through the one name-keyed call into the engine that
          * the readers above already use. */
         {
-            uint64_t operation = kiln_c99_temporal_op_code(key, key_len);
+            uint64_t operation = kiln_c99_temporal_op_code(intrinsic_key, intrinsic_len);
             if (operation != 0) {
                 *out = kiln_c99_method(operation);
                 return KILN_C99_OK;
@@ -373,12 +434,12 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
          * reference it reduces. Refusing that probe turned `String(aPlainDate)` into a thrown
          * "unsupported Temporal member" -- a refusal for a conversion the value plainly has, one
          * step after the missing text case stopped it reading `undefined`. */
-        if (key_len >= 2 && key[0] == '@' && key[1] == '@') {
+        if (kiln_c99_key_is_reserved(key)) {
             KILN_C99_ABSENT("a well-known symbol this Temporal type does not carry", out);
         }
         /* A name that exists in the language and is not wired says which. Reading `undefined`
          * would surface three frames away as "not a function". */
-        return kiln_c99_temporal_unsupported(thrown, kiln_c99_temporal_tag(target), key, key_len);
+        return kiln_c99_temporal_unsupported(thrown, kiln_c99_temporal_tag(target), intrinsic_key, intrinsic_len);
     }
 #endif
     case KILN_VALUE_REGEXP: {
@@ -388,19 +449,19 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         static const char known[] = "dgimsuvy";
         static const char *const names[] = {"hasIndices", "global",  "ignoreCase", "multiline",
                                             "dotAll",     "unicode", "unicodeSets", "sticky"};
-        if (kiln_c99_same_name(key, key_len, "source")) {
-            *out = kiln_c99_value(KILN_VALUE_STRING, 0, regexp->source, regexp->source_len);
+        if (kiln_c99_same_name_key(key, "source")) {
+            *out = kiln_c99_stable_key_value(regexp->source);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "flags")) {
-            *out = kiln_c99_value(KILN_VALUE_STRING, 0, regexp->flags, regexp->flags_len);
+        if (kiln_c99_same_name_key(key, "flags")) {
+            *out = kiln_c99_stable_key_value(regexp->flags);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "lastIndex")) {
+        if (kiln_c99_same_name_key(key, "lastIndex")) {
             *out = kiln_c99_number(regexp->last_index);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "constructor")) {
+        if (kiln_c99_same_name_key(key, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_REGEXP);
             return KILN_C99_OK;
         }
@@ -409,17 +470,19 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         for (index = 0; index + 1 < sizeof known; ++index) {
             size_t at;
             int present = 0;
-            if (!kiln_c99_same_name(key, key_len, names[index])) {
+            if (!kiln_c99_same_name_key(key, names[index])) {
                 continue;
             }
-            for (at = 0; at < regexp->flags_len; ++at) {
-                present = present || regexp->flags[at] == known[index];
+            for (at = 0; regexp->flags != NULL && at < regexp->flags->unit_len; ++at) {
+                present = present || kiln_string_unit_at(regexp->flags, at) == (unsigned char)known[index];
             }
             *out = kiln_c99_boolean(present);
             return KILN_C99_OK;
         }
         {
-            uint64_t code = kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_REGEXP_TEST,
+            (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
+                                                &intrinsic_len);
+            uint64_t code = kiln_c99_lookup_method(intrinsic_key, intrinsic_len, KILN_C99_METHOD_REGEXP_TEST,
                                                    KILN_C99_METHOD_REGEXP_TO_STRING);
             if (code != 0) {
                 *out = kiln_c99_method(code);
@@ -429,19 +492,20 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         KILN_C99_REFUSE("a RegExp.prototype member this backend has not implemented");
     }
     case KILN_VALUE_ARRAY_BUFFER:
-        if (kiln_c99_same_name(key, key_len, "byteLength")) {
+        (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
+        if (kiln_c99_same_name_key(key, "byteLength")) {
             *out = kiln_c99_number((double)kiln_c99_typed_buffer_of(target)->byte_length);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "constructor")) {
+        if (kiln_c99_same_name_key(key, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_BUFFER);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "slice")) {
+        if (kiln_c99_same_name_key(key, "slice")) {
             *out = kiln_c99_method(KILN_C99_METHOD_SLICE);
             return KILN_C99_OK;
         }
-        if (kiln_c99_is_array_buffer_member(key, key_len)) {
+        if (kiln_c99_is_array_buffer_member(intrinsic_key, intrinsic_len)) {
             KILN_C99_REFUSE("an ArrayBuffer.prototype member this backend has not implemented");
         }
         KILN_C99_ABSENT("not a member of ArrayBuffer.prototype; kiln_c99_is_array_buffer_member "
@@ -449,26 +513,26 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                         out);
     case KILN_VALUE_DATA_VIEW: {
         kiln_data_view *view = kiln_c99_data_view_of(target);
-        if (kiln_c99_same_name(key, key_len, "buffer")) {
+        if (kiln_c99_same_name_key(key, "buffer")) {
             /* The buffer the view was made over, not a copy of it: `new DataView(b).buffer === b`
              * is what a program checks before it starts writing through one. */
             *out = kiln_c99_value(KILN_VALUE_ARRAY_BUFFER, (uint64_t)(uintptr_t)view->buffer,
                                   NULL, 0);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "byteLength")) {
+        if (kiln_c99_same_name_key(key, "byteLength")) {
             *out = kiln_c99_number((double)view->byte_length);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "byteOffset")) {
+        if (kiln_c99_same_name_key(key, "byteOffset")) {
             *out = kiln_c99_number((double)view->byte_offset);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "constructor")) {
+        if (kiln_c99_same_name_key(key, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_DATA_VIEW);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "@@toStringTag")) {
+        if (kiln_c99_same_name_key(key, "@@toStringTag")) {
             /* The same string `Object.prototype.toString` reports, answered here for the reason a
              * typed view answers its own: a program reads one spelling or the other, and the two
              * must not be able to disagree. */
@@ -476,14 +540,16 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             return KILN_C99_OK;
         }
         {
+            (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
+                                                &intrinsic_len);
             /* One range, shared with the prototype table and with `in`, so a read and a presence
              * test cannot disagree about which names a view has. No `@@iterator` and no indices:
              * a DataView is not iterable and has no element to index, which is exactly what
              * distinguishes it from the typed views below. */
             uint64_t method =
-                kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_DATA_VIEW_GET_INT8,
+                kiln_c99_lookup_method(intrinsic_key, intrinsic_len, KILN_C99_METHOD_DATA_VIEW_GET_INT8,
                                        KILN_C99_METHOD_DATA_VIEW_SET_BIG_UINT64);
-            if (method == 0 && kiln_c99_is_data_view_member(key, key_len)) {
+            if (method == 0 && kiln_c99_is_data_view_member(intrinsic_key, intrinsic_len)) {
                 /* A real member of `DataView.prototype` this backend has not grown. The
                  * interpreter answers a function for both, so `undefined` here would be the
                  * silent kind of wrong -- the program would take the branch written for a realm
@@ -492,11 +558,11 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 KILN_C99_REFUSE("a DataView.prototype member this backend has not implemented");
             }
             if (method == 0) {
-                method = kiln_c99_same_name(key, key_len, "isPrototypeOf")
+                method = kiln_c99_same_name_key(key, "isPrototypeOf")
                              ? KILN_C99_METHOD_IS_PROTOTYPE_OF
-                         : kiln_c99_same_name(key, key_len, "propertyIsEnumerable")
+                         : kiln_c99_same_name_key(key, "propertyIsEnumerable")
                              ? KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE
-                             : kiln_c99_lookup_method(key, key_len,
+                             : kiln_c99_lookup_method(intrinsic_key, intrinsic_len,
                                                       KILN_C99_METHOD_HAS_OWN_PROPERTY,
                                                       KILN_C99_METHOD_OBJECT_VALUE_OF);
             }
@@ -506,49 +572,51 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
     }
     case KILN_VALUE_TYPED_ARRAY: {
         kiln_typed_array *view = kiln_c99_typed_array_of(target);
-        if (kiln_c99_same_name(key, key_len, "@@toStringTag")) {
+        if (kiln_c99_same_name_key(key, "@@toStringTag")) {
             const char *name = view->is_buffer ? "Uint8Array" : kiln_c99_typed_name(view->kind);
             *out = kiln_c99_copy_text(name, strlen(name));
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "length")) {
+        if (kiln_c99_same_name_key(key, "length")) {
             *out = kiln_c99_number((double)view->length);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "byteLength")) {
+        if (kiln_c99_same_name_key(key, "byteLength")) {
             *out = kiln_c99_number((double)(view->length * kiln_c99_typed_width(view->kind)));
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "byteOffset")) {
+        if (kiln_c99_same_name_key(key, "byteOffset")) {
             *out = kiln_c99_number((double)view->byte_offset);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "BYTES_PER_ELEMENT")) {
+        if (kiln_c99_same_name_key(key, "BYTES_PER_ELEMENT")) {
             *out = kiln_c99_number((double)kiln_c99_typed_width(view->kind));
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "buffer")) {
+        if (kiln_c99_same_name_key(key, "buffer")) {
             *out = kiln_c99_value(KILN_VALUE_ARRAY_BUFFER,
                                   (uint64_t)(uintptr_t)view->buffer, NULL, 0);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "constructor")) {
+        if (kiln_c99_same_name_key(key, "constructor")) {
             *out = kiln_c99_builtin(view->is_buffer ? KILN_C99_BUILTIN_BUFFER
                                                     : kiln_c99_typed_constructor(view->kind));
             return KILN_C99_OK;
         }
-        if (view->is_buffer && kiln_c99_same_name(key, key_len, "toString")) {
+        if (view->is_buffer && kiln_c99_same_name_key(key, "toString")) {
             *out = kiln_c99_method(KILN_C99_METHOD_BUFFER_TO_STRING);
             return KILN_C99_OK;
         }
         {
+            (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
+                                                &intrinsic_len);
             /* One table for the prototype's own members, shared with `in` and with the
              * reflective paths, so a read and a presence test can never disagree about which
              * names a view has. `@@iterator` is `values`, which is what makes `[...view]` and
              * `for (const x of view)` walk the live view rather than a copy. */
-            uint64_t method = kiln_c99_same_name(key, key_len, "@@iterator")
+            uint64_t method = kiln_c99_same_name_key(key, "@@iterator")
                                   ? KILN_C99_METHOD_ARRAY_VALUES
-                                  : kiln_c99_typed_prototype_method(key, key_len);
+                                  : kiln_c99_typed_prototype_method(intrinsic_key, intrinsic_len);
             if (method == 0) {
                 kiln_value concrete_proto =
                     kiln_c99_builtin(kiln_c99_typed_prototype(view->kind));
@@ -559,8 +627,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                     size_t pidx;
                     if (properties->shape != NULL) kiln_c99_ensure_dictionary(properties);
                     for (pidx = 0; pidx < properties->count; ++pidx) {
-                        if (kiln_c99_same_key(&properties->properties[pidx], key, key_len)) {
-                            return kiln_c99_get(host, store, key, key_len, out, depth, thrown);
+                        if (kiln_c99_same_key_view(&properties->properties[pidx], key)) {
+                            return kiln_c99_get_key(host, store, key, ikey, out, depth, thrown);
                         }
                     }
                 }
@@ -572,22 +640,22 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                     size_t pidx;
                     if (properties->shape != NULL) kiln_c99_ensure_dictionary(properties);
                     for (pidx = 0; pidx < properties->count; ++pidx) {
-                        if (kiln_c99_same_key(&properties->properties[pidx], key, key_len)) {
-                            return kiln_c99_get(host, store, key, key_len, out, depth, thrown);
+                        if (kiln_c99_same_key_view(&properties->properties[pidx], key)) {
+                            return kiln_c99_get_key(host, store, key, ikey, out, depth, thrown);
                         }
                     }
                 }
-                if (kiln_c99_is_typed_array_member(view->kind == KILN_TYPED_UINT8, key, key_len)) {
+                if (kiln_c99_is_typed_array_member(view->kind == KILN_TYPED_UINT8, intrinsic_key, intrinsic_len)) {
                     /* A real member this backend has not grown yet. `undefined` would be a
                      * silent wrong answer -- the program would call it and get a TypeError
                      * naming the wrong thing -- so this refuses and joins the backlog. */
                     KILN_C99_REFUSE("a typed-array member this backend has not implemented");
                 }
-                method = kiln_c99_same_name(key, key_len, "isPrototypeOf")
+                method = kiln_c99_same_name_key(key, "isPrototypeOf")
                              ? KILN_C99_METHOD_IS_PROTOTYPE_OF
-                         : kiln_c99_same_name(key, key_len, "propertyIsEnumerable")
+                         : kiln_c99_same_name_key(key, "propertyIsEnumerable")
                              ? KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE
-                             : kiln_c99_lookup_method(key, key_len,
+                             : kiln_c99_lookup_method(intrinsic_key, intrinsic_len,
                                                       KILN_C99_METHOD_HAS_OWN_PROPERTY,
                                                       KILN_C99_METHOD_OBJECT_VALUE_OF);
             }
@@ -597,35 +665,36 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
     }
     case KILN_VALUE_ARRAY: {
         uint64_t code;
-        if (kiln_c99_same_name(key, key_len, "constructor")) {
+        if (kiln_c99_same_name_key(key, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "length")) {
+        if (kiln_c99_same_name_key(key, "length")) {
             *out = kiln_c99_number((double)kiln_c99_array_of(target)->count);
             return KILN_C99_OK;
         }
         /* `for...of` asks for this and then drives `next`, where spread walks the array
          * directly. Both have to work, and they are different code paths, so an array needs the
          * protocol spelled out even though nothing else about it is unusual. */
-        if (kiln_c99_same_name(key, key_len, "@@iterator") ||
-            kiln_c99_same_name(key, key_len, "values")) {
+        if (kiln_c99_same_name_key(key, "@@iterator") ||
+            kiln_c99_same_name_key(key, "values")) {
             *out = kiln_c99_method(KILN_C99_METHOD_ARRAY_VALUES);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "@@unscopables")) {
+        if (kiln_c99_same_name_key(key, "@@unscopables")) {
             return kiln_c99_get_array_unscopables(out);
         }
-        code = kiln_c99_array_method(key, key_len);
+        (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
+        code = kiln_c99_array_method(intrinsic_key, intrinsic_len);
         if (code != 0) {
             *out = kiln_c99_method(code);
             return KILN_C99_OK;
         }
-        code = kiln_c99_same_name(key, key_len, "isPrototypeOf")
+        code = kiln_c99_same_name_key(key, "isPrototypeOf")
                    ? KILN_C99_METHOD_IS_PROTOTYPE_OF
-               : kiln_c99_same_name(key, key_len, "propertyIsEnumerable")
+               : kiln_c99_same_name_key(key, "propertyIsEnumerable")
                    ? KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE
-                   : kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_HAS_OWN_PROPERTY,
+                   : kiln_c99_lookup_method(intrinsic_key, intrinsic_len, KILN_C99_METHOD_HAS_OWN_PROPERTY,
                                             KILN_C99_METHOD_OBJECT_VALUE_OF);
         if (code != 0) {
             *out = kiln_c99_method(code);
@@ -638,7 +707,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
              * actually holds is answered, so a *missing* name is still the error below rather
              * than undefined. */
             int found;
-            int status = kiln_c99_store_get(host, target, key, key_len, out, depth, thrown,
+            int status = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown,
                                             &found);
             if (status != KILN_C99_OK || found) {
                 return status;
@@ -647,23 +716,23 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         {
             kiln_array *arr = kiln_c99_array_of(target);
             if (arr->match_index >= 0) {
-                if (kiln_c99_same_name(key, key_len, "index")) {
+                if (kiln_c99_same_name_key(key, "index")) {
                     *out = kiln_c99_number((double)arr->match_index);
                     return KILN_C99_OK;
                 }
-                if (kiln_c99_same_name(key, key_len, "input")) {
+                if (kiln_c99_same_name_key(key, "input")) {
                     *out = arr->match_input;
                     return KILN_C99_OK;
                 }
-                if (kiln_c99_same_name(key, key_len, "groups")) {
+                if (kiln_c99_same_name_key(key, "groups")) {
                     int found;
                     kiln_c99_materialize_match_properties(arr);
-                    return kiln_c99_store_get(host, target, key, key_len, out, depth, thrown,
+                    return kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown,
                                               &found);
                 }
             }
         }
-        if (kiln_c99_same_name(key, key_len, "toLocaleString")) {
+        if (kiln_c99_same_name_key(key, "toLocaleString")) {
             *out = kiln_c99_method(KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING);
             return KILN_C99_OK;
         }
@@ -671,7 +740,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
          * "undefined is not a function" three frames from the cause, so it says so here -- but
          * only for a name the language actually puts on `Array.prototype`. Anything else is
          * absent, and absent is undefined. */
-        if (!kiln_c99_is_array_member(key, key_len)) {
+        if (!kiln_c99_is_array_member(intrinsic_key, intrinsic_len)) {
             KILN_C99_ABSENT("not a member of Array.prototype; kiln_c99_is_array_member holds the "
                             "ones that are",
                             out);
@@ -679,16 +748,16 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         KILN_C99_REFUSE("an Array.prototype member this backend has not implemented");
     }
     case KILN_VALUE_BOOLEAN:
-        if (kiln_c99_same_name(key, key_len, "constructor")) {
+        if (kiln_c99_same_name_key(key, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_BOOLEAN);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "toString") ||
-            kiln_c99_same_name(key, key_len, "toLocaleString")) {
+        if (kiln_c99_same_name_key(key, "toString") ||
+            kiln_c99_same_name_key(key, "toLocaleString")) {
             *out = kiln_c99_method(KILN_C99_METHOD_PRIMITIVE_TO_STRING);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "valueOf")) {
+        if (kiln_c99_same_name_key(key, "valueOf")) {
             *out = kiln_c99_method(KILN_C99_METHOD_OBJECT_VALUE_OF);
             return KILN_C99_OK;
         }
@@ -699,32 +768,33 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         KILN_C99_ABSENT("not a member of the wrapper prototype this primitive boxes to", out);
     case KILN_VALUE_STRING: {
         uint64_t code;
-        if (kiln_c99_same_name(key, key_len, "constructor")) {
+        if (kiln_c99_same_name_key(key, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_STRING);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "toString")) {
+        if (kiln_c99_same_name_key(key, "toString")) {
             *out = kiln_c99_method(KILN_C99_METHOD_PRIMITIVE_TO_STRING);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "valueOf")) {
+        if (kiln_c99_same_name_key(key, "valueOf")) {
             *out = kiln_c99_method(KILN_C99_METHOD_OBJECT_VALUE_OF);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "length")) {
+        if (kiln_c99_same_name_key(key, "length")) {
             *out = kiln_c99_number((double)kiln_c99_string_length(target));
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "@@iterator")) {
+        if (kiln_c99_same_name_key(key, "@@iterator")) {
             *out = kiln_c99_method(KILN_C99_METHOD_ARRAY_VALUES);
             return KILN_C99_OK;
         }
-        code = kiln_c99_string_method(key, key_len);
+        (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
+        code = kiln_c99_string_method(intrinsic_key, intrinsic_len);
         if (code != 0) {
             *out = kiln_c99_method(code);
             return KILN_C99_OK;
         }
-        if (kiln_c99_is_string_member(key, key_len)) {
+        if (kiln_c99_is_string_member(intrinsic_key, intrinsic_len)) {
             KILN_C99_REFUSE("a String.prototype member this backend has not implemented");
         }
         /* Not an index, not `length`, not a member: the property is absent, and absent has an
@@ -734,20 +804,21 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                         out);
     }
     case KILN_VALUE_PROMISE: {
+        (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
         {
             int found;
-            int status = kiln_c99_store_get(host, target, key, key_len, out, depth, thrown,
+            int status = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown,
                                             &found);
             if (status != KILN_C99_OK || found) {
                 return status;
             }
         }
         uint64_t code;
-        if (kiln_c99_same_name(key, key_len, "constructor")) {
+        if (kiln_c99_same_name_key(key, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_PROMISE);
             return KILN_C99_OK;
         }
-        code = kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_THEN,
+        code = kiln_c99_lookup_method(intrinsic_key, intrinsic_len, KILN_C99_METHOD_THEN,
                                       KILN_C99_METHOD_FINALLY);
         if (code != 0) {
             *out = kiln_c99_method(code);
@@ -758,15 +829,16 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                         out);
     }
     case KILN_VALUE_COLLECTION: {
+        (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
         kiln_collection *collection = kiln_c99_collection_of(target);
         uint64_t code;
         /* A weak collection has no `size` at all, so its name falls through to the absent
          * answer below rather than stopping the program. */
-        if (!collection->is_weak && kiln_c99_same_name(key, key_len, "size")) {
+        if (!collection->is_weak && kiln_c99_same_name_key(key, "size")) {
             *out = kiln_c99_number((double)collection->live);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "constructor")) {
+        if (kiln_c99_same_name_key(key, "constructor")) {
             /* Which of the four this is, spelled the way every other exotic kind spells it. */
             *out = kiln_c99_builtin(collection->is_weak
                                         ? (collection->is_map ? KILN_C99_BUILTIN_WEAK_MAP
@@ -776,7 +848,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             return KILN_C99_OK;
         }
         code = kiln_c99_lookup_method(
-            key, key_len, KILN_C99_METHOD_COLLECTION_GET,
+            intrinsic_key, intrinsic_len, KILN_C99_METHOD_COLLECTION_GET,
             collection->is_weak ? KILN_C99_METHOD_COLLECTION_DELETE
                                 : KILN_C99_METHOD_COLLECTION_SELF);
         /* A Set has no `get` or `set`, and a Map has no `add`: offering one would let a program
@@ -789,7 +861,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
              * declared put on the prototype -- and only then the refusal that names a member
              * this backend has not grown. */
             int found;
-            int status = kiln_c99_store_get(host, target, key, key_len, out, depth, thrown,
+            int status = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown,
                                             &found);
             if (status != KILN_C99_OK || found) {
                 return status;
@@ -798,11 +870,11 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
              * be resolved here rather than fall to the absent answer below: turning
              * `m.hasOwnProperty` into undefined would replace a refusal with a wrong answer,
              * which is the trade this whole path exists to avoid. */
-            code = kiln_c99_same_name(key, key_len, "isPrototypeOf")
+            code = kiln_c99_same_name_key(key, "isPrototypeOf")
                        ? KILN_C99_METHOD_IS_PROTOTYPE_OF
-                   : kiln_c99_same_name(key, key_len, "propertyIsEnumerable")
+                   : kiln_c99_same_name_key(key, "propertyIsEnumerable")
                        ? KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE
-                       : kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_HAS_OWN_PROPERTY,
+                       : kiln_c99_lookup_method(intrinsic_key, intrinsic_len, KILN_C99_METHOD_HAS_OWN_PROPERTY,
                                                 KILN_C99_METHOD_OBJECT_VALUE_OF);
             if (code != 0) {
                 *out = kiln_c99_method(code);
@@ -812,7 +884,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
              * `m.forEach(f)` into "undefined is not a function" three frames from the cause, so
              * it says so here -- but only for a name the language actually puts on this
              * collection's prototype. Anything else is absent, and absent is undefined. */
-            if (!kiln_c99_is_collection_member(collection, key, key_len)) {
+            if (!kiln_c99_is_collection_member(collection, intrinsic_key, intrinsic_len)) {
                 KILN_C99_ABSENT("not a member of this collection's prototype; "
                                 "kiln_c99_is_collection_member holds the ones that are",
                                 out);
@@ -823,6 +895,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         return KILN_C99_OK;
     }
     case KILN_VALUE_DATE: {
+        (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
         static const struct {
             const char *name;
             uint64_t code;
@@ -852,14 +925,14 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             {"setSeconds", KILN_C99_METHOD_SET_SECONDS},
             {"setMilliseconds", KILN_C99_METHOD_SET_MILLISECONDS},
         };
-        uint64_t code = kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_GET_TIME,
+        uint64_t code = kiln_c99_lookup_method(intrinsic_key, intrinsic_len, KILN_C99_METHOD_GET_TIME,
                                                KILN_C99_METHOD_DATE_TO_STRING);
         size_t alias;
         if (code == 0) {
-            code = kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_SET_TIME,
+            code = kiln_c99_lookup_method(intrinsic_key, intrinsic_len, KILN_C99_METHOD_SET_TIME,
                                           KILN_C99_METHOD_SET_MILLISECONDS);
         }
-        if (kiln_c99_same_name(key, key_len, "constructor")) {
+        if (kiln_c99_same_name_key(key, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_DATE);
             return KILN_C99_OK;
         }
@@ -868,14 +941,14 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             return KILN_C99_OK;
         }
         for (alias = 0; alias < sizeof ALIASES / sizeof *ALIASES; ++alias) {
-            if (kiln_c99_same_name(key, key_len, ALIASES[alias].name)) {
+            if (kiln_c99_same_name_key(key, ALIASES[alias].name)) {
                 *out = kiln_c99_method(ALIASES[alias].code);
                 return KILN_C99_OK;
             }
         }
         /* Same split as the array above: a member this backend lacks refuses by name, and a name
          * that is not a member at all is undefined. */
-        if (!kiln_c99_is_date_member(key, key_len)) {
+        if (!kiln_c99_is_date_member(intrinsic_key, intrinsic_len)) {
             KILN_C99_ABSENT("not a member of Date.prototype; kiln_c99_is_date_member holds the "
                             "ones that are",
                             out);
@@ -883,8 +956,9 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         KILN_C99_REFUSE("a Date.prototype member this backend has not implemented");
     }
     case KILN_VALUE_GENERATOR: {
+        (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
         uint64_t code;
-        if (kiln_c99_same_name(key, key_len, "@@asyncIterator")) {
+        if (kiln_c99_same_name_key(key, "@@asyncIterator")) {
             /* Only an async generator has one, and answering for a sync one would make
              * `for await` take the wrong loop. */
             if (!kiln_c99_generator_of(target)->async_generator) {
@@ -893,11 +967,11 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             *out = kiln_c99_method(KILN_C99_METHOD_GENERATOR_SELF);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "throw")) {
+        if (kiln_c99_same_name_key(key, "throw")) {
             *out = kiln_c99_method(KILN_C99_METHOD_GENERATOR_THROW);
             return KILN_C99_OK;
         }
-        code = kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_GENERATOR_NEXT,
+        code = kiln_c99_lookup_method(intrinsic_key, intrinsic_len, KILN_C99_METHOD_GENERATOR_NEXT,
                                       KILN_C99_METHOD_GENERATOR_SELF);
         if (code != 0) {
             *out = kiln_c99_method(code);
@@ -911,14 +985,15 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
     case KILN_VALUE_COMMONJS_REQUIRE:
     case KILN_VALUE_METHOD:
     case KILN_VALUE_SETTLER: {
+        (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
         uint64_t callable;
         kiln_value store;
         int stored;
-        if (kiln_c99_same_name(key, key_len, "constructor")) {
+        if (kiln_c99_same_name_key(key, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_FUNCTION);
             return KILN_C99_OK;
         }
-        callable = kiln_c99_callable_method(key, key_len);
+        callable = kiln_c99_callable_method(intrinsic_key, intrinsic_len);
         if (callable != 0) {
             *out = kiln_c99_method(callable);
             return KILN_C99_OK;
@@ -935,11 +1010,11 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
          * `toString` exactly as it does for a plain object. */
         {
             uint64_t borrowed =
-                kiln_c99_same_name(key, key_len, "hasOwnProperty") ? KILN_C99_METHOD_HAS_OWN_PROPERTY
-                : kiln_c99_same_name(key, key_len, "isPrototypeOf") ? KILN_C99_METHOD_IS_PROTOTYPE_OF
-                : kiln_c99_same_name(key, key_len, "propertyIsEnumerable")
+                kiln_c99_same_name_key(key, "hasOwnProperty") ? KILN_C99_METHOD_HAS_OWN_PROPERTY
+                : kiln_c99_same_name_key(key, "isPrototypeOf") ? KILN_C99_METHOD_IS_PROTOTYPE_OF
+                : kiln_c99_same_name_key(key, "propertyIsEnumerable")
                     ? KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE
-                : kiln_c99_same_name(key, key_len, "valueOf") ? KILN_C99_METHOD_OBJECT_VALUE_OF
+                : kiln_c99_same_name_key(key, "valueOf") ? KILN_C99_METHOD_OBJECT_VALUE_OF
                     : 0;
             if (borrowed != 0) {
                 *out = kiln_c99_method(borrowed);
@@ -960,11 +1035,11 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                     kiln_c99_ensure_dictionary(properties);
                 }
                 for (index = 0; index < properties->count; ++index) {
-                    if (kiln_c99_same_key(&properties->properties[index], key, key_len))
-                        return kiln_c99_get(host, store, key, key_len, out, depth, thrown);
+                    if (kiln_c99_same_key_view(&properties->properties[index], key))
+                        return kiln_c99_get_key(host, store, key, ikey, out, depth, thrown);
                 }
             }
-            if (kiln_c99_same_name(key, key_len, "name")) {
+            if (kiln_c99_same_name_key(key, "name")) {
                 kiln_value inner;
                 int status = kiln_c99_get(host, bound->target, "name", 4, &inner, depth, thrown);
                 if (status != KILN_C99_OK) {
@@ -973,7 +1048,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 *out = kiln_c99_concat(kiln_c99_copy_text("bound ", 6), inner);
                 return out->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
             }
-            if (kiln_c99_same_name(key, key_len, "length")) {
+            if (kiln_c99_same_name_key(key, "length")) {
                 kiln_value inner;
                 double remaining;
                 int status = kiln_c99_get(host, bound->target, "length", 6, &inner, depth,
@@ -989,24 +1064,24 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         }
         if (target.tag == KILN_VALUE_METHOD &&
             target.bits == KILN_C99_METHOD_PROCESS_HRTIME &&
-            kiln_c99_same_name(key, key_len, "bigint")) {
+            kiln_c99_same_name_key(key, "bigint")) {
             *out = kiln_c99_method(KILN_C99_METHOD_PROCESS_HRTIME_BIGINT);
             return KILN_C99_OK;
         }
         if (target.tag == KILN_VALUE_METHOD &&
             target.bits == KILN_C99_METHOD_NODE_EVENT_EMITTER &&
-            (kiln_c99_same_name(key, key_len, "EventEmitter") ||
-             kiln_c99_same_name(key, key_len, "default"))) {
+            (kiln_c99_same_name_key(key, "EventEmitter") ||
+             kiln_c99_same_name_key(key, "default"))) {
             *out = target;
             return KILN_C99_OK;
         }
         if (target.tag == KILN_VALUE_METHOD &&
             target.bits == KILN_C99_METHOD_NODE_EVENT_EMITTER &&
-            kiln_c99_same_name(key, key_len, "listenerCount")) {
+            kiln_c99_same_name_key(key, "listenerCount")) {
             *out = kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_LISTENER_COUNT);
             return KILN_C99_OK;
         }
-        if (target.tag == KILN_VALUE_METHOD && kiln_c99_same_name(key, key_len, "prototype")) {
+        if (target.tag == KILN_VALUE_METHOD && kiln_c99_same_name_key(key, "prototype")) {
             return kiln_c99_callable_prototype(target, out);
         }
         stored = kiln_c99_callable_store(target, &store, 0);
@@ -1018,14 +1093,14 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 kiln_c99_ensure_dictionary(properties);
             }
             for (index = 0; index < properties->count; ++index) {
-                if (kiln_c99_same_key(&properties->properties[index], key, key_len)) {
-                    return kiln_c99_get(host, store, key, key_len, out, depth, thrown);
+                if (kiln_c99_same_key_view(&properties->properties[index], key)) {
+                    return kiln_c99_get_key(host, store, key, ikey, out, depth, thrown);
                 }
             }
         }
         /* `parseInt.name`. A method has no other property worth answering, and a wrong answer
          * here reads as a missing function three frames later. */
-        if (kiln_c99_same_name(key, key_len, "name")) {
+        if (kiln_c99_same_name_key(key, "name")) {
             const char *method = kiln_c99_method_name(target.bits);
             *out = method == NULL ? kiln_c99_from_units(NULL, 0)
                                   : kiln_c99_copy_text(method, strlen(method));
@@ -1034,6 +1109,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         KILN_C99_REFUSE("a member of a native method other than name");
     }
     case KILN_VALUE_BUILTIN: {
+        (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
         kiln_value store;
         int stored = kiln_c99_callable_store(target, &store, 0);
         if (stored != KILN_C99_OK) return stored;
@@ -1044,8 +1120,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 kiln_c99_ensure_dictionary(properties);
             }
             for (index = 0; index < properties->count; ++index) {
-                if (kiln_c99_same_key(&properties->properties[index], key, key_len))
-                    return kiln_c99_get(host, store, key, key_len, out, depth, thrown);
+                if (kiln_c99_same_key_view(&properties->properties[index], key))
+                    return kiln_c99_get_key(host, store, key, ikey, out, depth, thrown);
             }
         }
         /* `Temporal` first, because the namespace tables below are keyed by method name and every
@@ -1066,12 +1142,12 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                          {"Now", KILN_C99_BUILTIN_TEMPORAL_NOW}};
             size_t index;
             for (index = 0; index < sizeof types / sizeof *types; ++index) {
-                if (kiln_c99_same_name(key, key_len, types[index].name)) {
+                if (kiln_c99_same_name_key(key, types[index].name)) {
                     *out = kiln_c99_builtin(types[index].builtin);
                     return KILN_C99_OK;
                 }
             }
-            if (kiln_c99_same_name(key, key_len, "@@toStringTag")) {
+            if (kiln_c99_same_name_key(key, "@@toStringTag")) {
                 *out = kiln_c99_copy_text("Temporal", 8);
                 return KILN_C99_OK;
             }
@@ -1092,12 +1168,12 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                            {"plainDateTimeISO", 2},
                            {"zonedDateTimeISO", 7}};
             size_t index;
-            if (kiln_c99_same_name(key, key_len, "timeZoneId")) {
+            if (kiln_c99_same_name_key(key, "timeZoneId")) {
                 *out = kiln_c99_method(KILN_C99_METHOD_TEMPORAL_NOW_TIME_ZONE_ID);
                 return KILN_C99_OK;
             }
             for (index = 0; index < sizeof readers / sizeof *readers; ++index) {
-                if (kiln_c99_same_name(key, key_len, readers[index].name)) {
+                if (kiln_c99_same_name_key(key, readers[index].name)) {
                     *out = kiln_c99_method(KILN_C99_METHOD_TEMPORAL_NOW_READ +
                                            readers[index].kind);
                     return KILN_C99_OK;
@@ -1108,17 +1184,17 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         {
             int32_t constructed = kiln_c99_temporal_kind_of_builtin(target.bits);
             if (constructed >= 0) {
-                if (kiln_c99_same_name(key, key_len, "from")) {
+                if (kiln_c99_same_name_key(key, "from")) {
                     *out = kiln_c99_method(KILN_C99_METHOD_TEMPORAL_FROM +
                                            (uint64_t)constructed);
                     return KILN_C99_OK;
                 }
-                if (kiln_c99_same_name(key, key_len, "compare")) {
+                if (kiln_c99_same_name_key(key, "compare")) {
                     *out = kiln_c99_method(KILN_C99_METHOD_TEMPORAL_COMPARE +
                                            (uint64_t)constructed);
                     return KILN_C99_OK;
                 }
-                if (kiln_c99_same_name(key, key_len, "name")) {
+                if (kiln_c99_same_name_key(key, "name")) {
                     const char *name = kiln_c99_temporal_builtin_name(target.bits);
                     /* The bare type name, as `Temporal.PlainDate.name` answers -- not the dotted
                      * spelling the tag uses. */
@@ -1133,12 +1209,12 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                  * the other seven these names do not exist in the language at all, so they read as
                  * undefined below rather than saying which. */
                 if (constructed == 6) {
-                    if (kiln_c99_same_name(key, key_len, "fromEpochMilliseconds")) {
+                    if (kiln_c99_same_name_key(key, "fromEpochMilliseconds")) {
                         *out = kiln_c99_method(
                             KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_MILLISECONDS);
                         return KILN_C99_OK;
                     }
-                    if (kiln_c99_same_name(key, key_len, "fromEpochNanoseconds")) {
+                    if (kiln_c99_same_name_key(key, "fromEpochNanoseconds")) {
                         *out = kiln_c99_method(
                             KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_NANOSECONDS);
                         return KILN_C99_OK;
@@ -1158,10 +1234,11 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                  * program that writes one, and reproducing the interpreter's shape would make the
                  * two engines agree on an incomplete object. The move is still the interpreter's,
                  * so this names the missing member and waits for it. */
-                if (kiln_c99_same_name(key, key_len, "prototype")) {
+                if (kiln_c99_same_name_key(key, "prototype")) {
                     const char *owner = kiln_c99_temporal_builtin_name(target.bits);
+                    if (intrinsic_key == NULL) KILN_C99_REFUSE("a Temporal member with a non-ASCII key");
                     return kiln_c99_temporal_unsupported(thrown, owner == NULL ? "Temporal" : owner,
-                                                         key, key_len);
+                                                         intrinsic_key, intrinsic_len);
                 }
                 KILN_C99_ABSENT("not a static of this Temporal type", out);
             }
@@ -1172,15 +1249,15 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             int concrete = kiln_c99_typed_prototype_kind(target.bits, &typed_kind);
             if (concrete || target.bits == KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE) {
                 uint64_t method;
-                if (concrete && kiln_c99_same_name(key, key_len, "constructor")) {
+                if (concrete && kiln_c99_same_name_key(key, "constructor")) {
                     *out = kiln_c99_builtin(kiln_c99_typed_constructor(typed_kind));
                     return KILN_C99_OK;
                 }
-                if (concrete && kiln_c99_same_name(key, key_len, "BYTES_PER_ELEMENT")) {
+                if (concrete && kiln_c99_same_name_key(key, "BYTES_PER_ELEMENT")) {
                     *out = kiln_c99_number((double)kiln_c99_typed_width(typed_kind));
                     return KILN_C99_OK;
                 }
-                method = kiln_c99_typed_prototype_method(key, key_len);
+                method = kiln_c99_typed_prototype_method(intrinsic_key, intrinsic_len);
                 if (method == 0 && concrete) {
                     kiln_value common_proto =
                         kiln_c99_builtin(KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE);
@@ -1191,8 +1268,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                         size_t pidx;
                         if (properties->shape != NULL) kiln_c99_ensure_dictionary(properties);
                         for (pidx = 0; pidx < properties->count; ++pidx) {
-                            if (kiln_c99_same_key(&properties->properties[pidx], key, key_len)) {
-                                return kiln_c99_get(host, store, key, key_len, out, depth, thrown);
+                            if (kiln_c99_same_key_view(&properties->properties[pidx], key)) {
+                                return kiln_c99_get_key(host, store, key, ikey, out, depth, thrown);
                             }
                         }
                     }
@@ -1205,14 +1282,14 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                      * or feature-detects a method reads it off the prototype, which is the half
                      * that was answering wrongly. */
                     if (kiln_c99_is_typed_array_member(concrete && typed_kind == KILN_TYPED_UINT8,
-                                                       key, key_len)) {
+                                                       intrinsic_key, intrinsic_len)) {
                         KILN_C99_REFUSE("a typed-array member this backend has not implemented");
                     }
-                    method = kiln_c99_same_name(key, key_len, "isPrototypeOf")
+                    method = kiln_c99_same_name_key(key, "isPrototypeOf")
                                  ? KILN_C99_METHOD_IS_PROTOTYPE_OF
-                             : kiln_c99_same_name(key, key_len, "propertyIsEnumerable")
+                             : kiln_c99_same_name_key(key, "propertyIsEnumerable")
                                  ? KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE
-                                 : kiln_c99_lookup_method(key, key_len,
+                                 : kiln_c99_lookup_method(intrinsic_key, intrinsic_len,
                                                           KILN_C99_METHOD_HAS_OWN_PROPERTY,
                                                           KILN_C99_METHOD_OBJECT_VALUE_OF);
                 }
@@ -1220,10 +1297,10 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 return KILN_C99_OK;
             }
         }
-        uint64_t code = kiln_c99_namespace_method(target.bits, key, key_len);
+        uint64_t code = kiln_c99_namespace_method(target.bits, intrinsic_key, intrinsic_len);
         if (code == 0 && !kiln_c99_is_namespace(target.bits)) {
             /* A constructor is a function, so it answers to these too. A namespace is not. */
-            code = kiln_c99_callable_method(key, key_len);
+            code = kiln_c99_callable_method(intrinsic_key, intrinsic_len);
         }
         if (code == 0) {
             /* ...and everything inherits from `Object.prototype`, which is where
@@ -1232,17 +1309,17 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
              * would answer `[object Function]` for `String(Object)`, which is worse than not
              * answering at all, and a constructor already gives its own text through
              * `kiln_c99_callable_method`. `valueOf` hands back the receiver and shadows nothing. */
-            code = kiln_c99_same_name(key, key_len, "hasOwnProperty") ? KILN_C99_METHOD_HAS_OWN_PROPERTY
-                   : kiln_c99_same_name(key, key_len, "isPrototypeOf") ? KILN_C99_METHOD_IS_PROTOTYPE_OF
-                   : kiln_c99_same_name(key, key_len, "propertyIsEnumerable")
+            code = kiln_c99_same_name_key(key, "hasOwnProperty") ? KILN_C99_METHOD_HAS_OWN_PROPERTY
+                   : kiln_c99_same_name_key(key, "isPrototypeOf") ? KILN_C99_METHOD_IS_PROTOTYPE_OF
+                   : kiln_c99_same_name_key(key, "propertyIsEnumerable")
                        ? KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE
-                   : kiln_c99_same_name(key, key_len, "valueOf") ? KILN_C99_METHOD_OBJECT_VALUE_OF
+                   : kiln_c99_same_name_key(key, "valueOf") ? KILN_C99_METHOD_OBJECT_VALUE_OF
                        : 0;
         }
         /* `RangeError.name` is how `error.constructor.name` gets its answer, which is the ordinary
          * way a program asks what kind of error it caught. A namespace is not a constructor and
          * has no name to give. */
-        if (kiln_c99_same_name(key, key_len, "constructor")) {
+        if (kiln_c99_same_name_key(key, "constructor")) {
             /* A prototype table names its own constructor, which is how `[].constructor` and
              * `Array.prototype.constructor` reach the same value. */
             static const struct {
@@ -1282,7 +1359,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                                                                       : KILN_C99_BUILTIN_FUNCTION);
             return KILN_C99_OK;
         }
-        if (!kiln_c99_is_namespace(target.bits) && kiln_c99_same_name(key, key_len, "name")) {
+        if (!kiln_c99_is_namespace(target.bits) && kiln_c99_same_name_key(key, "name")) {
             const char *builtin = kiln_c99_builtin_name(target.bits);
             *out = kiln_c99_copy_text(builtin, strlen(builtin));
             return KILN_C99_OK;
@@ -1294,18 +1371,18 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         {
             kiln_typed_kind typed_kind;
             if (kiln_c99_builtin_typed_kind(target.bits, &typed_kind)) {
-                if (kiln_c99_same_name(key, key_len, "BYTES_PER_ELEMENT")) {
+                if (kiln_c99_same_name_key(key, "BYTES_PER_ELEMENT")) {
                     *out = kiln_c99_number((double)kiln_c99_typed_width(typed_kind));
                     return KILN_C99_OK;
                 }
                 /* `Uint8Array.of` and `Uint8Array.from` are not `Array`'s with a conversion
                  * afterwards: the constructor decides the width, so which constructor was named
                  * is part of the answer -- and it is the receiver of the call these return. */
-                if (kiln_c99_same_name(key, key_len, "of")) {
+                if (kiln_c99_same_name_key(key, "of")) {
                     *out = kiln_c99_method(KILN_C99_METHOD_TYPED_OF);
                     return KILN_C99_OK;
                 }
-                if (kiln_c99_same_name(key, key_len, "from")) {
+                if (kiln_c99_same_name_key(key, "from")) {
                     *out = kiln_c99_method(KILN_C99_METHOD_TYPED_FROM);
                     return KILN_C99_OK;
                 }
@@ -1318,12 +1395,12 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
          * `Array[Symbol.species]` came to answer nothing at all. */
         {
             kiln_value member;
-            if (kiln_c99_surface_value(target.bits, key, key_len, &member)) {
+            if (kiln_c99_surface_value(target.bits, intrinsic_key, intrinsic_len, &member)) {
                 *out = member;
                 return KILN_C99_OK;
             }
         }
-        if (kiln_c99_same_name(key, key_len, "prototype")) {
+        if (kiln_c99_same_name_key(key, "prototype")) {
             /* Reached for its methods rather than as an object: these are not yet the objects the
              * chains actually end at, which is what `Object.getPrototypeOf` would need.
              *
@@ -1402,7 +1479,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
          * work with an owner, and until somebody does it a refusal names the member and stops the
          * program at the cause. */
         if (!kiln_c99_is_namespace(target.bits) &&
-            kiln_c99_same_name(key, key_len, "length")) {
+            kiln_c99_same_name_key(key, "length")) {
             double arity;
             if (kiln_c99_builtin_length(target.bits, &arity)) {
                 *out = kiln_c99_number(arity);
@@ -1410,8 +1487,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             }
         }
         if (!kiln_c99_is_namespace(target.bits) &&
-            (kiln_c99_same_name(key, key_len, "length") ||
-             kiln_c99_same_name(key, key_len, "prototype"))) {
+            (kiln_c99_same_name_key(key, "length") ||
+             kiln_c99_same_name_key(key, "prototype"))) {
             KILN_C99_REFUSE("a built-in callable's own `length` or `prototype`, which this "
                             "backend does not model for this built-in");
         }
@@ -1426,8 +1503,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
              * built-in whose surface is not table-driven has no list to consult, so it keeps
              * refusing; that is the honest answer for a question we cannot yet ask. */
             int owned = 0;
-            (void)kiln_c99_builtin_member(target.bits, key, key_len, &owned);
-            if (owned && !kiln_c99_backlog_names(kiln_c99_builtin_name(target.bits), key, key_len)) {
+            (void)kiln_c99_builtin_member(target.bits, intrinsic_key, intrinsic_len, &owned);
+            if (owned && !kiln_c99_backlog_names(kiln_c99_builtin_name(target.bits), intrinsic_key, intrinsic_len)) {
                 KILN_C99_ABSENT("not a member of this built-in; BUILTIN_SURFACE and "
                                 "BUILTIN_SURFACE_BACKLOG hold every one that is",
                                 out);
@@ -1438,31 +1515,31 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
              * or a string: it is what the language answers. A bundled `mobx` reads names off
              * `Array.prototype` one at a time, which is how a library patches methods. */
             if (target.bits == KILN_C99_BUILTIN_ARRAY_PROTOTYPE &&
-                kiln_c99_same_name(key, key_len, "@@unscopables")) {
+                kiln_c99_same_name_key(key, "@@unscopables")) {
                 return kiln_c99_get_array_unscopables(out);
             }
             if (target.bits == KILN_C99_BUILTIN_ARRAY_PROTOTYPE &&
-                !kiln_c99_is_array_member(key, key_len)) {
+                !kiln_c99_is_array_member(intrinsic_key, intrinsic_len)) {
                 KILN_C99_ABSENT("not a member of Array.prototype; kiln_c99_is_array_member holds "
                                 "the ones that are",
                                 out);
             }
             if (target.bits == KILN_C99_BUILTIN_STRING_PROTOTYPE &&
-                !kiln_c99_is_string_member(key, key_len)) {
+                !kiln_c99_is_string_member(intrinsic_key, intrinsic_len)) {
                 KILN_C99_ABSENT("not a member of String.prototype; kiln_c99_is_string_member holds "
                                 "the ones that are",
                                 out);
             }
             if (target.bits == KILN_C99_BUILTIN_SYMBOL_PROTOTYPE) {
-                if (kiln_c99_same_name(key, key_len, "toString")) {
+                if (kiln_c99_same_name_key(key, "toString")) {
                     *out = kiln_c99_method(KILN_C99_METHOD_PRIMITIVE_TO_STRING);
                     return KILN_C99_OK;
                 }
-                if (kiln_c99_same_name(key, key_len, "valueOf")) {
+                if (kiln_c99_same_name_key(key, "valueOf")) {
                     *out = kiln_c99_method(KILN_C99_METHOD_OBJECT_VALUE_OF);
                     return KILN_C99_OK;
                 }
-                if (kiln_c99_same_name(key, key_len, "constructor")) {
+                if (kiln_c99_same_name_key(key, "constructor")) {
                     *out = kiln_c99_builtin(KILN_C99_BUILTIN_SYMBOL);
                     return KILN_C99_OK;
                 }
@@ -1471,19 +1548,19 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                                 out);
             }
             if (target.bits == KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE) {
-                if (kiln_c99_same_name(key, key_len, "slice")) {
+                if (kiln_c99_same_name_key(key, "slice")) {
                     *out = kiln_c99_method(KILN_C99_METHOD_SLICE);
                     return KILN_C99_OK;
                 }
-                if (kiln_c99_same_name(key, key_len, "constructor")) {
+                if (kiln_c99_same_name_key(key, "constructor")) {
                     *out = kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_BUFFER);
                     return KILN_C99_OK;
                 }
-                if (kiln_c99_same_name(key, key_len, "byteLength")) {
+                if (kiln_c99_same_name_key(key, "byteLength")) {
                     return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                                 "get byteLength: receiver does not have the required internal slot");
                 }
-                if (kiln_c99_is_array_buffer_member(key, key_len)) {
+                if (kiln_c99_is_array_buffer_member(intrinsic_key, intrinsic_len)) {
                     KILN_C99_REFUSE("an ArrayBuffer.prototype member this backend has not implemented");
                 }
                 KILN_C99_ABSENT("not a member of ArrayBuffer.prototype; kiln_c99_is_array_buffer_member holds "
@@ -1517,7 +1594,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                             target.bits == KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE,
                         target.bits == KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE ||
                             target.bits == KILN_C99_BUILTIN_WEAK_SET_PROTOTYPE,
-                        key, key_len)) {
+                        intrinsic_key, intrinsic_len)) {
                     KILN_C99_ABSENT("not a member of this collection's prototype; "
                                     "kiln_c99_collection_kind_member holds the ones that are",
                                     out);
@@ -1536,60 +1613,60 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
     case KILN_VALUE_BIGINT:
         /* `toString` and `valueOf` share the number codes: the dispatch reads the receiver, and
          * the receiver is what tells the two types apart. */
-        if (kiln_c99_same_name(key, key_len, "constructor")) {
+        if (kiln_c99_same_name_key(key, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_BIGINT);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "toString") ||
-            kiln_c99_same_name(key, key_len, "toLocaleString")) {
+        if (kiln_c99_same_name_key(key, "toString") ||
+            kiln_c99_same_name_key(key, "toLocaleString")) {
             *out = kiln_c99_method(KILN_C99_METHOD_NUMBER_TO_STRING);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "valueOf")) {
+        if (kiln_c99_same_name_key(key, "valueOf")) {
             *out = kiln_c99_method(KILN_C99_METHOD_NUMBER_VALUE_OF);
             return KILN_C99_OK;
         }
         KILN_C99_ABSENT("not a member of BigInt.prototype", out);
     case KILN_VALUE_NUMBER:
-        if (kiln_c99_same_name(key, key_len, "constructor")) {
+        if (kiln_c99_same_name_key(key, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_NUMBER);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "toString")) {
+        if (kiln_c99_same_name_key(key, "toString")) {
             *out = kiln_c99_method(KILN_C99_METHOD_NUMBER_TO_STRING);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "toFixed")) {
+        if (kiln_c99_same_name_key(key, "toFixed")) {
             *out = kiln_c99_method(KILN_C99_METHOD_NUMBER_TO_FIXED);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "toExponential")) {
+        if (kiln_c99_same_name_key(key, "toExponential")) {
             *out = kiln_c99_method(KILN_C99_METHOD_NUMBER_TO_EXPONENTIAL);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "toPrecision")) {
+        if (kiln_c99_same_name_key(key, "toPrecision")) {
             *out = kiln_c99_method(KILN_C99_METHOD_NUMBER_TO_PRECISION);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "valueOf")) {
+        if (kiln_c99_same_name_key(key, "valueOf")) {
             *out = kiln_c99_method(KILN_C99_METHOD_NUMBER_VALUE_OF);
             return KILN_C99_OK;
         }
         KILN_C99_ABSENT("not a member of Number.prototype", out);
     case KILN_VALUE_SYMBOL: {
-        if (kiln_c99_same_name(key, key_len, "constructor")) {
+        if (kiln_c99_same_name_key(key, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_SYMBOL);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "toString")) {
+        if (kiln_c99_same_name_key(key, "toString")) {
             *out = kiln_c99_method(KILN_C99_METHOD_PRIMITIVE_TO_STRING);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "valueOf")) {
+        if (kiln_c99_same_name_key(key, "valueOf")) {
             *out = kiln_c99_method(KILN_C99_METHOD_OBJECT_VALUE_OF);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "description")) {
+        if (kiln_c99_same_name_key(key, "description")) {
             kiln_symbol *symbol = kiln_c99_symbol_of(target);
             if (symbol != NULL && symbol->description_value.tag == KILN_VALUE_STRING) {
                 *out = symbol->description_value;
@@ -1608,48 +1685,24 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
     }
 }
 
-/* A read, with one rule about the machine's own keys layered over it.
- *
- * A `@@` key is a *protocol probe*: `for await` asks every subject for `@@asyncIterator` before
- * deciding which loop to run, and "this value does not have one" is a real answer. An unknown name
- * a *program* wrote is a different thing -- a method this backend does not have -- and stays the
- * error it was, because answering undefined would turn `a.sort(f)` into "undefined is not a
- * function" three frames from the cause. */
-static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
-                        kiln_value *out, int depth, kiln_value *thrown) {
-    return kiln_c99_get_ikey(host, target, key, key_len, NULL, out, depth, thrown);
-}
-
-/* `ikey` is the key's canonical pointer when the caller already holds it (a compiled site), or
- * NULL to have the object walk look it up. */
-static int kiln_c99_get_ikey(kiln_host *host, kiln_value target, const char *key, size_t key_len,
-                             const char *ikey, kiln_value *out, int depth, kiln_value *thrown) {
+/* A read, with one rule about the machine's own keys layered over it. This headed form is the
+ * semantic implementation; fixed compiler names below are borrowed Latin1 adapters. */
+static int kiln_c99_get_key(kiln_host *host, kiln_value target, const kiln_string *key,
+                            const kiln_string *ikey, kiln_value *out, int depth,
+                            kiln_value *thrown) {
     int status;
-    if (kiln_c99_is_node_hidden_key(key, key_len)) {
+    if (key == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (kiln_c99_is_node_hidden_key_key(key)) {
         KILN_C99_ABSENT("a hidden runtime slot, which no program names", out);
     }
     if (target.tag == KILN_VALUE_PROXY) {
-        /* Reading a proxy *is* a call, so it cannot go through the pure walk below. The trap
-         * takes a key value; a name reached by this path was always an ordinary string. */
-        kiln_value key_value = kiln_c99_copy_text(key, key_len);
+        kiln_value key_value = kiln_c99_key_value(key, &ikey);
         if (key_value.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
         return kiln_c99_proxy_get(host, target, key_value, target, out, depth, thrown);
     }
-    status = kiln_c99_get_own_kind(host, target, key, key_len, ikey, out, depth, thrown);
-    if (status == KILN_C99_CONTROL_ERROR && key_len >= 2 && key[0] == '@' && key[1] == '@') {
-        /* Nothing refused, so nothing may be left saying it did. The refusal that got here named
-         * itself at the site, and the diagnostic keeps the *first* note for the rest of the run --
-         * so a detail left behind by a read that was then answered would be reported as the cause
-         * of whatever refuses next, which is exactly the bug `kiln_c99_forget_handled_throw`
-         * exists to stop one layer up. */
+    status = kiln_c99_get_own_kind(host, target, key, ikey, out, depth, thrown);
+    if (status == KILN_C99_CONTROL_ERROR && kiln_c99_key_is_reserved(key)) {
         kiln_c99_diagnostic_detail = NULL;
-        /* THIS IS A CATCH-ALL AND NOT A LIST, WHICH MAKES IT THE ONE ABSENCE HERE THAT CAN LIE.
-         * A symbol probe must not stop a program -- `kiln_c99_to_primitive` asks every reference
-         * for `@@toPrimitive` -- so a refusal on a `@@` key becomes `undefined`. A symbol the
-         * receiver really does own and this backend has not wired is swallowed with the probes:
-         * `Array.prototype[Symbol.iterator]` read `undefined` here for as long as anybody looked.
-         * The fix is always upstream, in the receiver that owns the symbol; what finds them is
-         * `scripts/native-surface-inventory.py --gate`. */
         KILN_C99_ABSENT("a well-known symbol whose read reached a refusal, which a symbol probe "
                         "must not turn into a stop",
                         out);
@@ -1657,19 +1710,34 @@ static int kiln_c99_get_ikey(kiln_host *host, kiln_value target, const char *key
     return status;
 }
 
+static int kiln_c99_get_ikey(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+                             const kiln_string *ikey, kiln_value *out, int depth,
+                             kiln_value *thrown) {
+    kiln_string view;
+    if (key_len > UINT32_MAX) return KILN_C99_INVALID_ARGUMENT;
+    view.unit_len = (uint32_t)key_len;
+    view.flags = KILN_STRING_LATIN1;
+    view.data = key;
+    return kiln_c99_get_key(host, target, &view, ikey, out, depth, thrown);
+}
+
+static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+                        kiln_value *out, int depth, kiln_value *thrown) {
+    return kiln_c99_get_ikey(host, target, key, key_len, NULL, out, depth, thrown);
+}
+
 /* Remember where `key` sits on `object`, or on its immediate prototype, for next time. A
  * machine-private (`@@`) key has hiding rules and `__proto__` a relinking rule; both stay the
  * slow path's alone, so a site never learns either. */
-static int kiln_c99_site_learn(kiln_c99_site *site, const kiln_object *object, const char *key,
-                               size_t key_len) {
+static int kiln_c99_site_learn(kiln_c99_site *site, const kiln_object *object,
+                               const kiln_string *key, const kiln_string *canonical) {
     size_t index;
-    if ((key_len >= 2 && key[0] == '@' && key[1] == '@') ||
-        (key_len == 9 && memcmp(key, "__proto__", 9) == 0)) {
+    if (kiln_c99_key_is_reserved(key) || kiln_c99_same_name_key(key, "__proto__")) {
         return 0;
     }
-    if (object->shape != NULL) {
+    if (object->shape != NULL && canonical != NULL) {
         uint32_t slot;
-        if (kiln_c99_shape_find_slot(object->shape, key, &slot)) {
+        if (kiln_c99_shape_find_slot(object->shape, canonical, &slot)) {
             uint32_t p;
             for (p = 0; p < site->pic_count; ++p) {
                 if (site->entries[p].shape == object->shape) {
@@ -1689,7 +1757,7 @@ static int kiln_c99_site_learn(kiln_c99_site *site, const kiln_object *object, c
         }
     }
     for (index = 0; index < object->count && object->properties != NULL; ++index) {
-        if (object->properties[index].key == key) {
+        if (kiln_c99_same_key_view(&object->properties[index], key)) {
             site->own = kiln_c99_site_encode_dictionary_index(index);
             site->proto = 0;
             return 1;
@@ -1698,7 +1766,7 @@ static int kiln_c99_site_learn(kiln_c99_site *site, const kiln_object *object, c
     if (object->prototype.tag == KILN_VALUE_OBJECT) {
         const kiln_object *parent = kiln_c99_object_of(object->prototype);
         for (index = 0; index < parent->count && parent->properties != NULL; ++index) {
-            if (parent->properties[index].key == key) {
+            if (kiln_c99_same_key_view(&parent->properties[index], key)) {
                 site->own = 0;
                 site->proto = kiln_c99_site_encode_dictionary_index(index);
                 return 1;
@@ -1715,11 +1783,13 @@ static int kiln_c99_site_learn(kiln_c99_site *site, const kiln_object *object, c
  * after the receiver's own list has been scanned and missed -- by pointer, no bytes -- and only
  * when the immediate prototype is an ordinary object, which is precisely the slow path's second
  * step. An accessor is never answered here: reading one is a call. */
-static int kiln_c99_get_site(kiln_host *host, kiln_value target, const char *key, size_t key_len,
-                             kiln_value *out, int depth, kiln_value *thrown, kiln_c99_site *site) {
+static int kiln_c99_get_site(kiln_host *host, kiln_value target, const kiln_string *key,
+                             const kiln_string *canonical, kiln_value *out, int depth,
+                             kiln_value *thrown, kiln_c99_site *site) {
     int status;
+    if (key == NULL) return KILN_C99_INVALID_ARGUMENT;
     if (site == NULL || target.tag != KILN_VALUE_OBJECT) {
-        return kiln_c99_get(host, target, key, key_len, out, depth, thrown);
+        return kiln_c99_get_key(host, target, key, canonical, out, depth, thrown);
     }
     {
         const kiln_object *object = kiln_c99_object_of(target);
@@ -1734,7 +1804,7 @@ static int kiln_c99_get_site(kiln_host *host, kiln_value target, const char *key
             }
             {
                 uint32_t slot;
-                if (kiln_c99_shape_find_slot(object->shape, key, &slot)) {
+                if (canonical != NULL && kiln_c99_shape_find_slot(object->shape, canonical, &slot)) {
                     if (slot < object->slot_capacity) {
                         *out = kiln_val_to_boundary(object->slots[slot]);
                         if (site->pic_count < KILN_C99_PIC_SIZE) {
@@ -1753,7 +1823,8 @@ static int kiln_c99_get_site(kiln_host *host, kiln_value target, const char *key
                     const kiln_object *proto_obj = kiln_c99_object_of(current);
                     if (proto_obj->shape != NULL) {
                         uint32_t proto_slot;
-                        if (kiln_c99_shape_find_slot(proto_obj->shape, key, &proto_slot)) {
+                        if (canonical != NULL &&
+                            kiln_c99_shape_find_slot(proto_obj->shape, canonical, &proto_slot)) {
                             if (proto_slot < proto_obj->slot_capacity) {
                                 *out = kiln_val_to_boundary(proto_obj->slots[proto_slot]);
                                 return KILN_C99_OK;
@@ -1761,7 +1832,8 @@ static int kiln_c99_get_site(kiln_host *host, kiln_value target, const char *key
                         }
                     } else if (proto_obj->properties != NULL) {
                         size_t index = 0;
-                        while (index < proto_obj->count && proto_obj->properties[index].key != key) ++index;
+                        while (index < proto_obj->count &&
+                               !kiln_c99_same_key_view(&proto_obj->properties[index], key)) ++index;
                         if (index < proto_obj->count && !proto_obj->properties[index].accessor) {
                             *out = proto_obj->properties[index].value;
                             return KILN_C99_OK;
@@ -1773,7 +1845,8 @@ static int kiln_c99_get_site(kiln_host *host, kiln_value target, const char *key
             }
         }
         uint32_t own = kiln_c99_site_decode_dictionary_index(site->own);
-        if (own < object->count && object->properties != NULL && object->properties[own].key == key) {
+        if (own < object->count && object->properties != NULL &&
+            kiln_c99_same_key_view(&object->properties[own], key)) {
             if (!object->properties[own].accessor) {
                 *out = object->properties[own].value;
                 return KILN_C99_OK;
@@ -1782,20 +1855,21 @@ static int kiln_c99_get_site(kiln_host *host, kiln_value target, const char *key
                    object->prototype.tag == KILN_VALUE_OBJECT) {
             size_t index = 0;
             while (index < object->count && object->properties != NULL &&
-                   object->properties[index].key != key) ++index;
+                   !kiln_c99_same_key_view(&object->properties[index], key)) ++index;
             if (index == object->count) {
                 const kiln_object *parent = kiln_c99_object_of(object->prototype);
                 uint32_t at = kiln_c99_site_decode_dictionary_index(site->proto);
                 if (parent->properties != NULL && at < parent->count &&
-                    parent->properties[at].key == key && !parent->properties[at].accessor) {
+                    kiln_c99_same_key_view(&parent->properties[at], key) &&
+                    !parent->properties[at].accessor) {
                     *out = parent->properties[at].value;
                     return KILN_C99_OK;
                 }
             }
         }
-        status = kiln_c99_get_ikey(host, target, key, key_len, key, out, depth, thrown);
+        status = kiln_c99_get_key(host, target, key, canonical, out, depth, thrown);
         if (status == KILN_C99_OK && site->misses < KILN_C99_SITE_GIVE_UP &&
-            !kiln_c99_site_learn(site, object, key, key_len)) {
+            !kiln_c99_site_learn(site, object, key, canonical)) {
             site->misses += 1;
         }
         return status;

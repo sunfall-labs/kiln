@@ -4,21 +4,45 @@ static kiln_symbol *kiln_c99_symbol_of(kiln_value value) {
 }
 
 /* The specification's own symbols. One instance each, so equality is the pointer's exactly as it
- * is for a unique symbol -- there is no second kind of comparison to keep in step. */
+ * is for a unique symbol -- there is no second kind of comparison to keep in step. Their keys are
+ * static headers too: a property slot stores the same canonical shape as a user key, and no
+ * reserved-name path smuggles a payload pointer into the store. */
+#define KILN_C99_STATIC_SYMBOL_KEY(name, text) \
+    static const char name##_bytes[] = text; \
+    static const kiln_string name = {sizeof(text) - 1, KILN_STRING_LATIN1, name##_bytes}
+KILN_C99_STATIC_SYMBOL_KEY(kiln_c99_symbol_key_iterator, "@@iterator");
+KILN_C99_STATIC_SYMBOL_KEY(kiln_c99_symbol_key_async_iterator, "@@asyncIterator");
+KILN_C99_STATIC_SYMBOL_KEY(kiln_c99_symbol_key_has_instance, "@@hasInstance");
+KILN_C99_STATIC_SYMBOL_KEY(kiln_c99_symbol_key_to_string_tag, "@@toStringTag");
+KILN_C99_STATIC_SYMBOL_KEY(kiln_c99_symbol_key_to_primitive, "@@toPrimitive");
+KILN_C99_STATIC_SYMBOL_KEY(kiln_c99_symbol_key_is_concat_spreadable, "@@isConcatSpreadable");
+KILN_C99_STATIC_SYMBOL_KEY(kiln_c99_symbol_key_match, "@@match");
+KILN_C99_STATIC_SYMBOL_KEY(kiln_c99_symbol_key_match_all, "@@matchAll");
+KILN_C99_STATIC_SYMBOL_KEY(kiln_c99_symbol_key_replace, "@@replace");
+KILN_C99_STATIC_SYMBOL_KEY(kiln_c99_symbol_key_search, "@@search");
+KILN_C99_STATIC_SYMBOL_KEY(kiln_c99_symbol_key_species, "@@species");
+KILN_C99_STATIC_SYMBOL_KEY(kiln_c99_symbol_key_split, "@@split");
+KILN_C99_STATIC_SYMBOL_KEY(kiln_c99_symbol_key_unscopables, "@@unscopables");
+#undef KILN_C99_STATIC_SYMBOL_KEY
+
+#define KILN_C99_WELL_KNOWN(key, description, description_len) \
+    {&key, description, description_len, {KILN_VALUE_UNDEFINED, 0, {0}}, 0}
 static const kiln_symbol kiln_c99_well_known[] = {
-    {"@@iterator", 10, "Symbol.iterator", 15},
-    {"@@asyncIterator", 15, "Symbol.asyncIterator", 20},
-    {"@@hasInstance", 13, "Symbol.hasInstance", 18},
-    {"@@toStringTag", 13, "Symbol.toStringTag", 18},
-    {"@@toPrimitive", 13, "Symbol.toPrimitive", 18},
-    {"@@isConcatSpreadable", 20, "Symbol.isConcatSpreadable", 25},
-    {"@@match", 7, "Symbol.match", 12},
-    {"@@matchAll", 10, "Symbol.matchAll", 15},
-    {"@@replace", 9, "Symbol.replace", 14},
-    {"@@search", 8, "Symbol.search", 13},
-    {"@@species", 9, "Symbol.species", 14},
-    {"@@split", 7, "Symbol.split", 12},
-    {"@@unscopables", 13, "Symbol.unscopables", 18}};
+    KILN_C99_WELL_KNOWN(kiln_c99_symbol_key_iterator, "Symbol.iterator", 15),
+    KILN_C99_WELL_KNOWN(kiln_c99_symbol_key_async_iterator, "Symbol.asyncIterator", 20),
+    KILN_C99_WELL_KNOWN(kiln_c99_symbol_key_has_instance, "Symbol.hasInstance", 18),
+    KILN_C99_WELL_KNOWN(kiln_c99_symbol_key_to_string_tag, "Symbol.toStringTag", 18),
+    KILN_C99_WELL_KNOWN(kiln_c99_symbol_key_to_primitive, "Symbol.toPrimitive", 18),
+    KILN_C99_WELL_KNOWN(kiln_c99_symbol_key_is_concat_spreadable, "Symbol.isConcatSpreadable", 25),
+    KILN_C99_WELL_KNOWN(kiln_c99_symbol_key_match, "Symbol.match", 12),
+    KILN_C99_WELL_KNOWN(kiln_c99_symbol_key_match_all, "Symbol.matchAll", 15),
+    KILN_C99_WELL_KNOWN(kiln_c99_symbol_key_replace, "Symbol.replace", 14),
+    KILN_C99_WELL_KNOWN(kiln_c99_symbol_key_search, "Symbol.search", 13),
+    KILN_C99_WELL_KNOWN(kiln_c99_symbol_key_species, "Symbol.species", 14),
+    KILN_C99_WELL_KNOWN(kiln_c99_symbol_key_split, "Symbol.split", 12),
+    KILN_C99_WELL_KNOWN(kiln_c99_symbol_key_unscopables, "Symbol.unscopables", 18),
+};
+#undef KILN_C99_WELL_KNOWN
 
 /* Every symbol this run has made, by the value that *is* it.
  *
@@ -56,12 +80,12 @@ static int kiln_c99_remember_symbol(kiln_value symbol) {
  * here -- `@@iterator` beside `@@error`, `@@symbol:3` beside `@@iterpart` -- and reflection has
  * to report the first kind and must never report the second. This is the one place that line is
  * drawn on this side. */
-static int kiln_c99_symbol_of_key(const char *key, size_t key_len, kiln_value *out) {
+static int kiln_c99_symbol_of_key_view(const kiln_string *key, kiln_value *out) {
     size_t index;
     size_t known = sizeof kiln_c99_well_known / sizeof *kiln_c99_well_known;
+    if (key == NULL || out == NULL) return 0;
     for (index = 0; index < known; ++index) {
-        if (kiln_c99_well_known[index].key_len == key_len &&
-            memcmp(kiln_c99_well_known[index].key, key, key_len) == 0) {
+        if (kiln_string_equal(kiln_c99_well_known[index].key, key)) {
             *out = kiln_c99_value(KILN_VALUE_SYMBOL,
                                   (uint64_t)(uintptr_t)&kiln_c99_well_known[index],
                                   (const char *)(uintptr_t)&kiln_c99_well_known[index], 0);
@@ -70,7 +94,7 @@ static int kiln_c99_symbol_of_key(const char *key, size_t key_len, kiln_value *o
     }
     for (index = 0; index < kiln_c99_symbol_count; ++index) {
         const kiln_symbol *symbol = kiln_c99_symbol_of(kiln_c99_symbols[index]);
-        if (symbol->key_len == key_len && memcmp(symbol->key, key, key_len) == 0) {
+        if (kiln_string_equal(symbol->key, key)) {
             *out = kiln_c99_symbols[index];
             return 1;
         }
@@ -78,12 +102,23 @@ static int kiln_c99_symbol_of_key(const char *key, size_t key_len, kiln_value *o
     return 0;
 }
 
+/* Fixed C names still arrive as bytes. This adapter is intentionally one-way: it builds a
+ * borrowed Latin-1 view and immediately delegates to the unit comparison above. */
+static int kiln_c99_symbol_of_key(const char *key, size_t key_len, kiln_value *out) {
+    kiln_string view;
+    if (key_len > UINT32_MAX) return 0;
+    view.unit_len = (uint32_t)key_len;
+    view.flags = KILN_STRING_LATIN1;
+    view.data = key;
+    return kiln_c99_symbol_of_key_view(&view, out);
+}
+
 /* What the program would see as this property's `enumerable`. For a string key that is the stored
  * bit. For a symbol key the stored bit is held at 0 so the walks over own string keys skip the
  * `@@` spelling, and the program's own answer lives in `symbol_hidden` -- see `kiln_property`. */
 static int kiln_c99_property_is_enumerable(const kiln_property *property) {
     kiln_value symbol;
-    if (kiln_c99_symbol_of_key(property->key, property->key_len, &symbol)) {
+    if (kiln_c99_symbol_of_key_view(property->key, &symbol)) {
         return !property->symbol_hidden;
     }
     return property->enumerable;
@@ -97,7 +132,8 @@ static int kiln_c99_property_is_enumerable(const kiln_property *property) {
 static kiln_value kiln_c99_property_key(kiln_value key) {
     if (key.tag == KILN_VALUE_SYMBOL) {
         kiln_symbol *symbol = kiln_c99_symbol_of(key);
-        return kiln_c99_value(KILN_VALUE_STRING, 0, symbol->key, symbol->key_len);
+        return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)symbol->key,
+                              symbol->key->unit_len);
     }
     return kiln_c99_text(key);
 }
@@ -129,19 +165,25 @@ static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
      * every property stored under this symbol. The tracer still marks both `key` and
      * `description` as candidate blocks, so a description that came from a collected string --
      * `Symbol(String(x))` -- is kept alive by the symbol that carries it. */
-    symbol->key = key.bytes;
-    symbol->key_len = key.len;
     /* Registered as immortal: the interned copy is pinned for the realm's life, and a property
      * stored under the symbol carries that canonical pointer. The builder's malloc has done its
      * job once the copy exists. */
     {
-        const char *canonical = kiln_c99_intern_static(symbol->key, symbol->key_len);
-        if (canonical == NULL) {
+        kiln_string view;
+        if (key.len > UINT32_MAX) {
             free(key.bytes);
             kiln_c99_gc_release(symbol);
             return KILN_C99_OUT_OF_MEMORY;
         }
-        symbol->key = canonical;
+        view.unit_len = (uint32_t)key.len;
+        view.flags = KILN_STRING_LATIN1;
+        view.data = key.bytes;
+        symbol->key = kiln_c99_intern_static_key(&view);
+        if (symbol->key == NULL) {
+            free(key.bytes);
+            kiln_c99_gc_release(symbol);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
         free(key.bytes);
         key.bytes = NULL;
     }
@@ -167,78 +209,91 @@ static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
     return kiln_c99_remember_symbol(*out);
 }
 
+/* Provider strings cross the C boundary as the same header used by the heap. Copying them to a
+ * value is deliberately unit based; UTF-8 is never used as a registry identity. */
+static kiln_value kiln_c99_copy_symbol_key(const kiln_string *source) {
+    uint16_t *units;
+    kiln_value result;
+    size_t index;
+    if (source == NULL || source->unit_len > SIZE_MAX / sizeof *units) {
+        return kiln_c99_undefined();
+    }
+    units = source->unit_len == 0
+                ? NULL
+                : (uint16_t *)malloc((size_t)source->unit_len * sizeof *units);
+    if (source->unit_len != 0 && units == NULL) return kiln_c99_undefined();
+    for (index = 0; index < source->unit_len; ++index) {
+        units[index] = (uint16_t)kiln_string_unit_at(source, index);
+    }
+    result = kiln_c99_from_units(units, source->unit_len);
+    free(units);
+    return result;
+}
+
 static int kiln_c99_symbol_for(kiln_value *out, kiln_value key) {
     kiln_value text = kiln_c99_text(key);
-    uint8_t *encoded = NULL;
-    size_t encoded_len = 0;
+    const kiln_string *text_key;
+    kiln_string registered_key = {0, KILN_STRING_LATIN1, NULL};
+    kiln_value description;
     kiln_symbol *symbol;
-    const uint8_t *registered_key;
-    uint64_t registered_key_len;
     char *property_key;
+    kiln_string property_view;
     static const char property_prefix[] = "@@symbol-for:";
     uint64_t id;
-    if (text.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
-    if (kiln_c99_string_to_utf8_lossy(text, &encoded, &encoded_len) != KILN_C99_OK) {
-        return KILN_C99_OUT_OF_MEMORY;
-    }
-    if (kiln_realm_symbol_for(encoded, (uint64_t)encoded_len, &id) != KILN_C99_OK) {
-        free(encoded);
+    size_t property_len = (sizeof property_prefix - 1) + sizeof id;
+    if (text.tag != KILN_VALUE_STRING || text.ptr == NULL) return KILN_C99_OUT_OF_MEMORY;
+    text_key = (const kiln_string *)text.ptr;
+    if (kiln_realm_symbol_for(text_key, &id) != KILN_C99_OK) {
         KILN_C99_REFUSE("the realm would not register this symbol key");
     }
-    free(encoded);
-    if (kiln_realm_symbol_key_for(id, &registered_key, &registered_key_len) != KILN_C99_OK ||
-        registered_key_len > SIZE_MAX)
+    if (kiln_realm_symbol_key_for(id, &registered_key) != KILN_C99_OK ||
+        (registered_key.flags != KILN_STRING_LATIN1 && registered_key.flags != KILN_STRING_UTF16)) {
         KILN_C99_REFUSE("the realm would not answer with the symbol key it registered");
+    }
+    /* Copy the provider answer before any later allocation can change the active realm scratch. */
+    description = kiln_c99_copy_symbol_key(&registered_key);
+    if (description.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
     symbol = (kiln_symbol *)kiln_c99_gc_alloc(KILN_GC_SYMBOL, sizeof *symbol);
     if (symbol == NULL) return KILN_C99_OUT_OF_MEMORY;
-    symbol->description = NULL;
-    symbol->description_len = 0;
-    symbol->description_value = kiln_c99_undefined();
-    /* Registry key bytes, like `Symbol()`'s, stay malloc-backed and outlive the realm's heap:
-     * the symbol they belong to is rooted for the realm's whole life. */
-    property_key = (char *)malloc((sizeof property_prefix - 1) + sizeof id);
+    property_key = (char *)malloc(property_len);
     if (property_key == NULL) {
         kiln_c99_gc_release(symbol);
         return KILN_C99_OUT_OF_MEMORY;
     }
     memcpy(property_key, property_prefix, sizeof property_prefix - 1);
     memcpy(property_key + sizeof property_prefix - 1, &id, sizeof id);
-    symbol->key = property_key;
-    symbol->key_len = (sizeof property_prefix - 1) + sizeof id;
-    /* Two `Symbol.for("x")` calls make two of these structs with one key: interning is what
-     * makes a property stored through either findable through the other by pointer. The key
-     * carries the id's raw bytes, NULs included, which is one reason a key's length is read
-     * from its header and never measured. */
-    {
-        const char *canonical = kiln_c99_intern_static(symbol->key, symbol->key_len);
+    if (property_len > UINT32_MAX) {
         free(property_key);
-        if (canonical == NULL) {
-            kiln_c99_gc_release(symbol);
-            return KILN_C99_OUT_OF_MEMORY;
-        }
-        symbol->key = canonical;
-    }
-    symbol->description = NULL;
-    symbol->description_len = 0;
-    symbol->description_value = kiln_c99_copy_text((const char *)registered_key,
-                                                   (size_t)registered_key_len);
-    if (symbol->description_value.tag != KILN_VALUE_STRING) {
         kiln_c99_gc_release(symbol);
         return KILN_C99_OUT_OF_MEMORY;
     }
+    property_view.unit_len = (uint32_t)property_len;
+    property_view.flags = KILN_STRING_LATIN1;
+    property_view.data = property_key;
+    symbol->key = kiln_c99_intern_static_key(&property_view);
+    free(property_key);
+    if (symbol->key == NULL) {
+        kiln_c99_gc_release(symbol);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    symbol->description = NULL;
+    symbol->description_len = 0;
+    symbol->description_value = description;
     symbol->registry_id = id;
     *out = kiln_c99_value(KILN_VALUE_SYMBOL, 0, (const char *)(uintptr_t)symbol, 0);
     return kiln_c99_remember_symbol(*out);
 }
 
 static kiln_value kiln_c99_symbol_key_for(kiln_value value) {
-    const uint8_t *key;
-    uint64_t key_len;
-    if (value.tag != KILN_VALUE_SYMBOL) return kiln_c99_undefined();
-    if (kiln_realm_symbol_key_for(kiln_c99_symbol_of(value)->registry_id, &key, &key_len) !=
-        KILN_C99_OK)
+    kiln_string key = {0, KILN_STRING_LATIN1, NULL};
+    if (value.tag != KILN_VALUE_SYMBOL || kiln_c99_symbol_of(value)->registry_id == 0) {
         return kiln_c99_undefined();
-    return kiln_c99_copy_text((const char *)key, (size_t)key_len);
+    }
+    if (kiln_realm_symbol_key_for(kiln_c99_symbol_of(value)->registry_id, &key) != KILN_C99_OK ||
+        (key.flags != KILN_STRING_LATIN1 && key.flags != KILN_STRING_UTF16)) {
+        return kiln_c99_undefined();
+    }
+    return kiln_c99_copy_symbol_key(&key);
 }
 
 /* `call`, `apply`, `bind` and `toString`, which every callable answers to whatever kind of

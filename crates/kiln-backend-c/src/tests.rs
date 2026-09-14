@@ -340,9 +340,10 @@ int main(void) {{
     if (!kiln_c99_object_of(namespace_object)->module_namespace ||
         kiln_c99_object_of(namespace_object)->frozen) return 5;
     if (kiln_c99_object_of(namespace_object)->count != 3 ||
-        strcmp(kiln_c99_object_of(namespace_object)->properties[0].key, "a") != 0 ||
-        strcmp(kiln_c99_object_of(namespace_object)->properties[1].key, "z") != 0 ||
-        strcmp(kiln_c99_object_of(namespace_object)->properties[2].key, "@@toStringTag") != 0)
+        !kiln_test_key_equal(kiln_c99_object_of(namespace_object)->properties[0].key, "a", 1) ||
+        !kiln_test_key_equal(kiln_c99_object_of(namespace_object)->properties[1].key, "z", 1) ||
+        !kiln_test_key_equal(kiln_c99_object_of(namespace_object)->properties[2].key,
+                             "@@toStringTag", 13))
         return 6;
     if (kiln_c99_object_of(namespace_object)->properties[0].refused ||
         kiln_c99_object_of(namespace_object)->properties[0].symbol_hidden ||
@@ -372,13 +373,14 @@ int main(void) {{
         return 13;
     if (kiln_c99_get(NULL, namespace_object, "@@toStringTag", 13, &read, 0, &thrown) !=
             KILN_C99_OK ||
-        read.tag != KILN_VALUE_STRING || read.len != 6 || memcmp(read.ptr, "Module", 6) != 0)
+        read.tag != KILN_VALUE_STRING || !kiln_test_units_equal(read, "Module", 6))
         return 13;
     if (kiln_c99_put_mode(NULL, namespace_object, "a", 1, kiln_c99_number(3.0), 1, 0,
                           &thrown) != KILN_C99_THROWN)
         return 14;
     if (kiln_c99_get(NULL, thrown, "message", 7, &read, 0, &thrown) != KILN_C99_OK ||
-        read.tag != KILN_VALUE_STRING || strstr(read.ptr, "module namespace") == NULL) return 15;
+        read.tag != KILN_VALUE_STRING || !kiln_test_units_contain(read, "module namespace"))
+        return 15;
     if (kiln_c99_write_would_accept(namespace_object, "a", 1)) return 16;
     if (kiln_c99_delete(NULL, namespace_object, "a", 1, &found, 0, &thrown) != KILN_C99_OK ||
         found != 0) return 17;
@@ -397,8 +399,8 @@ int main(void) {{
     if ({symbol}_namespace_wrapper(&numeric_namespace, numeric_names, numeric_lengths, values, 2)
         != KILN_C99_OK) return 22;
     if (kiln_c99_object_of(numeric_namespace)->count != 3 ||
-        strcmp(kiln_c99_object_of(numeric_namespace)->properties[0].key, "10") != 0 ||
-        strcmp(kiln_c99_object_of(numeric_namespace)->properties[1].key, "2") != 0)
+        !kiln_test_key_equal(kiln_c99_object_of(numeric_namespace)->properties[0].key, "10", 2) ||
+        !kiln_test_key_equal(kiln_c99_object_of(numeric_namespace)->properties[1].key, "2", 1))
         return 23;
     if ({symbol}_namespace_wrapper(&read, reserved_names, reserved_lengths, values, 1) !=
         KILN_C99_INVALID_ARGUMENT) return 24;
@@ -426,37 +428,48 @@ int main(void) {{
 }
 
 #[test]
-fn owned_boundary_strings_preserve_identity_and_borrowed_strings_copy() {
+fn owned_boundary_strings_preserve_header_identity_across_conversions() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");
     let wrapper = r#"
 int main(void) {
     uint64_t realm;
     const char bytes[] = {(char)0xc3, (char)0xa9, 0, (char)0xff};
+    /* The byte string above decodes to three units: U+00E9, U+0000, and U+FFFD for the
+     * lone 0xFF. The boundary carries units, not bytes, so identity is asserted in units. */
+    static const uint16_t want[] = {0x00e9, 0x0000, 0xfffd};
     kiln_value owned = kiln_c99_copy_text(bytes, sizeof bytes);
     kiln_value borrowed;
+    kiln_value unflagged;
+    kiln_value second;
     kiln_val owned_value;
-    kiln_val copied_value;
     const kiln_string *header;
+    size_t index;
     if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
     kiln_test_realm_active = 1;
     if (owned.tag != KILN_VALUE_STRING || owned.flags != KILN_VALUE_FLAG_OWNED_STRING ||
-        owned.len != sizeof bytes || owned.ptr == NULL) return 2;
+        owned.len != 3 || owned.ptr == NULL) return 2;
     header = (const kiln_string *)owned.ptr;
-    if (header->data == NULL || header->unit_len != sizeof bytes) return 3;
+    if (header->data == NULL || header->unit_len != 3) return 3;
+    /* An owned boundary string crosses into a box by pointer: no copy. */
     owned_value = kiln_val_from_boundary(owned);
     if (!KILN_VAL_IS_STRING(owned_value) || (const kiln_string *)KILN_VAL_PTR(owned_value) != header)
         return 4;
+    /* ... and back out with the flag recomputed from the shared header/payload layout. */
     borrowed = kiln_val_to_boundary(owned_value);
     if (borrowed.flags != KILN_VALUE_FLAG_OWNED_STRING || borrowed.ptr != owned.ptr ||
         borrowed.len != owned.len) return 5;
-    borrowed = kiln_c99_value(KILN_VALUE_STRING, 0, owned.ptr, owned.len);
-    if (borrowed.flags != 0) return 6;
-    copied_value = kiln_val_from_boundary(borrowed);
-    if (!KILN_VAL_IS_STRING(copied_value) || KILN_VAL_PTR(copied_value) == KILN_VAL_PTR(owned_value))
-        return 7;
-    if (memcmp(((const kiln_string *)KILN_VAL_PTR(copied_value))->data, bytes, sizeof bytes) != 0)
-        return 8;
+    /* The flag is observational: clearing it changes nothing about the crossing itself. */
+    unflagged = kiln_c99_value(KILN_VALUE_STRING, 0, owned.ptr, owned.len);
+    if (KILN_VAL_PTR(kiln_val_from_boundary(unflagged)) != KILN_VAL_PTR(owned_value)) return 6;
+    /* A second construction of the same bytes is unit-identical, whatever its header. */
+    second = kiln_c99_copy_text(bytes, sizeof bytes);
+    if (second.tag != KILN_VALUE_STRING || second.len != 3) return 7;
+    header = (const kiln_string *)second.ptr;
+    if (header->unit_len != 3) return 8;
+    for (index = 0; index < 3; ++index) {
+        if (kiln_string_unit_at(header, index) != want[index]) return 8;
+    }
     kiln_test_realm_active = 0;
     return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 9;
 }
@@ -515,6 +528,9 @@ static int child_constructor(kiln_call_context *ctx, kiln_val *result, kiln_val 
     *result = receiver_ptr ? *receiver_ptr : KILN_VAL_UNDEFINED;
     return KILN_C99_OK;
 }}
+/* Headed closure names: the closure keeps the pointer. */
+static const kiln_string listener_name = {{ 8, KILN_STRING_LATIN1, "listener" }};
+static const kiln_string child_name = {{ 5, KILN_STRING_LATIN1, "Child" }};
 int main(void) {{
     uint64_t realm;
     kiln_value exports[1];
@@ -530,7 +546,7 @@ int main(void) {{
     kiln_value thrown = kiln_c99_undefined();
     if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
     kiln_test_realm_active = 1;
-    if (kiln_c99_make_closure(&callback, listener, "listener", 8, NULL, 0, "<test>", 0, 1, 0, 0, 0, 0, 0,
+    if (kiln_c99_make_closure(&callback, listener, &listener_name, NULL, 0, "<test>", 0, 1, 0, 0, 0, 0, 0,
                               1, KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED, 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 1;
     if ({symbol}(NULL, &result, NULL, 0, exports, 1) != KILN_C99_OK) return 2;
@@ -541,7 +557,7 @@ int main(void) {{
        if (kiln_c99_own_keys(NULL, emitter, &keys, 0, &thrown) != KILN_C99_OK) return 32;
        if (kiln_c99_array_of(keys)->count != 0) return 33;
     }}
-    if (kiln_c99_make_closure(&child, child_constructor, "Child", 5, NULL, 0, "<test>", 0, 0, 0, 0, 0, 0, 0,
+    if (kiln_c99_make_closure(&child, child_constructor, &child_name, NULL, 0, "<test>", 0, 0, 0, 0, 0, 0, 0,
                               1, KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED, 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 34;
     args[0] = child; args[1] = exports[0];
@@ -599,6 +615,7 @@ static int readable_child(kiln_call_context *ctx, kiln_val *result, kiln_val *up
     *result = receiver_ptr ? *receiver_ptr : KILN_VAL_UNDEFINED;
     return KILN_C99_OK;
 }
+static const kiln_string readable_child_name = { 5, KILN_STRING_LATIN1, "Child" };
 int main(void) {
     uint64_t realm;
     kiln_value readable = kiln_c99_method(KILN_C99_METHOD_NODE_READABLE);
@@ -621,7 +638,7 @@ int main(void) {
         method.bits != KILN_C99_METHOD_NODE_READABLE_PUSH) return 4;
     if (kiln_c99_get(NULL, readable_prototype, "on", 2, &method, 0, &thrown) != KILN_C99_OK ||
         method.tag != KILN_VALUE_METHOD || method.bits != KILN_C99_METHOD_NODE_EVENT_ON) return 5;
-    if (kiln_c99_make_closure(&child, readable_child, "Child", 5, "<test>", 6, "<test>", 0, 0, 0, 0, 0, 0, 0,
+    if (kiln_c99_make_closure(&child, readable_child, &readable_child_name, "<test>", 6, "<test>", 0, 0, 0, 0, 0, 0, 0,
                               1, KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED, 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 6;
     arguments[0] = child;
@@ -841,8 +858,8 @@ static int host_call(void *context, uint16_t operation, uint16_t argc,
                      const kiln_value *arguments, kiln_value *result) {{
     (void)context;
     if (operation != UINT16_C(1) || argc != 1 || arguments == NULL || result == NULL ||
-        arguments[0].tag != KILN_VALUE_STRING || arguments[0].len != 6 ||
-        memcmp(arguments[0].ptr, "called", 6) != 0) return 90;
+        arguments[0].tag != KILN_VALUE_STRING ||
+        !kiln_test_units_equal(arguments[0], "called", 6)) return 90;
     ++value_of_calls;
     *result = kiln_c99_undefined();
     return KILN_C99_OK;
@@ -890,15 +907,16 @@ int main(void) {
     if (kiln_c99_symbol_for(&second, key) != KILN_C99_OK) return 2;
     if (!kiln_c99_strict_equal(first, second)) return 3;
     recovered = kiln_c99_symbol_key_for(first);
-    if (recovered.tag != KILN_VALUE_STRING || recovered.len != key.len ||
-        memcmp(recovered.ptr, key.ptr, key.len) != 0) return 4;
+    if (!kiln_test_units_equal(recovered, "fastify-error-generic", 21)) return 4;
     if (kiln_c99_new_symbol(&unique, key) != KILN_C99_OK) return 5;
     if (kiln_c99_strict_equal(first, unique)) return 6;
     if (kiln_c99_symbol_key_for(unique).tag != KILN_VALUE_UNDEFINED) return 7;
-    if (kiln_c99_property_key(first).len == key.len &&
-        memcmp(kiln_c99_property_key(first).ptr, key.ptr, key.len) == 0) return 8;
-    if (kiln_c99_text(first).len != 29 ||
-        memcmp(kiln_c99_text(first).ptr, "Symbol(fastify-error-generic)", 29) != 0) return 9;
+    /* The symbol's property key is the registry slot (`@@symbol-for:<id>`), never the
+     * description the registry round-trips above. */
+    if (kiln_test_units_equal(kiln_c99_property_key(first), "fastify-error-generic", 21))
+        return 8;
+    if (!kiln_test_units_equal(kiln_c99_text(first), "Symbol(fastify-error-generic)", 29))
+        return 9;
     kiln_test_realm_active = 0;
     return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 10;
 }
@@ -1388,6 +1406,9 @@ static int refuses_before_instruction(kiln_call_context *ctx, kiln_val *result,
     (void)ctx; (void)result; (void)upvalues; (void)receiver_ptr; (void)args; (void)argc;
     return KILN_C99_CONTROL_ERROR;
 }
+/* The closure keeps the name pointer, so it is a headed static over ASCII bytes. */
+static const uint8_t init_name_data[] = "initialize";
+static const kiln_string init_name = { 10, KILN_STRING_LATIN1, init_name_data };
 int main(void) {
     uint64_t realm;
     kiln_value function;
@@ -1396,7 +1417,7 @@ int main(void) {
     kiln_value diagnostic;
     if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
     kiln_test_realm_active = 1;
-    if (kiln_c99_make_closure(&function, refuses_before_instruction, "initialize", 10,
+    if (kiln_c99_make_closure(&function, refuses_before_instruction, &init_name,
                               NULL, 0, "node_modules/example/index.js", 0, 0, 0, 0, 0, 0, 0,
                               1, KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED, 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 1;
@@ -1404,9 +1425,9 @@ int main(void) {
                       &thrown) != KILN_C99_CONTROL_ERROR) return 2;
     diagnostic = kiln_c99_control_diagnostic();
     if (diagnostic.tag != KILN_VALUE_STRING) return 3;
-    if (strstr(diagnostic.ptr, "module=node_modules/example/index.js") == NULL) return 4;
-    if (strstr(diagnostic.ptr, "operation=FunctionBody") == NULL) return 5;
-    if (strstr(diagnostic.ptr, "function=initialize") == NULL) return 6;
+    if (!kiln_test_units_contain(diagnostic, "module=node_modules/example/index.js")) return 4;
+    if (!kiln_test_units_contain(diagnostic, "operation=FunctionBody")) return 5;
+    if (!kiln_test_units_contain(diagnostic, "function=initialize")) return 6;
     kiln_test_realm_active = 0;
     return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 7;
 }
@@ -1641,15 +1662,15 @@ fn compact_closure_source_unions_live_ranges_and_remaps_nested_spans() {
 /// quiet wrong answer. Such a test belongs in `conformance/native`, where the real archive is
 /// linked.
 const REGEXP_FIXTURE: &str = r#"
-int32_t kiln_regexp_compile(const unsigned char *pattern, size_t pattern_len,
-                            const unsigned char *flags, size_t flags_len, void **out_handle) {
-    (void)pattern; (void)pattern_len; (void)flags; (void)flags_len; (void)out_handle;
+int32_t kiln_regexp_compile(const kiln_string *pattern, const kiln_string *flags,
+                            void **out_handle) {
+    (void)pattern; (void)flags; (void)out_handle;
     return -1;
 }
 void kiln_regexp_free(void *handle) { (void)handle; }
-int32_t kiln_regexp_search(void *handle, const uint16_t *subject, size_t subject_len, size_t start,
+int32_t kiln_regexp_search(void *handle, const kiln_string *subject, size_t start,
                            int64_t *out_ranges, size_t out_capacity) {
-    (void)handle; (void)subject; (void)subject_len; (void)start; (void)out_ranges;
+    (void)handle; (void)subject; (void)start; (void)out_ranges;
     (void)out_capacity;
     return -1;
 }
@@ -1767,11 +1788,9 @@ int32_t kiln_intl_segment(const unsigned char *bytes, size_t len, uint32_t granu
 /* `JSON.parse`'s reader lives in the Rust provider archive too, and this host does not link it.
  * Refusing every document is honest for the same reason the regexp stub is: no test here parses
  * one, and a test that did would see a SyntaxError rather than a quiet wrong answer. */
-struct kiln_json_node;
-int32_t kiln_json_parse(const unsigned char *bytes, size_t len,
-                        const struct kiln_json_node **out_nodes, size_t *out_count,
-                        const unsigned char **out_text, size_t *out_text_len) {
-    (void)bytes; (void)len; (void)out_nodes; (void)out_count; (void)out_text; (void)out_text_len;
+int32_t kiln_json_parse(const kiln_string *source, const kiln_json_node **out_nodes,
+                        size_t *out_count, kiln_string *out_text) {
+    (void)source; (void)out_nodes; (void)out_count; (void)out_text;
     return -1;
 }
 "#;
@@ -1785,7 +1804,7 @@ const REALM_FIXTURE: &str = r#"
 static uint64_t kiln_test_next_timer_id = 1;
 static int kiln_test_realm_active = 0;
 static uint64_t kiln_test_symbol_id = 1;
-static char kiln_test_symbol_key[256];
+static uint16_t kiln_test_symbol_key[256];
 static uint64_t kiln_test_symbol_key_len = 0;
 static uint32_t kiln_test_callable_tags[256];
 static uint64_t kiln_test_callable_codes[256];
@@ -1795,6 +1814,48 @@ static kiln_value kiln_test_value_slots[5];
 static uint64_t kiln_test_entropy_seed = 0;
 static uint64_t kiln_test_entropy_state = 0;
 static int kiln_test_entropy_initialized = 0;
+
+/* Test-only comparison: a string value carries a headed `kiln_string` at `ptr`, so a byte
+ * memcmp or strstr on `ptr` reads the header's words as units. Compare units instead; every
+ * expected spelling used here is ASCII, where a unit is a byte. */
+static int kiln_test_units_equal(kiln_value value, const char *bytes, size_t len) {
+    const kiln_string *string = (const kiln_string *)value.ptr;
+    size_t index;
+    if (value.tag != KILN_VALUE_STRING || value.ptr == NULL || string->unit_len != len) {
+        return 0;
+    }
+    for (index = 0; index < len; ++index) {
+        if (kiln_string_unit_at(string, index) != (uint8_t)bytes[index]) return 0;
+    }
+    return 1;
+}
+/* Same unit comparison for a bare headed key, as stored on a property. */
+static int kiln_test_key_equal(const kiln_string *key, const char *bytes, size_t len) {
+    size_t index;
+    if (key == NULL || key->unit_len != len) return 0;
+    for (index = 0; index < len; ++index) {
+        if (kiln_string_unit_at(key, index) != (uint8_t)bytes[index]) return 0;
+    }
+    return 1;
+}
+static int kiln_test_units_contain(kiln_value value, const char *needle) {    const kiln_string *string = (const kiln_string *)value.ptr;
+    size_t hay_len;
+    size_t length;
+    size_t start;
+    size_t index;
+    if (value.tag != KILN_VALUE_STRING || value.ptr == NULL || needle == NULL) return 0;
+    hay_len = string->unit_len;
+    length = strlen(needle);
+    if (length == 0) return 1;
+    if (length > hay_len) return 0;
+    for (start = 0; start + length <= hay_len; ++start) {
+        for (index = 0; index < length; ++index) {
+            if (kiln_string_unit_at(string, start + index) != (uint8_t)needle[index]) break;
+        }
+        if (index == length) return 1;
+    }
+    return 0;
+}
 
 int kiln_realm_create(uint64_t *out_realm) {
     if (out_realm == NULL) return KILN_C99_INVALID_ARGUMENT;
@@ -1892,29 +1953,46 @@ int kiln_ffi_last_error(const uint8_t **out_bytes, uint64_t *out_len) {
     if (out_len != NULL) *out_len = 0;
     return KILN_C99_OK;
 }
-int kiln_realm_symbol_for(const uint8_t *key, uint64_t key_len, uint64_t *out_id) {
-    if (!kiln_test_realm_active || out_id == NULL || key_len > sizeof kiln_test_symbol_key) {
+/* The registry answers in the same headed units the heap uses: identity is compared unit
+ * by unit, so a Latin1 registration and its UTF-16 spelling are the same key. Units are
+ * stored widened; every test key here is ASCII, where the spelling is unambiguous. */
+int kiln_realm_symbol_for(const kiln_string *key, uint64_t *out_id) {
+    size_t index;
+    int same;
+    if (!kiln_test_realm_active || out_id == NULL || key == NULL ||
+        key->unit_len > sizeof kiln_test_symbol_key / sizeof *kiln_test_symbol_key) {
         return KILN_C99_INVALID_ARGUMENT;
     }
     if (kiln_test_symbol_key_len == 0) {
-        memcpy(kiln_test_symbol_key, key, (size_t)key_len);
-        kiln_test_symbol_key_len = key_len;
-    } else if (key_len != kiln_test_symbol_key_len ||
-               memcmp(kiln_test_symbol_key, key, (size_t)key_len) != 0) {
-        ++kiln_test_symbol_id;
-        memcpy(kiln_test_symbol_key, key, (size_t)key_len);
-        kiln_test_symbol_key_len = key_len;
+        for (index = 0; index < key->unit_len; ++index) {
+            kiln_test_symbol_key[index] = kiln_string_unit_at(key, index);
+        }
+        kiln_test_symbol_key_len = key->unit_len;
+    } else {
+        same = kiln_test_symbol_key_len == key->unit_len;
+        for (index = 0; same && index < key->unit_len; ++index) {
+            if (kiln_test_symbol_key[index] != kiln_string_unit_at(key, index)) {
+                same = 0;
+            }
+        }
+        if (!same) {
+            ++kiln_test_symbol_id;
+            for (index = 0; index < key->unit_len; ++index) {
+                kiln_test_symbol_key[index] = kiln_string_unit_at(key, index);
+            }
+            kiln_test_symbol_key_len = key->unit_len;
+        }
     }
     *out_id = kiln_test_symbol_id;
     return KILN_C99_OK;
 }
-int kiln_realm_symbol_key_for(uint64_t id, const uint8_t **out_key, uint64_t *out_key_len) {
-    if (!kiln_test_realm_active || id != kiln_test_symbol_id || out_key == NULL ||
-        out_key_len == NULL) {
+int kiln_realm_symbol_key_for(uint64_t id, kiln_string *out_key) {
+    if (!kiln_test_realm_active || id != kiln_test_symbol_id || out_key == NULL) {
         return KILN_C99_INVALID_ARGUMENT;
     }
-    *out_key = (const uint8_t *)kiln_test_symbol_key;
-    *out_key_len = kiln_test_symbol_key_len;
+    out_key->unit_len = (uint32_t)kiln_test_symbol_key_len;
+    out_key->flags = KILN_STRING_UTF16;
+    out_key->data = kiln_test_symbol_key;
     return KILN_C99_OK;
 }
 int kiln_realm_callable_store(uint32_t tag, uint64_t code, void *candidate,
@@ -2187,14 +2265,19 @@ int kiln_realm_http_response_end_active(uint64_t resource, uint64_t id,
 /// runtime's includes first and makes `HEADER`'s request arrive too late to be honoured. The
 /// prologue is therefore repeated here, ahead of everything, so the one TU the tests build
 /// sees what the many TUs a build produces each see.
+///
+/// The provider fixtures follow the module rather than preceding it: their signatures name
+/// the headed `kiln_string` ABI, whose definition lives in `HEADER`'s prefix, while the calls
+/// in the prelude see `foundation.c`'s forward declarations. A definition may follow its
+/// calls; a use of an undeclared type may not, so this order is the only one that compiles.
 fn linked_source(module_source: &str, wrapper: &str) -> String {
     format!(
         "#if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)\n\
              #define _POSIX_C_SOURCE 200809L\n\
              #endif\n{}\n{}\n{}\n{}\n{}",
         kiln_native_number::runtime_source(),
-        REGEXP_FIXTURE,
         module_source,
+        REGEXP_FIXTURE,
         REALM_FIXTURE,
         wrapper
     )
@@ -2775,7 +2858,12 @@ fn emits_every_scalar_constant_and_host_call_through_numeric_abi() {
     assert!(generated.contains("typedef int (*kiln_host_call_fn)"));
     assert!(generated.contains("char kiln_module_") || generated.contains("_constant_4"));
     assert!(!generated.contains("printf(") || generated.contains("snprintf("));
-    assert!(generated.contains("\\x00\"\""));
+    // Headed constants store exact units in a decimal array, so the old C-string-literal
+    // hazards are gone by construction: no hex escape can swallow a following digit, and an
+    // embedded NUL is a 0 unit rather than a terminator. `"a\0é"` must survive as all three
+    // units in Latin1 storage.
+    assert!(generated.contains("{ 97, 0, 233 }"));
+    assert!(generated.contains("KILN_STRING_LATIN1"));
 }
 
 #[test]
@@ -2808,10 +2896,12 @@ fn generated_numeric_conversion_ignores_the_embedding_process_locale() {
         0,
     );
     let generated = emit(&program).expect("locale probe emits");
+    // The string arrives as ASCII bytes borrowed from the headed value; the provider call
+    // itself is unchanged, which is what keeps this free of `localeconv`.
     assert!(
         generated
             .source
-            .contains("kiln_string_to_number(value.ptr, value.len)")
+            .contains("kiln_string_to_number(bytes, length)")
     );
     // A *call*, matching the printf check below. Both names still appear in the runtime's
     // prose, where they are naming the things that must not be reached for.
@@ -2846,9 +2936,8 @@ static int host_call(void *context, uint16_t operation, uint16_t argc,
             return KILN_C99_HOST_ERROR;
     }} else if (calls == 1) {{
         static const char expected[] = "value=1.5";
-        if (arguments[0].tag != KILN_VALUE_STRING || arguments[0].ptr == NULL ||
-            arguments[0].len != sizeof(expected) - 1 ||
-            memcmp(arguments[0].ptr, expected, sizeof(expected) - 1) != 0)
+        if (arguments[0].tag != KILN_VALUE_STRING ||
+            !kiln_test_units_equal(arguments[0], expected, sizeof(expected) - 1))
             return KILN_C99_HOST_ERROR;
     }} else {{
         return KILN_C99_HOST_ERROR;
@@ -3232,7 +3321,7 @@ int main(void) {
     if (kiln_c99_put(NULL, first, "unwrappedName", 13, marker, 1, &thrown) != KILN_C99_OK)
         return 2;
     if (kiln_c99_get(NULL, first, "unwrappedName", 13, &read, 0, &thrown) != KILN_C99_OK ||
-        read.tag != KILN_VALUE_STRING || read.len != 5 || memcmp(read.ptr, "first", 5) != 0)
+        read.tag != KILN_VALUE_STRING || !kiln_test_units_equal(read, "first", 5))
         return 3;
     if (kiln_c99_get(NULL, second, "unwrappedName", 13, &read, 0, &thrown) == KILN_C99_OK)
         return 4;
@@ -3318,8 +3407,8 @@ int main(void) {
     if (kiln_c99_new_typed_array(&view, KILN_TYPED_INT8, kiln_c99_undefined(), 0, 0, 0,
                                  &thrown) != KILN_C99_OK) return 3;
     if (kiln_c99_call(NULL, &tag, getter, view, NULL, 0, 0, &thrown) != KILN_C99_OK ||
-        tag.tag != KILN_VALUE_STRING || tag.len != 9 ||
-        memcmp(tag.ptr, "Int8Array", 9) != 0) return 4;
+        tag.tag != KILN_VALUE_STRING ||
+        !kiln_test_units_equal(tag, "Int8Array", 9)) return 4;
     return 0;
 }
 "#;
@@ -3652,8 +3741,8 @@ static int host_call(void *context, uint16_t operation, uint16_t argc,
     if (calls == 0 && argc == 0) {{
         *result = kiln_c99_value(KILN_VALUE_STRING, 0, NULL, 0);
     }} else if (calls == 1 && argc == 1 && arguments != NULL &&
-               arguments[0].tag == KILN_VALUE_STRING && arguments[0].len == 1 &&
-               arguments[0].ptr != NULL && arguments[0].ptr[0] == 'x') {{
+               arguments[0].tag == KILN_VALUE_STRING &&
+               kiln_test_units_equal(arguments[0], "x", 1)) {{
         *result = kiln_c99_undefined();
     }} else {{
         return KILN_C99_HOST_ERROR;
@@ -4395,8 +4484,8 @@ static int host_call(void *context, uint16_t operation, uint16_t argc,
                      const kiln_value *arguments, kiln_value *result) {{
     (void)context;
     if (operation != UINT16_C(1) || argc != 1 || arguments == NULL || result == NULL ||
-        arguments[0].tag != KILN_VALUE_STRING || arguments[0].len != 8 ||
-        memcmp(arguments[0].ptr, "{{ a: 2 }}", 8) != 0) return 1;
+        arguments[0].tag != KILN_VALUE_STRING ||
+        !kiln_test_units_equal(arguments[0], "{{ a: 2 }}", 8)) return 1;
     *result = kiln_c99_undefined();
     return 0;
 }}
@@ -4667,6 +4756,9 @@ int main(void) {{
     size_t index;
     int found;
     int enumerable;
+    /* Headed keys for the renamed `typed_own_key`: the view keeps no copy. */
+    static const kiln_string typed_key_0 = {{ 1, KILN_STRING_LATIN1, "0" }};
+    static const kiln_string typed_key_length = {{ 6, KILN_STRING_LATIN1, "length" }};
     if (kiln_c99_new_typed_buffer(&buffer, 8) != KILN_C99_OK) return 2;
     if (kiln_c99_new_typed_array(&bytes, KILN_TYPED_UINT8, buffer, 0, 0, 0, &thrown) != KILN_C99_OK) return 3;
     if (kiln_c99_new_typed_array(&words, KILN_TYPED_UINT32, buffer, 0, 0, 0, &thrown) != KILN_C99_OK) return 4;
@@ -4714,9 +4806,9 @@ int main(void) {{
     if (kiln_c99_construct(NULL, &value, kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_BUFFER),
                            args, 1, 0, &thrown) != KILN_C99_THROWN) return 18;
     /* The view's indices are own and enumerable. Metadata and methods are inherited. */
-    kiln_c99_typed_own(bytes, "0", 1, &found, &enumerable);
+    kiln_c99_typed_own_key(bytes, &typed_key_0, &found, &enumerable);
     if (!found || !enumerable) return 19;
-    kiln_c99_typed_own(bytes, "length", 6, &found, &enumerable);
+    kiln_c99_typed_own_key(bytes, &typed_key_length, &found, &enumerable);
     if (found || enumerable) return 20;
     if (kiln_c99_own_keys(NULL, bytes, &keys, 0, NULL) != KILN_C99_OK ||
         kiln_c99_array_of(keys)->count != 8) return 21;
@@ -4742,8 +4834,8 @@ int main(void) {{
     if (kiln_c99_get(NULL, kiln_c99_builtin(KILN_C99_BUILTIN_SYMBOL), "toStringTag", 11,
                      &value, 0, &thrown) != KILN_C99_OK ||
         kiln_c99_get_computed(NULL, bytes, value, &step, 0, &thrown) != KILN_C99_OK ||
-        step.tag != KILN_VALUE_STRING || step.len != 10 ||
-        memcmp(step.ptr, "Uint8Array", 10) != 0) return 28;
+        step.tag != KILN_VALUE_STRING ||
+        !kiln_test_units_equal(step, "Uint8Array", 10)) return 28;
     return 0;
 }}
 /* {} */
@@ -4790,8 +4882,8 @@ static int host_call(void *context, uint16_t operation, uint16_t argc,
                      const kiln_value *arguments, kiln_value *result) {{
     (void)context;
     if (operation != UINT16_C(1) || argc != 1 || arguments == NULL || result == NULL ||
-        arguments[0].tag != KILN_VALUE_STRING || arguments[0].len != 8 ||
-        memcmp(arguments[0].ptr, "{{ a: 2 }}", 8) != 0) return 1;
+        arguments[0].tag != KILN_VALUE_STRING ||
+        !kiln_test_units_equal(arguments[0], "{{ a: 2 }}", 8)) return 1;
     *result = kiln_c99_undefined();
     return 0;
 }}
@@ -4942,7 +5034,7 @@ static int callback(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues
     }
     if (argc == 1 && KILN_VAL_IS_STRING(args[0])) {
         kiln_value s = kiln_val_to_boundary(args[0]);
-        if (s.len == 7 && memcmp(s.ptr, "forward", 7) == 0) {
+        if (kiln_test_units_equal(s, "forward", 7)) {
             *result = KILN_VAL_TRUE;
             return KILN_C99_OK;
         }
@@ -4950,6 +5042,7 @@ static int callback(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues
     *result = KILN_VAL_FALSE;
     return KILN_C99_OK;
 }
+static const kiln_string node_callback_name = { 8, KILN_STRING_LATIN1, "callback" };
 int main(void) {
     uint64_t realm;
     kiln_value thrown = kiln_c99_undefined();
@@ -4958,7 +5051,7 @@ int main(void) {
     kiln_value callable;
     if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
     kiln_test_realm_active = 1;
-    if (kiln_c99_make_closure(&callable, callback, "callback", 8, NULL, 0, "<test>", 0, 0, 0, 0, 0, 0, 0,
+    if (kiln_c99_make_closure(&callable, callback, &node_callback_name, NULL, 0, "<test>", 0, 0, 0, 0, 0, 0, 0,
                               1, KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED, 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK)
         return 1;
@@ -4967,8 +5060,8 @@ int main(void) {
     args[2] = kiln_c99_number(7.0);
     if (kiln_c99_node_util(NULL, &result, KILN_C99_METHOD_NODE_UTIL_FORMAT,
                            args, 3, 0, &thrown) != KILN_C99_OK ||
-        result.tag != KILN_VALUE_STRING || result.len != 6 ||
-        memcmp(result.ptr, "port:7", 6) != 0) return 2;
+        result.tag != KILN_VALUE_STRING ||
+        !kiln_test_units_equal(result, "port:7", 6)) return 2;
     args[0] = kiln_c99_undefined();
     args[1] = callable;
     args[2] = kiln_c99_undefined();

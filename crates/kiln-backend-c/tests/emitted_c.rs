@@ -989,8 +989,16 @@ fn runtime_prelude_size() {
     // ABI and its diagnostic/error helpers then brought the prelude to 45,012 lines; 45,200.
     // Zero-copy GC block sublist splicing and region transfer (Issue 02, ADR 0057) brought it to
     // 45,232 lines; 45,500.
+    //
+    // Widened on 2026-09-14, at 47,079 lines: the canonical headed-key migration -- one headed
+    // semantic walk with thin byte adapters across reads, writes, definition, enumeration,
+    // inspection, proxies, methods, shapes, spreads, symbols, JSON, regexp and the key interner,
+    // plus the headed provider signatures (JSON/regexp/symbol), the diagnostic function key,
+    // and the hoisted 16-byte string header both emission modes share. Net about +1,800 lines
+    // of overloads and adapters; no block is emitted twice (every test translation unit in
+    // `src/tests.rs` compiles the whole prelude exactly once). 48,500.
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 45_500;
+    const CEILING_LINES: usize = 48_500;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
@@ -1235,11 +1243,11 @@ fn string_operations() {
     // non-ASCII bytes into hex escapes that cannot swallow a following digit.
     let unit = emit(&program(
         vec![
-            Constant::String("h\u{e9}llo \"world\"\n\t7".to_owned()),
-            Constant::String("length".to_owned()),
-            Constant::String("toUpperCase".to_owned()),
-            Constant::String(" & more".to_owned()),
-            Constant::String("concat".to_owned()),
+            Constant::String("h\u{e9}llo \"world\"\n\t7".into()),
+            Constant::String("length".into()),
+            Constant::String("toUpperCase".into()),
+            Constant::String(" & more".into()),
+            Constant::String("concat".into()),
         ],
         vec![
             Instruction::Const(0),
@@ -1267,7 +1275,7 @@ fn string_operations() {
 fn host_call_and_builtin() {
     // String(42) + "hello", handed to the one host operation that exists.
     let unit = emit(&program(
-        vec![Constant::String("hello".to_owned()), number(42.0)],
+        vec![Constant::String("hello".into()), number(42.0)],
         vec![
             Instruction::LoadBuiltin(Builtin::String),
             Instruction::Const(1),
@@ -1292,9 +1300,9 @@ fn host_call_and_builtin() {
 fn objects_and_arrays() {
     let unit = emit(&program(
         vec![
-            Constant::String("a".to_owned()),
+            Constant::String("a".into()),
             number(1.0),
-            Constant::String("b".to_owned()),
+            Constant::String("b".into()),
             number(2.0),
         ],
         vec![
@@ -1342,7 +1350,7 @@ fn try_catch_throw() {
     let unit = emit(&program(
         vec![
             Constant::Boolean(true),
-            Constant::String("boom".to_owned()),
+            Constant::String("boom".into()),
             number(7.0),
         ],
         vec![
@@ -1659,9 +1667,9 @@ fn emitted_units_carry_no_ambient_state() {
 fn fused_property_read_and_write_emission() {
     let p = program(
         vec![
-            Constant::String("x".to_string()),
-            Constant::String("y".to_string()),
-            Constant::String("z".to_string()),
+            Constant::String("x".into()),
+            Constant::String("y".into()),
+            Constant::String("z".into()),
             number(42.0),
         ],
         vec![
@@ -1689,9 +1697,10 @@ fn fused_property_read_and_write_emission() {
     let unit = emit(&p).expect("fused property program emits");
     let b = body(&unit);
     // The graph carries the object and the value as SSA locals straight into the helpers: no
-    // operand stack exists in the body for a read or a write to go through.
-    assert!(b.contains("kiln_c99_val_read_property(host, v"));
-    assert!(b.contains("kiln_c99_val_write_property(host, v"));
+    // operand stack exists in the body for a read or a write to go through. The helpers take
+    // the interned headed key static, not a byte name and length.
+    assert!(b.contains("kiln_c99_val_read_property_key(host, v"));
+    assert!(b.contains("kiln_c99_val_write_property_key(host, v"));
     assert!(
         !b.contains("stack["),
         "a graph body has no operand stack:\n{b}"
@@ -1702,9 +1711,9 @@ fn fused_property_read_and_write_emission() {
 fn fused_call_method_statement_and_assignment() {
     let p = program(
         vec![
-            Constant::String("foo".to_string()),
-            Constant::String("bar".to_string()),
-            Constant::String("baz".to_string()),
+            Constant::String("foo".into()),
+            Constant::String("bar".into()),
+            Constant::String("baz".into()),
         ],
         vec![
             Instruction::LoadLocal(0),
@@ -1726,8 +1735,9 @@ fn fused_call_method_statement_and_assignment() {
     let b = body(&unit);
     // Three method calls, each on its receiver value, and no operand stack between them: the
     // result a statement discards is simply never read, and one assigned is the local's value.
+    // The helper takes the interned headed key static.
     assert_eq!(
-        b.matches("kiln_c99_val_call_method(host, v").count(),
+        b.matches("kiln_c99_val_call_method_key(host, v").count(),
         3,
         "{b}"
     );

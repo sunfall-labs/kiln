@@ -172,13 +172,21 @@ static int kiln_c99_json_quote_units(kiln_text *text, const kiln_string *string)
             if (kiln_c99_text_append(text, escape, 6) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;
             continue;
         }
-        if (point >= 0xD800 && point <= 0xDBFF && index + 1 < string->unit_len) {
-            uint32_t low = kiln_string_unit_at(string, index + 1);
-            if (low >= 0xDC00 && low <= 0xDFFF) {
-                point = 0x10000 + ((point - 0xD800) << 10) + (low - 0xDC00);
-                index += 1;
+        if (point >= 0xD800 && point <= 0xDBFF) {
+            if (index + 1 < string->unit_len) {
+                uint32_t low = kiln_string_unit_at(string, index + 1);
+                if (low >= 0xDC00 && low <= 0xDFFF) {
+                    point = 0x10000 + ((point - 0xD800) << 10) + (low - 0xDC00);
+                    index += 1;
+                } else {
+                    char escape[6] = {'\\', 'u', '0', '0', '0', '0'};
+                    escape[2] = hex[(point >> 12) & 15]; escape[3] = hex[(point >> 8) & 15];
+                    escape[4] = hex[(point >> 4) & 15]; escape[5] = hex[point & 15];
+                    if (kiln_c99_text_append(text, escape, 6) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;
+                    continue;
+                }
             } else {
-                char escape[6] = {'\\', 'u', 'd', '8', '0', '0'};
+                char escape[6] = {'\\', 'u', '0', '0', '0', '0'};
                 escape[2] = hex[(point >> 12) & 15]; escape[3] = hex[(point >> 8) & 15];
                 escape[4] = hex[(point >> 4) & 15]; escape[5] = hex[point & 15];
                 if (kiln_c99_text_append(text, escape, 6) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;
@@ -198,6 +206,21 @@ static int kiln_c99_json_quote_units(kiln_text *text, const kiln_string *string)
         if (kiln_c99_text_append(text, bytes, width) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;
     }
     return kiln_c99_text_append(text, "\"", 1);
+}
+
+/* Dispatch one canonical string through the ASCII byte fast path or the unit encoder.  Latin1
+ * bytes above ASCII are code units, not UTF-8, so handing them to `kiln_c99_json_quote` would
+ * write malformed output (for example U+00E9 as a lone 0xE9).  The cached ASCII predicate keeps
+ * ordinary short strings on the existing word-at-a-time path. */
+static int kiln_c99_json_quote_string(kiln_text *text, const kiln_string *string) {
+    kiln_value boundary;
+    if (string == NULL || string->unit_len == 0) return kiln_c99_json_quote(text, "", 0);
+    if (kiln_string_is_utf16(string)) return kiln_c99_json_quote_units(text, string);
+    boundary = kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)string, string->unit_len);
+    if (kiln_c99_string_is_ascii(boundary)) {
+        return kiln_c99_json_quote(text, (const char *)kiln_string_latin1(string), string->unit_len);
+    }
+    return kiln_c99_json_quote_units(text, string);
 }
 
 /* The four scalars a document is mostly made of, written straight from the heap's own
@@ -230,10 +253,7 @@ static int kiln_c99_json_scalar(kiln_text *text, kiln_val value, int *status) {
     }
     if (KILN_VAL_IS_STRING(value)) {
         const kiln_string *string = (const kiln_string *)KILN_VAL_PTR(value);
-        *status = string == NULL ? kiln_c99_json_quote(text, "", 0)
-                                 : (!kiln_string_is_utf16(string)
-                                        ? kiln_c99_json_quote(text, (const char *)kiln_string_latin1(string), string->unit_len)
-                                 : kiln_c99_json_quote_units(text, string));
+        *status = kiln_c99_json_quote_string(text, string);
         return 1;
     }
     if (value == KILN_VAL_NULL) {
@@ -264,13 +284,14 @@ static int kiln_c99_json_scalar(kiln_text *text, kiln_val value, int *status) {
  * `kiln_c99_put` -- interns before it transitions), so a shaped level compares by pointer against
  * one interned lookup of "toJSON" and never touches the bytes. A dictionary-mode level has no such
  * guarantee (a computed key can be heap bytes nobody interned) and is scanned by content instead,
- * which is why `kiln_c99_same_key` -- not a pointer compare -- is what a dictionary level uses.
+ * which is why `kiln_c99_same_key_view` -- not a pointer compare -- is what a dictionary level
+ * uses.
  *
  * Anything other than a plain object at the end of the chain -- a proxy, a function, a class
  * standing in as someone's prototype -- answers conservatively (0, "cannot promise it lacks one")
  * rather than guess, and the caller falls back to the real `kiln_c99_get` walk exactly as before. */
 static int kiln_c99_json_lacks_tojson(kiln_value value) {
-    const char *tojson_ikey = kiln_c99_interned("toJSON", 6);
+    const kiln_string *tojson_ikey = kiln_c99_interned("toJSON", 6);
     int hops = 0;
     for (;;) {
         kiln_object *object;
@@ -293,7 +314,7 @@ static int kiln_c99_json_lacks_tojson(kiln_value value) {
             }
         } else {
             for (index = 0; index < object->count; ++index) {
-                if (kiln_c99_same_key(&object->properties[index], "toJSON", 6)) return 0;
+                if (kiln_c99_same_name_key(object->properties[index].key, "toJSON")) return 0;
             }
         }
         value = object->prototype;
@@ -378,11 +399,7 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
     }
     case KILN_VALUE_STRING: {
         const kiln_string *string = (const kiln_string *)value.ptr;
-        if (string == NULL) return kiln_c99_json_quote(text, "", 0);
-        return kiln_string_is_utf16(string)
-                   ? kiln_c99_json_quote_units(text, string)
-                   : kiln_c99_json_quote(text, (const char *)kiln_string_latin1(string),
-                                         string->unit_len);
+        return kiln_c99_json_quote_string(text, string);
     }
     case KILN_VALUE_BIGINT:
         /* BigInt has no JSON representation.  This is a TypeError, rather than an omitted
@@ -590,12 +607,7 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
             }
             KILN_JSON_BREAK(written == 0);
             const kiln_string *key_string = (const kiln_string *)key.ptr;
-            int key_status = key_string == NULL
-                                 ? kiln_c99_json_quote(text, "", 0)
-                                 : kiln_string_is_utf16(key_string)
-                                       ? kiln_c99_json_quote_units(text, key_string)
-                                       : kiln_c99_json_quote(text, (const char *)kiln_string_latin1(key_string),
-                                                             key_string->unit_len);
+            int key_status = kiln_c99_json_quote_string(text, key_string);
             if (!is_array && (key_status != KILN_C99_OK ||
                               (indent_len != 0 ? kiln_c99_text_append(text, ": ", 2) : kiln_c99_text_append(text, ":", 1)) !=
                                   KILN_C99_OK)) {
@@ -693,20 +705,19 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
             }
             length = object->shape->property_count;
             for (index = 0; index < length && object->shape != NULL && index < object->shape->property_count; ++index) {
-                const char *skey = object->shape->keys[index];
-                size_t key_len = kiln_c99_key_len(skey);
+                const kiln_string *skey = object->shape->keys[index];
                 kiln_val held = (object->slots != NULL && index < object->slot_capacity)
                                     ? object->slots[index]
                                     : KILN_VAL_UNDEFINED;
                 kiln_value member;
                 size_t mark;
                 int wrote;
-                if (key_len >= 2 && skey[0] == '@' && skey[1] == '@') {
+                if (kiln_c99_key_is_reserved(skey)) {
                     continue;
                 }
                 mark = text->len;
                 KILN_JSON_BREAK(written == 0);
-                if (kiln_c99_json_quote(text, skey, key_len) != KILN_C99_OK ||
+                if (kiln_c99_json_quote_string(text, skey) != KILN_C99_OK ||
                     (indent_len != 0 ? kiln_c99_text_append(text, ": ", 2) : kiln_c99_text_append(text, ":", 1)) != KILN_C99_OK) {
                     kiln_c99_json_drop_nested(&nested);
                     return KILN_C99_OUT_OF_MEMORY;
@@ -762,8 +773,11 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
              * along with it rather than never written in the first place. */
             mark = text->len;
             KILN_JSON_BREAK(written == 0);
-            if (kiln_c99_json_quote(text, object->properties[index].key,
-                                    object->properties[index].key_len) != KILN_C99_OK ||
+            {
+                const kiln_string *key = object->properties[index].key;
+                status = kiln_c99_json_quote_string(text, key);
+            }
+            if (status != KILN_C99_OK ||
                 (indent_len != 0 ? kiln_c99_text_append(text, ": ", 2) : kiln_c99_text_append(text, ":", 1)) != KILN_C99_OK) {
                 kiln_c99_json_drop_nested(&nested);
                 return KILN_C99_OUT_OF_MEMORY;
@@ -810,7 +824,7 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
  * dictionary mode exactly as any other object growing past the same limit would. A repeated key
  * is `find_slot` overwriting the earlier value in place, which is JSON.parse's last-one-wins rule
  * for free. */
-static int kiln_c99_json_define(kiln_value built, const char *ikey, kiln_val member) {
+static int kiln_c99_json_define(kiln_value built, const kiln_string *ikey, kiln_val member) {
     kiln_object *object = kiln_c99_object_of(built);
     uint32_t slot;
     kiln_shape *next;
@@ -832,8 +846,16 @@ static int kiln_c99_json_define(kiln_value built, const char *ikey, kiln_val mem
             return KILN_C99_OK;
         }
     }
-    return kiln_c99_put(NULL, built, ikey, kiln_c99_key_len(ikey), kiln_val_to_boundary(member), 0,
-                        NULL);
+    /* JSON.parse performs CreateDataProperty.  The shared own-slot path retains that rule when
+     * the shape has fallen back to dictionary storage; a generic headed put would interpret
+     * `__proto__` as the assignment setter and relink the prototype. */
+    {
+        kiln_property *property;
+        int status = kiln_c99_own_slot_key(built, ikey, ikey, &property);
+        if (status != KILN_C99_OK) return status;
+        property->value = kiln_val_to_boundary(member);
+        return KILN_C99_OK;
+    }
 }
 
 /* Building `JSON.parse`'s answer from the tape the linked reader produced.
@@ -860,11 +882,9 @@ typedef struct kiln_json_build_frame {
      * can. Exactly one of the two is set while `has_key`.
      *
      * The spilled key is a `kiln_val` and not a boundary `kiln_value` because only the former
-     * names a block. A boundary string is bytes and a length with no heap identity, so mirroring
-     * one meant `kiln_val_from_boundary` allocating a *second* block and holding that: the block
-     * this frame actually points into stayed unrooted, was swept, and came back as a later key's
-     * bytes. */
-    const char *ikey;
+     * names a traced block. A canonical key header is boxed directly when the frame spills, while
+     * a tape view is copied once into a same-width heap string before it is rooted. */
+    const kiln_string *ikey;
     kiln_val key;
     /* Elements, or key/value pairs, still to arrive. */
     size_t remaining;
@@ -921,14 +941,9 @@ static int kiln_c99_json_build_materialize_key(kiln_json_build_stack *stack, siz
     if (!frame->has_key || frame->ikey == NULL) {
         return KILN_C99_OK;
     }
-    {
-        size_t len = kiln_c99_key_len(frame->ikey);
-        kiln_val key = kiln_c99_val_from_text(frame->ikey, len);
-        if (len != 0 && key == KILN_VAL_UNDEFINED) {
-            return KILN_C99_OUT_OF_MEMORY;
-        }
-        frame->key = key;
-    }
+    /* Canonical key headers are GC-owned strings.  Box the stable header directly so spilling a
+     * frame roots the existing key rather than allocating a second same-width copy. */
+    frame->key = kiln_val_from_boundary(kiln_c99_stable_key_value(frame->ikey));
     frame->ikey = NULL;
     return kiln_c99_json_build_mirror(stack, index, frame->key, 1);
 }
@@ -1009,8 +1024,35 @@ static void kiln_c99_json_build_release(kiln_json_build_stack *stack) {
  * The collector sees a `kiln_val` on the machine stack exactly as it saw the `kiln_value` it
  * replaces: `kiln_c99_gc_mark_word` tests a word both as a raw address and as a boxed pointer, so
  * a tagged string, array or object in a local is a root either way. */
+/* Return a borrowed unit view into the provider's decoded arena.  The provider owns the arena
+ * until the next parse, and this walk copies or interns every view before it can escape.  Keeping
+ * this as one width-aware constructor is what prevents UTF-16 text from being mistaken for a byte
+ * span at the C boundary. */
+static int kiln_c99_json_text_view(const kiln_string *text, size_t start, size_t len,
+                                   kiln_string *out) {
+    if (text == NULL || out == NULL ||
+        (text->flags != KILN_STRING_LATIN1 && text->flags != KILN_STRING_UTF16) ||
+        (text->unit_len != 0 && text->data == NULL) ||
+        (text->flags == KILN_STRING_UTF16 && text->data != NULL &&
+         ((uintptr_t)text->data & (sizeof(uint16_t) - 1)) != 0) ||
+        start > text->unit_len || len > text->unit_len - start || text->unit_len > UINT32_MAX ||
+        len > UINT32_MAX) {
+        return KILN_C99_INVALID_ARGUMENT;
+    }
+    *out = *text;
+    out->unit_len = (uint32_t)len;
+    if (len == 0) {
+        out->data = text->data;
+    } else if (kiln_string_is_utf16(text)) {
+        out->data = (const uint16_t *)text->data + start;
+    } else {
+        out->data = (const uint8_t *)text->data + start;
+    }
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_json_build(const kiln_json_node *nodes, size_t count,
-                               const unsigned char *text, size_t text_len, kiln_val *out) {
+                               const kiln_string *text, kiln_val *out) {
     kiln_json_build_stack stack;
     kiln_val root = KILN_VAL_UNDEFINED;
     int have_root = 0;
@@ -1033,8 +1075,8 @@ static int kiln_c99_json_build(const kiln_json_node *nodes, size_t count,
             KILN_C99_REFUSE_INTERNAL("JSON.parse, which turns it into a SyntaxError the program can catch");
         }
         if (node->tag == KILN_JSON_STRING &&
-            (node->value > (uint64_t)text_len ||
-             (size_t)node->len > text_len - (size_t)node->value)) {
+            (text == NULL || node->value > (uint64_t)text->unit_len ||
+             (size_t)node->len > (size_t)text->unit_len - (size_t)node->value)) {
             /* The offsets crossed an ABI; a lie there is a refusal, never a read past the text. */
             kiln_c99_json_build_release(&stack);
             KILN_C99_REFUSE_INTERNAL("JSON.parse, which turns it into a SyntaxError the program can catch");
@@ -1045,19 +1087,32 @@ static int kiln_c99_json_build(const kiln_json_node *nodes, size_t count,
                 kiln_c99_json_build_release(&stack);
                 KILN_C99_REFUSE_INTERNAL("JSON.parse, which turns it into a SyntaxError the program can catch");
             }
-            if (stack.spilled) {
-                top->key = kiln_c99_val_from_text((const char *)text + (size_t)node->value,
-                                                  (size_t)node->len);
+            {
+                kiln_string view;
+                status = kiln_c99_json_text_view(text, (size_t)node->value,
+                                                 (size_t)node->len, &view);
+                if (status != KILN_C99_OK) {
+                    kiln_c99_json_build_release(&stack);
+                    return status;
+                }
+                if (stack.spilled) {
+                    kiln_value copied;
+                    status = kiln_c99_copy_string_slice(&view, 0, view.unit_len, &copied);
+                    if (status != KILN_C99_OK) {
+                        kiln_c99_json_build_release(&stack);
+                        return status;
+                    }
+                    top->key = kiln_val_from_boundary(copied);
                 if (node->len != 0 && top->key == KILN_VAL_UNDEFINED) {
                     status = KILN_C99_OUT_OF_MEMORY;
                 } else {
                     status = kiln_c99_json_build_mirror(&stack, stack.depth - 1, top->key, 1);
                 }
-            } else {
-                top->ikey = kiln_c99_intern((const char *)text + (size_t)node->value,
-                                            (size_t)node->len);
-                if (top->ikey == NULL) {
-                    status = KILN_C99_OUT_OF_MEMORY;
+                } else {
+                    top->ikey = kiln_c99_intern_key(&view);
+                    if (top->ikey == NULL) {
+                        status = KILN_C99_OUT_OF_MEMORY;
+                    }
                 }
             }
             if (status != KILN_C99_OK) {
@@ -1083,10 +1138,17 @@ static int kiln_c99_json_build(const kiln_json_node *nodes, size_t count,
             value = kiln_c99_val_from_double(number);
             break;
         }
-        case KILN_JSON_STRING:
-            value = kiln_c99_val_from_text((const char *)text + (size_t)node->value,
-                                           (size_t)node->len);
+        case KILN_JSON_STRING: {
+            kiln_string view;
+            status = kiln_c99_json_text_view(text, (size_t)node->value, (size_t)node->len,
+                                             &view);
+            if (status == KILN_C99_OK) {
+                kiln_value copied;
+                status = kiln_c99_copy_string_slice(&view, 0, view.unit_len, &copied);
+                if (status == KILN_C99_OK) value = kiln_val_from_boundary(copied);
+            }
             break;
+        }
         case KILN_JSON_ARRAY:
             /* The count is known up front, so the array is allocated once at its final size. */
             status = kiln_c99_new_array_with_capacity(&container, (size_t)node->len, 1);
@@ -1127,17 +1189,18 @@ static int kiln_c99_json_build(const kiln_json_node *nodes, size_t count,
                 /* A repeated key overwrites in place, which keeps the first position and takes the
                  * last value; `__proto__` is an own property; both are `kiln_c99_json_define`'s
                  * doing. A spilled frame's key is a string, interned here at the last moment. */
-                const char *ikey = frame->ikey;
+                const kiln_string *ikey = frame->ikey;
                 if (ikey == NULL) {
-                    /* Free for a string: the bytes and length are read out of the block. */
+                    /* A spilled key was copied into this heap; intern its canonical unit view
+                     * only after the frame's rooted value exists. */
                     kiln_value spelling = kiln_val_to_boundary(frame->key);
-                    size_t spelling_len = 0;
-                    const char *spelling_bytes = kiln_c99_string_ascii_bytes(spelling, &spelling_len);
-                    if (spelling_bytes == NULL) {
+                    const kiln_string *spelling_view =
+                        spelling.tag == KILN_VALUE_STRING ? (const kiln_string *)spelling.ptr : NULL;
+                    if (spelling_view == NULL) {
                         kiln_c99_json_build_release(&stack);
                         return KILN_C99_OUT_OF_MEMORY;
                     }
-                    ikey = kiln_c99_intern(spelling_bytes, spelling_len);
+                    ikey = kiln_c99_intern_key(spelling_view);
                     if (ikey == NULL) {
                         kiln_c99_json_build_release(&stack);
                         return KILN_C99_OUT_OF_MEMORY;
@@ -1175,18 +1238,32 @@ static int kiln_c99_json_build(const kiln_json_node *nodes, size_t count,
  * text, so `JSON.parse("1 2")` has no answer here either. The tape is lent from the reader's
  * per-thread scratch and is valid until the next parse on this thread, which is after the walk:
  * the walk allocates on this heap and never parses. */
-static int kiln_c99_json_document(const char *bytes, size_t len, kiln_val *out) {
+static int kiln_c99_json_document(const kiln_string *source, kiln_val *out) {
     const kiln_json_node *nodes = NULL;
     size_t count = 0;
-    const unsigned char *text = NULL;
-    size_t text_len = 0;
-    int32_t parsed =
-        kiln_json_parse((const unsigned char *)bytes, len, &nodes, &count, &text, &text_len);
+    kiln_string text = {0, KILN_STRING_LATIN1, NULL};
+    int32_t parsed = kiln_json_parse(source, &nodes, &count, &text);
     if (parsed == -1) {
         KILN_C99_REFUSE_INTERNAL("JSON.parse, which turns it into a SyntaxError the program can catch");
     }
     if (parsed != 0) {
         return KILN_C99_OUT_OF_MEMORY;
     }
-    return kiln_c99_json_build(nodes, count, text, text_len, out);
+    if (count != 0 && nodes == NULL) {
+        return KILN_C99_INVALID_ARGUMENT;
+    }
+    if (text.flags != KILN_STRING_LATIN1 && text.flags != KILN_STRING_UTF16) {
+        return KILN_C99_INVALID_ARGUMENT;
+    }
+    if (text.unit_len != 0 && text.data == NULL) {
+        return KILN_C99_INVALID_ARGUMENT;
+    }
+    if (text.flags == KILN_STRING_UTF16 && text.data != NULL &&
+        ((uintptr_t)text.data & (sizeof(uint16_t) - 1)) != 0) {
+        return KILN_C99_INVALID_ARGUMENT;
+    }
+    if (text.unit_len > UINT32_MAX) {
+        return KILN_C99_INVALID_ARGUMENT;
+    }
+    return kiln_c99_json_build(nodes, count, &text, out);
 }

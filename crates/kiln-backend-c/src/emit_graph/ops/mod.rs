@@ -835,7 +835,7 @@ pub(super) fn emit_graph_op(
                 )
             };
             let check = call_status_check(diagnostic_site, pc, label, unwind);
-            let closure_diagnostic = "if ((status == KILN_C99_THROWN || status == KILN_C99_CONTROL_ERROR) && kiln_c99_diagnostic_function == NULL && plain != NULL) { kiln_c99_diagnostic_function = plain->name; kiln_c99_diagnostic_function_len = plain->name_len; }";
+            let closure_diagnostic = "if ((status == KILN_C99_THROWN || status == KILN_C99_CONTROL_ERROR) && kiln_c99_diagnostic_function == NULL && kiln_c99_diagnostic_function_key == NULL && plain != NULL) { kiln_c99_diagnostic_function = NULL; kiln_c99_diagnostic_function_len = 0; kiln_c99_diagnostic_function_key = plain->name; }";
             writeln!(
                 output,
                 "    {{ kiln_val call_stack[{n}] = {{ {init} }}; const kiln_val *call_args = {argc} > 0 ? &call_stack[1] : NULL; kiln_closure *plain = KILN_VAL_IS_CLOSURE(call_stack[0]) ? (kiln_closure *)KILN_VAL_PTR(call_stack[0]) : NULL; if (KILN_LIKELY(plain != NULL && !plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ kiln_val call_result = KILN_VAL_UNDEFINED; kiln_val recv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&recv); kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status; {indirect} {closure_diagnostic} {check} v{v} = call_result; }} else {{ int status = kiln_c99_val_call(host, call_stack[0], call_args, (size_t){argc}, depth, thrown, {diagnostic_source}, (size_t){pc}, \"{label}\", &v{v}); {check} }} }}",

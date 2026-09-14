@@ -558,8 +558,7 @@ static int kiln_c99_global_binding(kiln_value *out, const char *name, size_t nam
         kiln_c99_ensure_dictionary(object);
     }
     for (slot = 0; slot < object->count; ++slot) {
-        if (object->properties[slot].key_len == name_len &&
-            memcmp(object->properties[slot].key, name, name_len) == 0) {
+        if (kiln_string_equals_ascii(object->properties[slot].key, name, name_len)) {
             *out = object->properties[slot].value;
             *found = 1;
             return KILN_C99_OK;

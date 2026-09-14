@@ -1,11 +1,12 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
+assertion_line: 1598
 expression: report
 ---
 empty program
   invalid bytecode program: program has no instructions
 unsupported bytecode version
-  unsupported native emission: bytecode version 6 (backend supports 5)
+  unsupported native emission: bytecode version 7 (backend supports 6)
 constant index out of bounds
   invalid bytecode program: instruction 0: constant 0 is out of bounds
 local slot out of bounds

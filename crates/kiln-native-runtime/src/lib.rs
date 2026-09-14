@@ -240,8 +240,14 @@ typedef struct kiln_string {
     const void *data;
 } kiln_string;
 #if defined(__cplusplus)
+static_assert(offsetof(kiln_string, unit_len) == 0, "kiln_string.unit_len ABI offset");
+static_assert(offsetof(kiln_string, flags) == 4, "kiln_string.flags ABI offset");
+static_assert(offsetof(kiln_string, data) == 8, "kiln_string.data ABI offset");
 static_assert(sizeof(kiln_string) == 16, "kiln_string ABI size");
 #elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+_Static_assert(offsetof(kiln_string, unit_len) == 0, "kiln_string.unit_len ABI offset");
+_Static_assert(offsetof(kiln_string, flags) == 4, "kiln_string.flags ABI offset");
+_Static_assert(offsetof(kiln_string, data) == 8, "kiln_string.data ABI offset");
 _Static_assert(sizeof(kiln_string) == 16, "kiln_string ABI size");
 #endif
 static inline int kiln_string_is_utf16(const kiln_string *string) {
@@ -257,6 +263,22 @@ static inline uint16_t kiln_string_unit_at(const kiln_string *string, size_t ind
     if (string == NULL || index >= string->unit_len || string->data == NULL) return 0;
     return kiln_string_is_utf16(string) ? kiln_string_utf16(string)[index]
                                         : kiln_string_latin1(string)[index];
+}
+static inline int kiln_string_equals_ascii(const kiln_string *string, const char *ascii,
+                                           size_t length) {
+    size_t index;
+    if (string == NULL || (ascii == NULL && length != 0) || string->unit_len != length) return 0;
+    for (index = 0; index < length; ++index)
+        if (kiln_string_unit_at(string, index) != (uint8_t)ascii[index]) return 0;
+    return 1;
+}
+static inline int kiln_string_starts_ascii(const kiln_string *string, const char *ascii,
+                                           size_t length) {
+    size_t index;
+    if (string == NULL || ascii == NULL || string->unit_len < length) return 0;
+    for (index = 0; index < length; ++index)
+        if (kiln_string_unit_at(string, index) != (uint8_t)ascii[index]) return 0;
+    return 1;
 }
 static inline int kiln_string_equal(const kiln_string *left, const kiln_string *right) {
     if (left == NULL || right == NULL || left->unit_len != right->unit_len) return 0;
@@ -283,7 +305,9 @@ static inline size_t kiln_string_unit_width(const kiln_string *string) {
     return kiln_string_is_utf16(string) ? sizeof(uint16_t) : sizeof(uint8_t);
 }
 static inline int kiln_string_storage_size(uint32_t unit_len, uint32_t flags, size_t *out) {
-    size_t width = (flags & KILN_STRING_UTF16) != 0 ? sizeof(uint16_t) : sizeof(uint8_t);
+    size_t width;
+    if (flags != KILN_STRING_LATIN1 && flags != KILN_STRING_UTF16) return 0;
+    width = flags == KILN_STRING_UTF16 ? sizeof(uint16_t) : sizeof(uint8_t);
     size_t units = (size_t)unit_len;
     if (units > (SIZE_MAX - sizeof(kiln_string)) / width) return 0;
     *out = sizeof(kiln_string) + units * width;
@@ -645,6 +669,58 @@ static int kiln_cli_write_result_string(FILE *file, const kiln_string *string) {
     return KILN_C99_OK;
 }
 
+/* Error text crosses the process boundary as UTF-8 on stderr, while the runtime value keeps
+ * UTF-16 code units. Keep this codec local to the diagnostic boundary; language operations keep
+ * their canonical header and never use it as a key identity. */
+static int kiln_cli_write_string(FILE *sink, const kiln_string *string) {
+    size_t index;
+    if (kiln_cli_validate_result_string(string, &(int){0}) != KILN_C99_OK) {
+        return KILN_C99_INVALID_ARGUMENT;
+    }
+    for (index = 0; index < string->unit_len; ++index) {
+        uint32_t unit = kiln_string_unit_at(string, index);
+        uint32_t codepoint = unit;
+        if (kiln_string_is_utf16(string) && unit >= 0xD800 && unit <= 0xDBFF &&
+            index + 1 < string->unit_len) {
+            uint32_t low = kiln_string_unit_at(string, index + 1);
+            if (low >= 0xDC00 && low <= 0xDFFF) {
+                codepoint = 0x10000u + ((unit - 0xD800u) << 10) + (low - 0xDC00u);
+                ++index;
+            }
+        }
+        if (codepoint >= 0xD800 && codepoint <= 0xDFFF) codepoint = 0xFFFD;
+        if (codepoint < 0x80) {
+            if (fputc((int)codepoint, sink) == EOF) return KILN_C99_HOST_ERROR;
+        } else if (codepoint < 0x800) {
+            if (fputc((int)(0xC0 | (codepoint >> 6)), sink) == EOF ||
+                fputc((int)(0x80 | (codepoint & 0x3F)), sink) == EOF)
+                return KILN_C99_HOST_ERROR;
+        } else if (codepoint < 0x10000) {
+            if (fputc((int)(0xE0 | (codepoint >> 12)), sink) == EOF ||
+                fputc((int)(0x80 | ((codepoint >> 6) & 0x3F)), sink) == EOF ||
+                fputc((int)(0x80 | (codepoint & 0x3F)), sink) == EOF)
+                return KILN_C99_HOST_ERROR;
+        } else if (fputc((int)(0xF0 | (codepoint >> 18)), sink) == EOF ||
+                   fputc((int)(0x80 | ((codepoint >> 12) & 0x3F)), sink) == EOF ||
+                   fputc((int)(0x80 | ((codepoint >> 6) & 0x3F)), sink) == EOF ||
+                   fputc((int)(0x80 | (codepoint & 0x3F)), sink) == EOF) {
+            return KILN_C99_HOST_ERROR;
+        }
+    }
+    return KILN_C99_OK;
+}
+
+static kiln_value kiln_cli_ascii_value(const char *text, size_t length) {
+    static kiln_string header;
+    kiln_value value = { .tag = KILN_VALUE_STRING, .flags = 0, .len = 0, .bits = 0 };
+    header.unit_len = length > UINT32_MAX ? 0 : (uint32_t)length;
+    header.flags = KILN_STRING_LATIN1;
+    header.data = text;
+    value.ptr = &header;
+    value.len = header.unit_len;
+    return value;
+}
+
 /* Private KILNRES2 scalar-result writer. The explicit-path form is used by focused C tests;
  * the environment wrapper below is the only launcher-facing entry point. */
 int kiln_cli_write_result_file(const char *path, kiln_value value) {
@@ -785,7 +861,7 @@ kiln_value kiln_cli_describe_error(kiln_value value) {
     }
     if (value.tag == 9 /* KILN_VALUE_OBJECT */ && value.bits != 0) {
         typedef struct kiln_runtime_prop_view {
-            const char *key;
+            const kiln_string *key;
             size_t key_len;
             int enumerable;
             int symbol_hidden;
@@ -803,8 +879,12 @@ kiln_value kiln_cli_describe_error(kiln_value value) {
         if (obj != NULL && obj->properties != NULL) {
             for (size_t i = 0; i < obj->count; ++i) {
                 if (obj->properties[i].key != NULL &&
-                    obj->properties[i].key_len == 5 &&
-                    memcmp(obj->properties[i].key, "stack", 5) == 0) {
+                    obj->properties[i].key->unit_len == 5 &&
+                    kiln_string_unit_at(obj->properties[i].key, 0) == 's' &&
+                    kiln_string_unit_at(obj->properties[i].key, 1) == 't' &&
+                    kiln_string_unit_at(obj->properties[i].key, 2) == 'a' &&
+                    kiln_string_unit_at(obj->properties[i].key, 3) == 'c' &&
+                    kiln_string_unit_at(obj->properties[i].key, 4) == 'k') {
                     if (obj->properties[i].val.tag == KILN_VALUE_STRING &&
                         obj->properties[i].val.ptr != NULL) {
                         return obj->properties[i].val;
@@ -813,8 +893,14 @@ kiln_value kiln_cli_describe_error(kiln_value value) {
             }
             for (size_t i = 0; i < obj->count; ++i) {
                 if (obj->properties[i].key != NULL &&
-                    obj->properties[i].key_len == 7 &&
-                    memcmp(obj->properties[i].key, "message", 7) == 0) {
+                    obj->properties[i].key->unit_len == 7 &&
+                    kiln_string_unit_at(obj->properties[i].key, 0) == 'm' &&
+                    kiln_string_unit_at(obj->properties[i].key, 1) == 'e' &&
+                    kiln_string_unit_at(obj->properties[i].key, 2) == 's' &&
+                    kiln_string_unit_at(obj->properties[i].key, 3) == 's' &&
+                    kiln_string_unit_at(obj->properties[i].key, 4) == 'a' &&
+                    kiln_string_unit_at(obj->properties[i].key, 5) == 'g' &&
+                    kiln_string_unit_at(obj->properties[i].key, 6) == 'e') {
                     if (obj->properties[i].val.tag == KILN_VALUE_STRING &&
                         obj->properties[i].val.ptr != NULL) {
                         return obj->properties[i].val;
@@ -835,7 +921,7 @@ void kiln_cli_report_failure_in(int status, kiln_value value, const char *phase)
     if (status == KILN_C99_THROWN) {
         fputs("uncaught ", stderr);
         if (value.tag == KILN_VALUE_STRING && value.len != 0 && value.ptr != NULL) {
-            fwrite(value.ptr, 1, value.len, stderr);
+            kiln_cli_write_string(stderr, (const kiln_string *)value.ptr);
         } else {
             fputs("exception", stderr);
         }
@@ -852,7 +938,7 @@ void kiln_cli_report_failure_in(int status, kiln_value value, const char *phase)
         fputs("native backend refusal", stderr);
         if (value.tag == KILN_VALUE_STRING && value.len != 0 && value.ptr != NULL) {
             fputs(": ", stderr);
-            fwrite(value.ptr, 1, value.len, stderr);
+            kiln_cli_write_string(stderr, (const kiln_string *)value.ptr);
         } else if (phase != NULL) {
             /* The module body carries its own diagnostic; everything else has none to carry, so
              * the phase is the only thing that can be said -- and saying it beats a bare line. */
@@ -874,10 +960,10 @@ void kiln_cli_report_failure_in(int status, kiln_value value, const char *phase)
         fputs("the host refused an operation", stderr);
         if (value.tag == KILN_VALUE_STRING && value.len != 0 && value.ptr != NULL) {
             fputs(": ", stderr);
-            fwrite(value.ptr, 1, value.len, stderr);
+            kiln_cli_write_string(stderr, (const kiln_string *)value.ptr);
         } else if (kiln_cli_last_host_error.tag == KILN_VALUE_STRING && kiln_cli_last_host_error.len != 0 && kiln_cli_last_host_error.ptr != NULL) {
             fputs(": ", stderr);
-            fwrite(kiln_cli_last_host_error.ptr, 1, kiln_cli_last_host_error.len, stderr);
+            kiln_cli_write_string(stderr, (const kiln_string *)kiln_cli_last_host_error.ptr);
         } else if (phase != NULL) {
             fputs(" in ", stderr);
             fputs(phase, stderr);
@@ -911,7 +997,7 @@ static int kiln_cli_write_value_to(FILE *sink, kiln_value value) {
             ? kiln_cli_write_bytes(sink, true_text, sizeof(true_text) - 1)
             : kiln_cli_write_bytes(sink, false_text, sizeof(false_text) - 1);
     case KILN_VALUE_STRING:
-        return kiln_cli_write_bytes(sink, value.ptr, value.len);
+        return kiln_cli_write_string(sink, (const kiln_string *)value.ptr);
     case KILN_VALUE_NUMBER: {
         double number;
         char buffer[64];
@@ -999,7 +1085,7 @@ int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
     FILE *sink;
     (void)context;
     if (result == NULL || (argc != 0 && arguments == NULL)) {
-        kiln_cli_last_host_error = (kiln_value){ .tag = KILN_VALUE_STRING, .flags = 0, .len = 15, .ptr = "host capability" };
+        kiln_cli_last_host_error = kiln_cli_ascii_value("host capability", 15);
         if (result != NULL) {
             *result = kiln_cli_last_host_error;
         }
@@ -1007,32 +1093,32 @@ int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
     }
     if (operation == KILN_HOST_OP_CLOCK_NOW) {
         if (argc != 0) {
-            kiln_cli_last_host_error = (kiln_value){ .tag = KILN_VALUE_STRING, .flags = 0, .len = 10, .ptr = "clock time" };
+            kiln_cli_last_host_error = kiln_cli_ascii_value("clock time", 10);
             *result = kiln_cli_last_host_error;
             return KILN_C99_HOST_ERROR;
         }
         int status = kiln_cli_clock_now(result);
         if (status != KILN_C99_OK) {
-            kiln_cli_last_host_error = (kiln_value){ .tag = KILN_VALUE_STRING, .flags = 0, .len = 10, .ptr = "clock time" };
+            kiln_cli_last_host_error = kiln_cli_ascii_value("clock time", 10);
             *result = kiln_cli_last_host_error;
         }
         return status;
     }
     if (operation == KILN_HOST_OP_ENTROPY_U64) {
         if (argc != 0) {
-            kiln_cli_last_host_error = (kiln_value){ .tag = KILN_VALUE_STRING, .flags = 0, .len = 7, .ptr = "entropy" };
+            kiln_cli_last_host_error = kiln_cli_ascii_value("entropy", 7);
             *result = kiln_cli_last_host_error;
             return KILN_C99_HOST_ERROR;
         }
         int status = kiln_cli_entropy_u64(result);
         if (status != KILN_C99_OK) {
-            kiln_cli_last_host_error = (kiln_value){ .tag = KILN_VALUE_STRING, .flags = 0, .len = 7, .ptr = "entropy" };
+            kiln_cli_last_host_error = kiln_cli_ascii_value("entropy", 7);
             *result = kiln_cli_last_host_error;
         }
         return status;
     }
     if (operation != KILN_HOST_OP_WRITE_STDOUT && operation != KILN_HOST_OP_WRITE_STDERR) {
-        kiln_cli_last_host_error = (kiln_value){ .tag = KILN_VALUE_STRING, .flags = 0, .len = 15, .ptr = "host capability" };
+        kiln_cli_last_host_error = kiln_cli_ascii_value("host capability", 15);
         *result = kiln_cli_last_host_error;
         return KILN_C99_HOST_ERROR;
     }
@@ -1042,18 +1128,18 @@ int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
     sink = operation == KILN_HOST_OP_WRITE_STDERR ? stderr : stdout;
     for (index = 0; index < argc; ++index) {
         if (index != 0 && fputc(' ', sink) == EOF) {
-            kiln_cli_last_host_error = (kiln_value){ .tag = KILN_VALUE_STRING, .flags = 0, .len = 12, .ptr = "terminal I/O" };
+            kiln_cli_last_host_error = kiln_cli_ascii_value("terminal I/O", 12);
             *result = kiln_cli_last_host_error;
             return KILN_C99_HOST_ERROR;
         }
         if (kiln_cli_write_value_to(sink, arguments[index]) != KILN_C99_OK) {
-            kiln_cli_last_host_error = (kiln_value){ .tag = KILN_VALUE_STRING, .flags = 0, .len = 12, .ptr = "terminal I/O" };
+            kiln_cli_last_host_error = kiln_cli_ascii_value("terminal I/O", 12);
             *result = kiln_cli_last_host_error;
             return KILN_C99_HOST_ERROR;
         }
     }
     if (fputc('\n', sink) == EOF || fflush(sink) != 0) {
-        kiln_cli_last_host_error = (kiln_value){ .tag = KILN_VALUE_STRING, .flags = 0, .len = 12, .ptr = "terminal I/O" };
+        kiln_cli_last_host_error = kiln_cli_ascii_value("terminal I/O", 12);
         *result = kiln_cli_last_host_error;
         return KILN_C99_HOST_ERROR;
     }
@@ -1079,6 +1165,16 @@ extern int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *con
 extern int kiln_realm_set_argv(uint64_t realm, uint64_t argc, const char *const *argv);
 extern int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
 extern int kiln_realm_destroy(uint64_t realm);
+static kiln_value kiln_cli_launcher_ascii(const char *text, size_t length) {
+    static kiln_string header;
+    kiln_value value = { .tag = KILN_VALUE_STRING, .flags = 0, .len = 0, .bits = 0 };
+    header.unit_len = length > UINT32_MAX ? 0 : (uint32_t)length;
+    header.flags = KILN_STRING_LATIN1;
+    header.data = text;
+    value.ptr = &header;
+    value.len = header.unit_len;
+    return value;
+}
 extern int 
 "#;
 
@@ -1151,7 +1247,7 @@ int main(int argc, char **argv) {
             } else if (promise->state == 0 /* KILN_C99_PENDING */) {
                 status = KILN_C99_CONTROL_ERROR;
                 phase = "the turn loop";
-                result = (kiln_value){ .tag = KILN_VALUE_STRING, .flags = 0, .len = 29, .ptr = "top-level await never settled" };
+                result = kiln_cli_launcher_ascii("top-level await never settled", 29);
             } else if (promise->state == 1 /* KILN_C99_FULFILLED */) {
                 result = promise->value;
             }
@@ -1169,7 +1265,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     if (kiln_cli_write_result(result) != KILN_C99_OK) {
-        kiln_cli_report_failure_in(KILN_C99_HOST_ERROR, (kiln_value){ .tag = KILN_VALUE_STRING, .flags = 0, .len = 17, .ptr = "filesystem access" }, "result write");
+        kiln_cli_report_failure_in(KILN_C99_HOST_ERROR, kiln_cli_launcher_ascii("filesystem access", 17), "result write");
         return 1;
     }
     return 0;
