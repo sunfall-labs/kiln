@@ -48,6 +48,10 @@ pub mod node_net;
 pub mod node_stream;
 pub mod scripted_transport;
 pub use scripted_transport::{ScriptedTransport, ScriptedTransportLog};
+pub mod worker_pool;
+pub use worker_pool::{
+    ActorHandler, ActorId, DEFAULT_MAILBOX_CAPACITY, WorkerError, WorkerPool, WorkerRealmHandle,
+};
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashSet, VecDeque};
