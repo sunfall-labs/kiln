@@ -283,7 +283,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     bytes[13],
                     bytes[14],
                     bytes[15]
-                )))
+                ).into()))
             }
             Native::NodeCryptoRandomBytes => {
                 let Some(size_val) = arguments.first() else {
@@ -511,17 +511,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let encoding = arguments.first().map(Value::to_display_string);
                 match encoding.as_deref() {
                     None => Ok(node_bytes_value(raw_digest)),
-                    Some("hex") => Ok(Value::String(crate::to_hex_text(&raw_digest))),
+                    Some("hex") => Ok(Value::String(crate::to_hex_text(&raw_digest).into())),
                     Some("base64") => Ok(Value::String(crate::to_base64_text(
                         &raw_digest,
                         false,
                         false,
-                    ))),
+                    ).into())),
                     Some("base64url") => Ok(Value::String(crate::to_base64_text(
                         &raw_digest,
                         true,
                         true,
-                    ))),
+                    ).into())),
                     Some(encoding) => Err(ExecutionError::TypeErrorMessage {
                         message: format!("Unknown encoding: {encoding}"),
                     }),
