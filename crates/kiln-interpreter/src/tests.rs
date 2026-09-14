@@ -1,6 +1,42 @@
 use super::*;
 
 #[test]
+fn string_units_builder_enforces_width_aware_storage_budget() {
+    let mut latin = StringUnitsBuilder::with_limit(4);
+    latin.push_latin1(b"abcd").expect("latin1 prefix fits");
+    assert_eq!(
+        latin.push_latin1(b"e"),
+        Err(ExecutionError::StringTooLong { bytes: 5 })
+    );
+    assert_eq!(
+        latin.finish().to_units().as_ref(),
+        &[b'a' as u16, b'b' as u16, b'c' as u16, b'd' as u16]
+    );
+
+    let mut wide = StringUnitsBuilder::with_limit(4);
+    wide.push_utf16(&[0x100, 0x101]).expect("two UTF-16 units fit");
+    assert_eq!(
+        wide.push_utf16(&[0x102]),
+        Err(ExecutionError::StringTooLong { bytes: 6 })
+    );
+    assert_eq!(wide.finish().to_units().as_ref(), &[0x100, 0x101]);
+
+    let mut promoted = StringUnitsBuilder::with_limit(6);
+    promoted.push_latin1(b"ab").expect("latin1 prefix fits");
+    promoted
+        .push_utf16(&[0x100])
+        .expect("promotion fits the final UTF-16 backing store");
+    assert_eq!(
+        promoted.push_latin1(b"c"),
+        Err(ExecutionError::StringTooLong { bytes: 8 })
+    );
+    assert_eq!(
+        promoted.finish().to_units().as_ref(),
+        &[b'a' as u16, b'b' as u16, 0x100]
+    );
+}
+
+#[test]
 fn object_data_property_keys_preserve_lone_surrogates() {
     let key = StringUnits::from_units(&[0xd800]);
     let mut object = ObjectData::default();
@@ -4050,7 +4086,7 @@ fn symbol_registry_and_symbol_key_names_preserve_units() {
         serial: 9,
         description: Some(StringUnits::from_units(&[0xd800])),
     }));
-    define_function_name(
+    let _ = define_function_name(
         &Value::Function(function.clone()),
         &Value::Symbol(symbol),
         None,
