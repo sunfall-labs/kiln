@@ -1959,6 +1959,7 @@ static uint32_t kiln_c99_shift_right(uint32_t value, uint32_t count) {
 static uint32_t kiln_c99_utf8_next(const char *text, size_t length, size_t *offset) {
 typedef struct kiln_c99_utf16_iter {
 static int kiln_c99_utf16_next(kiln_c99_utf16_iter *iterator, uint16_t *unit) {
+static int kiln_c99_utf16_unit_at(kiln_value value, size_t index, uint16_t *unit) {
 static size_t kiln_c99_string_length(kiln_value value) {
 static double kiln_c99_array_index(kiln_value key) {
 static int kiln_c99_prototype_object(kiln_value function, kiln_value *out) {
@@ -2026,7 +2027,7 @@ static int kiln_c99_same_value_zero(kiln_value left, kiln_value right) {
 static size_t kiln_c99_relative_index(kiln_value value, size_t length, size_t fallback) {
 static size_t kiln_c99_unit_position(kiln_value value, size_t length, size_t fallback,
 static int kiln_c99_split_ascii_byte(kiln_value *result, const char *bytes, size_t byte_len,
-static int kiln_c99_invoke_string_method(kiln_value *result, uint64_t code, kiln_value receiver,
+static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_match_result(kiln_host *host, kiln_value *out, const uint16_t *units,
 static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_install_event_emitter_methods(kiln_value target) {
