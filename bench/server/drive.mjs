@@ -20,6 +20,9 @@ const durationMs = Number(process.argv[2] ?? 5000);
 const concurrency = Number(process.argv[3] ?? 16);
 const port = Number(process.argv[4] ?? 18088);
 const scenario = String(process.argv[5] ?? "hello");
+if (![durationMs, concurrency, port].every(Number.isSafeInteger) || durationMs <= 0 || concurrency <= 0 || port <= 0 || port > 65535) {
+  throw new Error("duration, concurrency, and port must be positive integers");
+}
 
 const isChurn = scenario === "churn" || scenario === "connection-churn";
 const agent = new http.Agent({ keepAlive: !isChurn, maxSockets: concurrency });
@@ -84,21 +87,60 @@ switch (scenario) {
 
 const latencies = [];
 let errors = 0;
+let wrong = 0;
+
+function validResponse(status, body) {
+  if (scenario === "hello") return status === 200 && body === "hello from kiln";
+  if (scenario === "static" || scenario === "static-file") return status === 200 && body.length > 0;
+  if (scenario === "stream" || scenario === "chunked-stream") {
+    return status === 200 && body === "kiln-stream-chunk-1\nkiln-stream-chunk-2\nkiln-stream-chunk-3\nkiln-stream-chunk-4\n";
+  }
+  if (scenario === "churn" || scenario === "connection-churn") return status === 200 && body === "churn ok";
+  if (scenario === "upload" || scenario === "large-upload") {
+    try { return status === 200 && JSON.parse(body).ok === true && JSON.parse(body).received === 262144; } catch { return false; }
+  }
+  if (scenario === "json-1k" || scenario === "json-echo-1k" || scenario === "json-64k" || scenario === "json-echo-64k") {
+    try {
+      const value = JSON.parse(body);
+      const expectedKind = scenario.includes("64k") ? "64k" : "1k";
+      return status === 200 && value.received?.kind === expectedKind && typeof value.received?.data === "string" &&
+        value.received.data.length === (expectedKind === "64k" ? 65000 : 950) && value.bytes === Buffer.byteLength(bodyData) &&
+        value.keys === 3 && value.sum === null;
+    } catch { return false; }
+  }
+  if (scenario === "fs-small-reads") {
+    try { const value = JSON.parse(body); return status === 200 && value.ok === true && value.files === 20 && value.totalBytes > 0; } catch { return false; }
+  }
+  if (scenario === "fs-large-read") {
+    try { const value = JSON.parse(body); return status === 200 && value.ok === true && value.bytes > 0; } catch { return false; }
+  }
+  if (scenario === "fs-stat-storm") {
+    try { const value = JSON.parse(body); return status === 200 && value.ok === true && value.count === 50 && value.totalSize > 0; } catch { return false; }
+  }
+  return status === 200;
+}
 
 function once() {
   return new Promise((resolve) => {
     const started = process.hrtime.bigint();
+    let settled = false;
     const req = http.request(
       { host: "127.0.0.1", port, method, path, agent, headers },
       (response) => {
-        response.resume();
+        const chunks = [];
+        response.on("data", (chunk) => chunks.push(chunk));
         response.on("end", () => {
+          if (settled) return;
+          settled = true;
+          const body = Buffer.concat(chunks).toString("utf8");
+          if (!validResponse(response.statusCode, body)) wrong += 1;
           latencies.push(Number(process.hrtime.bigint() - started) / 1e6);
-          resolve(response.statusCode === 200);
+          resolve(true);
         });
       },
     );
-    req.on("error", () => resolve(false));
+    req.setTimeout(Math.max(1000, Math.min(10000, durationMs + 1000)), () => req.destroy(new Error("request timeout")));
+    req.on("error", () => { if (!settled) { settled = true; resolve(false); } });
     if (bodyData) {
       req.write(bodyData);
     }
@@ -128,9 +170,11 @@ console.log(JSON.stringify({
   scenario,
   requests: latencies.length,
   errors,
+  wrong,
   seconds: Math.round(elapsed * 1000) / 1000,
   rps: Math.round(latencies.length / elapsed),
   p50_ms: percentile(latencies, 0.5),
   p95_ms: percentile(latencies, 0.95),
   p99_ms: percentile(latencies, 0.99),
 }));
+if (errors !== 0 || wrong !== 0 || latencies.length === 0) process.exitCode = 1;

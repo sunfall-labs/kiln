@@ -9,6 +9,9 @@ import http from "node:http";
 const durationMs = Number(process.argv[2] ?? 5000);
 const concurrency = Number(process.argv[3] ?? 16);
 const port = Number(process.argv[4] ?? 18088);
+if (![durationMs, concurrency, port].every(Number.isSafeInteger) || durationMs <= 0 || concurrency <= 0 || port <= 0 || port > 65535) {
+  throw new Error("duration, concurrency, and port must be positive integers");
+}
 const agent = new http.Agent({ keepAlive: true, maxSockets: concurrency });
 
 const echoBody = JSON.stringify({ name: "kiln", values: [1, 2, 3, 4, 5, 6, 7, 8], nested: { a: 1, b: "two" } });
@@ -66,6 +69,7 @@ function once(route) {
         });
       },
     );
+    request.setTimeout(Math.max(1000, Math.min(10000, durationMs + 1000)), () => request.destroy(new Error("request timeout")));
     request.on("error", () => resolve(false));
     if (route.body) request.write(route.body);
     request.end();
@@ -108,3 +112,4 @@ console.log(JSON.stringify({
   p99_ms: percentile(all, 0.99),
   routes,
 }));
+if (errors !== 0 || wrong !== 0 || total === 0) process.exitCode = 1;
