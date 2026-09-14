@@ -6476,6 +6476,7 @@ fn object_profile_selects_only_simple_array_parameter_receivers() {
         prologue_end: 0,
         declared_length,
         name: Some("array_length".into()),
+        inferred_name: None,
         parameter_count: 1,
         local_count: 1,
         code,
