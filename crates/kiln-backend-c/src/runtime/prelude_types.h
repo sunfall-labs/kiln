@@ -1623,6 +1623,7 @@ static int kiln_c99_text_append_grow(kiln_text *text, const char *bytes, size_t 
  * cannot mistake it for a unit-preserving string operation.  The returned buffer is malloc'd and
  * belongs to the caller. */
 static int kiln_c99_string_to_utf8_lossy(kiln_value value, uint8_t **out, size_t *out_len);
+static int kiln_c99_text_append_string(kiln_text *text, kiln_value value);
 
 /* Append `len` bytes. A piece that fits is copied here, with a byte loop for the short ones a
  * JSON writer appends by the thousand -- a quote, a comma, a key -- where a `memmove` call cost

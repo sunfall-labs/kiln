@@ -980,6 +980,8 @@ static int kiln_c99_intl_segment_raw(kiln_value *out, const kiln_value *args, si
     size_t count = 0;
     size_t index;
     uint32_t granularity;
+    uint8_t *text_owned = NULL;
+    size_t text_len = 0;
     int status;
     kiln_value built;
     kiln_value text = argc > 0 ? args[0] : kiln_c99_undefined();
@@ -991,7 +993,10 @@ static int kiln_c99_intl_segment_raw(kiln_value *out, const kiln_value *args, si
         kiln_c99_as_number(kind) < 0.0 || kiln_c99_as_number(kind) > 2.0)
         return kiln_c99_throw_not_a(thrown, kind, "Intl segment granularity code");
     granularity = (uint32_t)kiln_c99_as_number(kind);
-    status = kiln_intl_segment((const uint8_t *)text.ptr, text.len, granularity, &records, &count);
+    status = kiln_c99_string_to_utf8_lossy(text, &text_owned, &text_len);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_intl_segment(text_owned, text_len, granularity, &records, &count);
+    free(text_owned);
     if (status != 0 || (count != 0 && records == NULL))
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_ERROR,
                                     "Intl segmentation provider failed");
@@ -1174,8 +1179,11 @@ static int kiln_c99_ffi_type(kiln_value value, int result, uint32_t *out,
     size_t len;
     if (value.tag != KILN_VALUE_STRING)
         return kiln_c99_throw_not_a(thrown, value, "node:ffi type string");
-    name = value.ptr;
-    len = value.len;
+    name = kiln_c99_string_ascii_bytes(value, &len);
+    if (name == NULL) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "node:ffi type must be ASCII");
+    }
 #define KILN_FFI_TYPE(text, code) \
     if (kiln_c99_same_name(name, len, text)) { *out = code; return KILN_C99_OK; }
     KILN_FFI_TYPE("void", KILN_C99_FFI_VOID)
@@ -1273,10 +1281,19 @@ static int kiln_c99_ffi_argument(kiln_value value, uint32_t kind, kiln_ffi_value
             int status = kiln_c99_ffi_u64(value, &bits, thrown);
             if (status != KILN_C99_OK) return status;
         } else if (value.tag == KILN_VALUE_STRING) {
-            char *copy = (char *)malloc(value.len + 1);
-            if (copy == NULL) return KILN_C99_OUT_OF_MEMORY;
-            memcpy(copy, value.ptr, value.len);
-            copy[value.len] = '\0';
+            uint8_t *encoded = NULL;
+            size_t encoded_len = 0;
+            int status = kiln_c99_string_to_utf8_lossy(value, &encoded, &encoded_len);
+            char *copy;
+            if (status != KILN_C99_OK) return status;
+            copy = (char *)malloc(encoded_len + 1);
+            if (copy == NULL) {
+                free(encoded);
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            memcpy(copy, encoded, encoded_len);
+            copy[encoded_len] = '\0';
+            free(encoded);
             *owned = copy;
             bits = (uint64_t)(uintptr_t)copy;
         } else if (value.tag == KILN_VALUE_ARRAY_BUFFER) {
@@ -1557,7 +1574,12 @@ call_done:
             return kiln_c99_throw_not_a(thrown, path, "node:ffi library path");
         if (definitions.tag != KILN_VALUE_OBJECT)
             return kiln_c99_throw_not_a(thrown, definitions, "node:ffi definitions object");
-        status = kiln_ffi_open((const uint8_t *)path.ptr, (uint64_t)path.len, &library);
+        uint8_t *path_bytes = NULL;
+        size_t path_len = 0;
+        status = kiln_c99_string_to_utf8_lossy(path, &path_bytes, &path_len);
+        if (status == KILN_C99_OK)
+            status = kiln_ffi_open(path_bytes, (uint64_t)path_len, &library);
+        free(path_bytes);
         if (status != KILN_C99_OK) return kiln_c99_ffi_raise(thrown);
         status = kiln_c99_new_object(&functions);
         if (status == KILN_C99_OK) status = kiln_c99_new_object(&library_object);
@@ -1572,15 +1594,19 @@ call_done:
             uint32_t result_type = 0;
             uint64_t function_handle = 0;
             kiln_ffi_function_meta *metadata;
+            uint8_t *key_bytes = NULL;
+            size_t key_len = 0;
             if (key.tag != KILN_VALUE_STRING) continue;
             status = kiln_c99_get(host, definitions, key.ptr, key.len, &definition, depth, thrown);
             if (status == KILN_C99_OK)
                 status = kiln_c99_ffi_signature(host, definition, &types, &type_count,
                                                  &result_type, depth, thrown);
             if (status == KILN_C99_OK)
-                status = kiln_ffi_prepare(library, (const uint8_t *)key.ptr, (uint64_t)key.len,
-                                          types, (uint64_t)type_count, result_type,
-                                          &function_handle);
+                status = kiln_c99_string_to_utf8_lossy(key, &key_bytes, &key_len);
+            if (status == KILN_C99_OK)
+                status = kiln_ffi_prepare(library, key_bytes, (uint64_t)key_len, types,
+                                          (uint64_t)type_count, result_type, &function_handle);
+            free(key_bytes);
             if (status != KILN_C99_OK) {
                 free(types);
                 if (status < 0 && (thrown == NULL || thrown->tag == KILN_VALUE_UNDEFINED))
