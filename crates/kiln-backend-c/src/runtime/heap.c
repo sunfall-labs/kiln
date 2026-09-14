@@ -143,7 +143,7 @@ static void kiln_c99_gc_aligned_free(void *aligned);
  * interior-pointer fallback for strings already looks one header back from the bytes. The
  * trailing NUL stays so a `%s` diagnostic keeps working; it is not the length. */
 static inline size_t kiln_c99_key_len(const char *ikey) {
-    return ((const kiln_string *)ikey - 1)->byte_len;
+    return ((const kiln_string *)ikey - 1)->unit_len;
 }
 
 typedef struct kiln_key_entry {
@@ -1240,16 +1240,24 @@ static int kiln_c99_ascii_scan(const char *bytes, size_t len) {
  * scanned every call; constants are short (path segments, JSON keys, literals a program wrote)
  * and the scan is cheap relative to the UTF-8 decode it replaces. */
 static int kiln_c99_string_is_ascii(kiln_value value) {
+    const kiln_string *string;
     kiln_gc_heap *heap;
     kiln_gc_block *block;
     int ascii;
-    if (value.len == 0) return 1;
+    if (value.ptr == NULL || value.len == 0) return 1;
+    string = (const kiln_string *)value.ptr;
+    if (string->unit_len == 0) return 1;
+    if (kiln_string_is_utf16(string)) {
+        for (size_t index = 0; index < string->unit_len; ++index)
+            if (kiln_string_unit_at(string, index) >= 0x80) return 0;
+        return 1;
+    }
     heap = kiln_c99_gc_heap();
-    block = heap != NULL ? kiln_c99_gc_lookup(heap, value.ptr) : NULL;
+    block = heap != NULL ? kiln_c99_gc_lookup(heap, (void *)string) : NULL;
     if (block != NULL && (block->kind & KILN_GC_FLAG_ASCII_KNOWN) != 0) {
         return (block->kind & KILN_GC_FLAG_ASCII) != 0;
     }
-    ascii = kiln_c99_ascii_scan(value.ptr, value.len);
+    ascii = kiln_c99_ascii_scan((const char *)string->data, string->unit_len);
     if (block != NULL) {
         block->kind = (block->kind & KILN_GC_KIND_MASK) | KILN_GC_FLAG_ASCII_KNOWN |
                       (ascii ? KILN_GC_FLAG_ASCII : 0u);
@@ -2244,7 +2252,7 @@ static void kiln_c99_gc_release(void *payload) {
         if ((block->kind & KILN_GC_FLAG_DEAD) == 0) {
             if ((block->kind & KILN_GC_KIND_MASK) == KILN_GC_STRING) {
                 const kiln_string *text = (const kiln_string *)payload;
-                kiln_c99_key_forget(heap, text->bytes, text->byte_len);
+                kiln_c99_key_forget(heap, (const char *)text->data, text->unit_len);
             }
             kiln_c99_gc_finalize(block);
             block->kind |= KILN_GC_FLAG_DEAD;
@@ -2266,7 +2274,7 @@ static void kiln_c99_gc_release(void *payload) {
         /* Every string block is headed, an interned key's included, so the entry to forget is
          * the one whose bytes are the header's. */
         const kiln_string *text = (const kiln_string *)payload;
-        kiln_c99_key_forget(heap, text->bytes, text->byte_len);
+        kiln_c99_key_forget(heap, (const char *)text->data, text->unit_len);
     }
     kiln_c99_gc_finalize(block);
     heap->freed_blocks += 1;
@@ -2392,6 +2400,7 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
         kiln_c99_gc_mark_value(heap, &closure->captured_arguments);
         kiln_c99_gc_mark_value(heap, &closure->prototype);
         kiln_c99_gc_mark_value(heap, &closure->properties);
+        kiln_c99_gc_mark_value(heap, &closure->source_value);
         break;
     }
     case KILN_GC_CELL:
@@ -2557,6 +2566,7 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
         kiln_symbol *symbol = (kiln_symbol *)payload;
         kiln_c99_gc_mark_block(heap, symbol->key);
         kiln_c99_gc_mark_block(heap, symbol->description);
+        kiln_c99_gc_mark_value(heap, &symbol->description_value);
         break;
     }
     case KILN_GC_STRING:
@@ -3106,23 +3116,36 @@ static void kiln_c99_gc_result_roots(void *opaque, void *context, int phase) {
  * that could yield to another allocation, so no one ever reads the slab or nursery slot's
  * previous occupant back out of them. */
 static char *kiln_c99_gc_alloc_text(size_t len) {
-    kiln_string *s =
-        (kiln_string *)kiln_c99_gc_alloc_hot(KILN_GC_STRING, sizeof(kiln_string) + len + 1, 0);
+    size_t storage;
+    size_t total;
+    kiln_string *s;
+    if (len > UINT32_MAX || !kiln_string_storage_size((uint32_t)len, KILN_STRING_LATIN1, &storage) ||
+        storage == SIZE_MAX) return NULL;
+    total = storage + 1;
+    if (total < storage) return NULL;
+    s = (kiln_string *)kiln_c99_gc_alloc_hot(KILN_GC_STRING, total, 0);
     if (s == NULL) return NULL;
-    s->length = len;
-    s->byte_len = len;
-    s->bytes = (const char *)(s + 1);
+    s->unit_len = (uint32_t)len;
+    s->flags = KILN_STRING_LATIN1;
+    s->data = (const void *)(s + 1);
     char *bytes = (char *)(s + 1);
     bytes[len] = '\0';
     return bytes;
 }
 
 static char *kiln_c99_gc_alloc_text_tenured(size_t len) {
-    kiln_string *s = (kiln_string *)kiln_c99_gc_alloc_tenured(KILN_GC_STRING, sizeof(kiln_string) + len + 1);
+    size_t storage;
+    size_t total;
+    kiln_string *s;
+    if (len > UINT32_MAX || !kiln_string_storage_size((uint32_t)len, KILN_STRING_LATIN1, &storage) ||
+        storage == SIZE_MAX) return NULL;
+    total = storage + 1;
+    if (total < storage) return NULL;
+    s = (kiln_string *)kiln_c99_gc_alloc_tenured(KILN_GC_STRING, total);
     if (s == NULL) return NULL;
-    s->length = len;
-    s->byte_len = len;
-    s->bytes = (const char *)(s + 1);
+    s->unit_len = (uint32_t)len;
+    s->flags = KILN_STRING_LATIN1;
+    s->data = (const void *)(s + 1);
     char *bytes = (char *)(s + 1);
     bytes[len] = '\0';
     return bytes;
@@ -3197,9 +3220,10 @@ static size_t kiln_c99_gc_alloc_text_run(size_t count, const size_t *lens, char 
         block->next = NULL;
         header = (kiln_string *)(block + 1);
         bytes = (char *)(header + 1);
-        header->length = len;
-        header->byte_len = len;
-        header->bytes = bytes;
+        if (len > UINT32_MAX) return 0;
+        header->unit_len = (uint32_t)len;
+        header->flags = KILN_STRING_LATIN1;
+        header->data = bytes;
         bytes[len] = '\0';
         out[index] = bytes;
         counted += payload;

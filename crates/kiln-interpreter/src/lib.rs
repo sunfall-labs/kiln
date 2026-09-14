@@ -323,6 +323,7 @@ enum PropertyKeyRef<'a> {
     Units(&'a StringUnits),
 }
 
+
 impl<'a> PropertyKeyRef<'a> {
     /// Compare a language key with an ASCII spelling without materialising a scalar `String`.
     ///
@@ -368,6 +369,7 @@ impl<'a> PropertyKeyRef<'a> {
             Self::Units(key) => key.clone(),
         }
     }
+
 }
 
 #[derive(Clone, Debug)]
@@ -507,7 +509,9 @@ impl ObjectData {
     }
 
     pub fn get_own_attributes_units(&self, key: &StringUnits) -> Option<Attributes> {
+
         self.get_own_attributes_key(PropertyKeyRef::Units(key))
+
     }
 
     /// The three flags an own property carries, or `None` when there is no such property.
@@ -586,7 +590,9 @@ impl ObjectData {
     }
 
     fn lookup_key(&self, key: PropertyKeyRef<'_>) -> Option<Property> {
+
         if let Some(own) = self.properties.iter().find(|slot| key.matches(&slot.key)) {
+
             return Some(own.property.clone());
         }
         let mut current = self.prototype.clone();
@@ -649,11 +655,13 @@ impl ObjectData {
     }
 
     fn define_value_key(&mut self, key: PropertyKeyRef<'_>, value: Value, attributes: Attributes) {
+
         if let Some(slot) = self
             .properties
             .iter_mut()
             .find(|slot| key.matches(&slot.key))
         {
+
             if !redefinable(slot, attributes, true) {
                 return;
             }
@@ -734,7 +742,9 @@ impl ObjectData {
             return;
         }
         self.properties.push(Slot {
+
             key: key.owned(),
+
             property,
             attributes,
         });
@@ -817,11 +827,13 @@ impl ObjectData {
         if self.frozen || self.module_namespace {
             return;
         }
+
         if let Some(slot) = self
             .properties
             .iter_mut()
             .find(|slot| key.matches(&slot.key))
         {
+
             // Only a data property can refuse a write. An accessor's setter has already had its
             // chance -- `inherited_setter_key` runs ahead of every store -- so a store that reaches
             // an accessor slot here is the machine replacing its own bookkeeping.
@@ -836,6 +848,8 @@ impl ObjectData {
         }
         self.insert_key(key, Property::Value(value), Attributes::DEFAULT);
     }
+
+
 
     fn insert_key(&mut self, key: PropertyKeyRef<'_>, property: Property, attributes: Attributes) {
         let slot = Slot {
@@ -855,6 +869,7 @@ impl ObjectData {
             .unwrap_or(self.properties.len());
         self.properties.insert(position, slot);
     }
+
 
     /// Overwrite what one export of a module namespace holds, leaving its flags alone.
     ///
@@ -935,11 +950,13 @@ impl ObjectData {
             };
             let value = cell.borrow().clone();
             let key = key.clone();
+
             if let Some(slot) = self
                 .properties
                 .iter_mut()
                 .find(|slot| slot.key == key.as_str())
             {
+
                 slot.property = Property::Value(value);
             }
         }
@@ -982,6 +999,7 @@ impl ObjectData {
     }
 
     pub fn remove_units(&mut self, key: &StringUnits) -> bool {
+
         self.remove_key(PropertyKeyRef::Units(key))
     }
 
@@ -996,6 +1014,7 @@ impl ObjectData {
         }
         self.properties
             .retain(|slot| !key.matches(&slot.key) || !slot.attributes.configurable);
+
         true
     }
 
@@ -3529,6 +3548,9 @@ pub struct Closure {
     /// proto rather than copied, because a function expression in a loop makes one closure per
     /// pass and the name is the same every time.
     pub name: Option<Rc<str>>,
+    /// A lossless display name supplied by named evaluation for a function whose source had no
+    /// written identifier. This stays separate from `name`: the latter is a scalar binding.
+    pub inferred_name: Option<StringUnits>,
     /// One cell per [`kiln_ir::FunctionProto::upvalues`] entry, in the same order.
     pub upvalues: Vec<Cell>,
     /// The realm this function was created in.
@@ -3664,6 +3686,15 @@ impl CommonJsRequire {
 }
 
 impl Closure {
+    /// The display name exposed through function metadata, preserving UTF-16 code units.
+    pub fn display_name_units(&self) -> StringUnits {
+        self.name
+            .as_deref()
+            .map(StringUnits::from)
+            .or_else(|| self.inferred_name.clone())
+            .unwrap_or_default()
+    }
+
     /// Whether this body is strict code.
     ///
     /// A property of the source text the body was written in, not of the call: a strict function
@@ -5210,7 +5241,7 @@ struct ModuleRealmShared {
     http_client_requests: std::collections::BTreeMap<u64, Rc<RefCell<HttpClientRequestState>>>,
     next_http_client_request_id: u64,
     symbol_serial: u64,
-    symbol_registry: Vec<(String, Value)>,
+    symbol_registry: Vec<(StringUnits, Value)>,
     symbols: Vec<Rc<UniqueSymbol>>,
     template_objects: std::collections::HashMap<(RealmId, usize, u32), Value>,
     intrinsics: Rc<Intrinsics>,
@@ -7514,7 +7545,7 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// `Symbol.for`'s registry: one symbol per key, for the whole run. Its point is that two
     /// lookups of one key are the *same* symbol, which is what makes it usable across module
     /// boundaries where `Symbol()` would produce two.
-    symbol_registry: Vec<(String, Value)>,
+    symbol_registry: Vec<(StringUnits, Value)>,
     /// Canonical tagged-template literal objects cached by (RealmId, program pointer, site index)
     /// per ECMA-262 §13.2.8.5 (GetTemplateObject).
     template_objects: std::collections::HashMap<(RealmId, usize, u32), Value>,
@@ -17001,9 +17032,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(Value::Boolean(closed))
             }
             Native::SymbolFor => {
-                let key = arguments
-                    .first()
-                    .map_or_else(String::new, Value::to_display_string);
+                let key = self.as_text_units(
+                    arguments.first().unwrap_or(&Value::Undefined),
+                    instruction,
+                )?;
                 let registered = match &self.module_realm {
                     Some(realm) => realm.borrow().symbol_registry.clone(),
                     None => self.symbol_registry.clone(),
@@ -17023,7 +17055,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Native::SymbolKeyFor => {
                 let Some(Value::Symbol(symbol)) = arguments.first() else {
-                    return Ok(Value::Undefined);
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "Symbol.keyFor requires a symbol".to_owned(),
+                    });
                 };
                 if let Some(realm) = &self.module_realm {
                     return Ok(realm
@@ -17033,7 +17067,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         .find(|(_, registered)| {
                             matches!(registered, Value::Symbol(other) if other == symbol)
                         })
-                        .map_or(Value::Undefined, |(key, _)| Value::String(key.clone().into())));
+                        .map_or(Value::Undefined, |(key, _)| Value::String(key.clone())));
                 }
                 // Only a registered symbol has a key; one from `Symbol()` does not, which is how
                 // a program tells the two apart.
@@ -17043,7 +17077,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .find(|(_, registered)| {
                         matches!(registered, Value::Symbol(other) if other == symbol)
                     })
-                    .map_or(Value::Undefined, |(key, _)| Value::String(key.clone().into())))
+                    .map_or(Value::Undefined, |(key, _)| Value::String(key.clone())))
             }
             Native::DateConstructor => {
                 let time = match arguments.len() {
@@ -17499,7 +17533,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::SymbolConstructor => {
                 let description = match arguments.first() {
                     None | Some(Value::Undefined) => None,
-                    Some(value) => Some(value.to_display_string()),
+                    Some(value) => Some(self.as_text_units(value, instruction)?),
                 };
                 Ok(self.new_symbol(description))
             }
@@ -20128,6 +20162,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return Err(ExecutionError::SymbolIsNotAString);
         }
         Ok(primitive.to_display_string())
+    }
+
+    /// The lossless `ToString` result used by symbol descriptions and registry keys.
+    fn as_text_units(
+        &mut self,
+        value: &Value,
+        instruction: usize,
+    ) -> Result<StringUnits, ExecutionError> {
+        let primitive = self.as_primitive(value, PrimitiveHint::String, instruction)?;
+        if matches!(primitive, Value::Symbol(_)) {
+            return Err(ExecutionError::SymbolIsNotAString);
+        }
+        Ok(primitive.to_string_units())
     }
 
     /// `%IteratorPrototype%.reduce` and the seven other methods that consume an iterator.
@@ -28477,6 +28524,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // with the name of the caller's function number 0 -- and panicked outright when the
             // caller had fewer functions than the eval did.
             name: proto.name.as_deref().map(Rc::from),
+            inferred_name: proto.inferred_name.clone(),
             upvalues,
             realm: self.current_realm,
             // An arrow takes `this` from where it is written; an ordinary function takes it from
@@ -28507,14 +28555,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             );
             properties.define_value(
                 "name",
-                Value::String(
-                    closure
-                        .name
-                        .as_deref()
-                        .unwrap_or_default()
-                        .to_owned()
-                        .into(),
-                ),
+
+                Value::String(closure.display_name_units()),
+
                 FUNCTION_IDENTITY,
             );
         }
@@ -30532,6 +30575,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             .or_else(|| self.inherited_accessor_key(target, key))
     }
 
+    /// Unit-preserving store lookup. Scalar names use the established path so built-in tables
+    /// remain cheap; a name containing a lone surrogate can only be a program-owned slot.
+    fn stored_property_units(&self, target: &Value, name: &StringUnits) -> Option<Property> {
+        if let Ok(scalar) = name.to_scalar_string() {
+            return self.stored_property(target, &scalar);
+        }
+        self.own_stored_property_units(target, name)
+    }
+
     /// An accessor a built-in prototype above `target` carries.
     ///
     /// Split from the walk itself so that both guards are asked before any work is done. The
@@ -30613,6 +30665,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             _ => exotic_properties(target)
                 .filter(|_| !exotic_reserved_name_key(target, key))
                 .and_then(|store| store.borrow().lookup_key(key)),
+        }
+    }
+
+    fn own_stored_property_units(
+        &self,
+        target: &Value,
+        name: &StringUnits,
+    ) -> Option<Property> {
+        match target {
+            Value::Object(object) => object.borrow().lookup_units(name),
+            Value::Function(closure) if name.to_scalar_string().is_err() => {
+                closure.properties.borrow().lookup_units(name)
+            }
+            Value::Array(items) => items.properties.borrow().lookup_units(name),
+            Value::Bound(bound) => bound.properties.borrow().lookup_units(name),
+            Value::Native(_, _) | Value::Callback(_, _) => None,
+            _ => exotic_properties(target)
+                .and_then(|store| store.borrow().lookup_units(name)),
         }
     }
 
@@ -31926,11 +31996,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let key = &self.computed_key(key, instruction)?;
         let Value::Proxy(proxy) = target else {
             let units = key.property_key_units();
+
             return Ok(delete_property_key(
                 &self.intrinsics,
                 target,
                 PropertyKeyRef::Units(&units),
             ));
+
         };
         let proxy = Rc::clone(proxy);
         let inner = proxy.target.clone();
@@ -32145,7 +32217,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return self.proxy_get_with_receiver(target, key, receiver, instruction);
         }
         let property_key_units = key.property_key_units();
+
         let property_key = PropertyKeyRef::Units(&property_key_units);
+
         // The same accessors the named read consults, for the computed spelling: a symbol key
         // reaches `Symbol.species` only through here.
         if let Some(builtin) = property_key
@@ -32348,7 +32422,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             };
         }
         let key_units = key.property_key_units();
+
         let property_key = PropertyKeyRef::Units(&key_units);
+
         if let Value::TypedArray(view) = target
             && let Some(index) = canonical_numeric_index_key(property_key)
         {
@@ -33189,7 +33265,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ///
     /// Serials come from the module realm when there is one, so that two modules of the same
     /// program cannot mint the same key for two different symbols.
-    fn new_symbol(&mut self, description: Option<String>) -> Value {
+    fn new_symbol(&mut self, description: Option<StringUnits>) -> Value {
         let allocate = |serial: &mut u64, symbols: &mut Vec<Rc<UniqueSymbol>>| {
             *serial += 1;
             let symbol = Rc::new(UniqueSymbol {
@@ -36230,7 +36306,9 @@ fn call_native(
                     .borrow()
                     .entries()
                     .map(|(key, _)| key)
+
                     .filter(|key| !is_reserved_units(key))
+
                     .map(|key| Value::String(key.clone()))
                     .collect(),
                 Some(Value::Bound(bound)) => bound
@@ -36238,7 +36316,9 @@ fn call_native(
                     .borrow()
                     .entries()
                     .map(|(key, _)| key)
+
                     .filter(|key| !is_reserved_units(key))
+
                     .map(|key| Value::String(key.clone()))
                     .collect(),
                 // `entries` rather than `keys`: this reports what is *enumerated*, where
@@ -36252,7 +36332,9 @@ fn call_native(
                             .borrow()
                             .entries()
                             .map(|(key, _)| key)
+
                             .filter(|key| !is_reserved_units(key))
+
                             .map(|key| Value::String(key.clone())),
                     )
                     .collect(),
@@ -36286,7 +36368,9 @@ fn call_native(
                             .borrow()
                             .entries()
                             .map(|(key, _)| key)
+
                             .filter(|key| !is_reserved_units(key))
+
                             .map(|key| Value::String(key.clone())),
                     )
                     .collect(),
@@ -36299,7 +36383,9 @@ fn call_native(
                             .borrow()
                             .entries()
                             .map(|(key, _)| key)
+
                             .filter(|key| !is_reserved_units(key))
+
                             .map(|key| Value::String(key.clone())),
                     )
                     .collect(),
@@ -36309,7 +36395,9 @@ fn call_native(
                             .borrow()
                             .entries()
                             .map(|(key, _)| key)
+
                             .filter(|key| !is_reserved_units(key))
+
                             .map(|key| Value::String(key.clone()))
                             .collect()
                     })
@@ -40476,9 +40564,11 @@ fn index_key_units(name: &StringUnits) -> Option<usize> {
         if digits == 0 && unit == b'0' as u16 && name.unit_len() != 1 {
             return None;
         }
+
         value = value
             .checked_mul(10)?
             .checked_add(usize::from(unit - b'0' as u16))?;
+
         digits += 1;
     }
     (digits > 0 && value <= u32::MAX as usize - 1).then_some(value)
@@ -40852,7 +40942,9 @@ fn own_properties_units(intrinsics: &Intrinsics, value: &Value) -> Vec<(StringUn
             .properties
             .borrow()
             .entries()
+
             .map(|(key, property)| (key.clone(), property.clone()))
+
             .collect(),
         // A bound function keeps its own store, and `length` and `name` are not in it -- the
         // own-key walk supplies those two literally -- so what is here is exactly what a holder
@@ -40861,7 +40953,9 @@ fn own_properties_units(intrinsics: &Intrinsics, value: &Value) -> Vec<(StringUn
             .properties
             .borrow()
             .entries()
+
             .map(|(key, property)| (key.clone(), property.clone()))
+
             .collect(),
         Value::Object(object) => string_wrapper_entries_units(value)
             .into_iter()
@@ -40869,7 +40963,9 @@ fn own_properties_units(intrinsics: &Intrinsics, value: &Value) -> Vec<(StringUn
                 object
                     .borrow()
                     .entries()
+
                     .map(|(key, property)| (key.clone(), property.clone())),
+
             )
             .collect(),
         // The indices first and then whatever the program hung on the array by name, which is
@@ -40894,7 +40990,9 @@ fn own_properties_units(intrinsics: &Intrinsics, value: &Value) -> Vec<(StringUn
                     .properties
                     .borrow()
                     .entries()
+
                     .map(|(key, property)| (key.clone(), property.clone()))
+
                     .collect::<Vec<_>>(),
             )
             .collect(),
@@ -40911,7 +41009,9 @@ fn own_properties_units(intrinsics: &Intrinsics, value: &Value) -> Vec<(StringUn
                 view.properties
                     .borrow()
                     .entries()
+
                     .map(|(key, property)| (key.clone(), property.clone())),
+
             );
             entries
         }
@@ -40920,7 +41020,9 @@ fn own_properties_units(intrinsics: &Intrinsics, value: &Value) -> Vec<(StringUn
                 store
                     .borrow()
                     .entries()
+
                     .map(|(key, property)| (key.clone(), property.clone()))
+
                     .collect()
             })
             .unwrap_or_default(),
@@ -44116,15 +44218,11 @@ fn builtin_accessor_slot(accessor: BuiltinAccessor, receiver: &Value) -> Value {
             _ => unreachable!("TypedArray accessor passed a non-TypedArray receiver"),
         },
         BuiltinAccessor::SymbolDescription => match receiver {
-            Value::Symbol(symbol) => match symbol {
-                Symbol::WellKnown(well_known) => {
-                    Value::String(well_known.description().to_owned().into())
-                }
-                Symbol::Unique(unique) => unique
-                    .description
-                    .as_ref()
-                    .map_or(Value::Undefined, |text| Value::String(text.clone().into())),
-            },
+
+            Value::Symbol(symbol) => symbol
+                .description_units()
+                .map_or(Value::Undefined, Value::String),
+
             _ => unreachable!("Symbol accessor passed a non-symbol receiver"),
         },
         BuiltinAccessor::Species
@@ -44961,32 +45059,45 @@ fn define_function_name(function: &Value, key: &Value, prefix: Option<&str>) {
     let name = match key {
         // A symbol names the property after its description, in brackets; one with no description
         // names it nothing, and a prefix is still applied to that nothing.
-        Value::Symbol(symbol) => match symbol.description() {
-            "" => String::new(),
-            description => format!("[{description}]"),
-        },
+        Value::Symbol(symbol) => symbol.description_units().map_or_else(
+            StringUnits::default,
+            |description| {
+                let mut units = StringUnits::from("[").to_units().into_vec();
+                units.extend(description.units());
+                units.extend(StringUnits::from("]").units());
+                StringUnits::from_units(&units)
+            },
+        ),
         other => {
-            let key = other.property_key();
+            let key = other.property_key_units();
             // A private name is spelled the way the program wrote it rather than the way the
             // store keys it: `#m`, not the scope-numbered reservation standing in for it.
-            match key.strip_prefix(PRIVATE_KEY_PREFIX) {
-                Some(reserved) => format!(
-                    "#{}",
-                    reserved.split_once(':').map_or(reserved, |(_, name)| name)
-                ),
-                None => key,
+            match key.to_scalar_string() {
+                Ok(key) => match key.strip_prefix(PRIVATE_KEY_PREFIX) {
+                    Some(reserved) => StringUnits::from(format!(
+                        "#{}",
+                        reserved.split_once(':').map_or(reserved, |(_, name)| name)
+                    )),
+                    None => StringUnits::from(key),
+                },
+                // Ordinary property keys can contain lone surrogates. They are already in the
+                // canonical units representation; keep them intact rather than widening through
+                // a replacement character just to inspect a private-name prefix.
+                Err(_) => key,
             }
         }
     };
-    let name = match prefix {
-        Some(prefix) => format!("{prefix} {name}"),
-        None => name,
-    };
-    closure.properties.borrow_mut().define_value(
-        "name",
-        Value::String(name.into()),
-        FUNCTION_IDENTITY,
-    );
+
+    let name = prefix.map_or(name.clone(), |prefix| {
+        let mut units = StringUnits::from(format!("{prefix} ")).to_units().into_vec();
+        units.extend(name.units());
+        StringUnits::from_units(&units)
+    });
+    closure
+        .properties
+        .borrow_mut()
+        .define_value("name", Value::String(name), FUNCTION_IDENTITY);
+
 }
 
 const FUNCTION_IDENTITY: Attributes = Attributes {
@@ -45652,8 +45763,10 @@ impl Intrinsics {
         let data = &entries.iter().find(|(key, _)| *key == identity)?.1;
         Some(
             data.keys()
+
                 .filter(|key| !is_reserved_units(key))
                 .cloned()
+
                 .collect(),
         )
     }
@@ -45668,8 +45781,10 @@ impl Intrinsics {
             return Vec::new();
         };
         data.entries()
+
             .filter(|(key, _)| !is_reserved_units(key))
             .map(|(key, property)| (key.clone(), property.clone()))
+
             .collect()
     }
 
@@ -46348,6 +46463,7 @@ fn intrinsic_accessor(target: &Value, key: &str) -> Option<Property> {
 fn own_property_names_units(intrinsics: &Intrinsics, target: &Value) -> Vec<StringUnits> {
     let from_store = |data: &ObjectData| {
         data.keys()
+
             .filter(|key| !is_reserved_units(key))
             .cloned()
             .collect::<Vec<_>>()
@@ -46399,6 +46515,7 @@ fn own_property_names_units(intrinsics: &Intrinsics, target: &Value) -> Vec<Stri
             .map(|store| from_store(&store.borrow()))
             .unwrap_or_default(),
         _ => own_property_keys_units(intrinsics, target),
+
     }
 }
 
@@ -46420,8 +46537,10 @@ fn own_property_keys_units(intrinsics: &Intrinsics, target: &Value) -> Vec<Strin
     }
     let from_object = |data: &ObjectData| -> Vec<StringUnits> {
         data.keys()
+
             .filter(|key| !is_reserved_units(key))
             .cloned()
+
             .collect()
     };
     match target {
@@ -46777,12 +46896,16 @@ fn own_property_keys_including_symbols_units(
     // proxy invariants and `Object.defineProperties` consume the full own-key list. Append the
     // reserved slots after the ordinary names, preserving each store's insertion order.
     let stored = match target {
+
         Value::Object(object) => object.borrow().keys().cloned().collect(),
         Value::Function(closure) => closure.properties.borrow().keys().cloned().collect(),
         Value::Bound(bound) => bound.properties.borrow().keys().cloned().collect(),
         Value::Array(items) => items.properties.borrow().keys().cloned().collect(),
+
         other if exotic_properties(other).is_some() => exotic_properties(target)
+
             .map(|store| store.borrow().keys().cloned().collect())
+
             .unwrap_or_default(),
         Value::Native(_, _)
         | Value::Callback(_, _)
@@ -46791,7 +46914,9 @@ fn own_property_keys_including_symbols_units(
         | Value::Element(_) => intrinsic_key(target)
             .and_then(|identity| {
                 intrinsics.entries.borrow().iter().find_map(|(held, data)| {
+
                     (*held == identity).then(|| data.keys().cloned().collect())
+
                 })
             })
             .unwrap_or_default(),

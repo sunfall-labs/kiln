@@ -342,6 +342,7 @@ mod tests {
         code: Vec<Instruction>,
     ) -> FunctionProto {
         FunctionProto {
+        inferred_name: None,
             asynchronous: false,
             name: Some(name.to_string()),
             arrow: false,

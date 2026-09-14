@@ -2299,7 +2299,7 @@ const _: () = assert_refusals_name_themselves(
 /// `kiln_c99_key_len`. The pass that set it classified all ninety sites on 2026-09-07: fourteen
 /// took a shape or property key and became `kiln_c99_key_len`, one became the property's stored
 /// `key_len`, and these are the rest.
-pub const C_STRING_LENGTH_SITES: usize = 77;
+pub const C_STRING_LENGTH_SITES: usize = 78;
 
 /// How far the `strlen(` scan may skip after reading the last byte of its seven-byte window:
 /// the Horspool shift, as `refusal_scan_shift` is for the refusal scan, so the const evaluator

@@ -11,7 +11,7 @@ pub use kiln_host_abi::HostOp;
 pub use kiln_string::StringUnits;
 
 /// Version of the bytecode contract produced by this crate.
-pub const BYTECODE_VERSION: u16 = 5;
+pub const BYTECODE_VERSION: u16 = 6;
 
 /// A constant embedded in a [`Program`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -632,6 +632,8 @@ pub struct FunctionProto {
     pub asynchronous: bool,
     /// Diagnostics and stack traces only; calls go by index.
     pub name: Option<String>,
+    /// Lossless display name supplied by named evaluation when [`Self::name`] is absent.
+    pub inferred_name: Option<StringUnits>,
     /// An arrow function: it has no `this` of its own and captures the defining scope's.
     pub arrow: bool,
     /// A generator: calling it builds an object rather than running the body.
@@ -696,6 +698,18 @@ pub struct TypeAnnotations {
 }
 
 impl FunctionProto {
+    /// The name exposed by function metadata, preserving JavaScript UTF-16 units.
+    ///
+    /// Written names take precedence because they also establish a binding. Inferred names are
+    /// display metadata only and may contain lone surrogates from a property key.
+    pub fn display_name_units(&self) -> StringUnits {
+        self.name
+            .as_deref()
+            .map(StringUnits::from)
+            .or_else(|| self.inferred_name.clone())
+            .unwrap_or_default()
+    }
+
     /// Return the annotated type for parameter `slot`, if any.
     pub fn parameter_type(&self, slot: usize) -> Option<TypeAnnotation> {
         self.type_annotations

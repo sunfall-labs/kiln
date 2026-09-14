@@ -115,23 +115,23 @@ static int kiln_c99_define_named_fast(kiln_val target, kiln_val key, kiln_val va
         return 1;
     }
     keystr = (const kiln_string *)KILN_VAL_PTR(key);
-    if (keystr == NULL || keystr->byte_len == 0) {
+    if (keystr == NULL || keystr->unit_len == 0 || kiln_string_is_utf16(keystr)) {
         return 0;
     }
-    if (keystr->byte_len >= 2 && keystr->bytes[0] == '@' && keystr->bytes[1] == '@') {
+    if (keystr->unit_len >= 2 && kiln_string_latin1(keystr)[0] == '@' && kiln_string_latin1(keystr)[1] == '@') {
         /* A shape has no per-slot enumerable flag, and a `@@`-prefixed key must come out
          * non-enumerable (own_slot_ikey's rule); the generic path's dictionary-mode store is
          * where that is tracked. Reachable only via a computed key that happens to spell one --
          * a literal key can never start with `@`. */
         return 0;
     }
-    if (keystr->byte_len == 9 && memcmp(keystr->bytes, "__proto__", 9) == 0) {
+    if (keystr->unit_len == 9 && memcmp(kiln_string_latin1(keystr), "__proto__", 9) == 0) {
         /* This literal spelling of the key relinks the prototype instead of defining a property
          * (kiln_c99_put_mode_ikey's own `__proto__` special case, reached the same way whether
          * this fast path exists or not); leave it there rather than duplicate the check. */
         return 0;
     }
-    ikey = kiln_c99_intern(keystr->bytes, keystr->byte_len);
+    ikey = kiln_c99_intern((const char *)kiln_string_latin1(keystr), keystr->unit_len);
     if (ikey == NULL) {
         *status = KILN_C99_OUT_OF_MEMORY;
         return 1;

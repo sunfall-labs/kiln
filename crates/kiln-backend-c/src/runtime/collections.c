@@ -54,6 +54,21 @@ static int kiln_c99_new_collection(kiln_value *out, int is_map, int is_weak) {
     return KILN_C99_OK;
 }
 
+/* Map/Set hashes follow SameValueZero's string units. The boundary pointer names a canonical
+ * header; hashing it as if it were a byte span folds the header's first bytes into the key and
+ * makes an equal Latin1/UTF16 pair land in different buckets. */
+static uint64_t kiln_c99_collection_string_hash(const kiln_string *string) {
+    const uint64_t mix = UINT64_C(0xff51afd7ed558ccd);
+    size_t length = string == NULL ? 0 : string->unit_len;
+    uint64_t hash = UINT64_C(0x9e3779b97f4a7c15) ^ (uint64_t)length;
+    size_t index;
+    for (index = 0; index < length; ++index) {
+        hash = (hash ^ kiln_string_unit_at(string, index)) * mix;
+        hash ^= hash >> 29;
+    }
+    return hash ^ (hash >> 32);
+}
+
 static uint64_t kiln_c99_value_hash(kiln_value v) {
     if (v.tag == KILN_VALUE_NUMBER) {
         double d = kiln_c99_as_number(v);
@@ -70,7 +85,7 @@ static uint64_t kiln_c99_value_hash(kiln_value v) {
         return bits ^ (bits >> 29);
     }
     if (v.tag == KILN_VALUE_STRING) {
-        return kiln_c99_key_hash(v.ptr, v.len);
+        return kiln_c99_collection_string_hash((const kiln_string *)v.ptr);
     }
     if (v.tag == KILN_VALUE_SYMBOL) {
         const kiln_symbol *sym = kiln_c99_symbol_of(v);

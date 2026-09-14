@@ -11,7 +11,10 @@ static int kiln_c99_has_computed(kiln_host *host, kiln_value target, kiln_value 
     if (name.tag != KILN_VALUE_STRING) {
         KILN_C99_REFUSE("a computed property key that is neither a string nor a named symbol slot");
     }
-    return kiln_c99_has_property(host, target, name.ptr, name.len, answer, depth, thrown);
+    size_t name_len = 0;
+    const char *name_bytes = kiln_c99_string_ascii_bytes(name, &name_len);
+    if (name_bytes == NULL) KILN_C99_REFUSE("a UTF-16 computed property key without unit-key storage");
+    return kiln_c99_has_property(host, target, name_bytes, name_len, answer, depth, thrown);
 }
 
 static int kiln_c99_delete_computed(kiln_host *host, kiln_value target, kiln_value key,
@@ -25,7 +28,10 @@ static int kiln_c99_delete_computed(kiln_host *host, kiln_value target, kiln_val
     if (name.tag != KILN_VALUE_STRING) {
         KILN_C99_REFUSE("a computed property key that is neither a string nor a named symbol slot");
     }
-    return kiln_c99_delete(host, target, name.ptr, name.len, answer, depth, thrown);
+    size_t name_len = 0;
+    const char *name_bytes = kiln_c99_string_ascii_bytes(name, &name_len);
+    if (name_bytes == NULL) KILN_C99_REFUSE("a UTF-16 computed property key without unit-key storage");
+    return kiln_c99_delete(host, target, name_bytes, name_len, answer, depth, thrown);
 }
 
 /* Every name a built-in namespace or prototype table answers to.

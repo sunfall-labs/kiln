@@ -19,7 +19,13 @@ static int kiln_c99_buffer_from(kiln_value *out, kiln_value source, kiln_value *
     kiln_value built;
     int status;
     if (source.tag == KILN_VALUE_STRING) {
-        return kiln_c99_buffer_from_bytes(out, (const uint8_t *)source.ptr, source.len);
+        uint8_t *encoded = NULL;
+        size_t encoded_len = 0;
+        status = kiln_c99_string_to_utf8_lossy(source, &encoded, &encoded_len);
+        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_buffer_from_bytes(out, encoded, encoded_len);
+        free(encoded);
+        return status;
     } else if (source.tag == KILN_VALUE_TYPED_ARRAY || source.tag == KILN_VALUE_ARRAY) {
         status = kiln_c99_new_typed_array(&built, KILN_TYPED_UINT8, source, 0, 0, 0, thrown);
         if (status != KILN_C99_OK) return status;
@@ -129,9 +135,13 @@ static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value rec
         if (receiver.tag != KILN_VALUE_TYPED_ARRAY || encoding.tag != KILN_VALUE_STRING)
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                         "unsupported Buffer encoding");
-        nlen = encoding.len < 31 ? encoding.len : 31;
+        size_t encoding_len = 0;
+        const char *encoding_bytes = kiln_c99_string_ascii_bytes(encoding, &encoding_len);
+        if (encoding_bytes == NULL) return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                                                "unsupported Buffer encoding");
+        nlen = encoding_len < 31 ? encoding_len : 31;
         for (i = 0; i < nlen; ++i)
-            norm[i] = (char)tolower((unsigned char)encoding.ptr[i]);
+            norm[i] = (char)tolower((unsigned char)encoding_bytes[i]);
         norm[nlen] = '\0';
         if ((nlen == 4 && memcmp(norm, "utf8", 4) == 0) ||
             (nlen == 5 && memcmp(norm, "utf-8", 5) == 0)) {
@@ -329,7 +339,7 @@ static int kiln_c99_node_util(kiln_host *host, kiln_value *out, uint64_t code,
                 kiln_value shown = kiln_c99_inspect(args[index]);
                 if ((index != 0 && kiln_c99_text_append_c(&built, " ") != KILN_C99_OK) ||
                     shown.tag != KILN_VALUE_STRING ||
-                    kiln_c99_text_append(&built, shown.ptr, shown.len) != KILN_C99_OK) {
+                    kiln_c99_text_append_string(&built, shown) != KILN_C99_OK) {
                     free(built.bytes);
                     return KILN_C99_OUT_OF_MEMORY;
                 }
@@ -363,7 +373,7 @@ static int kiln_c99_node_util(kiln_host *host, kiln_value *out, uint64_t code,
                             kiln_c99_text_append(&built, &character, 1) != KILN_C99_OK) goto format_oom;
                         next -= 1;
                     } else if (shown.tag != KILN_VALUE_STRING ||
-                               kiln_c99_text_append(&built, shown.ptr, shown.len) != KILN_C99_OK) {
+                               kiln_c99_text_append_string(&built, shown) != KILN_C99_OK) {
                         goto format_oom;
                     }
                 }
@@ -372,7 +382,7 @@ static int kiln_c99_node_util(kiln_host *host, kiln_value *out, uint64_t code,
                 kiln_value shown = kiln_c99_inspect(args[next++]);
                 if (kiln_c99_text_append_c(&built, " ") != KILN_C99_OK ||
                     shown.tag != KILN_VALUE_STRING ||
-                    kiln_c99_text_append(&built, shown.ptr, shown.len) != KILN_C99_OK)
+                    kiln_c99_text_append_string(&built, shown) != KILN_C99_OK)
                     goto format_oom;
             }
         }

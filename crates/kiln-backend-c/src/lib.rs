@@ -38,8 +38,9 @@ pub const C99_HOST_MODULE_CREATE_REQUIRE: u16 = HOST_OP_MODULE_CREATE_REQUIRE;
 // Epoch 43 prunes unreachable declaration bodies; epoch 44 outlines compact operation plumbing;
 // epoch 45 packs source ranges observable through live closures; epoch 46 decouples compact C
 // source from generic-only emission. Epoch 47 preserves inherited class evaluation and budgets
-// release specialization using only retained code.
-pub const C_GENERATOR_VERSION: u32 = 47;
+// release specialization using only retained code. Epoch 48 carries the canonical unit-string
+// value bridge and its provider-boundary codecs through generated C.
+pub const C_GENERATOR_VERSION: u32 = 48;
 
 /// Content identity of this emitter checkout, including dirty source changes. Input-keyed
 /// caches must not trust a manually advanced generator epoch alone across active worktrees.
@@ -1527,6 +1528,7 @@ fn graph_for(
 /// starting undefined, and nothing captured.
 fn entry_proto(program: &Program) -> FunctionProto {
     FunctionProto {
+        inferred_name: None,
         asynchronous: has_top_level_await(program),
         name: None,
         arrow: false,

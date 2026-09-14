@@ -66,6 +66,7 @@ fn release_large_modules_preserve_throughput_policy() {
 
 fn empty_function() -> FunctionProto {
     FunctionProto {
+        inferred_name: None,
         span: kiln_ir::Span::default(),
         prologue_end: 0,
         asynchronous: false,
@@ -3572,6 +3573,7 @@ fn realm_scheduling_graph(project: &Path) -> ModuleGraph {
             local_count: 0,
             functions: vec![
                 FunctionProto {
+        inferred_name: None,
                     span: kiln_ir::Span::default(),
                     prologue_end: 0,
                     asynchronous: false,
@@ -3596,6 +3598,7 @@ fn realm_scheduling_graph(project: &Path) -> ModuleGraph {
                     type_annotations: None,
                 },
                 FunctionProto {
+        inferred_name: None,
                     span: kiln_ir::Span::default(),
                     prologue_end: 0,
                     asynchronous: false,
