@@ -873,6 +873,24 @@ static void kiln_c99_node_http_byte_span_release(kiln_c99_node_byte_span *span) 
     }
 }
 
+static int kiln_c99_node_copy_utf8(kiln_value value, char **out, size_t *out_len) {
+    uint8_t *encoded = NULL;
+    size_t length = 0;
+    char *copy;
+    int status = kiln_c99_string_to_utf8_lossy(value, &encoded, &length);
+    if (status != KILN_C99_OK) return status;
+    copy = length == 0 ? NULL : (char *)malloc(length);
+    if (length != 0 && copy == NULL) {
+        free(encoded);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    if (length != 0) memcpy(copy, encoded, length);
+    free(encoded);
+    *out = copy;
+    *out_len = length;
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *event,
                                     void *host, void *thrown) {
     kiln_node_socket *socket = (kiln_node_socket *)opaque;
@@ -2102,8 +2120,10 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
         if (code == KILN_C99_METHOD_NODE_READABLE_SET_ENCODING) {
             kiln_value encoding = argc > 0 ? kiln_c99_text(args[0])
                                            : kiln_c99_copy_text("utf8", 4);
-            if (!((encoding.len == 4 && memcmp(encoding.ptr, "utf8", 4) == 0) ||
-                  (encoding.len == 5 && memcmp(encoding.ptr, "utf-8", 5) == 0)))
+            size_t encoding_len = 0;
+            const char *encoding_bytes = kiln_c99_string_ascii_bytes(encoding, &encoding_len);
+            if (!((encoding_bytes != NULL && encoding_len == 4 && memcmp(encoding_bytes, "utf8", 4) == 0) ||
+                  (encoding_bytes != NULL && encoding_len == 5 && memcmp(encoding_bytes, "utf-8", 5) == 0)))
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                             "unsupported Node stream encoding");
             socket->utf8 = 1;
@@ -2296,18 +2316,12 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
         if (request == NULL) return KILN_C99_OUT_OF_MEMORY;
         request->host = host;
         request->callback = callback;
-        request->host_name = (char *)malloc(host_value.len);
-        request->path = (char *)malloc(path_value.len);
-        request->method = (char *)malloc(method_value.len);
-        if ((host_value.len != 0 && request->host_name == NULL) ||
-            (path_value.len != 0 && request->path == NULL) ||
-            (method_value.len != 0 && request->method == NULL)) return KILN_C99_OUT_OF_MEMORY;
-        memcpy(request->host_name, host_value.ptr, host_value.len);
-        memcpy(request->path, path_value.ptr, path_value.len);
-        memcpy(request->method, method_value.ptr, method_value.len);
-        request->host_name_len = host_value.len;
-        request->path_len = path_value.len;
-        request->method_len = method_value.len;
+        status = kiln_c99_node_copy_utf8(host_value, &request->host_name, &request->host_name_len);
+        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_node_copy_utf8(path_value, &request->path, &request->path_len);
+        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_node_copy_utf8(method_value, &request->method, &request->method_len);
+        if (status != KILN_C99_OK) return status;
         request->port = (uint16_t)kiln_c99_as_number(port_value);
         status = KILN_C99_OK;
         if (headers_value.tag == KILN_VALUE_UNDEFINED) {
@@ -2474,13 +2488,17 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
     if (code == KILN_C99_METHOD_NODE_RESPONSE_SET_HEADER) {
         kiln_value name = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
         kiln_value value = kiln_c99_text(argc > 1 ? args[1] : kiln_c99_undefined());
-        char *normalized = name.len == 0 ? NULL : kiln_c99_gc_alloc_text(name.len);
+        size_t name_len = 0;
+        const char *name_bytes = kiln_c99_string_ascii_bytes(name, &name_len);
+        if (name.tag != KILN_VALUE_STRING || name_bytes == NULL)
+            return KILN_C99_OUT_OF_MEMORY;
+        char *normalized = name_len == 0 ? NULL : kiln_c99_gc_alloc_text(name_len);
         size_t index;
         int status;
-        if (name.len != 0 && normalized == NULL) return KILN_C99_OUT_OF_MEMORY;
-        for (index = 0; index < name.len; ++index)
-            normalized[index] = (char)tolower((unsigned char)name.ptr[index]);
-        status = kiln_c99_put(NULL, response->headers, normalized, name.len, value, 0, NULL);
+        if (name_len != 0 && normalized == NULL) return KILN_C99_OUT_OF_MEMORY;
+        for (index = 0; index < name_len; ++index)
+            normalized[index] = (char)tolower((unsigned char)name_bytes[index]);
+        status = kiln_c99_put(NULL, response->headers, normalized, name_len, value, 0, NULL);
         *result = receiver;
         return status;
     }
@@ -2489,22 +2507,25 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
         code == KILN_C99_METHOD_NODE_RESPONSE_REMOVE_HEADER) {
         kiln_value name = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
         kiln_object *headers = kiln_c99_object_of(response->headers);
+        size_t name_len = 0;
+        const char *name_bytes = kiln_c99_string_ascii_bytes(name, &name_len);
+        if (name.tag != KILN_VALUE_STRING || name_bytes == NULL) return KILN_C99_OUT_OF_MEMORY;
         size_t index;
         size_t byte;
-        char *normalized = name.len == 0 ? NULL : kiln_c99_gc_alloc_text(name.len);
+        char *normalized = name_len == 0 ? NULL : kiln_c99_gc_alloc_text(name_len);
         if (headers->shape != NULL) {
             kiln_c99_ensure_dictionary(headers);
             if (code == KILN_C99_METHOD_NODE_RESPONSE_REMOVE_HEADER) {
                 headers->shape = NULL;
             }
         }
-        if (name.len != 0 && normalized == NULL) return KILN_C99_OUT_OF_MEMORY;
-        for (byte = 0; byte < name.len; ++byte)
-            normalized[byte] = (char)tolower((unsigned char)name.ptr[byte]);
+        if (name_len != 0 && normalized == NULL) return KILN_C99_OUT_OF_MEMORY;
+        for (byte = 0; byte < name_len; ++byte)
+            normalized[byte] = (char)tolower((unsigned char)name_bytes[byte]);
         for (index = 0; index < headers->count; ++index) {
             kiln_property *property = &headers->properties[index];
-            if (property->key_len == name.len &&
-                (name.len == 0 || memcmp(property->key, normalized, name.len) == 0)) {
+            if (property->key_len == name_len &&
+                (name_len == 0 || memcmp(property->key, normalized, name_len) == 0)) {
                 if (code == KILN_C99_METHOD_NODE_RESPONSE_REMOVE_HEADER) {
                     headers->shape = NULL;
                     if (index + 1 < headers->count)
