@@ -766,10 +766,8 @@ mod tests {
         let realm = pool
             .spawn_realm_with_factory(
                 move || {
-                    ScriptedHost::new([]).with_transport(
-                        resource,
-                        ScriptedTransport::new([], false),
-                    )
+                    ScriptedHost::new([])
+                        .with_transport(resource, ScriptedTransport::new([], false))
                 },
                 RealmCapabilities::default(),
             )
