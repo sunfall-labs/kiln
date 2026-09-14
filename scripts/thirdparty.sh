@@ -68,8 +68,11 @@ THRESHOLD="${KILN_THIRDPARTY_THRESHOLD:-25}"
 MIN_DELTA_MS="${KILN_THIRDPARTY_MIN_DELTA_MS:-3.0}"
 BASELINE="${KILN_THIRDPARTY_BASELINE:-bench/results/thirdparty-baseline.json}"
 PROFILE="${KILN_THIRDPARTY_PROFILE:-native-release}"
-PASSES="${PASSES:-5}"
-WARMUP="${WARMUP:-1}"
+# These programs finish in 2-20ms, where a five-sample median can be moved across the gate's
+# 3ms floor by one scheduler interruption. Twenty-one samples take only a few seconds for the
+# whole corpus and made consecutive full runs agree; three warmups keep fresh-page noise out.
+PASSES="${PASSES:-21}"
+WARMUP="${WARMUP:-3}"
 TARGET_BUNDLES=""
 
 while [[ $# -gt 0 ]]; do
@@ -121,8 +124,8 @@ while [[ $# -gt 0 ]]; do
 			echo "  --min-delta-ms <ms>             Minimum absolute delta in ms to consider regression (default: 3.0)"
 			echo "  --baseline-file <path>          Path to baseline JSON (default: bench/results/thirdparty-baseline.json)"
 			echo "  --profile <profile>             Native build profile (default: native-release)"
-			echo "  --passes <count>                Timing iterations per bundle (default: 5)"
-			echo "  --warmup <count>                Warmup iterations per bundle (default: 1)"
+			echo "  --passes <count>                Timing iterations per bundle (default: 21)"
+			echo "  --warmup <count>                Warmup iterations per bundle (default: 3)"
 			echo "  --bundles <names>               Comma-separated list of bundle names to test"
 			exit 0
 			;;

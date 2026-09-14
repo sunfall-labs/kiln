@@ -1950,9 +1950,11 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         return KILN_C99_OK;
     }
     /* Claimed here because the string range further down is open-ended at its top. */
+#if KILN_RETAIN_GROUP_TEMPORAL
     if ((groups & KILN_C99_GROUP_TEMPORAL)) {
         return kiln_c99_temporal_method(host, result, code, receiver, args, argc, depth, thrown);
     }
+#endif
     /* An intrinsic method reached *through* a proxy runs against the proxy: `push` on one reads
      * `length` and writes an element through the handler's traps, which is how a copy-on-write
      * layer sees the write at all. Every method here operates on the receiver's own storage
@@ -2107,8 +2109,12 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         /* `min`, `max` and `hypot` are variadic and reduce each argument themselves, so they must
          * not be reduced here as well: a `valueOf` that counts its own calls sees the difference,
          * and ToNumber is specified to happen once per argument. */
+#if KILN_RETAIN_GROUP_MATH_NUMBER
         if ((groups & KILN_C99_GROUP_MATH_NUMBER) ||
             code == KILN_C99_METHOD_GLOBAL_IS_NAN || code == KILN_C99_METHOD_GLOBAL_IS_FINITE) {
+#else
+        if (code == KILN_C99_METHOD_GLOBAL_IS_NAN || code == KILN_C99_METHOD_GLOBAL_IS_FINITE) {
+#endif
             if (argc > 0) {
                 int reduced = kiln_c99_to_number_checked(host, args[0], &first, depth, thrown);
                 if (reduced != KILN_C99_OK) {
@@ -2937,6 +2943,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 return KILN_C99_OK;
             }
         }
+#if KILN_RETAIN_GROUP_MATH_NUMBER
         case KILN_C99_METHOD_MATH_FLOOR: *result = kiln_c99_number(floor(first)); return KILN_C99_OK;
         case KILN_C99_METHOD_MATH_CEIL: *result = kiln_c99_number(ceil(first)); return KILN_C99_OK;
         case KILN_C99_METHOD_MATH_ROUND: {
@@ -3001,6 +3008,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             *result = kiln_c99_number((double)(int32_t)product);
             return KILN_C99_OK;
         }
+#endif
         case KILN_C99_METHOD_REGEXP_TO_STRING:
             if (receiver.tag != KILN_VALUE_REGEXP) {
                 KILN_C99_REFUSE("RegExp.prototype.toString on a receiver that is not a regular "
@@ -4638,6 +4646,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             if (code == KILN_C99_METHOD_DATE_TO_STRING) {
                 return kiln_c99_date_to_string(result, time);
             }
+#if KILN_RETAIN_GROUP_DATE_SETTER
             if ((groups & KILN_C99_GROUP_DATE_SETTER)) {
                 /* A setter writes through the instant the receiver already holds, which is why
                  * a Date is a heap slot rather than a value: `d.setUTCDate(31)` has to be
@@ -4679,6 +4688,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 *result = kiln_c99_number(written);
                 return KILN_C99_OK;
             }
+#endif
             parts = kiln_c99_date_parts(time);
             if (!parts.valid) {
                 *result = kiln_c99_number(0.0 / 0.0);
