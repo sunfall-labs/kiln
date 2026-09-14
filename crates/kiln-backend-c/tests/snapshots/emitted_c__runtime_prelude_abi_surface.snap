@@ -1,5 +1,6 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
+assertion_line: 803
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -106,6 +107,8 @@ static int kiln_c99_internal_status(const char *converted_by) {
 #define KILN_C99_REFUSE_NAMED(lacked, subject, subject_len) \
 #define KILN_C99_REFUSE_AT(site, instruction, operation, depth) \
 #define KILN_C99_REFUSE_INTERNAL(converted_by) return kiln_c99_internal_status(converted_by)
+typedef struct kiln_c99_method_metadata {
+static kiln_c99_method_metadata kiln_c99_method_metadata_for(uint64_t code);
 static inline void kiln_c99_reset_diagnostics(void) {
 #define KILN_C99_ABSENT(why, out)      \
 #define KILN_C99_MAX_CALL_DEPTH 256
@@ -995,6 +998,7 @@ int kiln_ffi_call(uint64_t function, const kiln_ffi_value *arguments, uint64_t a
 int kiln_ffi_register_callback(const uint32_t *argument_types, uint64_t argument_count, uint32_t result_type, kiln_ffi_dispatch_fn dispatch, void *context, uint64_t *out_pointer);
 int kiln_ffi_unregister_callback(uint64_t pointer);
 int kiln_ffi_last_error(const uint8_t **out_bytes, uint64_t *out_len);
+static kiln_c99_method_metadata kiln_c99_method_metadata_for(uint64_t code) {
 int kiln_realm_http_client_attach_active(uint64_t resource, kiln_realm_http_event_fn run,
 int kiln_realm_http_client_request_id_active(uint64_t *out_id);
 #define KILN_REALM_HTTP_AGENT_CONNECT 1
@@ -1214,6 +1218,7 @@ static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,
 static int kiln_c99_form_decode(const char *bytes, size_t len, kiln_value *out);
 static int kiln_c99_node_querystring_parse(kiln_value *out, const kiln_value *args, size_t argc);
 static int kiln_c99_typed_alloc(kiln_value *out, kiln_typed_kind kind, size_t count);
+static int kiln_c99_buffer_from_bytes(kiln_value *out, const uint8_t *bytes, uint64_t length);
 static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
 static int kiln_c99_buffer_from(kiln_value *out, kiln_value source, kiln_value *thrown);
 static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value receiver,
@@ -1612,6 +1617,7 @@ static int kiln_c99_ascii_iequals(const char *a, const char *b, size_t len) {
 static int kiln_c99_new_text_decoder(kiln_value *out, const kiln_value *args, size_t argc,
 static int kiln_c99_new_async_local_storage(kiln_value *out) {
 static int kiln_c99_abort(kiln_host *host, kiln_value signal, kiln_value reason, int depth,
+static int kiln_c99_buffer_from_bytes(kiln_value *out, const uint8_t *bytes, uint64_t length) {
 static int kiln_c99_buffer_from(kiln_value *out, kiln_value source, kiln_value *thrown) {
 static kiln_typed_array *kiln_c99_val_typed_array(kiln_val value) {
 static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value receiver,
@@ -2054,6 +2060,8 @@ static const char kiln_c99_transfer_encoding_chunked[] = "chunked";
 static const char kiln_c99_slash[] = "/";
 static kiln_value kiln_c99_node_http_target_text(const char *bytes, size_t len) {
 static kiln_value kiln_c99_node_http_method_text(const char *bytes, size_t len) {
+typedef struct {
+static int kiln_c99_node_http_byte_span(kiln_value value, kiln_c99_node_byte_span *out) {
 static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *event,
 static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *completion,
 static void kiln_c99_node_drop_fs_completion(void *opaque) { kiln_c99_gc_release(opaque); }
@@ -2122,8 +2130,6 @@ static int kiln_c99_temporal_coerce(kiln_host *host, int32_t kind, kiln_value it
 static int kiln_c99_temporal_answer(int32_t answered, void *handle, double number,
 static int kiln_c99_temporal_operation(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_temporal_method(kiln_host *host, kiln_value *result, uint64_t code,
-static uint32_t kiln_c99_numeric_arguments(uint64_t code) {
-static uint32_t kiln_c99_textual_arguments(uint64_t code) {
 static int kiln_c99_needs_number_conversion(kiln_value value) {
 static int kiln_c99_needs_text_conversion(kiln_value value) {
 static int kiln_c99_to_number_argument(kiln_host *host, kiln_value value, kiln_value *out,
