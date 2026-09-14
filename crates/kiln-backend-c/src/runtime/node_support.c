@@ -1,15 +1,22 @@
 
+static int kiln_c99_buffer_from_bytes(kiln_value *out, const uint8_t *bytes, uint64_t length) {
+    size_t size;
+    int status;
+    if (length > SIZE_MAX) return KILN_C99_INVALID_ARGUMENT;
+    size = (size_t)length;
+    if (size != 0 && bytes == NULL) return KILN_C99_INVALID_ARGUMENT;
+    status = kiln_c99_typed_alloc_ex(out, KILN_TYPED_UINT8, size, 0);
+    if (status != KILN_C99_OK) return status;
+    if (size != 0) memcpy(kiln_c99_typed_array_of(*out)->buffer->bytes, bytes, size);
+    kiln_c99_typed_array_of(*out)->is_buffer = 1;
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_buffer_from(kiln_value *out, kiln_value source, kiln_value *thrown) {
     kiln_value built;
-    size_t index;
     int status;
     if (source.tag == KILN_VALUE_STRING) {
-        status = kiln_c99_typed_alloc(&built, KILN_TYPED_UINT8, source.len);
-        if (status != KILN_C99_OK) return status;
-        for (index = 0; index < source.len; ++index) {
-            kiln_c99_typed_set(kiln_c99_typed_array_of(built), index,
-                               (double)(unsigned char)source.ptr[index]);
-        }
+        return kiln_c99_buffer_from_bytes(out, (const uint8_t *)source.ptr, source.len);
     } else if (source.tag == KILN_VALUE_TYPED_ARRAY || source.tag == KILN_VALUE_ARRAY) {
         status = kiln_c99_new_typed_array(&built, KILN_TYPED_UINT8, source, 0, 0, 0, thrown);
         if (status != KILN_C99_OK) return status;

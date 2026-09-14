@@ -829,6 +829,44 @@ static kiln_value kiln_c99_node_http_method_text(const char *bytes, size_t len) 
     return kiln_c99_copy_text(bytes, len);
 }
 
+typedef struct {
+    const uint8_t *bytes;
+    size_t len;
+    /* Keeps a fallback ToString result rooted for the duration of the host operation. */
+    kiln_value text;
+} kiln_c99_node_byte_span;
+
+/* Borrow bytes from strings and typed views without coercing a Buffer/Uint8Array through the
+ * language string representation (which would turn [0, 1, 2] into the text "0,1,2"). */
+static int kiln_c99_node_http_byte_span(kiln_value value, kiln_c99_node_byte_span *out) {
+    out->bytes = (const uint8_t *)"";
+    out->len = 0;
+    out->text = kiln_c99_undefined();
+    if (value.tag == KILN_VALUE_STRING) {
+        out->bytes = (const uint8_t *)value.ptr;
+        out->len = value.len;
+        return KILN_C99_OK;
+    }
+    if (value.tag == KILN_VALUE_TYPED_ARRAY) {
+        kiln_typed_array *view = kiln_c99_typed_array_of(value);
+        size_t width = kiln_c99_typed_width(view->kind);
+        if (view->length > SIZE_MAX / width) return KILN_C99_OUT_OF_MEMORY;
+        out->bytes = view->buffer->bytes + view->byte_offset;
+        out->len = view->length * width;
+        return KILN_C99_OK;
+    }
+    if (value.tag == KILN_VALUE_UNDEFINED) return KILN_C99_OK;
+    out->text = kiln_c99_text(value);
+    out->bytes = (const uint8_t *)out->text.ptr;
+    out->len = out->text.len;
+    return KILN_C99_OK;
+}
+
+/* Materialize a borrowed HTTP byte span directly as a Buffer. The realm owns the event bytes
+ * only for the duration of this callback, so the copy into the GC-managed typed-array storage
+ * must finish before dispatch returns. Keeping this representation step here avoids the old
+ * copy_text -> Buffer.from path, which allocated an intermediate string and converted it one byte
+ * at a time. */
 static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *event,
                                     void *host, void *thrown) {
     kiln_node_socket *socket = (kiln_node_socket *)opaque;
@@ -1002,10 +1040,8 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
         for (response = socket->responses; response != NULL; response = response->next) {
             if (response->request_id == event->id) {
                 if (event->kind == 2) {
-                    kiln_value bytes = kiln_c99_copy_text((const char *)event->data,
-                                                          (size_t)event->data_len);
                     kiln_value data;
-                    status = kiln_c99_buffer_from(&data, bytes, exception);
+                    status = kiln_c99_buffer_from_bytes(&data, event->data, event->data_len);
                     if (status != KILN_C99_OK) return status;
                     return kiln_c99_node_emit(socket->host, response->request, "data", data, 1,
                                               0, exception);
@@ -1116,8 +1152,9 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
                                   kiln_c99_undefined(), 0, 0, exception);
     }
     if (client != NULL && event->kind == 7) {
-        kiln_value data_value = kiln_c99_copy_text((const char *)event->data,
-                                                   (size_t)event->data_len);
+        kiln_value data_value;
+        int status = kiln_c99_buffer_from_bytes(&data_value, event->data, event->data_len);
+        if (status != KILN_C99_OK) return status;
         return kiln_c99_node_emit(client->host, client->response, "data", data_value, 1,
                                   0, exception);
     }
@@ -2272,30 +2309,31 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
         kiln_node_client_request *request =
             (kiln_node_client_request *)kiln_c99_node_hidden_pointer(receiver,
                                                                      "@@node:client", 13);
-        kiln_value text = argc > 0 && args[0].tag != KILN_VALUE_UNDEFINED
-                              ? kiln_c99_text(args[0])
-                              : kiln_c99_copy_text(NULL, 0);
+        kiln_c99_node_byte_span span;
         int status;
         if (request == NULL) return kiln_c99_throw_not_a(thrown, receiver, "ClientRequest");
         if (request->ended)
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_ERROR,
                                         "write after end");
+        status = kiln_c99_node_http_byte_span(
+            argc > 0 ? args[0] : kiln_c99_undefined(), &span);
+        if (status != KILN_C99_OK) return status;
         if (request->sent) {
             status = code == KILN_C99_METHOD_NODE_CLIENT_REQUEST_END
                          ? kiln_realm_http_client_end_active(
                                request->socket->resource, request->request_id,
-                               (const uint8_t *)text.ptr, text.len)
+                               span.bytes, span.len)
                          : kiln_realm_http_client_write_active(
                                request->socket->resource, request->request_id,
-                               (const uint8_t *)text.ptr, text.len);
+                               span.bytes, span.len);
             if (status < KILN_C99_OK) return status;
-        } else if (text.len != 0) {
+        } else if (span.len != 0) {
             if (kiln_c99_reserve((void **)&request->pending_body,
                                  &request->pending_body_capacity,
-                                 request->pending_body_len + text.len, 1) != KILN_C99_OK)
+                                 request->pending_body_len + span.len, 1) != KILN_C99_OK)
                 return KILN_C99_OUT_OF_MEMORY;
-            memcpy(request->pending_body + request->pending_body_len, text.ptr, text.len);
-            request->pending_body_len += text.len;
+            memcpy(request->pending_body + request->pending_body_len, span.bytes, span.len);
+            request->pending_body_len += span.len;
         }
         if (code == KILN_C99_METHOD_NODE_CLIENT_REQUEST_WRITE) {
             *result = kiln_c99_boolean(!request->sent || status == KILN_C99_OK);
@@ -2464,28 +2502,11 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
         return KILN_C99_OK;
     }
     if (code == KILN_C99_METHOD_NODE_RESPONSE_WRITE) {
-        const uint8_t *data_bytes = NULL;
-        size_t data_len = 0;
-        kiln_value text_val;
         kiln_value arg = argc > 0 ? args[0] : kiln_c99_undefined();
+        kiln_c99_node_byte_span span;
         int status;
-        if (arg.tag == KILN_VALUE_STRING) {
-            data_bytes = (const uint8_t *)arg.ptr;
-            data_len = arg.len;
-        } else if (arg.tag == KILN_VALUE_TYPED_ARRAY) {
-            kiln_typed_array *view = kiln_c99_typed_array_of(arg);
-            size_t width = kiln_c99_typed_width(view->kind);
-            if (view->length > SIZE_MAX / width) return KILN_C99_OUT_OF_MEMORY;
-            data_bytes = view->buffer->bytes + view->byte_offset;
-            data_len = view->length * width;
-        } else if (arg.tag == KILN_VALUE_UNDEFINED) {
-            data_bytes = (const uint8_t *)"";
-            data_len = 0;
-        } else {
-            text_val = kiln_c99_text(arg);
-            data_bytes = (const uint8_t *)text_val.ptr;
-            data_len = text_val.len;
-        }
+        status = kiln_c99_node_http_byte_span(arg, &span);
+        if (status != KILN_C99_OK) return status;
         if (response->ended)
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_ERROR,
                                         "write after end");
@@ -2510,7 +2531,7 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
         }
         status = kiln_realm_http_response_write_active(response->socket->resource,
                                                        response->request_id,
-                                                       data_bytes, data_len);
+                                                       span.bytes, span.len);
         if (status < KILN_C99_OK) return status;
         *result = kiln_c99_boolean(status == KILN_C99_OK);
         return KILN_C99_OK;
@@ -2539,30 +2560,13 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
             if (status != KILN_C99_OK) return status;
         }
         {
-            const uint8_t *data_bytes = NULL;
-            size_t data_len = 0;
-            kiln_value text_val;
             kiln_value arg = argc > 0 ? args[0] : kiln_c99_undefined();
-            if (arg.tag == KILN_VALUE_STRING) {
-                data_bytes = (const uint8_t *)arg.ptr;
-                data_len = arg.len;
-            } else if (arg.tag == KILN_VALUE_TYPED_ARRAY) {
-                kiln_typed_array *view = kiln_c99_typed_array_of(arg);
-                size_t width = kiln_c99_typed_width(view->kind);
-                if (view->length > SIZE_MAX / width) return KILN_C99_OUT_OF_MEMORY;
-                data_bytes = view->buffer->bytes + view->byte_offset;
-                data_len = view->length * width;
-            } else if (arg.tag == KILN_VALUE_UNDEFINED) {
-                data_bytes = (const uint8_t *)"";
-                data_len = 0;
-            } else {
-                text_val = kiln_c99_text(arg);
-                data_bytes = (const uint8_t *)text_val.ptr;
-                data_len = text_val.len;
-            }
+            kiln_c99_node_byte_span span;
+            status = kiln_c99_node_http_byte_span(arg, &span);
+            if (status != KILN_C99_OK) return status;
             status = kiln_realm_http_response_end_active(response->socket->resource,
                                                          response->request_id,
-                                                         data_bytes, data_len);
+                                                         span.bytes, span.len);
         }
         if (status < KILN_C99_OK) return status;
         response->ended = 1;

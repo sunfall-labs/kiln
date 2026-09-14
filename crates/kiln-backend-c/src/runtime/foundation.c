@@ -415,6 +415,7 @@ static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,
 static int kiln_c99_form_decode(const char *bytes, size_t len, kiln_value *out);
 static int kiln_c99_node_querystring_parse(kiln_value *out, const kiln_value *args, size_t argc);
 static int kiln_c99_typed_alloc(kiln_value *out, kiln_typed_kind kind, size_t count);
+static int kiln_c99_buffer_from_bytes(kiln_value *out, const uint8_t *bytes, uint64_t length);
 static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
                                     kiln_value source, size_t byte_offset, size_t length,
                                     int has_length, kiln_value *thrown);
