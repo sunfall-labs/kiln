@@ -20,6 +20,11 @@ static int kiln_c99_put_site(kiln_host *host, kiln_value target, const char *key
                     /* Polymorphic existing-property hit */
                     if (site->entries[p].transition_to == NULL) {
                         if (site->entries[p].slot < object->slot_capacity) {
+                            if ((object->shape->double_slots_mask & (1u << site->entries[p].slot)) &&
+                                value.tag != KILN_VALUE_NUMBER) {
+                                kiln_c99_ensure_dictionary(object);
+                                return kiln_c99_put_site(host, target, key, key_len, value, strict, depth, thrown, site);
+                            }
                             object->slots[site->entries[p].slot] = kiln_val_from_boundary(value);
                             return KILN_C99_OK;
                         }
@@ -29,9 +34,15 @@ static int kiln_c99_put_site(kiln_host *host, kiln_value target, const char *key
                              site->entries[p].slot < object->slot_capacity &&
                              (object->prototype.tag == KILN_VALUE_UNDEFINED ||
                               !kiln_c99_has_inherited_setter_or_readonly(object->prototype))) {
-                        object->slots[site->entries[p].slot] = kiln_val_from_boundary(value);
-                        object->shape = (kiln_shape *)site->entries[p].transition_to;
-                        return KILN_C99_OK;
+                        const kiln_shape *next_shape = site->entries[p].transition_to;
+                        if ((next_shape->double_slots_mask & (1u << site->entries[p].slot)) &&
+                            value.tag != KILN_VALUE_NUMBER) {
+                            /* Non-double written to double slot transition; fall through */
+                        } else {
+                            object->slots[site->entries[p].slot] = kiln_val_from_boundary(value);
+                            object->shape = (kiln_shape *)site->entries[p].transition_to;
+                            return KILN_C99_OK;
+                        }
                     }
                 }
             }
@@ -545,11 +556,17 @@ static int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_valu
             if (ikey == NULL) return KILN_C99_OUT_OF_MEMORY;
             if (kiln_c99_shape_find_slot(object->shape, ikey, &slot_idx)) {
                 if (slot_idx < object->slot_capacity) {
+                    if ((object->shape->double_slots_mask & (1u << slot_idx)) &&
+                        value.tag != KILN_VALUE_NUMBER) {
+                        kiln_c99_ensure_dictionary(object);
+                        goto fallback_dict;
+                    }
                     object->slots[slot_idx] = kiln_val_from_boundary(value);
                     return KILN_C99_OK;
                 }
             }
-            if (kiln_c99_shape_transition(object->shape, ikey, &next_shape)) {
+            int is_double = (value.tag == KILN_VALUE_NUMBER);
+            if (kiln_c99_shape_transition(object->shape, ikey, is_double, &next_shape)) {
                 uint32_t new_slot = next_shape->slot_index;
                 if (new_slot >= object->slot_capacity) {
                     size_t new_cap = object->slot_capacity == 0 ? KILN_C99_INLINE_SLOTS : object->slot_capacity * 2;
@@ -578,6 +595,7 @@ static int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_valu
                 return KILN_C99_OK;
             }
         }
+    fallback_dict:
         kiln_c99_ensure_dictionary(object);
     }
     status = kiln_c99_own_slot(target, text.ptr, text.len, &slot);

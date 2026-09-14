@@ -2,6 +2,7 @@ use super::OpContext;
 use super::{method_candidates, status_check};
 use crate::diagnostic_source;
 use crate::direct::TypedNeeds;
+use crate::emit_graph::EntryKind;
 use crate::graph::{GraphOp, ValueId};
 use crate::prelude::lookup_speculation_invariant;
 use kiln_ir::Constant;
@@ -453,9 +454,20 @@ pub(super) fn emit_call_method(
         o = object.0
     );
     let typed_check = status_check(diagnostic_site, pc, label, unwind);
+    let fn_id = ctx
+        .self_index
+        .map_or("entry".to_string(), |i| i.to_string());
     let typed_chain: String = typed_candidates
                 .iter()
                 .map(|&i| {
+                    let pfx = format!("{symbol}_fn_{fn_id}_v{v}_t_{i}");
+                    let shape_var = format!("{pfx}_shape");
+                    let row_var = format!("{pfx}_row");
+                    let proto_var = format!("{pfx}_proto");
+                    let epoch_var = format!("{pfx}_epoch");
+                    let upvalues_var = format!("{pfx}_upvalues");
+                    let fn_var = format!("{pfx}_fn");
+
                     let needs = plan.typed_needs[i as usize];
                     let mut call_args = String::from("depth + 1");
                     if needs.upvalues {
@@ -468,11 +480,11 @@ pub(super) fn emit_call_method(
                     // callee's own table after the first call, so the callee does no lookup.
                     let (row_arg, row_learn) = if needs.row {
                         let columns = plan.receiver_columns.get(i as usize).copied().unwrap_or(0);
-                        call_args.push_str(&format!(", obj->shape == kiln_typed_shape_{i} ? kiln_typed_row_{i} : NULL"));
+                        call_args.push_str(&format!(", obj->shape == {shape_var} ? {row_var} : NULL"));
                         (
                             String::new(),
                             format!(
-                                " if (obj->shape != kiln_typed_shape_{i}) {{ kiln_typed_shape_{i} = obj->shape; kiln_typed_row_{i} = kiln_c99_recv_row({symbol}_fn_{i}_recv_shape, &{symbol}_fn_{i}_recv_slot[0][0], {columns}, obj->shape); }} kiln_typed_proto_{i} = obj->prototype.tag == KILN_VALUE_OBJECT ? obj->prototype.bits : 0; kiln_typed_epoch_{i} = kiln_c99_site_callee_is_inherited(&site, obj) ? kiln_c99_proto_epoch : UINT64_MAX; kiln_typed_upvalues_{i} = plain->upvalues;"
+                                " if (obj->shape != {shape_var}) {{ const uint32_t *__r = kiln_c99_recv_row({symbol}_fn_{i}_typed_recv_shape, &{symbol}_fn_{i}_typed_recv_slot[0][0], {columns}, obj->shape); if (__r != NULL) {{ {shape_var} = obj->shape; {row_var} = __r; }} }} {proto_var} = obj->prototype.tag == KILN_VALUE_OBJECT ? obj->prototype.bits : 0; {epoch_var} = kiln_c99_site_callee_is_inherited(&site, obj) ? kiln_c99_proto_epoch : UINT64_MAX; {upvalues_var} = plain->upvalues;"
                             ),
                         )
                     } else {
@@ -492,12 +504,14 @@ pub(super) fn emit_call_method(
                     // cached callee equal to it is that closure: the site just read it live
                     // from where the method lives. Its body is then known without a load.
                     let matched = format!(
-                        "(cached_fn == kiln_typed_fn_{i} || (plain->body == (kiln_body_fn){symbol}_fn_{i} && (kiln_typed_fn_{i} = cached_fn) != 0)) && kiln_typed_ok"
+                        "(cached_fn == {fn_var} || (plain->body == (kiln_body_fn){symbol}_fn_{i} && ({fn_var} = cached_fn) != 0)) && kiln_typed_ok"
                     );
+                    let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
+                    let box_stmt = if need_box { format!(" v{v} = kiln_c99_val_from_double(kiln_typed_d);") } else { String::new() };
                     if plan.typed_returns[i as usize] {
-                        let twin = if typed { format!(" d{v} = kiln_typed_d;") } else { String::new() };
+                        let twin = if typed { format!(" d{v} = kiln_typed_d; kiln_twin = 1;") } else { String::new() };
                         format!(
-                            "if ({matched}) {{ double kiln_typed_d = {symbol}_fn_{i}_t({call_args}); if (KILN_UNLIKELY(kiln_c99_typed_failed(kiln_typed_d))) {failed} else {{ v{v} = kiln_c99_val_from_double(kiln_typed_d);{twin}{row_learn} }} handled = 1; }} else "
+                            "if ({matched}) {{ double kiln_typed_d = {symbol}_fn_{i}_t({call_args}); if (KILN_UNLIKELY(kiln_c99_typed_failed(kiln_typed_d))) {failed} else {{{box_stmt}{twin}{row_learn} }} handled = 1; }} else "
                         )
                     } else {
                         format!(
@@ -513,17 +527,7 @@ pub(super) fn emit_call_method(
     } else {
         "int kiln_typed_ok = !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH; (void)kiln_typed_ok; ".to_owned()
     };
-    let typed_remembered: String = typed_candidates
-                .iter()
-                .map(|i| {
-                    if plan.typed_needs[*i as usize].row {
-                        format!("static kiln_val kiln_typed_fn_{i} = 0; static const kiln_shape *kiln_typed_shape_{i} = NULL; static const uint32_t *kiln_typed_row_{i} = NULL; static uint64_t kiln_typed_proto_{i} = 0; static uint64_t kiln_typed_epoch_{i} = UINT64_MAX; static kiln_val *kiln_typed_upvalues_{i} = NULL; ")
-                    } else {
-                        format!("static kiln_val kiln_typed_fn_{i} = 0; ")
-                    }
-                })
-                .collect();
-    let typed_remembered = format!("{typed_guard_decl}{typed_remembered}");
+    let typed_remembered = typed_guard_decl;
     // The shape-first entry. Once the generic arm below has entered a typed candidate for a
     // receiver shape -- through the site's validated cache -- the shape, the receiver's own
     // prototype link and the prototype epoch of that moment name the callee outright: the same
@@ -534,16 +538,22 @@ pub(super) fn emit_call_method(
         .iter()
         .copied()
         .filter(|&i| plan.typed_needs[i as usize].row)
-        .map(|i| {
+        .enumerate()
+        .map(|(k, i)| {
+            let pfx = format!("{symbol}_fn_{fn_id}_v{v}_t_{i}");
+            let shape_var = format!("{pfx}_shape");
+            let row_var = format!("{pfx}_row");
+            let upvalues_var = format!("{pfx}_upvalues");
+
             let needs = plan.typed_needs[i as usize];
             let mut call_args = String::from("depth + 1");
             if needs.upvalues {
-                call_args.push_str(&format!(", kiln_typed_upvalues_{i}"));
+                call_args.push_str(&format!(", {upvalues_var}"));
             }
             if needs.receiver {
                 call_args.push_str(&format!(", v{}", object.0));
             }
-            call_args.push_str(&format!(", kiln_typed_row_{i}"));
+            call_args.push_str(", __row");
             if needs.runtime {
                 call_args.push_str(", host, thrown");
             }
@@ -553,21 +563,30 @@ pub(super) fn emit_call_method(
             let failed = format!(
                 "{{ int status = kiln_c99_typed_status; if (status == KILN_C99_THROWN) *thrown = kiln_c99_typed_thrown; {diag} {typed_check} }}"
             );
-            let guard = format!(
-                "if (!handled && obj->shape != NULL && obj->shape == kiln_typed_shape_{i} && kiln_typed_epoch_{i} == kiln_c99_proto_epoch && obj->prototype.tag == KILN_VALUE_OBJECT && obj->prototype.bits == kiln_typed_proto_{i} && kiln_typed_ok)"
-            );
+            let guard = if k == 0 {
+                format!("if (obj->shape == {shape_var})")
+            } else {
+                format!("else if (obj->shape == {shape_var})")
+            };
+            let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
+            let box_stmt = if need_box { format!(" v{v} = kiln_c99_val_from_double(kiln_typed_d);") } else { String::new() };
             if plan.typed_returns[i as usize] {
-                let twin = if typed { format!(" d{v} = kiln_typed_d;") } else { String::new() };
+                let twin = if typed { format!(" d{v} = kiln_typed_d; kiln_twin = 1;") } else { String::new() };
                 format!(
-                    "{guard} {{ double kiln_typed_d = {symbol}_fn_{i}_t({call_args}); if (KILN_UNLIKELY(kiln_c99_typed_failed(kiln_typed_d))) {failed} else {{ v{v} = kiln_c99_val_from_double(kiln_typed_d);{twin} }} handled = 1; }} "
+                    "{guard} {{ const uint32_t *__row = {row_var}; if (__row == NULL) __builtin_unreachable(); double kiln_typed_d = {symbol}_fn_{i}_t({call_args}); if (KILN_UNLIKELY(kiln_c99_typed_failed(kiln_typed_d))) {failed} else {{{box_stmt}{twin} }} handled = 1; }} "
                 )
             } else {
                 format!(
-                    "{guard} {{ kiln_val kiln_typed_r = {symbol}_fn_{i}_t({call_args}); if (KILN_UNLIKELY(kiln_typed_r == KILN_VAL_TYPED_FAIL)) {failed} else {{ v{v} = kiln_typed_r; }} handled = 1; }} "
+                    "{guard} {{ const uint32_t *__row = {row_var}; if (__row == NULL) __builtin_unreachable(); kiln_val kiln_typed_r = {symbol}_fn_{i}_t({call_args}); if (KILN_UNLIKELY(kiln_typed_r == KILN_VAL_TYPED_FAIL)) {failed} else {{ v{v} = kiln_typed_r; }} handled = 1; }} "
                 )
             }
         })
         .collect();
+    let typed_fast_block = if typed_fast.is_empty() {
+        String::new()
+    } else {
+        format!("{typed_fast} ")
+    };
     let by_name: String = candidates
                 .iter()
                 .filter(|i| !typed_candidates.contains(i))
@@ -580,14 +599,22 @@ pub(super) fn emit_call_method(
                     )
                 })
                 .collect();
-    let init = if args.is_empty() {
-        "KILN_VAL_UNDEFINED".to_owned()
+    let init_stmts = if args.is_empty() {
+        "call_args[0] = KILN_VAL_UNDEFINED;".to_owned()
     } else {
         args.iter()
-            .map(|a| format!("v{}", a.0))
+            .enumerate()
+            .map(|(i, a)| {
+                if numbers.contains(a) {
+                    format!("call_args[{i}] = kiln_c99_val_from_double(d{});", a.0)
+                } else {
+                    format!("call_args[{i}] = v{};", a.0)
+                }
+            })
             .collect::<Vec<_>>()
-            .join(", ")
+            .join(" ")
     };
+    let prep_args = format!("if (!call_args_ready) {{ {init_stmts} call_args_ready = 1; }} ");
     let check = status_check(diagnostic_site, pc, label, unwind);
     let closed_world = !program.has_direct_eval() && !program.has_dynamic_import();
 
@@ -1551,6 +1578,12 @@ pub(super) fn emit_call_method(
     // the twin alone where the intrinsic answered.
     let math_intrinsic = match math_intrinsic {
         Some(text) if typed => {
+            let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
+            let box_stmt = if need_box {
+                format!(" v{v} = kiln_c99_val_from_double(d{v});")
+            } else {
+                String::new()
+            };
             let assign = format!("v{v} = kiln_c99_val_from_double(");
             let mut out = String::with_capacity(text.len());
             let mut rest = text.as_str();
@@ -1561,9 +1594,7 @@ pub(super) fn emit_call_method(
                 };
                 let expr = &rest[expr_start..expr_start + end];
                 out.push_str(&rest[..at]);
-                out.push_str(&format!(
-                    "d{v} = {expr}; v{v} = kiln_c99_val_from_double(d{v}); kiln_twin = 1;"
-                ));
+                out.push_str(&format!("d{v} = {expr};{box_stmt} kiln_twin = 1;"));
                 rest = &rest[expr_start + end + 2..];
             }
             out.push_str(rest);
@@ -1610,56 +1641,68 @@ pub(super) fn emit_call_method(
     let iterator_s = iterator_intrinsic
         .map(|s| format!(" {s}"))
         .unwrap_or_default();
+    if matches!(ctx.kind, EntryKind::Typed { .. }) {
+        writeln!(
+            output,
+            "    {{ int handled = 0; int kiln_twin = 0; (void)kiln_twin; \
+            {math_s}{push_s}{regex_s}{map_s}{parallel_pool_s}{parallel_map_s}{filter_s}{reduce_s}{slice_s}{join_s}{split_s}{index_of_s}{substring_s}{collection_s}{json_s}{sort_s}{array_extra_s}{string_extra_s}{iterator_s} \
+            if (KILN_UNLIKELY(!handled)) {{ goto kiln_refusal; }} }}"
+        )
+        .unwrap();
+        return;
+    }
     let n = argc.max(1);
 
     writeln!(
                 output,
                 "    {{ static kiln_c99_site site = {{0}}; \
-                kiln_val call_args[{n}] = {{ {init} }}; \
+                kiln_val call_args[{n}]; int call_args_ready = 0; (void)call_args_ready; \
                 int handled = 0; int kiln_twin = 0; (void)kiln_twin; {typed_remembered}\
                 {math_s}{push_s}{regex_s}{map_s}{parallel_pool_s}{parallel_map_s}{filter_s}{reduce_s}{slice_s}{join_s}{split_s}{index_of_s}{substring_s}{collection_s}{json_s}{sort_s}{array_extra_s}{string_extra_s}{iterator_s} \
-                if (!handled && site.pic_count > 0 && KILN_VAL_IS_OBJECT(v{o})) {{ \
-                    const kiln_object *obj = (const kiln_object *)KILN_VAL_PTR(v{o}); \
-                    {typed_fast}\
-                    kiln_val cached_fn = handled ? 0 : kiln_c99_site_cached_callee(&site, obj); \
-                    if (cached_fn != 0 && KILN_VAL_IS_CLOSURE(cached_fn)) {{ \
-                        kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(cached_fn); \
-                        {typed_chain}if (!plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
-                            kiln_val vreceiver = plain->arrow ? plain->captured_this : v{o}; \
-                            if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vreceiver); \
-                            v{v} = KILN_VAL_UNDEFINED; \
-                            int status; \
-                            if (!plain->publishes_frame) {{ kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; {by_name} {{ status = plain->body(&ctx_call, &v{v}, plain->upvalues, &vreceiver, call_args, (size_t){argc}); }} }} \
-                            else {{ status = kiln_c99_invoke_closure(host, &v{v}, plain, vreceiver, call_args, (size_t){argc}, depth, thrown, NULL, 0); }} \
-                            if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) {{ \
-                                if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = kiln_val_to_boundary(v{o}).tag; \
-                                if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod invocation refused\"; \
-                                kiln_c99_note_refusal({diagnostic_source}, (size_t){pc}, \"{label}\", (size_t)kiln_c99_diagnostic_active_depth); \
-                            }} else if (KILN_UNLIKELY(status == KILN_C99_THROWN)) {{ \
-                                if (kiln_c99_diagnostic_detail == NULL) {{ \
-                                    kiln_c99_diagnostic_receiver_tag = kiln_val_to_boundary(v{o}).tag; \
-                                    kiln_c99_diagnostic_detail = \"CallMethod invocation threw\"; \
+                if (!handled && KILN_VAL_IS_OBJECT(v{o})) {{ \
+                    const kiln_object *obj = (const kiln_object *)KILN_VAL_PTR(v{o}); if (obj == NULL) __builtin_unreachable(); \
+                    {typed_fast_block}\
+                    if (!handled && site.pic_count > 0) {{ \
+                        kiln_val cached_fn = kiln_c99_site_cached_callee(&site, obj); \
+                        if (cached_fn != 0 && KILN_VAL_IS_CLOSURE(cached_fn)) {{ \
+                            kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(cached_fn); \
+                            {typed_chain}if (!plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                                kiln_val vreceiver = plain->arrow ? plain->captured_this : v{o}; \
+                                if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vreceiver); \
+                                v{v} = KILN_VAL_UNDEFINED; \
+                                int status; \
+                                if (!plain->publishes_frame) {{ kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; {prep_args}{by_name} {{ status = plain->body(&ctx_call, &v{v}, plain->upvalues, &vreceiver, call_args, (size_t){argc}); }} }} \
+                                else {{ {prep_args}status = kiln_c99_invoke_closure(host, &v{v}, plain, vreceiver, call_args, (size_t){argc}, depth, thrown, NULL, 0); }} \
+                                if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) {{ \
+                                    if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = kiln_val_to_boundary(v{o}).tag; \
+                                    if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod invocation refused\"; \
+                                    kiln_c99_note_refusal({diagnostic_source}, (size_t){pc}, \"{label}\", (size_t)kiln_c99_diagnostic_active_depth); \
+                                }} else if (KILN_UNLIKELY(status == KILN_C99_THROWN)) {{ \
+                                    if (kiln_c99_diagnostic_detail == NULL) {{ \
+                                        kiln_c99_diagnostic_receiver_tag = kiln_val_to_boundary(v{o}).tag; \
+                                        kiln_c99_diagnostic_detail = \"CallMethod invocation threw\"; \
+                                    }} \
+                                    kiln_c99_note_refusal({diagnostic_source}, (size_t){pc}, \"{label}\", (size_t)kiln_c99_diagnostic_active_depth); \
                                 }} \
-                                kiln_c99_note_refusal({diagnostic_source}, (size_t){pc}, \"{label}\", (size_t)kiln_c99_diagnostic_active_depth); \
+                                {check} \
+                                handled = 1; \
                             }} \
+                        }} else if (cached_fn != 0 && KILN_VAL_IS_METHOD(cached_fn) && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                            kiln_value bself = kiln_val_to_boundary(v{o}); \
+                            kiln_value bargs[{n}]; \
+                            {prep_args}for (size_t bi = 0; bi < {argc}; ++bi) bargs[bi] = kiln_val_to_boundary(call_args[bi]); \
+                            kiln_value bresult = kiln_c99_undefined(); \
+                            int status = kiln_c99_invoke_method(host, &bresult, KILN_VAL_METHOD_ID(cached_fn), bself, {argc} > 0 ? bargs : NULL, (size_t){argc}, depth, thrown); \
                             {check} \
+                            v{v} = kiln_val_from_boundary(bresult); \
                             handled = 1; \
                         }} \
-                    }} else if (cached_fn != 0 && KILN_VAL_IS_METHOD(cached_fn) && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
-                        kiln_value bself = kiln_val_to_boundary(v{o}); \
-                        kiln_value bargs[{n}]; \
-                        for (size_t bi = 0; bi < {argc}; ++bi) bargs[bi] = kiln_val_to_boundary(call_args[bi]); \
-                        kiln_value bresult = kiln_c99_undefined(); \
-                        int status = kiln_c99_invoke_method(host, &bresult, KILN_VAL_METHOD_ID(cached_fn), bself, {argc} > 0 ? bargs : NULL, (size_t){argc}, depth, thrown); \
-                        {check} \
-                        v{v} = kiln_val_from_boundary(bresult); \
-                        handled = 1; \
                     }} \
                 }} \
                 if (!handled && kiln_c99_cached_method_matches(&site, v{o}) && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
                     kiln_value bself = kiln_val_to_boundary(v{o}); \
                     kiln_value bargs[{n}]; \
-                    for (size_t bi = 0; bi < {argc}; ++bi) bargs[bi] = kiln_val_to_boundary(call_args[bi]); \
+                    {prep_args}for (size_t bi = 0; bi < {argc}; ++bi) bargs[bi] = kiln_val_to_boundary(call_args[bi]); \
                     kiln_value bresult = kiln_c99_undefined(); \
                     int status = kiln_c99_invoke_method(host, &bresult, site.cached_method, bself, {argc} > 0 ? bargs : NULL, (size_t){argc}, depth, thrown); \
                     {check} \
@@ -1667,7 +1710,7 @@ pub(super) fn emit_call_method(
                     handled = 1; \
                 }} \
                 if (!handled) {{ \
-                    int status = kiln_c99_val_call_method(host, v{o}, call_args, (size_t){argc}, {symbol}_key_{name}, {key_len}, depth, thrown, &site, {diagnostic_source}, (size_t){pc}, \"{label}\", &v{v}); \
+                    {prep_args}int status = kiln_c99_val_call_method(host, v{o}, call_args, (size_t){argc}, {symbol}_key_{name}, {key_len}, depth, thrown, &site, {diagnostic_source}, (size_t){pc}, \"{label}\", &v{v}); \
                     {check} \
                 }} {typed_sync} }}",
                 o = object.0,
