@@ -94,7 +94,7 @@ static int kiln_c99_define_named_fast(kiln_val target, kiln_val key, kiln_val va
                                       kiln_c99_site *site) {
     kiln_object *object;
     const kiln_string *keystr;
-    const char *ikey;
+    const kiln_string *ikey;
     uint32_t slot;
     kiln_shape *next;
 
@@ -115,23 +115,23 @@ static int kiln_c99_define_named_fast(kiln_val target, kiln_val key, kiln_val va
         return 1;
     }
     keystr = (const kiln_string *)KILN_VAL_PTR(key);
-    if (keystr == NULL || keystr->unit_len == 0 || kiln_string_is_utf16(keystr)) {
+    if (keystr == NULL || keystr->unit_len == 0) {
         return 0;
     }
-    if (keystr->unit_len >= 2 && kiln_string_latin1(keystr)[0] == '@' && kiln_string_latin1(keystr)[1] == '@') {
+    if (kiln_c99_key_is_reserved(keystr)) {
         /* A shape has no per-slot enumerable flag, and a `@@`-prefixed key must come out
          * non-enumerable (own_slot_ikey's rule); the generic path's dictionary-mode store is
          * where that is tracked. Reachable only via a computed key that happens to spell one --
          * a literal key can never start with `@`. */
         return 0;
     }
-    if (keystr->unit_len == 9 && memcmp(kiln_string_latin1(keystr), "__proto__", 9) == 0) {
+    if (kiln_c99_same_name_key(keystr, "__proto__")) {
         /* This literal spelling of the key relinks the prototype instead of defining a property
          * (kiln_c99_put_mode_ikey's own `__proto__` special case, reached the same way whether
          * this fast path exists or not); leave it there rather than duplicate the check. */
         return 0;
     }
-    ikey = kiln_c99_intern((const char *)kiln_string_latin1(keystr), keystr->unit_len);
+    ikey = kiln_c99_intern_key(keystr);
     if (ikey == NULL) {
         *status = KILN_C99_OUT_OF_MEMORY;
         return 1;
@@ -293,7 +293,10 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
             if (name.tag != KILN_VALUE_STRING) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
-            status = kiln_c99_put(host, target, name.ptr, name.len, element, depth, thrown);
+            /* The headed form, as in the computed write above: the byte adapter would read
+             * the header's words as key bytes. */
+            status = kiln_c99_put_mode_key(host, target, (const kiln_string *)name.ptr, NULL,
+                                           element, 0, depth, thrown);
             if (status != KILN_C99_OK) {
                 return status;
             }
@@ -363,8 +366,8 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
             size_t k;
             int has_symbol_key = 0;
             for (k = 0; k < scount; ++k) {
-                const char *skey = sshape->keys[k];
-                if (skey != NULL && skey[0] == '@' && skey[1] == '@') {
+                const kiln_string *skey = sshape->keys[k];
+                if (kiln_c99_key_is_reserved(skey)) {
                     has_symbol_key = 1;
                     break;
                 }
@@ -408,14 +411,14 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
             size_t k;
             int plain = 1;
             for (k = 0; k < scount; ++k) {
-                const char *skey = sshape->keys[k];
-                if (skey != NULL && skey[0] == '@' && skey[1] == '@') {
+                const kiln_string *skey = sshape->keys[k];
+                if (kiln_c99_key_is_reserved(skey)) {
                     plain = 0;
                     break;
                 }
             }
             for (k = 0; plain && k < scount; ++k) {
-                const char *ikey = sshape->keys[k];
+                const kiln_string *ikey = sshape->keys[k];
                 kiln_val sval = k < object->slot_capacity ? object->slots[k] : KILN_VAL_UNDEFINED;
                 uint32_t slot;
                 kiln_shape *next;
@@ -453,20 +456,20 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
         }
         size_t length = object->shape->property_count;
         for (index = 0; index < length && object->shape != NULL && index < object->shape->property_count; ++index) {
-            const char *skey = object->shape->keys[index];
+            const kiln_string *skey = object->shape->keys[index];
             size_t skey_len = kiln_c99_key_len(skey);
             kiln_value sval;
             int status;
-            if (skey_len >= 2 && skey[0] == '@' && skey[1] == '@') {
+            if (kiln_c99_key_is_reserved(skey)) {
                 kiln_value symbol;
-                if (!kiln_c99_symbol_of_key(skey, skey_len, &symbol)) {
+                if (!kiln_c99_symbol_of_key_view(skey, &symbol)) {
                     continue;
                 }
             }
             sval = (object->slots != NULL && index < object->slot_capacity)
                        ? kiln_val_to_boundary(object->slots[index])
                        : kiln_c99_undefined();
-            status = kiln_c99_put(host, target, skey, skey_len, sval, depth, thrown);
+            status = kiln_c99_put_mode_key(host, target, skey, skey, sval, 0, depth, thrown);
             if (status != KILN_C99_OK) {
                 return status;
             }
@@ -497,8 +500,7 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
                  * and skipping them silently drops what the interpreter kept -- which is the
                  * failure this whole helper exists to stop. A machine slot is not a symbol and
                  * is not affected: it is skipped, as it should be. */
-                if (!kiln_c99_symbol_of_key(object->properties[index].key,
-                                            object->properties[index].key_len, &symbol) ||
+                if (!kiln_c99_symbol_of_key_view(object->properties[index].key, &symbol) ||
                     object->properties[index].symbol_hidden) {
                     continue;
                 }
@@ -510,9 +512,9 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
                      * `"gone" in { ...source }` said false where node says true, because
                      * `CopyDataProperties` creates a property for every enumerable own key it
                      * was given, whatever the read produced. */
-                    status = kiln_c99_put(host, target, object->properties[index].key,
-                                          object->properties[index].key_len,
-                                          kiln_c99_undefined(), depth, thrown);
+                    status = kiln_c99_put_mode_key(host, target, object->properties[index].key,
+                                                   object->properties[index].key,
+                                                   kiln_c99_undefined(), 0, depth, thrown);
                     if (status != KILN_C99_OK) {
                         return status;
                     }
@@ -528,8 +530,9 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
             } else {
                 copied = object->properties[index].value;
             }
-            status = kiln_c99_put(host, target, object->properties[index].key,
-                                  object->properties[index].key_len, copied, depth, thrown);
+            status = kiln_c99_put_mode_key(host, target, object->properties[index].key,
+                                           object->properties[index].key, copied, 0, depth,
+                                           thrown);
             if (status != KILN_C99_OK) {
                 return status;
             }

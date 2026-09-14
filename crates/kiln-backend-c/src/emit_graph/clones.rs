@@ -201,6 +201,7 @@ pub fn emit_restartable(
         "kiln_c99_val_unary(",
         "thrown",
         "locals[",
+        "kiln_c99_val_read_property_key(",
     ];
     // The body, past the signature: a typed entry's parameter list names `thrown` when the
     // entry needs it, and the decision may not depend on what the entry needs.

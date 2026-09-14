@@ -1841,7 +1841,11 @@ static int kiln_c99_node_fs(kiln_host *host, kiln_value *result, uint64_t code,
     memset(&operation, 0, sizeof operation);
     operation.operation = work->operation;
     operation.flags = 1;
-    status = kiln_c99_string_to_utf8_lossy(path, &path_owned, &operation.text_len);
+    {
+        size_t path_len = 0;
+        status = kiln_c99_string_to_utf8_lossy(path, &path_owned, &path_len);
+        operation.text_len = (uint64_t)path_len;
+    }
     if (status != KILN_C99_OK) {
         free(data_owned);
         kiln_c99_gc_release(work);
@@ -2222,42 +2226,62 @@ static int kiln_c99_node_flatten_headers(kiln_object *headers, kiln_text *out) {
     out->len = 0;
     out->capacity = 0;
     for (index = 0; index < headers->count; ++index) {
+        kiln_value key_value = kiln_c99_stable_key_value(headers->properties[index].key);
+        uint8_t *key_encoded = NULL;
+        size_t key_encoded_len = 0;
         uint8_t *encoded = NULL;
         size_t encoded_len = 0;
+        if (kiln_c99_string_to_utf8_lossy(key_value, &key_encoded, &key_encoded_len) !=
+            KILN_C99_OK) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
         if (kiln_c99_string_to_utf8_lossy(kiln_c99_text(headers->properties[index].value),
                                           &encoded, &encoded_len) != KILN_C99_OK) {
+            free(key_encoded);
             return KILN_C99_OUT_OF_MEMORY;
         }
+        free(key_encoded);
         free(encoded);
-        if (headers->properties[index].key_len > SIZE_MAX - encoded_len - 2 ||
-            needed > SIZE_MAX - headers->properties[index].key_len - encoded_len - 2) {
+        if (key_encoded_len > SIZE_MAX - encoded_len - 2 ||
+            needed > SIZE_MAX - key_encoded_len - encoded_len - 2) {
             return KILN_C99_OUT_OF_MEMORY;
         }
-        needed += headers->properties[index].key_len + encoded_len + 2;
+        needed += key_encoded_len + encoded_len + 2;
     }
     if (needed == 0) return KILN_C99_OK;
     bytes = (char *)malloc(needed);
     if (bytes == NULL) return KILN_C99_OUT_OF_MEMORY;
     for (index = 0; index < headers->count; ++index) {
         kiln_property *property = &headers->properties[index];
+        kiln_value key_value = kiln_c99_stable_key_value(property->key);
+        uint8_t *key_encoded = NULL;
+        size_t key_encoded_len = 0;
         uint8_t *encoded = NULL;
         size_t encoded_len = 0;
-        if (kiln_c99_string_to_utf8_lossy(kiln_c99_text(property->value), &encoded,
-                                          &encoded_len) != KILN_C99_OK) {
+        if (kiln_c99_string_to_utf8_lossy(key_value, &key_encoded, &key_encoded_len) !=
+            KILN_C99_OK) {
             free(bytes);
             return KILN_C99_OUT_OF_MEMORY;
         }
-        if (at + property->key_len + encoded_len + 2 > needed) {
+        if (kiln_c99_string_to_utf8_lossy(kiln_c99_text(property->value), &encoded,
+                                          &encoded_len) != KILN_C99_OK) {
+            free(key_encoded);
+            free(bytes);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        if (at + key_encoded_len + encoded_len + 2 > needed) {
+            free(key_encoded);
             free(encoded);
             free(bytes);
             KILN_C99_REFUSE("a header buffer that outgrew the size it was measured at");
         }
-        if (property->key_len != 0) memcpy(bytes + at, property->key, property->key_len);
-        at += property->key_len;
+        if (key_encoded_len != 0) memcpy(bytes + at, key_encoded, key_encoded_len);
+        at += key_encoded_len;
         bytes[at++] = '\0';
         if (encoded_len != 0) memcpy(bytes + at, encoded, encoded_len);
         at += encoded_len;
         bytes[at++] = '\0';
+        free(key_encoded);
         free(encoded);
     }
     out->bytes = bytes;
@@ -2488,17 +2512,25 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
     if (code == KILN_C99_METHOD_NODE_RESPONSE_SET_HEADER) {
         kiln_value name = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
         kiln_value value = kiln_c99_text(argc > 1 ? args[1] : kiln_c99_undefined());
+        uint8_t *name_owned = NULL;
         size_t name_len = 0;
-        const char *name_bytes = kiln_c99_string_ascii_bytes(name, &name_len);
-        if (name.tag != KILN_VALUE_STRING || name_bytes == NULL)
-            return KILN_C99_OUT_OF_MEMORY;
+        int encode_status = kiln_c99_string_to_utf8_lossy(name, &name_owned, &name_len);
+        const char *name_bytes = (const char *)name_owned;
+        if (name.tag != KILN_VALUE_STRING || encode_status != KILN_C99_OK) {
+            free(name_owned);
+            return encode_status == KILN_C99_OK ? KILN_C99_OUT_OF_MEMORY : encode_status;
+        }
         char *normalized = name_len == 0 ? NULL : kiln_c99_gc_alloc_text(name_len);
         size_t index;
         int status;
-        if (name_len != 0 && normalized == NULL) return KILN_C99_OUT_OF_MEMORY;
+        if (name_len != 0 && normalized == NULL) {
+            free(name_owned);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
         for (index = 0; index < name_len; ++index)
             normalized[index] = (char)tolower((unsigned char)name_bytes[index]);
         status = kiln_c99_put(NULL, response->headers, normalized, name_len, value, 0, NULL);
+        free(name_owned);
         *result = receiver;
         return status;
     }
@@ -2507,9 +2539,14 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
         code == KILN_C99_METHOD_NODE_RESPONSE_REMOVE_HEADER) {
         kiln_value name = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
         kiln_object *headers = kiln_c99_object_of(response->headers);
+        uint8_t *name_owned = NULL;
         size_t name_len = 0;
-        const char *name_bytes = kiln_c99_string_ascii_bytes(name, &name_len);
-        if (name.tag != KILN_VALUE_STRING || name_bytes == NULL) return KILN_C99_OUT_OF_MEMORY;
+        int encode_status = kiln_c99_string_to_utf8_lossy(name, &name_owned, &name_len);
+        const char *name_bytes = (const char *)name_owned;
+        if (name.tag != KILN_VALUE_STRING || encode_status != KILN_C99_OK) {
+            free(name_owned);
+            return encode_status == KILN_C99_OK ? KILN_C99_OUT_OF_MEMORY : encode_status;
+        }
         size_t index;
         size_t byte;
         char *normalized = name_len == 0 ? NULL : kiln_c99_gc_alloc_text(name_len);
@@ -2519,13 +2556,15 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
                 headers->shape = NULL;
             }
         }
-        if (name_len != 0 && normalized == NULL) return KILN_C99_OUT_OF_MEMORY;
+        if (name_len != 0 && normalized == NULL) {
+            free(name_owned);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
         for (byte = 0; byte < name_len; ++byte)
             normalized[byte] = (char)tolower((unsigned char)name_bytes[byte]);
         for (index = 0; index < headers->count; ++index) {
             kiln_property *property = &headers->properties[index];
-            if (property->key_len == name_len &&
-                (name_len == 0 || memcmp(property->key, normalized, name_len) == 0)) {
+            if (kiln_string_equals_ascii(property->key, normalized, name_len)) {
                 if (code == KILN_C99_METHOD_NODE_RESPONSE_REMOVE_HEADER) {
                     headers->shape = NULL;
                     if (index + 1 < headers->count)
@@ -2538,9 +2577,11 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
                 } else {
                     *result = property->value;
                 }
+                free(name_owned);
                 return KILN_C99_OK;
             }
         }
+        free(name_owned);
         *result = code == KILN_C99_METHOD_NODE_RESPONSE_HAS_HEADER
                       ? kiln_c99_boolean(0)
                       : kiln_c99_undefined();
@@ -2557,8 +2598,8 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
         status = kiln_c99_new_object(&copy);
         for (index = 0; status == KILN_C99_OK && index < headers->count; ++index) {
             kiln_property *property = &headers->properties[index];
-            status = kiln_c99_put(NULL, copy, property->key, property->key_len,
-                                  property->value, 0, NULL);
+            status = kiln_c99_put_mode_key(NULL, copy, property->key, property->key,
+                                           property->value, 0, 0, NULL);
         }
         if (status != KILN_C99_OK) return status;
         *result = copy;
@@ -2585,9 +2626,9 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
             for (index = 0; index < provided->count; ++index) {
                 kiln_property *property = &provided->properties[index];
                 if (property->enumerable) {
-                    status = kiln_c99_put(NULL, response->headers, property->key,
-                                          property->key_len,
-                                          kiln_c99_text(property->value), 0, NULL);
+                    status = kiln_c99_put_mode_key(NULL, response->headers, property->key,
+                                                   property->key,
+                                                   kiln_c99_text(property->value), 0, 0, NULL);
                     if (status != KILN_C99_OK) return status;
                 }
             }

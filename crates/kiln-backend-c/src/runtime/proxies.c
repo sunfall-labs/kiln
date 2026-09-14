@@ -71,11 +71,11 @@ static int kiln_c99_get_with_receiver(kiln_host *host, kiln_value target, kiln_v
     if (target.tag == KILN_VALUE_PROXY) {
         return kiln_c99_proxy_get(host, target, key, receiver, out, depth, thrown);
     }
+    kiln_value name = kiln_c99_property_key(key);
     if (target.tag == KILN_VALUE_OBJECT &&
         !(receiver.tag == target.tag && receiver.bits == target.bits)) {
         /* Only an accessor can tell the two apart, so only an accessor is looked for here; a
          * data property reads the same either way and goes through the ordinary path. */
-        kiln_value name = kiln_c99_property_key(key);
         kiln_value current = target;
         size_t steps;
         if (name.tag != KILN_VALUE_STRING) {
@@ -93,7 +93,8 @@ static int kiln_c99_get_with_receiver(kiln_host *host, kiln_value target, kiln_v
                 kiln_c99_ensure_dictionary(object);
             }
             for (index = 0; index < object->count; ++index) {
-                if (!kiln_c99_same_key(&object->properties[index], name.ptr, name.len)) {
+                if (!kiln_c99_same_key_view(&object->properties[index],
+                                            (const kiln_string *)name.ptr)) {
                     continue;
                 }
                 if (!object->properties[index].accessor) {
@@ -113,6 +114,10 @@ static int kiln_c99_get_with_receiver(kiln_host *host, kiln_value target, kiln_v
             }
             current = object->prototype;
         }
+    }
+    if (name.tag == KILN_VALUE_STRING) {
+        return kiln_c99_get_key(host, target, (const kiln_string *)name.ptr,
+                                (const kiln_string *)name.ptr, out, depth, thrown);
     }
     return kiln_c99_get_computed(host, target, key, out, depth, thrown);
 }
@@ -141,10 +146,15 @@ static int kiln_c99_proxy_set_with_receiver(kiln_host *host, kiln_value proxy, k
         if (status != KILN_C99_OK || !strict || kiln_c99_truthy(ignored)) return status;
         {
             kiln_value text = kiln_c99_property_key(key);
-            return text.tag == KILN_VALUE_STRING
-                       ? kiln_c99_throw_read_only(thrown, text.ptr, text.len)
-                       : kiln_c99_refuse("a strict Proxy write refused a key with no string "
-                                         "spelling");
+            if (text.tag != KILN_VALUE_STRING) {
+                return kiln_c99_refuse("a strict Proxy write refused a key with no string spelling");
+            }
+            if (kiln_string_is_utf16((const kiln_string *)text.ptr)) {
+                return kiln_c99_refuse("a strict Proxy write refused a UTF-16 string key");
+            }
+            return kiln_c99_throw_read_only(
+                thrown, (const char *)kiln_string_latin1((const kiln_string *)text.ptr),
+                ((const kiln_string *)text.ptr)->unit_len);
         }
     }
 }
@@ -177,21 +187,32 @@ static int kiln_c99_set_with_receiver(kiln_host *host, kiln_value target, kiln_v
                 kiln_c99_ensure_dictionary(object);
             }
             for (index = 0; index < object->count; ++index) {
-                if (!kiln_c99_same_key(&object->properties[index], name.ptr, name.len)) {
+                if (!kiln_c99_same_key_view(&object->properties[index],
+                                            (const kiln_string *)name.ptr)) {
                     continue;
                 }
                 if (object->properties[index].accessor) {
                     if (object->properties[index].setter.tag == KILN_VALUE_UNDEFINED) {
-                        return strict ? kiln_c99_throw_read_only(thrown, name.ptr, name.len)
-                                      : KILN_C99_OK;
+                        if (!strict) return KILN_C99_OK;
+                        if (kiln_string_is_utf16((const kiln_string *)name.ptr)) {
+                            return kiln_c99_refuse("a strict Proxy write refused a UTF-16 string key");
+                        }
+                        return kiln_c99_throw_read_only(
+                            thrown, (const char *)kiln_string_latin1((const kiln_string *)name.ptr),
+                            ((const kiln_string *)name.ptr)->unit_len);
                     }
                     kiln_value ignored;
                     return kiln_c99_call(host, &ignored, object->properties[index].setter, receiver,
                                          &value, 1, depth, thrown);
                 }
                 if (!object->properties[index].writable) {
-                    return strict ? kiln_c99_throw_read_only(thrown, name.ptr, name.len)
-                                  : KILN_C99_OK;
+                    if (!strict) return KILN_C99_OK;
+                    if (kiln_string_is_utf16((const kiln_string *)name.ptr)) {
+                        return kiln_c99_refuse("a strict Proxy write refused a UTF-16 string key");
+                    }
+                    return kiln_c99_throw_read_only(
+                        thrown, (const char *)kiln_string_latin1((const kiln_string *)name.ptr),
+                        ((const kiln_string *)name.ptr)->unit_len);
                 }
                 steps = KILN_C99_MAX_PROTOTYPE_DEPTH;
                 break;
@@ -210,27 +231,53 @@ static int kiln_c99_set_with_receiver(kiln_host *host, kiln_value target, kiln_v
         }
         kiln_object *recv_obj = kiln_c99_object_of(recv_store);
         if (recv_obj->frozen) {
-            return strict ? kiln_c99_throw_read_only(thrown, name.ptr, name.len) : KILN_C99_OK;
+            if (!strict) return KILN_C99_OK;
+            if (kiln_string_is_utf16((const kiln_string *)name.ptr)) {
+                return kiln_c99_refuse("a strict Proxy write refused a UTF-16 string key");
+            }
+            return kiln_c99_throw_read_only(
+                thrown, (const char *)kiln_string_latin1((const kiln_string *)name.ptr),
+                ((const kiln_string *)name.ptr)->unit_len);
         }
         if (recv_obj->shape != NULL) {
             kiln_c99_ensure_dictionary(recv_obj);
         }
-        size_t recv_index = kiln_c99_own_index(recv_obj, NULL, name.ptr, name.len);
+        size_t recv_index = kiln_c99_own_index_key(recv_obj, NULL,
+                                                   (const kiln_string *)name.ptr);
         if (recv_index != recv_obj->count) {
             if (recv_obj->properties[recv_index].accessor) {
-                return strict ? kiln_c99_throw_read_only(thrown, name.ptr, name.len) : KILN_C99_OK;
+                if (!strict) return KILN_C99_OK;
+                if (kiln_string_is_utf16((const kiln_string *)name.ptr)) {
+                    return kiln_c99_refuse("a strict Proxy write refused a UTF-16 string key");
+                }
+                return kiln_c99_throw_read_only(
+                    thrown, (const char *)kiln_string_latin1((const kiln_string *)name.ptr),
+                    ((const kiln_string *)name.ptr)->unit_len);
             }
             if (!recv_obj->properties[recv_index].writable) {
-                return strict ? kiln_c99_throw_read_only(thrown, name.ptr, name.len) : KILN_C99_OK;
+                if (!strict) return KILN_C99_OK;
+                if (kiln_string_is_utf16((const kiln_string *)name.ptr)) {
+                    return kiln_c99_refuse("a strict Proxy write refused a UTF-16 string key");
+                }
+                return kiln_c99_throw_read_only(
+                    thrown, (const char *)kiln_string_latin1((const kiln_string *)name.ptr),
+                    ((const kiln_string *)name.ptr)->unit_len);
             }
             recv_obj->properties[recv_index].value = value;
             return KILN_C99_OK;
         }
         if (recv_obj->not_extensible) {
-            return strict ? kiln_c99_throw_read_only(thrown, name.ptr, name.len) : KILN_C99_OK;
+            if (!strict) return KILN_C99_OK;
+            if (kiln_string_is_utf16((const kiln_string *)name.ptr)) {
+                return kiln_c99_refuse("a strict Proxy write refused a UTF-16 string key");
+            }
+            return kiln_c99_throw_read_only(
+                thrown, (const char *)kiln_string_latin1((const kiln_string *)name.ptr),
+                ((const kiln_string *)name.ptr)->unit_len);
         }
         kiln_property *slot;
-        int status = kiln_c99_own_slot(recv_store, name.ptr, name.len, &slot);
+        int status = kiln_c99_own_slot_key(recv_store, (const kiln_string *)name.ptr,
+                                           (const kiln_string *)name.ptr, &slot);
         if (status != KILN_C99_OK) return status;
         slot->value = value;
         return KILN_C99_OK;
@@ -325,8 +372,9 @@ static int kiln_c99_proxy_describe(kiln_host *host, kiln_value proxy, kiln_value
             KILN_C99_REFUSE("a computed property key that is neither a string nor a named symbol "
                             "slot");
         }
-        return kiln_c99_describe_property(host, inner, name.ptr, name.len, out, found, depth,
-                                          thrown);
+        return kiln_c99_describe_property_key(host, inner, (const kiln_string *)name.ptr,
+                                              (const kiln_string *)name.ptr, out, found, depth,
+                                              thrown);
     }
     {
         kiln_value arguments[2];
@@ -358,8 +406,9 @@ static int kiln_c99_proxy_define(kiln_host *host, kiln_value proxy, kiln_value k
             KILN_C99_REFUSE("a computed property key that is neither a string nor a named symbol "
                             "slot");
         }
-        return kiln_c99_define_property(host, inner, name.ptr, name.len, descriptor, depth,
-                                        thrown);
+        return kiln_c99_define_property_key(host, inner, (const kiln_string *)name.ptr,
+                                            (const kiln_string *)name.ptr, descriptor, depth,
+                                            thrown);
     }
     {
         kiln_value arguments[3];
@@ -435,7 +484,12 @@ static int kiln_c99_proxy_own_keys(kiln_host *host, kiln_value proxy, kiln_value
         if (!kiln_c99_truthy(enumerable)) {
             continue;
         }
-        status = kiln_c99_array_push(kept, kiln_c99_property_key(key));
+        if (key.tag == KILN_VALUE_STRING) {
+            const kiln_string *view = (const kiln_string *)key.ptr;
+            key = kiln_c99_key_value(view, NULL);
+            if (key.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+        }
+        status = kiln_c99_array_push(kept, key);
         if (status != KILN_C99_OK) {
             return status;
         }

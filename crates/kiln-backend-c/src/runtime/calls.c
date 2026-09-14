@@ -952,20 +952,23 @@ static kiln_value kiln_c99_typeof(kiln_value value) {
     static const char symbol_text[] = "symbol";
     static const char bigint_text[] = "bigint";
     /* A proxy is transparent to `typeof`: the answer is about what it stands in front of. */
+    /* The answers are borrowed static unit strings, never raw literals: a string value
+     * carries a `kiln_string` header at its pointer, and wrapping a literal reads the
+     * literal's bytes as a header further down the line. */
     value = kiln_c99_proxy_inner(value);
     switch (value.tag) {
     case KILN_VALUE_BIGINT:
-        return kiln_c99_value(KILN_VALUE_STRING, 0, bigint_text, sizeof(bigint_text) - 1);
+        return kiln_c99_static_text(bigint_text, sizeof(bigint_text) - 1);
     case KILN_VALUE_SYMBOL:
-        return kiln_c99_value(KILN_VALUE_STRING, 0, symbol_text, sizeof(symbol_text) - 1);
+        return kiln_c99_static_text(symbol_text, sizeof(symbol_text) - 1);
     case KILN_VALUE_NULL:
-        return kiln_c99_value(KILN_VALUE_STRING, 0, object_text, sizeof(object_text) - 1);
+        return kiln_c99_static_text(object_text, sizeof(object_text) - 1);
     case KILN_VALUE_BOOLEAN:
-        return kiln_c99_value(KILN_VALUE_STRING, 0, boolean_text, sizeof(boolean_text) - 1);
+        return kiln_c99_static_text(boolean_text, sizeof(boolean_text) - 1);
     case KILN_VALUE_NUMBER:
-        return kiln_c99_value(KILN_VALUE_STRING, 0, number_text, sizeof(number_text) - 1);
+        return kiln_c99_static_text(number_text, sizeof(number_text) - 1);
     case KILN_VALUE_STRING:
-        return kiln_c99_value(KILN_VALUE_STRING, 0, string_text, sizeof(string_text) - 1);
+        return kiln_c99_static_text(string_text, sizeof(string_text) - 1);
     case KILN_VALUE_BUILTIN:
         /* A namespace is an object holding functions and cannot be called; a constructor is a
          * function. `typeof Math === "object"` is what a library feature-detects on.
@@ -979,12 +982,12 @@ static kiln_value kiln_c99_typeof(kiln_value value) {
          * calling it still refuses by name, which is the honest answer for a body that does not
          * exist. */
         if (value.bits == KILN_C99_BUILTIN_FUNCTION_PROTOTYPE) {
-            return kiln_c99_value(KILN_VALUE_STRING, 0, function_text, sizeof(function_text) - 1);
+            return kiln_c99_static_text(function_text, sizeof(function_text) - 1);
         }
         if (kiln_c99_is_namespace(value.bits)) {
-            return kiln_c99_value(KILN_VALUE_STRING, 0, object_text, sizeof(object_text) - 1);
+            return kiln_c99_static_text(object_text, sizeof(object_text) - 1);
         }
-        return kiln_c99_value(KILN_VALUE_STRING, 0, function_text, sizeof(function_text) - 1);
+        return kiln_c99_static_text(function_text, sizeof(function_text) - 1);
     case KILN_VALUE_FUNCTION:
     case KILN_VALUE_METHOD:
     /* A bound function is a function, and so is a settler: `typeof resolve` is what an executor
@@ -992,7 +995,7 @@ static kiln_value kiln_c99_typeof(kiln_value value) {
     case KILN_VALUE_BOUND:
     case KILN_VALUE_COMMONJS_REQUIRE:
     case KILN_VALUE_SETTLER:
-        return kiln_c99_value(KILN_VALUE_STRING, 0, function_text, sizeof(function_text) - 1);
+        return kiln_c99_static_text(function_text, sizeof(function_text) - 1);
     case KILN_VALUE_OBJECT:
     case KILN_VALUE_ARRAY:
     case KILN_VALUE_GENERATOR:
@@ -1007,9 +1010,9 @@ static kiln_value kiln_c99_typeof(kiln_value value) {
     case KILN_VALUE_DATA_VIEW:
     /* Every `Temporal` type is an ordinary object to `typeof`; none of them is callable. */
     case KILN_VALUE_TEMPORAL:
-        return kiln_c99_value(KILN_VALUE_STRING, 0, object_text, sizeof(object_text) - 1);
+        return kiln_c99_static_text(object_text, sizeof(object_text) - 1);
     case KILN_VALUE_UNDEFINED:
     default:
-        return kiln_c99_value(KILN_VALUE_STRING, 0, undefined_text, sizeof(undefined_text) - 1);
+        return kiln_c99_static_text(undefined_text, sizeof(undefined_text) - 1);
     }
 }

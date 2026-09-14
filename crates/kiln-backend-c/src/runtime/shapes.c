@@ -3,7 +3,7 @@ static struct kiln_shape *kiln_c99_shape_root(void) {
     return &kiln_c99_root_shape;
 }
 
-static int kiln_c99_shape_find_slot(const kiln_shape *shape, const char *ikey, uint32_t *out_slot) {
+static int kiln_c99_shape_find_slot(const kiln_shape *shape, const kiln_string *ikey, uint32_t *out_slot) {
     uint32_t i;
     if (shape == NULL || ikey == NULL) {
         return 0;
@@ -30,7 +30,7 @@ static int kiln_c99_shape_find_slot(const kiln_shape *shape, const char *ikey, u
  * sunk spread (see `emit_sunk_bridge` in the emitter) learns its source's slots through this,
  * once per shape it meets. */
 static uint32_t kiln_c99_shape_slot_named(const kiln_shape *shape, const char *bytes, size_t len) {
-    const char *ikey = kiln_c99_interned(bytes, len);
+    const kiln_string *ikey = kiln_c99_interned(bytes, len);
     uint32_t slot;
     if (ikey == NULL || !kiln_c99_shape_find_slot(shape, ikey, &slot)) {
         return UINT32_MAX;
@@ -38,29 +38,27 @@ static uint32_t kiln_c99_shape_slot_named(const kiln_shape *shape, const char *b
     return slot;
 }
 
-static void kiln_c99_pin_interned_key(const char *ikey) {
+static void kiln_c99_pin_interned_key(const kiln_string *ikey) {
     kiln_gc_heap *heap;
     kiln_key_entry *entry;
-    size_t len;
     size_t i;
     if (ikey == NULL || ikey == kiln_c99_key_empty) return;
     heap = kiln_c99_gc_heap();
     if (heap == NULL) return;
-    len = kiln_c99_key_len(ikey);
-    entry = kiln_c99_key_probe(&heap->keys, ikey, len, kiln_c99_key_hash(ikey, len));
+    entry = kiln_c99_key_probe(&heap->keys, ikey, kiln_c99_key_hash(ikey));
     if (entry != NULL) {
         entry->pinned = 1;
         return;
     }
     for (i = 0; i < heap->keys.capacity; ++i) {
-        if (heap->keys.entries[i].bytes == ikey) {
+        if (heap->keys.entries[i].string == ikey) {
             heap->keys.entries[i].pinned = 1;
             return;
         }
     }
 }
 
-static int kiln_c99_shape_transition(kiln_shape *current, const char *ikey, int is_double, kiln_shape **out_shape) {
+static int kiln_c99_shape_transition(kiln_shape *current, const kiln_string *ikey, int is_double, kiln_shape **out_shape) {
     kiln_shape_transition *tr;
     kiln_shape *next_shape;
     size_t i;
@@ -96,13 +94,15 @@ static int kiln_c99_shape_transition(kiln_shape *current, const char *ikey, int 
     kiln_c99_pin_interned_key(ikey);
     next_shape->parent = current;
     next_shape->ikey = ikey;
-    next_shape->has_symbol_key = current->has_symbol_key || (ikey[0] == '@' && ikey[1] == '@');
+    next_shape->has_symbol_key = current->has_symbol_key ||
+                                 (ikey->unit_len >= 2 && kiln_string_unit_at(ikey, 0) == '@' &&
+                                  kiln_string_unit_at(ikey, 1) == '@');
     next_shape->slot_index = current->property_count;
     next_shape->property_count = current->property_count + 1;
     next_shape->num_transitions = 0;
     next_shape->double_slots_mask = current->double_slots_mask | expected_bit;
     memcpy((void *)next_shape->keys, (const void *)current->keys,
-           current->property_count * sizeof(const char *));
+           current->property_count * sizeof(const kiln_string *));
     next_shape->keys[current->property_count] = ikey;
 
     if (current->num_transitions < 2) {
@@ -160,7 +160,7 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
             if (object->elements[i] == KILN_VAL_HOLE) continue;
             char num_buf[32];
             size_t nlen = kiln_c99_double_to_js((double)i, num_buf);
-            const char *ikey = kiln_c99_intern(num_buf, nlen);
+            const kiln_string *ikey = kiln_c99_intern(num_buf, nlen);
             object->properties[pos].key = ikey;
             object->properties[pos].key_len = nlen;
             object->properties[pos].enumerable = 1;
@@ -180,11 +180,12 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
         object->element_capacity = 0;
     }
     for (i = 0; i < shape->property_count; ++i) {
-        const char *key = shape->keys[i];
+        const kiln_string *key = shape->keys[i];
         size_t key_len = kiln_c99_key_len(key);
         object->properties[pos].key = key;
         object->properties[pos].key_len = key_len;
-        object->properties[pos].enumerable = !(key_len >= 2 && key[0] == '@' && key[1] == '@');
+        object->properties[pos].enumerable = !(key_len >= 2 && kiln_string_unit_at(key, 0) == '@' &&
+                                              kiln_string_unit_at(key, 1) == '@');
         object->properties[pos].writable = 1;
         object->properties[pos].configurable = 1;
         object->properties[pos].symbol_hidden = 0;

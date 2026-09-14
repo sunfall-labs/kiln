@@ -300,5 +300,51 @@ static int kiln_c99_callable_store(kiln_value callable, kiln_value *out, int cre
     return KILN_C99_OK;
 }
 
+/* Canonical headed store walk shared by arrays, collections and promises. The raw helper in
+ * keys.c remains a Latin1 adapter for fixed C names; arbitrary property keys enter here so the
+ * receiver's store and its prototype chain compare UTF-16 units exactly once. */
+static int kiln_c99_store_get_key(kiln_host *host, kiln_value target,
+                                  const kiln_string *key, const kiln_string *canonical,
+                                  kiln_value *out, int depth, kiln_value *thrown, int *found) {
+    kiln_value *slot = kiln_c99_exotic_store(target);
+    kiln_value current;
+    size_t steps;
+    if (found == NULL || out == NULL || key == NULL) return KILN_C99_INVALID_ARGUMENT;
+    *found = 0;
+    if (slot == NULL) return KILN_C99_OK;
+    current = *slot;
+    for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
+        kiln_object *object;
+        size_t index;
+        if (current.tag == KILN_VALUE_FUNCTION) {
+            current = kiln_c99_closure_of(current)->properties;
+        }
+        if (current.tag != KILN_VALUE_OBJECT) return KILN_C99_OK;
+        object = kiln_c99_object_of(current);
+        if (object->shape != NULL) kiln_c99_ensure_dictionary(object);
+        index = kiln_c99_own_index_key(object, canonical, key);
+        if (index != object->count) {
+            *found = 1;
+            if (object->properties[index].refused) {
+                return kiln_c99_refuse_named_key(
+                    "a member this backend declares and has not implemented", key);
+            }
+            if (!object->properties[index].accessor) {
+                *out = object->properties[index].value;
+                return KILN_C99_OK;
+            }
+            if (object->properties[index].getter.tag == KILN_VALUE_UNDEFINED) {
+                KILN_C99_ABSENT("an accessor with no getter, whose read is undefined by "
+                                "definition",
+                                out);
+            }
+            return kiln_c99_call(host, out, object->properties[index].getter, target, NULL, 0,
+                                 depth, thrown);
+        }
+        current = object->prototype;
+    }
+    return KILN_C99_OK;
+}
+
 /* Read a named property.  A missing one is undefined; a read *through* undefined or null is an
  * error, because that is a TypeError in the language and answering undefined would hide it. */

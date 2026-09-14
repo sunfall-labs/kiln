@@ -98,7 +98,7 @@ pub(super) fn emit_get_property(
         } else {
             writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_val_read_property(host, v{o}, {symbol}_key_{name}, {key_len}, depth, thrown, &site, &v{v}); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(v{o})); {check} }}{typed_sync}",
+                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_val_read_property_key(host, v{o}, {symbol}_key_{name}, depth, thrown, &site, &v{v}); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(v{o})); {check} }}{typed_sync}",
                 o = object.0,
             )
             .unwrap();
@@ -324,7 +324,7 @@ pub(super) fn emit_get_property(
                     }} \
                 }} \
                 if (!handled) {{ \
-                    int status = kiln_c99_val_read_property(host, v{o}, {symbol}_key_{name}, {key_len}, depth, thrown, &site, &v{v}); \
+                    int status = kiln_c99_val_read_property_key(host, v{o}, {symbol}_key_{name}, depth, thrown, &site, &v{v}); \
                     if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(v{o})); \
                     {check} \
                 }}{receiver_learn} }}\
@@ -403,7 +403,6 @@ pub(super) fn emit_set_property(
 ) {
     let v = vid.0;
     let graph = ctx.graph;
-    let program = ctx.program;
     let symbol = ctx.symbol;
     let diagnostic_site = ctx.diagnostic_site;
     let numbers = ctx.numbers;
@@ -447,17 +446,12 @@ pub(super) fn emit_set_property(
         }
         return;
     }
-    let key_str = match program.constants.get(*name as usize) {
-        Some(Constant::String(s)) => s.to_scalar_string().unwrap_or_default(),
-        _ => String::new(),
-    };
-    let key_len = key_str.len();
     let strict = matches!(op, GraphOp::SetPropertyStrict { strict: true, .. }) as u8;
     let check = status_check(diagnostic_site, pc, label, unwind);
     if ctx.plan.generic_only {
         writeln!(
             output,
-            "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_val_write_property(host, v{o}, {symbol}_key_{name}, {key_len}, v{val}, {strict}, depth, thrown, &site); {check} v{v} = v{val}; }}{typed_sync}",
+            "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_val_write_property_key(host, v{o}, {symbol}_key_{name}, v{val}, {strict}, depth, thrown, &site); {check} v{v} = v{val}; }}{typed_sync}",
             o = object.0,
             val = value.0,
             typed_sync = if typed {
@@ -490,7 +484,7 @@ pub(super) fn emit_set_property(
                     }} \
                 }} \
                 if (!handled) {{ \
-                    int status = kiln_c99_val_write_property(host, v{o}, {symbol}_key_{name}, {key_len}, v{val}, {strict}, depth, thrown, &site); \
+                    int status = kiln_c99_val_write_property_key(host, v{o}, {symbol}_key_{name}, v{val}, {strict}, depth, thrown, &site); \
                     {check} \
                     v{v} = v{val}; \
                 }} }}\

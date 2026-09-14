@@ -84,6 +84,24 @@ static int kiln_c99_inspect_key(kiln_text *text, const char *key, size_t len) {
     return kiln_c99_quote(text, key, len);
 }
 
+/* Property keys are headed units, but the console spells a key the way it spells a string
+ * value: UTF-8 with the host's documented replacement for lone surrogates, then the same
+ * identifier-or-quote decision above. One spelling for values and keys, so the two sides of
+ * the colon in `{ lonely: 1 }` cannot disagree about what the name is. */
+static int kiln_c99_inspect_key_units(kiln_text *text, const kiln_string *key) {
+    kiln_value value;
+    uint8_t *encoded = NULL;
+    size_t encoded_len = 0;
+    int status;
+    value = kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)key,
+                           key == NULL ? 0 : key->unit_len);
+    status = kiln_c99_string_to_utf8_lossy(value, &encoded, &encoded_len);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_inspect_key(text, (const char *)encoded, encoded_len);
+    free(encoded);
+    return status;
+}
+
 static int kiln_c99_inspect_into(kiln_text *text, kiln_value value, int depth);
 
 static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth) {
@@ -137,8 +155,7 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
                 kiln_c99_text_append_c(text, ", ") != KILN_C99_OK) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
-            if (kiln_c99_inspect_key(text, extra->properties[index].key,
-                                     extra->properties[index].key_len) != KILN_C99_OK ||
+            if (kiln_c99_inspect_key_units(text, extra->properties[index].key) != KILN_C99_OK ||
                 kiln_c99_text_append_c(text, ": ") != KILN_C99_OK ||
                 kiln_c99_inspect_into(text, extra->properties[index].value, depth + 1) !=
                     KILN_C99_OK) {
@@ -170,12 +187,14 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
                 }
                 {
                     kiln_closure *closure = kiln_c99_closure_of(maker);
-                    if (closure->name == NULL || closure->name_len == 0 ||
-                        kiln_c99_same_name(closure->name, closure->name_len, "Object")) {
+                    if (closure->name == NULL || closure->name->unit_len == 0 ||
+                        kiln_string_equals_ascii(closure->name, "Object", 6)) {
                         break;
                     }
-                    if (kiln_c99_text_append(text, closure->name, closure->name_len) !=
-                            KILN_C99_OK ||
+                    if (kiln_c99_text_append_string(
+                            text, kiln_c99_value(KILN_VALUE_STRING, 0,
+                                                 (const char *)closure->name,
+                                                 closure->name->unit_len)) != KILN_C99_OK ||
                         kiln_c99_text_append_c(text, " ") != KILN_C99_OK) {
                         return KILN_C99_OUT_OF_MEMORY;
                     }
@@ -200,8 +219,7 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
             if (enumerated++ != 0 && kiln_c99_text_append_c(text, ", ") != KILN_C99_OK) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
-            if (kiln_c99_inspect_key(text, object->properties[index].key,
-                                     object->properties[index].key_len) != KILN_C99_OK) {
+            if (kiln_c99_inspect_key_units(text, object->properties[index].key) != KILN_C99_OK) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
             if (kiln_c99_text_append_c(text, ": ") != KILN_C99_OK) {
@@ -267,7 +285,9 @@ static int kiln_c99_inspect_into(kiln_text *text, kiln_value value, int depth) {
             return kiln_c99_text_append_c(text, "[Function (anonymous)]");
         }
         if (kiln_c99_text_append_c(text, "[Function: ") != KILN_C99_OK ||
-            kiln_c99_text_append(text, closure->name, closure->name_len) != KILN_C99_OK) {
+            kiln_c99_text_append_string(
+                text, kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)closure->name,
+                                     closure->name->unit_len)) != KILN_C99_OK) {
             return KILN_C99_OUT_OF_MEMORY;
         }
         return kiln_c99_text_append_c(text, "]");

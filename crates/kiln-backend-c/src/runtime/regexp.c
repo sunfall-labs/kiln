@@ -8,13 +8,12 @@ static kiln_regexp *kiln_c99_regexp_of(kiln_value value) {
  * A rejection is a SyntaxError rather than a refusal, because that is what `new RegExp` with the
  * same text produces -- and a literal the frontend parsed can still be one the engine will not
  * take, so the program has to be able to catch it. */
-static int kiln_c99_new_regexp(kiln_value *out, const char *source, size_t source_len,
-                               const char *flags, size_t flags_len, kiln_value *thrown) {
+static int kiln_c99_new_regexp(kiln_value *out, const kiln_string *source,
+                               const kiln_string *flags, kiln_value *thrown) {
     kiln_regexp *regexp;
     void *handle = NULL;
     size_t index;
-    if (kiln_regexp_compile((const unsigned char *)source, source_len,
-                            (const unsigned char *)flags, flags_len, &handle) != 0) {
+    if (kiln_regexp_compile(source, flags, &handle) != 0) {
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
                                     "Invalid regular expression");
     }
@@ -27,9 +26,7 @@ static int kiln_c99_new_regexp(kiln_value *out, const char *source, size_t sourc
     regexp->matcher = NULL;
     regexp->matcher_ascii = NULL;
     regexp->source = source;
-    regexp->source_len = source_len;
     regexp->flags = flags;
-    regexp->flags_len = flags_len;
     regexp->global = 0;
     regexp->sticky = 0;
     regexp->last_index = 0.0;
@@ -37,10 +34,11 @@ static int kiln_c99_new_regexp(kiln_value *out, const char *source, size_t sourc
     regexp->cached_subject_len = 0;
     regexp->cached_is_ascii = 0;
     regexp->cached_group_count = 0;
-    for (index = 0; index < flags_len; ++index) {
-        if (flags[index] == 'g') {
+    for (index = 0; flags != NULL && index < flags->unit_len; ++index) {
+        uint32_t flag = kiln_string_unit_at(flags, index);
+        if (flag == 'g') {
             regexp->global = 1;
-        } else if (flags[index] == 'y') {
+        } else if (flag == 'y') {
             regexp->sticky = 1;
         }
     }
@@ -48,8 +46,8 @@ static int kiln_c99_new_regexp(kiln_value *out, const char *source, size_t sourc
     return KILN_C99_OK;
 }
 
-static int kiln_c99_new_regexp_matcher(kiln_value *out, const char *source, size_t source_len,
-                                       const char *flags, size_t flags_len,
+static int kiln_c99_new_regexp_matcher(kiln_value *out, const kiln_string *source,
+                                       const kiln_string *flags,
                                        int (*matcher)(const uint16_t *units, size_t count, size_t start,
                                                       int64_t *ranges, size_t capacity, size_t *groups,
                                                       int *matched),
@@ -60,7 +58,7 @@ static int kiln_c99_new_regexp_matcher(kiln_value *out, const char *source, size
     kiln_regexp *regexp;
     size_t index;
     if (matcher == NULL) {
-        return kiln_c99_new_regexp(out, source, source_len, flags, flags_len, thrown);
+        return kiln_c99_new_regexp(out, source, flags, thrown);
     }
     regexp = (kiln_regexp *)kiln_c99_gc_alloc(KILN_GC_REGEXP, sizeof *regexp);
     if (regexp == NULL) {
@@ -70,9 +68,7 @@ static int kiln_c99_new_regexp_matcher(kiln_value *out, const char *source, size
     regexp->matcher = matcher;
     regexp->matcher_ascii = matcher_ascii;
     regexp->source = source;
-    regexp->source_len = source_len;
     regexp->flags = flags;
-    regexp->flags_len = flags_len;
     regexp->global = 0;
     regexp->sticky = 0;
     regexp->last_index = 0.0;
@@ -80,10 +76,11 @@ static int kiln_c99_new_regexp_matcher(kiln_value *out, const char *source, size
     regexp->cached_subject_len = 0;
     regexp->cached_is_ascii = 0;
     regexp->cached_group_count = 0;
-    for (index = 0; index < flags_len; ++index) {
-        if (flags[index] == 'g') {
+    for (index = 0; flags != NULL && index < flags->unit_len; ++index) {
+        uint32_t flag = kiln_string_unit_at(flags, index);
+        if (flag == 'g') {
             regexp->global = 1;
-        } else if (flags[index] == 'y') {
+        } else if (flag == 'y') {
             regexp->sticky = 1;
         }
     }
@@ -128,7 +125,13 @@ static int kiln_c99_regexp_find(kiln_regexp *regexp, const uint16_t *units, size
         }
         return KILN_C99_OK;
     }
-    if (kiln_regexp_search(regexp->handle, units, count, start, ranges, capacity / 2) != 1) {
+    kiln_string subject = {
+        .unit_len = count > UINT32_MAX ? 0 : (uint32_t)count,
+        .flags = KILN_STRING_UTF16,
+        .data = units,
+    };
+    if (count > UINT32_MAX ||
+        kiln_regexp_search(regexp->handle, &subject, start, ranges, capacity / 2) != 1) {
         return KILN_C99_OK;
     }
     if (regexp->sticky && ranges[0] != (int64_t)start) {

@@ -11,10 +11,8 @@ static int kiln_c99_has_computed(kiln_host *host, kiln_value target, kiln_value 
     if (name.tag != KILN_VALUE_STRING) {
         KILN_C99_REFUSE("a computed property key that is neither a string nor a named symbol slot");
     }
-    size_t name_len = 0;
-    const char *name_bytes = kiln_c99_string_ascii_bytes(name, &name_len);
-    if (name_bytes == NULL) KILN_C99_REFUSE("a UTF-16 computed property key without unit-key storage");
-    return kiln_c99_has_property(host, target, name_bytes, name_len, answer, depth, thrown);
+    return kiln_c99_has_key(host, target, (const kiln_string *)name.ptr, NULL, answer, depth,
+                            thrown);
 }
 
 static int kiln_c99_delete_computed(kiln_host *host, kiln_value target, kiln_value key,
@@ -28,10 +26,8 @@ static int kiln_c99_delete_computed(kiln_host *host, kiln_value target, kiln_val
     if (name.tag != KILN_VALUE_STRING) {
         KILN_C99_REFUSE("a computed property key that is neither a string nor a named symbol slot");
     }
-    size_t name_len = 0;
-    const char *name_bytes = kiln_c99_string_ascii_bytes(name, &name_len);
-    if (name_bytes == NULL) KILN_C99_REFUSE("a UTF-16 computed property key without unit-key storage");
-    return kiln_c99_delete(host, target, name_bytes, name_len, answer, depth, thrown);
+    return kiln_c99_delete_key(host, target, (const kiln_string *)name.ptr, NULL, answer, depth,
+                               thrown);
 }
 
 /* Every name a built-in namespace or prototype table answers to.
@@ -227,25 +223,21 @@ static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value 
         kiln_c99_ensure_dictionary(object);
     }
     for (index = 0; index < object->count && status == KILN_C99_OK; ++index) {
-        if (object->properties[index].key_len >= 2 && object->properties[index].key[0] == '@' &&
-            object->properties[index].key[1] == '@') {
+        if (kiln_c99_key_is_reserved(object->properties[index].key)) {
             continue;
         }
         status = kiln_c99_array_push(built,
-                                     kiln_c99_copy_text(object->properties[index].key,
-                                                        object->properties[index].key_len));
+                                     kiln_c99_stable_key_value(object->properties[index].key));
     }
     for (index = 0; index < object->count && status == KILN_C99_OK; ++index) {
         kiln_value symbol;
         /* A `@@` key is either a symbol-keyed property or the machine's own bookkeeping. The
          * first is reported and the second never is; asking the symbol registry is what tells
          * them apart, because the key alone cannot. */
-        if (object->properties[index].key_len < 2 || object->properties[index].key[0] != '@' ||
-            object->properties[index].key[1] != '@') {
+        if (!kiln_c99_key_is_reserved(object->properties[index].key)) {
             continue;
         }
-        if (!kiln_c99_symbol_of_key(object->properties[index].key,
-                                    object->properties[index].key_len, &symbol)) {
+        if (!kiln_c99_symbol_of_key_view(object->properties[index].key, &symbol)) {
             continue;
         }
         status = kiln_c99_array_push(built, symbol);
@@ -286,51 +278,10 @@ static kiln_value *kiln_c99_exotic_store(kiln_value target) {
  * see the array. */
 static int kiln_c99_store_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                               kiln_value *out, int depth, kiln_value *thrown, int *found) {
-    kiln_value *slot = kiln_c99_exotic_store(target);
-    kiln_value current;
-    size_t steps;
-    *found = 0;
-    if (slot == NULL) {
-        return KILN_C99_OK;
-    }
-    current = *slot;
-    for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
-        kiln_object *object;
-        size_t index;
-        /* A chain that reaches a constructor continues into its statics, exactly as an
-         * object's does. */
-        if (current.tag == KILN_VALUE_FUNCTION) {
-            current = kiln_c99_closure_of(current)->properties;
-        }
-        if (current.tag != KILN_VALUE_OBJECT) {
-            return KILN_C99_OK;
-        }
-        object = kiln_c99_object_of(current);
-        if (object->shape != NULL) {
-            kiln_c99_ensure_dictionary(object);
-        }
-        for (index = 0; index < object->count; ++index) {
-            if (!kiln_c99_same_key(&object->properties[index], key, key_len)) {
-                continue;
-            }
-            *found = 1;
-            if (object->properties[index].refused) {
-                KILN_C99_REFUSE_NAMED("a member this backend declares and has not implemented", 
-                                      key, key_len);
-            }
-            if (!object->properties[index].accessor) {
-                *out = object->properties[index].value;
-                return KILN_C99_OK;
-            }
-            if (object->properties[index].getter.tag == KILN_VALUE_UNDEFINED) {
-                KILN_C99_ABSENT("an accessor with no getter, whose read is undefined by "
-                                "definition",
-                                out);
-            }
-            return kiln_c99_call(host, out, object->properties[index].getter, target, NULL, 0,
-                                 depth, thrown);
-        }
-        current = object->prototype;
-    }
-    return KILN_C99_OK;
+    kiln_string view;
+    if (key_len > UINT32_MAX) return KILN_C99_INVALID_ARGUMENT;
+    view.unit_len = (uint32_t)key_len;
+    view.flags = KILN_STRING_LATIN1;
+    view.data = key;
+    return kiln_c99_store_get_key(host, target, &view, NULL, out, depth, thrown, found);
 }

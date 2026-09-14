@@ -464,6 +464,39 @@ static int kiln_c99_throw_read_only(kiln_value *thrown, const char *key, size_t 
     return status;
 }
 
+/* Error text is a byte boundary. A headed key is encoded explicitly here so its header is never
+ * appended as though it were the message payload; property identity remains unit based. */
+static int kiln_c99_throw_named_key_text(kiln_value *thrown, const char *prefix,
+                                          const kiln_string *key, const char *suffix) {
+    static const char terminator[1] = {0};
+    kiln_value key_value;
+    uint8_t *encoded = NULL;
+    size_t encoded_len = 0;
+    kiln_text built = {NULL, 0, 0};
+    int status;
+    if (key == NULL) return KILN_C99_INVALID_ARGUMENT;
+    key_value = kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)key, key->unit_len);
+    status = kiln_c99_string_to_utf8_lossy(key_value, &encoded, &encoded_len);
+    if (status != KILN_C99_OK ||
+        kiln_c99_text_append_c(&built, prefix) != KILN_C99_OK ||
+        kiln_c99_text_append(&built, (const char *)encoded, encoded_len) != KILN_C99_OK ||
+        kiln_c99_text_append_c(&built, suffix) != KILN_C99_OK ||
+        kiln_c99_text_append(&built, terminator, 1) != KILN_C99_OK) {
+        free(encoded);
+        free(built.bytes);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    free(encoded);
+    status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, built.bytes);
+    free(built.bytes);
+    return status;
+}
+
+static int kiln_c99_throw_read_only_key(kiln_value *thrown, const kiln_string *key) {
+    return kiln_c99_throw_named_key_text(thrown, "Cannot assign to read only property '", key,
+                                          "' of object");
+}
+
 static int kiln_c99_throw_module_namespace(kiln_value *thrown, const char *prefix,
                                            const char *key, size_t key_len) {
     static const char terminator[1] = {0};
@@ -488,6 +521,13 @@ static int kiln_c99_throw_module_namespace_write(kiln_value *thrown, const char 
                                             key_len);
 }
 
+static int kiln_c99_throw_module_namespace_write_key(kiln_value *thrown,
+                                                     const kiln_string *key) {
+    return kiln_c99_throw_named_key_text(thrown,
+                                         "Cannot assign to module namespace property '", key,
+                                         "'");
+}
+
 static int kiln_c99_throw_module_namespace_delete(kiln_value *thrown, const char *key,
                                                   size_t key_len) {
     return kiln_c99_throw_module_namespace(thrown,
@@ -500,6 +540,12 @@ static int kiln_c99_throw_module_namespace_define(kiln_value *thrown, const char
     return kiln_c99_throw_module_namespace(thrown,
                                             "Cannot redefine module namespace property '", key,
                                             key_len);
+}
+
+static int kiln_c99_throw_module_namespace_define_key(kiln_value *thrown,
+                                                      const kiln_string *key) {
+    return kiln_c99_throw_named_key_text(
+        thrown, "Cannot redefine module namespace property '", key, "'");
 }
 
 static int kiln_c99_throw_module_namespace_freeze(kiln_value *thrown) {

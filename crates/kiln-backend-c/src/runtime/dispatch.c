@@ -76,6 +76,57 @@ static int kiln_c99_to_text_argument(kiln_host *host, kiln_value value, kiln_val
     return out->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
 }
 
+/* JSON.stringify's string `space` argument is capped at ten UTF-16 code units before it crosses
+ * the byte-oriented writer boundary. A cap in encoded bytes is wrong for non-ASCII text, and a
+ * lossy codec would silently turn a truncated surrogate pair into a different indentation. Keep
+ * the bounded bridge explicit: reject an ill-formed ten-unit prefix until the writer gains a
+ * native UTF-16 output buffer. */
+static int kiln_c99_json_indent_string(kiln_value value, kiln_text *out) {
+    const kiln_string *source;
+    kiln_string view;
+    kiln_value view_value;
+    uint8_t *encoded = NULL;
+    size_t encoded_len = 0;
+    size_t units;
+    size_t index;
+    int status;
+    if (value.tag != KILN_VALUE_STRING || value.ptr == NULL || out == NULL) {
+        return KILN_C99_INVALID_ARGUMENT;
+    }
+    source = (const kiln_string *)value.ptr;
+    if ((source->flags != KILN_STRING_LATIN1 && source->flags != KILN_STRING_UTF16) ||
+        (source->unit_len != 0 && source->data == NULL) ||
+        (source->flags == KILN_STRING_UTF16 && source->data != NULL &&
+         ((uintptr_t)source->data & (sizeof(uint16_t) - 1)) != 0)) {
+        return KILN_C99_INVALID_ARGUMENT;
+    }
+    units = source->unit_len > 10 ? 10 : source->unit_len;
+    view = *source;
+    view.unit_len = (uint32_t)units;
+    if (units != 0 && source->data != NULL) {
+        view.data = kiln_string_is_utf16(source)
+                        ? (const uint16_t *)source->data
+                        : (const uint8_t *)source->data;
+    }
+    if (kiln_string_is_utf16(&view)) {
+        for (index = 0; index < units; ++index) {
+            uint32_t unit = kiln_string_unit_at(&view, index);
+            if (unit >= 0xD800 && unit <= 0xDBFF) {
+                if (index + 1 >= units) return KILN_C99_INVALID_ARGUMENT;
+                unit = kiln_string_unit_at(&view, ++index);
+                if (unit < 0xDC00 || unit > 0xDFFF) return KILN_C99_INVALID_ARGUMENT;
+            } else if (unit >= 0xDC00 && unit <= 0xDFFF) {
+                return KILN_C99_INVALID_ARGUMENT;
+            }
+        }
+    }
+    view_value = kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)&view, units);
+    status = kiln_c99_string_to_utf8_lossy(view_value, &encoded, &encoded_len);
+    if (status == KILN_C99_OK) status = kiln_c99_text_append(out, (const char *)encoded, encoded_len);
+    free(encoded);
+    return status;
+}
+
 static int kiln_c99_data_view_write_bits(kiln_host *host, uint64_t code, kiln_value value,
                                          uint64_t *out, int depth, kiln_value *thrown);
 
@@ -1240,12 +1291,12 @@ int kiln_c99_default_require(void *context, kiln_host *host, kiln_value specifie
                              kiln_value *result, kiln_value *thrown) {
     (void)context;
     if (specifier.tag == KILN_VALUE_STRING && specifier.ptr != NULL) {
-        if (specifier.len == 8 && memcmp(specifier.ptr, "node:ffi", 8) == 0)
+        if (kiln_c99_string_equals_ascii(specifier, "node:ffi", 8))
             return kiln_c99_node_ffi_commonjs(host, result, thrown);
         kiln_text text = {0};
         int status;
         if (kiln_c99_text_append_c(&text, "Cannot find module '") != KILN_C99_OK ||
-            kiln_c99_text_append(&text, specifier.ptr, specifier.len) != KILN_C99_OK ||
+            kiln_c99_text_append_string(&text, specifier) != KILN_C99_OK ||
             kiln_c99_text_append_c(&text, "'") != KILN_C99_OK) {
             free(text.bytes);
             return KILN_C99_OUT_OF_MEMORY;
@@ -1480,19 +1531,24 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
     if (code == KILN_C99_METHOD_NODE_FS_EXISTS_SYNC) {
         if (argc > 0 && args != NULL) {
             kiln_value path_val = kiln_c99_text(args[0]);
-            if (path_val.ptr != NULL) {
+            uint8_t *path_bytes = NULL;
+            size_t path_len = 0;
+            if (path_val.tag == KILN_VALUE_STRING &&
+                kiln_c99_string_to_utf8_lossy(path_val, &path_bytes, &path_len) == KILN_C99_OK) {
                 char stack_buf[1024];
                 char *buf = stack_buf;
-                if (path_val.len >= sizeof(stack_buf)) {
-                    buf = (char *)malloc(path_val.len + 1);
+                if (path_len >= sizeof(stack_buf)) {
+                    buf = (char *)malloc(path_len + 1);
                 }
                 if (buf != NULL) {
-                    memcpy(buf, path_val.ptr, path_val.len);
-                    buf[path_val.len] = '\0';
+                    if (path_len != 0) memcpy(buf, path_bytes, path_len);
+                    buf[path_len] = '\0';
                     *result = kiln_c99_boolean(access(buf, F_OK) == 0);
                     if (buf != stack_buf) free(buf);
+                    free(path_bytes);
                     return KILN_C99_OK;
                 }
+                free(path_bytes);
             }
         }
         *result = kiln_c99_boolean(0);
@@ -1554,7 +1610,9 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         if (input.tag == KILN_VALUE_OBJECT) {
             kiln_value pathname;
             if (kiln_c99_get(host, input, "pathname", 8, &pathname, depth, thrown) == KILN_C99_OK &&
-                pathname.tag == KILN_VALUE_STRING && pathname.len > 0 && pathname.ptr[0] == '/') {
+                pathname.tag == KILN_VALUE_STRING && pathname.ptr != NULL &&
+                ((const kiln_string *)pathname.ptr)->unit_len > 0 &&
+                kiln_string_unit_at((const kiln_string *)pathname.ptr, 0) == '/') {
                 *result = pathname;
                 return KILN_C99_OK;
             }
@@ -1562,11 +1620,20 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         input = kiln_c99_text(input);
         kiln_value encoded;
         kiln_value decode_args[1];
-        if (input.tag != KILN_VALUE_STRING || input.len < 7 ||
-            memcmp(input.ptr, "file://", 7) != 0)
+        uint8_t *input_bytes = NULL;
+        size_t input_len = 0;
+        if (!kiln_c99_string_starts_ascii(input, "file://", 7))
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                         "fileURLToPath requires a file: URL");
-        encoded = kiln_c99_copy_text(input.ptr + 7, input.len - 7);
+        status = kiln_c99_string_to_utf8_lossy(input, &input_bytes, &input_len);
+        if (status != KILN_C99_OK) return status;
+        if (input_len < 7) {
+            free(input_bytes);
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "fileURLToPath requires a file: URL");
+        }
+        encoded = kiln_c99_copy_text((const char *)input_bytes + 7, input_len - 7);
+        free(input_bytes);
         decode_args[0] = encoded;
         return kiln_c99_invoke_method(host, result, KILN_C99_METHOD_DECODE_URI_COMPONENT,
                                       kiln_c99_undefined(), decode_args, 1, depth, thrown);
@@ -1578,9 +1645,11 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         if (input.tag != KILN_VALUE_STRING)
             return kiln_c99_throw_not_a(thrown, input, "string path");
         status = kiln_c99_text_append_c(&url, "file://");
-        if (status == KILN_C99_OK && (input.len == 0 || input.ptr[0] != '/'))
+        if (status == KILN_C99_OK &&
+            (input.ptr == NULL || ((const kiln_string *)input.ptr)->unit_len == 0 ||
+             kiln_string_unit_at((const kiln_string *)input.ptr, 0) != '/'))
             status = kiln_c99_text_append_c(&url, "/");
-        if (status == KILN_C99_OK) status = kiln_c99_text_append(&url, input.ptr, input.len);
+        if (status == KILN_C99_OK) status = kiln_c99_text_append_string(&url, input);
         if (status != KILN_C99_OK) { free(url.bytes); return status; }
         construct_args[0] = kiln_c99_text_value(&url);
         return kiln_c99_url_construct(result, construct_args, 1, thrown);
@@ -1717,7 +1786,9 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             uuid[at++] = hex[bytes[index] >> 4];
             uuid[at++] = hex[bytes[index] & 0x0f];
         }
-        *result = kiln_c99_value(KILN_VALUE_STRING, 0, uuid, 36);
+        /* `gc_alloc_text` answers the payload; the value carries the header. */
+        *result = kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)(((kiln_string *)uuid) - 1),
+                                 36);
         return KILN_C99_OK;
     }
     if (code == KILN_C99_METHOD_NODE_CRYPTO_CREATE_HASH) {
@@ -2260,7 +2331,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             kiln_value listener = argc > 1 ? args[1] : kiln_c99_undefined();
             size_t index;
             if (argc == 0 || args[0].tag != KILN_VALUE_STRING ||
-                !kiln_c99_same_name(args[0].ptr, args[0].len, "abort")) {
+                !kiln_c99_string_equals_ascii(args[0], "abort", 5)) {
                 *result = kiln_c99_undefined();
                 return KILN_C99_OK;
             }
@@ -3302,14 +3373,13 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     kiln_object *extra = kiln_c99_object_of(array->properties);
                     if (extra->properties == NULL && extra->shape != NULL) {
                         for (index = 0; index < extra->shape->property_count && status == KILN_C99_OK; ++index) {
-                            const char *skey = extra->shape->keys[index];
-                            size_t key_len = kiln_c99_key_len(skey);
+                            const kiln_string *skey = extra->shape->keys[index];
                             kiln_value key;
                             kiln_value val;
-                            if (key_len >= 2 && skey[0] == '@' && skey[1] == '@') {
+                            if (kiln_c99_key_is_reserved(skey)) {
                                 continue;
                             }
-                            key = kiln_c99_copy_text(skey, key_len);
+                            key = kiln_c99_stable_key_value(skey);
                             val = (extra->slots != NULL && index < extra->slot_capacity)
                                       ? kiln_val_to_boundary(extra->slots[index])
                                       : kiln_c99_undefined();
@@ -3334,8 +3404,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                             if (!extra->properties[index].enumerable) {
                                 continue;
                             }
-                            key = kiln_c99_copy_text(extra->properties[index].key,
-                                                     extra->properties[index].key_len);
+                            key = kiln_c99_stable_key_value(extra->properties[index].key);
                             if (code == KILN_C99_METHOD_OBJECT_KEYS) {
                                 status = kiln_c99_array_push(built, key);
                             } else if (code == KILN_C99_METHOD_OBJECT_VALUES) {
@@ -3447,14 +3516,13 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     }
                 }
                 for (index = 0; index < object->shape->property_count && status == KILN_C99_OK; ++index) {
-                    const char *skey = object->shape->keys[index];
-                    size_t key_len = kiln_c99_key_len(skey);
+                    const kiln_string *skey = object->shape->keys[index];
                     kiln_value key;
                     kiln_value val;
-                    if (key_len >= 2 && skey[0] == '@' && skey[1] == '@') {
+                    if (kiln_c99_key_is_reserved(skey)) {
                         continue;
                     }
-                    key = kiln_c99_copy_text(skey, key_len);
+                    key = kiln_c99_stable_key_value(skey);
                     val = (object->slots != NULL && index < object->slot_capacity)
                               ? kiln_val_to_boundary(object->slots[index])
                               : kiln_c99_undefined();
@@ -3482,8 +3550,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 if (!object->properties[index].enumerable) {
                     continue;
                 }
-                key = kiln_c99_copy_text(object->properties[index].key,
-                                         object->properties[index].key_len);
+                key = kiln_c99_stable_key_value(object->properties[index].key);
                 if (code == KILN_C99_METHOD_OBJECT_KEYS) {
                     status = kiln_c99_array_push(built, key);
                 } else if (code == KILN_C99_METHOD_OBJECT_VALUES) {
@@ -3555,19 +3622,19 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                         }
                     }
                     for (index = 0; index < source->shape->property_count; ++index) {
-                        const char *skey = source->shape->keys[index];
-                        size_t skey_len = kiln_c99_key_len(skey);
+                        const kiln_string *skey = source->shape->keys[index];
                         kiln_value sval;
-                        if (skey_len >= 2 && skey[0] == '@' && skey[1] == '@') {
+                        if (kiln_c99_key_is_reserved(skey)) {
                             kiln_value symbol;
-                            if (!kiln_c99_symbol_of_key(skey, skey_len, &symbol)) {
+                            if (!kiln_c99_symbol_of_key_view(skey, &symbol)) {
                                 continue;
                             }
                         }
                         sval = (source->slots != NULL && index < source->slot_capacity)
                                    ? kiln_val_to_boundary(source->slots[index])
                                    : kiln_c99_undefined();
-                        status = kiln_c99_put(host, target, skey, skey_len, sval, depth, thrown);
+                        status = kiln_c99_put_mode_key(host, target, skey, skey, sval, 0, depth,
+                                                       thrown);
                         if (status != KILN_C99_OK) {
                             return status;
                         }
@@ -3580,9 +3647,10 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                         if (!source->properties[index].enumerable) {
                             continue;
                         }
-                        status = kiln_c99_put(host, target, source->properties[index].key,
-                                              source->properties[index].key_len,
-                                              source->properties[index].value, depth, thrown);
+                        status = kiln_c99_put_mode_key(host, target, source->properties[index].key,
+                                                       source->properties[index].key,
+                                                       source->properties[index].value, 0, depth,
+                                                       thrown);
                         if (status != KILN_C99_OK) {
                             return status;
                         }
@@ -4925,8 +4993,12 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                         }
                     }
                 } else if (args[2].tag == KILN_VALUE_STRING) {
-                    size_t len = args[2].len > 10 ? 10 : args[2].len;
-                    if (kiln_c99_text_append(&indent, args[2].ptr, len) != KILN_C99_OK) {
+                    status = kiln_c99_json_indent_string(args[2], &indent);
+                    if (status == KILN_C99_INVALID_ARGUMENT) {
+                        free(indent.bytes);
+                        KILN_C99_REFUSE("JSON.stringify indentation with ill-formed UTF-16");
+                    }
+                    if (status != KILN_C99_OK) {
                         free(indent.bytes);
                         return KILN_C99_OUT_OF_MEMORY;
                     }
@@ -4960,12 +5032,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             if (source.tag != KILN_VALUE_STRING) {
                 KILN_C99_REFUSE("JSON.parse of a value with no string form");
             }
-            uint8_t *source_bytes = NULL;
-            size_t source_len = 0;
-            status = kiln_c99_string_to_utf8_lossy(source, &source_bytes, &source_len);
-            if (status != KILN_C99_OK) return status;
-            status = kiln_c99_json_document((const char *)source_bytes, source_len, &parsed);
-            free(source_bytes);
+            status = kiln_c99_json_document((const kiln_string *)source.ptr, &parsed);
             /* Malformed input is a `SyntaxError` the program catches, not a fault that stops it:
              * `try { JSON.parse(input) } catch {}` around text that came from outside is the most
              * ordinary code there is, and it was unwritable while this ended the process. Only the
@@ -5182,11 +5249,14 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         }
         case KILN_C99_METHOD_OBJECT_DEFINE_PROPERTY: {
             kiln_value name = argc > 1 ? kiln_c99_property_key(args[1]) : kiln_c99_undefined();
-            if (argc < 3 || name.tag != KILN_VALUE_STRING) {
+            const kiln_string *name_key =
+                name.tag == KILN_VALUE_STRING ? (const kiln_string *)name.ptr : NULL;
+            if (argc < 3 || name_key == NULL) {
                 KILN_C99_REFUSE("Object.defineProperty invalid key or arity");
             }
-            status = kiln_c99_define_property(host, args[0], name.ptr, name.len, args[2], depth,
-                                              thrown);
+            /* The headed form: the byte adapter would read the header's words as key bytes. */
+            status = kiln_c99_define_property_key(host, args[0], name_key, NULL, args[2],
+                                                  depth, thrown);
             if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL)
                 kiln_c99_diagnostic_detail = "Object.defineProperty rejected descriptor or target";
             /* The target, so a definition can be inlined into the expression that built it. */
@@ -5203,12 +5273,14 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         }
         case KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR: {
             kiln_value name = argc > 1 ? kiln_c99_property_key(args[1]) : kiln_c99_undefined();
+            const kiln_string *name_key =
+                name.tag == KILN_VALUE_STRING ? (const kiln_string *)name.ptr : NULL;
             int found;
-            if (argc < 2 || name.tag != KILN_VALUE_STRING) {
+            if (argc < 2 || name_key == NULL) {
                 KILN_C99_REFUSE("Object.getOwnPropertyDescriptor invalid key or arity");
             }
-            return kiln_c99_describe_property(host, args[0], name.ptr, name.len, result, &found,
-                                             depth, thrown);
+            return kiln_c99_describe_property_key(host, args[0], name_key, NULL, result,
+                                                  &found, depth, thrown);
         }
         case KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS: {
             /* One object holding every own property's descriptor, which is what a structural
@@ -5231,20 +5303,19 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 kiln_value described;
                 int found;
                 kiln_value symbol;
-                const char *key = object->properties[index].key;
-                size_t key_len = object->properties[index].key_len;
+                const kiln_string *key = object->properties[index].key;
                 /* A symbol-keyed property is described too -- this is how a faithful copy is
                  * made, and one that quietly leaves them out is the bug this family had. It
                  * lands in the result under the same reserved key it came from, so nothing here
                  * needs to know it is a symbol beyond deciding to keep it. */
-                if (key_len >= 2 && key[0] == '@' && key[1] == '@' &&
-                    !kiln_c99_symbol_of_key(key, key_len, &symbol)) {
+                if (kiln_c99_key_is_reserved(key) &&
+                    !kiln_c99_symbol_of_key_view(key, &symbol)) {
                     continue;
                 }
-                status = kiln_c99_describe_property(host, args[0], key, key_len, &described, &found,
-                                                    depth, thrown);
+                status = kiln_c99_describe_property_key(host, args[0], key, key, &described,
+                                                        &found, depth, thrown);
                 if (status == KILN_C99_OK && found) {
-                    status = kiln_c99_put(NULL, built, key, key_len, described, 0, NULL);
+                    status = kiln_c99_put_mode_key(NULL, built, key, key, described, 0, 0, NULL);
                 }
                 if (status != KILN_C99_OK) {
                     return status;
@@ -5641,7 +5712,8 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             if (receiver.tag == KILN_VALUE_TYPED_ARRAY && name.tag == KILN_VALUE_STRING) {
                 int found;
                 int enumerable;
-                kiln_c99_typed_own(receiver, name.ptr, name.len, &found, &enumerable);
+                kiln_c99_typed_own_key(receiver, (const kiln_string *)name.ptr, &found,
+                                       &enumerable);
                 *result = kiln_c99_boolean(found && enumerable);
                 return KILN_C99_OK;
             }
@@ -5653,7 +5725,8 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 kiln_c99_ensure_dictionary(object);
             }
             for (slot = 0; slot < object->count; ++slot) {
-                if (kiln_c99_same_key(&object->properties[slot], name.ptr, name.len)) {
+                if (kiln_c99_same_key_view(&object->properties[slot],
+                                           (const kiln_string *)name.ptr)) {
                     *result = kiln_c99_boolean(object->properties[slot].enumerable);
                     break;
                 }

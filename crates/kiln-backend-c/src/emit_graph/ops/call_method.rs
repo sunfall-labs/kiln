@@ -370,7 +370,9 @@ pub(super) fn emit_call_method(
             (Some("round"), 1) => format!(
                 "({{ double r = isfinite({a}) ? floor({a} + 0.5) : {a}; if (r == 0.0 && signbit({a})) r = -0.0; r; }})"
             ),
-            (Some("sign"), 1) => format!("(isnan({a}) || {a} == 0.0 ? {a} : ({a} < 0.0 ? -1.0 : 1.0))"),
+            (Some("sign"), 1) => {
+                format!("(isnan({a}) || {a} == 0.0 ? {a} : ({a} < 0.0 ? -1.0 : 1.0))")
+            }
             (Some("pow"), 2) => format!("pow({a}, {b})"),
             (Some("min"), 2) => format!(
                 "((isnan({a}) || isnan({b})) ? NAN : (({a} < {b} || ({a} == 0.0 && {b} == 0.0 && signbit({a}))) ? {a} : {b}))"
@@ -401,7 +403,6 @@ pub(super) fn emit_call_method(
         Some(Constant::String(s)) => s.to_scalar_string().unwrap_or_default(),
         _ => String::new(),
     };
-    let key_len = key_str.len();
     let diagnostic_source = diagnostic_source(diagnostic_site);
     if plan.generic_only {
         let n = argc.max(1);
@@ -419,7 +420,7 @@ pub(super) fn emit_call_method(
             .unwrap_or_default();
         writeln!(
             output,
-            "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_val call_args[{n}] = {{ {init} }}; int status = kiln_c99_val_call_method(host, v{o}, call_args, (size_t){argc}, {symbol}_key_{name}, {key_len}, depth, thrown, &site, {diagnostic_source}, (size_t){pc}, \"{label}\", &v{v}); {check}{sync_number} }}",
+            "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_val call_args[{n}] = {{ {init} }}; int status = kiln_c99_val_call_method_key(host, v{o}, call_args, (size_t){argc}, {symbol}_key_{name}, depth, thrown, &site, {diagnostic_source}, (size_t){pc}, \"{label}\", &v{v}); {check}{sync_number} }}",
             o = object.0,
             diagnostic_source = diagnostic_source,
         )
@@ -430,15 +431,19 @@ pub(super) fn emit_call_method(
     // called by name, and the C compiler may inline it into this site.
     let candidates = method_candidates(
         program,
-        program.constants.get(*name as usize).and_then(|c| match c {
-            Constant::String(s) => Some(s),
-            _ => None,
-        }).unwrap_or_else(|| unreachable!("method name is a string constant")),
+        program
+            .constants
+            .get(*name as usize)
+            .and_then(|c| match c {
+                Constant::String(s) => Some(s),
+                _ => None,
+            })
+            .unwrap_or_else(|| unreachable!("method name is a string constant")),
         &plan.publishes_frame,
     )
-        .into_iter()
-        .filter(|&index| plan.available.get(index as usize).copied().unwrap_or(true))
-        .collect::<Vec<_>>();
+    .into_iter()
+    .filter(|&index| plan.available.get(index as usize).copied().unwrap_or(true))
+    .collect::<Vec<_>>();
     // A candidate with a typed entry, at a site that proved every argument a number,
     // is entered typed: the receiver is the object the cache matched, so what the
     // language decides about a method's `this` -- an arrow's captured one, a sloppy
@@ -1725,7 +1730,7 @@ pub(super) fn emit_call_method(
                     handled = 1; \
                 }} \
                 if (!handled) {{ \
-                    {prep_args}int status = kiln_c99_val_call_method(host, v{o}, call_args, (size_t){argc}, {symbol}_key_{name}, {key_len}, depth, thrown, &site, {diagnostic_source}, (size_t){pc}, \"{label}\", &v{v}); \
+                    {prep_args}int status = kiln_c99_val_call_method_key(host, v{o}, call_args, (size_t){argc}, {symbol}_key_{name}, depth, thrown, &site, {diagnostic_source}, (size_t){pc}, \"{label}\", &v{v}); \
                     {check} \
                 }} {typed_sync} }}",
                 o = object.0,
