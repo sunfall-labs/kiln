@@ -12,6 +12,25 @@ fn object_data_property_keys_preserve_lone_surrogates() {
     assert!(object.get_units(&key).is_none());
 }
 
+#[test]
+fn regexp_patterns_keep_lone_units_and_utf16_offsets() {
+    let lone = StringUnits::from_units(&[0xd800]);
+    let Value::RegExp(regexp) = build_regexp(&lone, "") .expect("lone pattern compiles") else {
+        panic!("regexp constructor returned a non-regexp");
+    };
+    assert_eq!(regexp.source, lone);
+    assert_eq!(regexp_string_units(&regexp).to_units().as_ref(), &[b'/' as u16, b'\\' as u16, b'u' as u16, b'd' as u16, b'8' as u16, b'0' as u16, b'0' as u16, b'/' as u16]);
+    let matched = regexp_search(&regexp, &[0xd800], 0).expect("lone unit matches");
+    assert_eq!(matched.0, 0..1);
+
+    let astral = StringUnits::from_units(&[0xd83d, 0xde00]);
+    let Value::RegExp(regexp) = build_regexp(&astral, "u").expect("astral pattern compiles") else {
+        panic!("regexp constructor returned a non-regexp");
+    };
+    let matched = regexp_search(&regexp, &[0x61, 0xd83d, 0xde00], 1).expect("astral unit matches");
+    assert_eq!(matched.0, 1..3);
+}
+
 fn string_index_of(text: &str, needle: &str, start: Option<f64>) -> f64 {
     let mut arguments = vec![Value::String(needle.to_owned().into())];
     if let Some(start) = start {

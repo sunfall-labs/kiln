@@ -36025,7 +36025,7 @@ fn call_native(
             unreachable!("`String` is dispatched by the interpreter")
         }
         Native::ErrorToString => Value::String(error_to_string(receiver).into()),
-        Native::RegExpToString => Value::String(receiver.to_display_string().into()),
+        Native::RegExpToString => Value::String(receiver.to_string_units()),
         // Reading `{ maxByteLength }` off the options bag is an ordinary property read, which
         // may run a getter, so the machine has to be the one to do it.
         Native::ArrayBufferConstructor | Native::SharedArrayBufferConstructor => {
@@ -41317,7 +41317,24 @@ fn constructor_label(object: &ObjectData) -> Option<String> {
 /// Compile a regular expression, or `None` when the engine rejects the pattern.
 fn build_regexp(pattern: &StringUnits, flags: &str) -> Option<Value> {
     let units = pattern.to_units();
-    let compiled = regress::Regex::from_unicode(units.iter().copied().map(u32::from), flags).ok()?;
+    let mut codepoints = Vec::with_capacity(units.len());
+    let mut index = 0;
+    while index < units.len() {
+        let unit = units[index];
+        if (0xd800..=0xdbff).contains(&unit)
+            && units
+                .get(index + 1)
+                .is_some_and(|next| (0xdc00..=0xdfff).contains(next))
+        {
+            let low = units[index + 1];
+            codepoints.push(0x1_0000 + ((u32::from(unit) - 0xd800) << 10) + u32::from(low) - 0xdc00);
+            index += 2;
+        } else {
+            codepoints.push(u32::from(unit));
+            index += 1;
+        }
+    }
+    let compiled = regress::Regex::from_unicode(codepoints.iter().copied(), flags).ok()?;
     Some(Value::RegExp(Rc::new(RegExpData {
         source: pattern.clone(),
         flags: flags.to_owned(),
