@@ -1,10 +1,12 @@
 //! The small, versioned ABI between a Kiln program and its host.
 //!
 //! Compiler and runtime crates may evolve independently of the process that provides host
-//! services. Keep this crate dependency-free and make values crossing the boundary owned.
+//! services. Keep values crossing the boundary owned.
+
+use kiln_string::StringUnits;
 
 /// Version of the host operation and value contract.
-pub const HOST_ABI_VERSION: u32 = 3;
+pub const HOST_ABI_VERSION: u32 = 4;
 
 /// Internal native runtime operation that returns a realm-owned GC callable. It intentionally
 /// lives outside [`HostOp`], whose result is the scalar `HostValue` ABI.
@@ -51,7 +53,7 @@ pub enum HostValue {
     Null,
     Boolean(bool),
     Number(u64),
-    String(String),
+    String(StringUnits),
 }
 
 impl HostValue {
@@ -90,7 +92,7 @@ impl HostValue {
             Self::Null => "null".to_owned(),
             Self::Boolean(value) => value.to_string(),
             Self::Number(bits) => number_to_js_string(f64::from_bits(*bits)),
-            Self::String(value) => value.clone(),
+            Self::String(value) => value.to_lossy_string(),
         }
     }
 }

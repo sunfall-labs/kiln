@@ -1,5 +1,17 @@
 use super::*;
 
+#[test]
+fn object_data_property_keys_preserve_lone_surrogates() {
+    let key = StringUnits::from_units(&[0xd800]);
+    let mut object = ObjectData::default();
+    object.set_units(&key, Value::Number(7.0));
+    assert_eq!(object.get_units(&key), Some(Value::Number(7.0)));
+    assert_eq!(object.keys().next(), Some(&key));
+    assert!(object.lookup_units(&key).is_some());
+    assert!(object.remove_units(&key));
+    assert!(object.get_units(&key).is_none());
+}
+
 fn string_index_of(text: &str, needle: &str, start: Option<f64>) -> f64 {
     let mut arguments = vec![Value::String(needle.to_owned().into())];
     if let Some(start) = start {
@@ -632,12 +644,12 @@ impl HostOps for TestHost {
             HostOp::TimeZone => self
                 .timezone
                 .clone()
-                .map(HostValue::String)
+                .map(|value| HostValue::String(value.into()))
                 .ok_or_else(|| HostError::new("no scripted timezone")),
             HostOp::Locale => self
                 .locale
                 .clone()
-                .map(HostValue::String)
+                .map(|value| HostValue::String(value.into()))
                 .ok_or_else(|| HostError::new("no scripted locale")),
             _ => Ok(HostValue::Undefined),
         }

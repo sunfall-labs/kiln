@@ -208,7 +208,7 @@ pub(crate) fn node_http_request_arguments(
             .filter(|property| property.attributes.enumerable)
         {
             if let Property::Value(value) = &property.property {
-                headers.push((property.key.clone(), value.to_display_string()));
+                headers.push((property.key.to_lossy_string(), value.to_display_string()));
             }
         }
     }
