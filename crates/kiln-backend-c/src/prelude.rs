@@ -247,16 +247,6 @@ macro_rules! method_group_c_bits {
     };
 }
 
-macro_rules! method_group_c_case {
-    (KILN_C99_METHOD_TEMPORAL_LAST, $($group:ident),* ; $($metadata:tt)*) => { "" };
-    ($name:ident, $first:ident $(, $group:ident)* ; $($metadata:tt)*) => {
-        concat!(
-            "    case ", stringify!($name), ": return ",
-            method_group_c_bits!($first $(, $group)*), ";\n"
-        )
-    };
-}
-
 /* Argument coercion is part of the method registry, alongside dispatch groups.  Keeping the
  * masks here lets the C prelude consume one generated descriptor instead of maintaining three
  * independent switches (groups, numeric arguments, and textual arguments).  The interpreter has
@@ -296,12 +286,6 @@ macro_rules! method_ids {
                 textual_arguments: $textual,
             }),*
         ];
-
-        macro_rules! emit_method_group_cases {
-            () => {
-                concat!($(method_group_c_case!($name, $first_group $(, $group)* ; $numeric, $textual)),*)
-            };
-        }
 
         macro_rules! emit_method_metadata_cases {
             () => {
@@ -2240,12 +2224,6 @@ macro_rules! method_metadata_part {
     () => {
         concat!(
             r#"
-typedef struct kiln_c99_method_metadata {
-    uint32_t groups;
-    uint32_t numeric_arguments;
-    uint32_t textual_arguments;
-} kiln_c99_method_metadata;
-
 /* One registry-generated lookup answers dispatch routing and argument coercion together.  The
  * zero default is intentional: unknown and reserved codes remain refused by the normal dispatch
  * fallthrough, rather than acquiring a handler merely because they are in a numeric interval. */
@@ -2275,6 +2253,18 @@ static kiln_c99_method_metadata kiln_c99_method_metadata_for(uint64_t code) {
 }
 "#
         )
+    };
+}
+
+macro_rules! method_metadata_decl {
+    () => {
+        r#"typedef struct kiln_c99_method_metadata {
+    uint32_t groups;
+    uint32_t numeric_arguments;
+    uint32_t textual_arguments;
+} kiln_c99_method_metadata;
+static kiln_c99_method_metadata kiln_c99_method_metadata_for(uint64_t code);
+"#
     };
 }
 
@@ -3660,44 +3650,11 @@ enum kiln_value_tag {
 
 /* KILN_RUNTIME_ONLY_METHOD_GROUPS_BEGIN */
 static uint32_t kiln_c99_method_groups(uint64_t code) {
-    /* Four `Temporal` families are *ranges* rather than lists. `from`, `compare` and `Now.x` are
-     * one code per kind and the twenty-three operations are one code each, all contiguous, so the
-     * code carries which kind or which operation was asked for -- `kind = code - FROM` is how the
-     * dispatch recovers it, rather than a translation table that could drift from the provider's
-     * own order.
-     *
-     * The switch below is generated from the id list, which names only the two *endpoints* of
-     * each range. Every code between them therefore answered "no groups at all", which routed it
-     * past the `Temporal` dispatch entirely and out the refusal at the bottom. That is why
-     * `Temporal.PlainDate.from` worked and the other seven did not: 285 is named and 286 is not.
-     * The same hole took seven of the eight `compare`s, seven of the eight `Temporal.Now` reads,
-     * and twenty-one of the twenty-three operations.
-     *
-     * A range is checked as a range. The endpoints stay in the id list because the Rust
-     * assertions above measure the ranges from them. */
-    if (code >= KILN_C99_METHOD_TEMPORAL_FROM && code <= KILN_C99_METHOD_TEMPORAL_FROM_LAST) {
-        return KILN_C99_GROUP_TEMPORAL | KILN_C99_GROUP_TEMPORAL_FROM;
-    }
-    if (code >= KILN_C99_METHOD_TEMPORAL_COMPARE && code <= KILN_C99_METHOD_TEMPORAL_COMPARE_LAST) {
-        return KILN_C99_GROUP_TEMPORAL | KILN_C99_GROUP_TEMPORAL_COMPARE;
-    }
-    if (code >= KILN_C99_METHOD_TEMPORAL_NOW_READ &&
-        code <= KILN_C99_METHOD_TEMPORAL_NOW_READ_LAST) {
-        return KILN_C99_GROUP_TEMPORAL | KILN_C99_GROUP_TEMPORAL_NOW_READ;
-    }
-    if (code >= KILN_C99_METHOD_TEMPORAL_OP && code <= KILN_C99_METHOD_TEMPORAL_OP_LAST) {
-        return KILN_C99_GROUP_TEMPORAL | KILN_C99_GROUP_TEMPORAL_OP;
-    }
-    switch (code) {
-"#,
-    emit_method_group_cases!(),
-    r#"
-    default: return UINT32_C(0);
-    }
+    return kiln_c99_method_metadata_for(code).groups;
 }
 
 static int kiln_c99_method_in_group(uint64_t code, uint32_t group) {
-    return (kiln_c99_method_groups(code) & group) != 0;
+    return (kiln_c99_method_metadata_for(code).groups & group) != 0;
 }
 /* KILN_RUNTIME_ONLY_METHOD_GROUPS_END */
 "#,
@@ -3710,6 +3667,7 @@ static int kiln_c99_method_in_group(uint64_t code, uint32_t group) {
 pub(crate) const HEADER: &str = concat!(
     header_prefix!(),
     header_static_diagnostics!(),
+    method_metadata_decl!(),
     header_rest!(),
     method_metadata_part!(),
     runtime_parts!(),
