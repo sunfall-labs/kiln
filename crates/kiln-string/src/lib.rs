@@ -71,11 +71,18 @@ impl StringUnits {
 
 /// A borrowed JavaScript string view. The representation remains visible to consumers that can
 /// specialize Latin1 hot loops, while UTF-16 keeps every code unit including lone surrogates.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub enum StringView<'a> {
     Latin1(&'a [u8]),
     Utf16(&'a [u16]),
 }
+
+impl PartialEq for StringView<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.units().eq(other.units())
+    }
+}
+impl Eq for StringView<'_> {}
 
 impl<'a> StringView<'a> {
     pub fn unit_len(self) -> usize {
@@ -178,10 +185,12 @@ mod tests {
     #[test]
     fn borrowed_view_keeps_representation_and_units() {
         let latin = StringUnits::from("abc");
+        assert_eq!(latin.as_view(), StringView::Utf16(&[0x61, 0x62, 0x63]));
         assert_eq!(latin.as_view(), StringView::Latin1(b"abc"));
         let wide = StringUnits::from_units(&[0x61, 0xd800]);
         assert_eq!(wide.as_view().unit_at(1), Some(0xd800));
         assert!(wide.as_view().latin1_slice(0, 2).is_none());
+        assert_ne!(StringView::Utf16(&[0xd800]), StringView::Utf16(&[0xfffd]));
     }
     #[test]
     fn utf8_decodes_pairs() {
