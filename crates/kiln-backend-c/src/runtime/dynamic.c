@@ -1739,8 +1739,13 @@ static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *re
 
 
     size_t params_len = 0;
-    const char *params_bytes = kiln_c99_string_ascii_bytes(params_val, &params_len);
-    if (params_bytes != NULL && params_len > 0) {
+    uint8_t *params_owned = NULL;
+    if (kiln_c99_string_to_utf8_lossy(params_val, &params_owned, &params_len) != KILN_C99_OK) {
+        kiln_dyn_scope_destroy(&scope);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    const char *params_bytes = (const char *)params_owned;
+    if (params_len > 0) {
         const char *p = params_bytes;
         size_t plen = params_len;
         size_t ppos = 0;
@@ -1802,10 +1807,16 @@ static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *re
         }
     }
 
+    free(params_owned);
     size_t body_len = 0;
-    const char *body_bytes = kiln_c99_string_ascii_bytes(body_val, &body_len);
-    const char *bsrc = body_bytes != NULL ? body_bytes : "";
-    size_t blen = body_bytes != NULL ? body_len : 0;
+    uint8_t *body_owned = NULL;
+    const char *bsrc;
+    if (kiln_c99_string_to_utf8_lossy(body_val, &body_owned, &body_len) != KILN_C99_OK) {
+        kiln_dyn_scope_destroy(&scope);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    bsrc = (const char *)body_owned;
+    size_t blen = body_len;
     kiln_dyn_lexer lex;
     memset(&lex, 0, sizeof(lex));
     lex.src = bsrc;
@@ -1825,6 +1836,7 @@ static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *re
     }
 
     *result = kiln_val_from_boundary(bresult);
+    free(body_owned);
     kiln_dyn_token_free(&lex.curr);
     kiln_dyn_scope_destroy(&scope);
     return status;
@@ -1845,36 +1857,20 @@ static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
         upvalues[0] = kiln_c99_copy_text("", 0);
         upvalues[1] = kiln_c99_text(args[0]);
     } else {
-        size_t total_len = 0;
         size_t i;
+        upvalues[0] = kiln_c99_from_units(NULL, 0);
         for (i = 0; i < argc - 1; ++i) {
-            kiln_value t = kiln_c99_text(args[i]);
-            size_t t_len = 0;
-            total_len += kiln_c99_string_ascii_bytes(t, &t_len) != NULL ? t_len : 0;
-            if (i + 1 < argc - 1) total_len++;
-        }
-        char *joined = (char *)malloc(total_len + 1);
-        if (joined == NULL) return KILN_C99_OUT_OF_MEMORY;
-        size_t cur = 0;
-        for (i = 0; i < argc - 1; ++i) {
-            kiln_value t = kiln_c99_text(args[i]);
-            size_t tlen = 0;
-            const char *tbytes = kiln_c99_string_ascii_bytes(t, &tlen);
-            if (tbytes != NULL && tlen > 0) {
-                memcpy(&joined[cur], tbytes, tlen);
-                cur += tlen;
+            kiln_value next = kiln_c99_concat(upvalues[0], kiln_c99_text(args[i]));
+            if (next.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+            upvalues[0] = next;
+            if (i + 1 < argc - 1) {
+                next = kiln_c99_concat(upvalues[0], kiln_c99_static_text(",", 1));
+                if (next.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+                upvalues[0] = next;
             }
-            if (i + 1 < argc - 1) joined[cur++] = ',';
         }
-        joined[cur] = '\0';
-        upvalues[0] = kiln_c99_copy_text(joined, cur);
-        free(joined);
         upvalues[1] = kiln_c99_text(args[argc - 1]);
     }
-
-    size_t body_len = 0;
-    const char *body_bytes = kiln_c99_string_ascii_bytes(upvalues[1], &body_len);
-    const char *body_src = body_bytes != NULL ? body_bytes : "";
 
     kiln_val val_upvalues[3] = {
         kiln_val_from_boundary(upvalues[0]),
@@ -1883,7 +1879,7 @@ static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
     };
 
     return kiln_c99_make_closure(result, kiln_c99_dynamic_body_trampoline,
-                                 "anonymous", 9, body_src, body_len,
+                                 "anonymous", 9, "", 0,
                                  "eval", 0, (uint32_t)(argc > 1 ? argc - 1 : 0),
                                  0, 0, 0, 0, 0, 0, KILN_VAL_UNDEFINED,
                                  KILN_VAL_UNDEFINED, 0, 16, 0, 0,
@@ -1925,7 +1921,10 @@ static int kiln_c99_validate_dynamic_import_options(kiln_host *host, kiln_value 
         if (key.tag != KILN_VALUE_STRING) continue;
         size_t key_len = 0;
         const char *key_bytes = kiln_c99_string_ascii_bytes(key, &key_len);
-        if (key_bytes == NULL) continue;
+        if (key_bytes == NULL) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "unsupported import attribute");
+        }
         status = kiln_c99_get(host, attrs, key_bytes, key_len, &value, depth, thrown);
         if (status != KILN_C99_OK) return status;
         kiln_value entry;
@@ -1940,7 +1939,9 @@ static int kiln_c99_validate_dynamic_import_options(kiln_host *host, kiln_value 
         kiln_value entry = kiln_val_to_boundary(kiln_c99_array_of(entries)->elements[index]);
         kiln_value key = kiln_val_to_boundary(kiln_c99_array_of(entry)->elements[0]);
         kiln_value value = kiln_val_to_boundary(kiln_c99_array_of(entry)->elements[1]);
-        if (key_len != 4 || memcmp(key_bytes, "type", 4) != 0) continue;
+        size_t key_len = 0;
+        const char *key_bytes = kiln_c99_string_ascii_bytes(key, &key_len);
+        if (key_bytes == NULL || key_len != 4 || memcmp(key_bytes, "type", 4) != 0) continue;
         if (value.tag != KILN_VALUE_STRING) {
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                         "import attribute values must be strings");
@@ -1957,8 +1958,10 @@ static int kiln_c99_validate_dynamic_import_options(kiln_host *host, kiln_value 
     for (index = 0; index < kiln_c99_array_of(entries)->count; ++index) {
         kiln_value entry = kiln_val_to_boundary(kiln_c99_array_of(entries)->elements[index]);
         kiln_value key = kiln_val_to_boundary(kiln_c99_array_of(entry)->elements[0]);
+        size_t key_len = 0;
+        const char *key_bytes = kiln_c99_string_ascii_bytes(key, &key_len);
         if (key.tag == KILN_VALUE_STRING &&
-            (key_len != 4 || memcmp(key_bytes, "type", 4) != 0)) {
+            (key_bytes == NULL || key_len != 4 || memcmp(key_bytes, "type", 4) != 0)) {
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                         "unsupported import attribute");
         }

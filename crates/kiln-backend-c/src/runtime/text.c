@@ -553,6 +553,53 @@ oom:
     return kiln_c99_undefined();
 }
 
+static int kiln_c99_string_to_utf8_lossy(kiln_value value, uint8_t **out, size_t *out_len) {
+    const kiln_string *string;
+    size_t capacity;
+    size_t written = 0;
+    size_t index;
+    uint8_t *bytes;
+    if (out == NULL || out_len == NULL || value.tag != KILN_VALUE_STRING || value.ptr == NULL) {
+        return KILN_C99_INVALID_ARGUMENT;
+    }
+    string = (const kiln_string *)value.ptr;
+    if (string->unit_len > (SIZE_MAX - 4) / 3) return KILN_C99_OUT_OF_MEMORY;
+    capacity = (size_t)string->unit_len * 3 + 4;
+    bytes = capacity == 0 ? NULL : (uint8_t *)malloc(capacity);
+    if (capacity != 0 && bytes == NULL) return KILN_C99_OUT_OF_MEMORY;
+    for (index = 0; index < string->unit_len; ++index) {
+        uint32_t unit = kiln_string_unit_at(string, index);
+        uint32_t codepoint = unit;
+        if (kiln_string_is_utf16(string) && unit >= 0xD800 && unit <= 0xDBFF &&
+            index + 1 < string->unit_len) {
+            uint32_t next = kiln_string_unit_at(string, index + 1);
+            if (next >= 0xDC00 && next <= 0xDFFF) {
+                codepoint = 0x10000u + ((unit - 0xD800u) << 10) + (next - 0xDC00u);
+                index += 1;
+            }
+        }
+        if (codepoint >= 0xD800 && codepoint <= 0xDFFF) codepoint = 0xFFFD;
+        if (codepoint < 0x80) {
+            bytes[written++] = (uint8_t)codepoint;
+        } else if (codepoint < 0x800) {
+            bytes[written++] = (uint8_t)(0xC0 | (codepoint >> 6));
+            bytes[written++] = (uint8_t)(0x80 | (codepoint & 0x3F));
+        } else if (codepoint < 0x10000) {
+            bytes[written++] = (uint8_t)(0xE0 | (codepoint >> 12));
+            bytes[written++] = (uint8_t)(0x80 | ((codepoint >> 6) & 0x3F));
+            bytes[written++] = (uint8_t)(0x80 | (codepoint & 0x3F));
+        } else {
+            bytes[written++] = (uint8_t)(0xF0 | (codepoint >> 18));
+            bytes[written++] = (uint8_t)(0x80 | ((codepoint >> 12) & 0x3F));
+            bytes[written++] = (uint8_t)(0x80 | ((codepoint >> 6) & 0x3F));
+            bytes[written++] = (uint8_t)(0x80 | (codepoint & 0x3F));
+        }
+    }
+    *out = bytes;
+    *out_len = written;
+    return KILN_C99_OK;
+}
+
 static kiln_value kiln_c99_text(kiln_value value) {
     static const char undefined_text[] = "undefined";
     static const char null_text[] = "null";
@@ -832,9 +879,9 @@ static int kiln_c99_strict_equal(kiln_value left, kiln_value right) {
                                    (const void *)(uintptr_t)right.bits) == 0;
     }
     if (left.tag == KILN_VALUE_STRING) {
-        return left.len == right.len &&
-               (left.len == 0 || (left.ptr != NULL && right.ptr != NULL &&
-                                  memcmp(left.ptr, right.ptr, left.len) == 0));
+        const kiln_string *l = left.ptr == NULL ? NULL : (const kiln_string *)left.ptr;
+        const kiln_string *r = right.ptr == NULL ? NULL : (const kiln_string *)right.ptr;
+        return l != NULL && r != NULL && kiln_string_equal(l, r);
     }
     if (left.tag == KILN_VALUE_SYMBOL) {
         /* A registry symbol is identified by its id, not by the object that carries it: two
