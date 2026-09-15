@@ -351,6 +351,10 @@ static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_v
 static int kiln_c99_reflect_set(kiln_host *host, kiln_value target, kiln_value key,
                                 kiln_value value, int *accepted, int depth,
                                 kiln_value *thrown);
+static int kiln_c99_reflect_define_property(kiln_host *host, kiln_value target,
+                                            kiln_value key, kiln_value descriptor,
+                                            int *accepted, int depth,
+                                            kiln_value *thrown);
 static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value key,
                                  kiln_value *out, int depth, kiln_value *thrown);
 static int kiln_c99_definition_store(kiln_value target, kiln_value *out);

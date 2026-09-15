@@ -5393,6 +5393,24 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 return status;
             }
         }
+        case KILN_C99_METHOD_REFLECT_DEFINE_PROPERTY: {
+            kiln_value subject = argc > 0 ? args[0] : kiln_c99_undefined();
+            kiln_value key = argc > 1 ? args[1] : kiln_c99_undefined();
+            kiln_value descriptor = argc > 2 ? args[2] : kiln_c99_undefined();
+            int answer = 0;
+            if (!kiln_c99_is_reference(subject) && subject.tag != KILN_VALUE_DATE &&
+                subject.tag != KILN_VALUE_REGEXP && subject.tag != KILN_VALUE_PROMISE) {
+                return kiln_c99_throw_not_a(thrown, subject, "object");
+            }
+            if (descriptor.tag != KILN_VALUE_OBJECT) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "Property description must be an object");
+            }
+            status = kiln_c99_reflect_define_property(host, subject, key, descriptor, &answer,
+                                                      depth, thrown);
+            *result = kiln_c99_boolean(answer);
+            return status;
+        }
         case KILN_C99_METHOD_REFLECT_GET_PROTOTYPE_OF: {
             kiln_value subject = argc > 0 ? args[0] : kiln_c99_undefined();
             if (!kiln_c99_is_reference(subject) && subject.tag != KILN_VALUE_DATE &&
