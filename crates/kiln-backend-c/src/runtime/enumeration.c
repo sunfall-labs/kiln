@@ -740,6 +740,21 @@ static int kiln_c99_delete_or_throw(kiln_host *host, kiln_value target, const ch
     return kiln_c99_throw_cannot_delete(thrown, key, key_len);
 }
 
+/* The headed form: the strict delete of a namespace or non-configurable property names
+ * the key from units. */
+static int kiln_c99_delete_or_throw_key(kiln_host *host, kiln_value target,
+                                        const kiln_string *key, int strict, int *answer,
+                                        int depth, kiln_value *thrown) {
+    int status = kiln_c99_delete_key(host, target, key, NULL, answer, depth, thrown);
+    if (status != KILN_C99_OK || !strict || *answer) {
+        return status;
+    }
+    if (target.tag == KILN_VALUE_OBJECT && kiln_c99_object_of(target)->module_namespace) {
+        return kiln_c99_throw_module_namespace_delete_key(thrown, key);
+    }
+    return kiln_c99_throw_cannot_delete_key(thrown, key);
+}
+
 static int kiln_c99_delete_computed_or_throw(kiln_host *host, kiln_value target, kiln_value key,
                                              int strict, int *answer, int depth,
                                              kiln_value *thrown) {
