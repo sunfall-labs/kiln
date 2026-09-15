@@ -3672,10 +3672,14 @@ impl CommonJsRequire {
 
 impl Closure {
     /// The display name exposed through function metadata, preserving UTF-16 code units.
+    ///
+    /// An empty written name is no written name (anonymous class constructors
+    /// carry `Some("")`), so it defers to the inferred name like `None` does.
     pub fn display_name_units(&self) -> StringUnits {
         self.name
             .as_deref()
             .map(StringUnits::from)
+            .filter(|units: &StringUnits| !units.is_empty())
             .or_else(|| self.inferred_name.clone())
             .unwrap_or_default()
     }

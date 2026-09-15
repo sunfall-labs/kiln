@@ -701,10 +701,15 @@ impl FunctionProto {
     /// The optional name a runtime closure should expose, preserving JavaScript UTF-16 units.
     /// Written names take precedence because they establish a binding; inferred names are
     /// display metadata used only when no written name exists.
+    ///
+    /// An *empty* written name is no written name: anonymous class constructors
+    /// carry `Some("")` as their spelling, and it must not shadow the name a
+    /// named evaluation inferred (`const Dep = class {}` is `"Dep"`, not `""`).
     pub fn effective_name_units(&self) -> Option<StringUnits> {
         self.name
             .as_deref()
             .map(StringUnits::from)
+            .filter(|units| !units.is_empty())
             .or_else(|| self.inferred_name.clone())
     }
 
