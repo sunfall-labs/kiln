@@ -13,7 +13,7 @@ pub use kiln_host_abi::HostOp;
 pub const BYTECODE_VERSION: u16 = 5;
 
 /// A constant embedded in a [`Program`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Constant {
     Undefined,
     Null,
