@@ -116,8 +116,12 @@ static int kiln_c99_get_with_receiver(kiln_host *host, kiln_value target, kiln_v
         }
     }
     if (name.tag == KILN_VALUE_STRING) {
-        return kiln_c99_get_key(host, target, (const kiln_string *)name.ptr,
-                                (const kiln_string *)name.ptr, out, depth, thrown);
+        /* `ikey` is the canonical pointer or NULL (ADR 0047): a computed key is a
+         * boundary string the realm may never have stored, and the shaped-slot
+         * scan below compares pointers. NULL canonicalizes once for the whole
+         * walk inside `kiln_c99_get_own_kind`. */
+        return kiln_c99_get_key(host, target, (const kiln_string *)name.ptr, NULL, out,
+                                depth, thrown);
     }
     return kiln_c99_get_computed(host, target, key, out, depth, thrown);
 }
@@ -276,8 +280,10 @@ static int kiln_c99_set_with_receiver(kiln_host *host, kiln_value target, kiln_v
                 ((const kiln_string *)name.ptr)->unit_len);
         }
         kiln_property *slot;
+        /* NULL interns here: a computed key is a boundary string, not the
+         * canonical pointer `own_slot_key` stores (ADR 0047). */
         int status = kiln_c99_own_slot_key(recv_store, (const kiln_string *)name.ptr,
-                                           (const kiln_string *)name.ptr, &slot);
+                                           NULL, &slot);
         if (status != KILN_C99_OK) return status;
         slot->value = value;
         return KILN_C99_OK;

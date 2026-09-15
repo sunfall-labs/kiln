@@ -586,13 +586,16 @@ static int kiln_c99_throw_module_namespace_write(kiln_value *thrown, const char 
 static int kiln_c99_throw_module_namespace_write_key(kiln_value *thrown,
                                                      const kiln_string *key);
 static int kiln_c99_throw_module_namespace_delete(kiln_value *thrown, const char *key,
-                                                  size_t key_len);
+                                                   size_t key_len);
+static int kiln_c99_throw_module_namespace_delete_key(kiln_value *thrown,
+                                                      const kiln_string *key);
 static int kiln_c99_throw_module_namespace_define(kiln_value *thrown, const char *key,
                                                   size_t key_len);
 static int kiln_c99_throw_module_namespace_define_key(kiln_value *thrown,
                                                       const kiln_string *key);
 static int kiln_c99_throw_module_namespace_freeze(kiln_value *thrown);
 static int kiln_c99_throw_cannot_delete(kiln_value *thrown, const char *key, size_t key_len);
+static int kiln_c99_throw_cannot_delete_key(kiln_value *thrown, const kiln_string *key);
 static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_value left,
                                    kiln_value right, kiln_value *out, int depth,
                                    kiln_value *thrown);
@@ -1677,7 +1680,10 @@ call_done:
             uint8_t *key_bytes = NULL;
             size_t key_len = 0;
             if (key.tag != KILN_VALUE_STRING) continue;
-            status = kiln_c99_get(host, definitions, key.ptr, key.len, &definition, depth, thrown);
+            /* Keyed form with a NULL canonical: the value's pointer names the
+             * header, not key bytes (ADR 0047). */
+            status = kiln_c99_get_key(host, definitions, (const kiln_string *)key.ptr,
+                                      NULL, &definition, depth, thrown);
             if (status == KILN_C99_OK)
                 status = kiln_c99_ffi_signature(host, definition, &types, &type_count,
                                                  &result_type, depth, thrown);
@@ -1708,9 +1714,10 @@ call_done:
             metadata->arguments = types;
             metadata->next = kiln_c99_ffi_functions;
             kiln_c99_ffi_functions = metadata;
-            status = kiln_c99_put(host, functions, key.ptr, key.len,
-                                  kiln_c99_method(KILN_C99_FFI_DYNAMIC_BASE | function_handle),
-                                  depth, thrown);
+            status = kiln_c99_put_mode_key(host, functions, (const kiln_string *)key.ptr,
+                                               NULL,
+                                               kiln_c99_method(KILN_C99_FFI_DYNAMIC_BASE | function_handle),
+                                               0, depth, thrown);
             if (status != KILN_C99_OK) goto open_fail;
         }
         status = kiln_c99_u64_bigint(library, 0, &answer);

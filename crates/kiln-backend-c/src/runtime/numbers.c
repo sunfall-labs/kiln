@@ -572,7 +572,7 @@ static void kiln_c99_significant_digits(double value, size_t count, char *mantis
  * many digits the value needs. */
 static int kiln_c99_shortest_digits(double value, char *mantissa, size_t capacity, int *exponent) {
     kiln_value spelled = kiln_c99_text(kiln_c99_number(value));
-    const char *bytes;
+    const kiln_string *spelling;
     size_t len;
     size_t body;
     size_t index;
@@ -583,27 +583,34 @@ static int kiln_c99_shortest_digits(double value, char *mantissa, size_t capacit
     char raw[64];
     int suffix = 0;
     int suffix_sign = 1;
-    if (spelled.tag != KILN_VALUE_STRING) {
+    if (spelled.tag != KILN_VALUE_STRING || spelled.ptr == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
-    bytes = (const char *)spelled.ptr;
-    len = spelled.len;
+    /* The value's pointer names the header, not the spelling: indexing it as
+     * bytes reads the length and flags words as digits. */
+    spelling = (const kiln_string *)spelled.ptr;
+    len = spelling->unit_len;
     /* `1e+21` and above, and `1e-7` and below, are spelled with an exponent already; everything
      * between is spelled positionally. Both forms reduce to the same digits-and-a-place. */
     body = len;
     for (index = 0; index < len; ++index) {
-        if (bytes[index] == 'e' || bytes[index] == 'E') {
+        uint32_t unit = kiln_string_unit_at(spelling, index);
+        if (unit == 'e' || unit == 'E') {
             size_t at = index + 1;
             body = index;
-            if (at < len && (bytes[at] == '+' || bytes[at] == '-')) {
-                suffix_sign = bytes[at] == '-' ? -1 : 1;
-                at += 1;
+            if (at < len) {
+                uint32_t sign = kiln_string_unit_at(spelling, at);
+                if (sign == '+' || sign == '-') {
+                    suffix_sign = sign == '-' ? -1 : 1;
+                    at += 1;
+                }
             }
             for (; at < len; ++at) {
-                if (bytes[at] < '0' || bytes[at] > '9') {
+                uint32_t digit = kiln_string_unit_at(spelling, at);
+                if (digit < '0' || digit > '9') {
                     break;
                 }
-                suffix = suffix * 10 + (bytes[at] - '0');
+                suffix = suffix * 10 + (int)(digit - '0');
             }
             suffix *= suffix_sign;
             break;
@@ -611,15 +618,16 @@ static int kiln_c99_shortest_digits(double value, char *mantissa, size_t capacit
     }
     point = (size_t)-1;
     for (index = 0; index < body && produced < sizeof raw; ++index) {
-        if (bytes[index] == '.') {
+        uint32_t unit = kiln_string_unit_at(spelling, index);
+        if (unit == '.') {
             point = produced;
             continue;
         }
-        if (bytes[index] < '0' || bytes[index] > '9') {
+        if (unit < '0' || unit > '9') {
             /* A sign; the caller asked about a magnitude. */
             continue;
         }
-        raw[produced++] = bytes[index];
+        raw[produced++] = (char)unit;
     }
     if (point == (size_t)-1) {
         point = produced;
