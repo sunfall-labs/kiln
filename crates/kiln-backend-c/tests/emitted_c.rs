@@ -859,7 +859,11 @@ fn numeric_id_parser_rejects_malformed_definitions() {
 fn method_dispatch_membership_is_generated_from_registry() {
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
-    assert!(prelude.contains("static kiln_c99_method_metadata kiln_c99_method_metadata_for(uint64_t code)"));
+    assert!(
+        prelude.contains(
+            "static kiln_c99_method_metadata kiln_c99_method_metadata_for(uint64_t code)"
+        )
+    );
     assert!(prelude.contains(
         "case KILN_C99_METHOD_ARRAY_AT: return (kiln_c99_method_metadata){UINT32_C(2), UINT32_C(0x1), UINT32_C(0)};"
     ));

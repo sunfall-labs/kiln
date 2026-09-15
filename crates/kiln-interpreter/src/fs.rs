@@ -8,18 +8,22 @@ use crate::{ExecutionError, Native, RealmId, Value};
 pub(crate) fn node_encoding(option: Option<&Value>) -> Result<bool, ExecutionError> {
     match option {
         None | Some(Value::Undefined) | Some(Value::Null) => Ok(false),
-        Some(Value::String(encoding)) => parse_node_encoding(
-            &encoding.to_scalar_string().map_err(|_| ExecutionError::TypeErrorMessage {
-                message: "encoding contains a lone surrogate".to_owned(),
-            })?,
-        ),
+        Some(Value::String(encoding)) => {
+            parse_node_encoding(&encoding.to_scalar_string().map_err(|_| {
+                ExecutionError::TypeErrorMessage {
+                    message: "encoding contains a lone surrogate".to_owned(),
+                }
+            })?)
+        }
         Some(Value::Object(options)) => match options.borrow().get_own("encoding") {
             None | Some(Value::Undefined) | Some(Value::Null) => Ok(false),
-            Some(Value::String(encoding)) => parse_node_encoding(
-                &encoding.to_scalar_string().map_err(|_| ExecutionError::TypeErrorMessage {
-                    message: "encoding contains a lone surrogate".to_owned(),
-                })?,
-            ),
+            Some(Value::String(encoding)) => {
+                parse_node_encoding(&encoding.to_scalar_string().map_err(|_| {
+                    ExecutionError::TypeErrorMessage {
+                        message: "encoding contains a lone surrogate".to_owned(),
+                    }
+                })?)
+            }
             Some(value) => Err(ExecutionError::TypeErrorMessage {
                 message: format!("encoding must be a string, received {}", value.type_name()),
             }),

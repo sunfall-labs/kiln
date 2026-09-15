@@ -512,16 +512,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 match encoding.as_deref() {
                     None => Ok(node_bytes_value(raw_digest)),
                     Some("hex") => Ok(Value::String(crate::to_hex_text(&raw_digest).into())),
-                    Some("base64") => Ok(Value::String(crate::to_base64_text(
-                        &raw_digest,
-                        false,
-                        false,
-                    ).into())),
-                    Some("base64url") => Ok(Value::String(crate::to_base64_text(
-                        &raw_digest,
-                        true,
-                        true,
-                    ).into())),
+                    Some("base64") => Ok(Value::String(
+                        crate::to_base64_text(&raw_digest, false, false).into(),
+                    )),
+                    Some("base64url") => Ok(Value::String(
+                        crate::to_base64_text(&raw_digest, true, true).into(),
+                    )),
                     Some(encoding) => Err(ExecutionError::TypeErrorMessage {
                         message: format!("Unknown encoding: {encoding}"),
                     }),

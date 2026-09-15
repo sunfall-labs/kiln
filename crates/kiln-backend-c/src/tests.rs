@@ -799,7 +799,7 @@ fn executable_numeric_operand_order_matches_symbol_conversion_rules() {
             local_count: 0,
             functions: vec![
                 FunctionProto {
-        inferred_name: None,
+                    inferred_name: None,
                     span: kiln_ir::Span::default(),
                     prologue_end: 0,
                     asynchronous: false,
@@ -822,7 +822,7 @@ fn executable_numeric_operand_order_matches_symbol_conversion_rules() {
                     type_annotations: None,
                 },
                 FunctionProto {
-        inferred_name: None,
+                    inferred_name: None,
                     span: kiln_ir::Span::default(),
                     prologue_end: 0,
                     asynchronous: false,
@@ -1343,7 +1343,7 @@ fn nested_call_refusal_preserves_the_failing_instruction_without_blaming_the_cal
         ],
         local_count: 0,
         functions: vec![FunctionProto {
-        inferred_name: None,
+            inferred_name: None,
             span: kiln_ir::Span::default(),
             prologue_end: 0,
             asynchronous: false,
@@ -2324,74 +2324,74 @@ fn program_hash_covers_function_table_and_proto_contents() {
 
     for change in [
         FunctionProto {
-        inferred_name: None,
+            inferred_name: None,
             prologue_end: 0,
             asynchronous: true,
             ..function(vec![Instruction::Return])
         },
         FunctionProto {
-        inferred_name: None,
+            inferred_name: None,
             prologue_end: 0,
             name: Some("named".into()),
             ..function(vec![Instruction::Return])
         },
         FunctionProto {
-        inferred_name: None,
+            inferred_name: None,
             prologue_end: 0,
             name: Some(String::new()),
             ..function(vec![Instruction::Return])
         },
         FunctionProto {
-        inferred_name: None,
+            inferred_name: None,
             prologue_end: 0,
             arrow: true,
             ..function(vec![Instruction::Return])
         },
         FunctionProto {
-        inferred_name: None,
+            inferred_name: None,
             prologue_end: 0,
             generator: true,
             async_generator: false,
             ..function(vec![Instruction::Return])
         },
         FunctionProto {
-        inferred_name: None,
+            inferred_name: None,
             prologue_end: 0,
             is_method: true,
             ..function(vec![Instruction::Return])
         },
         FunctionProto {
-        inferred_name: None,
+            inferred_name: None,
             prologue_end: 0,
             parameter_count: 1,
             ..function(vec![Instruction::Return])
         },
         FunctionProto {
-        inferred_name: None,
+            inferred_name: None,
             prologue_end: 0,
             local_count: 1,
             ..function(vec![Instruction::Return])
         },
         FunctionProto {
-        inferred_name: None,
+            inferred_name: None,
             prologue_end: 0,
             upvalues: vec![Upvalue::ParentLocal(0)],
             ..function(vec![Instruction::Return])
         },
         FunctionProto {
-        inferred_name: None,
+            inferred_name: None,
             prologue_end: 0,
             upvalues: vec![Upvalue::ParentUpvalue(0)],
             ..function(vec![Instruction::Return])
         },
         FunctionProto {
-        inferred_name: None,
+            inferred_name: None,
             prologue_end: 0,
             upvalues: vec![Upvalue::ParentLocal(1)],
             ..function(vec![Instruction::Return])
         },
         FunctionProto {
-        inferred_name: None,
+            inferred_name: None,
             prologue_end: 0,
             upvalues: vec![Upvalue::ParentUpvalue(1)],
             ..function(vec![Instruction::Return])
@@ -2442,9 +2442,11 @@ fn emitted_closure_names_use_lossless_effective_function_metadata() {
         "static const kiln_string {}_function_name_0 = {{ 1, KILN_STRING_UTF16",
         high_emitted.symbol
     )));
-    assert!(high_emitted
-        .source
-        .contains(&format!("&{}_function_name_0", high_emitted.symbol)));
+    assert!(
+        high_emitted
+            .source
+            .contains(&format!("&{}_function_name_0", high_emitted.symbol))
+    );
 
     let mut written = function(vec![Instruction::Return]);
     written.name = Some("written".into());
@@ -6227,7 +6229,7 @@ fn closed_world_namespace_traces_a_captured_module_binding() {
         ],
         local_count: 2,
         functions: vec![FunctionProto {
-        inferred_name: None,
+            inferred_name: None,
             span: kiln_ir::Span::default(),
             prologue_end: 0,
             declared_length: 0,
@@ -6271,7 +6273,7 @@ fn closed_world_namespace_keeps_every_member_when_a_capture_escapes() {
         ],
         local_count: 2,
         functions: vec![FunctionProto {
-        inferred_name: None,
+            inferred_name: None,
             span: kiln_ir::Span::default(),
             prologue_end: 0,
             declared_length: 0,

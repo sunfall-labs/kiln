@@ -525,7 +525,11 @@ const fn takes_arithmetic_options(kind: engine::Kind) -> bool {
 fn calendar_argument(value: Option<&Value>) -> Result<Option<String>, ExecutionError> {
     match value {
         None | Some(Value::Undefined) => Ok(None),
-        Some(Value::String(text)) => Ok(Some(text.to_scalar_string().map_err(|_| type_error("calendar contains a lone surrogate"))?)),
+        Some(Value::String(text)) => {
+            Ok(Some(text.to_scalar_string().map_err(|_| {
+                type_error("calendar contains a lone surrogate")
+            })?))
+        }
         Some(Value::Temporal(built)) => match built.value().calendar_id() {
             Some(calendar) => Ok(Some(calendar.to_owned())),
             // A `PlainTime`, a `Duration` and an `Instant` carry no calendar, so none of the
@@ -551,7 +555,11 @@ fn calendar_argument(value: Option<&Value>) -> Result<Option<String>, ExecutionE
 fn zone_argument(value: Option<&Value>) -> Result<Option<String>, ExecutionError> {
     match value {
         None | Some(Value::Undefined) => Ok(None),
-        Some(Value::String(text)) => Ok(Some(text.to_scalar_string().map_err(|_| type_error("time zone contains a lone surrogate"))?)),
+        Some(Value::String(text)) => {
+            Ok(Some(text.to_scalar_string().map_err(|_| {
+                type_error("time zone contains a lone surrogate")
+            })?))
+        }
         Some(Value::Temporal(built)) if built.kind() == engine::Kind::ZonedDateTime => {
             Ok(built.value().time_zone_id())
         }
@@ -1000,9 +1008,15 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     Some(Value::String(unit)) => {
                         let mut options = engine::Options::default();
                         if matches!(method, Method::Total) {
-                            options.unit = Some(unit.to_scalar_string().map_err(|_| type_error("unit contains a lone surrogate"))?);
+                            options.unit = Some(
+                                unit.to_scalar_string()
+                                    .map_err(|_| type_error("unit contains a lone surrogate"))?,
+                            );
                         } else {
-                            options.smallest_unit = Some(unit.to_scalar_string().map_err(|_| type_error("unit contains a lone surrogate"))?);
+                            options.smallest_unit = Some(
+                                unit.to_scalar_string()
+                                    .map_err(|_| type_error("unit contains a lone surrogate"))?,
+                            );
                         }
                         options
                     }
@@ -1064,7 +1078,13 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             }
             Method::ToZonedDateTime => {
                 let (zone, time) = match arguments.first() {
-                    Some(Value::String(zone)) => (Some(zone.to_scalar_string().map_err(|_| type_error("time zone contains a lone surrogate"))?), None),
+                    Some(Value::String(zone)) => (
+                        Some(
+                            zone.to_scalar_string()
+                                .map_err(|_| type_error("time zone contains a lone surrogate"))?,
+                        ),
+                        None,
+                    ),
                     Some(item) if crate::is_an_object(item) => {
                         let zone = match self.read_property(item, "timeZone", instruction)? {
                             Value::Undefined => None,
@@ -1170,9 +1190,21 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             Value::Temporal(existing) => existing.value().to_kind(kind, None).map_err(thrown),
             Value::String(text) => {
                 if kind == engine::Kind::ZonedDateTime {
-                    engine::parse_zoned_date_time(&text.to_scalar_string().map_err(|_| type_error("temporal string contains a lone surrogate"))?, options).map_err(thrown)
+                    engine::parse_zoned_date_time(
+                        &text
+                            .to_scalar_string()
+                            .map_err(|_| type_error("temporal string contains a lone surrogate"))?,
+                        options,
+                    )
+                    .map_err(thrown)
                 } else {
-                    engine::parse(kind, &text.to_scalar_string().map_err(|_| type_error("temporal string contains a lone surrogate"))?).map_err(thrown)
+                    engine::parse(
+                        kind,
+                        &text
+                            .to_scalar_string()
+                            .map_err(|_| type_error("temporal string contains a lone surrogate"))?,
+                    )
+                    .map_err(thrown)
                 }
             }
             // A property bag is anything the language calls an object, which is the question

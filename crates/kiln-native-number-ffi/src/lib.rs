@@ -160,6 +160,7 @@ mod realm {
     use kiln_runtime::{
         Realm, RealmRuntime, RuntimeTurn, TimerId, WorkItem, duration_from_milliseconds,
     };
+    use kiln_string::StringUnits;
     use std::cell::{Cell, RefCell};
     use std::collections::{HashMap, HashSet};
     use std::hash::{Hash, Hasher};
@@ -167,7 +168,6 @@ mod realm {
     use std::ptr;
     use std::rc::Rc;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use kiln_string::StringUnits;
 
     type Entry = unsafe extern "C" fn(*mut c_void) -> i32;
     type RunWork = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> i32;

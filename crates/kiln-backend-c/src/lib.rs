@@ -2003,11 +2003,7 @@ fn render_constant_declarations(output: &mut String, program: &Program, symbol: 
                 // Headed like every other string constant: the digits are ASCII, so the
                 // static lands Latin1 and the keyed parse reads its payload in place.
                 let name = format!("{symbol}_bigint_digits_{index}");
-                render_static_string(
-                    output,
-                    &name,
-                    &kiln_ir::StringUnits::from(digits.as_str()),
-                );
+                render_static_string(output, &name, &kiln_ir::StringUnits::from(digits.as_str()));
                 writeln!(output, "#define {symbol}_constant_{index} (&{name})").unwrap();
                 writeln!(output, "static void *{symbol}_bigint_{index} = NULL;").unwrap();
             }

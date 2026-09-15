@@ -60,7 +60,9 @@ impl std::fmt::Display for NativeResultError {
             Self::LengthOverflow(length) => {
                 write!(formatter, "native result length {length} overflows usize")
             }
-            Self::InvalidStringPayload => formatter.write_str("native result string has invalid UTF-16 payload"),
+            Self::InvalidStringPayload => {
+                formatter.write_str("native result string has invalid UTF-16 payload")
+            }
             Self::TrailingBytes(count) => {
                 write!(formatter, "native result has {count} trailing bytes")
             }

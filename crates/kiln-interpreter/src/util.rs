@@ -3,7 +3,7 @@
 //! Provides utility functions including string formatting (`format`), inheritance helpers (`inherits`),
 //! inspection (`inspect`), and debug logging (`debuglog`).
 
-use crate::{is_callable, ExecutionError, Native, RealmId, Value};
+use crate::{ExecutionError, Native, RealmId, Value, is_callable};
 
 /// `node:util` property resolution.
 pub(crate) fn property(prop: &str) -> Option<Value> {

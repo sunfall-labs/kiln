@@ -61,7 +61,7 @@ fn statement(kind: StatementKind) -> Statement {
 
 fn function(name: &str, parameters: &[&str], body: Vec<Statement>) -> Statement {
     statement(StatementKind::Function(Box::new(kiln_hir::Function {
-            inferred_name: None,
+        inferred_name: None,
         strict: false,
         binds_own_name: false,
         asynchronous: false,
@@ -227,7 +227,7 @@ fn eval_code_binds_the_callers_names_to_its_first_slots() {
 #[test]
 fn strictness_reaches_every_body_written_inside_a_strict_one() {
     let mut inner = kiln_hir::Function {
-            inferred_name: None,
+        inferred_name: None,
         name: Some("inner".to_owned()),
         binds_own_name: true,
         arrow: false,
@@ -802,7 +802,7 @@ fn a_captured_defaulted_identifier_parameter_uses_its_positional_cell() {
         span: Span::default(),
     };
     let function = statement(StatementKind::Function(Box::new(kiln_hir::Function {
-            inferred_name: None,
+        inferred_name: None,
         strict: false,
         binds_own_name: false,
         asynchronous: false,
@@ -925,7 +925,7 @@ fn a_prototype_assigned_function_captures_its_module_binding() {
             property: "match".to_owned(),
             value: Box::new(Expression {
                 kind: ExpressionKind::Function(Box::new(kiln_hir::Function {
-            inferred_name: None,
+                    inferred_name: None,
                     strict: false,
                     binds_own_name: true,
                     asynchronous: false,
@@ -1014,7 +1014,7 @@ fn a_function_does_not_capture_a_local_it_declares_itself() {
 #[test]
 fn a_class_method_default_captures_its_module_binding() {
     let method = kiln_hir::Function {
-            inferred_name: None,
+        inferred_name: None,
         strict: false,
         binds_own_name: false,
         asynchronous: false,
@@ -1078,7 +1078,7 @@ fn a_class_method_default_captures_its_module_binding() {
 #[test]
 fn a_nested_class_resolves_the_private_name_declared_by_its_outer_class() {
     let read = kiln_hir::Function {
-            inferred_name: None,
+        inferred_name: None,
         strict: true,
         binds_own_name: false,
         asynchronous: false,
@@ -1113,7 +1113,7 @@ fn a_nested_class_resolves_the_private_name_declared_by_its_outer_class() {
         span: Span::default(),
     };
     let make = kiln_hir::Function {
-            inferred_name: None,
+        inferred_name: None,
         strict: true,
         binds_own_name: false,
         asynchronous: false,
@@ -1170,7 +1170,7 @@ fn a_nested_class_resolves_the_private_name_declared_by_its_outer_class() {
 #[test]
 fn a_class_constructor_inside_a_wrapper_captures_the_wrapper_binding() {
     let constructor = kiln_hir::Function {
-            inferred_name: None,
+        inferred_name: None,
         strict: false,
         binds_own_name: false,
         asynchronous: false,
@@ -1195,7 +1195,7 @@ fn a_class_constructor_inside_a_wrapper_captures_the_wrapper_binding() {
         span: Span::default(),
     };
     let wrapper = kiln_hir::Function {
-            inferred_name: None,
+        inferred_name: None,
         strict: false,
         binds_own_name: false,
         asynchronous: false,
@@ -1265,7 +1265,7 @@ fn an_exported_derived_constructor_captures_its_hidden_super_binding() {
             name: Some("Derived".to_owned()),
             superclass: Some(identifier("Base")),
             constructor: Some(kiln_hir::Function {
-            inferred_name: None,
+                inferred_name: None,
                 strict: false,
                 binds_own_name: false,
                 asynchronous: false,
@@ -1943,7 +1943,11 @@ fn a_template_concatenates_from_a_string() {
     let program = compile(&module(vec![statement(StatementKind::Expression(
         Expression {
             kind: ExpressionKind::Template {
-                quasis: vec![String::new().into(), String::new().into(), String::new().into()],
+                quasis: vec![
+                    String::new().into(),
+                    String::new().into(),
+                    String::new().into(),
+                ],
                 expressions: vec![number(1.0), number(2.0)],
             },
             span: Span::default(),

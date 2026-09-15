@@ -9,7 +9,7 @@ use kiln_runtime::node_net::TcpServerDriver;
 use kiln_runtime::node_stream::StreamDriver;
 
 use crate::{
-    is_callable, own_data_property, ExecutionError, Native, NodeObject, ObjectData, RealmId, Value,
+    ExecutionError, Native, NodeObject, ObjectData, RealmId, Value, is_callable, own_data_property,
 };
 
 #[derive(Debug)]

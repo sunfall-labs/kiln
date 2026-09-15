@@ -1,8 +1,8 @@
 //! One JSON grammar over JavaScript UTF-16 units.
 
 use crate::{
-    Node, ParseError, TextArena, UnitSource, TAG_ARRAY, TAG_FALSE, TAG_NULL, TAG_NUMBER,
-    TAG_OBJECT, TAG_STRING, TAG_TRUE,
+    Node, ParseError, TAG_ARRAY, TAG_FALSE, TAG_NULL, TAG_NUMBER, TAG_OBJECT, TAG_STRING, TAG_TRUE,
+    TextArena, UnitSource,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -27,11 +27,7 @@ pub(crate) fn number_from_parts(negative: bool, exact: Option<f64>, token: &[u8]
             .and_then(|text| text.parse::<f64>().ok())
             .unwrap_or(f64::NAN)
     });
-    if negative {
-        -magnitude
-    } else {
-        magnitude
-    }
+    if negative { -magnitude } else { magnitude }
 }
 
 #[inline]

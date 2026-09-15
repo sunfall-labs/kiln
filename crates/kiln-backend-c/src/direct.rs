@@ -417,7 +417,8 @@ impl DirectPlan {
                 if let GraphOp::CallMethod { name, args, .. } = op
                     && let Some(Constant::String(key)) = program.constants.get(*name as usize)
                 {
-                    let arities: &[u32] = match (key.to_scalar_string().ok().as_deref(), args.len()) {
+                    let arities: &[u32] = match (key.to_scalar_string().ok().as_deref(), args.len())
+                    {
                         (Some("map"), 1) | (Some("filter"), 1) => &[1, 2],
                         (Some("reduce"), 2) => &[2],
                         // `parallelMap`'s pooled lowering calls the typed entry from its chunk

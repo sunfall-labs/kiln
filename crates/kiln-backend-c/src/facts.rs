@@ -1156,7 +1156,7 @@ fn analyze_program_functions(program: &Program) -> Vec<FunctionFacts> {
     // Analyze top-level code as a function
     if !program.code.is_empty() {
         let top_level_proto = FunctionProto {
-        inferred_name: None,
+            inferred_name: None,
             asynchronous: false,
             name: Some("<top-level>".to_string()),
             arrow: false,
@@ -1287,7 +1287,11 @@ fn extract_function_facts(graph: &FunctionGraph, program: &Program) -> FunctionF
 
 fn format_constant_name(program: &Program, index: u32) -> String {
     if let Some(Constant::String(name)) = program.constants.get(index as usize) {
-        format!("\"{}\"", name.to_scalar_string().unwrap_or_else(|_| "<non-scalar>".into()))
+        format!(
+            "\"{}\"",
+            name.to_scalar_string()
+                .unwrap_or_else(|_| "<non-scalar>".into())
+        )
     } else {
         format!("#{index}")
     }
@@ -1497,7 +1501,7 @@ mod tests {
         ];
 
         let handler_proto = FunctionProto {
-        inferred_name: None,
+            inferred_name: None,
             asynchronous: false,
             name: Some("http_handler".to_string()),
             arrow: true,

@@ -29413,22 +29413,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         hint: PrimitiveHint,
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
-        // A `Temporal` value is an object in the specification's sense, and reducing one is a
-        // *call*: every `Temporal` type's `valueOf` throws on purpose, so that `date1 < date2`
-        // cannot quietly compare two NaNs and answer false in both directions. Passing it
-        // through as its own primitive is what made `Number(date)` answer NaN.
-        if !matches!(
-            value,
-            Value::Object(_)
-                | Value::Function(_)
-                | Value::Array(_)
-                | Value::Temporal(_)
-                // A `Date` is a value kind here rather than an object, but it reduces by
-                // *calling* for the same reason a `Temporal` does, and it is the one built-in
-                // where the answer depends on which hint was asked for. Passing it through as
-                // its own primitive is what made `date + date` add two instants.
-                | Value::Date(_)
-        ) {
+        // Any value that is an object reduces through @@toPrimitive or OrdinaryToPrimitive.
+        // Primitives pass through unchanged.
+        if !is_reflect_target(value) {
             return Ok(value.clone());
         }
         // `@@toPrimitive` overrides both and is told which hint it is answering. The hint spelling
@@ -29454,10 +29441,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // An `@@toPrimitive` that answers with another object ends the conversion rather
             // than being skipped: the program said this is how the value reduces, and falling
             // through to `valueOf` would answer with something it deliberately overrode.
-            return if matches!(
-                produced,
-                Value::Object(_) | Value::Function(_) | Value::Array(_)
-            ) {
+            return if is_reflect_target(&produced) {
                 Err(ExecutionError::NotPrimitive)
             } else {
                 Ok(produced)
@@ -29470,17 +29454,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
         for name in order {
             let method = self.read_property(value, name, instruction)?;
-            if !matches!(
-                method,
-                Value::Function(_) | Value::Native(_, _) | Value::Callback(_, _)
-            ) {
+            if !is_callable(&method) {
                 continue;
             }
             let result = self.call_value(&method, value.clone(), Vec::new(), instruction)?;
-            if !matches!(
-                result,
-                Value::Object(_) | Value::Function(_) | Value::Array(_)
-            ) {
+            if !is_reflect_target(&result) {
                 return Ok(result);
             }
         }
@@ -37001,43 +36979,84 @@ fn call_native(
             Value::String(out.into())
         }
         Native::DecodeUri | Native::DecodeUriComponent => {
-            let text = arguments
+            let units = arguments
                 .first()
-                .map_or_else(String::new, Value::to_display_string);
-            let bytes = text.as_bytes();
-            let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-            let mut index = 0;
-            while index < bytes.len() {
-                if bytes[index] != b'%' {
-                    out.push(bytes[index]);
-                    index += 1;
+                .cloned()
+                .unwrap_or(Value::Undefined)
+                .to_string_units_checked()?;
+            let is_decode_uri = matches!(native, Native::DecodeUri);
+            let len = units.len();
+            let mut out: Vec<u16> = Vec::with_capacity(len);
+            let mut k = 0;
+
+            let parse_hex_byte = |k: usize| -> Option<u8> {
+                let c1 = units.unit_at(k)?;
+                let c2 = units.unit_at(k + 1)?;
+                if c1 > 0x7F || c2 > 0x7F {
+                    return None;
+                }
+                let d1 = (c1 as u8 as char).to_digit(16)? as u8;
+                let d2 = (c2 as u8 as char).to_digit(16)? as u8;
+                Some((d1 << 4) | d2)
+            };
+
+            while k < len {
+                let unit = units.unit_at(k).unwrap_or(0);
+                if unit != b'%' as u16 {
+                    out.push(unit);
+                    k += 1;
                     continue;
                 }
-                // A `%` not followed by two hex digits is a URIError, not a literal percent.
-                let Some(pair) = text.get(index + 1..index + 3) else {
+                let Some(byte) = parse_hex_byte(k + 1) else {
                     return Err(ExecutionError::MalformedUri);
                 };
-                let Ok(byte) = u8::from_str_radix(pair, 16) else {
-                    return Err(ExecutionError::MalformedUri);
-                };
-                // `decodeURI` leaves the reserved set encoded: undoing it would change what the
-                // URI means, which is the one thing decoding must not do.
-                if matches!(native, Native::DecodeUri)
-                    && matches!(
-                        byte,
-                        b';' | b'/' | b'?' | b':' | b'@' | b'&' | b'=' | b'+' | b'$' | b',' | b'#'
-                    )
-                {
-                    out.extend_from_slice(&bytes[index..index + 3]);
+                k += 3;
+                if byte < 0x80 {
+                    if is_decode_uri
+                        && matches!(
+                            byte,
+                            b';' | b'/' | b'?' | b':' | b'@' | b'&' | b'=' | b'+' | b'$' | b',' | b'#'
+                        )
+                    {
+                        out.push(b'%' as u16);
+                        out.push(units.unit_at(k - 2).unwrap_or(0));
+                        out.push(units.unit_at(k - 1).unwrap_or(0));
+                    } else {
+                        out.push(byte as u16);
+                    }
                 } else {
-                    out.push(byte);
+                    let (n, min_cp, mut cp) = match byte {
+                        0xC2..=0xDF => (2, 0x80u32, (byte & 0x1F) as u32),
+                        0xE0..=0xEF => (3, 0x800u32, (byte & 0x0F) as u32),
+                        0xF0..=0xF4 => (4, 0x10000u32, (byte & 0x07) as u32),
+                        _ => return Err(ExecutionError::MalformedUri),
+                    };
+                    for _ in 1..n {
+                        if k >= len || units.unit_at(k) != Some(b'%' as u16) {
+                            return Err(ExecutionError::MalformedUri);
+                        }
+                        let Some(cont) = parse_hex_byte(k + 1) else {
+                            return Err(ExecutionError::MalformedUri);
+                        };
+                        if (cont & 0xC0) != 0x80 {
+                            return Err(ExecutionError::MalformedUri);
+                        }
+                        k += 3;
+                        cp = (cp << 6) | ((cont & 0x3F) as u32);
+                    }
+                    if cp < min_cp || (0xD800..=0xDFFF).contains(&cp) || cp > 0x10FFFF {
+                        return Err(ExecutionError::MalformedUri);
+                    }
+                    if cp < 0x10000 {
+                        out.push(cp as u16);
+                    } else {
+                        let v = cp - 0x10000;
+                        out.push(0xD800 + ((v >> 10) as u16));
+                        out.push(0xDC00 + ((v & 0x3FF) as u16));
+                    }
                 }
-                index += 3;
             }
-            match String::from_utf8(out) {
-                Ok(decoded) => Value::String(decoded.into()),
-                Err(_) => return Err(ExecutionError::MalformedUri),
-            }
+            Value::String(StringUnits::from_units(&out))
         }
         Native::ObjectSetPrototypeOf => {
             let target = arguments.first().cloned().unwrap_or(Value::Undefined);
@@ -39344,7 +39363,11 @@ fn has_property_checked(
     key: &Value,
 ) -> Result<bool, ExecutionError> {
     let units = key.property_key_units_checked()?;
-    Ok(has_property_key(intrinsics, target, PropertyKeyRef::Units(&units)))
+    Ok(has_property_key(
+        intrinsics,
+        target,
+        PropertyKeyRef::Units(&units),
+    ))
 }
 
 #[cfg(test)]
@@ -41069,7 +41092,11 @@ fn delete_property_checked(
     key: &Value,
 ) -> Result<bool, ExecutionError> {
     let units = key.property_key_units_checked()?;
-    Ok(delete_property_key(intrinsics, target, PropertyKeyRef::Units(&units)))
+    Ok(delete_property_key(
+        intrinsics,
+        target,
+        PropertyKeyRef::Units(&units),
+    ))
 }
 
 #[cfg(test)]
@@ -45313,18 +45340,16 @@ fn define_function_name(
     let name = match key {
         // A symbol names the property after its description, in brackets; one with no description
         // names it nothing, and a prefix is still applied to that nothing.
-        Value::Symbol(symbol) => {
-            match symbol.description_units() {
-                None => StringUnits::default(),
-                Some(description) => {
-                    let mut builder = StringUnitsBuilder::new();
-                    builder.push_ascii("[")?;
-                    builder.push_units(&description)?;
-                    builder.push_ascii("]")?;
-                    builder.finish()
-                }
+        Value::Symbol(symbol) => match symbol.description_units() {
+            None => StringUnits::default(),
+            Some(description) => {
+                let mut builder = StringUnitsBuilder::new();
+                builder.push_ascii("[")?;
+                builder.push_units(&description)?;
+                builder.push_ascii("]")?;
+                builder.finish()
             }
-        }
+        },
         other => {
             let key = other.property_key_units_checked()?;
             // A private name is spelled the way the program wrote it rather than the way the
@@ -48136,7 +48161,9 @@ fn loose_equal_checked(left: &Value, right: &Value) -> Result<bool, ExecutionErr
         // Nullish compares equal to itself and to nothing else -- not even to 0 or "".
         (Value::Undefined | Value::Null, _) | (_, Value::Undefined | Value::Null) => false,
         // A boolean converts to a number *first*, so `[] == false` is true by way of "" and 0.
-        (Value::Boolean(value), other) => loose_equal_checked(&Value::Number(f64::from(*value)), other)?,
+        (Value::Boolean(value), other) => {
+            loose_equal_checked(&Value::Number(f64::from(*value)), other)?
+        }
         (other, Value::Boolean(value)) => {
             loose_equal_checked(other, &Value::Number(f64::from(*value)))?
         }
