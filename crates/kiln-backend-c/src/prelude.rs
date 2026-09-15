@@ -1062,6 +1062,7 @@ method_ids! {
     // because the refusal does not need to be told which member it is: the instruction that
     // called it already carries the name, so this answers `CallMethod(readFileSync)`.
     (KILN_C99_METHOD_NODE_BUILTIN_UNMATERIALIZED, 482, Direct; 0, 0),
+    (KILN_C99_METHOD_REFLECT_DEFINE_PROPERTY, 512, Generic; 0, 0),
     (KILN_C99_METHOD_REFLECT_GET_PROTOTYPE_OF, 484, Generic; 0, 0),
     (KILN_C99_METHOD_GENERATOR_THROW, 485, Generic; 0, 0),
     (KILN_C99_METHOD_TEXT_DECODER_DECODE, 486, Generic; 0, 0),
@@ -1357,6 +1358,8 @@ builtin_surface! {
     (KILN_C99_BUILTIN_JSON, "JSON", "stringify", code(KILN_C99_METHOD_JSON_STRINGIFY)),
     (KILN_C99_BUILTIN_JSON, "JSON", "@@toStringTag", text("JSON")),
 
+    (KILN_C99_BUILTIN_REFLECT, "Reflect", "defineProperty",
+     code(KILN_C99_METHOD_REFLECT_DEFINE_PROPERTY)),
     (KILN_C99_BUILTIN_REFLECT, "Reflect", "deleteProperty",
      code(KILN_C99_METHOD_REFLECT_DELETE_PROPERTY)),
     (KILN_C99_BUILTIN_REFLECT, "Reflect", "apply", code(KILN_C99_METHOD_REFLECT_APPLY)),
@@ -1528,9 +1531,6 @@ builtin_backlog! {
      "not implemented; the raw-JSON marker has no representation in this value kernel"),
     ("JSON", "isRawJSON",
      "not implemented; the raw-JSON marker has no representation in this value kernel"),
-    ("Reflect", "defineProperty",
-     "answers a boolean where Object.defineProperty answers the target, so it is not the \
-              same operation under another name"),
     ("Reflect", "setPrototypeOf",
      "answers a boolean where Object.setPrototypeOf answers the target, so it is not the \
               same operation under another name"),
@@ -3403,6 +3403,7 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_REFLECT_DELETE_PROPERTY),
     emit_method_define!(KILN_C99_METHOD_REFLECT_APPLY),
     emit_method_define!(KILN_C99_METHOD_REFLECT_CONSTRUCT),
+    emit_method_define!(KILN_C99_METHOD_REFLECT_DEFINE_PROPERTY),
     emit_method_define!(KILN_C99_METHOD_REFLECT_GET_PROTOTYPE_OF),
     emit_method_define!(KILN_C99_METHOD_GENERATOR_THROW),
     r#"

@@ -16715,17 +16715,27 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 Ok(target)
             }
-            // `Object.keys` on a proxy is the `ownKeys` trap; the pure implementation reads a
-            // property store the proxy does not have.
+            // `Object.keys` on a proxy is the `ownKeys` trap filtered through `getOwnPropertyDescriptor`
+            // for enumerability; the pure implementation reads a property store the proxy does not have.
             Native::ObjectKeys if matches!(arguments.first(), Some(Value::Proxy(_))) => {
                 let target = arguments.first().cloned().unwrap_or(Value::Undefined);
-                let keys = self.own_keys(&target, instruction)?;
-                Ok(Value::Array(ArrayData::new(
-                    keys.into_iter()
-                        .filter(|key| !is_reserved_units(key))
-                        .map(Value::String)
-                        .collect(),
-                )))
+                let mut kept = Vec::new();
+                for key in self.own_keys(&target, instruction)? {
+                    if is_reserved_units(&key) {
+                        continue;
+                    }
+                    let described =
+                        self.proxy_descriptor(&target, &Value::String(key.clone()), instruction)?;
+                    if !is_an_object(&described) {
+                        continue;
+                    }
+                    let descriptor = self.read_descriptor(&described, instruction)?;
+                    if !descriptor.enumerable.unwrap_or(false) {
+                        continue;
+                    }
+                    kept.push(Value::String(key));
+                }
+                Ok(Value::Array(ArrayData::new(kept)))
             }
             // `map.forEach(cb)` calls back into the program, so it belongs here rather than in
             // the pure table. A Set passes its value as both arguments, which is the same shape

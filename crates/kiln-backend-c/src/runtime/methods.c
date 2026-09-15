@@ -491,6 +491,7 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_REFLECT_DELETE_PROPERTY: return "deleteProperty";
     case KILN_C99_METHOD_REFLECT_APPLY: return "apply";
     case KILN_C99_METHOD_REFLECT_CONSTRUCT: return "construct";
+    case KILN_C99_METHOD_REFLECT_DEFINE_PROPERTY: return "defineProperty";
     case KILN_C99_METHOD_REFLECT_GET_PROTOTYPE_OF: return "getPrototypeOf";
     case KILN_C99_METHOD_GENERATOR_THROW: return "throw";
     case KILN_C99_METHOD_PROXY_REVOCABLE: return "revocable";
