@@ -258,7 +258,8 @@ def main() -> int:
         except ResultError:
             snapshot = "unavailable"
         evidence_path = args.log or args.directory or "."
-        failure = {"schema": 1, "verdict": "infrastructure", "source": {"kind": args.kind, "name": args.kind, "code_snapshot_sha256": snapshot}, "outcomes": {"total": 0, "passed": 0, "failed": 0}, "evidence": {"log": str(Path(evidence_path).resolve())}, "error": str(exc)}
+        step_name = args.name if args.name != "gate step" else args.kind
+        failure = {"schema": 1, "verdict": "infrastructure", "source": {"kind": args.kind, "name": step_name, "code_snapshot_sha256": snapshot}, "outcomes": {"total": 0, "passed": 0, "failed": 0}, "evidence": {"log": str(Path(evidence_path).resolve())}, "error": str(exc)}
         write_atomic(args.out, failure)
         print(f"gate result: {exc}", file=__import__("sys").stderr)
         return 1

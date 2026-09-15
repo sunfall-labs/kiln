@@ -718,7 +718,7 @@ static kiln_value kiln_cli_ascii_value(const char *text, size_t length) {
     header.unit_len = length > UINT32_MAX ? 0 : (uint32_t)length;
     header.flags = KILN_STRING_LATIN1;
     header.data = text;
-    value.ptr = &header;
+    value.ptr = (const char *)&header;
     value.len = header.unit_len;
     return value;
 }
@@ -1173,7 +1173,7 @@ static kiln_value kiln_cli_launcher_ascii(const char *text, size_t length) {
     header.unit_len = length > UINT32_MAX ? 0 : (uint32_t)length;
     header.flags = KILN_STRING_LATIN1;
     header.data = text;
-    value.ptr = &header;
+    value.ptr = (const char *)&header;
     value.len = header.unit_len;
     return value;
 }
@@ -1965,8 +1965,12 @@ int kiln_module_test(kiln_host *host, kiln_value *result) {
     memcpy(&arguments[9].bits, &exponent_threshold, sizeof(exponent_threshold));
     arguments[10].tag = KILN_VALUE_NUMBER;
     memcpy(&arguments[10].bits, &tiny, sizeof(tiny));
+    static kiln_string text_header;
+    text_header.unit_len = sizeof(text) - 1;
+    text_header.flags = KILN_STRING_LATIN1;
+    text_header.data = text;
     arguments[11].tag = KILN_VALUE_STRING;
-    arguments[11].ptr = text;
+    arguments[11].ptr = (const char *)&text_header;
     arguments[11].len = sizeof(text) - 1;
     return host->call(host->context, 1, 12, arguments, result);
 }
@@ -2016,29 +2020,36 @@ int main(int argc, char **argv) {
 "#;
 
     const FAILURE_REPORTER_SOURCE: &str = r#"
+#include <string.h>
 #include "kiln_host.h"
 
 extern void kiln_cli_report_failure_in(int status, kiln_value value, const char *phase);
 
+static kiln_value ascii_val(const char *text) {
+    static kiln_string h[3];
+    static size_t idx = 0;
+    kiln_string *header = &h[idx++];
+    header->unit_len = (uint32_t)strlen(text);
+    header->flags = KILN_STRING_LATIN1;
+    header->data = text;
+    kiln_value val = { .tag = KILN_VALUE_STRING, .flags = KILN_VALUE_FLAG_OWNED_STRING, .len = header->unit_len, .bits = 0 };
+    val.ptr = (const char *)header;
+    return val;
+}
+
 int main(void) {
     kiln_value value = { .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 };
     kiln_cli_report_failure_in(KILN_C99_CONTROL_ERROR, value, NULL);
-    value.tag = KILN_VALUE_STRING;
-    value.flags = KILN_VALUE_FLAG_OWNED_STRING;
-    value.ptr = "module=node:http instruction=7 method=240 receiver_tag=18";
-    value.len = sizeof("module=node:http instruction=7 method=240 receiver_tag=18") - 1;
+    value = ascii_val("module=node:http instruction=7 method=240 receiver_tag=18");
     kiln_cli_report_failure_in(KILN_C99_CONTROL_ERROR, value, NULL);
     value = (kiln_value){ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 };
     kiln_cli_report_failure_in(KILN_C99_OUT_OF_MEMORY, value, NULL);
     kiln_cli_report_failure_in(KILN_C99_CALL_DEPTH_ERROR, value, NULL);
     kiln_cli_report_failure_in(KILN_C99_UNINITIALIZED_ERROR, value, NULL);
     kiln_cli_report_failure_in(KILN_C99_HOST_ERROR, value, NULL);
-    value.tag = KILN_VALUE_STRING;
-    value.ptr = "filesystem access";
-    value.len = sizeof("filesystem access") - 1;
+    value = ascii_val("filesystem access");
     kiln_cli_report_failure_in(KILN_C99_HOST_ERROR, value, NULL);
-    value.ptr = "terminal I/O";
-    value.len = sizeof("terminal I/O") - 1;
+    value = ascii_val("terminal I/O");
     kiln_cli_report_failure_in(KILN_C99_HOST_ERROR, value, NULL);
     value = (kiln_value){ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 };
     kiln_cli_report_failure_in(KILN_C99_HOST_ERROR, value, "the turn loop");

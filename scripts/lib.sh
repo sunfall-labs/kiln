@@ -11,6 +11,15 @@ kiln_repo_root() {
 	cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd
 }
 
+if [[ $(uname -s) == "Darwin" ]]; then
+	if [[ -z ${DEVELOPER_DIR:-} && -d /Library/Developer/CommandLineTools ]]; then
+		export DEVELOPER_DIR="/Library/Developer/CommandLineTools"
+	fi
+	if [[ -z ${SDKROOT:-} && -d /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk ]]; then
+		export SDKROOT="/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
+	fi
+fi
+
 # Copy stdin to the GitHub job summary as well as to the log, so a local run and a CI run show
 # the same text and the summary never drifts from what the log says happened.
 kiln_block() {

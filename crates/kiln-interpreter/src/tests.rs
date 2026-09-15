@@ -358,6 +358,32 @@ fn wide_backed_ascii_intrinsic_keys_follow_narrow_lookup() {
     );
 }
 
+#[test]
+fn non_ascii_property_reads_follow_stored_properties_and_prototype_chain() {
+    let program = no_program();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: std::collections::VecDeque::new(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+    let unicode_name = "℘";
+    let unicode_units = StringUnits::from(unicode_name);
+
+    let parent_data = ObjectData::default();
+    let parent = Rc::new(RefCell::new(parent_data));
+    parent.borrow_mut().set(unicode_name, Value::Number(42.0));
+
+    let mut child_data = ObjectData::default();
+    child_data.set_prototype(Value::Object(parent));
+    let child = Value::Object(Rc::new(RefCell::new(child_data)));
+
+    let read = vm.read_property_key(&child, PropertyKeyRef::Units(&unicode_units), 0);
+    assert_eq!(read.unwrap(), Value::Number(42.0));
+}
+
 fn string_index_of(text: &str, needle: &str, start: Option<f64>) -> f64 {
     let mut arguments = vec![Value::String(needle.to_owned().into())];
     if let Some(start) = start {

@@ -29413,9 +29413,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         hint: PrimitiveHint,
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
-        // Any value that is an object reduces through @@toPrimitive or OrdinaryToPrimitive.
-        // Primitives pass through unchanged.
-        if !is_reflect_target(value) {
+        // A `Temporal` value is an object in the specification's sense, and reducing one is a
+        // *call*: every `Temporal` type's `valueOf` throws on purpose, so that `date1 < date2`
+        // cannot quietly compare two NaNs and answer false in both directions. Passing it
+        // through as its own primitive is what made `Number(date)` answer NaN.
+        if !matches!(
+            value,
+            Value::Object(_)
+                | Value::Function(_)
+                | Value::Array(_)
+                | Value::Temporal(_)
+                // A `Date` is a value kind here rather than an object, but it reduces by
+                // *calling* for the same reason a `Temporal` does, and it is the one built-in
+                // where the answer depends on which hint was asked for. Passing it through as
+                // its own primitive is what made `date + date` add two instants.
+                | Value::Date(_)
+                | Value::RegExp(_)
+        ) {
             return Ok(value.clone());
         }
         // `@@toPrimitive` overrides both and is told which hint it is answering. The hint spelling
@@ -29441,7 +29455,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // An `@@toPrimitive` that answers with another object ends the conversion rather
             // than being skipped: the program said this is how the value reduces, and falling
             // through to `valueOf` would answer with something it deliberately overrode.
-            return if is_reflect_target(&produced) {
+            return if matches!(
+                produced,
+                Value::Object(_) | Value::Function(_) | Value::Array(_)
+            ) {
                 Err(ExecutionError::NotPrimitive)
             } else {
                 Ok(produced)
@@ -29454,11 +29471,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
         for name in order {
             let method = self.read_property(value, name, instruction)?;
-            if !is_callable(&method) {
+            if !matches!(
+                method,
+                Value::Function(_) | Value::Native(_, _) | Value::Callback(_, _)
+            ) {
                 continue;
             }
             let result = self.call_value(&method, value.clone(), Vec::new(), instruction)?;
-            if !is_reflect_target(&result) {
+            if !matches!(
+                result,
+                Value::Object(_) | Value::Function(_) | Value::Array(_)
+            ) {
                 return Ok(result);
             }
         }
@@ -30765,12 +30788,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         {
             return Err(ExecutionError::DataViewOutOfBounds);
         }
-        let accessor = self.stored_property_key(target, key);
+        let stored = self.stored_property_key(target, key);
         // `Object.prototype.__proto__` is an accessor and the tables have no room for one, so
         // the read reaches it here. An own or inherited property of that name shadows it exactly
         // as it would shadow any accessor further up the chain, which is why this runs only when
         // the walk above found nothing.
-        if key.matches_ascii("__proto__") && accessor.is_none() && is_reflect_target(target) {
+        if key.matches_ascii("__proto__") && stored.is_none() && is_reflect_target(target) {
             // `[[GetPrototypeOf]]`, which a proxy answers with a handler rather than a stored
             // link -- so reading `p.__proto__` reports the proxy's prototype, not its target's.
             return self.proxy_get_prototype_of(target, instruction);
@@ -30780,7 +30803,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // `%Function.prototype%`, both halves are `%ThrowTypeError%`, and so a read of either
         // name through anything callable throws -- unless the program gave that function an own
         // property of the name, which shadows the accessor exactly as it would any other.
-        if accessor.is_none()
+        if stored.is_none()
             && key
                 .known_ascii()
                 .is_some_and(|name| is_restricted_function_property(target, name.as_ref()))
@@ -30790,7 +30813,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // The same shape once more: an accessor a built-in *prototype* owns is a call, and the
         // tables have no room for one. `Map.prototype.size` is a `TypeError` for exactly this
         // reason -- the prototype is not a Map -- where the table answered `undefined`.
-        if accessor.is_none()
+        if stored.is_none()
             && let Some(builtin) = key
                 .known_ascii()
                 .and_then(|name| machine_accessor(target, name.as_ref()))
@@ -30800,7 +30823,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // And once more for `Temporal`, whose forty getters live in a table of the same shape.
         // Reading one off the prototype is the getter's own TypeError -- the prototype is not a
         // duration -- where the table answered `undefined`.
-        if accessor.is_none()
+        if stored.is_none()
             && let Value::Native(Native::Temporal(temporal::Op::Prototype(kind)), _) = target
             && let Some(field) = key
                 .known_ascii()
@@ -30813,12 +30836,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 instruction,
             );
         }
-        match accessor {
+        match stored {
             Some(Property::Accessor { get, .. }) => match get {
                 Some(getter) => self.call_value(&getter, target.clone(), Vec::new(), instruction),
                 // Setter-only, so there is nothing to read.
                 None => Ok(Value::Undefined),
             },
+            Some(Property::Value(value)) => Ok(value),
             _ => {
                 let found = self.property_key(target, key);
                 // Nothing in any store, so a proxy further up the chain is the one thing that

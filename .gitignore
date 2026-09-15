@@ -50,3 +50,4 @@ node_modules/
 .scratch/bench-io-test.tmp
 .kiln-shape-keys-probe.tmp
 gmon.out
+__pycache__/

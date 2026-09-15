@@ -2884,9 +2884,15 @@ pub fn build_function_graph(
 
     graph.blocks = basic_blocks;
     eliminate_dead_code(&mut graph);
-    canonicalize_loop_preheaders(&mut graph);
-    hoist_loop_invariants(&mut graph);
-    eliminate_common_subexpressions(&mut graph);
+    let has_suspend = graph
+        .blocks
+        .iter()
+        .any(|b| matches!(b.terminator, Terminator::Suspend { .. }));
+    if !has_suspend {
+        canonicalize_loop_preheaders(&mut graph);
+        hoist_loop_invariants(&mut graph);
+        eliminate_common_subexpressions(&mut graph);
+    }
     simplify_trivial_phis(&mut graph);
     eliminate_dead_code(&mut graph);
     compact_value_ids(&mut graph);
@@ -3001,7 +3007,20 @@ pub fn compute_dominators(graph: &FunctionGraph) -> HashMap<BlockId, HashSet<Blo
     if graph.blocks.is_empty() {
         return dominators;
     }
-    let all_blocks: HashSet<BlockId> = graph.blocks.iter().map(|b| b.id).collect();
+    let mut reachable = HashSet::new();
+    let mut worklist = vec![graph.entry_block];
+    reachable.insert(graph.entry_block);
+    while let Some(bid) = worklist.pop() {
+        if let Some(block) = graph.block(bid) {
+            for &succ in &block.successors {
+                if reachable.insert(succ) {
+                    worklist.push(succ);
+                }
+            }
+        }
+    }
+
+    let all_reachable: HashSet<BlockId> = reachable.clone();
 
     let mut entry_dom = HashSet::new();
     entry_dom.insert(graph.entry_block);
@@ -3009,7 +3028,13 @@ pub fn compute_dominators(graph: &FunctionGraph) -> HashMap<BlockId, HashSet<Blo
 
     for block in &graph.blocks {
         if block.id != graph.entry_block {
-            dominators.insert(block.id, all_blocks.clone());
+            if reachable.contains(&block.id) {
+                dominators.insert(block.id, all_reachable.clone());
+            } else {
+                let mut self_dom = HashSet::new();
+                self_dom.insert(block.id);
+                dominators.insert(block.id, self_dom);
+            }
         }
     }
 
@@ -3017,15 +3042,26 @@ pub fn compute_dominators(graph: &FunctionGraph) -> HashMap<BlockId, HashSet<Blo
     while changed {
         changed = false;
         for block in &graph.blocks {
-            if block.id == graph.entry_block {
+            if !reachable.contains(&block.id) || block.id == graph.entry_block {
                 continue;
             }
-            let mut new_dom = all_blocks.clone();
+            let mut new_dom: Option<HashSet<BlockId>> = None;
             for &pred in &block.predecessors {
+                if !reachable.contains(&pred) {
+                    continue;
+                }
                 if let Some(pred_dom) = dominators.get(&pred) {
-                    new_dom = new_dom.intersection(pred_dom).copied().collect();
+                    match &mut new_dom {
+                        Some(current) => {
+                            *current = current.intersection(pred_dom).copied().collect();
+                        }
+                        None => {
+                            new_dom = Some(pred_dom.clone());
+                        }
+                    }
                 }
             }
+            let mut new_dom = new_dom.unwrap_or_default();
             new_dom.insert(block.id);
 
             if dominators.get(&block.id) != Some(&new_dom) {
@@ -3412,13 +3448,14 @@ pub fn compute_dominator_tree(
             continue;
         }
         if let Some(doms) = dominators.get(&block.id) {
+            let mut candidates: Vec<BlockId> =
+                doms.iter().copied().filter(|&d| d != block.id).collect();
+            candidates.sort_by_key(|b| b.0);
             let mut best_idom: Option<(BlockId, usize)> = None;
-            for &d in doms {
-                if d != block.id {
-                    let d_size = dominators.get(&d).map_or(0, |s| s.len());
-                    if best_idom.is_none() || d_size > best_idom.unwrap().1 {
-                        best_idom = Some((d, d_size));
-                    }
+            for d in candidates {
+                let d_size = dominators.get(&d).map_or(0, |s| s.len());
+                if best_idom.is_none() || d_size > best_idom.unwrap().1 {
+                    best_idom = Some((d, d_size));
                 }
             }
             if let Some((idom, _)) = best_idom {
