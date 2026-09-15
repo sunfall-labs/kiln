@@ -36,3 +36,14 @@ console.log("string", named.join("|"));
 // 7. A small numeric array, below the floor, still through the same lowering.
 const small = ([3, 1, 2] as any).parallelMap((x: number) => x * x);
 console.log("small", small.join(","));
+
+// 8. Transcendental and trigonometric math builtins in parallelMap.
+const bigTrig: number[] = [];
+for (let i = 0; i < 50000; i++) bigTrig.push(i);
+const trig = (bigTrig as any).parallelMap((x: number) => {
+    return Math.sin(x) + Math.cos(x) + Math.hypot(x, 1) + Math.log(x + 1) + Math.exp(-x);
+});
+let trigSum = 0;
+for (let i = 0; i < 100; i++) trigSum += Math.round(trig[i] * 1000);
+console.log("transcendental", trig.length, trigSum);
+

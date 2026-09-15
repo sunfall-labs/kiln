@@ -380,6 +380,27 @@ pub(super) fn emit_call_method(
             (Some("max"), 2) => format!(
                 "((isnan({a}) || isnan({b})) ? NAN : (({a} > {b} || ({a} == 0.0 && {b} == 0.0 && !signbit({a}))) ? {a} : {b}))"
             ),
+            (Some("sin"), 1) => format!("sin({a})"),
+            (Some("cos"), 1) => format!("cos({a})"),
+            (Some("tan"), 1) => format!("tan({a})"),
+            (Some("asin"), 1) => format!("asin({a})"),
+            (Some("acos"), 1) => format!("acos({a})"),
+            (Some("atan"), 1) => format!("atan({a})"),
+            (Some("atan2"), 2) => format!("atan2({a}, {b})"),
+            (Some("sinh"), 1) => format!("sinh({a})"),
+            (Some("cosh"), 1) => format!("cosh({a})"),
+            (Some("tanh"), 1) => format!("tanh({a})"),
+            (Some("asinh"), 1) => format!("asinh({a})"),
+            (Some("acosh"), 1) => format!("acosh({a})"),
+            (Some("atanh"), 1) => format!("atanh({a})"),
+            (Some("exp"), 1) => format!("exp({a})"),
+            (Some("expm1"), 1) => format!("expm1({a})"),
+            (Some("log"), 1) => format!("log({a})"),
+            (Some("log2"), 1) => format!("log2({a})"),
+            (Some("log10"), 1) => format!("log10({a})"),
+            (Some("log1p"), 1) => format!("log1p({a})"),
+            (Some("cbrt"), 1) => format!("cbrt({a})"),
+            (Some("hypot"), 2) => format!("hypot({a}, {b})"),
             _ => unreachable!("PARALLEL_MATH names only these"),
         };
         writeln!(
@@ -792,6 +813,55 @@ pub(super) fn emit_call_method(
                 a1 = args[1].0,
                 v = v
             )),
+            ("sin", 1)
+            | ("cos", 1)
+            | ("tan", 1)
+            | ("asin", 1)
+            | ("acos", 1)
+            | ("atan", 1)
+            | ("sinh", 1)
+            | ("cosh", 1)
+            | ("tanh", 1)
+            | ("asinh", 1)
+            | ("acosh", 1)
+            | ("atanh", 1)
+            | ("exp", 1)
+            | ("expm1", 1)
+            | ("log", 1)
+            | ("log2", 1)
+            | ("log10", 1)
+            | ("log1p", 1)
+            | ("cbrt", 1) => {
+                let func_name = &key_str;
+                Some(format!(
+                    "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
+                                 if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}))) {{ \
+                                     double d; memcpy(&d, &v{a0}, sizeof(d)); \
+                                     v{v} = kiln_c99_val_from_double({func_name}(d)); \
+                                     handled = 1; \
+                                 }} \
+                             }}",
+                    o = object.0,
+                    a0 = args[0].0,
+                    v = v
+                ))
+            }
+            ("atan2", 2) | ("hypot", 2) => {
+                let func_name = &key_str;
+                Some(format!(
+                    "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
+                                 if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}) && KILN_VAL_IS_NUMBER(v{a1}))) {{ \
+                                     double d0, d1; memcpy(&d0, &v{a0}, sizeof(d0)); memcpy(&d1, &v{a1}, sizeof(d1)); \
+                                     v{v} = kiln_c99_val_from_double({func_name}(d0, d1)); \
+                                     handled = 1; \
+                                 }} \
+                             }}",
+                    o = object.0,
+                    a0 = args[0].0,
+                    a1 = args[1].0,
+                    v = v
+                ))
+            }
             _ => None,
         }
     } else {

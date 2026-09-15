@@ -650,19 +650,9 @@ fn intrinsic_results(graph: &FunctionGraph, program: &Program) -> HashMap<ValueI
                     Some(Constant::String(s)) => s.to_scalar_string().ok()?,
                     _ => return None,
                 };
-                let intrinsic = matches!(
-                    (key.as_str(), args.len()),
-                    ("sqrt", 1)
-                        | ("abs", 1)
-                        | ("floor", 1)
-                        | ("ceil", 1)
-                        | ("round", 1)
-                        | ("trunc", 1)
-                        | ("sign", 1)
-                        | ("min", 2)
-                        | ("max", 2)
-                        | ("pow", 2)
-                );
+                let intrinsic = crate::parallel::PARALLEL_MATH
+                    .iter()
+                    .any(|(k, n)| key == *k && *n == args.len());
                 intrinsic.then_some((*v, Proven::Number))
             }
             _ => None,

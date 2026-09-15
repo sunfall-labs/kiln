@@ -226,6 +226,7 @@ pub fn emit_parallel_chunk(output: &mut String, symbol: &str, index: usize, para
     const kiln_val *src = (const kiln_val *)in;\n\
     kiln_val *dst = (kiln_val *)out;\n\
     for (size_t i = start; i < end; ++i) {{\n\
+        if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
         double d; memcpy(&d, &src[i], sizeof d);\n\
         double r = {symbol}_fn_{index}_p(1, d{index_arg});\n\
         if (KILN_UNLIKELY(kiln_c99_typed_failed(r))) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\

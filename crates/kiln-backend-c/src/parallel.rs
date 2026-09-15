@@ -25,6 +25,27 @@ pub const PARALLEL_MATH: &[(&str, usize)] = &[
     ("min", 2),
     ("max", 2),
     ("pow", 2),
+    ("sin", 1),
+    ("cos", 1),
+    ("tan", 1),
+    ("asin", 1),
+    ("acos", 1),
+    ("atan", 1),
+    ("atan2", 2),
+    ("sinh", 1),
+    ("cosh", 1),
+    ("tanh", 1),
+    ("asinh", 1),
+    ("acosh", 1),
+    ("atanh", 1),
+    ("exp", 1),
+    ("expm1", 1),
+    ("log", 1),
+    ("log2", 1),
+    ("log10", 1),
+    ("log1p", 1),
+    ("cbrt", 1),
+    ("hypot", 2),
 ];
 
 /// Whether `graph` (the body of `proto`) may be lowered to a `parallelMap` chunk.
@@ -96,7 +117,10 @@ pub fn parallel_safe(graph: &FunctionGraph, proto: &FunctionProto, program: &Pro
                     match op {
                         GraphOp::Const { constant, .. } => matches!(
                             constant,
-                            Constant::Number(_) | Constant::Boolean(_) | Constant::Undefined
+                            Constant::Number(_)
+                                | Constant::Boolean(_)
+                                | Constant::Undefined
+                                | Constant::Null
                         ),
                         GraphOp::LoadLocal(_)
                         | GraphOp::StoreLocal { .. }
@@ -104,7 +128,13 @@ pub fn parallel_safe(graph: &FunctionGraph, proto: &FunctionProto, program: &Pro
                         GraphOp::LoadBuiltin(Builtin::Math) => true,
                         GraphOp::Unary { op, .. } => matches!(
                             op,
-                            UnaryOp::Plus | UnaryOp::Negate | UnaryOp::Not | UnaryOp::BitwiseNot
+                            UnaryOp::Plus
+                                | UnaryOp::Negate
+                                | UnaryOp::Not
+                                | UnaryOp::BitwiseNot
+                                | UnaryOp::ToNumeric
+                                | UnaryOp::Increment
+                                | UnaryOp::Decrement
                         ),
                         GraphOp::Binary { .. } => true,
                         _ => false,
@@ -168,6 +198,7 @@ mod tests {
                 Constant::String("sin".into()),
                 Constant::String("length".into()),
                 Constant::String("x".into()),
+                Constant::String("random".into()),
             ],
             code: vec![Instruction::Return],
             local_count: 0,
@@ -237,7 +268,13 @@ mod tests {
             Instruction::CallMethod { name: 2, argc: 1 },
             Instruction::Return,
         ];
-        assert!(!safe(proto(sin, 1)));
+        assert!(safe(proto(sin, 1)));
+        let random = vec![
+            Instruction::LoadBuiltin(Builtin::Math),
+            Instruction::CallMethod { name: 5, argc: 0 },
+            Instruction::Return,
+        ];
+        assert!(!safe(proto(random, 1)));
     }
 
     #[test]
