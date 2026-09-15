@@ -37980,16 +37980,23 @@ fn call_native(
                         let source: Vec<u16> = text.units().collect();
                         let mut parts = Vec::new();
                         let mut start = 0;
-                        while parts.len() + 1 < limit {
+                        // The limit counts pieces, and a truncated split drops the
+                        // tail rather than keeping it: `"a b c".split(" ", 1)` is
+                        // `["a"]`, not `["a b c"]`.
+                        while parts.len() < limit {
                             let Some(offset) = source[start..]
                                 .windows(separator.len())
                                 .position(|window| window == separator.as_slice())
-                            else { break; };
+                            else {
+                                parts.push(Value::String(StringUnits::from_units(
+                                    &source[start..],
+                                )));
+                                break;
+                            };
                             let end = start + offset;
                             parts.push(Value::String(StringUnits::from_units(&source[start..end])));
                             start = end + separator.len();
                         }
-                        parts.push(Value::String(StringUnits::from_units(&source[start..])));
                         parts
                     };
                     Value::Array(ArrayData::new(parts))

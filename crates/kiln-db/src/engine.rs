@@ -630,6 +630,7 @@ fn summary_frontend(path: &str, text: &str) -> Module {
                     binds_own_name: false,
                     asynchronous: false,
                     name: Some("f".to_owned()),
+                    inferred_name: None,
                     arrow: false,
                     generator: false,
                     parameters: Vec::new(),
