@@ -101,13 +101,13 @@ lends a per-thread tape, and walks it. Both the C recursive-descent reader and t
   is the simplest design that is correct under ADR 0028's one-realm-one-thread rule.
 * **Gate.** The backend lowers to the pool only for a callback it proves is a function of its
   `double` parameters: `parallel::parallel_safe` on the value graph (plain function or arrow with
-  one or two parameters, numeric constants, locals, arithmetic and comparison, `Math.<name>` from
-  a fixed allowlist on the `Math` builtin itself, no upvalues, no `this`, no property access, no
-  allocation, no other calls, no throw, a number returned), plus the plan's proof that the typed
-  entry returns a number, plus a scan of the emitted *parallel clone* (`_p`, the typed body with
-  `Math.<name>` as bare libm) for any mention of the host, `thrown`, the receiver, the upvalue
-  table, a shape row or the collector. Every other callback takes the existing sequential
-  lowering, which already agrees with the interpreter; nothing is refused, because the
+  one or two parameters, numeric/null constants, locals, arithmetic, updates (`++`/`--`), comparison,
+  and `Math.<name>` from the 31 pure C99 libm functions on the `Math` builtin itself, no upvalues, no
+  `this`, no property access, no allocation, no other calls, no throw, a number returned), plus the
+  plan's proof that the typed entry returns a number, plus a scan of the emitted *parallel clone*
+  (`_p`, the typed body with `Math.<name>` as bare libm) for any mention of the host, `thrown`, the
+  receiver, the upvalue table, a shape row or the collector. Every other callback takes the existing
+  sequential lowering, which already agrees with the interpreter; nothing is refused, because the
   sequential answer is the right answer and a refusal would turn a valid program into a stop.
 * **ABI.** One export, `kiln_parallel_map(in, count, out, chunk, ctx)`, where `in` and `out` are
   the program's own NaN-boxed element arrays as opaque pointers -- the provider never reads an
@@ -115,8 +115,10 @@ lends a per-thread tape, and walks it. Both the C recursive-descent reader and t
   `[start, end)` range that calls the parallel clone per element. Rust owns a private
   `rayon::ThreadPool`, the chunk size (1,024) and the sequential floor (16,384 elements, measured
   and recorded in the constant's doc comment), and `catch_unwind` turns a panic into -2, on which
-  the site takes the sequential lowering. The site checks `kiln_c99_builtin_store_epoch == 0` on
-  the realm thread first, so an overridden `Math.sqrt` never reaches the bare call.
+  the site takes the sequential lowering. The worker checks `__atomic_load_n((int *)ctx, __ATOMIC_RELAXED)`
+  on every element loop to immediately cancel all concurrent workers if any chunk fails typing.
+  The site checks `kiln_c99_builtin_store_epoch == 0` on the realm thread first, so an overridden
+  `Math.sqrt` never reaches the bare call.
 * **Pool.** Sized from `available_parallelism`, overridable with `KILN_PARALLELISM`; `1` runs
   every such map inline in the same binary, which is how the sequential number is measured.
 * **Measured** (`bench/non-io/parallel-map-large.mjs`, 2e6 elements, `sqrt`, `pow`, `%` and
