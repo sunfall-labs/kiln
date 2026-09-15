@@ -186,6 +186,8 @@ static kiln_value kiln_c99_number(double value);
 static kiln_value kiln_c99_uninitialized(void);
 static kiln_value kiln_c99_builtin(uint64_t code);
 static int kiln_c99_global_binding(kiln_value *out, const char *name, size_t name_len, int *found);
+static int kiln_c99_global_binding_key(kiln_value *out, const kiln_string *name, int *found);
+static int kiln_c99_declare_global_key(const kiln_string *name, int configurable);
 static kiln_value kiln_c99_temporal_value(void *handle);
 static void *kiln_c99_temporal_of(kiln_value value);
 static int kiln_c99_temporal_raise(kiln_value *thrown, int32_t code);
@@ -426,6 +428,8 @@ static kiln_value kiln_c99_bigint_value(void *handle);
 static const void *kiln_c99_bigint_one(void);
 static int kiln_c99_bigint_constant(void **cache, const char *digits, size_t len,
                                     kiln_value *out);
+static int kiln_c99_bigint_constant_key(void **cache, const kiln_string *digits,
+                                        kiln_value *out);
 static int kiln_c99_expand_replacement(kiln_text *out, const uint16_t *pattern,
                                        size_t pattern_count, const uint16_t *subject,
                                        size_t subject_count, const int64_t *ranges, size_t groups);
@@ -525,10 +529,14 @@ static int kiln_c99_aggregate_error_from_args(kiln_host *host, kiln_value *out,
                                                const kiln_value *args, size_t argc, int depth,
                                                kiln_value *thrown);
 static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, size_t key_len);
+static kiln_property *kiln_c99_own_private_key(kiln_value target, const kiln_string *key);
 static int kiln_c99_private_error(kiln_value *thrown, const char *key, size_t key_len,
                                   int mode);
+static int kiln_c99_private_error_key(kiln_value *thrown, const kiln_string *key, int mode);
 static int kiln_c99_define_private(kiln_value target, const char *key, size_t key_len,
                                    kiln_value function, int kind);
+static int kiln_c99_define_private_key(kiln_value target, const kiln_string *key,
+                                       kiln_value function, int kind);
 static int kiln_c99_is_node_hidden_key(const char *key, size_t key_len);
 static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype);
 static int kiln_c99_can_be_prototype(kiln_value value);

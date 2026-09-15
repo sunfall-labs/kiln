@@ -46,6 +46,26 @@ static int kiln_c99_bigint_constant(void **cache, const char *digits, size_t len
     return KILN_C99_OK;
 }
 
+/* The headed form: decimal digits are ASCII, so a Latin1 spelling parses in place and any
+ * other width is refused rather than reinterpreted. A non-ASCII "digits" constant cannot
+ * come from source text; refusing names the compiler fault instead of parsing garbage. */
+static int kiln_c99_bigint_constant_key(void **cache, const kiln_string *digits,
+                                        kiln_value *out) {
+    if (*cache == NULL) {
+        void *handle = NULL;
+        if (digits == NULL || kiln_string_is_utf16(digits)) {
+            KILN_C99_REFUSE("a BigInt literal with no byte spelling");
+        }
+        if (kiln_bigint_parse((const unsigned char *)digits->data, digits->unit_len, 10,
+                              &handle) != 0) {
+            KILN_C99_REFUSE("a BigInt literal the provider would not parse");
+        }
+        *cache = handle;
+    }
+    *out = kiln_c99_bigint_value(*cache);
+    return KILN_C99_OK;
+}
+
 /* `1n`, built once. Nothing frees a BigInt handle here, so a shared one is safe to keep. */
 static const void *kiln_c99_bigint_one(void) {
     static void *one = NULL;

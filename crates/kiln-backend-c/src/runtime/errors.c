@@ -240,6 +240,32 @@ static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, s
     return index == object->count ? NULL : &object->properties[index];
 }
 
+/* The headed form: private keys are unit-identified, so the lookup interns the header
+ * rather than reading its words as key bytes. */
+static kiln_property *kiln_c99_own_private_key(kiln_value target, const kiln_string *key) {
+    kiln_object *object;
+    size_t index;
+    if (target.tag == KILN_VALUE_FUNCTION) {
+        kiln_value store = kiln_c99_closure_of(target)->properties;
+        if (store.tag != KILN_VALUE_OBJECT) {
+            return NULL;
+        }
+        object = kiln_c99_object_of(store);
+    } else if (target.tag == KILN_VALUE_OBJECT) {
+        object = kiln_c99_object_of(target);
+    } else {
+        return NULL;
+    }
+    if (object->shape != NULL) {
+        kiln_c99_ensure_dictionary(object);
+    }
+    {
+        kiln_gc_heap *heap = kiln_c99_gc_heap();
+        index = kiln_c99_own_index_key(object, kiln_c99_interned_key_in(heap, key), key);
+    }
+    return index == object->count ? NULL : &object->properties[index];
+}
+
 /* A private element refusing what was asked of it: a TypeError naming the member.
  *
  * The stored key is `@@private:<scope>:<name>` -- reserved so nothing that enumerates own string
@@ -297,6 +323,77 @@ static int kiln_c99_private_error(kiln_value *thrown, const char *key, size_t ke
     if (kiln_c99_text_append_c(&text, before) != KILN_C99_OK ||
         kiln_c99_text_append(&text, &hash, 1) != KILN_C99_OK ||
         kiln_c99_text_append(&text, key + at, key_len - at) != KILN_C99_OK ||
+        kiln_c99_text_append_c(&text, after) != KILN_C99_OK) {
+        free(text.bytes);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    status = kiln_c99_new_error(&error, KILN_C99_BUILTIN_TYPE_ERROR, kiln_c99_text_value(&text));
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    *thrown = error;
+    return KILN_C99_THROWN;
+}
+
+/* The headed form: the `@@private:<scope>:` prefix is scanned by units, and the `<name>`
+ * half is encoded to UTF-8 for the message. Private names come from identifiers, which
+ * hold no lone surrogates, so the encoding is exact; a surrogate that arrived by any
+ * other road takes the host's documented replacement, as every other displayed string
+ * does at this boundary. */
+static int kiln_c99_private_error_key(kiln_value *thrown, const kiln_string *key, int mode) {
+    kiln_text text = {NULL, 0, 0};
+    kiln_value error;
+    kiln_string half;
+    kiln_value half_value;
+    size_t at = 0;
+    size_t colons = 0;
+    int status;
+    char hash = 0x23;
+    const char *before;
+    const char *after;
+    if (key == NULL) return KILN_C99_INVALID_ARGUMENT;
+    while (at < key->unit_len && colons < 2) {
+        if (kiln_string_unit_at(key, at) == ':') {
+            colons += 1;
+        }
+        at += 1;
+    }
+    if (colons < 2) {
+        at = 0;
+    }
+    switch (mode) {
+    case 1:
+        before = "Cannot write private member ";
+        after = " to an object whose class did not declare it";
+        break;
+    case 2:
+        before = "'";
+        after = "' was defined without a getter";
+        break;
+    case 3:
+        before = "'";
+        after = "' was defined without a setter";
+        break;
+    case 4:
+        before = "Private method '";
+        after = "' is not writable";
+        break;
+    default:
+        before = "Cannot read private member ";
+        after = " from an object whose class did not declare it";
+        break;
+    }
+    half = *key;
+    half.unit_len -= (uint32_t)at;
+    if (kiln_string_is_utf16(key)) {
+        half.data = (const uint16_t *)key->data + at;
+    } else {
+        half.data = (const uint8_t *)key->data + at;
+    }
+    half_value = kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)&half, half.unit_len);
+    if (kiln_c99_text_append_c(&text, before) != KILN_C99_OK ||
+        kiln_c99_text_append(&text, &hash, 1) != KILN_C99_OK ||
+        kiln_c99_text_append_string(&text, half_value) != KILN_C99_OK ||
         kiln_c99_text_append_c(&text, after) != KILN_C99_OK) {
         free(text.bytes);
         return KILN_C99_OUT_OF_MEMORY;
