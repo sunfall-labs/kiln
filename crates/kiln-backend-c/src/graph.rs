@@ -1779,8 +1779,17 @@ pub fn build_function_graph(
     proto: &FunctionProto,
     program: &Program,
 ) -> Result<FunctionGraph, UnsupportedInstruction> {
-    let mut graph =
-        FunctionGraph::new(proto.name.clone(), proto.parameter_count, proto.local_count);
+    // The graph carries the effective name -- written, else inferred -- because
+    // that is what the closure exposes and what the facts baseline records.
+    // Carrying the written name alone dropped every inferred name from the
+    // baseline the way a missing name would.
+    let mut graph = FunctionGraph::new(
+        proto
+            .effective_name_units()
+            .map(|units| units.to_lossy_string()),
+        proto.parameter_count,
+        proto.local_count,
+    );
 
     let code = &proto.code;
     if code.is_empty() {

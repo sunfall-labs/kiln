@@ -25,6 +25,11 @@ fn fingerprint(path: &Path, bytes: &mut Vec<u8>) {
 fn main() {
     let mut bytes = Vec::new();
     fingerprint(Path::new("src"), &mut bytes);
+    // Emission reads kiln-ir directly -- proto accessors like `effective_name_units`
+    // decide emitted bytes without changing the program digest -- so its sources
+    // join the fingerprint. Without them an IR-side change reused stale modules:
+    // same bytecode in, previous C out.
+    fingerprint(Path::new("../kiln-ir/src"), &mut bytes);
     fingerprint(Path::new("Cargo.toml"), &mut bytes);
     fingerprint(Path::new("build.rs"), &mut bytes);
     println!(
