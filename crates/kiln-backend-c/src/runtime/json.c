@@ -606,13 +606,16 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
                 return status;
             }
             KILN_JSON_BREAK(written == 0);
-            const kiln_string *key_string = (const kiln_string *)key.ptr;
-            int key_status = kiln_c99_json_quote_string(text, key_string);
-            if (!is_array && (key_status != KILN_C99_OK ||
-                              (indent_len != 0 ? kiln_c99_text_append(text, ": ", 2) : kiln_c99_text_append(text, ":", 1)) !=
-                                  KILN_C99_OK)) {
-                kiln_c99_json_drop_nested(&nested);
-                return KILN_C99_OUT_OF_MEMORY;
+            /* An array position writes only its member: quoting the index
+             * key here put `"0"` in front of every first element. */
+            if (!is_array) {
+                const kiln_string *key_string = (const kiln_string *)key.ptr;
+                if (kiln_c99_json_quote_string(text, key_string) != KILN_C99_OK ||
+                    (indent_len != 0 ? kiln_c99_text_append(text, ": ", 2) : kiln_c99_text_append(text, ":", 1)) !=
+                        KILN_C99_OK) {
+                    kiln_c99_json_drop_nested(&nested);
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
             }
             status = kiln_c99_json_value(host, text, member, indent, indent_len, nested.bytes,
                                          nested.len, &wrote, depth, &frame, thrown);

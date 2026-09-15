@@ -2306,7 +2306,7 @@ mod tests {
                 stdout: b"same\n".to_vec(),
                 stderr: Vec::new(),
                 timed_out: false,
-                result: Some(HostValue::String("1".to_owned())),
+                result: Some(HostValue::String("1".into())),
             },
         )
         .expect("typed mismatch is reported");
@@ -2403,7 +2403,7 @@ mod tests {
         let dir = scratch("native-result-executor");
         let executable = dir.join("program");
         let fixture = dir.join("fixture.result");
-        let expected = HostValue::String("line one\nline two\0".to_owned());
+        let expected = HostValue::String("line one\nline two\0".into());
         std::fs::write(
             &fixture,
             kiln_native_runtime::encode_native_result(&expected),
