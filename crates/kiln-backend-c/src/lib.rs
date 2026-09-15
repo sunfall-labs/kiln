@@ -4116,7 +4116,17 @@ fn hash_function_proto(hash: &mut u64, function: &FunctionProto) {
 
     byte(hash, 0x61);
     byte(hash, u8::from(function.asynchronous));
-    match function.effective_name_units() {
+    // Identity, not display: a present written name shadows any inferred one
+    // (equal programs must hit), while an empty written name is distinct
+    // from no written name (different statics emitted). `effective_name_units`
+    // filters empties for display and would conflate the last two, serving
+    // one's object file for the other.
+    match function
+        .name
+        .as_deref()
+        .map(kiln_ir::StringUnits::from)
+        .or_else(|| function.inferred_name.clone())
+    {
         Some(name) => {
             byte(hash, 1);
             word(hash, name.unit_len() as u64);
